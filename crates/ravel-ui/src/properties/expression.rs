@@ -89,6 +89,22 @@ fn first_expression(source: &ChannelSource) -> Option<&ParameterExpression> {
     }
 }
 
+/// Why `source` does not compile, as the message an editor shows.
+///
+/// Compiling without writing is what lets an error appear **while the author
+/// types**: the panel keeps the half-typed text as a draft, asks this for the
+/// message, and leaves the document — and the undo history — alone until the
+/// edit is confirmed. The message is [`ExpressionError`]'s own `Display`,
+/// which already names the line and column; it is not a locale key, because it
+/// quotes identifiers and spans of the author's own source.
+///
+/// [`ExpressionError`]: ravel_core::expression::ExpressionError
+pub fn compile_error(source: &str) -> Option<String> {
+    ParameterExpression::new(source)
+        .error()
+        .map(|error| error.to_string())
+}
+
 /// Whether any component of the parameter is driven by an expression.
 ///
 /// This is what a row badge answers. It is deliberately "any" rather than
@@ -425,6 +441,18 @@ mod tests {
             panic!("expected a channel");
         };
         assert_eq!(channel.evaluate(0.0, &ctx()), ChannelSource::DEFAULT_VALUE);
+    }
+
+    /// The editor compiles a draft to show its error without committing it,
+    /// so a half-typed source reports the problem while it is still being
+    /// typed and costs no undo step.
+    #[test]
+    fn a_draft_reports_its_error_without_being_stored() {
+        assert!(compile_error("frame *").is_some());
+        assert!(compile_error("unknown_name").is_some());
+        assert_eq!(compile_error("frame * 2"), None);
+        // Clearing the box is "no expression", not a syntax error.
+        assert_eq!(compile_error(""), None);
     }
 
     #[test]

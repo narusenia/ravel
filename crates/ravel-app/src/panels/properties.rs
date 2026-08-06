@@ -1130,6 +1130,15 @@ impl ExpressionRow {
     }
 }
 
+/// Expression text the author has typed but not confirmed.
+#[derive(Clone, Debug, PartialEq)]
+struct ExpressionDraft {
+    source: String,
+    /// Why the draft does not compile, if it does not — recomputed on every
+    /// keystroke, which is what puts the error on screen during editing.
+    error: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct ExpressionComponent {
     source: String,
@@ -1218,10 +1227,15 @@ fn expression_toggle_button(
 /// compile is a state the document holds, not an edit to refuse. A vector
 /// component that is *not* driven contributes no box, so a partially driven
 /// parameter shows only the parts that have an expression.
+///
+/// A component with a draft shows the **draft's** error rather than the
+/// document's, which is what makes the message track the text on screen while
+/// it is being typed.
 fn expression_editor_body(
     key: &str,
     row: &ExpressionRow,
     inputs: &[(String, usize, Entity<InputState>)],
+    drafts: &[(String, usize, ExpressionDraft)],
     muted: Hsla,
     danger: Hsla,
 ) -> Div {
@@ -1265,7 +1279,11 @@ fn expression_editor_body(
                     .child(Input::new(state).small().w_full()),
             ),
         );
-        if let Some(error) = &stored.error {
+        let error = drafts
+            .iter()
+            .find(|(k, index, _)| k == key && *index == component)
+            .map_or(stored.error.as_ref(), |(_, _, draft)| draft.error.as_ref());
+        if let Some(error) = error {
             body = body.child(
                 div()
                     .px_1()
@@ -1521,6 +1539,23 @@ pub struct PropertiesGpuiPanel {
     /// component index. Retained for the same reason every other Input is: a
     /// half-typed expression has to survive a document refresh.
     expression_inputs: Vec<(String, usize, StringBinding)>,
+    /// Uncommitted expression text, keyed by field key and component index.
+    ///
+    /// The draft is the whole of this editor's edit state, and it exists
+    /// because an expression is the one field in the panel that has to report
+    /// errors *while* it is typed. Committing on every keystroke would show
+    /// the error but fill the undo history with half-typed sources, so a
+    /// keystroke writes here instead: the draft is compiled for its message,
+    /// the document is not touched, and Enter or blur is what commits.
+    ///
+    /// It is also what keeps a stale box from overwriting the document. A
+    /// component with no draft has not been typed into since its last commit,
+    /// so `sync_expression_widgets` may replace its text with the document's
+    /// — which is how an undo reaches the box — and blur has nothing to
+    /// commit. Without that gate, an undo would leave the old text in a
+    /// focused box and the following blur would write it straight back,
+    /// undoing the undo.
+    expression_drafts: Vec<(String, usize, ExpressionDraft)>,
     /// Row widgets of the Ports section, keyed by port name: the name Input
     /// and the type Select of every editable row, plus the trailing add row.
     ///
@@ -1711,6 +1746,7 @@ impl PropertiesGpuiPanel {
             color_commit_generation: 0,
             expressions: Vec::new(),
             expression_inputs: Vec::new(),
+            expression_drafts: Vec::new(),
             // The target above may already name something, and nothing has
             // built its widgets yet.
             needs_rebuild: true,
@@ -2941,6 +2977,19 @@ impl PropertiesGpuiPanel {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
             _ => Vec::new(),
         };
+        // A draft belongs to a component that still has a box. Once the
+        // component stops being driven — detached, or the target changed —
+        // there is nothing to commit it into, and keeping it would let a stale
+        // source reappear in an unrelated parameter that happens to share the
+        // key.
+        let driven = self.expressions.clone();
+        self.expression_drafts.retain(|(key, component, _)| {
+            driven
+                .iter()
+                .find(|(field_key, _)| field_key == key)
+                .and_then(|(_, row)| row.components.get(*component))
+                .is_some_and(Option::is_some)
+        });
         self.build_expression_inputs(&node_ids, window, cx);
 
         for section in &sections {
@@ -3225,6 +3274,16 @@ impl PropertiesGpuiPanel {
     /// non-obstructive: the author can click away mid-expression and the text
     /// is kept. `set_param_expression` stores whatever is in the box, compiling
     /// or not, so nothing here inspects the source before sending it.
+    ///
+    /// `Change` does **not** commit. It records a draft and compiles it for
+    /// the error message, so the author sees a syntax error as they type
+    /// without every keystroke becoming an undo step. This is the one text
+    /// field in the panel that behaves this way; the rest commit on blur
+    /// alone, because only an expression has an error worth showing before the
+    /// edit is finished.
+    ///
+    /// A rebuilt Input is seeded from its draft when there is one, so widgets
+    /// replaced mid-edit do not drop the author's half-typed source.
     fn build_expression_inputs(
         &mut self,
         node_ids: &[NodeId],
@@ -3237,8 +3296,10 @@ impl PropertiesGpuiPanel {
                 let Some(stored) = stored else {
                     continue;
                 };
-                let entity =
-                    cx.new(|cx| InputState::new(window, cx).default_value(stored.source.clone()));
+                let initial = self
+                    .expression_draft(&key, component)
+                    .map_or_else(|| stored.source.clone(), |draft| draft.source.clone());
+                let entity = cx.new(|cx| InputState::new(window, cx).default_value(initial));
                 let field_key = key.clone();
                 let ids = node_ids.to_vec();
                 let sub = cx.subscribe_in(
@@ -3246,10 +3307,13 @@ impl PropertiesGpuiPanel {
                     window,
                     move |this, state, event: &InputEvent, _window, cx| match event {
                         InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                            let source = state.read(cx).value().to_string();
-                            this.commit_expression_change(&field_key, component, source, &ids, cx);
+                            this.commit_expression_draft(&field_key, component, &ids, cx);
                         }
-                        InputEvent::Change | InputEvent::Focus => {}
+                        InputEvent::Change => {
+                            let source = state.read(cx).value().to_string();
+                            this.note_expression_draft(&field_key, component, source, cx);
+                        }
+                        InputEvent::Focus => {}
                     },
                 );
                 self.expression_inputs.push((
@@ -3258,6 +3322,99 @@ impl PropertiesGpuiPanel {
                     StringBinding { state: entity, sub },
                 ));
             }
+        }
+    }
+
+    /// The uncommitted text of one component, if the author has typed into it
+    /// since its last commit.
+    fn expression_draft(&self, key: &str, component: usize) -> Option<&ExpressionDraft> {
+        self.expression_drafts
+            .iter()
+            .find(|(k, index, _)| k == key && *index == component)
+            .map(|(_, _, draft)| draft)
+    }
+
+    /// The source one component holds in the document.
+    fn committed_expression(&self, key: &str, component: usize) -> Option<&str> {
+        self.expressions
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .and_then(|(_, row)| row.components.get(component))
+            .and_then(|stored| stored.as_ref())
+            .map(|stored| stored.source.as_str())
+    }
+
+    /// Record a keystroke without touching the document, and refresh the error
+    /// shown beneath the box.
+    ///
+    /// Text that matches the document again *clears* the draft rather than
+    /// storing one: the component is back to committed, so an external change
+    /// may sync into it and a following blur has nothing to write.
+    fn note_expression_draft(
+        &mut self,
+        key: &str,
+        component: usize,
+        source: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.expression_drafts
+            .retain(|(k, index, _)| !(k == key && *index == component));
+        if self.committed_expression(key, component) != Some(source.as_str()) {
+            let error = expression::compile_error(&source);
+            self.expression_drafts.push((
+                key.to_string(),
+                component,
+                ExpressionDraft { source, error },
+            ));
+        }
+        cx.notify();
+    }
+
+    /// Commit the draft of one component, if it has one.
+    ///
+    /// No draft means nothing was typed since the last commit, so there is
+    /// nothing to write — and writing anyway is precisely the bug this guards:
+    /// the box's text lags the document until the next render, so a blur after
+    /// an undo would re-commit the value the undo removed.
+    fn commit_expression_draft(
+        &mut self,
+        key: &str,
+        component: usize,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .expression_drafts
+            .iter()
+            .position(|(k, i, _)| k == key && *i == component)
+        else {
+            return;
+        };
+        let (_, _, draft) = self.expression_drafts.remove(index);
+        self.commit_expression_change(key, component, draft.source, node_ids, cx);
+    }
+
+    /// Push committed expression sources into idle boxes, so an undo, a redo
+    /// or an external edit reaches the text the author is looking at.
+    ///
+    /// `InputState::set_value` needs a `Window`, so this runs from `render`
+    /// like the other widget syncs. A component with a draft is skipped: the
+    /// author is mid-edit and owns the text until they confirm or discard it.
+    fn sync_expression_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut updates: Vec<(Entity<InputState>, String)> = Vec::new();
+        for (key, component, binding) in &self.expression_inputs {
+            if self.expression_draft(key, *component).is_some() {
+                continue;
+            }
+            let Some(source) = self.committed_expression(key, *component) else {
+                continue;
+            };
+            if binding.state.read(cx).value().as_ref() != source {
+                updates.push((binding.state.clone(), source.to_string()));
+            }
+        }
+        for (state, value) in updates {
+            state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
     }
 
@@ -3399,6 +3556,7 @@ impl Render for PropertiesGpuiPanel {
         // refreshed section colors into retained picker widgets.
         self.sync_color_widgets(window, cx);
         self.sync_string_widgets(window, cx);
+        self.sync_expression_widgets(window, cx);
         self.sync_select_widgets(window, cx);
 
         let mut content = div()
@@ -3469,6 +3627,7 @@ impl Render for PropertiesGpuiPanel {
                 .map(|(k, component, b)| (k.clone(), *component, b.state.clone()))
                 .collect();
             let expression_rows = self.expressions.clone();
+            let expression_drafts = self.expression_drafts.clone();
             let port_widgets = PortWidgets {
                 names: self
                     .port_names
@@ -3635,6 +3794,7 @@ impl Render for PropertiesGpuiPanel {
                 let exposed_states = exposed_states.clone();
                 let expression_entities = expression_entities.clone();
                 let expression_rows = expression_rows.clone();
+                let expression_drafts = expression_drafts.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -3690,6 +3850,7 @@ impl Render for PropertiesGpuiPanel {
                                     field.key(),
                                     row,
                                     &expression_entities,
+                                    &expression_drafts,
                                     muted,
                                     danger,
                                 ))
@@ -6393,6 +6554,230 @@ mod tests {
             before,
             "the curve must be untouched"
         );
+    }
+
+    // ---- editing an expression --------------------------------------------
+
+    /// Type into one component's box the way the author does: the text lands
+    /// in the widget and the `Change` handler records it as a draft. Neither
+    /// touches the document.
+    fn type_expression(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        component: usize,
+        text: &str,
+        cx: &mut TestAppContext,
+    ) {
+        window
+            .update(cx, |panel, window, cx| {
+                let state = panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, index, _)| k == key && *index == component)
+                    .map(|(_, _, binding)| binding.state.clone())
+                    .expect("an input for the driven component");
+                state.update(cx, |state, cx| state.set_value(text, window, cx));
+                panel.note_expression_draft(key, component, text.to_string(), cx);
+            })
+            .unwrap();
+    }
+
+    fn input_text(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        component: usize,
+        cx: &mut TestAppContext,
+    ) -> String {
+        window
+            .read_with(cx, |panel, cx| {
+                panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, index, _)| k == key && *index == component)
+                    .map(|(_, _, binding)| binding.state.read(cx).value().to_string())
+                    .expect("an input for the driven component")
+            })
+            .unwrap()
+    }
+
+    fn expression_node() -> Node {
+        node_with_amount(ChannelSource::Expression(ParameterExpression::new("1")))
+    }
+
+    fn committed_source(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        cx: &mut TestAppContext,
+    ) -> String {
+        let value = node_param(project, path, node_id, "amount", cx);
+        expression::component_expression(&value, 0)
+            .expect("a driven component")
+            .source()
+            .to_string()
+    }
+
+    /// The completion criterion EXPR-4 states: a syntax error is shown *while
+    /// editing*, and showing it does not block the edit. Waiting for blur is
+    /// not "while editing", and committing every keystroke to get there would
+    /// fill the undo history with half-typed sources.
+    #[gpui::test]
+    fn a_syntax_error_shows_while_typing_without_reaching_the_document(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame *", cx);
+
+        let error = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .expression_draft("amount", 0)
+                    .expect("the keystroke is held as a draft")
+                    .error
+                    .clone()
+            })
+            .unwrap();
+        assert!(error.is_some(), "the error must be visible while typing");
+        assert_eq!(
+            committed_source(&project, &path, node_id, cx),
+            "1",
+            "and the document must not have moved"
+        );
+    }
+
+    /// Blur commits the draft — including one that does not compile, which is
+    /// stored rather than refused so the author can stop mid-expression.
+    #[gpui::test]
+    fn blur_commits_the_draft_and_clears_it(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame *", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(committed_source(&project, &path, node_id, cx), "frame *");
+        assert!(
+            window
+                .read_with(cx, |panel, _| panel.expression_draft("amount", 0).is_none())
+                .unwrap(),
+            "the draft is spent once committed"
+        );
+    }
+
+    /// The regression this mechanism exists for. An undo restores the previous
+    /// source, but the box still shows the text that was undone; a blur that
+    /// wrote it back would silently reverse the undo. The box is resynced and
+    /// the blur, having no draft, writes nothing.
+    #[gpui::test]
+    fn undo_resyncs_the_box_and_the_following_blur_does_not_recommit(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame * 2", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(committed_source(&project, &path, node_id, cx), "frame * 2");
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(committed_source(&project, &path, node_id, cx), "1");
+
+        // The render-time sync is what carries the undo into the widget.
+        window
+            .update(cx, |panel, window, cx| {
+                panel.sync_expression_widgets(window, cx);
+            })
+            .unwrap();
+        assert_eq!(input_text(&window, "amount", 0, cx), "1");
+
+        // Blurring the box afterwards must not resurrect the undone source.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(committed_source(&project, &path, node_id, cx), "1");
+    }
+
+    /// A sync must never overwrite text the author is still typing, even
+    /// though an undo landed while they typed.
+    #[gpui::test]
+    fn a_draft_outranks_the_document_until_it_is_committed(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "sin(tim", cx);
+        window
+            .update(cx, |panel, window, cx| {
+                panel.sync_expression_widgets(window, cx);
+            })
+            .unwrap();
+
+        assert_eq!(input_text(&window, "amount", 0, cx), "sin(tim");
+        assert_eq!(committed_source(&project, &path, node_id, cx), "1");
+    }
+
+    /// Widgets are rebuilt whenever the row shape changes. A rebuild that
+    /// dropped the draft would throw away the half-typed source.
+    #[gpui::test]
+    fn a_draft_survives_a_widget_rebuild(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame *", cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        assert_eq!(input_text(&window, "amount", 0, cx), "frame *");
+        assert!(
+            window
+                .read_with(cx, |panel, _| panel.expression_draft("amount", 0).is_some())
+                .unwrap()
+        );
+    }
+
+    /// Editing one component of a vector must leave its neighbours' sources
+    /// exactly as they are.
+    #[gpui::test]
+    fn editing_one_component_of_a_vector_leaves_the_others(cx: &mut TestAppContext) {
+        let source = |text: &str| {
+            AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new(text)))
+        };
+        let node = Node::new(NodeId::next(), "test").with_param(
+            "offset",
+            ParameterValue::Channel3([source("1"), source("2"), source("3")]),
+        );
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
+
+        type_expression(&window, "offset", 1, "frame * 4", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("offset", 1, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let value = node_param(&project, &path, node_id, "offset", cx);
+        let source_of = |component: usize| {
+            expression::component_expression(&value, component)
+                .expect("driven")
+                .source()
+                .to_string()
+        };
+        assert_eq!(source_of(0), "1");
+        assert_eq!(source_of(1), "frame * 4");
+        assert_eq!(source_of(2), "3");
     }
 
     /// Per-component attach and detach on a vector: the neighbours keep what

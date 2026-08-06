@@ -38,7 +38,6 @@
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
 | SNAP-1 | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | `viewer-snap-guides-plan.md` |
-| SHELL-5 | `parent` の設定 UI（Properties の Parent ドロップダウン） | `layer-shell-wiring-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -47,7 +46,6 @@
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
 | SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
-| SHEET-1 | `EvalRequest` の複数ターゲット化 | `attribute-spreadsheet-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -448,7 +446,7 @@ DISC-5 も同じ向きで、アイコンの対応表は UI 側に置き `NodeTem
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | OVL-1 | ✅ #255 | オーバーレイ機構の抽出（挙動不変のリファクタ） | — |
-| OVL-2 | ⬜ | オーバーレイ用の評価要求（multi-target に相乗り） | OVL-1, SHEET-1 |
+| OVL-2 | 🟡 | オーバーレイ用の評価要求（multi-target に相乗り） | OVL-1, SHEET-1 |
 | OVL-3 | ⬜ | Geometry オーバーレイ + `shape_node_bounds` の廃止 | OVL-2 |
 | OVL-4 | ⬜ | Field オーバーレイ | OVL-2 |
 | OVL-5 | 🟡 | `ParamRole` とマニピュレータ | OVL-1, VEC-5 |
@@ -515,7 +513,7 @@ Timeline の `widgets/curve_editor.rs` とは座標変換と評価関数を共�
 | SHELL-1 | 🟡 | `time_remap` の配線 | （BLUR-1 完了済みなので分数時刻が正しく出る） |
 | SHELL-2 | 🟡 | `track_matte` の配線 | — |
 | SHELL-3 | ⬜ | UI 露出 | SHELL-1, SHELL-2 |
-| SHELL-5 | 🟡 | `parent` の設定 UI（Properties の Parent ドロップダウン、循環候補を除外） | — |
+| SHELL-5 | ✅ | `parent` の設定 UI（Properties の Parent ドロップダウン、循環候補を除外）（#303） | — |
 | SHELL-4 | ⬜ | 文書更新 | SHELL-3, SHELL-5 |
 
 SHELL-5 は他の 3 つと**向きが逆の取り残し** — `parent` は評価では効くのに
@@ -672,13 +670,16 @@ DOCK-2 が担う。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SHEET-1 | 🟡 | `EvalRequest` の複数ターゲット化 | — |
-| SHEET-2 | ⬜ | 選択ノード評価と `SelectedGeometry` グローバル | SHEET-1 |
+| SHEET-1 | ✅ | `EvalRequest` の複数ターゲット化（#302） | — |
+| SHEET-2 | 🟡 | 選択ノード評価と `SelectedGeometry` グローバル | SHEET-1 |
 | SHEET-3 | ⬜ | パネル本体（`DataTable`） | SHEET-2, DOCK-8 |
 | SHEET-4 | ⬜ | 実機確認と文書更新 | SHEET-3 |
 
 SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触る。
-**実施順を決めてから着手する。**
+**順序は SHEET-1 が先で決着した**（2026-08-06、#302）。複数ターゲット化が入った
+ので、OVL-2 と SIM-3 は新しい形に**相乗りするだけ**になり、同じ概念が 3 回
+実装される事態は消えた。`results` は `nodes` と同じ長さ・同じ順序で埋まり、
+失敗したターゲットも `Err` としてスロットを保つ（位置引きが成り立つ）。
 
 ### タイポグラフィ（REQ-MOGRAPH-004）
 

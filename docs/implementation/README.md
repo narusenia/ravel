@@ -92,8 +92,10 @@ Three plans all change `EvalRequest` / `EvalUpdate`
 (`attribute-spreadsheet-plan.md` unit 1 makes them multi-target;
 `stateful-eval-plan.md` unit 3 adds a provisional-result flag;
 `viewer-overlay-manipulator-plan.md` unit 2 rides on the multi-target form to
-pull overlay data). Decide the order before starting any of them — the overlay
-plan deliberately adds no second evaluation path of its own.
+pull overlay data). **The order settled with the multi-target form landing
+first** (2026-08-06, #302), so the other two now extend a shape that exists
+instead of each inventing one. The overlay plan adds no second evaluation path
+of its own.
 
 `properties-parameter-editors-plan.md` unit 1 owns `ParameterValue::Curve` and
 `ParameterValue::Ramp`, and six nodes across three domains consume them: value

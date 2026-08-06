@@ -320,7 +320,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `NETIF-5` | Subnet の生成と `sync_subnet_pins`。済み |
 | `NETIF-6` | Collapse / Extract。済み（#304） |
 | `NETIF-7` | レジストリ / ロケール / 文書（`NETIF` の掃き寄せ） |
-| `SHEET-1` | `EvalRequest` の複数ターゲット化 |
+| `SHEET-1` | `EvalRequest` の複数ターゲット化。済み（#302） |
 | `OVL-1` | Viewer オーバーレイ機構の抽出（挙動不変）。済み |
 | `DOCK-1〜10` | フリードッキング（`free-pane-docking-plan.md`。旧 `PANEL-1〜3` を吸収） |
 | `3D-2` | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ。済み |
@@ -329,7 +329,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `FRAC-1` | 多角形の三角形分割器（`PATH-0b` の決定に従い `earcut` の上に書く） |
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`）。済み |
 | `DISC-1〜5` | ノードのロケールキー化 + ホバー Popover + 検索パレット + ノードアイコン（`done/node-discoverability-plan.md`）。済み |
-| `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン） |
+| `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン）。済み（#303） |
 | クラスタ: View トグルの欠落 | `MED-APP-23`。済み（#286） |
 | クラスタ: i18n の穴 | `LOW-APP-11`（ハードコードされたユーザー向け英語）。日本語が到達可能になってから拾う |
 
@@ -349,8 +349,10 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 メニュー・ロケールへの配線に閉じた。これで **`REQ-UI-005` の受入条件が全て
 埋まった**（`REQ-UI` 全体にはまだ未チェックの受入条件が残っている）。
 
-`SHEET-1` は `SIM-3` と `OVL-2` も同じ型を触る。**このフェーズで 3 者の
-順序を決着させる**（`README.md` に記録がある）。
+`SHEET-1` は `SIM-3` と `OVL-2` も同じ型を触る。**順序は `SHEET-1` を先に
+入れることで決着した**（2026-08-06、#302）。複数ターゲット化が先に入ったので
+残る 2 つは既にある形に相乗りするだけになり、同じ概念が 3 回実装される事態は
+消えた。`OVL-2` は着手可能になった。
 
 `NETIF-1〜3` が入り、**カスタムポートがテストフィクスチャの外に初めて
 存在できるようになった**（2026-08-02）。ここが直前までいちばん大きな断絶
@@ -395,7 +397,12 @@ REQ-UI-002 の受入条件も実装に揃えてある。
 `SHELL-5` は基準 4 の該当例。`Layer.parent` は評価では効く（親の P/R/S を
 継承する）のに、**設定 UI がどこにも無い** — Properties のレイヤー節は
 timing / transform / opacity / blend / adjustment だけ、Timeline に Parent 列は無く、
-Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到達可能になる。
+Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到達可能になった
+（2026-08-06、#303）。実装の過程で `duplicate_composition` が `parent` を
+再マップしておらず、**親子を組んだコンプを複製すると検証に落ちる**ことが
+分かったので同時に直した — 設定手段が無い間は踏みようが無かった穴で、
+基準 4 の単位が「評価はできるが編集できない」を解くと、その周辺の
+既存バグが初めて到達可能になるという例。
 
 ## フェーズ C4: 成果物が出せること
 

@@ -78,6 +78,8 @@ pub use context::{
 pub use error::{ExpressionError, ExpressionErrorKind, Span};
 pub use lexer::MAX_TOKENS;
 pub use parser::{MAX_NESTING_DEPTH, parse};
+#[cfg(test)]
+pub(crate) use program::compile_calls;
 pub use program::{CompileOptions, Dependencies, MAX_STACK_SLOTS, Program};
 pub use scope::{
     AttributeDecl, FIELD_VARIABLES, PARAMETER_VARIABLES, STANDARD_ATTRIBUTES, Scope, VarSlot,

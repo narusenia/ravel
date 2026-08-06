@@ -343,12 +343,36 @@ impl Program {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has entered [`compile`].
+    ///
+    /// The claim "sampling a field does not parse" is not observable from a
+    /// compiled [`Program`] — it looks identical whether it was built once or
+    /// rebuilt per element — so the only honest evidence is counting the
+    /// calls. Thread-local rather than a global counter because the test
+    /// harness runs tests concurrently, and a shared counter would make the
+    /// assertion "no compilation happened here" flaky against unrelated
+    /// tests. Compilation is synchronous, so the count on the calling thread
+    /// is exactly the work that caller caused.
+    static COMPILE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Compilations performed on this thread so far (tests only).
+#[cfg(test)]
+pub(crate) fn compile_calls() -> usize {
+    COMPILE_CALLS.with(std::cell::Cell::get)
+}
+
 /// Compile `source` against `scope`.
 pub(super) fn compile(
     source: &str,
     scope: &Scope,
     options: CompileOptions,
 ) -> Result<Program, ExpressionError> {
+    #[cfg(test)]
+    COMPILE_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     if source.trim().is_empty() {
         return Ok(Program::empty());
     }

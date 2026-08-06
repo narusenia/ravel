@@ -1406,22 +1406,53 @@ mod tests {
         assert_eq!(straight, scalar_sample(&field, &positions));
     }
 
+    /// Sampling must not parse — the completion criterion of EXPR-5, and the
+    /// whole reason a compiled form is kept at all.
+    ///
+    /// Counting calls into the compiler is the only evidence that shows it.
+    /// Comparing the held program's address does not: a `sample` that parsed
+    /// afresh for every element and threw the result away would leave the
+    /// stored program untouched and pass.
     #[test]
-    fn sampling_uses_the_program_compiled_at_construction() {
-        let field = ExpressionField::new("@P.x + 1", 0.0);
-        let positions = [Vec2(1.0, 0.0), Vec2(2.0, 0.0)];
+    fn sampling_never_parses() {
+        use crate::expression::compile_calls;
 
-        // Compiled before anything is sampled: `sample` takes `&self` and the
-        // field holds no interior mutability, so there is nowhere for a parse
-        // to happen later.
-        let compiled = field.program().expect("compiled at construction") as *const Program;
-        scalar_sample(&field, &positions);
-        scalar_sample(&field, &positions);
+        let before = compile_calls();
+        let field = ExpressionField::new("@P.x + 1", 0.0);
+        let after_construction = compile_calls();
         assert_eq!(
-            field.program().expect("still compiled") as *const Program,
-            compiled,
-            "sampling must reuse the program rather than rebuild one"
+            after_construction - before,
+            1,
+            "construction is what compiles, exactly once"
         );
+
+        // 512 elements sampled four times. A parse per element, or even one
+        // per `sample` call, would show up here; nothing does.
+        let positions: Vec<Vec2> = (0..512).map(|index| Vec2(index as f32, 0.0)).collect();
+        for _ in 0..4 {
+            scalar_sample(&field, &positions);
+        }
+
+        assert_eq!(
+            compile_calls(),
+            after_construction,
+            "sampling compiled something: the point of holding a compiled \
+             program is that evaluation never parses"
+        );
+    }
+
+    /// The same guarantee on the other path: a refused or broken source must
+    /// not be retried on every sample either.
+    #[test]
+    fn sampling_a_refused_expression_never_parses_either() {
+        use crate::expression::compile_calls;
+
+        let field = ExpressionField::new("@Cd.r", 1.0);
+        assert!(field.error().is_some());
+
+        let after_construction = compile_calls();
+        scalar_sample(&field, &[Vec2(0.0, 0.0); 8]);
+        assert_eq!(compile_calls(), after_construction);
     }
 
     #[test]

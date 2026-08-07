@@ -156,7 +156,15 @@ pub fn collect(
                 // Chose to keep the files: ask for somewhere else to write.
                 Conflicts::Elsewhere => continue,
             },
-            Err(error) => prompt.note(&error.localized()),
+            // Only a refusal another directory could answer is worth asking
+            // again. Planning also refuses things the output has nothing to
+            // do with — a composition with no frames, a codec that went
+            // away — and re-asking those traps the user in a question no
+            // answer can satisfy, with Ctrl-C as the only way out. Those
+            // leave with the same classified exit code the flags would have
+            // produced.
+            Err(error) if fixable_by_another_output(&error) => prompt.note(&error.localized()),
+            Err(error) => return Err(error),
         }
     }
 
@@ -169,6 +177,22 @@ pub fn collect(
     } else {
         Err(CliError::Cancelled)
     }
+}
+
+/// Whether a different output directory could make this refusal go away.
+///
+/// The output question is the only one asked in a loop, so it is the only
+/// place a planning refusal can be retried — and retrying one the answer
+/// cannot reach is a trap, not a courtesy. Only the refusals the output
+/// itself produces qualify: a name that would escape the directory, a
+/// directory that cannot be written. Everything else — the range, the codec,
+/// the composition, the parameters — was decided by an earlier question or by
+/// the project, and leaves with its own exit code exactly as the flags would.
+fn fixable_by_another_output(error: &CliError) -> bool {
+    matches!(
+        error,
+        CliError::OutputName(_) | CliError::OutputExists { .. }
+    )
 }
 
 /// Which composition, spelled the way `--comp` will resolve back to it.
@@ -1040,6 +1064,42 @@ mod tests {
             collect_with(&mut prompt, &document(), &available_encoders()).expect("a session");
         assert_eq!(args.output, Path::new("/tmp/out-7"));
         assert_eq!(prompt.notes.len(), 1, "{:?}", prompt.notes);
+    }
+
+    /// A refusal the output cannot answer leaves with its own exit code
+    /// instead of asking for another directory forever.
+    ///
+    /// A composition with no frames is the reachable case: no directory the
+    /// user can name will give it any, so the loop that re-asks a bad name
+    /// would here become one only Ctrl-C ends.
+    #[test]
+    fn a_refusal_another_directory_cannot_answer_stops_the_session() {
+        let document = Document::default().with_composition(Composition::new(
+            CompId::new(1),
+            "Empty",
+            (16, 16),
+            FrameRate::new(30, 1),
+            0,
+        ));
+        // One more output answer than the session should ever consume: if the
+        // loop kept going it would take this too, and `Scripted` would run out
+        // rather than hang.
+        let mut prompt = Scripted::new([
+            Answer::Select(0),
+            Answer::Select(0),
+            Answer::Select(0),
+            text("/tmp/out-7-empty"),
+            text("/tmp/out-7-empty-again"),
+        ]);
+        let error = collect_with(&mut prompt, &document, &available_encoders())
+            .expect_err("a composition with no frames cannot be rendered anywhere");
+        assert_eq!(error.code(), crate::error::EXIT_USAGE);
+        assert_eq!(error.id(), "empty-range");
+        assert!(
+            prompt.notes.is_empty(),
+            "the refusal was reported as a retryable note: {:?}",
+            prompt.notes
+        );
     }
 
     /// Declining the last question is a cancellation, and nothing is

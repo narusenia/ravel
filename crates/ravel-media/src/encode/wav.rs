@@ -151,14 +151,21 @@ impl WavWriter {
     ///
     /// After this the WAV is final and the writer no longer owns it, so a
     /// later drop removes nothing.
+    ///
+    /// **The file is released last**, once every patch has landed. A seek or a
+    /// write that fails partway — a full disk is the ordinary way — has to
+    /// leave the writer still owning a file whose length fields are still
+    /// zero, so [`Drop`] removes it; letting go first would leave a WAV that
+    /// claims to be finished and decodes as empty, under the name a completed
+    /// render would have used.
     pub fn finish(&mut self) -> MediaResult<()> {
-        let mut file = self.file.take().ok_or_else(finished)?;
         let data_bytes = u32::try_from(self.data_bytes).map_err(|_| {
             MediaError::EncodeError(format!(
                 "a WAV cannot hold more than {MAX_DATA_BYTES} bytes of samples"
             ))
         })?;
         let frame_bytes = self.frame_bytes();
+        let file = self.file.as_mut().ok_or_else(finished)?;
 
         // `RIFF` size: everything after that field itself.
         file.seek(SeekFrom::Start(4))?;
@@ -170,6 +177,9 @@ impl WavWriter {
         file.seek(SeekFrom::Start(u64::from(HEADER_BYTES) - 4))?;
         file.write_all(&data_bytes.to_le_bytes())?;
         file.flush()?;
+        // Every field is on disk: only now may the file be let go, so that the
+        // drop which follows leaves the finished WAV alone.
+        self.file.take();
         Ok(())
     }
 

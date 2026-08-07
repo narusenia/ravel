@@ -9,9 +9,11 @@
 //! what lets the interactive mode (`EXPORT-7`) build the same
 //! [`RenderArgs`] from answers to questions instead of from `argv`.
 
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ravel_core::media::encode::{EncodeTarget, PngDepth, SequenceCodec};
 use ravel_core::media::{ImageFormat, VideoCodec};
@@ -71,30 +73,46 @@ pub fn expand_tilde(text: &str) -> PathBuf {
     let Some(rest) = text.strip_prefix('~') else {
         return PathBuf::from(text);
     };
-    let rest = match rest {
-        "" => "",
-        // Both separators, because a Windows user types either one.
-        _ if rest.starts_with('/') || rest.starts_with('\\') => &rest[1..],
+    // Both separators, because a Windows user types either one. **Every**
+    // leading separator has to go, not just the first: `Path::join` with an
+    // argument that still starts with one discards the base entirely, so
+    // `~//renders` would resolve to `/renders` — outside the home directory
+    // the tilde asked for.
+    let trimmed = rest.trim_start_matches(['/', '\\']);
+    if !rest.is_empty() && trimmed.len() == rest.len() {
         // `~user/...`, or a file whose name genuinely starts with a tilde.
-        _ => return PathBuf::from(text),
-    };
+        return PathBuf::from(text);
+    }
     match dirs::home_dir() {
-        Some(home) if rest.is_empty() => home,
-        Some(home) => home.join(rest),
+        Some(home) if trimmed.is_empty() => home,
+        Some(home) => home.join(trimmed),
         None => PathBuf::from(text),
     }
 }
 
-/// `expand_tilde` in the shape clap's `value_parser` wants. Infallible: an
-/// unexpandable tilde is a path, not a usage error.
-fn tilde_path(text: &str) -> Result<PathBuf, std::convert::Infallible> {
-    Ok(expand_tilde(text))
+/// [`expand_tilde`] for a raw argument, keeping paths that are not UTF-8.
+///
+/// A tilde cannot be recognised without decoding, and a path that does not
+/// decode is still a path — on Unix a file name is bytes, not text. Passing it
+/// through untouched is what keeps such an argument *acceptable*: a plain
+/// `Fn(&str)` parser makes clap reject it before this ever runs, which would
+/// make adding tilde support quietly narrow what the CLI takes.
+fn expand_tilde_os(raw: &OsStr) -> PathBuf {
+    match raw.to_str() {
+        Some(text) => expand_tilde(text),
+        None => PathBuf::from(raw),
+    }
+}
+
+/// `expand_tilde_os` in the shape clap's `value_parser` wants.
+fn tilde_path() -> impl TypedValueParser<Value = PathBuf> {
+    OsStringValueParser::new().map(|raw: OsString| expand_tilde_os(&raw))
 }
 
 #[derive(Debug, Args)]
 pub struct ProjectArg {
     /// The `.ravprj` to read. Never written.
-    #[arg(value_parser = tilde_path)]
+    #[arg(value_parser = tilde_path())]
     pub project: PathBuf,
 }
 
@@ -107,7 +125,7 @@ pub struct ProjectArg {
 pub struct RenderArgs {
     /// The `.ravprj` to render. Never written — a project that migrates on
     /// load is migrated in memory only.
-    #[arg(value_parser = tilde_path)]
+    #[arg(value_parser = tilde_path())]
     pub project: PathBuf,
 
     /// Composition to render, by name or by numeric id. Defaults to the
@@ -131,7 +149,7 @@ pub struct RenderArgs {
     pub png_depth: PngBits,
 
     /// Directory the numbered frames are written into. Created if missing.
-    #[arg(long, short = 'o', value_name = "DIR", value_parser = tilde_path)]
+    #[arg(long, short = 'o', value_name = "DIR", value_parser = tilde_path())]
     pub output: PathBuf,
 
     /// File name text before the frame number.
@@ -345,6 +363,44 @@ mod tests {
         assert_eq!(expand_tilde("~"), home);
         assert_eq!(expand_tilde("~/renders"), home.join("renders"));
         assert_eq!(expand_tilde("~/a/b.ravprj"), home.join("a/b.ravprj"));
+    }
+
+    /// A repeated separator must not push the result out of the home
+    /// directory: `Path::join` with a still-absolute argument drops the base,
+    /// so `~//renders` would otherwise resolve to `/renders`.
+    #[test]
+    fn repeated_separators_stay_below_the_home_directory() {
+        let home = dirs::home_dir().expect("the test host has a home directory");
+        for text in ["~//renders", "~///renders", "~/\\renders", "~\\\\renders"] {
+            let expanded = expand_tilde(text);
+            assert!(
+                expanded.starts_with(&home),
+                "{text:?} escaped the home directory: {expanded:?}"
+            );
+            assert_eq!(expanded, home.join("renders"), "{text:?}");
+        }
+        assert_eq!(expand_tilde("~//"), home);
+    }
+
+    /// Adding tilde support must not narrow what the CLI accepts. A `&str`
+    /// parser would make clap refuse a path that is not valid UTF-8, which on
+    /// Unix is a perfectly ordinary file name.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_accepted_unchanged() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let raw = OsString::from_vec(b"/tmp/\xff\xfe.ravprj".to_vec());
+        let cli = Cli::try_parse_from([
+            OsString::from("ravel-cli"),
+            OsString::from("interactive"),
+            raw.clone(),
+        ])
+        .expect("a non-UTF-8 path is still a path");
+        let Command::Interactive(project) = cli.command else {
+            panic!("interactive parses as interactive");
+        };
+        assert_eq!(project.project, PathBuf::from(&raw));
     }
 
     /// Expansion must not touch a path that only looks like it starts with a

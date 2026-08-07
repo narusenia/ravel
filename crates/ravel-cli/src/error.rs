@@ -72,6 +72,17 @@ pub enum CliError {
         raw: String,
     },
 
+    /// `apply`'s own refusal, carried whole.
+    ///
+    /// Kept defensively rather than narrowed to the variants a command line
+    /// can actually produce. `ExposedApplyError::TypeMismatch` is unreachable
+    /// from here — the CLI parses each value *against its declared type*, so
+    /// a mismatch is refused earlier as [`Self::ParamValue`] (`params.rs`
+    /// spells the reasoning out) — but `apply` is `ravel-core`'s contract and
+    /// gains variants on its own schedule. Enumerating the reachable subset
+    /// here would turn every such addition into a silent misclassification;
+    /// forwarding the error keeps one exit code (`EXIT_PARAM`) and one
+    /// sentence covering whatever `apply` decides to refuse.
     #[error("the supplied parameters were refused: {0}")]
     ParamRejected(#[from] ExposedApplyError),
 

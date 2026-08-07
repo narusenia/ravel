@@ -57,6 +57,16 @@ pub struct ExportSettings {
     /// Composition to render. `None` when the project has none, which
     /// [`resolve`](Self::resolve) refuses rather than guessing at.
     pub comp: Option<CompId>,
+    /// Frame count of `comp`, as the document holds it.
+    ///
+    /// A number rather than a string because it is not a field anyone types:
+    /// it travels with `comp` and moves when the composition picker does. It
+    /// is here so [`resolve`](Self::resolve) can refuse a composition with no
+    /// frames — the range fields alone cannot express "empty", since the
+    /// inclusive end of a zero-length composition is the same frame 0 as its
+    /// start and would otherwise submit a job for a frame that does not
+    /// exist. `ravel-cli` refuses the same request in `plan::plan_render`.
+    pub duration: u64,
     /// First frame, absolute and **inclusive**.
     pub start: String,
     /// Last frame, absolute and **inclusive** — as the user reads a range,
@@ -91,6 +101,7 @@ impl ExportSettings {
     pub fn for_composition(comp: CompId, name: &str, duration: u64, directory: PathBuf) -> Self {
         Self {
             comp: Some(comp),
+            duration,
             start: "0".to_owned(),
             end: duration.saturating_sub(1).to_string(),
             format: ImageFormat::Png,
@@ -116,6 +127,14 @@ impl ExportSettings {
     /// complaint is the topmost mistake.
     pub fn resolve(&self) -> Result<ExportRequest, ExportError> {
         let comp = self.comp.ok_or(ExportError::NoComposition)?;
+        // A composition with no frames has nothing to render, and the range
+        // fields cannot say so: `end` is inclusive on screen, so the opening
+        // form reads 0 to 0 and would resolve to the one-frame range 0..1 —
+        // a job that renders a frame the composition does not have.
+        // `plan::plan_render` refuses the same request as an empty range.
+        if self.duration == 0 {
+            return Err(ExportError::EmptyComposition);
+        }
 
         let start: u64 = self
             .start
@@ -226,6 +245,8 @@ impl ExportRequest {
 pub enum ExportError {
     /// The project has no composition to render.
     NoComposition,
+    /// The chosen composition is zero frames long.
+    EmptyComposition,
     /// The first frame is not a number.
     InvalidStart,
     /// The last frame is not a number.
@@ -250,6 +271,7 @@ impl ExportError {
     pub fn message_key(self) -> &'static str {
         match self {
             Self::NoComposition => "export.error.no_composition",
+            Self::EmptyComposition => "export.error.empty_composition",
             Self::InvalidStart => "export.error.invalid_start",
             Self::InvalidEnd => "export.error.invalid_end",
             Self::EmptyRange => "export.error.empty_range",
@@ -426,6 +448,37 @@ mod tests {
         assert_eq!(form.resolve(), Err(ExportError::NoComposition));
     }
 
+    /// A zero-length composition has no frame 0, and the inclusive range the
+    /// form shows cannot say "nothing" — `0` to `0` reads as one frame. The
+    /// duration is what decides it, the same answer `plan::plan_render`
+    /// gives the flag form of the request.
+    #[test]
+    fn a_composition_with_no_frames_cannot_be_exported() {
+        let form = ExportSettings::for_composition(comp(), "empty", 0, PathBuf::from("/tmp/out"));
+        assert_eq!(
+            (form.start.as_str(), form.end.as_str()),
+            ("0", "0"),
+            "the opening range is the degenerate one this refusal exists for",
+        );
+        assert_eq!(form.resolve(), Err(ExportError::EmptyComposition));
+
+        // One frame is a composition, so the refusal is the boundary rather
+        // than a minimum length.
+        let form = ExportSettings::for_composition(comp(), "single", 1, PathBuf::from("/tmp/out"));
+        assert_eq!(form.resolve().expect("a one-frame comp").range, 0..1);
+    }
+
+    /// The refusal comes from the composition's own length, not from the
+    /// range fields: widening them cannot buy frames the composition lacks.
+    #[test]
+    fn a_typed_range_cannot_rescue_a_composition_with_no_frames() {
+        let mut form = settings();
+        form.duration = 0;
+        form.start = "0".into();
+        form.end = "99".into();
+        assert_eq!(form.resolve(), Err(ExportError::EmptyComposition));
+    }
+
     #[test]
     fn overwrite_maps_to_the_workers_policy() {
         let mut form = settings();
@@ -469,6 +522,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for error in [
             ExportError::NoComposition,
+            ExportError::EmptyComposition,
             ExportError::InvalidStart,
             ExportError::InvalidEnd,
             ExportError::EmptyRange,

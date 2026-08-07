@@ -53,6 +53,9 @@ const LABEL_WIDTH: f32 = 120.0;
 pub struct CompChoice {
     pub id: CompId,
     pub name: String,
+    /// Frame count of this composition, carried so the form can refuse one
+    /// with no frames whichever row the picker lands on.
+    pub duration: u64,
     /// Whether any layer of this composition carries audio
     /// (`export::composition_has_audio`).
     pub has_audio: bool,
@@ -299,7 +302,12 @@ impl ExportForm {
 
     /// Read the widgets back out. Called by the OK button.
     pub fn settings(&self, cx: &App) -> ExportSettings {
-        let comp = self.selected_comp(cx).map(|comp| comp.id);
+        let selected = self.selected_comp(cx);
+        let comp = selected.map(|comp| comp.id);
+        // No composition means no frames either; the missing composition is
+        // the complaint `resolve` reaches first, so the zero is never the
+        // sentence the user sees.
+        let duration = selected.map_or(0, |comp| comp.duration);
         let (format, png_depth) = self
             .choices
             .get(self.format)
@@ -307,6 +315,7 @@ impl ExportForm {
             .unwrap_or((ImageFormat::Png, PngDepth::Eight));
         ExportSettings {
             comp,
+            duration,
             start: self.start.read(cx).value().to_string(),
             end: self.end.read(cx).value().to_string(),
             format,
@@ -598,10 +607,13 @@ mod form_tests {
         settings
     }
 
-    fn choice(id: CompId, name: &str, has_audio: bool) -> CompChoice {
+    /// A picker row. `duration` matches [`initial`]'s unless a test is about
+    /// the length itself.
+    fn choice(id: CompId, name: &str, duration: u64, has_audio: bool) -> CompChoice {
         CompChoice {
             id,
             name: name.to_owned(),
+            duration,
             has_audio,
         }
     }
@@ -609,8 +621,8 @@ mod form_tests {
     fn form(window: &mut gpui::Window, cx: &mut gpui::Context<ExportForm>) -> ExportForm {
         ExportForm::new(
             vec![
-                choice(comp(), "shot 010", true),
-                choice(CompId::new(4), "b", true),
+                choice(comp(), "shot 010", 120, true),
+                choice(CompId::new(4), "b", 120, true),
             ],
             initial(),
             format_choices(&ravel_media::encode::available_encoders()),
@@ -717,7 +729,7 @@ mod form_tests {
         cx.update(gpui_component::init);
         let window = cx.add_window(|window, cx| {
             ExportForm::new(
-                vec![choice(comp(), "shot 010", true)],
+                vec![choice(comp(), "shot 010", 120, true)],
                 initial(),
                 format_choices(&ravel_media::encode::available_encoders()),
                 // A build that cannot decode: the composition's own sound is
@@ -747,8 +759,8 @@ mod form_tests {
         let window = cx.add_window(|window, cx| {
             ExportForm::new(
                 vec![
-                    choice(comp(), "silent", false),
-                    choice(with_sound, "voiced", true),
+                    choice(comp(), "silent", 120, false),
+                    choice(with_sound, "voiced", 120, true),
                 ],
                 initial(),
                 format_choices(&ravel_media::encode::available_encoders()),
@@ -790,6 +802,57 @@ mod form_tests {
                     settings.audio,
                     "the soundtrack is on by default and was never turned off by hand",
                 );
+            })
+            .unwrap();
+    }
+
+    /// The length travels with the picker for the same reason the soundtrack
+    /// does. A composition with no frames is refused whichever row it sits on
+    /// — otherwise the dialog submits a one-frame job for a composition that
+    /// has no frame 0, which `ravel-cli` refuses outright.
+    #[gpui::test]
+    fn picking_a_composition_with_no_frames_is_refused(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let empty = CompId::new(4);
+        let window = cx.add_window(|window, cx| {
+            ExportForm::new(
+                vec![
+                    choice(comp(), "shot 010", 120, true),
+                    choice(empty, "empty", 0, true),
+                ],
+                initial(),
+                format_choices(&ravel_media::encode::available_encoders()),
+                true,
+                window,
+                cx,
+            )
+        });
+        window
+            .update(cx, |form, _window, cx| {
+                form.settings(cx)
+                    .resolve()
+                    .expect("the form opens on a composition that has frames");
+            })
+            .unwrap();
+
+        window
+            .update(cx, |form, window, cx| {
+                form.composition.update(cx, |picker, cx| {
+                    picker.set_selected_index(
+                        Some(gpui_component::IndexPath::default().row(1)),
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window
+            .update(cx, |form, _window, cx| {
+                let settings = form.settings(cx);
+                assert_eq!(settings.comp, Some(empty));
+                assert_eq!(settings.resolve(), Err(ExportError::EmptyComposition));
             })
             .unwrap();
     }
@@ -874,6 +937,7 @@ mod locale_tests {
         keys.extend(
             [
                 ExportError::NoComposition,
+                ExportError::EmptyComposition,
                 ExportError::InvalidStart,
                 ExportError::InvalidEnd,
                 ExportError::EmptyRange,

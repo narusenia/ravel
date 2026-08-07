@@ -963,6 +963,7 @@ audio_silent_composition = "This composition has no layers with audio."
 
 [export.error]
 no_composition = "This project has no composition to export."
+empty_composition = "This composition is zero frames long and has nothing to render."
 invalid_start = "The first frame must be a whole number."
 invalid_end = "The last frame must be a whole number."
 empty_range = "The last frame is before the first."

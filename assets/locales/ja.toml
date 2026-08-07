@@ -955,6 +955,7 @@ audio_silent_composition = "このコンポジションには音声を持つレ�
 
 [export.error]
 no_composition = "書き出せるコンポジションがありません。"
+empty_composition = "このコンポジションは長さが 0 フレームで、書き出す内容がありません。"
 invalid_start = "開始フレームは整数で入力してください。"
 invalid_end = "終了フレームは整数で入力してください。"
 empty_range = "終了フレームが開始フレームより前です。"

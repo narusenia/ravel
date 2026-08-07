@@ -1895,8 +1895,8 @@ Unknown type keys are skipped silently (plugin space).
   language never changes a comparison or an edit.
 
 - `export` (export.rs): the export dialog's headless half (`EXPORT-5`).
-  `ExportSettings { comp, start, end, format, png_depth, directory, prefix,
-  suffix, padding, overwrite, audio }` holds the widgets' raw strings —
+  `ExportSettings { comp, duration, start, end, format, png_depth, directory,
+  prefix, suffix, padding, overwrite, audio }` holds the widgets' raw strings —
   `for_composition(comp, name, duration, directory)` is the opening state —
   and `resolve() -> Result<ExportRequest, ExportError>` turns them into
   `ExportRequest { comp, range, output: ImageSequenceOutput, overwrite,
@@ -1904,7 +1904,11 @@ Unknown type keys are skipped silently (plugin space).
   frame numbers are **inclusive on screen and half-open in the request**, as
   `ravel-cli`'s `--range start:end` is — an inclusive last frame of
   `u64::MAX` has no half-open end and is `ExportError::RangeOverflow` rather
-  than an overflow. `ExportError::message_key()` names the sentence; nothing
+  than an overflow. `duration` is the chosen composition's frame count rather
+  than a typed field, and travels with the picker: zero is
+  `ExportError::EmptyComposition`, the refusal `plan::plan_render` gives the
+  same request, because the inclusive range of an empty composition reads as
+  the single frame 0. `ExportError::message_key()` names the sentence; nothing
   here holds prose. The checks are pre-flight only — the worker's
   `check_preconditions` remains authoritative, and `available_encoders()` is
   the one authority on what can be written.

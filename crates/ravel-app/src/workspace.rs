@@ -1403,8 +1403,9 @@ impl RavelWorkspace {
                     id: *id,
                     name: comp.name.clone(),
                     // Per entry, not once for the active composition: the
-                    // dialog's picker can move, and the checkbox has to
-                    // follow it.
+                    // dialog's picker can move, and the checkbox and the
+                    // empty-composition refusal both have to follow it.
+                    duration: comp.duration_frames,
                     has_audio: crate::export::composition_has_audio(document, *id),
                 })
                 .collect();

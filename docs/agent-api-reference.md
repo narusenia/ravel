@@ -1284,8 +1284,8 @@ Consumers publish updates monotonically: any update newer than the last
 published generation is shown (requiring `generation == latest_generation()`
 starved the viewer whenever one evaluation outlived one playback tick);
 `cancel_pending()` returns a fence generation that blocks in-flight results.
-`ravel-app`'s `GpuEvalHooks` (`src/eval_hooks.rs`) owns `GpuContext` +
-`ShaderManager`, maps hints to `register_all_processors` /
+`ravel_nodes::GpuEvalHooks` (`crates/ravel-nodes/src/eval_hooks.rs`) owns
+`GpuContext` + `ShaderManager`, maps hints to `register_all_processors` /
 `processor_for_node` (searching the document's layer networks too), and
 rasterizes `Geometry` outputs for the Viewer. A `Params` hint whose node
 already has a processor reporting `rebuild_on_node_change() == false` is
@@ -1316,7 +1316,19 @@ RenderEvent::{Started, Progress, Completed, Cancelled, Failed}
 RenderError::{CompositionNotFound, EmptyRange, Compile, OutputExists,
     Eval, NotAFrame, Encode, WorkerGone}
 CONFLICT_SAMPLE: usize    // paths OutputExists lists; its `total` is exact
+
+JobProgress::started(&RenderEvent) -> Option<Self>   // Some for Started only
+    .observe(&RenderEvent) -> bool   // false = another job's event, ignored
+    .job() / .total_frames() / .rendered() / .last_frame() / .state()
+    .is_finished() / .fraction() -> f32
+JobState::{Running, Completed, Cancelled, Failed { message }}
 ```
+
+`JobProgress` folds the event stream into "n of m frames, running" once, for
+every consumer: `ravel-cli`'s progress line and the render queue panel
+(`EXPORT-5`) read the same numbers. It holds no user-visible text — the
+`Failed` message is `RenderError`'s own `Display`, a diagnostic; a localized
+sentence is the caller's job through `t!`.
 
 A second worker rather than a mode of `EvalService`, whose latest-wins queue
 would drop frames. It runs its own `Evaluator` (`reset` per job, so the cache
@@ -2412,3 +2424,70 @@ Unknown type keys are skipped silently (plugin space).
   invalidate old queued audio. An atomic transport gate couples epoch changes
   to clock writes; the callback tries it without waiting and advances the
   clock only for current-epoch frames actually copied (never underrun silence).
+
+## ravel-cli — headless render front end
+
+`crates/ravel-cli`, binary `ravel-cli`. **No `gpui`, `ravel-ui`, `ravel-dock`
+or `ravel-app` dependency** — that absence is the design, not an accident
+(`docs/implementation/render-export-plan.md`, "CLI は GPUI にリンクしない
+別バイナリにする"). `ffmpeg` is an off-by-default feature exactly as in
+`ravel-app`; image sequences never need it.
+
+```text
+ravel-cli render <project.ravprj> -o <DIR>
+    [--comp NAME_OR_ID] [--range START-END] [--format png|exr|vp9|…]
+    [--png-depth 8|16] [--prefix …] [--suffix …] [--padding N]
+    [--param NAME=VALUE]… [--overwrite] [--progress auto|bar|json|quiet]
+ravel-cli list comps  <project.ravprj>     // JSON
+ravel-cli list params <project.ravprj>     // ExposedListing's own JSON
+ravel-cli list codecs                      // every target, with route or reason
+```
+
+```rust
+// crate root
+locale_dir() -> PathBuf / init_locale()
+load_project(&Path) -> Result<ProjectFile, CliError>   // never writes
+plan_from_args(&RenderArgs) -> Result<RenderPlan, CliError>
+render_with_hooks<H: EvalWorkerHooks>(&RenderArgs, H, &CancelFlag,
+    &mut dyn Reporter) -> Result<Summary, CliError>
+render(&RenderArgs, &CancelFlag, &mut dyn Reporter)    // GpuEvalHooks
+run(Cli) -> u8                                          // the exit code
+
+plan::plan_render(&RenderArgs, &Document, project_root, &[EncoderAvailability])
+    -> Result<RenderPlan, CliError>                     // pure decision
+plan::Warning::{AudioNotRendered { layers }, BindingIssue { detail }}
+execute::CancelFlag  // .request() / .is_requested(); safe in a signal handler
+report::Reporter { note / update / success / failure }  // bar, JSON, quiet
+error::CliError.code() / .id() / .localized()
+```
+
+Exit codes (`error::EXIT_*`): `0` ok, `1` internal, `2` usage (clap's own, and
+an unknown composition or empty range), `3` load, `4` `--param`, `5` codec,
+`6` output exists, `7` evaluation, `8` encoding, `9` cancelled. `9` rather
+than `130`: Windows has no `128 + signal` convention and the code has to mean
+one thing everywhere.
+
+Three seams are load-bearing for later units:
+
+- **`plan_render` is a pure function** of arguments plus a document, so every
+  refusal happens before a job exists. `EXPORT-7`'s interactive mode builds
+  the same `RenderArgs` from answers and calls it after each one.
+- **`execute` is generic over `EvalWorkerHooks`**, so the binary passes
+  `ravel_nodes::GpuEvalHooks` and tests pass a CPU stub — the plan's
+  guarantees are verified without a device (`tests/render_cli.rs`), and the
+  binary's own wiring separately (`tests/cli_binary.rs`, needs a GPU).
+- **Progress arithmetic is `ravel_core::runtime::JobProgress`**, not a CLI
+  type, so `EXPORT-5`'s render queue panel reads the same projection.
+
+`--param` is parsed against the **declared** type, so `--param scale=2` for a
+float declaration is `Float(2.0)`; a value that will not read is `CliError::
+ParamValue` (exit 4). A name with no declaration is passed through as a
+string so `exposed::apply` reports `Undeclared` — the CLI never decides what
+a project declares. `--range` is **inclusive at both ends** (`0-9` is ten
+frames) and becomes the worker's half-open range.
+
+Video targets are enumerated but not writable: there is no container
+`Encoder` yet, so `--format vp9` fails with `CodecUnavailable` (no FFmpeg) or
+`CodecNoWriter` (FFmpeg present) — both exit 5. `EXPORT-4` is what removes
+the second. A composition with audio layers renders picture only and says so
+(`Warning::AudioNotRendered`).

@@ -589,11 +589,14 @@ no_platform_route = "this operating system offers no route to it"
 not_offered = "Ravel does not offer it"
 
 [cli.warn]
-audio_not_rendered = "this composition has {count} layer(s) with audio, and the render is picture only"
+audio_not_rendered = "this composition has {count} layer(s) with audio, and --no-audio was given, so the render is picture only"
+audio_no_decoder = "this composition has {count} layer(s) with audio, but this build has no FFmpeg and cannot decode any, so the render is picture only"
+audio_source_skipped = "the layer \"{layer}\" is silent in the mix: its media asset \"{asset}\" could not be loaded: {detail}"
 binding_issue = "a supplied parameter did not fully reach the project: {detail}"
 
 [cli.result]
 completed = "wrote {count} frame(s) to {path}"
+audio = "wrote the soundtrack to {path}"
 
 
 # Node type labels, descriptions, and parameter docs, keyed by type_key

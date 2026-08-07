@@ -256,9 +256,9 @@ fn run_render(args: &RenderArgs) -> u8 {
     let mut reporter = report::reporter(args.progress);
     let cancel = CancelFlag::new();
 
-    install_interrupt_handler(&cancel);
-
-    match render(args, &cancel, reporter.as_mut()) {
+    let outcome =
+        install_interrupt_handler(&cancel).and_then(|()| render(args, &cancel, reporter.as_mut()));
+    match outcome {
         Ok(summary) => {
             reporter.success(&summary);
             EXIT_OK
@@ -278,13 +278,16 @@ fn run_render(args: &RenderArgs) -> u8 {
 /// worker stops at the next frame boundary and the encoder removes what it
 /// made.
 ///
-/// A handler that cannot be installed is logged rather than fatal — the
-/// render is still correct, it just cannot be interrupted cleanly.
-fn install_interrupt_handler(cancel: &CancelFlag) {
+/// A handler that cannot be installed is **fatal, before the render starts**.
+/// Continuing would leave Ctrl-C on its default behaviour, which kills the
+/// process where it stands and leaves however many frames were already
+/// written — the exact outcome "an interrupted render leaves nothing behind"
+/// promises will not happen. A guarantee that quietly downgrades to a warning
+/// line is worse than no guarantee, so the run is refused instead.
+fn install_interrupt_handler(cancel: &CancelFlag) -> Result<(), CliError> {
     let cancel = cancel.clone();
-    if let Err(error) = ctrlc::set_handler(move || cancel.request()) {
-        tracing::warn!(%error, "interrupt handler unavailable; Ctrl-C will not clean up");
-    }
+    ctrlc::set_handler(move || cancel.request())
+        .map_err(|error| CliError::InterruptHandler(error.to_string()))
 }
 
 #[cfg(test)]
@@ -313,5 +316,20 @@ mod tests {
             Some(PathBuf::from("/abs")),
             "an absolute path keeps its own parent"
         );
+    }
+
+    /// The interrupt handler is a precondition, not a nicety: when it cannot
+    /// be installed the CLI has to say so rather than render without the
+    /// cleanup it advertises. `ctrlc` refuses a second handler in a process,
+    /// which is how the failure is reachable deterministically.
+    ///
+    /// The only test in this crate that touches the process-wide handler.
+    #[test]
+    fn a_handler_that_cannot_be_installed_is_a_failure() {
+        let cancel = CancelFlag::new();
+        install_interrupt_handler(&cancel).expect("the first handler installs");
+        let error = install_interrupt_handler(&cancel).expect_err("the second cannot");
+        assert_eq!(error.code(), crate::error::EXIT_INTERNAL);
+        assert_eq!(error.id(), "interrupt-handler");
     }
 }

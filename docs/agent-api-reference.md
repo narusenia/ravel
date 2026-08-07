@@ -2466,11 +2466,14 @@ report::Reporter { note / update / success / failure }  // bar, JSON, quiet
 error::CliError.code() / .id() / .localized()
 ```
 
-Exit codes (`error::EXIT_*`): `0` ok, `1` internal, `2` usage (clap's own, and
-an unknown composition or empty range), `3` load, `4` `--param`, `5` codec,
-`6` output exists, `7` evaluation, `8` encoding, `9` cancelled. `9` rather
-than `130`: Windows has no `128 + signal` convention and the code has to mean
-one thing everywhere.
+Exit codes (`error::EXIT_*`): `0` ok, `1` internal (no adapter, no interrupt
+handler), `2` usage (clap's own, and an unknown composition or an
+empty range), `3` load, `4` `--param`, `5` codec, `6` output exists, `7`
+evaluation, `8` encoding, `9` cancelled. `9` rather than `130`: Windows has no
+`128 + signal` convention and the code has to mean one thing everywhere.
+
+An interrupt handler that cannot be installed is fatal *before* the render, since
+"an interrupt leaves nothing behind" cannot hold without one.
 
 Four seams are load-bearing for later units:
 

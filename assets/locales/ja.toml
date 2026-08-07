@@ -570,6 +570,7 @@ eval = "書き出しに失敗した: {detail}"
 encode = "出力の書き込みに失敗した: {detail}"
 cancelled = "書き出しを中断した。出力は残っていない"
 gpu = "使える GPU アダプタが見つからない: {detail}"
+interrupt_handler = "Ctrl-C ハンドラを設置できなかった。中断しても部分出力を片付けられないため書き出しを開始しない: {detail}"
 internal = "書き出しが予期せず停止した: {detail}"
 
 [cli.codec.reason]

@@ -577,6 +577,7 @@ eval = "the render failed: {detail}"
 encode = "writing the output failed: {detail}"
 cancelled = "the render was interrupted; nothing was left behind"
 gpu = "no usable GPU adapter was found: {detail}"
+interrupt_handler = "the Ctrl-C handler could not be installed, so an interrupted render could not clean up after itself: {detail}"
 internal = "the render stopped unexpectedly: {detail}"
 
 [cli.codec.reason]

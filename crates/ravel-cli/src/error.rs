@@ -120,6 +120,9 @@ pub enum CliError {
     #[error("no usable GPU adapter: {0}")]
     Gpu(String),
 
+    #[error("the interrupt handler could not be installed: {0}")]
+    InterruptHandler(String),
+
     #[error("internal failure: {0}")]
     Internal(String),
 }
@@ -142,7 +145,7 @@ impl CliError {
             Self::Eval(_) => EXIT_EVAL,
             Self::Encode(_) => EXIT_ENCODE,
             Self::Cancelled => EXIT_CANCELLED,
-            Self::Gpu(_) | Self::Internal(_) => EXIT_INTERNAL,
+            Self::Gpu(_) | Self::InterruptHandler(_) | Self::Internal(_) => EXIT_INTERNAL,
         }
     }
 
@@ -167,6 +170,7 @@ impl CliError {
             Self::Encode(_) => "encode-failed",
             Self::Cancelled => "cancelled",
             Self::Gpu(_) => "no-gpu",
+            Self::InterruptHandler(_) => "interrupt-handler",
             Self::Internal(_) => "internal",
         }
     }
@@ -213,6 +217,9 @@ impl CliError {
             Self::Encode(detail) => t!("cli.error.encode").replace("{detail}", detail),
             Self::Cancelled => t!("cli.error.cancelled"),
             Self::Gpu(detail) => t!("cli.error.gpu").replace("{detail}", detail),
+            Self::InterruptHandler(detail) => {
+                t!("cli.error.interrupt_handler").replace("{detail}", detail)
+            }
             Self::Internal(detail) => t!("cli.error.internal").replace("{detail}", detail),
         }
     }
@@ -282,6 +289,7 @@ mod tests {
             EXIT_PARAM
         );
         assert_eq!(CliError::UnknownComposition("x".into()).code(), EXIT_USAGE);
+        assert_eq!(CliError::InterruptHandler("x".into()).code(), EXIT_INTERNAL);
         assert_eq!(CliError::CodecNoWriter { format: "vp9" }.code(), EXIT_CODEC);
         assert_eq!(
             CliError::OutputExists {

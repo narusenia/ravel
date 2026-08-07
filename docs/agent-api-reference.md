@@ -1410,8 +1410,9 @@ other systems the reason is `NoPlatformRouteOnThisOs`.
 
 `SequenceCodec` rather than an `ImageFormat` plus loose options: the bit depth
 only means something for PNG, and formats Ravel cannot write have no variant,
-so `ImageSequenceEncoder::new` cannot fail. Choosing the depth is `EXPORT-3`'s
-job — there is no UI or CLI for it yet.
+so `ImageSequenceEncoder::new` cannot fail. The depth is chosen by
+`ravel-cli render --png-depth 8|16` (`EXPORT-3`); the export dialog picks it up
+in `EXPORT-5`.
 
 `MediaWriter` writes one container with interleaved streams; `Encoder` is the
 render worker's contract and also covers the `n`-files case. `index` is the

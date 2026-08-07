@@ -48,8 +48,10 @@ model is still current.
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
   and the application entry point
 - `crates/ravel-cli`: the `ravel-cli` binary — headless rendering
-  (`ravel-cli render`) and the machine-readable enumerations the interactive
-  mode will sit on (`ravel-cli list comps | params | codecs`). GUI-free by
+  (`ravel-cli render`), the machine-readable enumerations
+  (`ravel-cli list comps | params | codecs`), and the interactive mode that
+  sits on them (`ravel-cli interactive`, which refuses to start without a
+  terminal on standard input). GUI-free by
   construction: it does not depend on `gpui`, `ravel-ui`, `ravel-dock`, or
   `ravel-app`, so a headless host cannot link a window toolkit by accident.
   Releases therefore ship **two** binaries, `ravel` and `ravel-cli`. A render

@@ -2468,6 +2468,8 @@ ravel-cli render <project.ravprj> -o <DIR>
 ravel-cli list comps  <project.ravprj>     // JSON
 ravel-cli list params <project.ravprj>     // ExposedListing's own JSON
 ravel-cli list codecs                      // every target, with route or reason
+ravel-cli interactive <project.ravprj>     // asks, then renders (needs a TTY
+                                           // on **stdin**; refuses otherwise)
 ```
 
 ```rust
@@ -2500,11 +2502,23 @@ audio::{OUTPUT_SAMPLE_RATE = 48_000, OUTPUT_CHANNELS = 2}
 execute::CancelFlag  // .request() / .is_requested(); safe in a signal handler
 report::Reporter { note / update / success / failure }  // bar, JSON, quiet
 error::CliError.code() / .id() / .localized()
+
+// EXPORT-7: the interactive mode, a layer over `listing` + `plan_render`
+interactive::gate(stdin_is_terminal: bool) -> Result<(), CliError>
+interactive::Prompt { select / text / confirm / note }   // stderr; testable
+interactive::TerminalPrompt                              // dialoguer
+interactive::collect(&mut dyn Prompt, project, &Document, project_root,
+    &[EncoderAvailability]) -> Result<RenderArgs, CliError>
+interactive::usable_formats(&[EncoderAvailability]) -> Vec<(OutputFormat, String)>
+interactive::equivalent_argv(&RenderArgs) -> Vec<String> / shell_join(&[String])
+interactive::PROGRESS = ProgressMode::Bar   // never Json: exclusive by
+                                            // construction
 ```
 
 Exit codes (`error::EXIT_*`): `0` ok, `1` internal (no adapter, no interrupt
-handler), `2` usage (clap's own, and an unknown or ambiguous composition or an
-empty range), `3` load, `4` `--param`, `5` codec, `6` output exists, `7`
+handler), `2` usage (clap's own, an unknown or ambiguous composition, an empty
+range, and `interactive` with no terminal on stdin), `3` load, `4` `--param`,
+`5` codec, `6` output exists, `7`
 evaluation, `8` encoding, `9` cancelled. `9` rather than `130`: Windows has no
 `128 + signal` convention and the code has to mean one thing everywhere.
 
@@ -2517,8 +2531,9 @@ Four seams are load-bearing for later units:
 
 - **`plan_render` is a pure function** of arguments plus a document — no
   filesystem — so every refusal it can make happens before a job exists.
-  `EXPORT-7`'s interactive mode builds the same `RenderArgs` from answers and
-  calls it after each one.
+  `interactive::collect` builds the same `RenderArgs` from answers and calls
+  it after each one, which is why the interactive mode adds no validation of
+  its own and can reach no render the flags cannot express.
 - **`execute` is generic over `EvalWorkerHooks`**, so the binary passes
   `ravel_nodes::GpuEvalHooks` and tests pass a CPU stub — the plan's
   guarantees are verified without a device (`tests/render_cli.rs`), and the

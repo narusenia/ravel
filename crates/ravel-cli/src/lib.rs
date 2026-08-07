@@ -44,11 +44,13 @@ pub mod args;
 pub mod audio;
 pub mod error;
 pub mod execute;
+pub mod interactive;
 pub mod listing;
 pub mod params;
 pub mod plan;
 pub mod report;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use ravel_core::runtime::eval_service::EvalWorkerHooks;
@@ -261,6 +263,38 @@ pub fn run(cli: Cli) -> u8 {
                 error.code()
             }
         },
+        Command::Interactive(arg) => run_interactive(&arg.project),
+    }
+}
+
+/// Ask for a render and then run it exactly as `render` would have.
+///
+/// The gate comes first, before the project is even opened: a prompt with
+/// nobody to answer it is a hang, and a hang is worse than any refusal this
+/// crate can report. Everything after it is the non-interactive path —
+/// [`run_render`] plans, refuses and renders the collected arguments with no
+/// idea where they came from.
+fn run_interactive(project: &Path) -> u8 {
+    let outcome = interactive::gate(std::io::stdin().is_terminal()).and_then(|()| {
+        let file = load_project(project)?;
+        interactive::collect(
+            &mut interactive::TerminalPrompt::default(),
+            project,
+            &file.document,
+            project_root(project).as_deref(),
+            &available_encoders(),
+        )
+    });
+    match outcome {
+        // The project is loaded a second time by the render itself. It is a
+        // read either way, and going through the one entry point is what
+        // makes "the session is a command line" true of the code and not
+        // only of the arguments.
+        Ok(args) => run_render(&args),
+        Err(error) => {
+            eprintln!("{}", error.localized());
+            error.code()
+        }
     }
 }
 

@@ -120,9 +120,10 @@
 ## REQ-PROJ-006: 公開パラメータ宣言
 
 - **優先度**: Must
-- **ステータス**: Draft（2026-08-03 新設。機構は
-  `implementation/done/exposed-parameters-plan.md` で実装済み。CLI からの
-  差し替えは `render-export-plan.md` の `EXPORT-3` 待ち）
+- **ステータス**: Implemented（2026-08-03 新設。機構は
+  `implementation/done/exposed-parameters-plan.md`、CLI からの差し替えは
+  `render-export-plan.md` の `EXPORT-3` で実装済み。UI で作った宣言を
+  `ravel-cli render --param` で差し替えて書き出す往復を実機で確認済み）
 - **説明**: 「名前・型・既定値・説明を宣言し、内部のパラメータに束縛する」という
   **単一の機構**。宣言は外部から見える契約で、内部のノード構成・レイヤー名・
   配線を変えても壊れない。

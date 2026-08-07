@@ -117,6 +117,10 @@ ffmpeg-the-third = "5"
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 ctrlc = "3"
+# The prompts of `ravel-cli interactive` (unit 7). Without default features:
+# `editor` and `password` would pull `tempfile` and `zeroize` for prompts this
+# CLI never asks.
+dialoguer = { version = "0.12", default-features = false }
 
 [patch.crates-io]
 gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }

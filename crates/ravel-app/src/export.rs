@@ -225,6 +225,28 @@ impl RenderService {
         }
     }
 
+    /// Open a row and fold events into it without a worker behind them.
+    ///
+    /// Test-only, and the whole reason it exists is that the render queue
+    /// panel's drawing is the one part of this that needs a *populated*
+    /// service: submitting for real wants a GPU adapter, which the machines
+    /// running the tests may not have.
+    #[cfg(test)]
+    pub(crate) fn record_for_test(
+        &mut self,
+        job: RenderJobId,
+        composition: &str,
+        directory: &str,
+        total_frames: u64,
+        events: &[RenderEvent],
+    ) {
+        self.rows
+            .submitted(job, composition, directory, total_frames);
+        for event in events {
+            self.rows.observe(event);
+        }
+    }
+
     /// Spawn the worker if this session has not needed one yet.
     ///
     /// Fails only when there is no GPU: the render evaluator is the same

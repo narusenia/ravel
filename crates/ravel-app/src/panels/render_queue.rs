@@ -234,3 +234,106 @@ impl Render for RenderQueueGpuiPanel {
             .child(list)
     }
 }
+
+// A `use super::*;` glob in a test module in a file that expands the gpui
+// proc macros crashes rustc 1.95 (SIGBUS); name what the tests need instead.
+#[cfg(test)]
+mod tests {
+    use super::RenderQueueGpuiPanel;
+    use crate::export::{RenderService, RenderServiceHandle};
+    use gpui::AppContext as _;
+    use ravel_core::runtime::{RenderError, RenderEvent, RenderJobId};
+
+    /// The panel draws every state a row can be in.
+    ///
+    /// One of the few things `.agents/rules/gpui.md` keeps GPUI tests for —
+    /// behaviour that depends on actual rendering. Every row builds several
+    /// stateful elements from its index, and a collision or a widget built
+    /// wrongly is a panic no headless test can see.
+    #[gpui::test]
+    fn the_panel_draws_every_row_state(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let service = cx.update(|cx| cx.new(RenderService::new));
+        service.update(cx, |service, _cx| {
+            let queued = RenderJobId::from_raw(1);
+            service.record_for_test(queued, "shot 010", "/tmp/out", 120, &[]);
+
+            let running = RenderJobId::from_raw(2);
+            service.record_for_test(
+                running,
+                "shot 020",
+                "/tmp/out",
+                120,
+                &[
+                    RenderEvent::Started {
+                        job: running,
+                        total_frames: 120,
+                    },
+                    RenderEvent::Progress {
+                        job: running,
+                        frame: 46,
+                        rendered: 47,
+                        total_frames: 120,
+                    },
+                ],
+            );
+
+            let failed = RenderJobId::from_raw(3);
+            service.record_for_test(
+                failed,
+                "shot 030",
+                "/tmp/out",
+                4,
+                &[
+                    RenderEvent::Started {
+                        job: failed,
+                        total_frames: 4,
+                    },
+                    RenderEvent::Failed {
+                        job: failed,
+                        error: RenderError::EmptyRange { start: 5, end: 5 },
+                    },
+                ],
+            );
+
+            let done = RenderJobId::from_raw(4);
+            service.record_for_test(
+                done,
+                "shot 040",
+                "/tmp/out",
+                4,
+                &[
+                    RenderEvent::Started {
+                        job: done,
+                        total_frames: 4,
+                    },
+                    RenderEvent::Completed {
+                        job: done,
+                        frames: 4,
+                    },
+                ],
+            );
+        });
+        cx.update(|cx| cx.set_global(RenderServiceHandle(service.downgrade())));
+
+        let window = cx.add_window(|window, cx| {
+            RenderQueueGpuiPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(300.0)));
+        cx.run_until_parked();
+    }
+
+    /// A session with no queue at all (a panel built before the workspace, or
+    /// after it went away) shows its empty state instead of failing.
+    #[gpui::test]
+    fn the_panel_draws_without_a_service(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(|window, cx| {
+            RenderQueueGpuiPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(300.0)));
+        cx.run_until_parked();
+    }
+}

@@ -631,6 +631,22 @@ mod form_tests {
             .unwrap();
     }
 
+    /// The form draws.
+    ///
+    /// One of the few things `.agents/rules/gpui.md` keeps GPUI tests for —
+    /// behaviour that depends on actual rendering. A dialog whose `render`
+    /// panics (a duplicated element id, a widget built without its state) is
+    /// invisible to every other test here, and the first thing to find it
+    /// would otherwise be the user opening `File ▸ Export…`.
+    #[gpui::test]
+    fn the_form_renders(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(form);
+        let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(gpui::size(gpui::px(420.0), gpui::px(600.0)));
+        cx.run_until_parked();
+    }
+
     /// A build that cannot decode audio, or a composition without any, must
     /// not produce a request that asks for a soundtrack.
     #[gpui::test]

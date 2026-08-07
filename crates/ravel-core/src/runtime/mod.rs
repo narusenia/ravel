@@ -20,6 +20,7 @@ pub mod eval_pool;
 pub mod eval_service;
 pub mod io_runtime;
 pub mod playback;
+pub mod render;
 
 pub use channels::{DecodedFrame, EvalResponse, decode_channel, eval_channel, reply_channel};
 pub use decode_pool::{DecodePool, DecodePoolConfig};
@@ -30,6 +31,9 @@ pub use eval_service::{
 };
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};
 pub use playback::{PlaybackClock, PlaybackState};
+pub use render::{
+    OverwritePolicy, RenderError, RenderEvent, RenderJob, RenderJobId, RenderOutput, RenderQueue,
+};
 
 /// Top-level configuration for all runtime pools.
 #[derive(Clone, Debug, Default)]

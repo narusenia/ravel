@@ -56,6 +56,13 @@ use crate::types::FrameBuffer;
 pub trait Encoder: Send {
     /// Prepare the destination (create directories, open the container, write
     /// the header). Called exactly once, before any frame.
+    ///
+    /// A `begin` that returns `Err` may have got partway — some directories
+    /// made, a header written — so the render worker calls [`abort`]
+    /// afterwards. Implementations either undo their own work here or leave
+    /// it for that call; either way nothing they created may survive.
+    ///
+    /// [`abort`]: Encoder::abort
     fn begin(&mut self) -> MediaResult<()>;
 
     /// Write one frame.
@@ -67,6 +74,24 @@ pub trait Encoder: Send {
     fn write_frame(&mut self, frame: &FrameBuffer, index: u64) -> MediaResult<()>;
 
     /// Flush and close the output. After this the written files are final.
+    ///
+    /// An `Err` from `finish` is one of two different things, and the
+    /// difference is what the caller may then do:
+    ///
+    /// - **Finalization failed** on an encoder that was active — a container
+    ///   died halfway through its trailer. The output is *not* final, and the
+    ///   encoder must still be abortable: [`abort`] removes what it created.
+    /// - **The call was out of order** — `finish` on an encoder that was
+    ///   never begun, or already finished, or already aborted. Nothing
+    ///   happens; in particular an already-finished encoder's output stays
+    ///   final, and a following `abort` is itself an error because there is
+    ///   nothing left that is the encoder's to remove.
+    ///
+    /// The render worker calls `abort` after any failed `finish` rather than
+    /// trusting `Drop` to notice, and logs the second case's error instead of
+    /// treating it as a new failure — by then the job is already lost.
+    ///
+    /// [`abort`]: Encoder::abort
     fn finish(&mut self) -> MediaResult<()>;
 
     /// Cancel the job and remove the output it created.

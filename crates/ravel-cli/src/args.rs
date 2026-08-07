@@ -53,9 +53,48 @@ pub enum ListCommand {
     Codecs,
 }
 
+/// Expands a leading `~` (bare, or followed by a separator) to the home
+/// directory.
+///
+/// A shell does this before `argv` exists, so it only matters when the tilde
+/// reaches the process intact — which happens two ways, both of them ordinary:
+/// a quoted argument (`-o '~/renders'`, and every `~` typed into a Windows
+/// prompt), and the paths the interactive mode reads from its own prompts,
+/// which no shell ever sees.
+///
+/// `~user` is left alone: resolving another account's home needs a directory
+/// lookup this has no business doing, and passing it through unchanged fails
+/// with the path the user typed instead of one silently rewritten to the wrong
+/// account. A home directory that cannot be determined leaves the path
+/// untouched for the same reason.
+pub fn expand_tilde(text: &str) -> PathBuf {
+    let Some(rest) = text.strip_prefix('~') else {
+        return PathBuf::from(text);
+    };
+    let rest = match rest {
+        "" => "",
+        // Both separators, because a Windows user types either one.
+        _ if rest.starts_with('/') || rest.starts_with('\\') => &rest[1..],
+        // `~user/...`, or a file whose name genuinely starts with a tilde.
+        _ => return PathBuf::from(text),
+    };
+    match dirs::home_dir() {
+        Some(home) if rest.is_empty() => home,
+        Some(home) => home.join(rest),
+        None => PathBuf::from(text),
+    }
+}
+
+/// `expand_tilde` in the shape clap's `value_parser` wants. Infallible: an
+/// unexpandable tilde is a path, not a usage error.
+fn tilde_path(text: &str) -> Result<PathBuf, std::convert::Infallible> {
+    Ok(expand_tilde(text))
+}
+
 #[derive(Debug, Args)]
 pub struct ProjectArg {
     /// The `.ravprj` to read. Never written.
+    #[arg(value_parser = tilde_path)]
     pub project: PathBuf,
 }
 
@@ -68,6 +107,7 @@ pub struct ProjectArg {
 pub struct RenderArgs {
     /// The `.ravprj` to render. Never written — a project that migrates on
     /// load is migrated in memory only.
+    #[arg(value_parser = tilde_path)]
     pub project: PathBuf,
 
     /// Composition to render, by name or by numeric id. Defaults to the
@@ -91,7 +131,7 @@ pub struct RenderArgs {
     pub png_depth: PngBits,
 
     /// Directory the numbered frames are written into. Created if missing.
-    #[arg(long, short = 'o', value_name = "DIR")]
+    #[arg(long, short = 'o', value_name = "DIR", value_parser = tilde_path)]
     pub output: PathBuf,
 
     /// File name text before the frame number.
@@ -298,6 +338,63 @@ impl FromStr for FrameRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leading_tilde_becomes_the_home_directory() {
+        let home = dirs::home_dir().expect("the test host has a home directory");
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/renders"), home.join("renders"));
+        assert_eq!(expand_tilde("~/a/b.ravprj"), home.join("a/b.ravprj"));
+    }
+
+    /// Expansion must not touch a path that only looks like it starts with a
+    /// home reference, or a relative path that happens to contain a tilde.
+    #[test]
+    fn only_a_leading_bare_tilde_expands() {
+        for text in [
+            "~other/renders",
+            "~backup",
+            "/tmp/~/renders",
+            "./~",
+            "renders",
+            "",
+        ] {
+            assert_eq!(
+                expand_tilde(text),
+                PathBuf::from(text),
+                "{text:?} must pass through unchanged"
+            );
+        }
+    }
+
+    /// The three path arguments all route through the same expansion — a
+    /// tilde that works for `--output` and not for the project is worse than
+    /// one that works for neither.
+    #[test]
+    fn every_path_argument_expands_a_tilde() {
+        let home = dirs::home_dir().expect("the test host has a home directory");
+        let Command::Render(args) =
+            Cli::parse_from(["ravel-cli", "render", "~/p.ravprj", "--output", "~/renders"]).command
+        else {
+            panic!("render parses as render");
+        };
+        assert_eq!(args.project, home.join("p.ravprj"));
+        assert_eq!(args.output, home.join("renders"));
+
+        let Command::Interactive(project) =
+            Cli::parse_from(["ravel-cli", "interactive", "~/p.ravprj"]).command
+        else {
+            panic!("interactive parses as interactive");
+        };
+        assert_eq!(project.project, home.join("p.ravprj"));
+
+        let Command::List(ListCommand::Comps(project)) =
+            Cli::parse_from(["ravel-cli", "list", "comps", "~/p.ravprj"]).command
+        else {
+            panic!("list comps parses as list comps");
+        };
+        assert_eq!(project.project, home.join("p.ravprj"));
+    }
 
     #[test]
     fn a_range_is_inclusive_at_both_ends() {

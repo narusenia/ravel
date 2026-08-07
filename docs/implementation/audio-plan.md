@@ -93,17 +93,26 @@ pub struct Layer {
 Document（audio を持つレイヤー群）
         │  ProjectState の document observer
         ▼
-AudioMixdown::build(comp, frame_rate)      ravel-app/src/audio/mixdown.rs
+AudioMixdown::build(comp, frame_rate)      ravel-audio の mixdown モジュール
         │  レイヤー → Track { samples, start_frame, gain 曲線, fades, mute/solo }
         │  background で decode + output-rate SRC
         │  結果は asset_id + stream で Arc キャッシュ
-        ▼
-AudioEngine::SetTrack …                    ravel-audio
-        ▼
-Audio Prep（gain はブロックごとにチャネル評価、epoch 付き chunk）
+        ├─────────────────────────────┐
+        ▼                             ▼
+AudioEngine::SetTrack …        offline::mix_range（範囲を 1 回、AudioBuffer）
+（playback フィーチャの下）      書き出し経路。ravel-cli / 書き出しダイアログ
+        ▼                             ▼
+Audio Prep（gain はブロックごとに   WAV 併置（連番）/ 将来 mux（動画）
+チャネル評価、epoch 付き chunk）
         ▼
 CPAL callback → SyncClock::advance()
 ```
+
+**`mixdown` は `ravel-app` から `ravel-audio` へ移設済み**（`EXPORT-4`）。
+再生と書き出しが同じ写像を通ることが「画面で聞いた音と書き出した音が同じ」の
+前提なので、GUI 側に置いたままにはできない。同じ理由で CPAL と device / engine は
+既定 on の `playback` フィーチャの下へ移し、`ravel-cli` はそれを要求しない
+（ヘッドレスなレンダーノードが CoreAudio / ALSA をリンクしない）。
 
 - レイヤーの `muted` / `solo` は**映像と音声で同じ意味**にする
   （mute したレイヤーは音も消える。音だけ消したいときは `audio_muted`）。

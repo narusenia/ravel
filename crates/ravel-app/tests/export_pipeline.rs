@@ -13,10 +13,12 @@
 //! carrying `ravel_media::encode::ImageSequenceEncoder`, and that running it
 //! leaves the same files under the same names `ravel-cli` would write.
 //!
-//! Held against `crates/ravel-cli/src/execute.rs`, which builds its job from
-//! `plan_render`'s output in the same three lines. If the GUI ever grows its
-//! own encoder or its own worker, the assertions below stop describing the
-//! CLI and this test is where that shows up.
+//! **The CLI is not described here, it is called.** `ravel-cli` is a
+//! dev-dependency of this crate, so the same export is resolved a second time
+//! by `ravel_cli::plan::plan_render` and rendered a second time by
+//! `ravel_cli::execute::execute`, and the two sets of frames are compared byte
+//! for byte. Hand-written expectations would go on passing after `plan_render`
+//! changed its mind about a default; this cannot.
 //!
 //! Headless on purpose. The dialog's widgets are covered by the `gpui::test`s
 //! in `export_dialog`; everything from the settings onward needs no window,
@@ -29,6 +31,10 @@
 
 use ravel_app::export::build_render_job;
 use ravel_app::export_dialog::initial_settings;
+use ravel_cli::args::{OutputFormat, PngBits, ProgressMode, RenderArgs};
+use ravel_cli::execute::CancelFlag;
+use ravel_cli::plan::{RenderPlan, plan_render};
+use ravel_cli::report::Reporter;
 use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::eval::{
     EvalContext, EvalScope, NodeProcessor, ProcessorRegistry as _, ResolvedParams,
@@ -186,6 +192,53 @@ fn render(settings: &ExportSettings) -> (RenderEvent, JobProgress) {
     }
 }
 
+/// The same export, written the way it would be typed at `ravel-cli render`.
+///
+/// Every field comes from the dialog's own settings rather than from a
+/// constant, so the CLI is asked for *this* export and not for one that
+/// happens to look like it.
+fn cli_args(settings: &ExportSettings, output: &std::path::Path) -> RenderArgs {
+    RenderArgs {
+        // `plan_render` takes the document as an argument; the path is only
+        // what `main` would have loaded it from.
+        project: std::path::PathBuf::from("unused.ravprj"),
+        comp: Some("shot 010".to_owned()),
+        range: Some(
+            format!("{}-{}", settings.start.trim(), settings.end.trim())
+                .parse()
+                .expect("the dialog's range is one the CLI accepts"),
+        ),
+        format: OutputFormat::Png,
+        png_depth: PngBits::Eight,
+        output: output.to_path_buf(),
+        prefix: settings.prefix.clone(),
+        suffix: settings.suffix.clone(),
+        padding: settings.padding.parse().expect("the dialog's padding"),
+        params: Vec::new(),
+        overwrite: settings.overwrite,
+        no_audio: !settings.audio,
+        progress: ProgressMode::Quiet,
+    }
+}
+
+/// A reporter that keeps the stable identifiers of whatever the CLI says.
+#[derive(Default)]
+struct Notes(Vec<String>);
+
+impl Reporter for Notes {
+    fn note(&mut self, id: &str, _message: &str) {
+        self.0.push(id.to_owned());
+    }
+}
+
+/// Render `plan` through `ravel-cli`'s own executor, on the stub hooks.
+fn render_with_cli(plan: &RenderPlan) -> (u64, Notes) {
+    let mut notes = Notes::default();
+    let frames = ravel_cli::execute::execute(StubHooks, plan, &CancelFlag::new(), &mut notes)
+        .expect("the CLI renders the same export");
+    (frames, notes)
+}
+
 fn frame_names(directory: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(directory)
         .expect("output directory")
@@ -208,12 +261,42 @@ fn frame_names(directory: &std::path::Path) -> Vec<String> {
 #[test]
 fn the_dialogs_settings_are_rendered_by_the_same_worker_and_encoder_as_the_cli() {
     let dir = tempfile::tempdir().expect("temp dir");
+    let cli_dir = tempfile::tempdir().expect("temp dir");
     let settings = settings(dir.path());
     let request = settings.resolve().expect("the settings resolve");
 
-    // The resolved description, held against what `ravel-cli`'s `plan_render`
-    // builds from `--range 0:11 --format png --output <dir>`: a half-open
-    // absolute range, PNG at eight bits, and the shared default padding.
+    // The same export as the CLI resolves it. Not a restatement of what
+    // `plan_render` is believed to decide — `plan_render` itself, so a change
+    // of mind on its side lands here rather than in a user's output.
+    let document = document();
+    let plan = plan_render(
+        &cli_args(&settings, cli_dir.path()),
+        &document,
+        None,
+        &ravel_media::encode::available_encoders(),
+    )
+    .expect("the CLI plans the dialog's export");
+
+    assert_eq!(request.comp, plan.comp);
+    assert_eq!(
+        request.range, plan.range,
+        "inclusive on screen, half-open in both front ends",
+    );
+    assert_eq!(request.output.codec(), plan.codec);
+    assert_eq!(request.output.padding(), plan.output.padding());
+    assert_eq!(request.overwrite, plan.overwrite);
+    // Same names, and the frames' own directory is the only thing that
+    // differs — the two renders have to be able to run side by side.
+    assert_eq!(
+        request.output.frame_path(7).file_name(),
+        plan.output.frame_path(7).file_name(),
+    );
+    assert_eq!(
+        request.audio_path().file_name(),
+        plan.output.audio_path(plan.range.clone()).file_name(),
+    );
+    // And still the shared defaults, so a broken pair cannot agree on the
+    // wrong thing quietly.
     assert_eq!(request.comp, comp_id());
     assert_eq!(request.range, 0..DURATION);
     assert_eq!(request.output.codec(), SequenceCodec::Png(PngDepth::Eight));
@@ -241,6 +324,28 @@ fn the_dialogs_settings_are_rendered_by_the_same_worker_and_encoder_as_the_cli()
     // encoder under test is `ravel-media`'s, so its output must decode.
     let first = image::open(request.output.frame_path(0)).expect("the frame is a readable PNG");
     assert_eq!((first.width(), first.height()), RESOLUTION);
+
+    // The same export through `ravel-cli`'s own executor. Both sides run the
+    // stub hooks, so the only thing that can differ is the front end.
+    let (cli_frames, notes) = render_with_cli(&plan);
+    assert_eq!(cli_frames, DURATION);
+    assert!(
+        notes.0.is_empty(),
+        "a picture-only project warns about nothing: {:?}",
+        notes.0,
+    );
+    assert_eq!(
+        frame_names(dir.path()),
+        frame_names(cli_dir.path()),
+        "the two front ends name their frames the same",
+    );
+    for frame in plan.range.clone() {
+        assert_eq!(
+            std::fs::read(request.output.frame_path(frame)).expect("a frame from the dialog"),
+            std::fs::read(plan.output.frame_path(frame)).expect("a frame from the CLI"),
+            "frame {frame} differs between the dialog and the CLI",
+        );
+    }
 }
 
 /// The unit's second completion criterion, at the seam the dialog uses: an

@@ -1304,6 +1304,10 @@ RenderOutput::{Sequence(ImageSequenceOutput), Container(PathBuf)}
     .conflicts(Range<u64>) -> Vec<PathBuf>         // the occupied subset; the
         // worker's own OverwritePolicy::Refuse check, callable by a front end
         // that wants to refuse earlier (ravel-cli, before it builds a GPU)
+occupied(&Path) -> bool   // symlink_metadata, not exists: a link to nowhere
+        // still occupies the name. What conflicts() filters by, and what a
+        // front end asks about output the worker knows nothing about
+        // (ravel-cli's companion WAV)
 OverwritePolicy::{Refuse /* default */, Replace}
 RenderQueue::spawn(hooks, on_event)      // thread "ravel-render-worker"
 RenderQueue::spawn_with_budget(hooks, SharedCacheBudget, on_event)
@@ -2556,8 +2560,9 @@ once the pictures exist. Nothing is created, truncated or replaced at
 before the first frame leaves no orphan soundtrack, an interrupted
 `--overwrite` still has the previous one, and a `finish()` that dies partway
 cannot leave a WAV that claims to be complete. `RenderPlan::conflicts()`
-includes the destination, so an existing soundtrack is refused like an
-existing frame.
+includes the destination and asks `runtime::occupied` about it — the frames'
+own predicate — so an existing soundtrack is refused like an existing frame,
+a dangling symlink included.
 
 Two things are said rather than silently done. `--no-audio`, or a build
 without FFmpeg, yields `Warning::AudioNotRendered` (id `audio-not-rendered`,

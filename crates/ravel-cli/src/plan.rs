@@ -37,7 +37,7 @@ use ravel_core::id::CompId;
 use ravel_core::media::encode::{
     Availability, EncoderAvailability, ImageSequenceOutput, SequenceCodec,
 };
-use ravel_core::runtime::{OverwritePolicy, RenderOutput};
+use ravel_core::runtime::{OverwritePolicy, RenderOutput, occupied};
 
 use crate::args::{OutputFormat, RenderArgs};
 use crate::audio::{AudioPlan, NoAudio};
@@ -77,12 +77,16 @@ impl RenderPlan {
     ///
     /// The worker only knows about the frames — the WAV is written by the
     /// front end — so the overwrite refusal has to ask both. One list rather
-    /// than two questions, so a render is never refused for its frames and
-    /// then silently allowed to replace someone's audio.
+    /// than two questions, **asked the same way**: `occupied` is the frames'
+    /// own predicate, and answering it with `Path::exists` for the sound would
+    /// have called a dangling symlink free where the frames call it taken. A
+    /// weaker question there is not a smaller refusal, it is a render that
+    /// starts and then writes through the link, outside its own output
+    /// directory.
     pub fn conflicts(&self) -> Vec<std::path::PathBuf> {
         let mut conflicts = self.render_output().conflicts(self.range.clone());
         if let Some(audio) = &self.audio
-            && audio.path.exists()
+            && occupied(&audio.path)
         {
             conflicts.push(audio.path.clone());
         }
@@ -579,6 +583,43 @@ mod tests {
                 }]
             );
         }
+    }
+
+    /// A symlink pointing nowhere answers `false` to `Path::exists` and `Ok`
+    /// to `symlink_metadata`, and `WavWriter::create` follows it — so the
+    /// weaker question would call the soundtrack's path free and then truncate
+    /// whatever the link names, outside the output directory entirely. The
+    /// frames have always asked the stronger one.
+    ///
+    /// The plan is built and then given its soundtrack by hand, because a
+    /// build without FFmpeg plans none at all and this refusal is not a
+    /// property of the decoder.
+    #[cfg(unix)]
+    #[test]
+    fn a_soundtrack_path_that_is_a_dangling_symlink_conflicts() {
+        use crate::audio::{OUTPUT_CHANNELS, OUTPUT_SAMPLE_RATE};
+        use ravel_audio::MixerConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("frame_0000-0049.wav");
+        std::os::unix::fs::symlink(dir.path().join("elsewhere.wav"), &wav).expect("symlink");
+        assert!(!wav.exists(), "the fixture points at nothing");
+
+        let mut plan = plan_render(&args(dir.path()), &document(), None, &available_encoders())
+            .expect("plans");
+        assert!(plan.conflicts().is_empty(), "no frame is in the way");
+        plan.audio = Some(AudioPlan {
+            path: wav.clone(),
+            config: MixerConfig {
+                output_sample_rate: OUTPUT_SAMPLE_RATE,
+                output_channels: OUTPUT_CHANNELS,
+            },
+        });
+        assert_eq!(
+            plan.conflicts(),
+            vec![wav],
+            "a link to nothing occupies the name a render would write"
+        );
     }
 
     #[test]

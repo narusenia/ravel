@@ -1293,4 +1293,39 @@ mod sound {
         assert_eq!(run(&overwriting).code(), 0, "asked for, it is replaced");
         assert!(read_wav(&out.join("frame_0000-0009.wav")).frame_count() > 0);
     }
+
+    /// A link to nothing is not a free name: `WavWriter::create` follows it,
+    /// so calling it free is a render that starts and then truncates a file
+    /// outside its own output directory. The frames have always counted such a
+    /// link as occupied; the sound now asks the same question.
+    #[cfg(unix)]
+    #[test]
+    fn a_soundtrack_path_that_is_a_dangling_symlink_is_refused() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("output directory");
+        let elsewhere = dir.path().join("someone-elses.wav");
+        std::os::unix::fs::symlink(&elsewhere, out.join("frame_0000-0009.wav")).expect("symlink");
+
+        let refused = run(&sound_args(&project, &out, "0-9"));
+        assert_eq!(refused.code(), EXIT_OUTPUT_EXISTS);
+        assert!(frames(&out).is_empty(), "nothing was evaluated");
+        assert!(
+            !elsewhere.exists(),
+            "and nothing was written through the link"
+        );
+
+        // Asked for, the link is *replaced* rather than written through:
+        // publication is a rename, which swaps the name and does not follow
+        // it.
+        let mut overwriting = sound_args(&project, &out, "0-9");
+        overwriting.overwrite = true;
+        assert_eq!(run(&overwriting).code(), 0);
+        assert!(
+            !elsewhere.exists(),
+            "the render replaced the link, not what it pointed at"
+        );
+        assert!(read_wav(&out.join("frame_0000-0009.wav")).frame_count() > 0);
+    }
 }

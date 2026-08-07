@@ -33,7 +33,7 @@ pub use io_runtime::{IoRuntime, IoRuntimeConfig};
 pub use playback::{PlaybackClock, PlaybackState};
 pub use render::{
     CONFLICT_SAMPLE, JobProgress, JobState, OverwritePolicy, RenderError, RenderEvent, RenderJob,
-    RenderJobId, RenderOutput, RenderQueue,
+    RenderJobId, RenderOutput, RenderQueue, occupied,
 };
 
 /// Top-level configuration for all runtime pools.

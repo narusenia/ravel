@@ -9,6 +9,10 @@
 //!
 //! In release builds, logs are also written to rotating files under the
 //! application log directory.
+//!
+//! Console output goes to **stderr**, never stdout: `ravel-cli` puts its
+//! machine-readable output on stdout, and a consumer of that stream must
+//! never have to filter diagnostics out of it.
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
@@ -37,7 +41,13 @@ pub fn init_logging(
 ) -> Result<LogGuard, anyhow::Error> {
     let env_filter = EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // `with_writer` is not optional here: `fmt::layer()` defaults to
+    // **stdout**, and a diagnostic on stdout is indistinguishable from
+    // output. `ravel-cli` writes its machine-readable progress and its
+    // listings there, so a log line landing in the same stream turns valid
+    // JSON into something no consumer can parse.
     let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
         .with_target(true)
         .with_thread_names(true)
         .compact();

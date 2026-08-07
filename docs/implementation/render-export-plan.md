@@ -249,7 +249,7 @@ GUI ダイアログ（単位 5）は後から載せる。
 | EXPORT-4 | ✅ 音声のミックスダウンと多重化 | EXPORT-2 |
 | EXPORT-5 | 書き出し UI（ダイアログ + レンダーキューパネル） | EXPORT-3, DOCK-8 |
 | EXPORT-6 | 文書更新 | EXPORT-5 |
-| EXPORT-7 | CLI の対話モード | EXPORT-3 |
+| EXPORT-7 | ✅ CLI の対話モード | EXPORT-3 |
 
 ### 単位 0: 永続化を GUI 非依存クレートへ抽出（`ravel-app` → 新クレート）
 

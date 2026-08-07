@@ -5961,6 +5961,7 @@ dependencies = [
  "ctrlc",
  "image",
  "indicatif",
+ "ravel-audio",
  "ravel-core",
  "ravel-gpu",
  "ravel-i18n",

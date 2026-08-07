@@ -23,9 +23,22 @@
 //!
 //! The [`SyncClock`] is the single source of truth for playback position —
 //! the video renderer reads it to determine which frame to display.
+//!
+//! # The `playback` feature
+//!
+//! CPAL — and with it the platform's audio device stack (CoreAudio, ALSA) —
+//! is reached from [`device`] and [`engine`] and from nowhere else. Both sit
+//! behind the default-on `playback` feature so that a caller who mixes
+//! without playing, such as `ravel-cli` writing a render's soundtrack, can
+//! depend on this crate with `default-features = false` and link no audio
+//! device library at all. Everything else — the [`mixer`], the [`mixdown`]
+//! mapping, [`resampler`], [`effects`], [`sync`] and [`waveform`] — is
+//! device-free and always compiled.
 
+#[cfg(feature = "playback")]
 pub mod device;
 pub mod effects;
+#[cfg(feature = "playback")]
 pub mod engine;
 pub mod error;
 pub mod mixdown;
@@ -35,7 +48,9 @@ pub mod sync;
 pub mod waveform;
 
 // Re-export key types at crate root for convenience.
+#[cfg(feature = "playback")]
 pub use device::OutputConfig;
+#[cfg(feature = "playback")]
 pub use engine::{AudioCommand, AudioEngine, AudioEngineConfig};
 pub use error::AudioError;
 pub use mixer::{Mixer, MixerConfig, Track, TrackGain, TrackId};

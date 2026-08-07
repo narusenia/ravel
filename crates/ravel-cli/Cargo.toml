@@ -14,9 +14,13 @@ path = "src/main.rs"
 default = []
 # FFmpeg-backed decoding for media nodes. Off by default so a plain build
 # needs no FFmpeg shared libraries; image-sequence output never needs it.
-ffmpeg = ["ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
+ffmpeg = ["ravel-audio/ffmpeg", "ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
 
 [dependencies]
+# Without `features = ["playback"]` this is CPAL-free: a headless render node
+# mixes a soundtrack, and must not have to provide CoreAudio or ALSA to do
+# so. `tests/cli_binary.rs` pins it.
+ravel-audio = { workspace = true }
 ravel-core = { workspace = true }
 ravel-gpu = { workspace = true }
 ravel-i18n = { workspace = true }

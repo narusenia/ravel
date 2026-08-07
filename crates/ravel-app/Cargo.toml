@@ -20,7 +20,8 @@ ffmpeg = ["ravel-audio/ffmpeg", "ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
 [dependencies]
 gpui-component-assets = { workspace = true }
 rust-embed = { workspace = true }
-ravel-audio = { workspace = true }
+# The GUI is the half of the workspace that opens an output device.
+ravel-audio = { workspace = true, features = ["playback"] }
 ravel-core = { workspace = true }
 ravel-dock = { workspace = true }
 ravel-gpu = { workspace = true }

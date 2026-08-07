@@ -130,6 +130,13 @@ impl SilentRender {
 /// A function of the document and the request alone — no queue, no device —
 /// which is what lets it be asked before anything can fail, and tested
 /// without either, exactly as `ravel-cli`'s `plan_audio` is.
+///
+/// The build is asked **before** the request, which is the opposite of
+/// `plan_audio`'s order and has to be: `--no-audio` is the flag the user
+/// typed, whereas `audio_requested` here has already been gated by the
+/// dialog — a build that cannot decode leaves the checkbox off, and reading
+/// that as "you turned it off" would blame the user for their build in
+/// exactly the build where the other reason is the true one.
 pub fn silent_render(
     document: &Document,
     comp: CompId,
@@ -139,10 +146,10 @@ pub fn silent_render(
     if layers == 0 {
         return None;
     }
-    if !audio_requested {
-        return Some((SilentRender::NotAsked, layers));
+    if !AUDIO_DECODE_AVAILABLE {
+        return Some((SilentRender::NoDecoder, layers));
     }
-    (!AUDIO_DECODE_AVAILABLE).then_some((SilentRender::NoDecoder, layers))
+    (!audio_requested).then_some((SilentRender::NotAsked, layers))
 }
 
 /// One audio source that was left out of an otherwise complete mix, named the
@@ -761,20 +768,26 @@ mod tests {
     /// `a_project_with_audio_warns_that_the_render_is_silent`: a composition
     /// with sound rendered without it is a warning, and the reason says which
     /// of the two situations it is.
+    ///
+    /// Both reasons are reachable: this build's `ffmpeg` feature decides which
+    /// branch runs, and the two verification runs (`mise run check` without
+    /// it, `cargo test --workspace --features ffmpeg` with it) cover one each.
     #[test]
     fn a_composition_with_sound_rendered_without_it_is_a_warning() {
-        assert_eq!(
-            silent_render(&document(true), comp_id(), false),
-            Some((SilentRender::NotAsked, 1)),
-            "clearing the soundtrack box is still worth saying out loud",
-        );
-
-        // Asked for: whether it happens is the build's answer, not the
-        // project's, and the two reasons must not be confused.
+        let dropped = silent_render(&document(true), comp_id(), false);
         let asked = silent_render(&document(true), comp_id(), true);
         if AUDIO_DECODE_AVAILABLE {
+            assert_eq!(
+                dropped,
+                Some((SilentRender::NotAsked, 1)),
+                "clearing the soundtrack box is still worth saying out loud",
+            );
             assert_eq!(asked, None, "the soundtrack is being written");
         } else {
+            // The dialog leaves the box off in a build that cannot decode, so
+            // the request looks the same either way — and the honest reason is
+            // the build, not a choice the user never made.
+            assert_eq!(dropped, Some((SilentRender::NoDecoder, 1)));
             assert_eq!(asked, Some((SilentRender::NoDecoder, 1)));
         }
 

@@ -449,3 +449,40 @@ fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
         "the machine-readable record names the file a script has to collect"
     );
 }
+
+/// The structural half of the interactive mode, through the shipped binary:
+/// started where nobody can answer, it **refuses instead of waiting**.
+///
+/// `Command::output` gives the child a null stdin, which is the pipe a script
+/// would hand it. A prompt drawn into that would block for an answer that is
+/// never coming, and the script would hang rather than fail — so this test
+/// hanging *is* the regression it exists to catch. Nothing reaches stdout,
+/// because stdout is where machine-readable output lives.
+#[test]
+fn interactive_refuses_when_standard_input_is_not_a_terminal() {
+    let dir = TempDir::new().expect("tempdir");
+    let project = project(dir.path());
+
+    let output = cli()
+        .arg("interactive")
+        .arg(&project)
+        .output()
+        .expect("runs");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a usage failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout stays clean: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("terminal"),
+        "the refusal says why: {stderr}"
+    );
+}

@@ -33,6 +33,14 @@ pub enum Command {
     /// Print what a project or this machine offers, as JSON.
     #[command(subcommand)]
     List(ListCommand),
+    /// Ask for the render options and then render, for a terminal.
+    ///
+    /// A separate subcommand rather than a `render --interactive` flag: the
+    /// answers *are* a `render` command line, so the two cannot share a set
+    /// of arguments without making `--output` optional — that is, without
+    /// weakening the non-interactive contract for the sake of the
+    /// interactive one.
+    Interactive(ProjectArg),
 }
 
 #[derive(Debug, Subcommand)]
@@ -52,7 +60,11 @@ pub struct ProjectArg {
 }
 
 /// Everything a render needs, before a project has been looked at.
-#[derive(Debug, Args)]
+///
+/// `PartialEq` because the interactive mode's claim is an equality: the
+/// answers it collects are the same arguments a caller would have typed, and
+/// a test says so by comparing the two.
+#[derive(Clone, Debug, Args, PartialEq, Eq)]
 pub struct RenderArgs {
     /// The `.ravprj` to render. Never written — a project that migrates on
     /// load is migrated in memory only.

@@ -570,6 +570,7 @@ output_exists = "出力先に既存ファイルが {count} 件ある（最初: {
 eval = "書き出しに失敗した: {detail}"
 encode = "出力の書き込みに失敗した: {detail}"
 cancelled = "書き出しを中断した。出力は残っていない"
+not_interactive = "対話モードは質問できる端末を必要とする。標準入力が端末ではないため、オプションはフラグで指定する（ravel-cli render --help）"
 gpu = "使える GPU アダプタが見つからない: {detail}"
 interrupt_handler = "Ctrl-C ハンドラを設置できなかった。中断しても部分出力を片付けられないため書き出しを開始しない: {detail}"
 internal = "書き出しが予期せず停止した: {detail}"
@@ -590,6 +591,22 @@ binding_issue = "指定したパラメータがプロジェクトに完全には
 [cli.result]
 completed = "{count} フレームを {path} に書き出した"
 audio = "音声を {path} に書き出した"
+
+# `ravel-cli interactive` — 標準エラー出力に出す質問。答えは
+# `ravel-cli render` のコマンドラインになり、confirm がそれを見せる。
+[cli.prompt]
+comp = "書き出すコンポジション"
+comp_option = "{name} — {width}×{height}、{frames} フレーム"
+comp_root = "（プロジェクトのルート）"
+format = "出力形式"
+format_option = "{format}（{route}）"
+png_depth = "1 チャンネルあたりのビット数"
+output = "フレームを書き出すディレクトリ"
+output_required = "ディレクトリが必要。フレームを書き出すパスを入力する"
+param = "{name}（{type}）"
+param_unresolved = "［宣言はあるが、現在どのパラメータにも届いていない］"
+overwrite = "出力先に既存ファイルが {count} 件ある（最初: {first}）。上書きするか？"
+confirm = "この内容で書き出すか？\n  {command}\n開始"
 
 
 # ノード種別のラベル・説明・パラメータ説明。type_key がキー（ドットを含む

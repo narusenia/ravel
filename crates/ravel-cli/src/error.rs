@@ -131,6 +131,15 @@ pub enum CliError {
     #[error("the render was interrupted")]
     Cancelled,
 
+    /// `ravel-cli interactive` where nobody can answer.
+    ///
+    /// A usage failure rather than an internal one: the command is fine, the
+    /// environment is not the one it is for. Refusing is the whole point —
+    /// a prompt written into a pipe blocks forever on an answer that is
+    /// never coming, and the script that started it hangs instead of failing.
+    #[error("the interactive mode needs a terminal on standard input")]
+    NotInteractive,
+
     #[error("no usable GPU adapter: {0}")]
     Gpu(String),
 
@@ -154,7 +163,8 @@ impl CliError {
             | Self::NoComposition
             | Self::BadRange { .. }
             | Self::EmptyRange { .. }
-            | Self::OutputName(_) => EXIT_USAGE,
+            | Self::OutputName(_)
+            | Self::NotInteractive => EXIT_USAGE,
             Self::CodecUnavailable { .. } | Self::CodecNoWriter { .. } => EXIT_CODEC,
             Self::OutputExists { .. } => EXIT_OUTPUT_EXISTS,
             Self::Eval(_) => EXIT_EVAL,
@@ -185,6 +195,7 @@ impl CliError {
             Self::Eval(_) => "eval-failed",
             Self::Encode(_) => "encode-failed",
             Self::Cancelled => "cancelled",
+            Self::NotInteractive => "not-interactive",
             Self::Gpu(_) => "no-gpu",
             Self::InterruptHandler(_) => "interrupt-handler",
             Self::Internal(_) => "internal",
@@ -244,6 +255,7 @@ impl CliError {
             Self::Eval(detail) => t!("cli.error.eval").replace("{detail}", detail),
             Self::Encode(detail) => t!("cli.error.encode").replace("{detail}", detail),
             Self::Cancelled => t!("cli.error.cancelled"),
+            Self::NotInteractive => t!("cli.error.not_interactive"),
             Self::Gpu(detail) => t!("cli.error.gpu").replace("{detail}", detail),
             Self::InterruptHandler(detail) => {
                 t!("cli.error.interrupt_handler").replace("{detail}", detail)
@@ -339,6 +351,8 @@ mod tests {
         assert_eq!(CliError::Eval("x".into()).code(), EXIT_EVAL);
         assert_eq!(CliError::Encode("x".into()).code(), EXIT_ENCODE);
         assert_eq!(CliError::Cancelled.code(), EXIT_CANCELLED);
+        assert_eq!(CliError::NotInteractive.code(), EXIT_USAGE);
+        assert_eq!(CliError::NotInteractive.id(), "not-interactive");
         assert_eq!(CliError::Internal("x".into()).code(), EXIT_INTERNAL);
     }
 

@@ -577,6 +577,7 @@ output_exists = "{count} output file(s) are already there, starting with {first}
 eval = "the render failed: {detail}"
 encode = "writing the output failed: {detail}"
 cancelled = "the render was interrupted; nothing was left behind"
+not_interactive = "the interactive mode needs a terminal to ask on; standard input is not one, so pass the options as flags instead (ravel-cli render --help)"
 gpu = "no usable GPU adapter was found: {detail}"
 interrupt_handler = "the Ctrl-C handler could not be installed, so an interrupted render could not clean up after itself; the render was not started: {detail}"
 internal = "the render stopped unexpectedly: {detail}"
@@ -597,6 +598,22 @@ binding_issue = "a supplied parameter did not fully reach the project: {detail}"
 [cli.result]
 completed = "wrote {count} frame(s) to {path}"
 audio = "wrote the soundtrack to {path}"
+
+# `ravel-cli interactive` — the questions, asked on stderr. The answers
+# amount to a `ravel-cli render` command line, which `confirm` shows.
+[cli.prompt]
+comp = "Composition to render"
+comp_option = "{name} — {width}×{height}, {frames} frame(s)"
+comp_root = "(the project's root)"
+format = "Output format"
+format_option = "{format} ({route})"
+png_depth = "Bits per channel"
+output = "Directory to write the frames into"
+output_required = "a directory is needed; type a path to write the frames into"
+param = "{name} ({type})"
+param_unresolved = "[declared, but it currently reaches no parameter]"
+overwrite = "{count} file(s) are already there, starting with {first}. Replace them?"
+confirm = "Render this?\n  {command}\nStart"
 
 
 # Node type labels, descriptions, and parameter docs, keyed by type_key

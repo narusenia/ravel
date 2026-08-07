@@ -116,6 +116,23 @@ impl RenderOutput {
             Self::Container(path) => vec![path.clone()],
         }
     }
+
+    /// The subset of [`Self::occupied_paths`] that something already
+    /// occupies — the whole of what [`OverwritePolicy::Refuse`] means.
+    ///
+    /// Public because a front end wants to refuse a doomed render *earlier*
+    /// than the worker can: `ravel-cli` calls this before it builds a GPU
+    /// context, so a machine with no adapter still reports an existing
+    /// output as one. The worker's own check remains the authoritative one —
+    /// it runs at the instant the job starts, which is the only moment the
+    /// answer is not already stale — and calls this same function, so
+    /// "already there" has one definition rather than two.
+    pub fn conflicts(&self, range: Range<u64>) -> Vec<PathBuf> {
+        self.occupied_paths(range)
+            .into_iter()
+            .filter(|path| occupied(path))
+            .collect()
+    }
 }
 
 /// Whether a job may write where files already are.
@@ -873,11 +890,7 @@ fn check_preconditions(
         });
     }
     if overwrite == OverwritePolicy::Refuse {
-        let conflicts: Vec<PathBuf> = output
-            .occupied_paths(range.clone())
-            .into_iter()
-            .filter(|path| occupied(path))
-            .collect();
+        let conflicts = output.conflicts(range.clone());
         if !conflicts.is_empty() {
             let total = conflicts.len();
             let mut sample = conflicts;

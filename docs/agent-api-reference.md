@@ -1301,6 +1301,9 @@ RenderJob { document: Arc<Document>, comp: CompId, range: Range<u64>,
     .with_overwrite(OverwritePolicy::Replace) / .frame_count()
 RenderOutput::{Sequence(ImageSequenceOutput), Container(PathBuf)}
     .occupied_paths(Range<u64>) -> Vec<PathBuf>    // one per frame, per name
+    .conflicts(Range<u64>) -> Vec<PathBuf>         // the occupied subset; the
+        // worker's own OverwritePolicy::Refuse check, callable by a front end
+        // that wants to refuse earlier (ravel-cli, before it builds a GPU)
 OverwritePolicy::{Refuse /* default */, Replace}
 RenderQueue::spawn(hooks, on_event)      // thread "ravel-render-worker"
 RenderQueue::spawn_with_budget(hooks, SharedCacheBudget, on_event)

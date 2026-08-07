@@ -478,10 +478,14 @@ fn a_declared_parameter_is_accepted() {
 /// migrated on the way in may be written back.
 #[test]
 fn the_project_file_is_never_written() {
-    for version in [7, 6] {
+    // Derived rather than written down: the point is "the current format and
+    // one that has to be migrated", and a literal goes stale the next time
+    // the format is raised.
+    let current = ravel_project::manifest::CURRENT_FORMAT_VERSION;
+    for version in [current, current - 1] {
         let dir = TempDir::new().expect("tempdir");
         let project = project_file(dir.path(), document(false));
-        if version != 7 {
+        if version != current {
             downgrade_format_version(&project, version);
         }
         let before = std::fs::read(&project).expect("fixture readable");

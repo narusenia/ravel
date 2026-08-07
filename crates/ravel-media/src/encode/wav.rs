@@ -94,6 +94,9 @@ impl WavWriter {
         let channels = u16::try_from(channels).map_err(|_| {
             MediaError::EncodeError(format!("a WAV cannot describe {channels} channels"))
         })?;
+        // Refused here rather than wrapped into a plausible-looking value
+        // later: `block_align` says why.
+        block_align(frame_bytes(channels))?;
 
         let file = File::create(&path)?;
         let mut writer = Self {
@@ -155,13 +158,14 @@ impl WavWriter {
                 "a WAV cannot hold more than {MAX_DATA_BYTES} bytes of samples"
             ))
         })?;
+        let frame_bytes = self.frame_bytes();
 
         // `RIFF` size: everything after that field itself.
         file.seek(SeekFrom::Start(4))?;
         file.write_all(&(HEADER_BYTES - 8 + data_bytes).to_le_bytes())?;
         // `fact` sample-frame count.
         file.seek(SeekFrom::Start(u64::from(HEADER_BYTES) - 12))?;
-        file.write_all(&(data_bytes / u32::from(self.frame_bytes())).to_le_bytes())?;
+        file.write_all(&(data_bytes / frame_bytes).to_le_bytes())?;
         // `data` size.
         file.seek(SeekFrom::Start(u64::from(HEADER_BYTES) - 4))?;
         file.write_all(&data_bytes.to_le_bytes())?;
@@ -170,13 +174,23 @@ impl WavWriter {
     }
 
     /// Bytes per sample frame across all channels.
-    fn frame_bytes(&self) -> u16 {
-        self.channels * (BITS_PER_SAMPLE / 8)
+    fn frame_bytes(&self) -> u32 {
+        frame_bytes(self.channels)
     }
 
     /// Write the header with both length fields zeroed; `finish` patches them.
     fn write_header(&mut self, sample_rate: u32) -> MediaResult<()> {
-        let frame_bytes = u32::from(self.frame_bytes());
+        let frame_bytes = self.frame_bytes();
+        // Both header fields derived by multiplication, both checked: a
+        // wrapped byte rate is not a smaller number, it is a header that every
+        // reader believes and no reader decodes.
+        let byte_rate = sample_rate.checked_mul(frame_bytes).ok_or_else(|| {
+            MediaError::EncodeError(format!(
+                "a WAV cannot describe {sample_rate} Hz at {frame_bytes} bytes per sample frame: \
+                 the byte rate does not fit a u32"
+            ))
+        })?;
+        let block_align = block_align(frame_bytes)?;
         let file = self.file.as_mut().ok_or_else(finished)?;
         file.write_all(b"RIFF")?;
         file.write_all(&0u32.to_le_bytes())?; // patched by `finish`
@@ -187,8 +201,8 @@ impl WavWriter {
         file.write_all(&FORMAT_IEEE_FLOAT.to_le_bytes())?;
         file.write_all(&self.channels.to_le_bytes())?;
         file.write_all(&sample_rate.to_le_bytes())?;
-        file.write_all(&(sample_rate * frame_bytes).to_le_bytes())?; // byte rate
-        file.write_all(&(frame_bytes as u16).to_le_bytes())?; // block align
+        file.write_all(&byte_rate.to_le_bytes())?;
+        file.write_all(&block_align.to_le_bytes())?;
         file.write_all(&BITS_PER_SAMPLE.to_le_bytes())?;
         file.write_all(&0u16.to_le_bytes())?; // cbSize
 
@@ -215,6 +229,29 @@ impl Drop for WavWriter {
 
 fn finished() -> MediaError {
     MediaError::EncodeError("the WAV has already been finished".to_string())
+}
+
+/// Bytes per sample frame across all channels, in the width the arithmetic
+/// needs rather than the width the header field has: `channels × 4` leaves
+/// `u16` at 16 384 channels, and wrapping there would write a block align of
+/// zero into a file that looks valid.
+fn frame_bytes(channels: u16) -> u32 {
+    u32::from(channels) * u32::from(BITS_PER_SAMPLE / 8)
+}
+
+/// The `fmt ` chunk's block align, or a refusal for a sample frame the field
+/// cannot hold.
+///
+/// [`WavWriter::create`] asks first, so a constructed writer never sees the
+/// error — which is the point: the channel count is refused where the caller
+/// can still do something about it, not silently truncated where the header
+/// is written.
+fn block_align(frame_bytes: u32) -> MediaResult<u16> {
+    u16::try_from(frame_bytes).map_err(|_| {
+        MediaError::EncodeError(format!(
+            "a sample frame of {frame_bytes} bytes does not fit a WAV's block align field"
+        ))
+    })
 }
 
 // ===========================================================================
@@ -316,6 +353,33 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut writer = WavWriter::create(dir.path().join("mix.wav"), 48_000, 2).expect("creates");
         assert!(writer.write_samples(&[0.1, 0.2, 0.3]).is_err());
+    }
+
+    /// The byte rate is `rate × frame bytes`, and unchecked that product
+    /// panics in a debug build and wraps in a release one — a header every
+    /// reader believes and no reader decodes. A rate this absurd is not the
+    /// point; the point is that the failure is a refusal rather than a file.
+    #[test]
+    fn a_byte_rate_that_does_not_fit_the_header_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mix.wav");
+        assert!(WavWriter::create(&path, u32::MAX, 2).is_err());
+        assert!(!path.exists(), "and the refusal leaves nothing behind");
+        // The same rate is fine for a mono frame, so the check is the
+        // arithmetic and not a rate ceiling invented here.
+        assert!(WavWriter::create(dir.path().join("mono.wav"), u32::MAX / 4, 1).is_ok());
+    }
+
+    /// Block align is a `u16`, so the channel count it cannot describe has to
+    /// be refused rather than wrapped — `16_384 × 4` is `0` in `u16`.
+    #[test]
+    fn a_channel_count_whose_sample_frame_does_not_fit_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(WavWriter::create(dir.path().join("a.wav"), 48_000, 16_384).is_err());
+        assert!(
+            WavWriter::create(dir.path().join("b.wav"), 48_000, 16_383).is_ok(),
+            "the refusal is the format's limit, not a smaller one invented here"
+        );
     }
 
     #[test]

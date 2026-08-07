@@ -11,6 +11,7 @@ members = [
     "crates/ravel-dock",
     "crates/ravel-project",
     "crates/ravel-app",
+    "crates/ravel-cli",
 ]
 
 [workspace.package]
@@ -30,6 +31,7 @@ ravel-audio = { path = "crates/ravel-audio" }
 ravel-nodes = { path = "crates/ravel-nodes" }
 ravel-project = { path = "crates/ravel-project" }
 ravel-app = { path = "crates/ravel-app" }
+ravel-cli = { path = "crates/ravel-cli" }
 
 # UI framework (gpui-ce community edition)
 gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }
@@ -104,6 +106,13 @@ bincode = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 ffmpeg-the-third = "5"
+
+# Command-line front end (`ravel-cli`). Approved as production dependencies for
+# the render CLI (`docs/implementation/render-export-plan.md`, unit 3); none of
+# them is linked into the GUI binary.
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+ctrlc = "3"
 
 [patch.crates-io]
 gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }

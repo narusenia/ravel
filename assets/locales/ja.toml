@@ -548,6 +548,47 @@ empty = "保存済みレイアウトはありません。"
 embed = "保存するプロジェクトに現在のレイアウトを埋め込む"
 embed_hint = "既定はオフ。オンにすると保存した .ravprj がこのレイアウトを持ち、開いたときそのセッションだけに適用される。"
 
+# ------------------------------------------------------------------
+# `ravel-cli`（ヘッドレス書き出し）。コマンドラインで人が読む文字列のみ。
+# 機械可読な出力（終了コード、JSON の error 識別子）は翻訳しない。
+# ------------------------------------------------------------------
+
+[cli.error]
+load = "プロジェクト {path} を読めない: {detail}"
+param_syntax = "--param は NAME=VALUE の形。\"{raw}\" はその形ではない"
+param_value = "--param {name} は {type} 型。\"{raw}\" は {type} として読めない"
+param_rejected = "指定されたパラメータが拒否された: {detail}"
+unknown_composition = "\"{name}\" という名前のコンポジションがこのプロジェクトに無い"
+ambiguous_composition = "\"{name}\" という名前のコンポジションが複数ある。--comp に id を指定する: {ids}"
+no_composition = "書き出せるコンポジションが無い。--comp で指定する"
+bad_range = "--range は START-END か単一フレーム。\"{raw}\" はどちらでもない"
+empty_range = "フレーム範囲 {start}-{end} はフレームを含まない"
+output_name = "出力ファイル名が使えない: {detail}"
+codec_unavailable = "{format} はこの環境で書き出せない: {reason}"
+codec_no_writer = "{format} はこの環境でエンコードできるが、Ravel はまだ書き出せない。連番画像を使う"
+output_exists = "出力先に既存ファイルが {count} 件ある（最初: {first}）。上書きするなら --overwrite を付ける"
+eval = "書き出しに失敗した: {detail}"
+encode = "出力の書き込みに失敗した: {detail}"
+cancelled = "書き出しを中断した。出力は残っていない"
+gpu = "使える GPU アダプタが見つからない: {detail}"
+interrupt_handler = "Ctrl-C ハンドラを設置できなかった。中断しても部分出力を片付けられないため書き出しを開始しない: {detail}"
+internal = "書き出しが予期せず停止した: {detail}"
+
+[cli.codec.reason]
+ffmpeg_not_linked = "このビルドに FFmpeg が無い"
+ffmpeg_encoder_missing = "このビルドの FFmpeg に次のいずれも無い: {candidates}"
+platform_api_unavailable = "この環境は {api} を提供していない"
+no_platform_route = "この OS に経路が無い"
+not_offered = "Ravel は提供していない"
+
+[cli.warn]
+audio_not_rendered = "このコンポジションには音声を持つレイヤーが {count} 件あるが、書き出しは映像のみ"
+binding_issue = "指定したパラメータがプロジェクトに完全には届いていない: {detail}"
+
+[cli.result]
+completed = "{count} フレームを {path} に書き出した"
+
+
 # ノード種別のラベル・説明・パラメータ説明。type_key がキー（ドットを含む
 # ためクォート）。`ravel_app::node_locale` が解決し、キーが無い型は
 # type_key にフォールバックする。params.* はパラメータの短い説明。

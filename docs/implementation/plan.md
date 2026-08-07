@@ -79,8 +79,11 @@ layer-network evaluation (`video` remains a load-time alias). Import runs
 through File ▸ Import and OS file drops, assets persist as runtime-resolved
 relative paths, and the MediaBin panel browses them with cached thumbnails.
 
-Media properties and relinking, offline-asset display, and a complete render
-queue/export workflow are not implemented.
+Rendering to disk exists headlessly: `ravel-cli render` drives the render
+queue and writes PNG / EXR sequences without FFmpeg
+(`crates/ravel-cli`). Media properties and relinking, offline-asset display,
+video-container output, audio in the render, and the in-application export
+workflow are not implemented (`render-export-plan.md`, units 4–6).
 
 ### Audio
 
@@ -104,8 +107,10 @@ buffers. GPU node chains can remain resident across intermediate operations,
 and geometry has GPU rasterization with a CPU reference path. The Viewer
 receives evaluated images through the background evaluation path.
 
-Zero-copy Viewer presentation, a render queue, Write node, and end-to-end
-export are not implemented.
+The render queue (`ravel_core::runtime::render`) evaluates whole ranges at
+`Quality::Final` on its own worker, and `ravel-cli render` is its first
+caller. Zero-copy Viewer presentation, the Write node, and export from the
+application itself are not implemented.
 
 ### Built-in nodes
 

@@ -553,6 +553,49 @@ empty = "No saved layouts yet."
 embed = "Embed the current layout in saved projects"
 embed_hint = "Off by default. When on, a saved .ravprj carries this layout; opening it applies the layout for that session only."
 
+# ------------------------------------------------------------------
+# `ravel-cli` — the headless render front end. Every string a person
+# reads on the command line lives here; the machine-readable output
+# (exit codes, JSON `error` identifiers) is deliberately not
+# localized.
+# ------------------------------------------------------------------
+
+[cli.error]
+load = "cannot read the project {path}: {detail}"
+param_syntax = "--param takes NAME=VALUE, and \"{raw}\" is not that"
+param_value = "--param {name} takes a value of type {type}, and \"{raw}\" is not one"
+param_rejected = "the supplied parameters were refused: {detail}"
+unknown_composition = "this project has no composition called \"{name}\""
+ambiguous_composition = "this project has more than one composition called \"{name}\"; name the one you mean by its id with --comp: {ids}"
+no_composition = "this project has no composition to render; name one with --comp"
+bad_range = "--range takes START-END or a single frame, and \"{raw}\" is neither"
+empty_range = "the frame range {start}-{end} covers no frames"
+output_name = "the output file name cannot be used: {detail}"
+codec_unavailable = "{format} cannot be written here: {reason}"
+codec_no_writer = "{format} can be encoded on this machine, but Ravel cannot write it yet; render an image sequence instead"
+output_exists = "{count} output file(s) are already there, starting with {first}; pass --overwrite to replace them"
+eval = "the render failed: {detail}"
+encode = "writing the output failed: {detail}"
+cancelled = "the render was interrupted; nothing was left behind"
+gpu = "no usable GPU adapter was found: {detail}"
+interrupt_handler = "the Ctrl-C handler could not be installed, so an interrupted render could not clean up after itself; the render was not started: {detail}"
+internal = "the render stopped unexpectedly: {detail}"
+
+[cli.codec.reason]
+ffmpeg_not_linked = "this build has no FFmpeg"
+ffmpeg_encoder_missing = "the FFmpeg this build uses has none of: {candidates}"
+platform_api_unavailable = "this machine does not offer {api}"
+no_platform_route = "this operating system offers no route to it"
+not_offered = "Ravel does not offer it"
+
+[cli.warn]
+audio_not_rendered = "this composition has {count} layer(s) with audio, and the render is picture only"
+binding_issue = "a supplied parameter did not fully reach the project: {detail}"
+
+[cli.result]
+completed = "wrote {count} frame(s) to {path}"
+
+
 # Node type labels, descriptions, and parameter docs, keyed by type_key
 # (quoted: type keys contain dots). Resolved by `ravel_app::node_locale`;
 # a type without an entry falls back to its raw type_key. `params.*` values

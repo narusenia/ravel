@@ -43,6 +43,12 @@ model is still current.
   callers can load and save projects
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
   and the application entry point
+- `crates/ravel-cli`: the `ravel-cli` binary — headless rendering
+  (`ravel-cli render`) and the machine-readable enumerations the interactive
+  mode will sit on (`ravel-cli list comps | params | codecs`). GUI-free by
+  construction: it does not depend on `gpui`, `ravel-ui`, `ravel-dock`, or
+  `ravel-app`, so a headless host cannot link a window toolkit by accident.
+  Releases therefore ship **two** binaries, `ravel` and `ravel-cli`
 - `assets`: locales, keybindings, workspace preset data, and the bundled
   UI fonts (`assets/fonts/`). The fonts are SIL OFL 1.1: their license texts
   live beside them, must stay there, and — because the faces are compiled

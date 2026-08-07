@@ -386,7 +386,7 @@ impl ProjectState {
                     // once settings reach the runtime (`SET-8`).
                     let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
                     let eval = spawn_viewer_eval_service(
-                        crate::eval_hooks::GpuEvalHooks::with_budget(gpu_ctx, budget.clone()),
+                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx, budget.clone()),
                         budget,
                         update_tx,
                     );

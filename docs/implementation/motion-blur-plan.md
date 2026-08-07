@@ -180,7 +180,7 @@ sim はサブフレーム状態を持たないため、N 回評価しても同�
 - 品質切替でキャッシュが無効化されるテスト。
 - Viewer が `Preview`、レンダーワーカーが `Final` を要求するテスト。
   後半はこの単位の時点でレンダーワーカーが存在せず果たせなかった。
-  `render-export-plan.md` の `EXPORT-2` が `RenderQueue` と同時に回収済み。
+  `done/render-export-plan.md` の `EXPORT-2` が `RenderQueue` と同時に回収済み。
 - `ViewerResolution` の係数と `quality` が独立に効くテスト
   （`Full` × `Preview`、`Quarter` × `Final` が両方成立する）。
 

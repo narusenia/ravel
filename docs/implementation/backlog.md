@@ -72,8 +72,7 @@
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
-| EXPORT-5 | 書き出し UI（`EXPORT-3` / `DOCK-8` 完了で着手可能） | `render-export-plan.md` |
-| CICACHE-1 | sccache + R2 へ移す（R2 バケットと Secrets が要る） | `ci-cache-plan.md` |
+| CICACHE-2 | CI キャッシュの効果の計測と設定の詰め（`CICACHE-1` 完了で着手可能） | `ci-cache-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
@@ -554,16 +553,16 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | EXPORT-2 | ✅ | レンダーワーカーとキュー | #314 |
 | EXPORT-3 | ✅ | **CLI（`ravel-cli render`、別バイナリ）** | #325 |
 | EXPORT-4 | ✅ | 音声のミックスダウンと多重化 | #328 |
-| EXPORT-5 | 🟡 | 書き出し UI | EXPORT-3 ✅, DOCK-8 ✅ |
-| EXPORT-6 | ⬜ | 文書更新 | EXPORT-5 |
+| EXPORT-5 | ✅ | 書き出し UI | #332 |
+| EXPORT-6 | ✅ | 文書更新 | #335 |
 | EXPORT-7 | ✅ | CLI の対話モード | #330 |
 
 ### CI キャッシュ
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| CICACHE-1 | 🟡 | sccache を導入し `target/` のアーカイブを外す | R2 バケットと Secrets |
-| CICACHE-2 | ⬜ | 効果の計測と設定の詰め | CICACHE-1 |
+| CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
+| CICACHE-2 | 🟡 | 効果の計測と設定の詰め | CICACHE-1 ✅ |
 
 ### 式言語（REQ-CORE-014 / REQ-CORE-015）
 
@@ -923,7 +922,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | Lua / 式 | REQ-CODE-001 / REQ-PLUGIN-003。REQ-MOGRAPH-001 と REQ-CORE-010 の受入条件が 1 つずつこれ待ちで残る |
 | トランジション | REQ-MOGRAPH-005 の受入条件だがタイムライン側の仕事。計画なし |
 | REQ-DATA 全体 | CSV/JSON → Table → 属性バインディング。データ駆動インフォグラフィックスの柱ごと欠落。計画なし |
-| REQ-RENDER-002 Write ノード | 評価純粋性とディスクキャッシュ設計の問題。`render-export-plan.md` の非対象 |
+| REQ-RENDER-002 Write ノード | 評価純粋性とディスクキャッシュ設計の問題。`done/render-export-plan.md` の非対象 |
 | Fuse / パス自己交差解消 | 空間分割構造が要る |
 | ビート検出 | FFT 見送りの延長 |
 | レイヤー制約（look-at / パス追従） | ジオメトリ側は VEC-3 で解決するが、レイヤー殻には無い |

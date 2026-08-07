@@ -6,7 +6,7 @@
 並べる Render Queue パネルの**意図した挙動**。実装状況の正は
 [`../../ui-impl-status.md`](../../ui-impl-status.md)、CLI からの同じ書き出しは
 [`../../dev/render-cli.md`](../../dev/render-cli.md)、設計の根拠は
-[`../../implementation/render-export-plan.md`](../../implementation/render-export-plan.md)。
+[`../../implementation/done/render-export-plan.md`](../../implementation/done/render-export-plan.md)。
 
 関連要件: REQ-RENDER-001（キューベースバックグラウンドレンダリング）、
 REQ-RENDER-005（CLI ヘッドレスレンダリング）。

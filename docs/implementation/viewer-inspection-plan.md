@@ -189,6 +189,6 @@ REQ-UI-004 は波形モニタ / ベクトルスコープ / ヒストグラム / 
   評価パイプライン全体の話なので本計画では扱わない（`INSP-5` の判断対象）
 - **A/B 比較・差分表示・外部モニタ出力**。REQ-UI-004 の「将来」項目
 - **ROI（作業領域）枠**。部分レンダリングの機能が無いので、枠だけ描いても
-  何にも使われない。`cache-plan.md` / `render-export-plan.md` が部分評価を
+  何にも使われない。`cache-plan.md` / `done/render-export-plan.md` が部分評価を
   持った時点で引き取る（`viewer-overlay-manipulator-plan.md` の棚卸し表に
   見送りとして記録済み）

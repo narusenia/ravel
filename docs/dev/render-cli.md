@@ -5,7 +5,7 @@
 GUI を起動せずに `.ravprj` をレンダリングする経路。要件は
 [`../requirements/REQ-RENDER.md`](../requirements/REQ-RENDER.md) の
 REQ-RENDER-005、設計の根拠は
-[`../implementation/render-export-plan.md`](../implementation/render-export-plan.md)。
+[`../implementation/done/render-export-plan.md`](../implementation/done/render-export-plan.md)。
 型と関数の地図は [`../agent-api-reference.md`](../agent-api-reference.md) の
 `ravel-cli` 節。**このページは「どう使うか」だけを書く。**
 

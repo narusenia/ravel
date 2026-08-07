@@ -438,7 +438,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | `EXPO-1〜4` | ✅ 公開パラメータ宣言（`exposed-parameters-plan.md`） |
 | `EXPORT-3` | ✅ **CLI（`ravel-cli render`。GPUI にリンクしない別バイナリ）** |
 | `EXPORT-4` | ✅ 音声のミックスダウンと多重化（REQ-RENDER-005 を回収） |
-| `EXPORT-5〜6` | 書き出し UI と文書 |
+| `EXPORT-5〜6` | ✅ 書き出し UI と文書 |
 | `EXPORT-7` | ✅ CLI の対話モード（`EXPORT-3` の列挙の上に載る層） |
 | `EXPO-5〜7` | ✅ 宣言の編集 UI と文書 |
 | `EXPR-1〜7` | ✅ 式言語（`expression-language-plan.md`） |
@@ -778,7 +778,7 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 
 `EXPORT-*` がフェーズ G にあったのは依存関係の結果で、製品としての優先度の
 判断ではなかった。現状 **何も書き出せない**（`README.md` の
-`render-export-plan.md` の説明が「you cannot currently export anything」と
+`done/render-export-plan.md` の説明が「you cannot currently export anything」と
 明記）。機能を足しても成果物が出ないので、ここが開くまで他の投資が回収されない。
 
 引き上げのコストは低かった。`EXPORT-1`（エンコーダ抽象と実行時列挙）は依存が

@@ -626,7 +626,7 @@ OFX の GPU Suite が Metal を要求するため。
 - 全 GPU ノードのゴールデンテストが wgpu バックエンドと一致する
 - `perf_baseline` が動作し、wgpu バックエンドとの比較が記録される
 - バックエンドを切り替えても `.ravprj` の出力がビット等価
-  （`render-export-plan.md` の決定性要件）
+  （`done/render-export-plan.md` の決定性要件）
 
 ### GPUBK-13 文書更新
 

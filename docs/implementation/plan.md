@@ -89,7 +89,7 @@ same job description through the same worker and encoder, and the render queue
 panel follows it. Media properties and relinking, offline-asset display, and
 **video-container output** are not implemented — a video target is enumerated
 with its route but has no writer, so both front ends refuse it before a frame
-(`render-export-plan.md`).
+(`done/render-export-plan.md`).
 
 ### Audio
 
@@ -106,7 +106,7 @@ Properties panel picks which container stream plays
 (`docs/implementation/audio-plan.md`, units 1–4).
 
 Both export front ends write the same mix offline through
-`ravel_audio::offline::mix_range` (`render-export-plan.md`, `EXPORT-4`): 48 kHz
+`ravel_audio::offline::mix_range` (`done/render-export-plan.md`, `EXPORT-4`): 48 kHz
 stereo, decoded through the optional `ffmpeg` feature, and a build without it
 says so rather than delivering silence. Waveform display, audio analysis nodes,
 and the tagged sound bank are not implemented.

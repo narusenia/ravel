@@ -302,7 +302,7 @@ Transfer  : Linear | Srgb | Rec709 | Pq
 - sRGB 素材を取り込んで PNG に書き出すと**ビット単位で元に戻る**テスト
   （入力変換と出力変換が往復する）
 - 動画書き出しと PNG がビット単位で一致するテスト
-- `render-export-plan.md` の v1 出力形式表の根拠が事実と一致すること
+- `done/render-export-plan.md` の v1 出力形式表の根拠が事実と一致すること
 
 ### CM-5 文書更新（骨格）
 

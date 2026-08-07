@@ -552,9 +552,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | EXPORT-0 | ✅ | 永続化を GUI 非依存クレートへ抽出（`crates/ravel-project`） | #299 |
 | EXPORT-1 | ✅ | エンコーダ抽象と実行時列挙 | #313 |
-| EXPORT-2 | 🟡 | レンダーワーカーとキュー | EXPORT-0 ✅, EXPORT-1 ✅, BLUR-3 ✅ |
-| EXPORT-3 | ⬜ | **CLI（`ravel render`）** | EXPORT-2, EXPO-3 |
-| EXPORT-4 | ⬜ | 音声のミックスダウンと多重化 | EXPORT-2 |
+| EXPORT-2 | ✅ | レンダーワーカーとキュー | #314 |
+| EXPORT-3 | 🟡 | **CLI（`ravel render`）** | EXPORT-2 ✅, EXPO-3 ✅ |
+| EXPORT-4 | 🟡 | 音声のミックスダウンと多重化 | EXPORT-2 ✅ |
 | EXPORT-5 | ⬜ | 書き出し UI | EXPORT-3, DOCK-8 |
 | EXPORT-6 | ⬜ | 文書更新 | EXPORT-5 |
 

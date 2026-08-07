@@ -1,6 +1,6 @@
 # 式言語 実装計画（REQ-CORE-014 / REQ-CORE-015）
 
-> **Status**: Planned — 2026-08-03
+> **Status**: Done — 2026-08-07。`EXPR-1`〜`EXPR-7` 完了
 
 対象要件: REQ-CORE-014（パラメータ式）、REQ-CORE-015（フィールド式）。
 関連: REQ-CORE-007、REQ-CORE-010、REQ-CORE-012、REQ-MOGRAPH-001、REQ-INFRA-007。
@@ -91,7 +91,7 @@
 ### 表層構文（2026-08-06 設計セッション）
 
 **構文そのものは
-[`docs/specifications/expression-language.md`](../specifications/expression-language.md)
+[`docs/specifications/expression-language.md`](../../specifications/expression-language.md)
 が規範。** ここには理由だけ置く（文法を 2 箇所に書かない）。
 
 決めたのは C / AE 系の流儀（三項 `?:`、`&&` `||` `!`、べき乗演算子なし）、

@@ -349,6 +349,8 @@ duration_frames = "{count} フレーム"
 keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
 exposed = "このパラメータをプロジェクトの入力として公開"
+expression = "このパラメータの式を切替"
+expression_blocked = "式はこのパラメータの駆動元（キーフレーム・ノード出力・ブレンド）を置き換えてしまう。先に解除すること。"
 
 [properties.ports]
 new_name = "新しいポート名"
@@ -845,10 +847,10 @@ points = "変換カーブの制御点（入力→出力）。"
 
 [node."field.expression"]
 label = "エクスプレッションフィールド"
-description = "テキスト式で定義するフィールド。式の評価は未実装で、サンプリングは default 値を返す。"
+description = "テキスト式で定義するフィールド。各サンプル位置で式を評価する。"
 [node."field.expression".params]
-expression = "式のテキスト（予約済み。まだ評価されない）。"
-default = "すべてのサンプルで返す値。"
+expression = "式のテキスト。`@P` がサンプル位置、`@name` がジオメトリ属性を指す。"
+default = "式が答えられない場合に返す値。コンパイルできないソース、およびサンプル対象のジオメトリが持たない属性。"
 
 [node."field.add"]
 label = "フィールド加算"

@@ -354,6 +354,8 @@ duration_frames = "{count} frames"
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
 exposed = "Expose this parameter as a project input"
+expression = "Toggle expression on this parameter"
+expression_blocked = "An expression would replace what drives this parameter (keyframes, a node output or a blend). Clear it first."
 
 [properties.ports]
 new_name = "New port name"
@@ -851,10 +853,10 @@ points = "Control points of the transfer curve (input to output)."
 
 [node."field.expression"]
 label = "Expression Field"
-description = "A field defined by a text expression. Expression evaluation is not implemented yet: sampling returns the default value."
+description = "A field defined by a text expression, evaluated at every sample position."
 [node."field.expression".params]
-expression = "Expression text (reserved; not yet evaluated)."
-default = "Value returned for every sample."
+expression = "Expression text. `@P` names the sample position and `@name` reads a geometry attribute."
+default = "Value returned where the expression cannot answer: a source that does not compile, and an attribute the sampled geometry does not carry."
 
 [node."field.add"]
 label = "Field Add"

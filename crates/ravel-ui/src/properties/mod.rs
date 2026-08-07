@@ -10,6 +10,7 @@
 
 pub mod composition;
 pub mod exposed;
+pub mod expression;
 pub mod layer;
 pub mod node;
 

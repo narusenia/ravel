@@ -24,6 +24,10 @@ fn channel_display(ch: &ravel_core::animation::channel::AnimationChannel) -> Str
     let v = match &ch.source {
         ChannelSource::Constant(v) => *v,
         ChannelSource::Keyframes(curve) => curve.sample(0.0),
+        // An expression has no value without a context, and `0.00` would be a
+        // number the parameter does not hold. Its source is what the node
+        // stores, and the row elides it like any other over-wide value.
+        ChannelSource::Expression(expression) => return expression.source().to_string(),
         _ => 0.0,
     };
     format!("{v:.2}")

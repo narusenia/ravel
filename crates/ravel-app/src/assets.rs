@@ -201,6 +201,9 @@ pub enum RavelIcon {
     NodeFieldCurveRemap,
     /// Node header/menu: `field.expression`.
     NodeFieldExpression,
+    /// A parameter driven by an expression (Properties row badge). Shares the
+    /// `field.expression` glyph: both mean "this value comes from a formula".
+    Expression,
     /// Node header/menu: `field.add`.
     NodeFieldAdd,
     /// Node header/menu: `field.multiply`.
@@ -424,6 +427,7 @@ impl IconNamed for RavelIcon {
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",
             Self::NodeFieldExpression => "icons/sigma.svg",
+            Self::Expression => "icons/sigma.svg",
             Self::NodeFieldAdd => "icons/plus.svg",
             Self::NodeFieldMultiply => "icons/x.svg",
             Self::NodeFieldMax => "icons/arrow-up-to-line.svg",

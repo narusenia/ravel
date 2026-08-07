@@ -52,6 +52,7 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::{AssetMetadata, Layer};
+use ravel_core::eval::EvalContext;
 use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
 };
@@ -61,11 +62,13 @@ use ravel_core::network::{CustomPortType, NetworkError};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
+use ravel_ui::properties::expression;
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
@@ -1097,6 +1100,203 @@ fn key_toggle_button(
     }
 }
 
+/// What one parameter row needs to show about its expressions.
+///
+/// One entry per animation channel the parameter carries, `None` where that
+/// component is not driven by an expression. A vector parameter can be
+/// partially driven, so this is per component rather than per row.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct ExpressionRow {
+    components: Vec<Option<ExpressionComponent>>,
+    /// Whether clicking the badge would attach anything.
+    ///
+    /// False for a row whose every component is driven by something an
+    /// expression would have to destroy — a keyframe curve, a node output, an
+    /// audio source, a blend. The badge is drawn dead for those rather than
+    /// accepting a click that quietly does nothing.
+    attachable: bool,
+}
+
+impl ExpressionRow {
+    /// Whether any component is driven — what the row badge shows.
+    fn is_attached(&self) -> bool {
+        self.components.iter().any(Option::is_some)
+    }
+
+    /// Which components are driven. Editing a source does not change this, so
+    /// it is the part a widget rebuild has to watch: the set of Inputs.
+    fn shape(&self) -> Vec<bool> {
+        self.components.iter().map(Option::is_some).collect()
+    }
+}
+
+/// Expression text the author has typed but not confirmed.
+#[derive(Clone, Debug, PartialEq)]
+struct ExpressionDraft {
+    source: String,
+    /// Why the draft does not compile, if it does not — recomputed on every
+    /// keystroke, which is what puts the error on screen during editing.
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ExpressionComponent {
+    source: String,
+    /// Why the source does not compile, if it does not.
+    ///
+    /// Carried from `ExpressionError`'s own `Display`, which already names the
+    /// line and column. It is **not** a locale key: it quotes identifiers the
+    /// author typed and spans of their own source, the same way the node
+    /// description passes through untranslated.
+    error: Option<String>,
+}
+
+/// The expression shape of every row, for the rebuild guard.
+fn expression_shape(rows: &[(String, ExpressionRow)]) -> Vec<(String, Vec<bool>)> {
+    rows.iter()
+        .map(|(key, row)| (key.clone(), row.shape()))
+        .collect()
+}
+
+/// The expression badge shown left of a channel-backed field's label:
+/// filled (theme primary) when any component is driven by an expression,
+/// muted when a click would attach one, and dimmed to the border colour when
+/// it would not.
+///
+/// Clicking it attaches an expression to every component that holds a plain
+/// constant, seeded with the value already on screen, or detaches every one
+/// and freezes that value — the same one-click, one-undo-step contract as the
+/// keyframe toggle beside it.
+///
+/// The dead state is the visible half of the rule in
+/// `ravel_ui::properties::expression`: attaching would overwrite whatever
+/// drives the parameter, so it refuses. Drawing the badge live and swallowing
+/// the click would leave the author clicking a control that never responds, so
+/// the badge greys out and its tooltip says why.
+fn expression_toggle_button(
+    key: &str,
+    attached: bool,
+    attachable: bool,
+    node_id: NodeId,
+    active: Hsla,
+    muted: Hsla,
+    disabled: Hsla,
+) -> Stateful<Div> {
+    // Detaching is always available once something is attached; only the
+    // attach direction can be refused.
+    let live = attached || attachable;
+    let color = match (attached, live) {
+        (true, _) => active,
+        (false, true) => muted,
+        (false, false) => disabled,
+    };
+    let key = key.to_string();
+    let mut badge = div()
+        .id(SharedString::from(format!("expression-toggle-{key}")))
+        .flex_shrink_0()
+        .w(px(14.0))
+        .child(Icon::new(RavelIcon::Expression).size_3().text_color(color));
+    badge = if live {
+        badge.cursor_pointer().tooltip(|window, cx| {
+            Tooltip::new(t!("properties.toggle.expression")).build(window, cx)
+        })
+    } else {
+        badge.cursor_default().tooltip(|window, cx| {
+            Tooltip::new(t!("properties.toggle.expression_blocked")).build(window, cx)
+        })
+    };
+    badge.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+        if !live {
+            return;
+        }
+        let editor = cx
+            .try_global::<super::NodeEditorHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(editor) = editor {
+            editor.update(cx, |editor, cx| {
+                editor.toggle_param_expression(node_id, &key, cx);
+            });
+        }
+    })
+}
+
+/// The expression editor under a driven row: one source box per driven
+/// component, each with its compile error beneath it.
+///
+/// The error is shown and the box stays editable — a source that does not
+/// compile is a state the document holds, not an edit to refuse. A vector
+/// component that is *not* driven contributes no box, so a partially driven
+/// parameter shows only the parts that have an expression.
+///
+/// A component with a draft shows the **draft's** error rather than the
+/// document's, which is what makes the message track the text on screen while
+/// it is being typed.
+fn expression_editor_body(
+    key: &str,
+    row: &ExpressionRow,
+    inputs: &[(String, usize, Entity<InputState>)],
+    drafts: &[(String, usize, ExpressionDraft)],
+    muted: Hsla,
+    danger: Hsla,
+) -> Div {
+    const COMPONENT_LABELS: [&str; 4] = ["x", "y", "z", "w"];
+    let multi = row.components.len() > 1;
+    let mut body = div().flex().flex_col().w_full().pl(px(18.0)).pb(px(2.0));
+
+    for (component, stored) in row.components.iter().enumerate() {
+        let Some(stored) = stored else {
+            continue;
+        };
+        let Some((_, _, state)) = inputs
+            .iter()
+            .find(|(k, index, _)| k == key && *index == component)
+        else {
+            continue;
+        };
+        let mut line = div().flex().items_center().gap_1().w_full();
+        // Axis letters are left untranslated, as everywhere else in the UI.
+        if multi {
+            line = line.child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(12.0))
+                    .text_xs()
+                    .text_color(muted)
+                    .child(SharedString::from(
+                        COMPONENT_LABELS
+                            .get(component)
+                            .copied()
+                            .unwrap_or_default()
+                            .to_string(),
+                    )),
+            );
+        }
+        body = body.child(
+            line.child(
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .child(Input::new(state).small().w_full()),
+            ),
+        );
+        let error = drafts
+            .iter()
+            .find(|(k, index, _)| k == key && *index == component)
+            .map_or(stored.error.as_ref(), |(_, _, draft)| draft.error.as_ref());
+        if let Some(error) = error {
+            body = body.child(
+                div()
+                    .px_1()
+                    .py(px(1.0))
+                    .text_xs()
+                    .text_color(danger)
+                    .child(SharedString::from(error.clone())),
+            );
+        }
+    }
+    body
+}
+
 /// Discriminant fingerprint of the sections' fields: key plus variant kind.
 /// A same-target refresh whose shape changed (e.g. a parameter switched
 /// between editable and driven read-only) must rebuild widget bindings.
@@ -1328,6 +1528,34 @@ pub struct PropertiesGpuiPanel {
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
     curves: Vec<(String, CurveBinding)>,
+    /// Expression state of the selected node's parameters, keyed by field key.
+    ///
+    /// Derived from the document on every refresh rather than held as edit
+    /// state: the source of truth is the `ChannelSource::Expression` in the
+    /// graph, and an editor that kept its own copy would show a stale source
+    /// after an undo.
+    expressions: Vec<(String, ExpressionRow)>,
+    /// One text Input per expression-driven component, keyed by field key and
+    /// component index. Retained for the same reason every other Input is: a
+    /// half-typed expression has to survive a document refresh.
+    expression_inputs: Vec<(String, usize, StringBinding)>,
+    /// Uncommitted expression text, keyed by field key and component index.
+    ///
+    /// The draft is the whole of this editor's edit state, and it exists
+    /// because an expression is the one field in the panel that has to report
+    /// errors *while* it is typed. Committing on every keystroke would show
+    /// the error but fill the undo history with half-typed sources, so a
+    /// keystroke writes here instead: the draft is compiled for its message,
+    /// the document is not touched, and Enter or blur is what commits.
+    ///
+    /// It is also what keeps a stale box from overwriting the document. A
+    /// component with no draft has not been typed into since its last commit,
+    /// so `sync_expression_widgets` may replace its text with the document's
+    /// — which is how an undo reaches the box — and blur has nothing to
+    /// commit. Without that gate, an undo would leave the old text in a
+    /// focused box and the following blur would write it straight back,
+    /// undoing the undo.
+    expression_drafts: Vec<(String, usize, ExpressionDraft)>,
     /// Row widgets of the Ports section, keyed by port name: the name Input
     /// and the type Select of every editable row, plus the trailing add row.
     ///
@@ -1516,6 +1744,9 @@ impl PropertiesGpuiPanel {
             curve_resize: None,
             pending_color_commit: None,
             color_commit_generation: 0,
+            expressions: Vec::new(),
+            expression_inputs: Vec::new(),
+            expression_drafts: Vec::new(),
             // The target above may already name something, and nothing has
             // built its widgets yet.
             needs_rebuild: true,
@@ -1534,8 +1765,11 @@ impl PropertiesGpuiPanel {
     /// read-only row.
     fn refresh_values_checked(&mut self, cx: &mut Context<Self>) {
         let before = fields_shape(&self.sections);
+        let before_expressions = expression_shape(&self.expressions);
         self.refresh_values(cx);
-        if fields_shape(&self.sections) != before {
+        if fields_shape(&self.sections) != before
+            || expression_shape(&self.expressions) != before_expressions
+        {
             self.needs_rebuild = true;
         }
     }
@@ -1633,6 +1867,70 @@ impl PropertiesGpuiPanel {
             .map(|layer| layer_local_frame(layer, Self::playback_frame(cx)))
             .unwrap_or(0);
         Some((nodes, driven, frame))
+    }
+
+    /// The context an expression-driven node parameter is *displayed*
+    /// through: the owning composition's frame rate and resolution.
+    ///
+    /// A parameter expression may name `fps`, `res.*` and `comp.*`, so the row
+    /// cannot show its value without them. Nothing here evaluates the graph —
+    /// the numbers come straight out of the composition's settings. Falls back
+    /// to a 30 fps, 1×1 context when the network's composition cannot be
+    /// resolved, which is also when there is no row to draw.
+    fn node_eval_context(&self, cx: &App) -> EvalContext {
+        let resolved = (|| {
+            let PropertiesTarget::Nodes { network, .. } = &self.target else {
+                return None;
+            };
+            let document = self.project.as_ref()?.read(cx).document();
+            let comp = document.get_composition(network.comp)?;
+            Some(EvalContext::new(
+                Self::playback_frame(cx),
+                comp.frame_rate,
+                comp.resolution,
+            ))
+        })();
+        resolved.unwrap_or_else(|| EvalContext::new(0, FrameRate::new(30, 1), (1, 1)))
+    }
+
+    /// The expression state of the selected node's parameters.
+    ///
+    /// Only a node target has one: layer shell properties are edited through
+    /// `apply_layer_field`, which has no expression path yet, so offering the
+    /// badge there would advertise something no click could reach.
+    fn expression_rows(&self, cx: &App) -> Vec<(String, ExpressionRow)> {
+        let Some((nodes, driven, _)) = self.resolved_nodes(cx) else {
+            return Vec::new();
+        };
+        let Some(node) = nodes.first() else {
+            return Vec::new();
+        };
+        node.parameters
+            .iter()
+            // A parameter driven by a connected port renders read-only; its
+            // stored expression is inert, so the row must not offer to edit it.
+            .filter(|parameter| !driven.iter().any(|d| d.key == parameter.key))
+            .filter_map(|parameter| {
+                let count = expression::channel_count(&parameter.value)?;
+                let components = (0..count)
+                    .map(|component| {
+                        expression::component_expression(&parameter.value, component).map(
+                            |stored| ExpressionComponent {
+                                source: stored.source().to_string(),
+                                error: stored.error().map(|error| error.to_string()),
+                            },
+                        )
+                    })
+                    .collect();
+                Some((
+                    parameter.key.clone(),
+                    ExpressionRow {
+                        components,
+                        attachable: expression::can_attach(&parameter.value),
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Resolve the current composition target's settings from the live
@@ -2533,8 +2831,15 @@ impl PropertiesGpuiPanel {
                     let node = nodes.first().expect("non-empty");
                     // The Ports section of an interface node offers the types
                     // this network's position admits (REQ-LAYER-002/003).
-                    let mut sections =
-                        sections_for_node(node, &self.registry, frame, &driven, network.context());
+                    let eval = self.node_eval_context(cx);
+                    let mut sections = sections_for_node(
+                        node,
+                        &self.registry,
+                        frame,
+                        &eval,
+                        &driven,
+                        network.context(),
+                    );
                     append_node_description(&mut sections, &node.type_key);
                     sections
                 }
@@ -2587,6 +2892,7 @@ impl PropertiesGpuiPanel {
     /// keeps its state.
     fn refresh_values(&mut self, cx: &mut Context<Self>) {
         self.sections = self.sections_for_target(cx);
+        self.expressions = self.expression_rows(cx);
         let mut updates: Vec<(String, f32)> = Vec::new();
         for section in &self.sections {
             for field in &section.fields {
@@ -2649,6 +2955,7 @@ impl PropertiesGpuiPanel {
         let span = tracing::debug_span!("rebuild_widgets");
         let _guard = span.enter();
         self.needs_rebuild = false;
+        self.expression_inputs.clear();
         self.scrubs.clear();
         self.strings.clear();
         self.selects.clear();
@@ -2665,10 +2972,25 @@ impl PropertiesGpuiPanel {
         self.committed_exposed_rename = None;
 
         let sections = self.sections_for_target(cx);
+        self.expressions = self.expression_rows(cx);
         let node_ids = match &self.target {
             PropertiesTarget::Nodes { ids, .. } => ids.clone(),
             _ => Vec::new(),
         };
+        // A draft belongs to a component that still has a box. Once the
+        // component stops being driven — detached, or the target changed —
+        // there is nothing to commit it into, and keeping it would let a stale
+        // source reappear in an unrelated parameter that happens to share the
+        // key.
+        let driven = self.expressions.clone();
+        self.expression_drafts.retain(|(key, component, _)| {
+            driven
+                .iter()
+                .find(|(field_key, _)| field_key == key)
+                .and_then(|(_, row)| row.components.get(*component))
+                .is_some_and(Option::is_some)
+        });
+        self.build_expression_inputs(&node_ids, window, cx);
 
         for section in &sections {
             for field in &section.fields {
@@ -2946,6 +3268,190 @@ impl PropertiesGpuiPanel {
         }
     }
 
+    /// Build one text Input per expression-driven component.
+    ///
+    /// Committing on Enter *and* on blur is what makes the editor
+    /// non-obstructive: the author can click away mid-expression and the text
+    /// is kept. `set_param_expression` stores whatever is in the box, compiling
+    /// or not, so nothing here inspects the source before sending it.
+    ///
+    /// `Change` does **not** commit. It records a draft and compiles it for
+    /// the error message, so the author sees a syntax error as they type
+    /// without every keystroke becoming an undo step. This is the one text
+    /// field in the panel that behaves this way; the rest commit on blur
+    /// alone, because only an expression has an error worth showing before the
+    /// edit is finished.
+    ///
+    /// A rebuilt Input is seeded from its draft when there is one, so widgets
+    /// replaced mid-edit do not drop the author's half-typed source.
+    fn build_expression_inputs(
+        &mut self,
+        node_ids: &[NodeId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.expressions.clone();
+        for (key, row) in rows {
+            for (component, stored) in row.components.iter().enumerate() {
+                let Some(stored) = stored else {
+                    continue;
+                };
+                let initial = self
+                    .expression_draft(&key, component)
+                    .map_or_else(|| stored.source.clone(), |draft| draft.source.clone());
+                let entity = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+                let field_key = key.clone();
+                let ids = node_ids.to_vec();
+                let sub = cx.subscribe_in(
+                    &entity,
+                    window,
+                    move |this, state, event: &InputEvent, _window, cx| match event {
+                        InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                            this.commit_expression_draft(&field_key, component, &ids, cx);
+                        }
+                        InputEvent::Change => {
+                            let source = state.read(cx).value().to_string();
+                            this.note_expression_draft(&field_key, component, source, cx);
+                        }
+                        InputEvent::Focus => {}
+                    },
+                );
+                self.expression_inputs.push((
+                    key.clone(),
+                    component,
+                    StringBinding { state: entity, sub },
+                ));
+            }
+        }
+    }
+
+    /// The uncommitted text of one component, if the author has typed into it
+    /// since its last commit.
+    fn expression_draft(&self, key: &str, component: usize) -> Option<&ExpressionDraft> {
+        self.expression_drafts
+            .iter()
+            .find(|(k, index, _)| k == key && *index == component)
+            .map(|(_, _, draft)| draft)
+    }
+
+    /// The source one component holds in the document.
+    fn committed_expression(&self, key: &str, component: usize) -> Option<&str> {
+        self.expressions
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .and_then(|(_, row)| row.components.get(component))
+            .and_then(|stored| stored.as_ref())
+            .map(|stored| stored.source.as_str())
+    }
+
+    /// Record a keystroke without touching the document, and refresh the error
+    /// shown beneath the box.
+    ///
+    /// Text that matches the document again *clears* the draft rather than
+    /// storing one: the component is back to committed, so an external change
+    /// may sync into it and a following blur has nothing to write.
+    fn note_expression_draft(
+        &mut self,
+        key: &str,
+        component: usize,
+        source: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.expression_drafts
+            .retain(|(k, index, _)| !(k == key && *index == component));
+        if self.committed_expression(key, component) != Some(source.as_str()) {
+            let error = expression::compile_error(&source);
+            self.expression_drafts.push((
+                key.to_string(),
+                component,
+                ExpressionDraft { source, error },
+            ));
+        }
+        cx.notify();
+    }
+
+    /// Commit the draft of one component, if it has one.
+    ///
+    /// No draft means nothing was typed since the last commit, so there is
+    /// nothing to write — and writing anyway is precisely the bug this guards:
+    /// the box's text lags the document until the next render, so a blur after
+    /// an undo would re-commit the value the undo removed.
+    fn commit_expression_draft(
+        &mut self,
+        key: &str,
+        component: usize,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .expression_drafts
+            .iter()
+            .position(|(k, i, _)| k == key && *i == component)
+        else {
+            return;
+        };
+        let (_, _, draft) = self.expression_drafts.remove(index);
+        self.commit_expression_change(key, component, draft.source, node_ids, cx);
+    }
+
+    /// Push committed expression sources into idle boxes, so an undo, a redo
+    /// or an external edit reaches the text the author is looking at.
+    ///
+    /// `InputState::set_value` needs a `Window`, so this runs from `render`
+    /// like the other widget syncs. A component with a draft is skipped: the
+    /// author is mid-edit and owns the text until they confirm or discard it.
+    fn sync_expression_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut updates: Vec<(Entity<InputState>, String)> = Vec::new();
+        for (key, component, binding) in &self.expression_inputs {
+            if self.expression_draft(key, *component).is_some() {
+                continue;
+            }
+            let Some(source) = self.committed_expression(key, *component) else {
+                continue;
+            };
+            if binding.state.read(cx).value().as_ref() != source {
+                updates.push((binding.state.clone(), source.to_string()));
+            }
+        }
+        for (state, value) in updates {
+            state.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
+
+    /// Send one component's edited source to the node editor, which owns the
+    /// graph and the undo step.
+    ///
+    /// The panel does not check whether the source compiles: a broken
+    /// expression is stored, shown with its error, and evaluated as the
+    /// channel default. Refusing to commit it would throw away exactly the
+    /// text the author is still working on.
+    fn commit_expression_change(
+        &mut self,
+        key: &str,
+        component: usize,
+        source: String,
+        node_ids: &[NodeId],
+        cx: &mut Context<Self>,
+    ) {
+        let unchanged = self
+            .expressions
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .and_then(|(_, row)| row.components.get(component))
+            .and_then(|stored| stored.as_ref())
+            .is_some_and(|stored| stored.source == source);
+        if unchanged {
+            return;
+        }
+        let Some(node_id) = node_ids.first().copied() else {
+            return;
+        };
+        let key = key.to_string();
+        self.with_node_editor(cx, move |editor, cx| {
+            editor.set_param_expression(node_id, &key, component, &source, cx);
+        });
+    }
+
     /// Build the Ports section's widgets: a name Input and a type Select per
     /// editable row, plus the trailing add row.
     ///
@@ -3050,6 +3556,7 @@ impl Render for PropertiesGpuiPanel {
         // refreshed section colors into retained picker widgets.
         self.sync_color_widgets(window, cx);
         self.sync_string_widgets(window, cx);
+        self.sync_expression_widgets(window, cx);
         self.sync_select_widgets(window, cx);
 
         let mut content = div()
@@ -3114,6 +3621,13 @@ impl Render for PropertiesGpuiPanel {
                 .map(|(k, b)| (k.clone(), b.state.clone(), self.curve_height(k)))
                 .collect();
             let expanded_curves = self.expanded_curves.clone();
+            let expression_entities: Vec<(String, usize, Entity<InputState>)> = self
+                .expression_inputs
+                .iter()
+                .map(|(k, component, b)| (k.clone(), *component, b.state.clone()))
+                .collect();
+            let expression_rows = self.expressions.clone();
+            let expression_drafts = self.expression_drafts.clone();
             let port_widgets = PortWidgets {
                 names: self
                     .port_names
@@ -3147,6 +3661,8 @@ impl Render for PropertiesGpuiPanel {
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             let danger = cx.theme().colors.danger;
+            // Dimmer than `muted`: a control that is present but cannot act.
+            let disabled = cx.theme().colors.border;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
             // keyed / exposed states stand out from the muted chrome.
             let active = cx.theme().colors.primary;
@@ -3276,6 +3792,9 @@ impl Render for PropertiesGpuiPanel {
                 let key_states = key_states.clone();
                 let port_states = port_states.clone();
                 let exposed_states = exposed_states.clone();
+                let expression_entities = expression_entities.clone();
+                let expression_rows = expression_rows.clone();
+                let expression_drafts = expression_drafts.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -3318,6 +3837,38 @@ impl Render for PropertiesGpuiPanel {
                             )),
                             _ => None,
                         };
+                        let expression_row = expression_rows
+                            .iter()
+                            .find(|(k, _)| k == field.key())
+                            .map(|(_, row)| row);
+                        // The editor sits directly under its own row, like the
+                        // inline curve editor, so a vector's components stay
+                        // next to the values they drive.
+                        let expression_body = match (port_node, expression_row) {
+                            (Some(_), Some(row)) if row.is_attached() => {
+                                Some(expression_editor_body(
+                                    field.key(),
+                                    row,
+                                    &expression_entities,
+                                    &expression_drafts,
+                                    muted,
+                                    danger,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        let expression_button = match (port_node, expression_row) {
+                            (Some(node_id), Some(row)) => Some(expression_toggle_button(
+                                field.key(),
+                                row.is_attached(),
+                                row.attachable,
+                                node_id,
+                                active,
+                                muted,
+                                disabled,
+                            )),
+                            _ => None,
+                        };
                         let port_button = match (port_node, port_states.get(field.key())) {
                             (Some(node_id), Some(state)) => Some(port_toggle_button(
                                 field.key(),
@@ -3339,7 +3890,10 @@ impl Render for PropertiesGpuiPanel {
                             )),
                             _ => None,
                         };
-                        if key_button.is_none() && port_button.is_none() && exposed_button.is_none()
+                        if key_button.is_none()
+                            && port_button.is_none()
+                            && exposed_button.is_none()
+                            && expression_button.is_none()
                         {
                             container = container.child(row);
                         } else {
@@ -3353,10 +3907,16 @@ impl Render for PropertiesGpuiPanel {
                             if let Some(button) = key_button {
                                 wrapper = wrapper.child(button);
                             }
+                            if let Some(button) = expression_button {
+                                wrapper = wrapper.child(button);
+                            }
                             container = container
                                 .child(wrapper.child(div().flex_grow().min_w_0().child(row)));
                         }
                         if let Some(body) = curve_body {
+                            container = container.child(body);
+                        }
+                        if let Some(body) = expression_body {
                             container = container.child(body);
                         }
                     }
@@ -3392,6 +3952,7 @@ mod tests {
     // to the built-in one.
     use core::prelude::v1::test;
     use gpui::TestAppContext;
+    use ravel_core::animation::channel::ParameterExpression;
     use ravel_core::composition::{AudioSource, BlendMode, Layer};
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
@@ -5242,10 +5803,12 @@ mod tests {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
         let node = Node::new(NodeId::new(1), "plugin.unknown");
+        let eval = EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080));
         let mut sections = sections_for_node(
             &node,
             &registry,
             0,
+            &eval,
             &[],
             ravel_core::network::NetworkContext::LayerRoot,
         );
@@ -5280,6 +5843,46 @@ mod tests {
                 panel.refresh_values(cx);
                 panel.rebuild_widgets(window, cx);
                 rows
+            })
+            .unwrap()
+    }
+
+    // ---- expression rows --------------------------------------------------
+
+    fn node_param(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> ParameterValue {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .expect("network")
+                .node(node_id)
+                .expect("node")
+                .parameters
+                .iter()
+                .find(|p| p.key == key)
+                .expect("parameter")
+                .value
+                .clone()
+        })
+    }
+
+    fn expression_row(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> ExpressionRow {
+        window
+            .read_with(cx, |panel, _| {
+                panel
+                    .expressions
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, row)| row.clone())
+                    .expect("an expression row for the parameter")
             })
             .unwrap()
     }
@@ -5842,5 +6445,420 @@ mod tests {
             .value
             .clone();
         assert_eq!(value, ParameterValue::Float(4.0));
+    }
+
+    fn ramp_curve() -> ravel_core::animation::curve::KeyframeCurve {
+        use ravel_core::animation::interpolation::Interpolation;
+        let mut curve = ravel_core::animation::curve::KeyframeCurve::with_default(0.0);
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 10.0, Interpolation::Linear);
+        curve
+    }
+
+    fn node_with_amount(source: ChannelSource) -> Node {
+        Node::new(NodeId::next(), "test").with_param(
+            "amount",
+            ParameterValue::Channel(AnimationChannel::new(source)),
+        )
+    }
+
+    /// `Blend(Keyframes, Expression)` is a state the core supports (EXPR-2).
+    /// A badge that only matched the top of the source read it as undriven,
+    /// and the click that followed replaced the whole blend with a literal.
+    #[gpui::test]
+    fn a_blend_holding_an_expression_lights_the_badge(cx: &mut TestAppContext) {
+        let blend = ChannelSource::Blend(
+            Box::new(ChannelSource::Keyframes(ramp_curve())),
+            Box::new(ChannelSource::Expression(ParameterExpression::new(
+                "frame * 4",
+            ))),
+            ravel_core::animation::blend::BlendMode::Mix,
+            0.5,
+        );
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, node_with_amount(blend));
+
+        let row = expression_row(&window, "amount", cx);
+        assert!(
+            row.is_attached(),
+            "the nested expression must light the badge"
+        );
+        assert_eq!(
+            row.components[0].as_ref().map(|c| c.source.as_str()),
+            Some("frame * 4"),
+            "and the editor must show the nested source"
+        );
+        // Attaching would have to overwrite the blend, so the badge is dead in
+        // that direction; the click detaches instead.
+        assert!(!row.attachable);
+    }
+
+    /// The toggle on a blend detaches, and detaching freezes the expression
+    /// where it sits. Replacing the blend with a literal would delete the
+    /// curve the author blended with.
+    #[gpui::test]
+    fn toggling_a_blend_freezes_the_expression_and_keeps_the_blend(cx: &mut TestAppContext) {
+        let blend = ChannelSource::Blend(
+            Box::new(ChannelSource::Keyframes(ramp_curve())),
+            Box::new(ChannelSource::Expression(ParameterExpression::new(
+                "frame * 4",
+            ))),
+            ravel_core::animation::blend::BlendMode::Mix,
+            0.5,
+        );
+        let (_window, editor, project, path, node_id) =
+            setup_target_for_node(cx, node_with_amount(blend));
+
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_expression(node_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ParameterValue::Channel(channel) = node_param(&project, &path, node_id, "amount", cx)
+        else {
+            panic!("expected a channel");
+        };
+        let ChannelSource::Blend(a, b, mode, factor) = &channel.source else {
+            panic!("the blend must survive the toggle, not be replaced wholesale");
+        };
+        assert!(
+            matches!(**a, ChannelSource::Keyframes(_)),
+            "the keyframes the author blended with must survive"
+        );
+        assert!(matches!(**b, ChannelSource::Constant(v) if v == 0.0));
+        assert_eq!(*mode, ravel_core::animation::blend::BlendMode::Mix);
+        assert_eq!(*factor, 0.5);
+    }
+
+    /// Attaching over a keyframe curve would destroy the animation and leave
+    /// the "return to a constant or keyframes" operation nothing to return to.
+    /// The badge is drawn dead and the click changes nothing.
+    #[gpui::test]
+    fn a_keyframed_parameter_refuses_to_attach_an_expression(cx: &mut TestAppContext) {
+        let (window, editor, project, path, node_id) =
+            setup_target_for_node(cx, node_with_amount(ChannelSource::Keyframes(ramp_curve())));
+
+        let row = expression_row(&window, "amount", cx);
+        assert!(!row.is_attached());
+        assert!(
+            !row.attachable,
+            "the badge must be dead, not silently inert"
+        );
+
+        let before = node_param(&project, &path, node_id, "amount", cx);
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_expression(node_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            node_param(&project, &path, node_id, "amount", cx),
+            before,
+            "the curve must be untouched"
+        );
+    }
+
+    // ---- editing an expression --------------------------------------------
+
+    /// Type into one component's box the way the author does: the text lands
+    /// in the widget and the `Change` handler records it as a draft. Neither
+    /// touches the document.
+    fn type_expression(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        component: usize,
+        text: &str,
+        cx: &mut TestAppContext,
+    ) {
+        window
+            .update(cx, |panel, window, cx| {
+                let state = panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, index, _)| k == key && *index == component)
+                    .map(|(_, _, binding)| binding.state.clone())
+                    .expect("an input for the driven component");
+                state.update(cx, |state, cx| state.set_value(text, window, cx));
+                panel.note_expression_draft(key, component, text.to_string(), cx);
+            })
+            .unwrap();
+    }
+
+    fn input_text(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        component: usize,
+        cx: &mut TestAppContext,
+    ) -> String {
+        window
+            .read_with(cx, |panel, cx| {
+                panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, index, _)| k == key && *index == component)
+                    .map(|(_, _, binding)| binding.state.read(cx).value().to_string())
+                    .expect("an input for the driven component")
+            })
+            .unwrap()
+    }
+
+    fn expression_node() -> Node {
+        node_with_amount(ChannelSource::Expression(ParameterExpression::new("1")))
+    }
+
+    fn committed_source(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        cx: &mut TestAppContext,
+    ) -> String {
+        let value = node_param(project, path, node_id, "amount", cx);
+        expression::component_expression(&value, 0)
+            .expect("a driven component")
+            .source()
+            .to_string()
+    }
+
+    /// The completion criterion EXPR-4 states: a syntax error is shown *while
+    /// editing*, and showing it does not block the edit. Waiting for blur is
+    /// not "while editing", and committing every keystroke to get there would
+    /// fill the undo history with half-typed sources.
+    #[gpui::test]
+    fn a_syntax_error_shows_while_typing_without_reaching_the_document(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame *", cx);
+
+        let error = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .expression_draft("amount", 0)
+                    .expect("the keystroke is held as a draft")
+                    .error
+                    .clone()
+            })
+            .unwrap();
+        assert!(error.is_some(), "the error must be visible while typing");
+        assert_eq!(
+            committed_source(&project, &path, node_id, cx),
+            "1",
+            "and the document must not have moved"
+        );
+    }
+
+    /// Blur commits the draft — including one that does not compile, which is
+    /// stored rather than refused so the author can stop mid-expression.
+    #[gpui::test]
+    fn blur_commits_the_draft_and_clears_it(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame *", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(committed_source(&project, &path, node_id, cx), "frame *");
+        assert!(
+            window
+                .read_with(cx, |panel, _| panel.expression_draft("amount", 0).is_none())
+                .unwrap(),
+            "the draft is spent once committed"
+        );
+    }
+
+    /// The regression this mechanism exists for. An undo restores the previous
+    /// source, but the box still shows the text that was undone; a blur that
+    /// wrote it back would silently reverse the undo. The box is resynced and
+    /// the blur, having no draft, writes nothing.
+    #[gpui::test]
+    fn undo_resyncs_the_box_and_the_following_blur_does_not_recommit(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame * 2", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(committed_source(&project, &path, node_id, cx), "frame * 2");
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(committed_source(&project, &path, node_id, cx), "1");
+
+        // The render-time sync is what carries the undo into the widget.
+        window
+            .update(cx, |panel, window, cx| {
+                panel.sync_expression_widgets(window, cx);
+            })
+            .unwrap();
+        assert_eq!(input_text(&window, "amount", 0, cx), "1");
+
+        // Blurring the box afterwards must not resurrect the undone source.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(committed_source(&project, &path, node_id, cx), "1");
+    }
+
+    /// Commit is gated on there being a draft, not on what the box holds.
+    ///
+    /// The resync normally keeps the two together, but the gate is what makes
+    /// a blur harmless in its own right: a box whose text disagrees with the
+    /// document — for any reason, including a refresh the widget has not
+    /// caught up with — writes nothing unless the author actually typed into
+    /// it. Committing the widget's text instead is what let a blur after an
+    /// undo put the undone source straight back.
+    #[gpui::test]
+    fn a_blur_commits_nothing_when_the_author_typed_nothing(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        // Text in the box, deliberately no draft: the author did not type it.
+        window
+            .update(cx, |panel, window, cx| {
+                let state = panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, index, _)| k == "amount" && *index == 0)
+                    .map(|(_, _, binding)| binding.state.clone())
+                    .expect("an input");
+                state.update(cx, |state, cx| state.set_value("frame * 2", window, cx));
+            })
+            .unwrap();
+        assert_eq!(input_text(&window, "amount", 0, cx), "frame * 2");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("amount", 0, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            committed_source(&project, &path, node_id, cx),
+            "1",
+            "a blur with nothing typed must leave the document alone"
+        );
+    }
+
+    /// A sync must never overwrite text the author is still typing, even
+    /// though an undo landed while they typed.
+    #[gpui::test]
+    fn a_draft_outranks_the_document_until_it_is_committed(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "sin(tim", cx);
+        window
+            .update(cx, |panel, window, cx| {
+                panel.sync_expression_widgets(window, cx);
+            })
+            .unwrap();
+
+        assert_eq!(input_text(&window, "amount", 0, cx), "sin(tim");
+        assert_eq!(committed_source(&project, &path, node_id, cx), "1");
+    }
+
+    /// Widgets are rebuilt whenever the row shape changes. A rebuild that
+    /// dropped the draft would throw away the half-typed source.
+    #[gpui::test]
+    fn a_draft_survives_a_widget_rebuild(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, expression_node());
+
+        type_expression(&window, "amount", 0, "frame *", cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        assert_eq!(input_text(&window, "amount", 0, cx), "frame *");
+        assert!(
+            window
+                .read_with(cx, |panel, _| panel.expression_draft("amount", 0).is_some())
+                .unwrap()
+        );
+    }
+
+    /// Editing one component of a vector must leave its neighbours' sources
+    /// exactly as they are.
+    #[gpui::test]
+    fn editing_one_component_of_a_vector_leaves_the_others(cx: &mut TestAppContext) {
+        let source = |text: &str| {
+            AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new(text)))
+        };
+        let node = Node::new(NodeId::next(), "test").with_param(
+            "offset",
+            ParameterValue::Channel3([source("1"), source("2"), source("3")]),
+        );
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
+
+        type_expression(&window, "offset", 1, "frame * 4", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_expression_draft("offset", 1, &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let value = node_param(&project, &path, node_id, "offset", cx);
+        let source_of = |component: usize| {
+            expression::component_expression(&value, component)
+                .expect("driven")
+                .source()
+                .to_string()
+        };
+        assert_eq!(source_of(0), "1");
+        assert_eq!(source_of(1), "frame * 4");
+        assert_eq!(source_of(2), "3");
+    }
+
+    /// Per-component attach and detach on a vector: the neighbours keep what
+    /// they hold, driven or not.
+    #[gpui::test]
+    fn attaching_a_vector_leaves_a_keyframed_component_alone(cx: &mut TestAppContext) {
+        let node = Node::new(NodeId::next(), "test").with_param(
+            "offset",
+            ParameterValue::Channel2([
+                AnimationChannel::keyframes(ramp_curve()),
+                AnimationChannel::constant(3.0),
+            ]),
+        );
+        let (window, editor, project, path, node_id) = setup_target_for_node(cx, node);
+
+        assert!(expression_row(&window, "offset", cx).attachable);
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_expression(node_id, "offset", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ParameterValue::Channel2(channels) = node_param(&project, &path, node_id, "offset", cx)
+        else {
+            panic!("expected a channel pair");
+        };
+        assert!(
+            matches!(channels[0].source, ChannelSource::Keyframes(_)),
+            "the keyframed component keeps its curve"
+        );
+        let ChannelSource::Expression(expression) = &channels[1].source else {
+            panic!("the constant component gains an expression");
+        };
+        assert_eq!(expression.source(), "3");
     }
 }

@@ -278,6 +278,32 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 
 ---
 
+## 書き出し（File ▸ Export…）
+
+**ステータス**: `render-export-plan.md` 単位 5 完了。CLI からの同じ書き出しは
+[`dev/render-cli.md`](dev/render-cli.md)、設計意図は
+[`specifications/ui/render-queue.md`](specifications/ui/render-queue.md)。
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| 書き出しダイアログ | ✅ | `File ▸ Export…`（`CommandId::FileExport`）。対象コンプ（音声の有無は選び直しに追随）・フレーム範囲（画面上は両端 inclusive）・形式・PNG ビット深度・出力ディレクトリ・接頭辞 / 接尾辞 / ゼロ詰め桁数・上書き・音声の有無。OK を押すまでキューに何も届かない。空コンプと `out < in` はその場で拒否 |
+| 形式一覧 | ✅ | 実行時列挙（`available_encoders`）から作る。CLI の `list codecs` / `--format` と同じ 1 経路。**使えない行も理由付きで出す** |
+| 動画コンテナ | 🔲 | 一覧には出るが選べない。書き手が無いため（CLI 側の `codec-no-writer` と同じ拒否）。`render-export-plan.md` の非対象 |
+| 連番書き出し | ✅ | PNG / EXR。ファイル名は絶対フレーム番号。CLI と同じワーカー・同じエンコーダを通ることを `ravel-app/tests/export_pipeline.rs` がバイト比較で確認する |
+| 音声の併置 | ✅ | 音声を持つコンプは同じ範囲の WAV（48kHz ステレオ 32bit float）がフレームの横に出る。素材のデコードは `ffmpeg` フィーチャ依存 |
+| 上書き拒否 | ✅ | 既定は拒否。ファイル名単位で判定し、**1 フレームも評価せずに**失敗する |
+| ジョブの一時停止 / 再開・優先度変更 | 🔲 | REQ-RENDER-001 の残項目。あるのは中止のみ。引き受ける計画は未定 |
+
+**実機確認済み**（2026-08-08）: `File ▸ Export…` から 1080p のコンポジションを
+100 フレーム書き出し、**PNG 連番 100 枚と WAV が並んで出ること**を実物で確認した。
+レンダーキューパネルの進捗表示も動く。
+
+`ravel-cli render --param` で公開パラメータを差し替える往復も実機確認済み
+（2026-08-07）: GUI で作った宣言を `ravel-cli list params` が読み、`--param` で
+差し替えた出力が既定とバイト単位で違うことを確認した。
+
+---
+
 ## ワークスペース・ドッキング・ウィンドウ
 
 `crates/ravel-dock/`（描画）、`crates/ravel-app/src/{window_host,title_bar,

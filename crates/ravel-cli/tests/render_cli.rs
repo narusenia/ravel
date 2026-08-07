@@ -994,6 +994,21 @@ mod sound {
         }
     }
 
+    /// Every name in `dir`, so a test can say "and nothing else" — the
+    /// soundtrack's temporary file included, which [`frames`] would count and
+    /// [`read_wav`] would never look for.
+    fn entries(dir: &Path) -> Vec<String> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = read
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     // -----------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------
@@ -1149,6 +1164,77 @@ mod sound {
         assert!(
             !out.join("frame_0000-0009.wav").exists(),
             "and neither does the sound that was written before them"
+        );
+        assert!(
+            entries(&out).is_empty(),
+            "nor the temporary file it was written through: {:?}",
+            entries(&out)
+        );
+    }
+
+    /// The failure that happens **before** a frame rather than during one: no
+    /// GPU adapter, which is the ordinary state of a render node that has been
+    /// handed the wrong job. The sound is decoded first, so the only thing
+    /// keeping a soundtrack for a picture that does not exist off the disk is
+    /// that the device is built before the mix and the mix lands on a
+    /// temporary name.
+    #[test]
+    fn a_render_that_cannot_build_its_evaluator_writes_no_soundtrack() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+
+        let error = render_with_hooks(
+            &sound_args(&project, &out, "0-9"),
+            || Err::<StubHooks, _>(CliError::Gpu("no adapter on this machine".into())),
+            &CancelFlag::new(),
+            &mut Recorder::default(),
+        )
+        .expect_err("a render with no evaluator cannot succeed");
+
+        assert_eq!(error.id(), "no-gpu");
+        assert!(
+            !out.exists(),
+            "not even a directory: nothing may be written before the render can start, \
+             and least of all a soundtrack — {:?}",
+            entries(&out)
+        );
+    }
+
+    /// `--overwrite` is permission to replace the previous soundtrack with a
+    /// new one. It is not permission to destroy it on behalf of a render that
+    /// then does not finish — which is what truncating the real name up front
+    /// would do, leaving neither the old sound nor the new.
+    #[test]
+    fn an_interrupted_overwrite_leaves_the_previous_soundtrack_whole() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("output directory");
+        let soundtrack = out.join("frame_0000-0009.wav");
+        std::fs::write(&soundtrack, b"the previous render").expect("an earlier soundtrack");
+
+        let cancel = CancelFlag::new();
+        let mut overwriting = sound_args(&project, &out, "0-9");
+        overwriting.overwrite = true;
+        let run = run_with(
+            &overwriting,
+            StubHooks::slow(),
+            Recorder::cancelling(2, &cancel),
+            &cancel,
+        );
+
+        assert_eq!(run.code(), EXIT_CANCELLED);
+        assert!(frames(&out).is_empty(), "no frames survive");
+        assert_eq!(
+            std::fs::read(&soundtrack).expect("the previous soundtrack is still readable"),
+            b"the previous render".to_vec(),
+            "an interrupted overwrite must not cost the old sound as well as the new"
+        );
+        assert_eq!(
+            entries(&out),
+            vec!["frame_0000-0009.wav".to_string()],
+            "and the temporary file the new mix went to is gone"
         );
     }
 

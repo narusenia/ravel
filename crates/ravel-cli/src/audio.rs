@@ -20,10 +20,29 @@
 //!   hour of it. Decoding first is what puts those warnings next to the ones
 //!   planning already produced.
 //! * **Cleanup is one known path.** If the render is then cancelled or fails,
-//!   removing the WAV is a single `remove_file` of a name computed before
+//!   the soundtrack is one temporary file to remove, at a name computed before
 //!   anything started. The reverse order would mean deleting however many
 //!   frames the worker had written because the *audio* failed, which the
 //!   encoder's own abort is not there to do.
+//!
+//! # Why it is not written where it belongs
+//!
+//! The mix goes to a temporary name **in the frames' own directory** and is
+//! renamed into place only once the render has produced its pictures
+//! ([`PendingAudio`]). Writing straight to `frame_0000-0047.wav` would mean
+//! three different ways to leave a deliverable nobody can use:
+//!
+//! * a render that fails **before** a frame — no GPU adapter is the ordinary
+//!   case — leaving a soundtrack for pictures that do not exist;
+//! * `--overwrite` truncating the previous render's audio and then being
+//!   interrupted, so neither the old sound nor the new one survives;
+//! * `WavWriter::finish` dying partway through its length fields, leaving a
+//!   WAV that claims to be complete under the name a finished one would have.
+//!
+//! One `rename` after the frames answers all three: nothing appears at the
+//! real name until there is a render to go with it. The temporary file has to
+//! share the directory for that — `rename` is atomic within a filesystem and
+//! a copy across two.
 //!
 //! # The muxing that is not here
 //!
@@ -37,6 +56,7 @@
 //! than dead code.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ravel_audio::MixerConfig;
 use ravel_core::composition::Document;
@@ -152,11 +172,12 @@ fn audio_layers(document: &Document, comp: CompId) -> Option<usize> {
     (count > 0).then_some(count)
 }
 
-/// Mix the plan's range and write it to the WAV, reporting every source that
-/// could not be loaded.
+/// Mix the plan's range and write it, reporting every source that could not be
+/// loaded.
 ///
-/// Returns the file that was written, or `None` when the plan has no audio.
-/// A source that cannot be decoded — offline, relinked away, past
+/// Returns the finished mix as a [`PendingAudio`] — written, but not yet at
+/// the name it is for — or `None` when the plan has no audio. A source that
+/// cannot be decoded — offline, relinked away, past
 /// [`MAX_DECODE_BYTES`](ravel_audio::mixdown::MAX_DECODE_BYTES) — is a
 /// **warning**, not a failure: the picture is still worth having and the mix
 /// is still the right length, so the deliverable stays in sync. What must not
@@ -165,7 +186,7 @@ fn audio_layers(document: &Document, comp: CompId) -> Option<usize> {
 pub fn render_audio(
     plan: &RenderPlan,
     reporter: &mut dyn Reporter,
-) -> Result<Option<PathBuf>, CliError> {
+) -> Result<Option<PendingAudio>, CliError> {
     let Some(audio) = &plan.audio else {
         return Ok(None);
     };
@@ -205,7 +226,13 @@ pub fn render_audio(
         })?;
     }
 
-    let mut writer = WavWriter::create(&audio.path, mix.buffer.sample_rate, mix.buffer.channels)
+    // Everything from here writes the *temporary* name. The real one is not
+    // opened, truncated or created at any point before the rename, which is
+    // what leaves an existing soundtrack intact until there is a new render to
+    // replace it with. A `WavWriter` that fails or is dropped unfinished
+    // removes its own file, so this stretch needs no cleanup of its own.
+    let temporary = temporary_path(&audio.path);
+    let mut writer = WavWriter::create(&temporary, mix.buffer.sample_rate, mix.buffer.channels)
         .map_err(|error| CliError::Encode(error.to_string()))?;
     writer
         .write_samples(&mix.buffer.data)
@@ -213,21 +240,93 @@ pub fn render_audio(
     writer
         .finish()
         .map_err(|error| CliError::Encode(error.to_string()))?;
-    Ok(Some(audio.path.clone()))
+
+    Ok(Some(PendingAudio {
+        destination: audio.path.clone(),
+        temporary,
+    }))
 }
 
-/// Remove a written WAV because the render it belonged to did not finish.
+/// A finished mix, written beside where it belongs and waiting for the render
+/// to earn it.
 ///
-/// The picture's own cleanup is `Encoder::abort`, which the worker drives.
-/// This is the same promise for the half the worker does not know about: an
-/// interrupted or failed render leaves nothing behind, including a soundtrack
-/// for frames that are not there.
-pub fn discard_audio(path: &Path) {
-    if let Err(error) = std::fs::remove_file(path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %path.display(), %error, "could not remove the render's audio");
+/// **Dropping this removes the file.** That is the whole cleanup path for a
+/// render that fails, is cancelled, or never starts: the sound is written
+/// first, so every one of those exits passes through this drop, and none of
+/// them can reach the name the deliverable is under.
+/// [`publish`](Self::publish) is the only thing that does.
+pub struct PendingAudio {
+    destination: PathBuf,
+    /// The file actually written. Emptied by [`publish`](Self::publish), so
+    /// [`Drop`] knows whether there is still anything to take back.
+    temporary: PathBuf,
+}
+
+impl PendingAudio {
+    /// Where the soundtrack will go once the frames are there.
+    pub fn destination(&self) -> &Path {
+        &self.destination
     }
+
+    /// Put the mix at its real name, and return that name.
+    ///
+    /// Called after the frames, so the rename is the moment the deliverable
+    /// becomes complete — atomically, because the temporary file shares the
+    /// destination's directory. A destination that already exists is replaced
+    /// (the render asked for `--overwrite`, or nothing would have got this
+    /// far); a destination that is a symlink is replaced by the file, which is
+    /// the same refusal-or-replacement the frames get rather than a write
+    /// through to wherever the link pointed.
+    pub fn publish(mut self) -> Result<PathBuf, CliError> {
+        std::fs::rename(&self.temporary, &self.destination).map_err(|error| {
+            CliError::Encode(format!(
+                "cannot put the soundtrack at {}: {error}",
+                self.destination.display()
+            ))
+        })?;
+        // Published: there is no temporary file left to take back, and the
+        // drop that follows must leave the deliverable alone.
+        self.temporary = PathBuf::new();
+        Ok(self.destination.clone())
+    }
+}
+
+impl Drop for PendingAudio {
+    fn drop(&mut self) {
+        if self.temporary.as_os_str().is_empty() {
+            return;
+        }
+        if let Err(error) = std::fs::remove_file(&self.temporary)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %self.temporary.display(),
+                %error,
+                "could not remove the unfinished render's audio"
+            );
+        }
+    }
+}
+
+/// The name a mix is written under until the render has earned the real one.
+///
+/// **Beside the destination, never in a system temporary directory.**
+/// Publication is a `rename`, which is atomic within one filesystem and a
+/// copy-then-delete across two — and a copy that fails halfway is exactly the
+/// half-written deliverable this design exists to rule out.
+///
+/// The leading dot keeps it out of a listing; the process id and the serial
+/// keep two renders — the split `--range` slices a render farm runs into one
+/// directory — from writing to one another's file.
+fn temporary_path(destination: &Path) -> PathBuf {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    destination.with_file_name(format!(".{name}.{}-{serial}.part", std::process::id()))
 }
 
 #[cfg(test)]

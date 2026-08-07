@@ -200,21 +200,23 @@ where
         reporter.note(id, &message);
     }
 
+    // The device before anything is written. `hooks()` is the last refusal a
+    // render can make — a machine with no adapter — and evaluating it as an
+    // argument to `execute` would let it escape past the sound, which is
+    // already on disk by then.
+    let hooks = hooks()?;
+
     // Sound first: its warnings are worth having before an hour of frames,
     // and undoing one WAV is simpler than undoing however many frames the
     // worker wrote. See `audio`'s module docs.
     let audio = audio::render_audio(&plan, reporter)?;
-    let frames = match execute::execute(hooks()?, &plan, cancel, reporter) {
-        Ok(frames) => frames,
-        Err(error) => {
-            // A soundtrack for frames that are not there is exactly the
-            // partial output the plan promises never to leave.
-            if let Some(path) = &audio {
-                audio::discard_audio(path);
-            }
-            return Err(error);
-        }
-    };
+
+    // Every exit from here to the `publish` below drops `audio`, which takes
+    // its temporary file with it and never touches the soundtrack's real name
+    // — so a failed or cancelled render leaves neither a soundtrack without
+    // frames nor a `--overwrite` target destroyed for nothing.
+    let frames = execute::execute(hooks, &plan, cancel, reporter)?;
+    let audio = audio.map(audio::PendingAudio::publish).transpose()?;
 
     Ok(Summary {
         frames,

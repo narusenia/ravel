@@ -1458,11 +1458,14 @@ unit `EXPORT-1`.
 An image sequence carries no sound, so the same module holds
 `WavWriter::create(path, sample_rate, channels)` / `.write_samples(&[f32])` /
 `.finish()` — 32-bit float (`WAVE_FORMAT_IEEE_FLOAT`), FFmpeg-free for the
-same reason the sequence writer is, and **removed on drop unless `finish` ran**,
-so an abandoned render leaves no soundtrack either. Float rather than 16-bit
-PCM: `Mixer::mix` produces `f32`, so the delivered file neither quantises nor
-clips, matching the precision argument EXR rests on. RIFF sizes are `u32`, so
-past ~4 GiB it refuses rather than wrapping (`EXPORT-4`).
+same reason the sequence writer is, and **removed on drop unless `finish` ran
+to completion**, so neither an abandoned render nor a `finish` that dies
+partway through the length fields leaves a soundtrack. Float rather than
+16-bit PCM: `Mixer::mix` produces `f32`, so the delivered file neither
+quantises nor clips, matching the precision argument EXR rests on. RIFF sizes
+are `u32`, so past ~4 GiB it refuses rather than wrapping; a rate or channel
+count whose byte rate or block align does not fit its header field is refused
+by `create` for the same reason (`EXPORT-4`).
 
 **No transfer function is applied on the way out**, matching ingest, the
 viewer, and the FFmpeg encoder — so the written values are display-referred,
@@ -2483,8 +2486,11 @@ plan::Warning::{AudioNotRendered { layers, reason: audio::NoAudio },
 audio::plan_audio(&Document, CompId, &ImageSequenceOutput, Range<u64>, bool)
     -> (Option<AudioPlan>, Vec<Warning>)        // called by plan_render
 audio::render_audio(&RenderPlan, &mut dyn Reporter)
-    -> Result<Option<PathBuf>, CliError>        // mixes and writes the WAV
-audio::discard_audio(&Path)                     // the failure-path cleanup
+    -> Result<Option<PendingAudio>, CliError>   // mixes and writes the WAV,
+                                                // under a temporary name
+audio::PendingAudio.destination() -> &Path
+    .publish() -> Result<PathBuf, CliError>     // rename into place, after the
+                                                // frames; Drop removes instead
 audio::DECODE_AVAILABLE: bool                   // cfg!(feature = "ffmpeg")
 audio::{OUTPUT_SAMPLE_RATE = 48_000, OUTPUT_CHANNELS = 2}
 execute::CancelFlag  // .request() / .is_requested(); safe in a signal handler
@@ -2513,10 +2519,12 @@ Four seams are load-bearing for later units:
   `ravel_nodes::GpuEvalHooks` and tests pass a CPU stub — the plan's
   guarantees are verified without a device (`tests/render_cli.rs`), and the
   binary's own wiring separately (`tests/cli_binary.rs`, needs a GPU).
-- **The hooks are built last**, after loading, planning and the output-conflict
-  scan. A machine with no adapter therefore still reports a bad `--param` as
-  `4` and an existing output as `6`, instead of collapsing every class into
-  the `1` a failed `GpuContext::new_blocking` would produce.
+- **The hooks are built after every refusal and before anything is written** —
+  after loading, planning and the output-conflict scan, and before the
+  soundtrack. A machine with no adapter therefore still reports a bad
+  `--param` as `4` and an existing output as `6`, instead of collapsing every
+  class into the `1` a failed `GpuContext::new_blocking` would produce, and
+  fails without having written a note of sound.
 - **Progress arithmetic is `ravel_core::runtime::JobProgress`**, not a CLI
   type, so `EXPORT-5`'s render queue panel reads the same projection.
 
@@ -2541,10 +2549,15 @@ to ask, and no flag exposes it), written by `ravel_media::encode::WavWriter`.
 
 The soundtrack is produced **before** the frames — a decode warning is worth
 having before an hour of rendering, and undoing one WAV on failure or
-cancellation is simpler than undoing frames the worker wrote — and
-`render_with_hooks` removes it if the render then fails, so an interrupted
-render still leaves nothing. `RenderPlan::conflicts()` includes it, so an
-existing soundtrack is refused like an existing frame.
+cancellation is simpler than undoing frames the worker wrote — but it lands on
+a temporary name in the frames' own directory and is renamed into place only
+once the pictures exist. Nothing is created, truncated or replaced at
+`frame_0000-0009.wav` until there is a render to go with it, so a failure
+before the first frame leaves no orphan soundtrack, an interrupted
+`--overwrite` still has the previous one, and a `finish()` that dies partway
+cannot leave a WAV that claims to be complete. `RenderPlan::conflicts()`
+includes the destination, so an existing soundtrack is refused like an
+existing frame.
 
 Two things are said rather than silently done. `--no-audio`, or a build
 without FFmpeg, yields `Warning::AudioNotRendered` (id `audio-not-rendered`,

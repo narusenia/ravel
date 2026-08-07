@@ -332,6 +332,15 @@ pub const PANEL_BINDINGS: &[PanelBinding] = &[
         panel: PanelKind::Timeline,
         context: panels::timeline::KEY_CONTEXT,
     },
+    // The same chord the node editor uses, because it is the same command on
+    // the same kind of selection — duplicating layers is what Cmd+D means with
+    // the Timeline focused.
+    PanelBinding {
+        command: CommandId::EditDuplicate,
+        chord: "Cmd+D",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
     // Tool shortcuts (Viewer key context, REQ-UI-011 unit 2).
     PanelBinding {
         command: CommandId::ToolSelect,

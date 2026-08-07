@@ -34,6 +34,26 @@ env:
   # passes an incremental invocation straight through to rustc and stores
   # nothing for it, so leaving them on would make every compile uncacheable.
   CARGO_INCREMENTAL: "0"
+  # Full debug info is the largest thing CI builds and the one thing it never
+  # reads: no debugger attaches here, and `line-tables-only` still gives test
+  # panics their file and line. Measured on one machine, `cargo test
+  # --workspace --all-targets --no-run`, alternating runs:
+  #
+  #   | debug            | wall            | target/ | sccache stores |
+  #   | full (default)   | 207.8 / 203.2 s | 7.4 GB  |         795 MB |
+  #   | line-tables-only |         182.5 s | 6.0 GB  |         667 MB |
+  #
+  # The sizes are byte-identical across repeats; the ~11% wall-clock delta sits
+  # well outside the ~2% spread between the two full-debug runs. The 16 %
+  # smaller objects are the point: a warm job is dominated by *reading* them
+  # back (see the cold/warm table below), so shrinking the payload shortens the
+  # part of CI that sccache cannot remove.
+  #
+  # Set here rather than in `[profile.dev]` so a local `cargo build` keeps the
+  # debug info a developer of a desktop application actually wants.
+  # **Changing this re-keys every entry in the bucket**: the flags are part of
+  # the hash, so the first run after an edit is a cold one.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # Compiler output is cached in Cloudflare R2 through sccache; see the cache
   # note in the check job for why it is no longer an `actions/cache` archive.
   #
@@ -53,6 +73,28 @@ env:
   # secret into the environment. Comparisons first make the whole expression
   # boolean, which stringifies to exactly 'true' or 'false'.
   SCCACHE_ENABLED: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+
+# Measured effect of the R2 backend, `check` job, wall clock (CICACHE-2):
+#
+#   |          | cold (empty bucket) | warm  | saved |
+#   | macOS    |             22m 26s | 16m55s | -25% |
+#   | Windows  |             29m 37s | 21m19s | -28% |
+#
+# Warm hit rates: macOS 99.61 % (6 misses of 1843 requests), Windows 91.90 %
+# (of 1490). Windows sits lower on the one sample there is; both platforms are
+# far from the 0.00 / 0.07 % of the cold run, so the backend is working and the
+# gap is not worth chasing until a second warm sample says it is systematic.
+#
+# Where a warm job's time actually goes, per the same run:
+#
+#   | step               | macOS | Windows |
+#   | Clippy             |  426s |    459s |
+#   | Test               |  548s |    740s |
+#   | cache restore+save |   13s |     38s |
+#
+# That last row is the headline: archiving `target/` used to cost **~12 minutes
+# on Windows**, and the cache steps are now rounding error. What is left is
+# compilation and test execution, so the next win is not a bigger cache.
 
 jobs:
   check:
@@ -267,7 +309,8 @@ jobs:
       # exact-key hit that actions/cache would skip saving, which is what
       # previously froze this cache for a month. Archiving `~/.cargo` alone is
       # cheap; the multi-gigabyte `target/` that made this step cost nearly
-      # twelve minutes on Windows is no longer in the path list.
+      # twelve minutes on Windows is no longer in the path list — **measured at
+      # 37 s on Windows and 12 s on macOS** once it was removed (CICACHE-2).
       # The scope guard can only fire on a pull request, so this never saves a
       # cache whose restore was skipped — stated here rather than left to the
       # reader to derive, so extending the guard to pushes cannot break it.

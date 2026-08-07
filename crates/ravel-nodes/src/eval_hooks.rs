@@ -1,13 +1,21 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! GPU-backed [`EvalWorkerHooks`] implementation for the background
-//! evaluation service.
+//! GPU-backed [`EvalWorkerHooks`] implementation for the evaluation workers.
 //!
 //! Owns the `GpuContext` and `ShaderManager` on the worker thread so every
 //! wgpu queue submission of the evaluation path happens off the UI thread
 //! and on a single thread (no queue contention with GPUI's renderer, which
 //! uses its own device).
+//!
+//! It lives here rather than in the GPUI host because it names nothing but
+//! `ravel-core`, `ravel-gpu` and this crate's own registration entry points,
+//! and because **both** workers need it: the interactive
+//! [`EvalService`](ravel_core::runtime::EvalService) the application spawns
+//! and the [`RenderQueue`](ravel_core::runtime::RenderQueue) the headless
+//! `ravel-cli` spawns. A hooks implementation that only a GUI binary could
+//! reach would make "the CLI renders through the same worker" impossible to
+//! hold (`docs/implementation/render-export-plan.md`).
 
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::Document;
@@ -31,7 +39,7 @@ impl GpuEvalHooks {
     /// and any host without a cache budget.
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
-        let pool = ravel_nodes::shared_texture_pool(&gpu);
+        let pool = crate::shared_texture_pool(&gpu);
         Self { gpu, shaders, pool }
     }
 
@@ -42,7 +50,7 @@ impl GpuEvalHooks {
     /// from the same place — see `ProjectState::new`.
     pub fn with_budget(gpu: GpuContext, budget: SharedCacheBudget) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
-        let pool = ravel_nodes::shared_texture_pool_with_budget(&gpu, budget);
+        let pool = crate::shared_texture_pool_with_budget(&gpu, budget);
         Self { gpu, shaders, pool }
     }
 }
@@ -102,7 +110,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                         continue;
                     }
                     if let Some(node) = find_node(graph, document, *id)
-                        && let Some(proc) = ravel_nodes::processor_for_node(
+                        && let Some(proc) = crate::processor_for_node(
                             &node,
                             &self.gpu,
                             &mut self.shaders,
@@ -117,7 +125,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 // The evaluator arrives already reset: `EvalService` clears
                 // it for a structural hint, which is what keeps the cache
                 // budget (state the service owns) across the resync.
-                ravel_nodes::register_all_processors(
+                crate::register_all_processors(
                     evaluator,
                     graph,
                     &self.gpu,
@@ -130,7 +138,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 if let Some(document) = document {
                     for comp in document.compositions.values() {
                         for layer in &comp.layers {
-                            ravel_nodes::register_all_processors(
+                            crate::register_all_processors(
                                 evaluator,
                                 &layer.network,
                                 &self.gpu,
@@ -168,7 +176,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 "stroke_width",
                 ravel_core::graph::ParameterValue::Float(0.0),
             );
-        let proc = ravel_nodes::rasterize::RasterizeProcessor::from_node(&rast_node);
+        let proc = crate::rasterize::RasterizeProcessor::from_node(&rast_node);
         let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![Some(value.clone())];
         let mut scope = ravel_core::eval::Evaluator::new();
         match proc.process(
@@ -218,7 +226,7 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut hooks = GpuEvalHooks::new(gpu.clone());
 
-        let pool = ravel_nodes::shared_texture_pool(&gpu);
+        let pool = crate::shared_texture_pool(&gpu);
         let cpu = FrameBuffer::from_f32(4, 4, vec![0.5f32; 4 * 4 * 4]);
         let frame = GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu).expect("upload");
 

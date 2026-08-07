@@ -133,7 +133,12 @@ impl ExportSettings {
         if end < start {
             return Err(ExportError::EmptyRange);
         }
-        let range = start..end + 1;
+        // The half-open end is one past the last frame, so the very last
+        // number a `u64` can hold has no representable range. Checked rather
+        // than added: a debug build panics on the overflow and a release build
+        // wraps it into an empty range, which would submit a job that renders
+        // nothing and reports success.
+        let range = start..end.checked_add(1).ok_or(ExportError::RangeOverflow)?;
 
         let codec = self.codec().ok_or(ExportError::NoWriter)?;
 
@@ -227,6 +232,9 @@ pub enum ExportError {
     InvalidEnd,
     /// The last frame is before the first.
     EmptyRange,
+    /// The last frame is the largest number there is, so the half-open range
+    /// the worker takes cannot name its end.
+    RangeOverflow,
     /// The chosen format has no sequence writer.
     NoWriter,
     /// No output directory was given.
@@ -245,6 +253,7 @@ impl ExportError {
             Self::InvalidStart => "export.error.invalid_start",
             Self::InvalidEnd => "export.error.invalid_end",
             Self::EmptyRange => "export.error.empty_range",
+            Self::RangeOverflow => "export.error.range_overflow",
             Self::NoWriter => "export.error.no_writer",
             Self::MissingDirectory => "export.error.missing_directory",
             Self::InvalidPadding => "export.error.invalid_padding",
@@ -327,6 +336,24 @@ mod tests {
         let request = form.resolve().expect("a single frame is a range");
         assert_eq!(request.range, 100..101);
         assert_eq!(request.frame_count(), 1);
+    }
+
+    /// The other end of the range: a last frame at the top of the number
+    /// space has no half-open end, and is refused rather than wrapped into an
+    /// empty range (which a release build would otherwise submit as a
+    /// successful render of nothing).
+    #[test]
+    fn a_last_frame_at_the_top_of_the_number_space_is_refused() {
+        let mut form = settings();
+        form.start = "0".into();
+        form.end = u64::MAX.to_string();
+        assert_eq!(form.resolve(), Err(ExportError::RangeOverflow));
+
+        // One below it still resolves, so the refusal is the boundary rather
+        // than a range-length limit.
+        form.end = (u64::MAX - 1).to_string();
+        let request = form.resolve().expect("the largest representable range");
+        assert_eq!(request.range, 0..u64::MAX);
     }
 
     #[test]
@@ -445,6 +472,7 @@ mod tests {
             ExportError::InvalidStart,
             ExportError::InvalidEnd,
             ExportError::EmptyRange,
+            ExportError::RangeOverflow,
             ExportError::NoWriter,
             ExportError::MissingDirectory,
             ExportError::InvalidPadding,

@@ -749,6 +749,7 @@ mod locale_tests {
                 ExportError::InvalidStart,
                 ExportError::InvalidEnd,
                 ExportError::EmptyRange,
+                ExportError::RangeOverflow,
                 ExportError::NoWriter,
                 ExportError::MissingDirectory,
                 ExportError::InvalidPadding,

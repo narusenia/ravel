@@ -105,8 +105,17 @@ fn expand_tilde_os(raw: &OsStr) -> PathBuf {
 }
 
 /// `expand_tilde_os` in the shape clap's `value_parser` wants.
+///
+/// The empty check restores what clap's native `PathBuf` parser did before
+/// this replaced it: `-o ""` is a typo, never a location, and accepting it
+/// would defer the complaint to a failed directory creation.
 fn tilde_path() -> impl TypedValueParser<Value = PathBuf> {
-    OsStringValueParser::new().map(|raw: OsString| expand_tilde_os(&raw))
+    OsStringValueParser::new().try_map(|raw: OsString| {
+        if raw.is_empty() {
+            return Err("path must not be empty");
+        }
+        Ok(expand_tilde_os(&raw))
+    })
 }
 
 #[derive(Debug, Args)]
@@ -380,6 +389,18 @@ mod tests {
             assert_eq!(expanded, home.join("renders"), "{text:?}");
         }
         assert_eq!(expand_tilde("~//"), home);
+    }
+
+    /// The replacement parser must keep clap's native refusal of an empty
+    /// path, or `-o ""` reaches the render and fails as a directory error.
+    #[test]
+    fn an_empty_path_is_still_refused() {
+        assert!(Cli::try_parse_from(["ravel-cli", "interactive", ""]).is_err());
+        assert!(
+            Cli::try_parse_from(["ravel-cli", "render", "p.ravprj", "--output", ""]).is_err(),
+            "an empty --output must not parse"
+        );
+        assert!(Cli::try_parse_from(["ravel-cli", "list", "comps", ""]).is_err());
     }
 
     /// Adding tilde support must not narrow what the CLI accepts. A `&str`

@@ -30,10 +30,29 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   # Incremental artifacts only pay off across edits on one machine, which never
-  # happens on a fresh runner — and they are roughly a quarter of `target/`
-  # (26 GB of a 101 GB local tree). Disabling them is what keeps the two check
-  # caches inside the 10 GB per-repository limit; see the cache note below.
+  # happens on a fresh runner. sccache points the same way independently: it
+  # passes an incremental invocation straight through to rustc and stores
+  # nothing for it, so leaving them on would make every compile uncacheable.
   CARGO_INCREMENTAL: "0"
+  # Compiler output is cached in Cloudflare R2 through sccache; see the cache
+  # note in the check job for why it is no longer an `actions/cache` archive.
+  #
+  # A fork's pull request receives no secrets, so this workflow has to build
+  # without sccache rather than fail. `secrets` is not a context any `if:` can
+  # read, so the decision is made once here — workflow-level `env` is one of the
+  # few places `secrets` *is* available — and every gate downstream reads it
+  # back through the `env` context, which step `if:` does allow.
+  #
+  # All three are required. A missing account id alone would still produce a
+  # syntactically valid endpoint (`https://.r2.cloudflarestorage.com`) that
+  # sccache cannot reach, and an unreachable backend fails the build rather than
+  # degrading to a miss — the exact failure the fork case exists to avoid.
+  #
+  # Comparing each secret to '' first is load-bearing: GitHub's `&&` returns an
+  # operand, not a boolean, so `secrets.A && secrets.B` would interpolate a
+  # secret into the environment. Comparisons first make the whole expression
+  # boolean, which stringifies to exactly 'true' or 'false'.
+  SCCACHE_ENABLED: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
 
 jobs:
   check:
@@ -148,6 +167,55 @@ jobs:
       - uses: jdx/mise-action@v2
         if: steps.scope.outputs.run_code == 'true'
 
+      # The sccache binary is pinned rather than tracking the action's "latest
+      # release" default: a cache is only useful if the thing computing its keys
+      # does not change under it, and an sccache that hashes differently turns
+      # every entry in the bucket into a miss on a day nobody touched this file.
+      - name: Install sccache
+        if: steps.scope.outputs.run_code == 'true' && env.SCCACHE_ENABLED == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.17.0"
+
+      # `RUSTC_WRAPPER` is set here rather than in the workflow `env` so that a
+      # run without secrets never names a wrapper that was not installed.
+      # Secrets are read through this step's `env` instead of being interpolated
+      # into the script text.
+      #
+      # `SCCACHE_IDLE_TIMEOUT=0` keeps the server alive for the whole job. Stats
+      # live in the server process and it otherwise exits after ten idle
+      # minutes; test *execution* opens no sccache connections, so a long test
+      # phase would leave the stats step to start a fresh server and print zeros
+      # — a false "the cache is not working" rather than a missing number.
+      - name: Enable sccache
+        if: steps.scope.outputs.run_code == 'true' && env.SCCACHE_ENABLED == 'true'
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -eu
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_BUCKET=ravel-ci-cache"
+            echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      # Only `~/.cargo` is archived. `target/` used to be in this list and is
+      # what broke the cache: macOS and Windows together came to roughly 11 GB
+      # against a 10 GB per-repository limit, so each merge evicted the other
+      # platform's generation and pull requests restored nothing. Compiler
+      # output now goes to R2 through sccache, which has no such ceiling and is
+      # keyed per compilation unit instead of per tree. What stays here is the
+      # crate download side — the registry index, the `.crate` archives and the
+      # git checkouts — which sccache does not cache and which is small enough
+      # for both platforms to coexist.
+      #
       # Restore on every run, but only write the cache from a main push. See the
       # note above the save step for why the write side is gated.
       - uses: actions/cache/restore@v4
@@ -158,8 +226,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-            !target/**/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
@@ -186,13 +252,22 @@ jobs:
         if: steps.scope.outputs.run_code == 'true'
         run: mise run test
 
-      # Saving a multi-gigabyte target/ costs real time — nearly twelve minutes
-      # on the Windows runner at 7.31 GB — and a pull request that saved its own
-      # cache would pay that on every push while producing a cache nobody reads
-      # again. So only main writes: pull requests restore main's cache for free,
-      # and the `github.run_id` in the key guarantees each merge publishes a
-      # fresh generation instead of an exact-key hit that actions/cache would
-      # skip saving, which is what previously froze this cache for a month.
+      # Runs after a failure too: when a build breaks, whether the compiler ran
+      # against a warm cache is part of reading the log. `SCCACHE_PATH` is set by
+      # the install step above and is what makes this one line work on Windows
+      # as well.
+      - name: sccache statistics
+        if: ${{ !cancelled() && steps.scope.outputs.run_code == 'true' && env.SCCACHE_ENABLED == 'true' }}
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
+      # Only main writes: a pull request that saved its own generation would
+      # produce a cache nobody reads again, and the `github.run_id` in the key
+      # guarantees each merge publishes a fresh generation instead of an
+      # exact-key hit that actions/cache would skip saving, which is what
+      # previously froze this cache for a month. Archiving `~/.cargo` alone is
+      # cheap; the multi-gigabyte `target/` that made this step cost nearly
+      # twelve minutes on Windows is no longer in the path list.
       # The scope guard can only fire on a pull request, so this never saves a
       # cache whose restore was skipped — stated here rather than left to the
       # reader to derive, so extending the guard to pushes cannot break it.
@@ -204,8 +279,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-            !target/**/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
 
   # Benchmarks only gate main, not pull requests. `mise run clippy` already
@@ -221,19 +294,50 @@ jobs:
 
       - uses: jdx/mise-action@v2
 
+      # Gated exactly like the check job. A fork pushing to its own `main` runs
+      # this job with no secrets, so it has to build without sccache too.
+      - name: Install sccache
+        if: env.SCCACHE_ENABLED == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.17.0"
+
+      - name: Enable sccache
+        if: env.SCCACHE_ENABLED == 'true'
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -eu
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_BUCKET=ravel-ci-cache"
+            echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
       # This job used to keep its own cache generation, which made three
       # multi-gigabyte Rust caches compete for a 10 GB per-repository limit —
       # and the loser was always macOS, whose check cache was evicted before any
       # pull request could read it. Since bench only runs on merges while the
-      # check caches are read by every pull request, this job now reads the
-      # check generation and writes nothing. It pays a cold bench-profile build
-      # per merge; that cost sits off the pull-request path.
+      # check caches are read by every pull request, this job reads the check
+      # generation and writes nothing.
       #
-      # The path list must match the check job's exactly. `actions/cache` folds
-      # the path list into the cache version, so a restore that narrowed this to
-      # `~/.cargo` alone would miss every time even on a key hit. What this job
-      # actually reuses is `~/.cargo`; the restored debug `target/` belongs to
-      # another profile and is simply ignored.
+      # The path list must still match the check job's exactly. `actions/cache`
+      # folds the path list into the cache version, so any divergence between
+      # the two would miss every time even on a key hit. Both lists are now
+      # `~/.cargo` alone — `target/` moved to sccache — and they have to stay in
+      # step.
+      #
+      # This job used to pay a fully cold bench-profile build per merge. sccache
+      # keys include the compiler flags, so it shares nothing with the debug
+      # builds in the check job, but it does reuse its own output from the
+      # previous merge for every crate that did not change.
       - uses: actions/cache/restore@v4
         with:
           path: |
@@ -241,8 +345,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
-            !target/**/incremental
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
@@ -250,3 +352,8 @@ jobs:
 
       - name: Benchmark (dry run)
         run: mise exec -- cargo bench --workspace -- --test
+
+      - name: sccache statistics
+        if: ${{ !cancelled() && env.SCCACHE_ENABLED == 'true' }}
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats

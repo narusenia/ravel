@@ -117,7 +117,7 @@ impl Track {
 }
 
 /// Configuration for the mixer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MixerConfig {
     /// Output sample rate in Hz.
     pub output_sample_rate: u32,

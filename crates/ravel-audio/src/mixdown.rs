@@ -323,7 +323,14 @@ fn sample_gain_curve(
 
 /// Convert `frames` at `fps` into sample frames at `rate` (truncating, like
 /// the playback clock's own frame arithmetic).
-fn comp_frames_to_rate(frames: u64, fps: FrameRate, rate: u32) -> u64 {
+///
+/// Public because an offline render has to ask the same question about the
+/// **boundaries** of its frame range. Converting the two ends separately and
+/// subtracting is not the same as converting the length: at 30 fps and
+/// 48 kHz they agree, but at 29.97 they do not, and it is the boundary form
+/// that makes two half-renders join seamlessly — frame *n* lands on the same
+/// sample whichever range contains it.
+pub fn comp_frames_to_rate(frames: u64, fps: FrameRate, rate: u32) -> u64 {
     let num = fps.num.max(1) as u128;
     let value = frames as u128 * rate as u128 * fps.den.max(1) as u128 / num;
     u64::try_from(value).unwrap_or(u64::MAX)

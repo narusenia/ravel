@@ -43,6 +43,7 @@ pub mod engine;
 pub mod error;
 pub mod mixdown;
 pub mod mixer;
+pub mod offline;
 pub mod resampler;
 pub mod sync;
 pub mod waveform;

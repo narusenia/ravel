@@ -5947,6 +5947,7 @@ dependencies = [
  "ravel-core",
  "ravel-media",
  "rubato",
+ "tempfile",
  "thiserror 2.0.19",
  "tracing",
 ]

@@ -380,3 +380,72 @@ fn a_closed_stdout_is_not_a_failure() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The soundtrack, through the shipped binary rather than the library.
+///
+/// `render_cli.rs` pins what the mix *is*; what only the binary can show is
+/// that the real entry point runs the audio path at all and reports the file
+/// in the record a script reads. **Needs a GPU adapter and a decoder**, so it
+/// is behind the `ffmpeg` feature like the mix's own tests.
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
+    use ravel_core::composition::{AudioSource, MediaAssetEntry};
+    use ravel_media::encode::WavWriter;
+
+    let dir = TempDir::new().expect("tempdir");
+
+    // Half a second of 44.1 kHz stereo silence: the content does not matter,
+    // only that a real decoder can open it.
+    let asset = dir.path().join("voice.wav");
+    let mut writer = WavWriter::create(&asset, 44_100, 2).expect("fixture WAV");
+    writer
+        .write_samples(&vec![0.0_f32; 44_100])
+        .expect("fixture samples");
+    writer.finish().expect("fixture finishes");
+
+    let mut comp = Composition::new(CompId::new(1), "Main", (64, 64), FrameRate::new(24, 1), 24)
+        .add_layer(Layer::new(LayerId::new(1), "shape", layer_network()).with_time(0, 0, 24));
+    let mut voice = Layer::new(LayerId::new(2), "voice", Graph::new()).with_time(0, 0, 24);
+    voice.audio = Some(AudioSource::new("voice", 0));
+    comp = comp.add_layer(voice);
+
+    let mut document = Document::default().with_composition(comp);
+    document
+        .media_assets
+        .insert("voice".into(), MediaAssetEntry::from_absolute(&asset));
+    let project = dir.path().join("sound.ravprj");
+    ProjectFile::from_document("Sound", "2026-01-01T00:00:00Z", document)
+        .save(&project)
+        .expect("fixture saves");
+
+    let out = dir.path().join("frames");
+    let output = cli()
+        .arg("render")
+        .arg(&project)
+        .args(["--range", "0-11", "--progress", "json", "-o"])
+        .arg(&out)
+        .output()
+        .expect("runs");
+    assert!(
+        output.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let wav = out.join("frame_0000-0011.wav");
+    assert!(wav.is_file(), "the soundtrack is beside the frames");
+
+    let last: serde_json::Value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next_back()
+        .map(|line| serde_json::from_str(line).expect("the last line is JSON"))
+        .expect("at least one line");
+    assert_eq!(last["event"], "completed");
+    assert_eq!(
+        last["audio"],
+        serde_json::Value::from(wav.display().to_string()),
+        "the machine-readable record names the file a script has to collect"
+    );
+}

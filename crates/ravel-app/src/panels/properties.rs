@@ -239,11 +239,14 @@ fn port_type_label(port_type: Option<CustomPortType>) -> String {
     ravel_i18n::translate(&format!("properties.ports.type.{name}"))
 }
 
+/// Width of the reorder-handle column: two [`port_button`]s side by side.
+const PORT_HANDLE_GUTTER: f32 = 28.0;
+
 /// A built-in port's row: the name and the type the shell gave it, both
 /// muted and neither editable. The row exists so the list matches the node on
 /// the canvas — hiding `base_geometry` would make Properties disagree with
 /// what the user can see and wire.
-fn fixed_port_row(row: &ravel_ui::properties::PortRow, muted: Hsla) -> Div {
+fn fixed_port_row(row: &ravel_ui::properties::PortRow, gutter: bool, muted: Hsla) -> Div {
     div().child(
         div()
             .id(SharedString::from(format!("port-fixed-{}", row.name)))
@@ -260,7 +263,7 @@ fn fixed_port_row(row: &ravel_ui::properties::PortRow, muted: Hsla) -> Div {
                 div()
                     .flex()
                     .items_center()
-                    .child(div().w(px(28.0)))
+                    .children(gutter.then(|| div().w(px(PORT_HANDLE_GUTTER))))
                     .child(field_label_cell(row.name.clone(), muted)),
             )
             .child(
@@ -299,9 +302,15 @@ fn port_button(
 /// (or missing) cannot move that way. `network::move_custom_port` is the
 /// authority and refuses the same move; this only keeps the panel from
 /// offering a button that would do nothing.
+///
+/// `gutter` is false when the list has nothing to reorder at all, in which
+/// case the handle column is not reserved: an indent that never fills reads as
+/// stray padding, and it pushed the whole Ports section out of line with every
+/// other row in the panel.
 fn custom_port_row(
     row: &ravel_ui::properties::PortRow,
     neighbours: (bool, bool),
+    gutter: bool,
     ports: &PortWidgets,
     panel: &WeakEntity<PropertiesGpuiPanel>,
     muted: Hsla,
@@ -386,14 +395,19 @@ fn custom_port_row(
         .gap_1()
         .px_1()
         .py(px(1.0))
-        .child(handles)
+        .children(gutter.then_some(handles))
         .child(fields)
         .child(remove)
 }
 
 /// The trailing row: a name to type, the type the port gets, and the button
 /// that creates it.
-fn add_port_row(ports: &PortWidgets, panel: &WeakEntity<PropertiesGpuiPanel>, muted: Hsla) -> Div {
+fn add_port_row(
+    ports: &PortWidgets,
+    gutter: bool,
+    panel: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Div {
     let Some((name, port_type)) = ports.add.as_ref() else {
         return div();
     };
@@ -404,7 +418,7 @@ fn add_port_row(ports: &PortWidgets, panel: &WeakEntity<PropertiesGpuiPanel>, mu
         .gap_1()
         .px_1()
         .py(px(1.0))
-        .child(div().w(px(28.0)))
+        .children(gutter.then(|| div().w(px(PORT_HANDLE_GUTTER))))
         .child(
             div()
                 .flex_grow()
@@ -806,9 +820,14 @@ fn build_field_row(
         // editable.
         PropertyField::PortList { rows, .. } => {
             let mut list = div().flex().flex_col();
+            // A single custom port has no neighbour to swap with, so no handle
+            // in the list can ever be enabled and the column it would sit in is
+            // dead space. Decided once for the whole list rather than per row,
+            // so the names stay in one column.
+            let gutter = rows.iter().filter(|row| !row.fixed).count() > 1;
             for (index, row) in rows.iter().enumerate() {
                 if row.fixed {
-                    list = list.child(fixed_port_row(row, muted));
+                    list = list.child(fixed_port_row(row, gutter, muted));
                     continue;
                 }
                 let movable = |neighbour: Option<&ravel_ui::properties::PortRow>| {
@@ -818,9 +837,11 @@ fn build_field_row(
                     movable(index.checked_sub(1).and_then(|i| rows.get(i))),
                     movable(rows.get(index + 1)),
                 );
-                list = list.child(custom_port_row(row, neighbours, ports, editor, muted));
+                list = list.child(custom_port_row(
+                    row, neighbours, gutter, ports, editor, muted,
+                ));
             }
-            list = list.child(add_port_row(ports, editor, muted));
+            list = list.child(add_port_row(ports, gutter, editor, muted));
             if let Some(message) = &ports.error {
                 list = list.child(
                     div()

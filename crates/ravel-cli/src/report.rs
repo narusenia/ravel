@@ -49,16 +49,28 @@ pub trait Reporter {
 /// when someone is watching, JSON lines when the output is being read by
 /// something.
 pub fn reporter(mode: ProgressMode) -> Box<dyn Reporter> {
-    let mode = match mode {
-        ProgressMode::Auto if std::io::stderr().is_terminal() => ProgressMode::Bar,
-        ProgressMode::Auto => ProgressMode::Json,
-        other => other,
-    };
-    match mode {
+    match resolve(mode, std::io::stdout().is_terminal()) {
         ProgressMode::Bar => Box::new(HumanReporter::default()),
         ProgressMode::Json => Box::new(JsonReporter),
         ProgressMode::Quiet => Box::new(QuietReporter),
         ProgressMode::Auto => unreachable!("resolved above"),
+    }
+}
+
+/// Turn `Auto` into a concrete mode.
+///
+/// The question is about **stdout**, not stderr, because stdout is the stream
+/// whose contents differ between the two answers: `HumanReporter::success`
+/// prints a localized sentence there and `JsonReporter` prints a record.
+/// `ravel-cli render … > result.txt` leaves stderr attached to the terminal,
+/// so asking stderr would put prose in the file a script is about to parse —
+/// which is the CLI's whole purpose. Where the *bar* goes is a separate
+/// question, already answered: stderr, always.
+fn resolve(mode: ProgressMode, stdout_is_terminal: bool) -> ProgressMode {
+    match mode {
+        ProgressMode::Auto if stdout_is_terminal => ProgressMode::Bar,
+        ProgressMode::Auto => ProgressMode::Json,
+        other => other,
     }
 }
 
@@ -226,5 +238,22 @@ mod tests {
             warning_text(&Warning::BindingIssue { detail: "x".into() }).0,
             "binding-issue"
         );
+    }
+
+    /// A redirected stdout is a machine reading it, whatever stderr is doing.
+    #[test]
+    fn auto_follows_stdout_and_nothing_else() {
+        assert_eq!(resolve(ProgressMode::Auto, false), ProgressMode::Json);
+        assert_eq!(resolve(ProgressMode::Auto, true), ProgressMode::Bar);
+    }
+
+    /// An explicit mode is never second-guessed: `--progress bar` into a pipe
+    /// is a person watching through `less`, not a mistake to correct.
+    #[test]
+    fn an_explicit_mode_survives_the_terminal_question() {
+        for mode in [ProgressMode::Bar, ProgressMode::Json, ProgressMode::Quiet] {
+            assert_eq!(resolve(mode, true), mode);
+            assert_eq!(resolve(mode, false), mode);
+        }
     }
 }

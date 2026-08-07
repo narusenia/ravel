@@ -229,7 +229,7 @@ GUI ダイアログ（単位 5）は後から載せる。
 | EXPORT-0 | ✅ 永続化を GUI 非依存クレートへ抽出 | — |
 | EXPORT-1 | ✅ エンコーダ抽象と実行時列挙 | — |
 | EXPORT-2 | ✅ レンダーワーカーとキュー | EXPORT-0, EXPORT-1, BLUR-3 |
-| EXPORT-3 | **CLI**（`ravel-cli render`） | EXPORT-2, EXPO-3 |
+| EXPORT-3 | ✅ **CLI**（`ravel-cli render`） | EXPORT-2, EXPO-3 |
 | EXPORT-4 | 音声のミックスダウンと多重化 | EXPORT-2 |
 | EXPORT-5 | 書き出し UI（ダイアログ + レンダーキューパネル） | EXPORT-3, DOCK-8 |
 | EXPORT-6 | 文書更新 | EXPORT-5 |

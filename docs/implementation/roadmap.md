@@ -436,7 +436,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | `BLUR-3` | ✅ 品質段階（`EvalContext.quality`。`motion-blur-plan.md`） |
 | `EXPORT-2` | ✅ レンダーワーカーとキュー |
 | `EXPO-1〜4` | ✅ 公開パラメータ宣言（`exposed-parameters-plan.md`） |
-| `EXPORT-3` | **CLI（`ravel-cli render`。GPUI にリンクしない別バイナリ）** |
+| `EXPORT-3` | ✅ **CLI（`ravel-cli render`。GPUI にリンクしない別バイナリ）** |
 | `EXPORT-4` | 音声のミックスダウンと多重化 |
 | `EXPORT-5〜6` | 書き出し UI と文書 |
 | `EXPORT-7` | CLI の対話モード（`EXPORT-3` の列挙の上に載る層） |

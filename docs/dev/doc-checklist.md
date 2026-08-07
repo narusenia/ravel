@@ -19,6 +19,7 @@
 | 評価・合成・キャッシュの構造 | [`../specifications/architecture.md`](../specifications/architecture.md) |
 | `Document` / `Composition` / `Layer` / `Graph` の形 | [`../specifications/data-model.md`](../specifications/data-model.md)、[persistence.md](persistence.md) |
 | 永続化フォーマット（`format_version` / 追加フィールド / エントリ） | [persistence.md](persistence.md)、[`../ui-impl-status.md`](../ui-impl-status.md) の永続化節、[`../specifications/data-model.md`](../specifications/data-model.md) |
+| `ravel-cli` の引数 / サブコマンド / 終了コード / 出力ファイル名 | [render-cli.md](render-cli.md)（**外部契約なので規約で義務**）、[`../agent-api-reference.md`](../agent-api-reference.md) の `ravel-cli` 節 |
 | 登録経路（`processor_for_node` / `register_panels` / `for_each_command!`） | 該当する `docs/dev/` の手順（**規約で義務**） |
 | アセット形式（locale / keybinding / workspace / theme） | `../specifications/ui/` の該当ファイル、[add-locale.md](add-locale.md) |
 | ジオメトリ・属性の設計原則に関わる実装 | [`../specifications/procedural-geometry.md`](../specifications/procedural-geometry.md) |

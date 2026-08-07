@@ -1902,7 +1902,7 @@ Unknown type keys are skipped silently (plugin space).
   `ExportRequest { comp, range, output: ImageSequenceOutput, overwrite,
   audio }` with `render_output()`, `frame_count()` and `audio_path()`. The
   frame numbers are **inclusive on screen and half-open in the request**, as
-  `ravel-cli`'s `--range start:end` is — an inclusive last frame of
+  `ravel-cli`'s `--range START-END` is — an inclusive last frame of
   `u64::MAX` has no half-open end and is `ExportError::RangeOverflow` rather
   than an overflow. `duration` is the chosen composition's frame count rather
   than a typed field, and travels with the picker: zero is

@@ -1,6 +1,6 @@
 # Ravel — UI 仕様書
 
-> 最終更新: 2026-08-03
+> 最終更新: 2026-08-08
 
 この文書は**索引**。各ビューの仕様は `docs/specifications/ui/` に分かれている。
 
@@ -13,6 +13,7 @@
 | Viewer | [ui/viewer.md](ui/viewer.md) |
 | Properties Inspector | [ui/properties.md](ui/properties.md) |
 | Media Bin | [ui/media-bin.md](ui/media-bin.md) |
+| 書き出しダイアログ / Render Queue | [ui/render-queue.md](ui/render-queue.md) |
 | テーマ | [ui/theme.md](ui/theme.md) |
 | キーバインド | [ui/keybindings.md](ui/keybindings.md) |
 | 設定ダイアログ（環境設定 / プロジェクト設定） | [ui/settings.md](ui/settings.md) |
@@ -90,7 +91,7 @@ Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 
 `typography-plan.md`、Shader Editor と Lua Console は REQ-CODE-001。
 
 Render Queue はどのプリセットにも無いが実装済みで、View メニューか
-`File ▸ Export…` の後に開く。
+`File ▸ Export…` の後に開く。仕様は [ui/render-queue.md](ui/render-queue.md)。
 
 ## サブグラフ
 

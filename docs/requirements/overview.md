@@ -163,7 +163,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-RENDER-002 | Write Nodeノード単位中間出力 | Should | Draft |
 | REQ-RENDER-003 | OCIO + GPU LUTカラーマネジメント | Must | Draft |
 | REQ-RENDER-004 | モーションブラー | Should | Draft |
-| REQ-RENDER-005 | CLI ヘッドレスレンダリング | Must | Draft |
+| REQ-RENDER-005 | CLI ヘッドレスレンダリング | Must | Implemented |
 
 ### PLUGIN — プラグインシステム
 
@@ -185,7 +185,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-PROJ-003 | 自動マイグレーション + バックアップ + 確認 | Must | Draft |
 | REQ-PROJ-004 | 設定の層マージ + 設定 UI + プロジェクトオーバーライド | Should | Revised (v2) |
 | REQ-PROJ-005 | シングルユーザー + チームワークフロー考慮 | Should | Draft |
-| REQ-PROJ-006 | 公開パラメータ宣言 | Must | Draft |
+| REQ-PROJ-006 | 公開パラメータ宣言 | Must | Implemented |
 
 ### INFRA — インフラストラクチャ
 

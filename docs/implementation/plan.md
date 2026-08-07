@@ -79,12 +79,17 @@ layer-network evaluation (`video` remains a load-time alias). Import runs
 through File ▸ Import and OS file drops, assets persist as runtime-resolved
 relative paths, and the MediaBin panel browses them with cached thumbnails.
 
-Rendering to disk exists headlessly: `ravel-cli render` drives the render
-queue and writes PNG / EXR sequences without FFmpeg (`crates/ravel-cli`), with
-the composition's soundtrack in a WAV beside them (32-bit float, same absolute
-frame range, so split renders concatenate). Media properties and relinking,
-offline-asset display, video-container output, and the in-application export
-workflow are not implemented (`render-export-plan.md`, units 5–6).
+Rendering to disk works from both front ends. `ravel-cli render` drives the
+render queue headlessly and writes PNG / EXR sequences without FFmpeg
+(`crates/ravel-cli`), with the composition's soundtrack in a WAV beside them
+(32-bit float, same absolute frame range, so split renders concatenate);
+`ravel-cli list comps | params | codecs` and `ravel-cli interactive` sit on the
+same resolution path (`docs/dev/render-cli.md`). `File ▸ Export…` submits the
+same job description through the same worker and encoder, and the render queue
+panel follows it. Media properties and relinking, offline-asset display, and
+**video-container output** are not implemented — a video target is enumerated
+with its route but has no writer, so both front ends refuse it before a frame
+(`render-export-plan.md`).
 
 ### Audio
 
@@ -100,9 +105,11 @@ Importing media with sound binds the layer shell's `AudioSource`, and the
 Properties panel picks which container stream plays
 (`docs/implementation/audio-plan.md`, units 1–4).
 
-`ravel-cli render` writes the same mix offline (`render-export-plan.md`,
-`EXPORT-4`). Waveform display, audio analysis nodes, and the tagged sound bank
-are not implemented.
+Both export front ends write the same mix offline through
+`ravel_audio::offline::mix_range` (`render-export-plan.md`, `EXPORT-4`): 48 kHz
+stereo, decoded through the optional `ffmpeg` feature, and a build without it
+says so rather than delivering silence. Waveform display, audio analysis nodes,
+and the tagged sound bank are not implemented.
 
 ### GPU and rendering
 
@@ -113,9 +120,12 @@ and geometry has GPU rasterization with a CPU reference path. The Viewer
 receives evaluated images through the background evaluation path.
 
 The render queue (`ravel_core::runtime::render`) evaluates whole ranges at
-`Quality::Final` on its own worker, and `ravel-cli render` is its first
-caller. Zero-copy Viewer presentation, the Write node, and export from the
-application itself are not implemented.
+`Quality::Final` on its own worker, with `ravel-cli render` and the
+application's export dialog as its two callers; the application's queue
+outlives the render queue panel, so closing the panel does not stop a render.
+Zero-copy Viewer presentation and the Write node are not implemented. Neither
+is pausing or reordering a queued job — cancelling it is, at a frame boundary
+and without leaving partial output.
 
 ### Built-in nodes
 
@@ -141,7 +151,7 @@ quaternion math, and `Scene` with its cameras and the `scene.add` / `scene.merge
 ### UI panels and interaction
 
 The GPUI application has concrete Node Editor, Timeline, Properties, Viewer,
-Outliner, and MediaBin panels. Implemented interaction includes graph editing,
+Outliner, MediaBin, and Render Queue panels. Implemented interaction includes graph editing,
 Composition/Layer timeline editing, composition management and multi-layer
 selection from the Outliner, keyframe editing and curve view, frame playback
 controls, Viewer zoom/pan and overlays, Viewer selection/move,

@@ -66,7 +66,7 @@ mise run docs:check            # リンク切れ / 索引漏れ / issue 件数�
 | [procedural-geometry.md](specifications/procedural-geometry.md) | ジオメトリと属性の設計原則 |
 | [expression-language.md](specifications/expression-language.md) | 式言語の字句・文法・意味論・組み込み関数・変数の語彙 |
 | [ui-spec.md](specifications/ui-spec.md) | **UI 仕様の索引**（設計原則・パネル一覧・制約） |
-| [ui/](specifications/ui/) | ビューごとの仕様（viewer / timeline / node-editor / outliner / properties / media-bin / theme / keybindings / settings / workspaces） |
+| [ui/](specifications/ui/) | ビューごとの仕様（viewer / timeline / node-editor / outliner / properties / media-bin / render-queue / theme / keybindings / settings / workspaces） |
 
 ## 実装
 

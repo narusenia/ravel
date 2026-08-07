@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 8 | 18 | [high/](high/) — 1件1ファイル |
+| high | 9 | 18 | [high/](high/) — 1件1ファイル |
 | medium | 35 | 22 | [medium/](medium/) — 領域別5ファイル |
 | low | 30 | 7 | [low/backlog.md](low/backlog.md) — 1ファイル |
 

@@ -109,9 +109,27 @@ pub fn load_project(path: &Path) -> Result<ProjectFile, CliError> {
 }
 
 /// The project root relative asset paths resolve against.
-fn project_root(path: &Path) -> Option<&Path> {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+///
+/// The anchoring rule itself is `ravel_project::project_root_of` — shared
+/// with saving and with `AssetPath` resolution (REQ-PROJ-001), and not to be
+/// re-derived here. What this adds is the working directory, because
+/// `project_root_of` answers `None` for a path that names no directory at
+/// all rather than silently rooting a *stored* reference at wherever the
+/// process happens to be standing.
+///
+/// A command line is the case that reasoning does not cover:
+/// `ravel-cli render project.ravprj` names a path **relative to the working
+/// directory**, so that directory is not a guess, and without it every
+/// `./relative` asset in the project stops resolving exactly when the user
+/// is standing in the project's own folder. Making the path absolute first
+/// and handing the result to the same rule is the whole fix.
+fn project_root(path: &Path) -> Option<PathBuf> {
+    match std::env::current_dir() {
+        Ok(cwd) => ravel_project::project_root_of(&cwd.join(path)),
+        // No working directory to be relative to: an absolute path still
+        // anchors, a relative one has nothing to anchor against.
+        Err(_) => ravel_project::project_root_of(path),
+    }
 }
 
 /// Plan a render from arguments and the project they name.
@@ -120,7 +138,7 @@ pub fn plan_from_args(args: &RenderArgs) -> Result<RenderPlan, CliError> {
     plan::plan_render(
         args,
         &project.document,
-        project_root(&args.project),
+        project_root(&args.project).as_deref(),
         &available_encoders(),
     )
 }
@@ -266,5 +284,34 @@ fn install_interrupt_handler(cancel: &CancelFlag) {
     let cancel = cancel.clone();
     if let Err(error) = ctrlc::set_handler(move || cancel.request()) {
         tracing::warn!(%error, "interrupt handler unavailable; Ctrl-C will not clean up");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare file name is the case `Path::parent` answers `""` for, and the
+    /// case a user hits by standing in the project's own directory. It has to
+    /// anchor at the working directory, not at "no root at all", or every
+    /// `./relative` asset reference in that project stops resolving.
+    #[test]
+    fn a_project_named_without_a_directory_still_has_a_root() {
+        let cwd = std::env::current_dir().expect("a working directory");
+        assert_eq!(
+            project_root(Path::new("project.ravprj")),
+            Some(cwd.clone()),
+            "a bare file name anchors at the working directory"
+        );
+        assert_eq!(
+            project_root(Path::new("nested/project.ravprj")),
+            Some(cwd.join("nested")),
+            "a relative directory is absolutised, not left relative"
+        );
+        assert_eq!(
+            project_root(Path::new("/abs/project.ravprj")),
+            Some(PathBuf::from("/abs")),
+            "an absolute path keeps its own parent"
+        );
     }
 }

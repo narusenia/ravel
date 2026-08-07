@@ -97,7 +97,7 @@ about = "F1"
 | バインド | コンテキスト |
 |---|---|
 | `V` / `P` / `R` / `E` / `H` / `Z`（ツール切替） | Viewer |
-| `Cmd+D`（複製） | Node Editor |
+| `Cmd+D`（複製） | Node Editor、Timeline |
 | `F`（ビューをフィット） | Node Editor |
 | `Tab`（ノード検索パレット） | Node Editor |
 | `Delete` / `Backspace`（削除） | Node Editor、Timeline |

@@ -191,6 +191,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | Solo/Mute/Lock トグル | ✅ | Document 更新（solo/mute は Structural 再評価） |
 | レイヤー作成 | ✅ | Layer メニュー（Solid/Shape/Video/Null、テンプレートから生成） |
 | レイヤー削除 | ✅ | Delete/Backspace（locked は保護）、Document undo で復元 |
+| レイヤー複製 | ✅ | Cmd+D、または行の右クリック → Duplicate。複数選択なら選択全体を 1 undo で複製し、コピーは各元の直上に入る |
 | Document/undo 統合 | ✅ | 追加・削除・並べ替え・トリム・移動すべて Document 単位 undo |
 | レイヤーバードラッグ移動 | ✅ | バー本体ドラッグ = start_frame 移動、端 6px = in/out トリム。1 ジェスチャ = 1 undo |
 | レイヤー並べ替え | ✅ | ヘッダー縦ドラッグ |

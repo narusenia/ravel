@@ -63,6 +63,7 @@ several plans here wait on its later units rather than on each other.
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
 | `render-export-plan.md` | Render queue, headless CLI, and audio mixdown — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers), `done/exposed-parameters-plan.md` (EXPO-3, merged) | REQ-RENDER-001, REQ-RENDER-005 |
+| `ci-cache-plan.md` | Move the CI cache to sccache + Cloudflare R2 — **two platforms' `target/` archives cannot both fit the 10 GB limit, so every merge evicts the other** | — (needs an R2 bucket and repository secrets) | — |
 | `color-management-plan.md` | Linear working space, per-asset input colour space, viewer/export transforms, then the OCIO backend — **the pipeline is display-referred today while the requirements assume linear** | `render-export-plan.md` (EXPORT-1 for CM-4) | REQ-RENDER-003, REQ-CORE-009 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |

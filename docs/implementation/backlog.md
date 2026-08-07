@@ -922,7 +922,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | Lua / 式 | REQ-CODE-001 / REQ-PLUGIN-003。REQ-MOGRAPH-001 と REQ-CORE-010 の受入条件が 1 つずつこれ待ちで残る |
 | トランジション | REQ-MOGRAPH-005 の受入条件だがタイムライン側の仕事。計画なし |
 | REQ-DATA 全体 | CSV/JSON → Table → 属性バインディング。データ駆動インフォグラフィックスの柱ごと欠落。計画なし |
-| REQ-RENDER-002 Write ノード | 評価純粋性とディスクキャッシュ設計の問題。`render-export-plan.md` の非対象 |
+| REQ-RENDER-002 Write ノード | 評価純粋性とディスクキャッシュ設計の問題。`done/render-export-plan.md` の非対象 |
 | Fuse / パス自己交差解消 | 空間分割構造が要る |
 | ビート検出 | FFT 見送りの延長 |
 | レイヤー制約（look-at / パス追従） | ジオメトリ側は VEC-3 で解決するが、レイヤー殻には無い |

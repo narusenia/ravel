@@ -86,7 +86,7 @@ Voronoi セル自体も Delaunay 三角形分割を必要としない。セル�
   すると同じファイルがビルドによって違う絵になり、書き出しとプレビューで
   結果が食い違う
 
-feature の有無に応じた選択肢の列挙は、`render-export-plan.md` の `EXPORT-1`
+feature の有無に応じた選択肢の列挙は、`done/render-export-plan.md` の `EXPORT-1`
 （エンコーダの実行時列挙）と同じ問題。レジストリの `param_options` は静的
 なので、**機構を共有する**。
 

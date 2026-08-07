@@ -254,7 +254,7 @@ audio.analysis(layer: LayerId, mode: Rms|Peak|Band, band: Low|Mid|High) → Scal
   使い心地を見てから判断する。
 - ストリーミング再生（全長メモリ常駐で始める）。
 - BPM 検出 / ビートマーカー / キーフレームの BPM スナップ（REQ-MEDIA-003 の後半）。
-- 音声の書き出し。**`render-export-plan.md` の `EXPORT-4` が引き受けた**
+- 音声の書き出し。**`done/render-export-plan.md` の `EXPORT-4` が引き受けた**
   （2026-08-03 更新 / 2026-08-07 実装）。`Mixer::mix` は `&self` の純関数で
   デバイスと結合していないため、オフラインミックスダウンは再生経路の外側で
   成立する。実体は `ravel_audio::offline::mix_range` で、`mixdown` の写像は

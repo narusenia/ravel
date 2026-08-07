@@ -62,9 +62,8 @@ several plans here wait on its later units rather than on each other.
 | `vector-field-plan.md` | Vector fields — look-at, curl noise, flow — **units 5 and 7a merged** | `per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
-| `render-export-plan.md` | Render queue, headless CLI, and audio mixdown — **you cannot currently export anything** | `motion-blur-plan.md` (quality tiers), `done/exposed-parameters-plan.md` (EXPO-3, merged) | REQ-RENDER-001, REQ-RENDER-005 |
 | `ci-cache-plan.md` | Move the CI cache to sccache + Cloudflare R2 — **two platforms' `target/` archives cannot both fit the 10 GB limit, so every merge evicts the other** | — (needs an R2 bucket and repository secrets) | — |
-| `color-management-plan.md` | Linear working space, per-asset input colour space, viewer/export transforms, then the OCIO backend — **the pipeline is display-referred today while the requirements assume linear** | `render-export-plan.md` (EXPORT-1 for CM-4) | REQ-RENDER-003, REQ-CORE-009 |
+| `color-management-plan.md` | Linear working space, per-asset input colour space, viewer/export transforms, then the OCIO backend — **the pipeline is display-referred today while the requirements assume linear** | `done/render-export-plan.md` (EXPORT-1 for CM-4) | REQ-RENDER-003, REQ-CORE-009 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
 | `image-instancing-plan.md` | `InstanceSource`, the `geometry.from_image` node, and the rasterize texture path — frame buffers copied through the existing instance mechanism; retires `SceneContent::Image` | — (IMG-1 only; IMG-2 onward is sequenced after roadmap phase C4) | REQ-3D-001, REQ-MOGRAPH-001, REQ-CORE-010 |
@@ -143,7 +142,7 @@ budget (the texture pool's `LruBudget` becomes subordinate to it), the
 output-stage frame cache, and the hit-rate API. Three other plans must not
 invent their own version of these — `motion-blur-plan.md` unit 2 (time-based
 validity) is absorbed into it, `stateful-eval-plan.md` gets its simulation
-reservation from it, and `render-export-plan.md` relies on its precision
+reservation from it, and `done/render-export-plan.md` relies on its precision
 requirement so a render never eats a preview-quality frame. It also takes over
 seven cache issues (HIGH-03, HIGH-16, MED-CORE-02/03/06/07 and the
 single-entry image cache in MED-MED-02) because they all rewrite the same functions.
@@ -188,6 +187,7 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/render-export-plan.md` | Render queue, headless CLI (`ravel-cli render`, `list`, `interactive`), audio mixdown, and the export dialog with its render queue panel | #299–#335 — 2026-08-08 | REQ-RENDER-001, REQ-RENDER-005 |
 | `done/exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | #321 — 2026-08-07 | REQ-PROJ-006, REQ-PLUGIN-005 |
 | `done/expression-language-plan.md` | The loop-free expression language: parameter and field expressions, geometry attribute access, and the Properties expression editor | #320 — 2026-08-07 | REQ-CORE-014/015, REQ-CORE-007/010, REQ-MOGRAPH-001 |
 | `done/pointer-feedback-plan.md` | Cursor feedback for canvas panels and Outliner layer reordering | #213 — 2026-07-30 | REQ-UI-002/003/011/012 |

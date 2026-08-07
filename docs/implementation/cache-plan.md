@@ -55,7 +55,7 @@ VRAM / RAM / Disk のどの層も存在せず、「プレビュー再生時は V
 | `motion-blur-plan.md` BLUR-2 | 有効判定を整数 frame ではなく時間基準に | 同計画が `CacheMiss` を独自に増やす |
 | `motion-blur-plan.md` BLUR-3 | `quality` を有効判定に参加させる | 同上 |
 | `stateful-eval-plan.md` SIM-1 | フレーム連続区間の保持 | 別 map を新設（`evaluation-scope-plan.md:96` で合意済み）。ただし**予算は未定義** |
-| `render-export-plan.md` EXPORT-2 | 書き出しが対話用キャッシュを汚さない / 汚されない | 2 本目の `Evaluator` を立てるだけで、精度の取り違えを防ぐ手段がない |
+| `done/render-export-plan.md` EXPORT-2 | 書き出しが対話用キャッシュを汚さない / 汚されない | 2 本目の `Evaluator` を立てるだけで、精度の取り違えを防ぐ手段がない |
 | Timeline のキャッシュ帯（本計画で追加） | comp 単位・時間単位のキャッシュ占有範囲 | 問い合わせ API がないので実装できない |
 
 `evaluation-scope-plan.md` は既に「3 機能が同じ制約に別々の回避策で当たって
@@ -269,7 +269,7 @@ pub enum Tier { Vram, Ram, Disk }
 ### sim の長期保持は将来「明示キャッシュノード」に寄せる
 
 暗黙 LRU で数百フレームを守り続けるのではなく、ユーザーが明示的に固定
-できる形（`util.cache` 相当）を将来方向とする。`render-export-plan.md`
+できる形（`util.cache` 相当）を将来方向とする。`done/render-export-plan.md`
 の非対象節が「Write ノードは評価純粋性とディスクキャッシュ設計の問題」として保留
 しているので、**同じ議論に合流させる**。本計画では保護枠までを扱う。
 
@@ -532,7 +532,7 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 - `docs/implementation/motion-blur-plan.md`: 単位 2 が本計画の単位 2 に
   統合された旨。
 - `docs/implementation/stateful-eval-plan.md`: sim 予約枠の旨。
-- `docs/implementation/render-export-plan.md`: `min_precision` で
+- `docs/implementation/done/render-export-plan.md`: `min_precision` で
   キャッシュ汚染を防ぐ旨。
 - `docs/implementation/backlog.md` / `roadmap.md` / `README.md`。
 
@@ -573,7 +573,7 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 - **近似ヒット**（上位解像度・上位精度からの降格流用）。将来方向として、
   「厳密ヒットが無いときだけ / `resolution` 軸だけ / GPU 経路だけ」に
   限定して足せる。`quality` 軸は降格不可。
-- **明示キャッシュノード**（`util.cache` 相当）。`render-export-plan.md` の
+- **明示キャッシュノード**（`util.cache` 相当）。`done/render-export-plan.md` の
   Write ノード議論に合流させる。
 - **コンパイル済みシェーダのディスクキャッシュ**（REQ-GPU-001 の受入条件。
   未実装）。台帳には載せるが本計画では扱わない。HIGH-06（検証がハッシュ照合の

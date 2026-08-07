@@ -95,5 +95,5 @@ linear を切り替えるフラグは持たない。
 - REQ-RENDER-003（OCIO + GPU LUT カラーマネジメント。Must）
 - REQ-CORE-009（32bit float リニア空間の前提）
 - `docs/implementation/color-management-plan.md`
-- `docs/implementation/render-export-plan.md`（`EXPORT-1` が入れた
+- `docs/implementation/done/render-export-plan.md`（`EXPORT-1` が入れた
   「この値は scene-linear ではない」という doc コメントは `CM-4` で撤回する）

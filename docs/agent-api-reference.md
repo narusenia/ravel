@@ -1459,7 +1459,7 @@ order, each with a route or a structured reason, so the UI shows a disabled row
 that explains itself. Reasons carry no prose — the caller renders them with
 `t!`. Implementations live in `ravel_media::encode`: `ImageSequenceEncoder`
 (PNG / EXR, no FFmpeg, so it works in every build) and `available_encoders()`
-= `enumerate_encoders(&RuntimeProbe)`. `docs/implementation/render-export-plan.md`
+= `enumerate_encoders(&RuntimeProbe)`. `docs/implementation/done/render-export-plan.md`
 unit `EXPORT-1`.
 
 An image sequence carries no sound, so the same module holds
@@ -2519,7 +2519,7 @@ Unknown type keys are skipped silently (plugin space).
 
 `crates/ravel-cli`, binary `ravel-cli`. **No `gpui`, `ravel-ui`, `ravel-dock`
 or `ravel-app` dependency** — that absence is the design, not an accident
-(`docs/implementation/render-export-plan.md`, "CLI は GPUI にリンクしない
+(`docs/implementation/done/render-export-plan.md`, "CLI は GPUI にリンクしない
 別バイナリにする"). `ffmpeg` is an off-by-default feature exactly as in
 `ravel-app`; image sequences never need it. The one edge between the two runs
 the other way and only in tests: `ravel-app`'s **dev**-dependency on this crate

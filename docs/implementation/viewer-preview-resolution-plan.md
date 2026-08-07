@@ -256,4 +256,4 @@ EvalContext.resolution   ← 既存。評価はこれだけを見る
 - `gpu-compositing-plan.md` の `GPUCOMP-11`（`VIEWER_MAX_DIM` の判断。
   本計画へ委譲）
 - `done/viewer-comp-coordinate-scale-plan.md`（評価バッファとコンポ座標の変換）
-- `render-export-plan.md`（書き出しはコンポ解像度。係数は掛からない）
+- `done/render-export-plan.md`（書き出しはコンポ解像度。係数は掛からない）

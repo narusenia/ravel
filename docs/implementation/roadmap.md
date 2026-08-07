@@ -778,7 +778,7 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 
 `EXPORT-*` がフェーズ G にあったのは依存関係の結果で、製品としての優先度の
 判断ではなかった。現状 **何も書き出せない**（`README.md` の
-`render-export-plan.md` の説明が「you cannot currently export anything」と
+`done/render-export-plan.md` の説明が「you cannot currently export anything」と
 明記）。機能を足しても成果物が出ないので、ここが開くまで他の投資が回収されない。
 
 引き上げのコストは低かった。`EXPORT-1`（エンコーダ抽象と実行時列挙）は依存が

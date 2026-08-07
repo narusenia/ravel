@@ -437,7 +437,7 @@ bbox の 8 ハンドルを機能させ、殻 transform を Viewer で掴める�
 | カーソル下のピクセル値読み取り | `viewer-inspection-plan.md` `INSP-3`（表示は本機構のスクリーン空間描画に乗る） |
 | ボックス選択（ラバーバンド）の枠 | `viewer-tool-extensions-plan.md` `TOOLX-2`（枠の描画は本機構に乗る） |
 | プロキシ / 解像度低下 / ドロップフレーム / キャッシュ状態 | `viewer-inspection-plan.md` `INSP-4` |
-| ROI（作業領域）枠 | **見送り**。部分レンダリングの機能が無いので枠だけ描いても使われない。`cache-plan.md` / `render-export-plan.md` が部分評価を持った時点で引き取る |
+| ROI（作業領域）枠 | **見送り**。部分レンダリングの機能が無いので枠だけ描いても使われない。`cache-plan.md` / `done/render-export-plan.md` が部分評価を持った時点で引き取る |
 | 3D 以外で本機構に乗らないもの | チェッカーボードとチャンネル表示の 2 件だけ。それ以外の可視化はすべてこの trait を通す |
 
 ## 検証

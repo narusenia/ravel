@@ -976,7 +976,9 @@ not_offered = "対象外"
 
 [export.notice]
 completed_title = "書き出し完了"
-completed_message = "フレームの出力先"
+# {count} と {path} はホストが埋める。語順と改行位置は翻訳側が決める
+# （cli.result.completed と同じ形）。
+completed = "{count} フレームを次の場所に書き出しました:\n{path}"
 failed_title = "書き出し失敗"
 warning_title = "書き出しの警告"
 failed_message = "レンダリングが完了しませんでした。"

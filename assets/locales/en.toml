@@ -984,7 +984,9 @@ not_offered = "not offered"
 
 [export.notice]
 completed_title = "Export finished"
-completed_message = "Frames written to"
+# Both blanks are filled by the host; the words around them, and the line
+# break, are the translator's — the same shape as `cli.result.completed`.
+completed = "Wrote {count} frame(s) to\n{path}"
 failed_title = "Export failed"
 warning_title = "Export warning"
 failed_message = "The render did not finish."

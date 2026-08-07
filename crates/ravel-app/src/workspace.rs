@@ -1799,12 +1799,16 @@ fn show_render_event(event: &crate::export::RenderServiceEvent, window: &mut Win
                 Notification::new()
                     .with_type(NotificationType::Success)
                     .title(SharedString::from(t!("export.notice.completed_title")))
-                    .message(SharedString::from(format!(
-                        "{frames} {}\n{} {}",
-                        t!("render_queue.frames"),
-                        t!("export.notice.completed_message"),
-                        directory.display()
-                    ))),
+                    // One phrase with both blanks filled, not a sentence
+                    // assembled here: the count, the path and the words
+                    // between them sit in whatever order the locale puts
+                    // them. `ravel-cli` says the same thing through the same
+                    // shape of key (`cli.result.completed`).
+                    .message(SharedString::from(
+                        t!("export.notice.completed")
+                            .replace("{count}", &frames.to_string())
+                            .replace("{path}", &directory.display().to_string()),
+                    )),
                 cx,
             );
         }

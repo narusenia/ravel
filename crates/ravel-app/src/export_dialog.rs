@@ -914,7 +914,7 @@ mod locale_tests {
             "export.unavailable.no_platform_route",
             "export.unavailable.not_offered",
             "export.notice.completed_title",
-            "export.notice.completed_message",
+            "export.notice.completed",
             "export.notice.failed_title",
             "export.notice.failed_message",
             "export.notice.warning_title",
@@ -966,6 +966,42 @@ mod locale_tests {
                     "{locale}.toml is missing the export key \"{key}\""
                 );
             }
+        }
+    }
+
+    /// The completion notice is **one phrase per locale**, not a count and a
+    /// path glued together in Rust: the words between the two blanks, and
+    /// their order, differ by language. Every locale must therefore keep
+    /// both placeholders — a value that dropped one would silently lose the
+    /// frame count or the folder the frames went to.
+    #[test]
+    fn the_completion_notice_carries_both_blanks_in_every_locale() {
+        for locale in ["en", "ja"] {
+            let catalog = catalog(locale);
+            let phrase = catalog["export"]["notice"]["completed"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("{locale}.toml: export.notice.completed is not a string")
+                });
+            for blank in ["{count}", "{path}"] {
+                assert!(
+                    phrase.contains(blank),
+                    "{locale}.toml: export.notice.completed is missing {blank}",
+                );
+            }
+        }
+    }
+
+    /// The key the notice was assembled from is gone rather than left
+    /// behind: a fragment of a sentence in a catalog is an invitation to
+    /// glue one together again.
+    #[test]
+    fn the_sentence_fragment_the_notice_replaced_is_gone() {
+        for locale in ["en", "ja"] {
+            assert!(
+                !has_key(&catalog(locale), "export.notice.completed_message"),
+                "{locale}.toml still carries the half-sentence completed_message",
+            );
         }
     }
 }

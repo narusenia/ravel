@@ -72,7 +72,6 @@
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
-| CICACHE-2 | CI キャッシュの効果の計測と設定の詰め（`CICACHE-1` 完了で着手可能） | `ci-cache-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
@@ -562,7 +561,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
-| CICACHE-2 | 🟡 | 効果の計測と設定の詰め | CICACHE-1 ✅ |
+| CICACHE-2 | ✅ #339 | 効果の計測と設定の詰め（cold/warm 実測、R2 見積もり、`line-tables-only`） | CICACHE-1 ✅ |
 
 ### 式言語（REQ-CORE-014 / REQ-CORE-015）
 

@@ -21,6 +21,7 @@
 
 pub mod command;
 pub mod document;
+pub mod export;
 pub mod keybindings;
 pub mod keyframes;
 pub mod layout;
@@ -37,6 +38,7 @@ pub mod view_state;
 pub mod window;
 
 pub use command::{CommandId, ToolKind};
+pub use export::{ExportError, ExportRequest, ExportSettings};
 pub use keybindings::{KeyBindings, KeyChord};
 pub use layout::{
     LayoutError, LayoutNode, LayoutValidationError, Orientation, PanelInstance, PanelInstanceId,

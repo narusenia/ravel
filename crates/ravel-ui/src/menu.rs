@@ -101,6 +101,7 @@ impl MenuBar {
                 MenuItem::action(CommandId::FileNew),
                 MenuItem::action(CommandId::FileOpen),
                 MenuItem::action(CommandId::FileImport),
+                MenuItem::action(CommandId::FileExport),
                 MenuItem::Separator,
                 MenuItem::action(CommandId::FileSave),
                 MenuItem::action(CommandId::FileSaveAs),

@@ -11,6 +11,7 @@ pub mod timeline;
 pub mod viewer;
 
 pub mod properties;
+pub mod render_queue;
 
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon};
@@ -898,6 +899,9 @@ fn build_panel_view(
         PanelKind::Properties => panel!(|cx| properties::PropertiesGpuiPanel::new(id, window, cx)),
         PanelKind::Viewer => panel!(|cx| viewer::ViewerPanel::new(id, window, cx)),
         PanelKind::MediaBin => panel!(|cx| media_bin::MediaBinGpuiPanel::new(id, window, cx)),
+        PanelKind::RenderQueue => {
+            panel!(|cx| render_queue::RenderQueueGpuiPanel::new(id, window, cx))
+        }
         kind => panel!(|cx| PlaceholderPanel::new(id, kind, window, cx)),
     }
 }

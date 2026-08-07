@@ -1318,6 +1318,9 @@ RenderQueue::spawn_with_budget(hooks, SharedCacheBudget, on_event)
                                          // join — both drain what was queued
 RenderJobId          // Copy + Ord + Hash; identifies a job in every event
     .raw() -> u64    // and Display — the form for logs and the CLI's output
+    ::from_raw(u64)  // names an existing id; only `submit` issues them. For a
+                     // caller reading one back off machine-readable output,
+                     // and for a presenter's tests (the queue panel's rows)
 RenderEvent::{Started, Progress, Completed, Cancelled, Failed}
     .job() -> RenderJobId / .is_terminal()
 RenderError::{CompositionNotFound, EmptyRange, Compile, OutputExists,
@@ -1891,6 +1894,32 @@ Unknown type keys are skipped silently (plugin space).
   the translator's. The stored value is the key in every locale, so switching
   language never changes a comparison or an edit.
 
+- `export` (export.rs): the export dialog's headless half (`EXPORT-5`).
+  `ExportSettings { comp, duration, start, end, format, png_depth, directory,
+  prefix, suffix, padding, overwrite, audio }` holds the widgets' raw strings —
+  `for_composition(comp, name, duration, directory)` is the opening state —
+  and `resolve() -> Result<ExportRequest, ExportError>` turns them into
+  `ExportRequest { comp, range, output: ImageSequenceOutput, overwrite,
+  audio }` with `render_output()`, `frame_count()` and `audio_path()`. The
+  frame numbers are **inclusive on screen and half-open in the request**, as
+  `ravel-cli`'s `--range start:end` is — an inclusive last frame of
+  `u64::MAX` has no half-open end and is `ExportError::RangeOverflow` rather
+  than an overflow. `duration` is the chosen composition's frame count rather
+  than a typed field, and travels with the picker: zero is
+  `ExportError::EmptyComposition`, the refusal `plan::plan_render` gives the
+  same request, because the inclusive range of an empty composition reads as
+  the single frame 0. `ExportError::message_key()` names the sentence; nothing
+  here holds prose. The checks are pre-flight only — the worker's
+  `check_preconditions` remains authoritative, and `available_encoders()` is
+  the one authority on what can be written.
+- `panels::render_queue` (panels/render_queue.rs): the queue panel's rows.
+  `RenderQueueRows { submitted(job, composition, directory, total_frames),
+  observe(&RenderEvent) -> bool, rows(), unfinished(), has_unfinished(),
+  clear_finished() }` and `RenderQueueRow { job(), composition(),
+  directory(), total_frames(), rendered(), fraction(), is_finished(),
+  is_cancellable(), state_key(), failure() }`. A row exists from submission,
+  before the worker picks the job up; the arithmetic is `JobProgress`'s.
+
 ## ravel-dock — docking UI
 
 - `DockRoot` (dock.rs): GPUI entity rendering one window's `LayoutNode`
@@ -2439,6 +2468,41 @@ Unknown type keys are skipped silently (plugin space).
   `AudioService` notifies Timeline and MediaBin while a requested asset is
   preparing; both render a localized preparation label and preparation
   failures become non-auto-hiding workspace notifications.
+- Export (`src/export.rs`, `src/export_dialog.rs`, `panels/render_queue.rs`,
+  `EXPORT-5`): `RenderService` (entity, registered as the
+  `RenderServiceHandle` global, strongly owned by `RavelWorkspace`, reached
+  through `export::render_service(cx)`) owns the session's `RenderQueue`. It
+  is spawned on the **first** submission with a *second* `GpuEvalHooks`
+  instance built on `ProjectState::gpu_context()` and
+  `ProjectState::cache_budget()` — separate caches, one device, one budget.
+  The queue's callback runs on the worker thread and only pushes into an
+  unbounded channel; a detached foreground task folds the events into the
+  entity. `build_render_job(&ExportRequest, Arc<Document>) -> RenderJob` is
+  the single place a request becomes work, and is the same construction
+  `ravel-cli`'s `execute` performs (`ImageSequenceEncoder` plus the one
+  `ImageSequenceOutput` cloned into the job's `output`). A soundtrack is
+  mixed with `ravel_audio::offline::mix_range` and written with
+  `ravel_media::encode::WavWriter` on the background executor **before** the
+  frames are queued, to a `.part` name beside the destination that is renamed
+  only when the job completes and deleted whenever it does not. Dropping the
+  service cancels every unfinished job — the answer to the question
+  `RenderQueue`'s `Drop` leaves to the export UI. `RenderServiceEvent`
+  (`Completed` / `Failed` / `Warning`) becomes a workspace notification.
+  `Warning` is the GUI's answer to `ravel-cli`'s warning stream, and a render
+  never drops sound quietly: `submit` asks
+  `silent_render(&Document, CompId, audio_requested) -> Option<(SilentRender,
+  usize)>` **before** anything can refuse the job (`SilentRender::NotAsked` /
+  `NoDecoder`, the layer count for the sentence's `{count}`, and
+  `message_key()` for the sentence), and every source the mix could not decode
+  comes back as a `SkippedAudioSource { layer, asset, detail }` and becomes one
+  more warning. The dialog's picker carries `CompChoice { id, name, has_audio
+  }` per composition, so the soundtrack checkbox follows the *selected*
+  composition rather than the one the dialog opened on; `ExportForm::new` takes
+  `AUDIO_DECODE_AVAILABLE` and asks `audio_possible(cx)` at read time.
+  `ravel-cli` is a **dev-dependency** of `ravel-app`: `tests/export_pipeline.rs`
+  plans and runs the same export through `ravel_cli::plan::plan_render` and
+  `ravel_cli::execute::execute` and compares the frames byte for byte. The
+  edge is tests-only and one-way — `ravel-cli` never depends on `ravel-app`.
 - Playback clock: `Transport::tick_with/toggle_with(&ClockSource)` where
   `ClockSource::Wall(Instant)` (the historical path, used by all existing
   tests) or `ClockSource::Audio(&SyncClock)`. The single switch decision is
@@ -2457,7 +2521,11 @@ Unknown type keys are skipped silently (plugin space).
 or `ravel-app` dependency** — that absence is the design, not an accident
 (`docs/implementation/render-export-plan.md`, "CLI は GPUI にリンクしない
 別バイナリにする"). `ffmpeg` is an off-by-default feature exactly as in
-`ravel-app`; image sequences never need it.
+`ravel-app`; image sequences never need it. The one edge between the two runs
+the other way and only in tests: `ravel-app`'s **dev**-dependency on this crate
+lets `tests/export_pipeline.rs` render the same export through `plan_render`
+and `execute` and compare it with the dialog's. It adds nothing to either
+shipped binary, and `cargo build -p ravel-cli` is untouched by it.
 
 ```text
 ravel-cli render <project.ravprj> -o <DIR>

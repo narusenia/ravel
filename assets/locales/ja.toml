@@ -14,6 +14,7 @@ _self = "ファイル"
 new = "新規"
 open = "開く…"
 import = "読み込み…"
+export = "書き出し…"
 save = "保存"
 save_as = "別名で保存…"
 quit = "終了"
@@ -950,3 +951,73 @@ amount = "適用の強さ（0 で元の値のまま、1 で完全に適用）。
 combine = "既存値との合成方法: set / add / multiply / min / max。"
 components = "対象の成分（空で全成分。例: xy / rgb / a）。"
 group = "対象要素を絞る bool アトリビュート名（空で全要素）。"
+
+[export]
+title = "書き出し"
+submit = "書き出す"
+browse = "参照…"
+
+[export.field]
+composition = "コンポジション"
+range = "フレーム範囲"
+format = "形式"
+directory = "出力フォルダ"
+prefix = "ファイル名の前置き"
+suffix = "ファイル名の後置き"
+padding = "連番の桁数"
+overwrite = "既存のファイルを置き換える"
+audio = "音声を書き出す (WAV)"
+audio_no_decoder = "このビルドには FFmpeg が無く、音声をデコードできません。"
+audio_silent_composition = "このコンポジションには音声を持つレイヤーがありません。"
+
+[export.error]
+no_composition = "書き出せるコンポジションがありません。"
+empty_composition = "このコンポジションは長さが 0 フレームで、書き出す内容がありません。"
+invalid_start = "開始フレームは整数で入力してください。"
+invalid_end = "終了フレームは整数で入力してください。"
+empty_range = "終了フレームが開始フレームより前です。"
+range_overflow = "終了フレームの番号が大きすぎます。"
+no_writer = "この形式はまだ書き出せません。"
+missing_directory = "出力フォルダを指定してください。"
+invalid_padding = "連番の桁数は 1〜12 の範囲で指定してください。"
+output_name = "前置き・後置きが出力フォルダの外を指しています。"
+no_gpu = "レンダリングには GPU が必要ですが、このセッションでは初期化できませんでした。"
+
+[export.unavailable]
+no_writer = "書き出し未対応"
+ffmpeg_not_linked = "このビルドに FFmpeg がありません"
+ffmpeg_encoder_missing = "FFmpeg に該当のエンコーダがありません"
+platform_api = "ハードウェアエンコーダを利用できません"
+no_platform_route = "この環境にハードウェアエンコーダがありません"
+not_offered = "対象外"
+
+[export.notice]
+completed_title = "書き出し完了"
+# {count} と {path} はホストが埋める。語順と改行位置は翻訳側が決める
+# （cli.result.completed と同じ形）。
+completed = "{count} フレームを次の場所に書き出しました:\n{path}"
+failed_title = "書き出し失敗"
+warning_title = "書き出しの警告"
+failed_message = "レンダリングが完了しませんでした。"
+audio_failed_message = "フレームは書き出せましたが、音声を所定の位置に置けませんでした。"
+audio_exists_message = "音声ファイルが既にあります。上書きするには「既存のファイルを置き換える」を有効にしてください。"
+
+# ravel-cli の audio-not-rendered / audio-source-skipped と同じ通知。
+# 音声を落とす書き出しは必ずその旨を伝える。
+[export.warning]
+audio_not_rendered = "このコンポジションには音声を持つレイヤーが {count} 件ありますが、音声の書き出しが無効なため映像のみになります。"
+audio_no_decoder = "このコンポジションには音声を持つレイヤーが {count} 件ありますが、このビルドには FFmpeg が無くデコードできないため映像のみになります。"
+audio_source_skipped = "レイヤー「{layer}」はミックスで無音です: メディアアセット「{asset}」を読み込めませんでした: {detail}"
+
+[render_queue]
+empty = "ジョブがありません"
+clear_finished = "完了分を消す"
+cancel = "中止"
+frames = "フレーム"
+
+[render_queue.state]
+queued = "待機中"
+running = "レンダリング中"
+completed = "完了"
+cancelled = "中止"
+failed = "失敗"

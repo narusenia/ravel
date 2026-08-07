@@ -12,5 +12,6 @@ pub mod layer_selection;
 pub mod media_bin;
 pub mod outliner;
 pub mod properties;
+pub mod render_queue;
 pub mod timeline;
 pub mod viewer;

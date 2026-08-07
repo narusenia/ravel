@@ -16,6 +16,7 @@ _self = "File"
 new = "New"
 open = "Open…"
 import = "Import…"
+export = "Export…"
 save = "Save"
 save_as = "Save As…"
 quit = "Quit"
@@ -958,3 +959,73 @@ amount = "Strength of the application (0 leaves the old value, 1 applies fully).
 combine = "How the sampled value combines with the existing one: set, add, multiply, min, max."
 components = "Components to affect (empty for all; for example xy, rgb, a)."
 group = "Name of a bool attribute limiting the affected elements (empty for all)."
+
+[export]
+title = "Export"
+submit = "Export"
+browse = "Browse…"
+
+[export.field]
+composition = "Composition"
+range = "Frame Range"
+format = "Format"
+directory = "Output Folder"
+prefix = "File Prefix"
+suffix = "File Suffix"
+padding = "Number Padding"
+overwrite = "Replace existing files"
+audio = "Write a soundtrack (WAV)"
+audio_no_decoder = "This build has no FFmpeg and cannot decode audio."
+audio_silent_composition = "This composition has no layers with audio."
+
+[export.error]
+no_composition = "This project has no composition to export."
+empty_composition = "This composition is zero frames long and has nothing to render."
+invalid_start = "The first frame must be a whole number."
+invalid_end = "The last frame must be a whole number."
+empty_range = "The last frame is before the first."
+range_overflow = "The last frame number is too large."
+no_writer = "This format cannot be written yet."
+missing_directory = "Choose an output folder."
+invalid_padding = "The number padding must be between 1 and 12 digits."
+output_name = "The prefix or suffix would put the frames outside the output folder."
+no_gpu = "Rendering needs a GPU, and this session could not open one."
+
+[export.unavailable]
+no_writer = "no writer yet"
+ffmpeg_not_linked = "this build has no FFmpeg"
+ffmpeg_encoder_missing = "FFmpeg has no encoder for it"
+platform_api = "the hardware encoder is unavailable"
+no_platform_route = "no hardware encoder on this system"
+not_offered = "not offered"
+
+[export.notice]
+completed_title = "Export finished"
+# Both blanks are filled by the host; the words around them, and the line
+# break, are the translator's — the same shape as `cli.result.completed`.
+completed = "Wrote {count} frame(s) to\n{path}"
+failed_title = "Export failed"
+warning_title = "Export warning"
+failed_message = "The render did not finish."
+audio_failed_message = "The frames were written, but the soundtrack could not be put in place."
+audio_exists_message = "A soundtrack is already there; turn on \"Replace existing files\" to overwrite it."
+
+# The same notices `ravel-cli` prints as `audio-not-rendered` and
+# `audio-source-skipped`. A render that drops sound never does so quietly.
+[export.warning]
+audio_not_rendered = "This composition has {count} layer(s) with audio, and the soundtrack was turned off, so the render is picture only."
+audio_no_decoder = "This composition has {count} layer(s) with audio, but this build has no FFmpeg and cannot decode any, so the render is picture only."
+audio_source_skipped = "The layer \"{layer}\" is silent in the mix: its media asset \"{asset}\" could not be loaded: {detail}"
+
+[render_queue]
+empty = "No renders yet"
+clear_finished = "Clear Finished"
+cancel = "Cancel"
+frames = "frames"
+
+[render_queue.state]
+queued = "Queued"
+running = "Rendering"
+completed = "Done"
+cancelled = "Cancelled"
+failed = "Failed"

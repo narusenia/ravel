@@ -46,3 +46,11 @@ tracing = { workspace = true }
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+# **Tests only.** `tests/export_pipeline.rs` is the unit's "the GUI goes
+# through the same worker and the same encoder as the CLI" criterion, and the
+# only way to show that rather than restate it is to plan and run the same
+# export through `ravel-cli`'s own `plan_render` / `execute` and compare the
+# bytes. A dev-dependency adds no edge to the shipped `ravel` binary, and none
+# to `cargo build -p ravel-cli`, whose GUI-free dependency list is the whole
+# point of that crate — the arrow points this way, never back.
+ravel-cli = { workspace = true }

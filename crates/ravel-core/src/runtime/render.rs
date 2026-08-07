@@ -81,6 +81,19 @@ impl RenderJobId {
     pub fn raw(self) -> u64 {
         self.0
     }
+
+    /// Rebuild an id from its [`raw`](Self::raw) form.
+    ///
+    /// [`RenderQueue::submit`] is the only thing that *issues* ids; this only
+    /// names one that already exists — for a caller reading an id back out of
+    /// machine-readable output, and for the tests of a presenter that folds
+    /// events without a worker behind them ([`JobProgress`] and the render
+    /// queue panel's rows). An id naming no job matches nothing, which is the
+    /// same thing that happens to a cancellation for a job that has already
+    /// finished.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 impl std::fmt::Display for RenderJobId {

@@ -76,19 +76,21 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 | Dopesheet | 打点一覧の独立パネル | 🔲 | Node, Motion, Color |
 | Scopes (Waveform / Vectorscope / Histogram / Parade) | 波形・ベクトルスコープ・ヒストグラム・パレード | 🔲 | Color |
 | Text Editor | タイポグラフィ編集 | 🔲 | Motion |
-| Render Queue | レンダージョブ管理 | 🔲 | （どのプリセットにも無い） |
+| Render Queue | レンダージョブ管理 | ✅ | （どのプリセットにも無い） |
 | Shader Editor | WGSL カスタムシェーダ編集 | 🔲 | （どのプリセットにも無い） |
 | Lua Console | スクリプトエディタ / コンソール | 🔲 | （どのプリセットにも無い） |
 
 `🔲` のパネルのうち Dopesheet / スコープ 4 種 / Text Editor は
 ワークスペースプリセット（`assets/workspaces/*.toml`）が実際に配置しており、
-開くとプレースホルダが出る。Render Queue / Shader Editor / Lua Console は
+開くとプレースホルダが出る。Shader Editor / Lua Console は
 どのプリセットにも無いが、**16 種すべてに View メニューの表示トグルがある**ので
 プリセットに依らず出せる。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
 `viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
-`typography-plan.md`、Render Queue は `render-export-plan.md`、
-Shader Editor と Lua Console は REQ-CODE-001。
+`typography-plan.md`、Shader Editor と Lua Console は REQ-CODE-001。
+
+Render Queue はどのプリセットにも無いが実装済みで、View メニューか
+`File ▸ Export…` の後に開く。
 
 ## サブグラフ
 

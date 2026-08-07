@@ -13,6 +13,7 @@
 | ユーザーに見える文字列を追加する | [add-locale.md](add-locale.md) |
 | 式を書く / 式言語に名前を足す | [write-expression.md](write-expression.md) |
 | 永続化（`.ravprj`）を変更する | [persistence.md](persistence.md) |
+| CLI から書き出す（`ravel-cli`） | [render-cli.md](render-cli.md) |
 | テストをどこに書くか、どう検証するか | [testing.md](testing.md) |
 | 着手から PR までの流し方 | [workflow.md](workflow.md) |
 | **何を変えたらどの文書を直すのか** | [doc-checklist.md](doc-checklist.md) |

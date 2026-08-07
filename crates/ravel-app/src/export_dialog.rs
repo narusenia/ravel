@@ -42,6 +42,22 @@ use std::path::PathBuf;
 /// Width of the label column, matching the composition dialog's.
 const LABEL_WIDTH: f32 = 120.0;
 
+/// One composition the dialog's picker offers.
+///
+/// Carries whether that composition has sound, because the dialog outlives
+/// the composition it opened on: the picker can be moved to another one, and
+/// an answer computed once at opening time would then describe a composition
+/// the user is no longer exporting. That is exactly how a project with a
+/// soundtrack was rendered silent without a word.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompChoice {
+    pub id: CompId,
+    pub name: String,
+    /// Whether any layer of this composition carries audio
+    /// (`export::composition_has_audio`).
+    pub has_audio: bool,
+}
+
 /// One row of the dialog's format list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatChoice {
@@ -162,7 +178,7 @@ fn unavailable_text(reason: &UnavailableReason) -> SharedString {
 /// The export dialog's body.
 pub struct ExportForm {
     /// Compositions of the open document, in the order the picker lists them.
-    comps: Vec<(CompId, String)>,
+    comps: Vec<CompChoice>,
     composition: Entity<SelectState<Vec<SharedString>>>,
     start: Entity<InputState>,
     end: Entity<InputState>,
@@ -174,14 +190,24 @@ pub struct ExportForm {
     suffix: Entity<InputState>,
     padding: Entity<InputState>,
     overwrite: bool,
+    /// What the user asked for, **ungated**. Whether it is possible depends
+    /// on the composition currently picked, which is a different question and
+    /// is asked at read time ([`audio_possible`](Self::audio_possible)):
+    /// folding the two together here is what made "switch to a composition
+    /// with sound" leave the box permanently off.
     audio: bool,
-    /// Whether a soundtrack is possible at all: this build can decode, and
-    /// the chosen composition has audio layers.
-    audio_possible: bool,
+    /// Whether this build can decode an audio asset at all. A fact about the
+    /// build, so it never changes while the dialog is open.
+    decode_available: bool,
     /// The refusal shown under the form, set by the OK button when the
     /// settings do not resolve.
     error: Option<SharedString>,
     focus_handle: FocusHandle,
+    /// Redraws the form when the picker's selection changes, which is what
+    /// re-asks [`audio_possible`](Self::audio_possible) for the composition
+    /// now chosen. Held for the form's lifetime, as GPUI subscriptions must
+    /// be.
+    _composition_sub: Subscription,
 }
 
 impl ExportForm {
@@ -190,21 +216,25 @@ impl ExportForm {
     /// `initial` supplies the field values; `choices` the format list. Both
     /// are passed in rather than derived here so the caller (the workspace)
     /// keeps the document access and this stays a widget holder.
+    ///
+    /// `decode_available` is the build's ability to decode audio at all
+    /// (`export::AUDIO_DECODE_AVAILABLE`); whether a *particular* composition
+    /// has sound rides on its [`CompChoice`].
     pub fn new(
-        comps: Vec<(CompId, String)>,
+        comps: Vec<CompChoice>,
         initial: ExportSettings,
         choices: Vec<FormatChoice>,
-        audio_possible: bool,
+        decode_available: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let labels: Vec<SharedString> = comps
             .iter()
-            .map(|(_, name)| SharedString::from(name.clone()))
+            .map(|comp| SharedString::from(comp.name.clone()))
             .collect();
         let selected = comps
             .iter()
-            .position(|(id, _)| Some(*id) == initial.comp)
+            .position(|comp| Some(comp.id) == initial.comp)
             .unwrap_or(0);
         let composition = cx.new(|cx| {
             SelectState::new(
@@ -214,6 +244,10 @@ impl ExportForm {
                 cx,
             )
         });
+        // The picker notifies when a row is confirmed; nothing else tells the
+        // form that the composition — and with it whether a soundtrack is
+        // possible — has changed.
+        let composition_sub = cx.observe(&composition, |_this, _picker, cx| cx.notify());
         let text = |value: &str, window: &mut Window, cx: &mut Context<Self>| {
             let value = value.to_owned();
             cx.new(|cx| InputState::new(window, cx).default_value(value))
@@ -234,26 +268,38 @@ impl ExportForm {
             suffix: text(&initial.suffix, window, cx),
             padding: text(&initial.padding, window, cx),
             overwrite: initial.overwrite,
-            audio: initial.audio && audio_possible,
-            audio_possible,
+            audio: initial.audio,
+            decode_available,
             comps,
             composition,
             choices,
             format,
             error: None,
             focus_handle: cx.focus_handle(),
+            _composition_sub: composition_sub,
         }
     }
 
-    /// Read the widgets back out. Called by the OK button.
-    pub fn settings(&self, cx: &App) -> ExportSettings {
-        let comp = self
-            .composition
+    /// The composition the picker currently points at.
+    fn selected_comp(&self, cx: &App) -> Option<&CompChoice> {
+        self.composition
             .read(cx)
             .selected_index(cx)
             .and_then(|index| self.comps.get(index.row))
             .or_else(|| self.comps.first())
-            .map(|(id, _)| *id);
+    }
+
+    /// Whether this export could carry a soundtrack: the build can decode,
+    /// and the composition **currently** picked has audio layers.
+    ///
+    /// Asked afresh every time rather than stored, because the picker moves.
+    pub fn audio_possible(&self, cx: &App) -> bool {
+        self.decode_available && self.selected_comp(cx).is_some_and(|comp| comp.has_audio)
+    }
+
+    /// Read the widgets back out. Called by the OK button.
+    pub fn settings(&self, cx: &App) -> ExportSettings {
+        let comp = self.selected_comp(cx).map(|comp| comp.id);
         let (format, png_depth) = self
             .choices
             .get(self.format)
@@ -270,18 +316,14 @@ impl ExportForm {
             suffix: self.suffix.read(cx).value().to_string(),
             padding: self.padding.read(cx).value().to_string(),
             overwrite: self.overwrite,
-            audio: self.audio && self.audio_possible,
+            audio: self.audio && self.audio_possible(cx),
         }
     }
 
     /// Name of the composition the form is pointing at, for the queue row.
     pub fn composition_name(&self, cx: &App) -> String {
-        self.composition
-            .read(cx)
-            .selected_index(cx)
-            .and_then(|index| self.comps.get(index.row))
-            .or_else(|| self.comps.first())
-            .map(|(_, name)| name.clone())
+        self.selected_comp(cx)
+            .map(|comp| comp.name.clone())
             .unwrap_or_default()
     }
 
@@ -378,6 +420,19 @@ impl Focusable for ExportForm {
 impl Render for ExportForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().colors.muted_foreground;
+        // Re-asked on every draw, and the picker's `cx.notify()` is what makes
+        // a draw happen when the composition changes.
+        let audio_possible = self.audio_possible(cx);
+        // Two different facts read the same way otherwise: a build that cannot
+        // decode anything, and a composition that has nothing to decode. The
+        // build comes first — it is true of every composition in the list.
+        let audio_hint_key = if !self.decode_available {
+            Some("export.field.audio_no_decoder")
+        } else if !audio_possible {
+            Some("export.field.audio_silent_composition")
+        } else {
+            None
+        };
         let range = div()
             .flex()
             .items_center()
@@ -469,19 +524,19 @@ impl Render for ExportForm {
                     .child(
                         Checkbox::new("export-audio")
                             .label(SharedString::from(t!("export.field.audio")))
-                            .checked(self.audio && self.audio_possible)
-                            .disabled(!self.audio_possible)
+                            .checked(self.audio && audio_possible)
+                            .disabled(!audio_possible)
                             .on_click(cx.listener(|this, checked: &bool, _window, cx| {
                                 this.audio = *checked;
                                 cx.notify();
                             })),
                     )
-                    .when(!self.audio_possible, |column| {
+                    .when_some(audio_hint_key, |column, key| {
                         column.child(
                             div()
                                 .text_xs()
                                 .text_color(muted)
-                                .child(SharedString::from(t!("export.field.audio_hint"))),
+                                .child(SharedString::from(t!(key))),
                         )
                     }),
             )
@@ -528,7 +583,7 @@ pub fn initial_settings(
 // the same constraint `panels/mod.rs` records.
 #[cfg(test)]
 mod form_tests {
-    use super::{ExportForm, format_choices, initial_settings};
+    use super::{CompChoice, ExportForm, format_choices, initial_settings};
     use ravel_core::id::CompId;
     use ravel_core::media::ImageFormat;
     use ravel_ui::export::{ExportError, ExportSettings};
@@ -543,11 +598,19 @@ mod form_tests {
         settings
     }
 
+    fn choice(id: CompId, name: &str, has_audio: bool) -> CompChoice {
+        CompChoice {
+            id,
+            name: name.to_owned(),
+            has_audio,
+        }
+    }
+
     fn form(window: &mut gpui::Window, cx: &mut gpui::Context<ExportForm>) -> ExportForm {
         ExportForm::new(
             vec![
-                (comp(), "shot 010".to_owned()),
-                (CompId::new(4), "b".into()),
+                choice(comp(), "shot 010", true),
+                choice(CompId::new(4), "b", true),
             ],
             initial(),
             format_choices(&ravel_media::encode::available_encoders()),
@@ -654,9 +717,11 @@ mod form_tests {
         cx.update(gpui_component::init);
         let window = cx.add_window(|window, cx| {
             ExportForm::new(
-                vec![(comp(), "shot 010".to_owned())],
+                vec![choice(comp(), "shot 010", true)],
                 initial(),
                 format_choices(&ravel_media::encode::available_encoders()),
+                // A build that cannot decode: the composition's own sound is
+                // beside the point.
                 false,
                 window,
                 cx,
@@ -664,8 +729,67 @@ mod form_tests {
         });
         window
             .update(cx, |form, _window, cx| {
+                assert!(!form.audio_possible(cx));
                 assert!(!form.settings(cx).audio);
                 assert!(!form.settings(cx).resolve().expect("resolves").audio);
+            })
+            .unwrap();
+    }
+
+    /// The dialog outlives the composition it opened on. Picking one that has
+    /// sound must re-enable the soundtrack — the bug this pins is a project
+    /// with audio being exported silently because the *first* composition had
+    /// none.
+    #[gpui::test]
+    fn picking_a_composition_with_sound_re_enables_the_soundtrack(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let with_sound = CompId::new(4);
+        let window = cx.add_window(|window, cx| {
+            ExportForm::new(
+                vec![
+                    choice(comp(), "silent", false),
+                    choice(with_sound, "voiced", true),
+                ],
+                initial(),
+                format_choices(&ravel_media::encode::available_encoders()),
+                true,
+                window,
+                cx,
+            )
+        });
+        window
+            .update(cx, |form, _window, cx| {
+                assert!(!form.audio_possible(cx), "the form opens on the silent one");
+                assert!(!form.settings(cx).audio);
+            })
+            .unwrap();
+
+        window
+            .update(cx, |form, window, cx| {
+                form.composition.update(cx, |picker, cx| {
+                    picker.set_selected_index(
+                        Some(gpui_component::IndexPath::default().row(1)),
+                        window,
+                        cx,
+                    );
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window
+            .update(cx, |form, _window, cx| {
+                assert_eq!(form.composition_name(cx), "voiced");
+                assert!(
+                    form.audio_possible(cx),
+                    "the checkbox follows the picker, not the composition the dialog opened on",
+                );
+                let settings = form.settings(cx);
+                assert!(settings.comp == Some(with_sound));
+                assert!(
+                    settings.audio,
+                    "the soundtrack is on by default and was never turned off by hand",
+                );
             })
             .unwrap();
     }
@@ -716,7 +840,8 @@ mod locale_tests {
             "export.field.padding",
             "export.field.overwrite",
             "export.field.audio",
-            "export.field.audio_hint",
+            "export.field.audio_no_decoder",
+            "export.field.audio_silent_composition",
             "export.error.no_gpu",
             "export.unavailable.no_writer",
             "export.unavailable.ffmpeg_not_linked",

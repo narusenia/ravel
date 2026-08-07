@@ -958,7 +958,8 @@ suffix = "File Suffix"
 padding = "Number Padding"
 overwrite = "Replace existing files"
 audio = "Write a soundtrack (WAV)"
-audio_hint = "This build cannot decode audio, or the composition has no audio layers."
+audio_no_decoder = "This build has no FFmpeg and cannot decode audio."
+audio_silent_composition = "This composition has no layers with audio."
 
 [export.error]
 no_composition = "This project has no composition to export."

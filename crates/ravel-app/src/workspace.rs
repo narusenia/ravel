@@ -1396,17 +1396,24 @@ impl RavelWorkspace {
         let opened = {
             let project = self.project.read(cx);
             let document = project.document();
-            let mut comps: Vec<(ravel_core::id::CompId, String)> = document
+            let mut comps: Vec<crate::export_dialog::CompChoice> = document
                 .compositions
                 .iter()
-                .map(|(id, comp)| (*id, comp.name.clone()))
+                .map(|(id, comp)| crate::export_dialog::CompChoice {
+                    id: *id,
+                    name: comp.name.clone(),
+                    // Per entry, not once for the active composition: the
+                    // dialog's picker can move, and the checkbox has to
+                    // follow it.
+                    has_audio: crate::export::composition_has_audio(document, *id),
+                })
                 .collect();
             // The map iterates in hash order; the picker shows the same order
             // every time rather than one that depends on insertion history.
-            comps.sort_by_key(|(id, _)| *id);
+            comps.sort_by_key(|comp| comp.id);
             panels::active_composition(cx)
                 .filter(|id| document.get_composition(*id).is_some())
-                .or_else(|| comps.first().map(|(id, _)| *id))
+                .or_else(|| comps.first().map(|comp| comp.id))
                 .map(|active| {
                     let comp = document
                         .get_composition(active)
@@ -1417,20 +1424,13 @@ impl RavelWorkspace {
                         comp.duration_frames,
                         project.project_path(),
                     );
-                    let audio_possible = crate::export::AUDIO_DECODE_AVAILABLE
-                        && crate::export::composition_has_audio(document, active);
                     // `Document` is immutable-by-clone, so this is the
                     // snapshot the job renders: later edits to the session's
                     // copy cannot reach it.
-                    (
-                        comps,
-                        initial,
-                        audio_possible,
-                        std::sync::Arc::new(document.clone()),
-                    )
+                    (comps, initial, std::sync::Arc::new(document.clone()))
                 })
         };
-        let Some((comps, initial, audio_possible, document)) = opened else {
+        let Some((comps, initial, document)) = opened else {
             // Nothing to render. The menu entry stays enabled — a project
             // with no composition is a state the user can leave — so say why
             // instead of doing nothing.
@@ -1449,7 +1449,7 @@ impl RavelWorkspace {
                 comps,
                 initial,
                 choices,
-                audio_possible,
+                crate::export::AUDIO_DECODE_AVAILABLE,
                 window,
                 cx,
             )

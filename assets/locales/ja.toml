@@ -950,7 +950,8 @@ suffix = "ファイル名の後置き"
 padding = "連番の桁数"
 overwrite = "既存のファイルを置き換える"
 audio = "音声を書き出す (WAV)"
-audio_hint = "このビルドは音声をデコードできないか、コンポジションに音声レイヤーがありません。"
+audio_no_decoder = "このビルドには FFmpeg が無く、音声をデコードできません。"
+audio_silent_composition = "このコンポジションには音声を持つレイヤーがありません。"
 
 [export.error]
 no_composition = "書き出せるコンポジションがありません。"

@@ -166,7 +166,7 @@ scene = "シーン"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
-expose_parameter = "パラメータを公開"
+expose_parameter = "パラメータを入力ポートに公開"
 delete_node = "ノードを削除"
 delete_edge = "エッジを削除"
 rename_port = "ポート名を変更"

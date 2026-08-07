@@ -285,7 +285,7 @@ REQ-RENDER-005 の「宣言の一覧を機械可読形式で取得できる」�
   何も変わらない操作（先頭行の「上へ」、同じ説明の再確定）は何も積まない
 - **プロジェクトを指す `PropertiesTarget` が要る。** 宣言はコンポジションにも
   レイヤーにもノードにも属さないので、選択では辿り着かない。
-  `CommandId::ProjectExposedParameters`（Cmd+Shift+E）が対象を設定して
+  `CommandId::ProjectExposedParameters`（Cmd+Shift+K）が対象を設定して
   Properties を開く。パネルが閉じていた場合に**新しく作られたパネルが
   設定済みの対象を読む**必要があり、`PropertiesGpuiPanel::new` が
   `SelectedPropertiesTarget` を初期値に採るようにした（Global の observer は

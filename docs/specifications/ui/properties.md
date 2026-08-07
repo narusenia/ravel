@@ -18,7 +18,7 @@
 | `Layers { comp, layer_ids }` | 同（2 枚以上） | 🔲 読み取り専用（件数と一致する値のみ） |
 | `Composition { comp }` | Outliner のコンプ行、コンプ管理コマンド | ✅ |
 | `MediaAsset { id }` | MediaBin の選択 | 🔲 プレースホルダ（`MEDIA-6`） |
-| `Project` | `CommandId::ProjectExposedParameters`（Cmd+Shift+E / コンポジションメニュー） | ✅ 公開パラメータ宣言 |
+| `Project` | `CommandId::ProjectExposedParameters`（Cmd+Shift+K / コンポジションメニュー） | ✅ 公開パラメータ宣言 |
 
 複数レイヤー選択を `Layer` と別 variant にしているのは、**一括編集がどの
 レイヤーにも適用先を持たないウィジェットから漏れ出さないようにする**ため。

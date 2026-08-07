@@ -66,7 +66,7 @@ toggle_media_bin = "Alt+8"
 settings = "Cmd+K"
 
 [project]
-exposed_parameters = "Cmd+Shift+E"
+exposed_parameters = "Cmd+Shift+K"
 
 [playback]
 toggle = "Space"

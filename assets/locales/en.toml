@@ -169,7 +169,7 @@ scene = "Scene"
 
 [panel.node_graph_menu]
 add_node = "Add Node"
-expose_parameter = "Expose Parameter"
+expose_parameter = "Expose Parameter as Input Port"
 delete_node = "Delete Node"
 delete_edge = "Delete Edge"
 rename_port = "Rename Port"

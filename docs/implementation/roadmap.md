@@ -438,7 +438,7 @@ Outliner は「表示のみ、D&D 不可」。ドロップダウン 1 つで到�
 | `EXPO-1〜4` | ✅ 公開パラメータ宣言（`exposed-parameters-plan.md`） |
 | `EXPORT-3` | ✅ **CLI（`ravel-cli render`。GPUI にリンクしない別バイナリ）** |
 | `EXPORT-4` | ✅ 音声のミックスダウンと多重化（REQ-RENDER-005 を回収） |
-| `EXPORT-5〜6` | 書き出し UI と文書 |
+| `EXPORT-5〜6` | ✅ 書き出し UI と文書 |
 | `EXPORT-7` | ✅ CLI の対話モード（`EXPORT-3` の列挙の上に載る層） |
 | `EXPO-5〜7` | ✅ 宣言の編集 UI と文書 |
 | `EXPR-1〜7` | ✅ 式言語（`expression-language-plan.md`） |

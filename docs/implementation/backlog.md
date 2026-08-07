@@ -72,8 +72,7 @@
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
-| EXPORT-5 | 書き出し UI（`EXPORT-3` / `DOCK-8` 完了で着手可能） | `render-export-plan.md` |
-| CICACHE-1 | sccache + R2 へ移す（R2 バケットと Secrets が要る） | `ci-cache-plan.md` |
+| CICACHE-2 | CI キャッシュの効果の計測と設定の詰め（`CICACHE-1` 完了で着手可能） | `ci-cache-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
@@ -554,16 +553,16 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | EXPORT-2 | ✅ | レンダーワーカーとキュー | #314 |
 | EXPORT-3 | ✅ | **CLI（`ravel-cli render`、別バイナリ）** | #325 |
 | EXPORT-4 | ✅ | 音声のミックスダウンと多重化 | #328 |
-| EXPORT-5 | 🟡 | 書き出し UI | EXPORT-3 ✅, DOCK-8 ✅ |
-| EXPORT-6 | ⬜ | 文書更新 | EXPORT-5 |
+| EXPORT-5 | ✅ | 書き出し UI | #332 |
+| EXPORT-6 | ✅ | 文書更新 | #335 |
 | EXPORT-7 | ✅ | CLI の対話モード | #330 |
 
 ### CI キャッシュ
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| CICACHE-1 | 🟡 | sccache を導入し `target/` のアーカイブを外す | R2 バケットと Secrets |
-| CICACHE-2 | ⬜ | 効果の計測と設定の詰め | CICACHE-1 |
+| CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
+| CICACHE-2 | 🟡 | 効果の計測と設定の詰め | CICACHE-1 ✅ |
 
 ### 式言語（REQ-CORE-014 / REQ-CORE-015）
 

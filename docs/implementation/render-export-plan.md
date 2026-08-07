@@ -1,6 +1,6 @@
 # 書き出し実装計画（REQ-RENDER-001 / REQ-RENDER-005）
 
-> **Status**: In progress — 2026-07-27（**2026-08-03 改訂**: CLI 先行、音声を対象化 /
+> **Status**: Done — 2026-08-08（全単位マージ済み）— 2026-07-27（**2026-08-03 改訂**: CLI 先行、音声を対象化 /
 > **2026-08-07 改訂**: CLI を別バイナリ化、対話モードを単位 7 へ分離）
 
 対象要件: REQ-RENDER-001（キューベースバックグラウンドレンダリング）、
@@ -247,8 +247,8 @@ GUI ダイアログ（単位 5）は後から載せる。
 | EXPORT-2 | ✅ レンダーワーカーとキュー | EXPORT-0, EXPORT-1, BLUR-3 |
 | EXPORT-3 | ✅ **CLI**（`ravel-cli render`） | EXPORT-2, EXPO-3 |
 | EXPORT-4 | ✅ 音声のミックスダウンと多重化 | EXPORT-2 |
-| EXPORT-5 | 書き出し UI（ダイアログ + レンダーキューパネル） | EXPORT-3, DOCK-8 |
-| EXPORT-6 | 文書更新 | EXPORT-5 |
+| EXPORT-5 | ✅ 書き出し UI（ダイアログ + レンダーキューパネル） | EXPORT-3, DOCK-8 |
+| EXPORT-6 | ✅ 文書更新 | EXPORT-5 |
 | EXPORT-7 | ✅ CLI の対話モード | EXPORT-3 |
 
 ### 単位 0: 永続化を GUI 非依存クレートへ抽出（`ravel-app` → 新クレート）

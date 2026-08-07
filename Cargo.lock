@@ -6012,6 +6012,7 @@ dependencies = [
  "crossbeam-channel",
  "earcut",
  "im",
+ "log",
  "rayon",
  "ron",
  "serde",
@@ -6021,6 +6022,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

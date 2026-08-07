@@ -177,4 +177,40 @@ mod tests {
             assert_eq!(events_passing(directives), 1, "{directives}");
         }
     }
+
+    /// The real path, which the two tests above do **not** exercise: gpui emits
+    /// this warning with `log::warn!`, not `tracing::warn!`
+    /// (`gpui/src/window/a11y.rs`). It reaches the filter at all only because
+    /// `SubscriberInitExt::try_init` installs a `LogTracer` when the
+    /// `tracing-log` feature is on — which it is, by default, through
+    /// `tracing-subscriber`. That is an implicit dependency of the suppression
+    /// on a default feature of a transitive crate, so it is pinned here: if the
+    /// bridge ever goes away, the directive silently stops doing anything and
+    /// only this test notices.
+    ///
+    /// Global rather than scoped because `log` has no thread-local default —
+    /// `LogTracer` routes into whichever subscriber is globally installed. This
+    /// is the only test in the crate that sets one.
+    #[test]
+    fn the_a11y_warning_is_dropped_when_it_arrives_through_the_log_facade() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(pin_quiet_targets(EnvFilter::new("info")))
+            .with(CountEvents(count.clone()));
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a global subscriber");
+        tracing_log::LogTracer::init().expect("the log bridge installs once");
+
+        log::warn!(
+            target: "gpui::window::a11y",
+            "expected an empty a11y tree update (only the root node), but got 47 nodes"
+        );
+        log::warn!(target: "ravel_core::logging", "something Ravel can act on");
+
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "the a11y warning must be dropped and the ordinary one kept"
+        );
+    }
 }

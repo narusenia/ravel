@@ -179,6 +179,21 @@ pub struct ProjectState {
     /// only in tests (a live worker thread breaks the deterministic gpui
     /// test scheduler).
     eval: Option<EvalService>,
+    /// The device the evaluation worker runs on, retained so a **second**
+    /// worker can be built on it.
+    ///
+    /// The render queue (`render-export-plan.md`, unit 5) needs its own
+    /// [`EvalWorkerHooks`] — sharing the interactive service's would put
+    /// export frames and preview frames in one cache, which is the coupling
+    /// that worker exists to avoid — but it must not open a second adapter:
+    /// REQ-GPU-001 puts the whole pipeline on one device, and `GpuContext` is
+    /// cheap to clone precisely so a second consumer shares it.
+    gpu: Option<GpuContext>,
+    /// The cache budget the evaluation worker answers to, retained for the
+    /// same reason: the render worker's evaluator gets a clone, so both
+    /// answer to one authority rather than two independent limits
+    /// (`cache-plan.md`, `CACHE-3`).
+    cache_budget: Option<SharedCacheBudget>,
     /// GPU initialization failure captured at startup. The workspace shows it
     /// after its Root exists, so adapter-less systems get a visible error
     /// instead of a constructor panic.
@@ -363,10 +378,10 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
 
 impl ProjectState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (eval, startup_gpu_error) = if EVAL_DISABLED_FOR_TESTS
+        let (eval, gpu, cache_budget, startup_gpu_error) = if EVAL_DISABLED_FOR_TESTS
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            (None, None)
+            (None, None, None, None)
         } else {
             match GpuContext::new_blocking() {
                 Ok(gpu_ctx) => {
@@ -386,8 +401,8 @@ impl ProjectState {
                     // once settings reach the runtime (`SET-8`).
                     let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
                     let eval = spawn_viewer_eval_service(
-                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx, budget.clone()),
-                        budget,
+                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone()),
+                        budget.clone(),
                         update_tx,
                     );
                     cx.spawn(async move |this, cx| {
@@ -402,11 +417,11 @@ impl ProjectState {
                         }
                     })
                     .detach();
-                    (Some(eval), None)
+                    (Some(eval), Some(gpu_ctx), Some(budget), None)
                 }
                 Err(error) => {
                     tracing::error!(%error, "GPU context initialization failed");
-                    (None, Some(error.to_string()))
+                    (None, None, None, Some(error.to_string()))
                 }
             }
         };
@@ -430,6 +445,8 @@ impl ProjectState {
             store,
             registry,
             eval,
+            gpu,
+            cache_budget,
             startup_gpu_error,
             compiled: None,
             pending_hint: InvalidationHint::None,
@@ -451,6 +468,19 @@ impl ProjectState {
 
     pub fn startup_gpu_error(&self) -> Option<&str> {
         self.startup_gpu_error.as_deref()
+    }
+
+    /// The device the evaluation worker runs on, for a second worker that
+    /// must share it (the render queue). `None` when there is no adapter, or
+    /// in tests, which is the same condition as `eval` being absent.
+    pub fn gpu_context(&self) -> Option<&GpuContext> {
+        self.gpu.as_ref()
+    }
+
+    /// The cache budget the evaluation worker answers to; see
+    /// [`Self::cache_budget`](Self::cache_budget) on the field.
+    pub fn cache_budget(&self) -> Option<&SharedCacheBudget> {
+        self.cache_budget.as_ref()
     }
 
     /// Generation of what the document-mirroring panels display; see

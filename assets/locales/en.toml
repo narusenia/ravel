@@ -985,9 +985,17 @@ not_offered = "not offered"
 completed_title = "Export finished"
 completed_message = "Frames written to"
 failed_title = "Export failed"
+warning_title = "Export warning"
 failed_message = "The render did not finish."
 audio_failed_message = "The frames were written, but the soundtrack could not be put in place."
 audio_exists_message = "A soundtrack is already there; turn on \"Replace existing files\" to overwrite it."
+
+# The same notices `ravel-cli` prints as `audio-not-rendered` and
+# `audio-source-skipped`. A render that drops sound never does so quietly.
+[export.warning]
+audio_not_rendered = "This composition has {count} layer(s) with audio, and the soundtrack was turned off, so the render is picture only."
+audio_no_decoder = "This composition has {count} layer(s) with audio, but this build has no FFmpeg and cannot decode any, so the render is picture only."
+audio_source_skipped = "The layer \"{layer}\" is silent in the mix: its media asset \"{asset}\" could not be loaded: {detail}"
 
 [render_queue]
 empty = "No renders yet"

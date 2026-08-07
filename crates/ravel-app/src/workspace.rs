@@ -1810,6 +1810,20 @@ fn show_render_event(event: &crate::export::RenderServiceEvent, window: &mut Win
         crate::export::RenderServiceEvent::Failed { message } => {
             show_export_failure(message.clone(), window, cx);
         }
+        // Not a refusal: the render is happening, and something about it is
+        // worth knowing. Kept on screen (`autohide(false)`) for the same
+        // reason `ravel-cli` prints its warnings — a silent deliverable is
+        // discovered far too late otherwise.
+        crate::export::RenderServiceEvent::Warning { message } => {
+            window.push_notification(
+                Notification::new()
+                    .with_type(NotificationType::Warning)
+                    .title(SharedString::from(t!("export.notice.warning_title")))
+                    .message(message.clone())
+                    .autohide(false),
+                cx,
+            );
+        }
     }
 }
 

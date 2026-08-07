@@ -977,9 +977,17 @@ not_offered = "対象外"
 completed_title = "書き出し完了"
 completed_message = "フレームの出力先"
 failed_title = "書き出し失敗"
+warning_title = "書き出しの警告"
 failed_message = "レンダリングが完了しませんでした。"
 audio_failed_message = "フレームは書き出せましたが、音声を所定の位置に置けませんでした。"
 audio_exists_message = "音声ファイルが既にあります。上書きするには「既存のファイルを置き換える」を有効にしてください。"
+
+# ravel-cli の audio-not-rendered / audio-source-skipped と同じ通知。
+# 音声を落とす書き出しは必ずその旨を伝える。
+[export.warning]
+audio_not_rendered = "このコンポジションには音声を持つレイヤーが {count} 件ありますが、音声の書き出しが無効なため映像のみになります。"
+audio_no_decoder = "このコンポジションには音声を持つレイヤーが {count} 件ありますが、このビルドには FFmpeg が無くデコードできないため映像のみになります。"
+audio_source_skipped = "レイヤー「{layer}」はミックスで無音です: メディアアセット「{asset}」を読み込めませんでした: {detail}"
 
 [render_queue]
 empty = "ジョブがありません"

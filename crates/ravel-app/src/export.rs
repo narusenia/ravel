@@ -81,9 +81,80 @@ pub const AUDIO_DECODE_AVAILABLE: bool = cfg!(feature = "ffmpeg");
 /// Scoped to the composition being rendered: the audio option means nothing
 /// for a picture-only composition, whatever the rest of the project holds.
 pub fn composition_has_audio(document: &Document, comp: CompId) -> bool {
-    document
-        .get_composition(comp)
-        .is_some_and(|comp| comp.layers.iter().any(|layer| layer.audio.is_some()))
+    audio_layer_count(document, comp) > 0
+}
+
+/// How many layers of `comp` carry audio.
+fn audio_layer_count(document: &Document, comp: CompId) -> usize {
+    document.get_composition(comp).map_or(0, |comp| {
+        comp.layers
+            .iter()
+            .filter(|layer| layer.audio.is_some())
+            .count()
+    })
+}
+
+/// Why a render whose composition has sound will not carry any.
+///
+/// The GUI half of `ravel-cli`'s `Warning::AudioNotRendered`: two different
+/// situations for the reader, one they chose and one their build imposed,
+/// and both worth saying out loud. Silence that nobody asked for is the
+/// failure this exists to prevent — the plan's unit 4 requires a render that
+/// drops a composition's sound to say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SilentRender {
+    /// The dialog's soundtrack box was cleared.
+    NotAsked,
+    /// This build has no FFmpeg, so nothing can be decoded.
+    NoDecoder,
+}
+
+impl SilentRender {
+    /// Locale key of the sentence, which carries a `{count}` the caller
+    /// fills with the layer count.
+    pub fn message_key(self) -> &'static str {
+        match self {
+            Self::NotAsked => "export.warning.audio_not_rendered",
+            Self::NoDecoder => "export.warning.audio_no_decoder",
+        }
+    }
+}
+
+/// Whether this export leaves a composition's sound out, and why.
+///
+/// `None` when there is nothing to leave out (a picture-only composition) or
+/// nothing is left out. The layer count rides along for the sentence, so a
+/// project with one stray audio layer reads differently from one built around
+/// a mix.
+///
+/// A function of the document and the request alone — no queue, no device —
+/// which is what lets it be asked before anything can fail, and tested
+/// without either, exactly as `ravel-cli`'s `plan_audio` is.
+pub fn silent_render(
+    document: &Document,
+    comp: CompId,
+    audio_requested: bool,
+) -> Option<(SilentRender, usize)> {
+    let layers = audio_layer_count(document, comp);
+    if layers == 0 {
+        return None;
+    }
+    if !audio_requested {
+        return Some((SilentRender::NotAsked, layers));
+    }
+    (!AUDIO_DECODE_AVAILABLE).then_some((SilentRender::NoDecoder, layers))
+}
+
+/// One audio source that was left out of an otherwise complete mix, named the
+/// way the user will read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkippedAudioSource {
+    /// The layer's name, or its id when the layer is gone.
+    pub layer: String,
+    /// The media asset it names.
+    pub asset: String,
+    /// Why it could not be loaded.
+    pub detail: String,
 }
 
 /// One export, as the dialog hands it over.
@@ -133,6 +204,11 @@ pub enum RenderServiceEvent {
     /// The export did not happen, or did not finish. The message is already
     /// localized.
     Failed { message: SharedString },
+    /// Something the user should know that does not stop the render — a
+    /// deliverable that will be silent, a source that could not be decoded.
+    /// The GUI's answer to `ravel-cli`'s warning stream, and the reason a
+    /// dropped soundtrack is never quiet about it. Already localized.
+    Warning { message: SharedString },
 }
 
 /// The session's render queue.
@@ -189,7 +265,25 @@ impl RenderService {
     /// sound is reported before a long render rather than after it), on the
     /// background executor — mixing decodes every audio asset of the range
     /// and must not touch the UI thread.
+    ///
+    /// The mix is one call for the whole range, so a job cannot be cancelled
+    /// while it runs — the row does not exist yet. Left that way on purpose:
+    /// splitting the mix into cancellable chunks buys nothing until a range
+    /// is long enough for the wait to be felt, and the queue's own
+    /// cancellation already covers every frame after it.
     pub fn submit(&mut self, job: ExportJob, cx: &mut Context<Self>) {
+        // Before anything can refuse the job: a deliverable that will be
+        // silent is a fact about the *request*, so it is said even when the
+        // submission then fails for want of a device.
+        if let Some((reason, layers)) =
+            silent_render(&job.document, job.request.comp, job.request.audio)
+        {
+            cx.emit(RenderServiceEvent::Warning {
+                message: SharedString::from(
+                    t!(reason.message_key()).replace("{count}", &layers.to_string()),
+                ),
+            });
+        }
         if let Err(message) = self.ensure_queue(cx) {
             cx.emit(RenderServiceEvent::Failed { message });
             return;
@@ -201,7 +295,22 @@ impl RenderService {
         cx.spawn(async move |this, cx| {
             let prepared = prepare.await;
             let _ = this.update(cx, |this, cx| match prepared {
-                Ok(audio) => this.enqueue(job, audio, cx),
+                Ok(prepared) => {
+                    // The mix is the only place a source's failure is seen,
+                    // and it is seen on a background thread; the sentences are
+                    // built here, where the locale catalog and the user are.
+                    for skipped in &prepared.skipped {
+                        cx.emit(RenderServiceEvent::Warning {
+                            message: SharedString::from(
+                                t!("export.warning.audio_source_skipped")
+                                    .replace("{layer}", &skipped.layer)
+                                    .replace("{asset}", &skipped.asset)
+                                    .replace("{detail}", &skipped.detail),
+                            ),
+                        });
+                    }
+                    this.enqueue(job, prepared.pending, cx)
+                }
                 Err(message) => cx.emit(RenderServiceEvent::Failed {
                     message: SharedString::from(message),
                 }),
@@ -291,7 +400,7 @@ impl RenderService {
         &self,
         job: &ExportJob,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Task<Result<Option<PendingAudio>, String>>> {
+    ) -> Option<gpui::Task<Result<PreparedAudio, String>>> {
         if !job.request.audio || !AUDIO_DECODE_AVAILABLE {
             return None;
         }
@@ -448,15 +557,17 @@ pub fn render_service(cx: &App) -> Option<Entity<RenderService>> {
 /// A source that cannot be decoded is a **warning**, not a failure: the
 /// picture is still worth having and the mix is still the right length, so
 /// the deliverable stays in sync. This mirrors `ravel-cli`'s `render_audio`,
-/// which is the reference for the whole soundtrack path; the notes go to the
-/// log here because a render started from a dialog has no report stream.
+/// which is the reference for the whole soundtrack path — including that the
+/// notes reach the user: they are carried back in
+/// [`PreparedAudio::skipped`] and become notifications, because a source that
+/// went missing only in the log is a deliverable that is quietly wrong.
 fn write_soundtrack(
     document: &Document,
     comp: CompId,
     range: std::ops::Range<u64>,
     destination: PathBuf,
     overwrite: OverwritePolicy,
-) -> Result<Option<PendingAudio>, String> {
+) -> Result<PreparedAudio, String> {
     // The frames' conflict check knows nothing about the WAV beside them
     // (`RenderOutput::conflicts` describes frames), so a render that must not
     // overwrite has to ask about this name itself.
@@ -473,8 +584,9 @@ fn write_soundtrack(
         output_channels: AUDIO_CHANNELS,
     };
     let Some(mix) = ravel_audio::offline::mix_range(document, comp, range, &config) else {
-        return Ok(None);
+        return Ok(PreparedAudio::default());
     };
+    let mut skipped_sources = Vec::with_capacity(mix.skipped.len());
     for skipped in &mix.skipped {
         tracing::warn!(
             layer = skipped.layer_id.raw(),
@@ -482,6 +594,17 @@ fn write_soundtrack(
             reason = %skipped.reason,
             "an audio source was left out of the render"
         );
+        skipped_sources.push(SkippedAudioSource {
+            // The name the user knows the layer by; the id is the fallback
+            // for a layer the document no longer has.
+            layer: document
+                .get_composition(comp)
+                .and_then(|comp| comp.layers.iter().find(|l| l.id == skipped.layer_id))
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| skipped.layer_id.raw().to_string()),
+            asset: skipped.asset_id.clone(),
+            detail: skipped.reason.clone(),
+        });
     }
 
     // The image encoder makes this directory in `begin`, and the sound is
@@ -503,10 +626,26 @@ fn write_soundtrack(
         .map_err(|error| error.to_string())?;
     writer.finish().map_err(|error| error.to_string())?;
 
-    Ok(Some(PendingAudio {
-        destination,
-        temporary,
-    }))
+    Ok(PreparedAudio {
+        pending: Some(PendingAudio {
+            destination,
+            temporary,
+        }),
+        skipped: skipped_sources,
+    })
+}
+
+/// What a finished mix leaves for the UI thread: the file to publish, and
+/// everything the user has to be told about it.
+#[derive(Default)]
+struct PreparedAudio {
+    /// The written mix, or `None` when the composition turned out to carry no
+    /// audio after all.
+    pending: Option<PendingAudio>,
+    /// Sources that could not be decoded. Structured rather than localized
+    /// here: this is built on the background executor, and the sentences
+    /// belong where the user is.
+    skipped: Vec<SkippedAudioSource>,
 }
 
 /// A finished mix, written beside where it belongs and waiting for the render
@@ -574,4 +713,159 @@ fn temporary_path(destination: &Path) -> PathBuf {
         .into_owned();
     let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
     destination.with_file_name(format!(".{name}.{}-{serial}.part", std::process::id()))
+}
+
+// Named imports rather than a `use super::*;` glob: this file expands the
+// gpui proc macros, and the glob crashes rustc 1.95 there (the same
+// constraint `export_dialog.rs` and `panels/mod.rs` record).
+#[cfg(test)]
+mod tests {
+    use super::{
+        AUDIO_DECODE_AVAILABLE, ExportJob, RenderService, RenderServiceEvent, SilentRender,
+        silent_render,
+    };
+    use gpui::AppContext as _;
+    use ravel_core::composition::{AudioSource, Composition, Document, Layer};
+    use ravel_core::graph::Graph;
+    use ravel_core::id::{CompId, LayerId};
+    use ravel_core::types::FrameRate;
+    use ravel_ui::export::{ExportRequest, ExportSettings};
+    use std::sync::Arc;
+
+    const FPS: FrameRate = FrameRate { num: 30, den: 1 };
+    const DURATION: u64 = 12;
+
+    fn comp_id() -> CompId {
+        CompId::new(1)
+    }
+
+    /// A one-layer composition, with or without a soundtrack on that layer.
+    fn document(with_audio: bool) -> Arc<Document> {
+        let mut layer = Layer::new(LayerId::new(1), "voice over", Graph::new());
+        if with_audio {
+            layer.audio = Some(AudioSource::new("voice", 0));
+        }
+        let mut comp = Composition::new(comp_id(), "shot 010", (32, 18), FPS, DURATION);
+        comp.layers.push_back(layer);
+        Arc::new(Document::new(Graph::new()).with_composition(comp))
+    }
+
+    fn request(directory: &std::path::Path, audio: bool) -> ExportRequest {
+        let mut settings =
+            ExportSettings::for_composition(comp_id(), "shot 010", DURATION, directory.to_owned());
+        settings.audio = audio;
+        settings.resolve().expect("the default form resolves")
+    }
+
+    /// The GUI's half of `ravel-cli`'s
+    /// `a_project_with_audio_warns_that_the_render_is_silent`: a composition
+    /// with sound rendered without it is a warning, and the reason says which
+    /// of the two situations it is.
+    #[test]
+    fn a_composition_with_sound_rendered_without_it_is_a_warning() {
+        assert_eq!(
+            silent_render(&document(true), comp_id(), false),
+            Some((SilentRender::NotAsked, 1)),
+            "clearing the soundtrack box is still worth saying out loud",
+        );
+
+        // Asked for: whether it happens is the build's answer, not the
+        // project's, and the two reasons must not be confused.
+        let asked = silent_render(&document(true), comp_id(), true);
+        if AUDIO_DECODE_AVAILABLE {
+            assert_eq!(asked, None, "the soundtrack is being written");
+        } else {
+            assert_eq!(asked, Some((SilentRender::NoDecoder, 1)));
+        }
+
+        // A picture-only composition has nothing to lose and says nothing —
+        // the CLI's `a_project_without_audio_says_nothing`.
+        assert_eq!(silent_render(&document(false), comp_id(), false), None);
+        assert_eq!(silent_render(&document(false), comp_id(), true), None);
+    }
+
+    #[derive(Default)]
+    struct EventRecorder(Vec<RenderServiceEvent>);
+
+    fn record(
+        service: &gpui::Entity<RenderService>,
+        cx: &mut gpui::TestAppContext,
+    ) -> gpui::Entity<EventRecorder> {
+        let recorder = cx.new(|_| EventRecorder::default());
+        recorder.update(cx, |_, cx| {
+            cx.subscribe(
+                service,
+                |recorder, _service, event: &RenderServiceEvent, _cx| {
+                    recorder.0.push(event.clone());
+                },
+            )
+            .detach();
+        });
+        recorder
+    }
+
+    fn warnings(
+        recorder: &gpui::Entity<EventRecorder>,
+        cx: &mut gpui::TestAppContext,
+    ) -> Vec<String> {
+        recorder.read_with(cx, |recorder, _| {
+            recorder
+                .0
+                .iter()
+                .filter_map(|event| match event {
+                    RenderServiceEvent::Warning { message } => Some(message.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    /// The warning is on the submission path itself, so it reaches the user
+    /// whatever happens to the job afterwards — this session has no GPU, and
+    /// the export fails, and the notice about the missing sound still arrives.
+    #[gpui::test]
+    fn submitting_an_export_that_drops_the_sound_warns(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let service = cx.new(RenderService::new);
+        let recorder = record(&service, cx);
+
+        service.update(cx, |service, cx| {
+            service.submit(
+                ExportJob {
+                    request: request(dir.path(), false),
+                    document: document(true),
+                    composition: "shot 010".to_owned(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            warnings(&recorder, cx).len(),
+            1,
+            "a composition with sound exported without it must say so exactly once",
+        );
+    }
+
+    /// And nothing is said when there is nothing to say: a picture-only
+    /// composition must not train the user to dismiss the notice.
+    #[gpui::test]
+    fn submitting_a_picture_only_export_says_nothing(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let service = cx.new(RenderService::new);
+        let recorder = record(&service, cx);
+
+        service.update(cx, |service, cx| {
+            service.submit(
+                ExportJob {
+                    request: request(dir.path(), false),
+                    document: document(false),
+                    composition: "shot 010".to_owned(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(warnings(&recorder, cx).is_empty());
+    }
 }

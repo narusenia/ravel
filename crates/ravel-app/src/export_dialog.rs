@@ -797,6 +797,7 @@ mod form_tests {
 
 #[cfg(test)]
 mod locale_tests {
+    use crate::export::SilentRender;
     use ravel_ui::export::ExportError;
 
     fn catalog(locale: &str) -> toml::Table {
@@ -853,8 +854,10 @@ mod locale_tests {
             "export.notice.completed_message",
             "export.notice.failed_title",
             "export.notice.failed_message",
+            "export.notice.warning_title",
             "export.notice.audio_failed_message",
             "export.notice.audio_exists_message",
+            "export.warning.audio_source_skipped",
             "panel.render_queue",
             "render_queue.empty",
             "render_queue.clear_finished",
@@ -882,6 +885,13 @@ mod locale_tests {
             ]
             .into_iter()
             .map(ExportError::message_key),
+        );
+        // Likewise for the reasons a render comes out silent: a new one must
+        // not be able to reach a notification without a sentence.
+        keys.extend(
+            [SilentRender::NotAsked, SilentRender::NoDecoder]
+                .into_iter()
+                .map(SilentRender::message_key),
         );
 
         for locale in ["en", "ja"] {

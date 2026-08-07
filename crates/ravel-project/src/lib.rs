@@ -58,6 +58,7 @@ pub mod manifest;
 pub mod migration;
 pub mod paths;
 pub mod settings;
+pub mod subgraph_template;
 pub mod timestamp;
 pub mod ui_state;
 

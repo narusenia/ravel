@@ -118,11 +118,14 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
-use crate::composition::{AssetKind, AssetPath, Document, MediaAssetEntry, graph_walk};
-use crate::exposed::{ExposedParameter, ExposedType, ExposedValue, KeyRename};
+use crate::composition::{
+    AssetKind, AssetPath, Composition, Document, MediaAssetEntry, graph_walk,
+};
+use crate::eval::EvalContext;
+use crate::exposed::{ExposedBinding, ExposedParameter, ExposedType, ExposedValue, KeyRename};
 use crate::graph::{Graph, Node, Parameter, ParameterValue};
 use crate::id::NodeId;
-use crate::types::{Color, Vec2, Vec3, Vec4};
+use crate::types::{Color, FrameRate, Vec2, Vec3, Vec4};
 
 // ===========================================================================
 // Reporting
@@ -348,6 +351,125 @@ pub fn resolve(document: &Document) -> Vec<BindingIssue> {
             }
         })
         .collect()
+}
+
+/// The value a declaration binding to `binding` should default to: the value
+/// that parameter has in `document` at `frame`.
+///
+/// This is the other half of "expose this parameter": an editor knows the node
+/// and the key the user clicked, and needs the *declaration* that describes it
+/// — which type it belongs to, and what the caller gets when they supply
+/// nothing. Deriving both here rather than in the editor keeps one mapping
+/// between a [`ParameterValue`] and an [`ExposedValue`] in the codebase; a
+/// second one written in a panel would decide the type differently and mint
+/// declarations [`apply`] refuses.
+///
+/// The type it picks is the one [`assign`] writes back through:
+///
+/// | parameter | seeded as |
+/// |---|---|
+/// | `Float` / `Int` / `Bool` / `String` | the same constant |
+/// | `Channel` | [`ExposedType::Float`] |
+/// | `Channel2` / `Channel3` | [`ExposedType::Vec2`] / [`ExposedType::Vec3`] |
+/// | `Channel4` | [`ExposedType::Color`] — what a four-channel parameter is presented as |
+/// | a media node's `asset_id` | [`ExposedType::Media`], carrying the asset's current path |
+///
+/// `None` means the parameter has no place in an external contract at all:
+/// the node or the key is gone, the value is a `PathPoints` or a `Curve` (the
+/// exclusions the module documentation states), or it is a media node's
+/// `asset_id` naming an asset the document does not hold — there is no path to
+/// default to, and inventing an empty one would declare a contract that
+/// resolves to nothing.
+///
+/// # This is not the inverse of [`assign`]
+///
+/// The type it seeds is the one `assign` writes back through, but a value it
+/// seeds is not one `assign` will necessarily write: a component driven by
+/// keyframes or an expression can be *read* and cannot be *written*, so a
+/// declaration seeded over one lands only partially (or not at all) and
+/// [`resolve`] reports it as
+/// [`BindingIssueReason::AnimatedComponents`]. Declaring such a parameter is
+/// still worth allowing — the contract lists the input and says why it does
+/// not take — so the refusal belongs in the report, not here.
+///
+/// **`frame` is what makes that default a number worth having.** An animated
+/// component is sampled there, so the declaration's default is the value the
+/// render would produce at that frame rather than an unconditional `0.0` that
+/// a caller omitting `--param` would silently get. Callers pass the frame the
+/// user is looking at (in the editor, the playhead's layer-local frame). A
+/// source that has no value yet — `NodeOutput`, `AudioReactive` — samples as
+/// [`ChannelSource::DEFAULT_VALUE`], the same value a render reads from it.
+pub fn seed_value(
+    document: &Document,
+    binding: &ExposedBinding,
+    frame: u64,
+) -> Option<ExposedValue> {
+    let (node, comp) = find_node_with_basis(document, binding.node)?;
+    let current = node
+        .parameters
+        .iter()
+        .find(|parameter| parameter.key == binding.key)?;
+
+    if MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) && binding.key == ASSET_REFERENCE_KEY {
+        let ParameterValue::String(asset) = &current.value else {
+            return None;
+        };
+        return document
+            .media_assets
+            .get(asset)
+            .map(|entry| ExposedValue::Media(entry.path.clone()));
+    }
+
+    let ctx = seed_context(document, comp, frame);
+    let at = |channel: &AnimationChannel| sample_for_seed(channel, &ctx);
+
+    Some(match &current.value {
+        ParameterValue::Float(v) => ExposedValue::Float(*v),
+        ParameterValue::Int(v) => ExposedValue::Int(*v),
+        ParameterValue::Bool(v) => ExposedValue::Bool(*v),
+        ParameterValue::String(v) => ExposedValue::String(v.clone()),
+        ParameterValue::Channel(c) => ExposedValue::Float(at(c)),
+        ParameterValue::Channel2(c) => ExposedValue::Vec2(Vec2(at(&c[0]), at(&c[1]))),
+        ParameterValue::Channel3(c) => ExposedValue::Vec3(Vec3(at(&c[0]), at(&c[1]), at(&c[2]))),
+        ParameterValue::Channel4(c) => ExposedValue::Color(Color {
+            r: at(&c[0]),
+            g: at(&c[1]),
+            b: at(&c[2]),
+            a: at(&c[3]),
+        }),
+        ParameterValue::PathPoints(_) | ParameterValue::Curve(_) => return None,
+    })
+}
+
+/// The value `channel` has at `ctx`'s frame, whatever drives it.
+///
+/// A non-finite sample falls back to `0.0`: [`ExposedParameter::new`] refuses a
+/// non-finite default, so passing one through would turn "expose this
+/// parameter" into an error the user cannot act on.
+fn sample_for_seed(channel: &AnimationChannel, ctx: &EvalContext) -> f32 {
+    let value = channel.evaluate(ctx.sample_frame(), ctx);
+    if value.is_finite() { value } else { 0.0 }
+}
+
+/// The basis an animated component is sampled against: `comp`'s frame rate and
+/// resolution at `frame`.
+///
+/// A node in the document's flat graph belongs to no composition, so the root
+/// composition's basis stands in — it is the only timeline that graph could be
+/// rendered under. With no composition at all there is nothing to stand in for;
+/// keyframes still sample correctly (they are indexed in frames) and only an
+/// expression reading the canvas sees the placeholder.
+fn seed_context(document: &Document, comp: Option<&Composition>, frame: u64) -> EvalContext {
+    let comp = comp.or_else(|| {
+        document
+            .root_comp
+            .and_then(|id| document.get_composition(id))
+            .map(|comp| &**comp)
+    });
+    match comp {
+        Some(comp) => EvalContext::new(frame, comp.frame_rate, comp.resolution),
+        None => EvalContext::new(frame, FrameRate::new(30, 1), (1, 1)),
+    }
 }
 
 /// What inspecting one declaration found: the write it produces, and the part
@@ -705,7 +827,7 @@ enum Assignment {
 ///
 /// [`ExposedType::Media`] has no pairing here: a media reference is not a
 /// value a parameter holds but an entry in the document's asset table, which
-/// is EXPO-4's job (`docs/implementation/exposed-parameters-plan.md`).
+/// is EXPO-4's job (`docs/implementation/done/exposed-parameters-plan.md`).
 fn assign(value: &ExposedValue, current: &ParameterValue) -> Option<Assignment> {
     match (value, current) {
         (ExposedValue::Float(v), ParameterValue::Float(_)) => {
@@ -818,14 +940,26 @@ fn parameter_kind(value: &ParameterValue) -> &'static str {
 /// a binding a stable reference in the first place — and what lets this search
 /// stop at the first hit.
 fn find_node(document: &Document, id: NodeId) -> Option<&Arc<Node>> {
+    find_node_with_basis(document, id).map(|(node, _)| node)
+}
+
+/// The same search, also reporting the composition the node was found in —
+/// the frame rate and resolution [`seed_value`] samples an animated component
+/// against. `None` for the composition means the document's flat graph, which
+/// belongs to no composition.
+fn find_node_with_basis(
+    document: &Document,
+    id: NodeId,
+) -> Option<(&Arc<Node>, Option<&Composition>)> {
     if let Some(node) = node_in(&document.graph, id) {
-        return Some(node);
+        return Some((node, None));
     }
-    document
-        .compositions
-        .values()
-        .flat_map(|comp| comp.layers.iter())
-        .find_map(|layer| node_in(&layer.network, id))
+    document.compositions.values().find_map(|comp| {
+        comp.layers
+            .iter()
+            .find_map(|layer| node_in(&layer.network, id))
+            .map(|node| (node, Some(&**comp)))
+    })
 }
 
 fn node_in(graph: &Graph, id: NodeId) -> Option<&Arc<Node>> {
@@ -1989,5 +2123,174 @@ mod tests {
         )]));
         let applied = apply(document.clone(), &HashMap::new(), AssetContext::default()).unwrap();
         assert_eq!(applied.document, document);
+    }
+
+    // ---- seeding a declaration from a parameter (EXPO-5) ------------------
+
+    fn seed(document: &Document, node: NodeId, key: &str) -> Option<ExposedValue> {
+        seed_value(document, &ExposedBinding::new(node, key), 0)
+    }
+
+    #[test]
+    fn a_parameter_seeds_the_constant_it_holds() {
+        let document = document(ExposedParameters::new());
+        assert_eq!(
+            seed(&document, title(), "text"),
+            Some(ExposedValue::String("Ravel".into()))
+        );
+        assert_eq!(
+            seed(&document, title(), "scale"),
+            Some(ExposedValue::Float(1.0))
+        );
+        assert_eq!(
+            seed(&document, title(), "offset"),
+            Some(ExposedValue::Vec2(Vec2(0.0, 0.0)))
+        );
+    }
+
+    /// [`title_node`] with `key` holding `value` instead.
+    fn with_parameter(document: &Document, key: &str, value: ParameterValue) -> Document {
+        let mut node = title_node();
+        node.parameters
+            .iter_mut()
+            .find(|parameter| parameter.key == key)
+            .expect("the key is one title_node declares")
+            .value = value;
+        with_network(document, Graph::new().add_node(node).unwrap())
+    }
+
+    /// The property that makes this the right place for the mapping: a
+    /// declaration seeded from a parameter always writes back to it. If the
+    /// panel invented its own pairing it could mint a declaration `apply`
+    /// refuses, and the user would see a contract that never resolves.
+    #[test]
+    fn a_seeded_declaration_resolves_against_the_parameter_it_came_from() {
+        let node = Node::new(title(), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("count", ParameterValue::Int(7))
+            .with_param("on", ParameterValue::Bool(true))
+            .with_param("depth", ParameterValue::Float(2.5))
+            .with_param(
+                "triple",
+                ParameterValue::Channel3([
+                    AnimationChannel::constant(1.0),
+                    AnimationChannel::constant(2.0),
+                    AnimationChannel::constant(3.0),
+                ]),
+            )
+            .with_param(
+                "tint",
+                ParameterValue::Channel4([
+                    AnimationChannel::constant(0.1),
+                    AnimationChannel::constant(0.2),
+                    AnimationChannel::constant(0.3),
+                    AnimationChannel::constant(1.0),
+                ]),
+            );
+        let base = with_network(
+            &document(ExposedParameters::new()),
+            Graph::new().add_node(node).unwrap(),
+        );
+
+        let mut set = ExposedParameters::new();
+        for key in ["count", "on", "depth", "triple", "tint"] {
+            let binding = ExposedBinding::new(title(), key);
+            let value = seed_value(&base, &binding, 0).expect("every kind here is exposable");
+            set.insert(
+                ExposedParameter::inferred(key, value, binding).expect("the seed is finite"),
+            )
+            .expect("the keys differ");
+        }
+        assert_eq!(
+            set.get("tint").map(ExposedParameter::value_type),
+            Some(ExposedType::Color),
+            "a four-channel parameter is presented as a colour, so it is declared as one"
+        );
+
+        let document = base.with_exposed_parameters(set);
+        assert_eq!(
+            resolve(&document),
+            Vec::new(),
+            "a declaration seeded from a parameter binds to it cleanly"
+        );
+    }
+
+    /// An animated component has no constant to read, but it does have a
+    /// value: the one the render produces at the frame the user is looking at.
+    /// Seeding `0.0` instead would make the declaration's default — what a
+    /// caller gets when they omit `--param` — a number nothing in the document
+    /// ever chose.
+    ///
+    /// The declaration is still allowed: `resolve` is what tells the user it
+    /// will not drive that component.
+    #[test]
+    fn an_animated_component_seeds_its_value_at_the_frame() {
+        let document = with_parameter(
+            &document(ExposedParameters::new()),
+            "scale",
+            ParameterValue::Channel(keyframed()),
+        );
+        let binding = ExposedBinding::new(title(), "scale");
+        // `keyframed` runs 1.0 at frame 0 to 5.0 at frame 30, linearly.
+        assert_eq!(
+            seed_value(&document, &binding, 0),
+            Some(ExposedValue::Float(1.0))
+        );
+        assert_eq!(
+            seed_value(&document, &binding, 15),
+            Some(ExposedValue::Float(3.0)),
+            "the seed follows the playhead, not the start of the curve"
+        );
+
+        let value = seed_value(&document, &binding, 0).unwrap();
+        let document =
+            document.with_exposed_parameters(declarations([ExposedParameter::inferred(
+                "scale", value, binding,
+            )
+            .unwrap()]));
+        assert_eq!(
+            resolve(&document)
+                .into_iter()
+                .map(|issue| issue.reason)
+                .collect::<Vec<_>>(),
+            [BindingIssueReason::AnimatedComponents {
+                components: vec![0]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_media_reference_seeds_the_path_the_asset_table_holds() {
+        let document = media_document();
+        assert_eq!(
+            seed(&document, media_node(), "asset_id"),
+            Some(ExposedValue::Media(AssetPath::Absolute(
+                "/footage/original.mov".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn nothing_that_cannot_be_an_external_contract_seeds_a_value() {
+        let base = document(ExposedParameters::new());
+        assert_eq!(seed(&base, title(), "absent"), None);
+        assert_eq!(seed(&base, NodeId::new(404), "text"), None);
+
+        let with_path = with_parameter(&base, "text", ParameterValue::PathPoints(Vec::new()));
+        assert_eq!(seed(&with_path, title(), "text"), None);
+
+        // A media node whose asset_id names nothing the document holds has no
+        // path to default to, so there is no contract to declare yet.
+        let orphan = with_network(
+            &media_document(),
+            Graph::new()
+                .add_node(
+                    Node::new(media_node(), "media")
+                        .with_output("frame", DataTypeId::FRAME_BUFFER)
+                        .with_param("asset_id", ParameterValue::String("never imported".into())),
+                )
+                .unwrap(),
+        );
+        assert_eq!(seed(&orphan, media_node(), "asset_id"), None);
     }
 }

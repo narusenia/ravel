@@ -599,21 +599,37 @@ pub enum DocumentValidationError {
 pub const MAX_SUBNET_DEPTH: usize = 64;
 
 fn check_subnet_depth(graph: &Graph) -> Result<(), DocumentValidationError> {
+    if subnet_depth_exceeds(graph, MAX_SUBNET_DEPTH) {
+        return Err(DocumentValidationError::SubnetDepthExceeded {
+            limit: MAX_SUBNET_DEPTH,
+        });
+    }
+    Ok(())
+}
+
+/// Whether `graph` nests subnet ownership boundaries more than `limit` deep.
+///
+/// Public because the document is not the only thing that has to hold this
+/// line: a `.ravtpl` carries a graph that will *become* part of a document
+/// ([`crate::subgraph_template`]), and checking it there with a second walk
+/// would be a second place for the two to disagree.
+///
+/// The walk keeps its own stack rather than recursing, so measuring a graph
+/// too deep to recurse over cannot itself overflow.
+pub fn subnet_depth_exceeds(graph: &Graph, limit: usize) -> bool {
     let mut pending = vec![(graph, 0usize)];
     while let Some((graph, depth)) = pending.pop() {
         for node in graph.nodes() {
             if let Some(subnet) = node.subnet.as_deref() {
                 let nested_depth = depth + 1;
-                if nested_depth > MAX_SUBNET_DEPTH {
-                    return Err(DocumentValidationError::SubnetDepthExceeded {
-                        limit: MAX_SUBNET_DEPTH,
-                    });
+                if nested_depth > limit {
+                    return true;
                 }
                 pending.push((subnet, nested_depth));
             }
         }
     }
-    Ok(())
+    false
 }
 
 /// Node ids must be document-globally unique (REQ-LAYER-009): processors

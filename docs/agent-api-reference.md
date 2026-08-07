@@ -450,6 +450,19 @@ ExposedValue::{Float, Int, Bool, String, Vec2, Vec3, Vec4, Color, Media(AssetPat
 
 ExposedParameters::{new, from_declarations([..]), insert(decl), get(name),
                     contains(name), iter, len, is_empty}
+
+// Editing (EXPO-5). The uniqueness invariant lives here, not in the panel.
+ExposedParameters::remove(name)             -> Option<ExposedParameter>
+ExposedParameters::rename(from, to)         -> Result<(), ExposedParameterError>
+    // trims `to`; EmptyName on blank, DuplicateName on a taken name (the set
+    // is left unchanged — a colliding rename is REFUSED, never disambiguated),
+    // UnknownName when `from` is not declared. Renaming to its own name is Ok.
+ExposedParameters::set_description(name, text) -> Result<(), _>
+ExposedParameters::shift(name, offset: i32) -> Result<bool, _>   // clamped
+    // Ok(false) when nothing moved, so a no-op records no undo step.
+ExposedParameters::position(name)           -> Option<usize>
+ExposedParameters::bound_to(NodeId, key)    -> Option<&ExposedParameter>
+    // "is this parameter already exposed?" — what a parameter row asks.
 ```
 
 Three invariants, enforced by the constructors **and** by `Deserialize`: names
@@ -521,6 +534,34 @@ ExposedListing::of_declarations(&ExposedParameters)   // no document, resolved: 
 ExposedListingEntry { name, value_type, default, description, resolved }
 ```
 
+```rust
+// ravel_core::exposed::apply — the other half of "expose this parameter"
+seed_value(&Document, &ExposedBinding, frame: u64) -> Option<ExposedValue>
+```
+
+`seed_value` is the **one** mapping between a `ParameterValue` and the value
+space of the external contract: it picks the type the private `assign` that
+`apply` writes through would accept, so a declaration built from a seed is one
+`apply` takes rather than refuses. `Float`/`Int`/`Bool`/`String` seed the same
+constant; `Channel` seeds `Float`; `Channel2`/`Channel3` seed `Vec2`/`Vec3`;
+`Channel4` seeds `Color` (what a four-channel parameter is presented as); a
+media node's `asset_id` seeds `Media` with the asset table's current path.
+`None` means the parameter has no place in a contract at all — node or key
+gone, a `PathPoints`/`Curve`, or a media node naming an asset the document does
+not hold. **Do not write a second such mapping in a panel** — the two would
+drift and the second would mint declarations `apply` refuses.
+
+It is **not** the inverse of `assign`, and nothing should be built on the
+assumption that it is: a component driven by keyframes or an expression can be
+read and cannot be written, so a seed taken over one produces a declaration
+that lands partially or not at all, which `resolve` reports as
+`AnimatedComponents`. Such a component is sampled at `frame` — the value the
+render produces there, `ChannelSource::DEFAULT_VALUE` for a source with no
+value yet — so the declaration's default is a number the document chose rather
+than an unconditional `0.0` a caller omitting `--param` would inherit. Callers
+pass the frame the user is looking at; the properties panel passes the
+playhead's layer-local frame.
+
 The listing is **not** the persisted form, deliberately: it drops the binding
 (the internal detail the declaration exists to hide) and writes values
 natively rather than as tagged Rust variants, so the JSON a CLI prints is
@@ -548,6 +589,84 @@ changes the reference and nothing else — no composition resize, no duration
 change, no metadata carried over (probing needs a decoder `ravel-core` does not
 have), and an image **sequence** is not declarable because its `AssetKind`
 fields come from the import probe.
+
+### `subgraph_template` — Reusable subnets (REQ-PLUGIN-005 (2), EXPO-6)
+
+`ravel_core::subgraph_template`. A subnet's inner graph plus the exposed
+parameters it publishes — Ravel's HDA / Gizmo / Node Group. Persisted by
+`ravel_project::subgraph_template` (see below); **no `.ravprj` change**, because
+an instantiated template's declarations go into the v7
+`Document.exposed_parameters` like any other.
+
+```rust
+SubgraphTemplate::capture(name, &Graph, subnet_id, &ExposedParameters)
+    -> Result<SubgraphTemplate, SubgraphTemplateError>
+    // EmptyName / NotASubnet(id) / NoInnerGraph(id). Keeps only the
+    // declarations bound INSIDE the subnet — the rest are the containing
+    // project's contract, not the template's.
+template.name() / .declarations() -> &ExposedParameters / .inner() -> &Graph
+
+template.instantiate()
+    -> Result<Instantiated { node: Node, declarations: ExposedParameters }, _>
+    // Fresh ids via Graph::duplicate_with_fresh_ids (nested subnets and
+    // node-output parameter bindings included), and the declarations' bindings
+    // rewritten through the SAME map. The two belong in ONE document commit.
+    // UnboundDeclaration { name, node } when a declaration binds a node the
+    // inner graph does not hold (a hand-edited or stale file — capture cannot
+    // make one). Keeping the id would NOT leave it unresolvable: a NodeId is a
+    // bare integer, so it very plausibly names a live node of the document
+    // being stamped into, and the declaration would drive that stranger.
+    // NestingTooDeep { limit } when the inner graph nests subnets past the
+    // DOCUMENT's MAX_SUBNET_DEPTH — same limit, same walk
+    // (composition::subnet_depth_exceeds), because a template is a graph on
+    // its way into a document.
+template.check_nesting() -> Result<(), SubgraphTemplateError>
+instantiated_ids(&Instantiated) -> HashSet<NodeId>
+
+add_declarations(Document, ExposedParameters) -> (Document, Vec<(String, String)>)
+    // Merge, suffixing a taken name to the first free `<name>_<n>` from 2 and
+    // reporting every rename. Renaming lives HERE, not in
+    // `ExposedParameters::insert`: a colliding rename the USER made is refused
+    // (see `exposed`), but a second stamp of a template is not a naming
+    // decision they expressed, and failing it would make templates single-use.
+```
+
+The declarations field is `ExposedParameters` itself — **not** a template-side
+look-alike — so a template file's entries pass the same checked `Deserialize`
+a `.ravprj`'s do, and an instantiated template's declarations are
+indistinguishable to `ExposedListing`, to `apply` and to the editing UI. There
+is no second validation path to keep in step because there is no second type.
+
+`network::adopt_subnet_inner(&mut Node, Graph)` is the one way to attach an
+inner graph: it derives the node's pins from the inner In/Out and promotes the
+inner In's parameters. Setting `Node.subnet` directly leaves a node the outer
+graph cannot wire.
+
+```rust
+// ravel_project::subgraph_template — the file half (*.ravtpl)
+to_ron(&SubgraphTemplate) / from_ron(&str) -> Result<_, SubgraphTemplateFileError>
+template_path(dir, name) -> Result<PathBuf, _>    // dir + ONE checked component
+save_new(&SubgraphTemplate, dir, name)  -> Result<PathBuf, _>  // create_new
+replace(&SubgraphTemplate, dir, name)   -> Result<PathBuf, _>  // atomic, must exist
+load(&Path) -> Result<SubgraphTemplate, _>
+load_dir(&Path) -> Result<Vec<SubgraphTemplate>, _>
+    // file-name order; an unreadable file is SKIPPED with a warning, a symlink
+    // is skipped rather than followed, and a missing directory is an empty
+    // library, not an error.
+templates_dir() -> Option<PathBuf>                // <config>/ravel/subgraph-templates
+TEMPLATE_EXTENSION = "ravtpl" / TEMPLATES_DIR = "subgraph-templates"
+```
+
+A template is named, not pathed: `save_new` / `replace` take a *name*, build the
+path themselves from the library directory plus one checked component, and own
+the extension. A user-typed name is user input, and passing one through as a
+`Path` is how `../../keep.ravprj` becomes a write. The two write calls are
+separate because "save a new template" and "overwrite that one" are separate
+intentions — a single `save` doing whichever applies turns a typo into a
+destroyed template.
+
+Nothing in `ravel-app` calls this yet: EXPO-6 is headless and the save / load
+UI is REQ-PLUGIN-005's own work.
 
 ### `composition` — Layer-network model (v3, REQ-LAYER-001)
 

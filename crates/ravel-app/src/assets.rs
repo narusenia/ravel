@@ -106,6 +106,11 @@ pub enum RavelIcon {
     CircleDot,
     /// Port toggle: parameter exposed and driven by an edge (●).
     CircleFilled,
+    /// Declaration toggle: parameter not part of the project's external
+    /// contract (□).
+    Square,
+    /// Declaration toggle: parameter declared as a project input (■).
+    SquareFilled,
     /// Tool toolbar: select tool (V).
     ToolSelect,
     /// Tool toolbar: pen tool (P).
@@ -372,6 +377,8 @@ impl IconNamed for RavelIcon {
             Self::Circle => "icons/circle.svg",
             Self::CircleDot => "icons/circle-dot.svg",
             Self::CircleFilled => "icons/circle-filled.svg",
+            Self::Square => "icons/square.svg",
+            Self::SquareFilled => "icons/square-filled.svg",
             Self::ToolSelect => "icons/mouse-pointer.svg",
             Self::ToolPen => "icons/pen-tool.svg",
             Self::ToolRect => "icons/square.svg",

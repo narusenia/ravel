@@ -191,3 +191,26 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   （波及先の一覧は [`../agent-api-reference.md`](../agent-api-reference.md) の
   `registry` 節）
 - ノード 1 個で解けないものを 1 個に詰め込まない。組み合わせで解く
+
+## パラメータが外部契約に出られるか (REQ-PROJ-006)
+
+Properties のパラメータ行には**公開トグル（□ / ■）**があり、押すとその
+パラメータがプロジェクトの公開パラメータ宣言になる（CLI の `--param`、
+サブグラフテンプレートの公開入力）。**ノード側に書くことは何も無い**が、
+どのパラメータにトグルが出るかは `ParameterValue` の種別で決まる。
+
+| `ParameterValue` | 宣言される型 |
+|---|---|
+| `Float` / `Int` / `Bool` / `String` | 同じ定数型 |
+| `Channel` | `float` |
+| `Channel2` / `Channel3` | `vec2` / `vec3` |
+| `Channel4` | `color`（Properties が色として描くもの） |
+| `media` ノードの `asset_id` | `media`（素材差し替え） |
+| `PathPoints` / `Curve` | **対象外**（トグルを出さない） |
+
+対応は `ravel-core::exposed::apply::seed_value` の 1 箇所だけが持つ。
+**UI 側で種別判定を書き足さないこと** — 2 つ目の対応表ができた瞬間、
+`apply` が書き戻せない宣言を作れるようになる。`PathPoints` / `Curve` が
+外れているのは内部表現を外部契約に露出させないため
+（[`../specifications/data-model.md`](../specifications/data-model.md) の
+公開パラメータ宣言モデル）。

@@ -1,7 +1,9 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Robustness ("fuzz") tests for the `.ravprj` parsing surface.
+//! Robustness ("fuzz") tests for the project parsing surface — `.ravprj` and
+//! the `.ravtpl` subgraph templates that are dropped into the same library
+//! directories.
 //!
 //! The acceptance criteria require that the project parsers survive 100 000
 //! malformed inputs without crashing. A full `cargo-fuzz` harness needs a
@@ -17,6 +19,7 @@ use ravel_project::ProjectFile;
 use ravel_project::container::RawArchive;
 use ravel_project::graph_doc::GraphDoc;
 use ravel_project::settings::SettingsLayer;
+use ravel_project::subgraph_template;
 
 /// Minimal deterministic xorshift64* PRNG.
 struct Rng(u64);
@@ -65,6 +68,9 @@ fn structured_bytes(rng: &mut Rng) -> Vec<u8> {
         b"[color]\nworking_space=\"ACEScg\"",            // valid TOML
         b"[playback\nframe_rate=",                       // broken TOML
         b"{\"format_version\":1,\"color_space\":\"x\"}", // v1 manifest fragment
+        // A subgraph template: valid, and truncated inside its graph.
+        b"SubgraphTemplate(name:\"t\",inner:(nodes:[],edges:[]),declarations:[])",
+        b"SubgraphTemplate(name:\"t\",inner:(nodes:[Node(id:NodeId(1),",
     ];
     let seed = SEEDS[(rng.next_u64() as usize) % SEEDS.len()];
     let mut buf = seed.to_vec();
@@ -104,9 +110,13 @@ fn fuzz_parsers_survive_100k_inputs() {
         }
 
         // 3) Text parsers operate on lossy-UTF8 views of the same bytes.
+        //    `.ravtpl` is here too: a template library is a directory the user
+        //    drops files into, so its parser meets the same adversarial input
+        //    the project's does.
         let text = String::from_utf8_lossy(&bytes);
         let _ = GraphDoc::from_ron(&text);
         let _ = SettingsLayer::from_toml(&text);
+        let _ = subgraph_template::from_ron(&text);
     }
 
     // Reaching here means no parser panicked across 100k adversarial inputs.

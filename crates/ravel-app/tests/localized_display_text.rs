@@ -181,3 +181,83 @@ fn channel_names_translate_words_and_keep_axis_letters() {
     assert_eq!(channel_name_label(CHANNEL_VALUE), "値");
     assert_eq!(channel_name_label("timeline.property.rotation"), "回転");
 }
+
+/// Every reason a declaration can fail to reach its parameter has its own
+/// translated sentence in **both** catalogs (REQ-PROJ-006, EXPO-5).
+///
+/// Nothing else enforces this: `ravel-ui` emits a locale key per
+/// `BindingIssueReason` and the panel resolves it at the display boundary, so
+/// a missing key shows the user `properties.exposed.issue.node_missing`
+/// instead of a sentence. The ja side in particular is not mechanically
+/// checked anywhere (`docs/dev/add-locale.md`).
+#[test]
+fn every_binding_issue_reason_reads_as_a_sentence_in_every_locale() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_i18n();
+
+    let reasons = [
+        ravel_core::exposed::apply::BindingIssueReason::NodeMissing,
+        ravel_core::exposed::apply::BindingIssueReason::ParameterMissing,
+        ravel_core::exposed::apply::BindingIssueReason::KindMismatch {
+            declared: ravel_core::exposed::ExposedType::Float,
+            parameter_kind: "string",
+        },
+        ravel_core::exposed::apply::BindingIssueReason::AnimatedComponents {
+            components: vec![0],
+        },
+        ravel_core::exposed::apply::BindingIssueReason::NotAMediaNode {
+            type_key: "transform".into(),
+        },
+        ravel_core::exposed::apply::BindingIssueReason::NotAnAssetReference {
+            expected: "asset_id",
+        },
+    ];
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+        for reason in &reasons {
+            let key = ravel_ui::properties::exposed::issue_key(reason);
+            let text = ravel_i18n::translate(key);
+            assert_ne!(
+                text, key,
+                "{locale}: {key} has no translation, so the user would see the key"
+            );
+            assert!(!text.is_empty(), "{locale}: {key} translates to nothing");
+        }
+    }
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
+/// The strings the declarations section itself shows: its title, the empty
+/// state, the row buttons, the toggle tooltip, and every refusal.
+#[test]
+fn the_declarations_section_reads_as_sentences_in_every_locale() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_i18n();
+
+    let keys = [
+        ravel_ui::properties::exposed::SECTION_EXPOSED,
+        "properties.toggle.exposed",
+        "properties.exposed.empty",
+        "properties.exposed.description",
+        "properties.exposed.remove",
+        "properties.exposed.move_up",
+        "properties.exposed.move_down",
+        "properties.exposed.error.empty_name",
+        "properties.exposed.error.duplicate",
+        "properties.exposed.error.not_exposable",
+        "properties.exposed.error.already_exposed",
+        "properties.exposed.error.failed",
+        ravel_ui::command::CommandId::ProjectExposedParameters.label_key(),
+    ];
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+        for key in keys {
+            let text = ravel_i18n::translate(key);
+            assert_ne!(text, key, "{locale}: {key} has no translation");
+            assert!(!text.is_empty(), "{locale}: {key} translates to nothing");
+        }
+    }
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}

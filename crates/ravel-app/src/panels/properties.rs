@@ -52,6 +52,9 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::{AssetMetadata, Layer};
+use ravel_core::exposed::{
+    ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
+};
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
@@ -62,6 +65,7 @@ use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
 use ravel_ui::keyframes::layer_local_frame;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
+use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
@@ -421,6 +425,195 @@ fn add_port_row(ports: &PortWidgets, panel: &WeakEntity<PropertiesGpuiPanel>, mu
         ))
 }
 
+/// One declaration row: the reorder handles, the name Input, the type and
+/// default it declares, the remove button, a description Input underneath, and
+/// the reason it does not resolve when it does not.
+///
+/// The type and the default are **read-only**. Both are fixed when the
+/// parameter is exposed and both are derived from that parameter
+/// (`ravel_core::exposed::apply::seed_value`); letting the panel retype a
+/// declaration would let the user build a contract `apply` refuses, which the
+/// row could then only report as broken.
+fn exposed_row(
+    row: &ExposedRow,
+    neighbours: (bool, bool),
+    widgets: &ExposedWidgets,
+    panel: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+    fg: Hsla,
+    danger: Hsla,
+) -> Div {
+    let (can_move_up, can_move_down) = neighbours;
+    let name_input = widgets.names.iter().find(|(n, _)| n == &row.name);
+    let description_input = widgets.descriptions.iter().find(|(n, _)| n == &row.name);
+
+    let mut handles = div().flex().flex_shrink_0().items_center();
+    for (offset, enabled, icon, tooltip_key) in [
+        (
+            -1,
+            can_move_up,
+            gpui_component::IconName::ChevronUp,
+            "properties.exposed.move_up",
+        ),
+        (
+            1,
+            can_move_down,
+            gpui_component::IconName::ChevronDown,
+            "properties.exposed.move_down",
+        ),
+    ] {
+        if !enabled {
+            handles = handles.child(div().w(px(14.0)));
+            continue;
+        }
+        let panel = panel.clone();
+        let name = row.name.clone();
+        handles = handles.child(port_button(
+            format!("exposed-move-{offset}-{}", row.name),
+            icon,
+            ravel_i18n::translate(tooltip_key),
+            muted,
+            move |_window, cx| {
+                let name = name.clone();
+                panel
+                    .update(cx, move |this, cx| this.move_declaration(&name, offset, cx))
+                    .ok();
+            },
+        ));
+    }
+
+    let remove = {
+        let panel = panel.clone();
+        let name = row.name.clone();
+        port_button(
+            format!("exposed-remove-{}", row.name),
+            gpui_component::IconName::Delete,
+            t!("properties.exposed.remove"),
+            muted,
+            move |_window, cx| {
+                let name = name.clone();
+                panel
+                    .update(cx, move |this, cx| this.remove_declaration(&name, cx))
+                    .ok();
+            },
+        )
+    };
+
+    let mut head = div().flex().items_center().gap_1().px_1().py(px(1.0));
+    head = head.child(handles);
+    if let Some((_, input)) = name_input {
+        head = head.child(
+            div()
+                .flex_grow()
+                .min_w_0()
+                .child(Input::new(input).xsmall()),
+        );
+    }
+    // The command-line spelling of the type, then the default a caller gets
+    // when they supply nothing. Both are syntax, so neither is translated.
+    head = head.child(
+        div()
+            .flex_shrink_0()
+            .max_w(px(120.0))
+            .overflow_hidden()
+            .text_xs()
+            .text_color(muted)
+            .child(SharedString::from(format!(
+                "{} = {}",
+                row.value_type, row.default
+            ))),
+    );
+    head = head.child(remove);
+
+    let mut body = div().flex().flex_col().child(head);
+    if let Some((_, input)) = description_input {
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .pb(px(1.0))
+                .child(div().w(px(28.0)))
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .child(Input::new(input).xsmall().w_full()),
+                ),
+        );
+    }
+    if let Some(issue) = row.issue {
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .pb(px(2.0))
+                .child(div().w(px(28.0)))
+                .child(
+                    Icon::new(gpui_component::IconName::TriangleAlert)
+                        .size_3()
+                        .text_color(danger),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(danger)
+                        .child(SharedString::from(ravel_i18n::translate(issue))),
+                ),
+        );
+    }
+    let _ = fg;
+    body
+}
+
+/// Per-parameter declaration toggle: exposes the parameter as a project input,
+/// or reveals the declaration that already does.
+///
+/// Sibling of [`port_toggle_button`] and deliberately a different affordance:
+/// a *port* makes a parameter drivable from inside the graph, a *declaration*
+/// makes it settable from outside the project. They are independent, so a
+/// parameter can carry both.
+fn exposed_toggle_button(
+    key: &str,
+    declared: bool,
+    node_id: NodeId,
+    panel: &WeakEntity<PropertiesGpuiPanel>,
+    active: Hsla,
+    muted: Hsla,
+) -> Stateful<Div> {
+    let (icon, color) = if declared {
+        (RavelIcon::SquareFilled, active)
+    } else {
+        (RavelIcon::Square, muted)
+    };
+    let key = key.to_string();
+    // Unlike the port toggle, this edits the document from the Properties panel
+    // itself: the declarations belong to the project, not to the network the
+    // node editor owns, so there is nothing to route through it.
+    let panel = panel.clone();
+    div()
+        .id(SharedString::from(format!("exposed-toggle-{key}")))
+        .flex_shrink_0()
+        .w(px(14.0))
+        .cursor_pointer()
+        .child(Icon::new(icon).size_3().text_color(color))
+        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.exposed")).build(window, cx))
+        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+            let key = key.clone();
+            panel
+                .update(cx, move |this, cx| {
+                    this.expose_parameter(node_id, &key, cx);
+                    cx.notify();
+                })
+                .ok();
+        })
+}
+
 /// Synthetic scrub keys for the components of a `Vector` field
 /// (`center#x`, `center#y`, ...).
 fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
@@ -589,6 +782,7 @@ fn build_field_row(
     colors: &[(String, Entity<ColorPickerState>)],
     expanded_curves: &std::collections::HashSet<String>,
     ports: &PortWidgets,
+    declarations: &ExposedWidgets,
     editor: &WeakEntity<PropertiesGpuiPanel>,
     node_ids: &[NodeId],
     muted: Hsla,
@@ -625,6 +819,46 @@ fn build_field_row(
             }
             list = list.child(add_port_row(ports, editor, muted));
             if let Some(message) = &ports.error {
+                list = list.child(
+                    div()
+                        .px_1()
+                        .py(px(1.0))
+                        .text_xs()
+                        .text_color(danger)
+                        .child(message.clone()),
+                );
+            }
+            list
+        }
+
+        // The project's declarations. There is no trailing add row: a
+        // declaration is created by exposing a parameter, which is where the
+        // binding comes from (see `PropertyField::ExposedList`).
+        PropertyField::ExposedList { rows, .. } => {
+            let mut list = div().flex().flex_col();
+            if rows.is_empty() {
+                list = list.child(
+                    div()
+                        .px_1()
+                        .py(px(2.0))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(t!("properties.exposed.empty"))),
+                );
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let neighbours = (index > 0, index + 1 < rows.len());
+                list = list.child(exposed_row(
+                    row,
+                    neighbours,
+                    declarations,
+                    editor,
+                    muted,
+                    fg,
+                    danger,
+                ));
+            }
+            if let Some(message) = &declarations.error {
                 list = list.child(
                     div()
                         .px_1()
@@ -900,6 +1134,21 @@ fn field_shape_key(field: &PropertyField) -> String {
             }
             shape
         }
+        // A declaration list changes shape the same way a port list does: the
+        // rows *are* the widgets, so adding, removing, renaming or reordering
+        // one has to rebuild them. The issue is fingerprinted too — it decides
+        // whether the row renders its warning line.
+        PropertyField::ExposedList { key, rows } => {
+            let mut shape = key.clone();
+            for row in rows {
+                let _ = write!(
+                    shape,
+                    "\n{}\t{}\t{}\t{}\t{:?}",
+                    row.name, row.value_type, row.default, row.description, row.issue
+                );
+            }
+            shape
+        }
         PropertyField::Enum { key, options, .. } => {
             let mut shape = key.clone();
             for option in options {
@@ -1013,6 +1262,32 @@ struct PortWidgets {
     error: Option<SharedString>,
 }
 
+/// Everything the declarations section renders with, collected from the panel
+/// before `render` walks the sections (render itself only reads).
+#[derive(Clone)]
+struct ExposedWidgets {
+    names: Vec<(String, Entity<InputState>)>,
+    descriptions: Vec<(String, Entity<InputState>)>,
+    error: Option<SharedString>,
+}
+
+/// The message shown under the declarations list for a refused edit.
+///
+/// The vocabulary is the core's ([`ExposedParameterError`]) so that the panel
+/// never invents a reason of its own; `UnknownName` has no key because the
+/// panel only ever names rows it just rendered, so reaching it means the list
+/// and the document disagreed — a bug, not something to explain to the user.
+fn exposed_error_message(err: &ExposedParameterError) -> SharedString {
+    let key = match err {
+        ExposedParameterError::EmptyName => "properties.exposed.error.empty_name",
+        ExposedParameterError::DuplicateName(_) => "properties.exposed.error.duplicate",
+        ExposedParameterError::DefaultTypeMismatch { .. }
+        | ExposedParameterError::NonFiniteDefault(_)
+        | ExposedParameterError::UnknownName(_) => "properties.exposed.error.failed",
+    };
+    SharedString::from(ravel_i18n::translate(key))
+}
+
 /// Quiet period after the last `ColorPickerEvent::Change` before the edit
 /// commits one Document undo step. The picker emits a change per slider
 /// tick with no gesture-end event, so live changes apply uncommitted and
@@ -1080,6 +1355,19 @@ pub struct PropertiesGpuiPanel {
     /// that itself) or the target changes, so a rename that was *refused* can
     /// be retried under a different name straight away.
     committed_port_rename: Option<(String, String)>,
+    /// Row widgets of the declarations section, keyed by declaration name: the
+    /// name Input and the description Input of every row.
+    ///
+    /// Owned for the same reason as the Ports section's widgets — a half-typed
+    /// name has to survive a document refresh — and rebuilt whenever the list
+    /// itself changes, which `fields_shape` detects by fingerprinting the rows.
+    exposed_names: Vec<(String, StringBinding)>,
+    exposed_descriptions: Vec<(String, StringBinding)>,
+    /// The last refused declaration edit, shown under the list.
+    exposed_error: Option<SharedString>,
+    /// The declaration rename this panel has already sent, with the same
+    /// Enter-then-Blur duplicate guard as [`Self::rename_port`].
+    committed_exposed_rename: Option<(String, String)>,
     /// Curve rows whose inline editor is open, and the height each open
     /// editor was dragged to.
     ///
@@ -1143,6 +1431,8 @@ impl PropertiesGpuiPanel {
                 // and a rename record names a row that is going with it.
                 this.port_error = None;
                 this.committed_port_rename = None;
+                this.exposed_error = None;
+                this.committed_exposed_rename = None;
                 // Curve expansion is per-target view state (see the field
                 // docs): a new target starts with every curve row collapsed,
                 // so returning to a node shows it collapsed again.
@@ -1193,7 +1483,17 @@ impl PropertiesGpuiPanel {
 
         Self {
             sections: Vec::new(),
-            target: PropertiesTarget::Empty,
+            // A panel opened *because* something was selected has to show it.
+            // The selection lives in a durable global, and the observer above
+            // only fires on later writes, so a panel created after the write —
+            // which is exactly what `CommandId::ProjectExposedParameters` does
+            // when Properties is closed — would open on the empty state and
+            // stay there until the user selected something else.
+            target: cx
+                .try_global::<SelectedPropertiesTarget>()
+                .cloned()
+                .unwrap_or_default()
+                .0,
             project,
             registry,
             scrubs: Vec::new(),
@@ -1207,12 +1507,18 @@ impl PropertiesGpuiPanel {
             port_type_options: Vec::new(),
             port_error: None,
             committed_port_rename: None,
+            exposed_names: Vec::new(),
+            exposed_descriptions: Vec::new(),
+            exposed_error: None,
+            committed_exposed_rename: None,
             expanded_curves: std::collections::HashSet::new(),
             curve_heights: std::collections::HashMap::new(),
             curve_resize: None,
             pending_color_commit: None,
             color_commit_generation: 0,
-            needs_rebuild: false,
+            // The target above may already name something, and nothing has
+            // built its widgets yet.
+            needs_rebuild: true,
             focus_handle,
             focus_subscriptions,
             selection_sub,
@@ -1758,6 +2064,212 @@ impl PropertiesGpuiPanel {
         });
     }
 
+    // ----- Exposed parameter declarations (REQ-PROJ-006) --------------------
+
+    /// The layer-local frame under the playhead for the current node target —
+    /// the frame this panel shows animated values at, and the frame a
+    /// declaration seeds its default from. `0` when the target is not a node
+    /// selection, which is also when nothing reads it.
+    fn node_frame(&self, cx: &App) -> u64 {
+        self.resolved_nodes(cx)
+            .map(|(_, _, frame)| frame)
+            .unwrap_or(0)
+    }
+
+    /// Which of the first selected node's parameters can be, or already are,
+    /// part of the project's external contract (REQ-PROJ-006), keyed by field.
+    ///
+    /// Both answers come from the core: `seed_value` decides what a parameter
+    /// can be declared as, `bound_to` what already is. A parameter nothing can
+    /// declare is absent from the map and gets no toggle, rather than one that
+    /// always refuses.
+    fn exposed_states(
+        &self,
+        sections: &[PropertySection],
+        cx: &App,
+    ) -> std::collections::HashMap<String, bool> {
+        let PropertiesTarget::Nodes { ids, .. } = &self.target else {
+            return std::collections::HashMap::new();
+        };
+        let (Some(node_id), Some(project)) = (ids.first().copied(), self.project.as_ref()) else {
+            return std::collections::HashMap::new();
+        };
+        let frame = self.node_frame(cx);
+        let document = project.read(cx).document();
+        sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter(|field| {
+                !matches!(
+                    field,
+                    PropertyField::PortList { .. } | PropertyField::ExposedList { .. }
+                )
+            })
+            .filter_map(|field| {
+                let key = field.key();
+                let binding = ExposedBinding::new(node_id, key);
+                let declared = document.exposed_parameters.bound_to(node_id, key).is_some();
+                (declared
+                    || ravel_core::exposed::apply::seed_value(document, &binding, frame).is_some())
+                .then(|| (key.to_string(), declared))
+            })
+            .collect()
+    }
+
+    /// Run one declaration edit against the document and keep its refusal.
+    ///
+    /// Declarations live on the `Document`, so unlike a port edit there is no
+    /// node editor to route through: the panel edits the project directly, the
+    /// way a layer field edit does. `edit` reports whether anything changed, so
+    /// a no-op (renaming a row to the name it already has, pressing "up" on the
+    /// first row) records no undo step that would undo to an identical
+    /// document.
+    ///
+    /// Every accepted edit is **one** `commit_document`, which is what makes
+    /// each operation one undo step. The hint is `None`: a declaration is not
+    /// part of the compiled graph — `apply` writes its value into the document
+    /// once, before evaluation — so nothing downstream needs invalidating.
+    fn edit_declarations(
+        &mut self,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(&mut ExposedParameters) -> Result<bool, ExposedParameterError>,
+    ) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let mut refusal = None;
+        project.update(cx, |project, cx| {
+            let mut declarations = project.document().exposed_parameters.clone();
+            match edit(&mut declarations) {
+                Ok(true) => {
+                    let document = project
+                        .document()
+                        .clone()
+                        .with_exposed_parameters(declarations);
+                    project.commit_document(document, InvalidationHint::None, cx);
+                }
+                Ok(false) => {}
+                Err(err) => refusal = Some(exposed_error_message(&err)),
+            }
+        });
+        self.exposed_error = refusal;
+        cx.notify();
+    }
+
+    /// Show a message under the declarations list without touching the
+    /// document — for the refusals the panel makes itself.
+    fn refuse_declaration_edit(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.exposed_error = Some(SharedString::from(ravel_i18n::translate(key)));
+        cx.notify();
+    }
+
+    /// Commit a row's edited name on Enter or blur.
+    ///
+    /// The same Enter-then-Blur duplicate guard as [`Self::rename_port`]: one
+    /// gesture reports both, carrying the same pair, and sending it twice would
+    /// put an `UnknownName` under a rename that succeeded.
+    fn rename_declaration(&mut self, old_name: &str, new_name: String, cx: &mut Context<Self>) {
+        let new_name = new_name.trim().to_string();
+        if new_name == old_name {
+            return;
+        }
+        if new_name.is_empty() {
+            self.refuse_declaration_edit("properties.exposed.error.empty_name", cx);
+            return;
+        }
+        let rename = (old_name.to_string(), new_name);
+        if self.committed_exposed_rename.as_ref() == Some(&rename) {
+            return;
+        }
+        self.committed_exposed_rename = Some(rename.clone());
+        let (old_name, new_name) = rename;
+        self.edit_declarations(cx, move |declarations| {
+            declarations.rename(&old_name, &new_name).map(|()| true)
+        });
+    }
+
+    /// Commit a row's edited description on Enter or blur. Unlike a rename this
+    /// cannot collide, so the only guard is "did the text actually change".
+    fn describe_declaration(&mut self, name: &str, description: String, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let current = project
+            .read(cx)
+            .document()
+            .exposed_parameters
+            .get(name)
+            .map(|declaration| declaration.description().to_string());
+        if current.as_deref() == Some(description.as_str()) {
+            return;
+        }
+        let name = name.to_string();
+        self.edit_declarations(cx, move |declarations| {
+            declarations
+                .set_description(&name, description)
+                .map(|()| true)
+        });
+    }
+
+    fn remove_declaration(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.edit_declarations(cx, move |declarations| {
+            Ok(declarations.remove(&name).is_some())
+        });
+    }
+
+    /// Move a row one slot. The handle is only rendered when a neighbour
+    /// exists in that direction, which is exactly when `shift` moves it, so a
+    /// rendered handle never records an undo step that changes nothing.
+    fn move_declaration(&mut self, name: &str, offset: i32, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.edit_declarations(cx, move |declarations| declarations.shift(&name, offset));
+    }
+
+    /// Declare `key` on `node_id` as a project input, named after the
+    /// parameter.
+    ///
+    /// The type and the default come from
+    /// [`ravel_core::exposed::apply::seed_value`] — the one place that maps a
+    /// parameter onto the value space of the external contract — so a
+    /// declaration made here always binds back to the parameter it came from.
+    /// A parameter that has no place in a contract (a path, a curve, a media
+    /// node with no asset) is refused with the core's reason rather than
+    /// declared and then reported as broken.
+    ///
+    /// The default is seeded at the playhead's layer-local frame, the frame
+    /// this panel is showing the value at: exposing a keyframed parameter
+    /// gives the contract the number the user can see, not a `0.0` chosen by
+    /// nothing. That the animated components will not *take* a caller's value
+    /// is reported by `resolve` in the declarations list, next to the row.
+    ///
+    /// Exposing is **not** a toggle back off. Removing a declaration removes a
+    /// name callers may already be passing on a command line, so it is done
+    /// deliberately from the declarations list, not by clicking the same 14px
+    /// icon that created it. Clicking an already-exposed parameter says so
+    /// instead.
+    fn expose_parameter(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let binding = ExposedBinding::new(node_id, key);
+        let frame = self.node_frame(cx);
+        let document = project.read(cx).document();
+        if document.exposed_parameters.bound_to(node_id, key).is_some() {
+            self.refuse_declaration_edit("properties.exposed.error.already_exposed", cx);
+            return;
+        }
+        let Some(seed) = ravel_core::exposed::apply::seed_value(document, &binding, frame) else {
+            self.refuse_declaration_edit("properties.exposed.error.not_exposable", cx);
+            return;
+        };
+        let name = key.to_string();
+        self.edit_declarations(cx, move |declarations| {
+            let declaration = ExposedParameter::inferred(name, seed, binding)?;
+            declarations.insert(declaration).map(|()| true)
+        });
+    }
+
     /// Route a field edit to its target: document-owned targets edit the
     /// document here, while node targets call the owning node editor.
     fn route_change(
@@ -2060,6 +2572,13 @@ impl PropertiesGpuiPanel {
             // A media asset shows a placeholder until unit 6 builds the real
             // inspector (metadata, path editing, relink).
             PropertiesTarget::MediaAsset { .. } => Vec::new(),
+            // The project's external parameter contract (REQ-PROJ-006). The
+            // section exists even when nothing is declared, so the list has
+            // somewhere to say so.
+            PropertiesTarget::Project => match &self.project {
+                Some(project) => vec![exposed_section(project.read(cx).document())],
+                None => Vec::new(),
+            },
         }
     }
 
@@ -2139,8 +2658,11 @@ impl PropertiesGpuiPanel {
         self.port_types.clear();
         self.port_add = None;
         self.port_type_options.clear();
+        self.exposed_names.clear();
+        self.exposed_descriptions.clear();
         // The rename records belong to the Inputs being replaced here.
         self.committed_port_rename = None;
+        self.committed_exposed_rename = None;
 
         let sections = self.sections_for_target(cx);
         let node_ids = match &self.target {
@@ -2364,9 +2886,64 @@ impl PropertiesGpuiPanel {
                 if let PropertyField::PortList { rows, options, .. } = field {
                     self.build_port_widgets(rows, options, window, cx);
                 }
+
+                if let PropertyField::ExposedList { rows, .. } = field {
+                    self.build_exposed_widgets(rows, window, cx);
+                }
             }
         }
         self.sections = sections;
+    }
+
+    /// Build the declarations section's widgets: a name Input and a
+    /// description Input per row.
+    ///
+    /// There is no widget for the type or the default. Both are decided when
+    /// the parameter is exposed and are read back from the declaration, so an
+    /// editor for them would offer to build a contract the core would refuse.
+    fn build_exposed_widgets(
+        &mut self,
+        rows: &[ExposedRow],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for row in rows {
+            let entity = cx.new(|cx| InputState::new(window, cx).default_value(row.name.clone()));
+            let old_name = row.name.clone();
+            let sub = cx.subscribe_in(
+                &entity,
+                window,
+                move |this, state, event: &InputEvent, _window, cx| match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let value = state.read(cx).value().to_string();
+                        this.rename_declaration(&old_name, value, cx);
+                    }
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+            self.exposed_names
+                .push((row.name.clone(), StringBinding { state: entity, sub }));
+
+            let entity = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(row.description.clone())
+                    .placeholder(SharedString::from(t!("properties.exposed.description")))
+            });
+            let name = row.name.clone();
+            let sub = cx.subscribe_in(
+                &entity,
+                window,
+                move |this, state, event: &InputEvent, _window, cx| match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let value = state.read(cx).value().to_string();
+                        this.describe_declaration(&name, value, cx);
+                    }
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+            self.exposed_descriptions
+                .push((row.name.clone(), StringBinding { state: entity, sub }));
+        }
     }
 
     /// Build the Ports section's widgets: a name Input and a type Select per
@@ -2554,6 +3131,19 @@ impl Render for PropertiesGpuiPanel {
                     .map(|add| (add.name.clone(), add.port_type.clone())),
                 error: self.port_error.clone(),
             };
+            let exposed_widgets = ExposedWidgets {
+                names: self
+                    .exposed_names
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone()))
+                    .collect(),
+                descriptions: self
+                    .exposed_descriptions
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone()))
+                    .collect(),
+                error: self.exposed_error.clone(),
+            };
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             let danger = cx.theme().colors.danger;
@@ -2578,6 +3168,7 @@ impl Render for PropertiesGpuiPanel {
                 PropertiesTarget::Composition { .. }
                 | PropertiesTarget::Layers { .. }
                 | PropertiesTarget::MediaAsset { .. }
+                | PropertiesTarget::Project
                 | PropertiesTarget::Empty => None,
             };
             let resolved_layer = match &self.target {
@@ -2623,6 +3214,7 @@ impl Render for PropertiesGpuiPanel {
                 PropertiesTarget::Composition { .. }
                 | PropertiesTarget::Layers { .. }
                 | PropertiesTarget::MediaAsset { .. }
+                | PropertiesTarget::Project
                 | PropertiesTarget::Empty => std::collections::HashMap::new(),
             };
 
@@ -2658,6 +3250,12 @@ impl Render for PropertiesGpuiPanel {
                 _ => None,
             };
 
+            // Which of the first selected node's parameters can be, or already
+            // are, part of the project's external contract (REQ-PROJ-006).
+            // Both answers come from the core: `seed_value` decides what can be
+            // declared, `bound_to` what already is. The panel only draws them.
+            let exposed_states = self.exposed_states(&sections, cx);
+
             let mut accordion = Accordion::new("properties-accordion")
                 .multiple(true)
                 .small();
@@ -2671,11 +3269,13 @@ impl Render for PropertiesGpuiPanel {
                 let curves = curve_entities.clone();
                 let expanded_curves = expanded_curves.clone();
                 let ports = port_widgets.clone();
+                let declarations = exposed_widgets.clone();
                 let editor = editor.clone();
                 let node_ids = node_ids.clone();
                 let key_target = key_target.clone();
                 let key_states = key_states.clone();
                 let port_states = port_states.clone();
+                let exposed_states = exposed_states.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -2688,6 +3288,7 @@ impl Render for PropertiesGpuiPanel {
                             &colors,
                             &expanded_curves,
                             &ports,
+                            &declarations,
                             &editor,
                             &node_ids,
                             muted,
@@ -2727,10 +3328,25 @@ impl Render for PropertiesGpuiPanel {
                             )),
                             _ => None,
                         };
-                        if key_button.is_none() && port_button.is_none() {
+                        let exposed_button = match (port_node, exposed_states.get(field.key())) {
+                            (Some(node_id), Some(declared)) => Some(exposed_toggle_button(
+                                field.key(),
+                                *declared,
+                                node_id,
+                                &editor,
+                                active,
+                                muted,
+                            )),
+                            _ => None,
+                        };
+                        if key_button.is_none() && port_button.is_none() && exposed_button.is_none()
+                        {
                             container = container.child(row);
                         } else {
                             let mut wrapper = div().flex().items_center();
+                            if let Some(button) = exposed_button {
+                                wrapper = wrapper.child(button);
+                            }
                             if let Some(button) = port_button {
                                 wrapper = wrapper.child(button);
                             }
@@ -4636,5 +5252,595 @@ mod tests {
         let fields_before = sections[0].fields.len();
         append_node_description(&mut sections, &node.type_key);
         assert_eq!(sections[0].fields.len(), fields_before);
+    }
+
+    // ----- Exposed parameter declarations (REQ-PROJ-006, EXPO-5) -----------
+
+    /// The project's declarations, as the panel's Project target renders them.
+    fn declaration_rows(
+        properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        cx: &mut TestAppContext,
+    ) -> Vec<ExposedRow> {
+        properties
+            .update(cx, |panel, window, cx| {
+                let restore = panel.target.clone();
+                panel.target = PropertiesTarget::Project;
+                panel.refresh_values(cx);
+                panel.rebuild_widgets(window, cx);
+                let rows = panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::ExposedList { rows, .. } => Some(rows.clone()),
+                        _ => None,
+                    })
+                    .expect("the Project target has a declarations section");
+                panel.target = restore;
+                panel.refresh_values(cx);
+                panel.rebuild_widgets(window, cx);
+                rows
+            })
+            .unwrap()
+    }
+
+    fn declaration_names(
+        properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        declaration_rows(properties, cx)
+            .into_iter()
+            .map(|row| row.name)
+            .collect()
+    }
+
+    /// `CommandId::ProjectExposedParameters` sets the target and *then* opens
+    /// Properties, so a panel that has to be created must read the selection
+    /// that is already there — the observer only sees later writes.
+    #[gpui::test]
+    fn a_panel_opened_after_the_selection_shows_it(cx: &mut TestAppContext) {
+        let (_properties, project, _path, in_id) = setup_in_node_target(cx);
+        cx.update(|cx| {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Project));
+        });
+        project.update(cx, |project, cx| {
+            let declaration = ExposedParameter::inferred(
+                "amount",
+                ravel_core::exposed::ExposedValue::Float(1.0),
+                ExposedBinding::new(in_id, "amount"),
+            )
+            .expect("a float defaults to a float");
+            let document = project.document().clone().with_exposed_parameters(
+                ExposedParameters::from_declarations([declaration]).expect("one name"),
+            );
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+        cx.run_until_parked();
+
+        let opened = cx.add_window(|window, cx| {
+            PropertiesGpuiPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        cx.run_until_parked();
+        // Deliberately no `rebuild_widgets` call: the panel adopted the
+        // standing selection in `new` *and* marked itself as owing a build, so
+        // its first render already produced the sections. Building them here
+        // would let the test pass with either half of the fix reverted.
+        let rows = opened
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.target, PropertiesTarget::Project);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::ExposedList { rows, .. } => Some(rows.clone()),
+                        _ => None,
+                    })
+            })
+            .unwrap();
+        let rows = rows.expect("the new panel opens on the declarations, not the empty state");
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["amount"]
+        );
+    }
+
+    /// The toggle has to appear on the parameter rows of a selected node, or
+    /// there is no way to expose anything: this is what the on-device check
+    /// looks at, and what a missing one would show as a row with no □.
+    #[gpui::test]
+    fn every_declarable_parameter_row_offers_the_toggle(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        let states = properties
+            .update(cx, |panel, _window, cx| {
+                let sections = panel.sections.clone();
+                panel.exposed_states(&sections, cx)
+            })
+            .unwrap();
+        let mut keys: Vec<&str> = states.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["amount", "tint"],
+            "the In node's two parameters are declarable; its read-only info fields are not"
+        );
+        assert!(
+            states.values().all(|declared| !declared),
+            "nothing is declared yet"
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let states = properties
+            .update(cx, |panel, _window, cx| {
+                let sections = panel.sections.clone();
+                panel.exposed_states(&sections, cx)
+            })
+            .unwrap();
+        assert_eq!(
+            states.get("amount"),
+            Some(&true),
+            "the row shows it declared"
+        );
+        assert_eq!(states.get("tint"), Some(&false));
+    }
+
+    /// Exposing a keyframed parameter takes its value **at the playhead** —
+    /// the number the panel is showing — not a `0.0` chosen by nothing.
+    ///
+    /// The default is what a caller gets when they omit `--param`, so seeding
+    /// it with a placeholder puts a value in the contract that no part of the
+    /// document ever chose. That the animated components will not take a
+    /// caller's value is a separate thing, reported on the row.
+    #[gpui::test]
+    fn exposing_an_animated_parameter_seeds_its_value_at_the_playhead(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let (properties, project, path, in_id) = setup_in_node_target(cx);
+
+        // `tint`'s red channel runs 0.0 at frame 0 to 1.0 at frame 100.
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(100, 1.0, Interpolation::Linear);
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(
+                project.document(),
+                path.comp,
+                path.layer,
+                |layer| {
+                    layer.network = layer
+                        .network
+                        .clone()
+                        .set_params(
+                            in_id,
+                            &[ravel_core::graph::Parameter {
+                                key: "tint".into(),
+                                value: ParameterValue::Channel4([
+                                    AnimationChannel::new(ChannelSource::Keyframes(curve.clone())),
+                                    AnimationChannel::constant(1.0),
+                                    AnimationChannel::constant(1.0),
+                                    AnimationChannel::constant(1.0),
+                                ]),
+                            }],
+                        )
+                        .expect("the In node has a tint parameter");
+                },
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        cx.update(|cx| {
+            cx.set_global(crate::panels::PlaybackPosition {
+                frame: 50,
+                fps: ravel_core::types::FrameRate::new(30, 1),
+            });
+        });
+        cx.run_until_parked();
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "tint", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        project.read_with(cx, |project, _| {
+            let declaration = project
+                .document()
+                .exposed_parameters
+                .get("tint")
+                .expect("the declaration is in the document");
+            let ravel_core::exposed::ExposedValue::Color(color) = declaration.default_value()
+            else {
+                panic!("a four-channel parameter declares a colour");
+            };
+            assert!(
+                (color.r - 0.5).abs() < 1e-3,
+                "the red channel is seeded at the playhead (expected 0.5, got {})",
+                color.r
+            );
+            assert_eq!((color.g, color.b, color.a), (1.0, 1.0, 1.0));
+        });
+    }
+
+    /// Exposing takes the parameter's own type and value, so the declaration
+    /// binds back to the parameter it came from with no further input.
+    #[gpui::test]
+    fn exposing_a_parameter_declares_it_with_the_parameters_own_value(cx: &mut TestAppContext) {
+        let (properties, project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let rows = declaration_rows(&properties, cx);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "amount");
+        assert_eq!(rows[0].value_type, "float");
+        assert_eq!(rows[0].default, "1");
+        assert_eq!(rows[0].issue, None, "the declaration reaches its parameter");
+
+        project.read_with(cx, |project, _| {
+            let declaration = project
+                .document()
+                .exposed_parameters
+                .get("amount")
+                .expect("the declaration is in the document");
+            assert_eq!(declaration.binding(), &ExposedBinding::new(in_id, "amount"));
+        });
+    }
+
+    /// A parameter with no place in an external contract gets the core's
+    /// reason, not a declaration that would then report itself broken.
+    #[gpui::test]
+    fn a_parameter_that_cannot_be_a_contract_is_refused(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "not a parameter", cx);
+                assert_eq!(
+                    panel.exposed_error.as_deref(),
+                    Some(ravel_i18n::translate("properties.exposed.error.not_exposable").as_str())
+                );
+            })
+            .unwrap();
+        assert!(declaration_names(&properties, cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn exposing_an_already_exposed_parameter_says_so(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+                assert_eq!(
+                    panel.exposed_error.as_deref(),
+                    Some(
+                        ravel_i18n::translate("properties.exposed.error.already_exposed").as_str()
+                    )
+                );
+            })
+            .unwrap();
+        assert_eq!(declaration_names(&properties, cx), ["amount"]);
+    }
+
+    /// EXPO-5's refusal case: the name is the contract, so two declarations may
+    /// not answer to one name, and the user has to see why.
+    #[gpui::test]
+    fn renaming_a_declaration_onto_an_existing_name_is_refused(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+                panel.expose_parameter(in_id, "tint", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(declaration_names(&properties, cx), ["amount", "tint"]);
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_declaration("amount", "tint".into(), cx);
+                assert_eq!(
+                    panel.exposed_error.as_deref(),
+                    Some(ravel_i18n::translate("properties.exposed.error.duplicate").as_str())
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            declaration_names(&properties, cx),
+            ["amount", "tint"],
+            "a refused rename changes nothing"
+        );
+
+        // And the row can be retried under a free name straight away.
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_declaration("amount", "gain".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(declaration_names(&properties, cx), ["gain", "tint"]);
+    }
+
+    /// The name Input reports Enter *and* the blur that follows it, carrying
+    /// the same pair; the second must not reach the document.
+    #[gpui::test]
+    fn a_declaration_renames_own_blur_does_not_commit_it_twice(cx: &mut TestAppContext) {
+        let (properties, project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let revision = project.read_with(cx, |project, _| project.document().clone());
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_declaration("amount", "gain".into(), cx);
+                panel.rename_declaration("amount", "gain".into(), cx);
+                assert_eq!(
+                    panel.exposed_error, None,
+                    "the repeat is dropped, not failed"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(declaration_names(&properties, cx), ["gain"]);
+
+        // One undo puts the old name back: the repeat recorded no second step.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(declaration_names(&properties, cx), ["amount"]);
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project.document().exposed_parameters,
+                revision.exposed_parameters
+            );
+        });
+    }
+
+    /// Every declaration edit is exactly one undo step, the same contract the
+    /// Ports section holds to.
+    #[gpui::test]
+    fn each_declaration_edit_is_one_undo_step(cx: &mut TestAppContext) {
+        let (properties, project, _path, in_id) = setup_in_node_target(cx);
+        let mut history = vec![declaration_rows(&properties, cx)];
+
+        for key in ["amount", "tint"] {
+            properties
+                .update(cx, |panel, _window, cx| {
+                    panel.expose_parameter(in_id, key, cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+            history.push(declaration_rows(&properties, cx));
+        }
+        assert_eq!(
+            history
+                .last()
+                .unwrap()
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["amount", "tint"]
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_declaration("amount", "gain".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        history.push(declaration_rows(&properties, cx));
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.describe_declaration("gain", "How much".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        history.push(declaration_rows(&properties, cx));
+        assert_eq!(history.last().unwrap()[0].description, "How much");
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.move_declaration("gain", 1, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        history.push(declaration_rows(&properties, cx));
+        assert_eq!(
+            history
+                .last()
+                .unwrap()
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["tint", "gain"]
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.remove_declaration("gain", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        history.push(declaration_rows(&properties, cx));
+        assert_eq!(
+            history
+                .last()
+                .unwrap()
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            ["tint"]
+        );
+
+        while history.len() > 1 {
+            let expected = history[history.len() - 2].clone();
+            project.update(cx, |project, cx| assert!(project.undo(cx)));
+            assert_eq!(
+                declaration_rows(&properties, cx),
+                expected,
+                "edit {} is a single undo step",
+                history.len() - 1
+            );
+            history.pop();
+        }
+    }
+
+    /// A no-op is not an edit: it must not leave an undo step that undoes to
+    /// an identical document.
+    #[gpui::test]
+    fn a_declaration_edit_that_changes_nothing_records_nothing(cx: &mut TestAppContext) {
+        let (properties, project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let before = project.read_with(cx, |project, _| project.document().clone());
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                // Up on the only row, the description it already has, and a
+                // removal of a declaration that is not there.
+                panel.move_declaration("amount", -1, cx);
+                panel.describe_declaration("amount", String::new(), cx);
+                panel.remove_declaration("absent", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            // The single step still on the stack is the expose.
+            assert!(project.undo(cx));
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.document().exposed_parameters.is_empty(),
+                "the no-ops recorded nothing, so one undo removed the declaration"
+            );
+        });
+        assert!(!before.exposed_parameters.is_empty());
+    }
+
+    /// The panel does not decide that a declaration is broken — it shows the
+    /// reason `resolve` gives, in the user's language.
+    #[gpui::test]
+    fn an_unresolved_declaration_shows_the_cores_reason(cx: &mut TestAppContext) {
+        let (properties, project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(declaration_rows(&properties, cx)[0].issue, None);
+
+        // Rebind the declaration at a node that is not there. Doing it through
+        // the document rather than the panel is the point: whatever leaves a
+        // binding dangling, the row reports it.
+        project.update(cx, |project, cx| {
+            let declaration = project
+                .document()
+                .exposed_parameters
+                .get("amount")
+                .expect("declared")
+                .clone()
+                .with_binding(ExposedBinding::new(NodeId::next(), "amount"));
+            let declarations =
+                ExposedParameters::from_declarations([declaration]).expect("one name");
+            let document = project
+                .document()
+                .clone()
+                .with_exposed_parameters(declarations);
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            declaration_rows(&properties, cx)[0].issue,
+            Some(ravel_ui::properties::exposed::ISSUE_NODE_MISSING)
+        );
+    }
+
+    /// The contract the whole mechanism exists for: a declaration the UI made
+    /// is a declaration the headless CLI path reads and applies. If the panel
+    /// ever mints one its own way, this is what catches it.
+    #[gpui::test]
+    fn a_declaration_made_in_the_panel_is_one_the_headless_path_applies(cx: &mut TestAppContext) {
+        use ravel_core::exposed::ExposedValue;
+        use ravel_core::exposed::apply::{AssetContext, apply};
+        use ravel_core::exposed::listing::ExposedListing;
+
+        let (properties, project, path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.expose_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_declaration("amount", "gain".into(), cx);
+                panel.describe_declaration("gain", "How much".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let document = project.read_with(cx, |project, _| project.document().clone());
+
+        // The listing a CLI reads: name, type, default, description, resolved.
+        let listing = ExposedListing::of(&document);
+        assert_eq!(listing.parameters.len(), 1);
+        let entry = &listing.parameters[0];
+        assert_eq!(entry.name, "gain");
+        assert_eq!(entry.value_type, ravel_core::exposed::ExposedType::Float);
+        assert_eq!(entry.default, ExposedValue::Float(1.0));
+        assert_eq!(entry.description, "How much");
+        assert!(
+            entry.resolved,
+            "the panel's declaration reaches its parameter"
+        );
+
+        // And the value a caller supplies reaches the parameter.
+        let applied = apply(
+            document,
+            &[("gain".to_string(), ExposedValue::Float(4.0))]
+                .into_iter()
+                .collect(),
+            AssetContext::default(),
+        )
+        .expect("the declared type accepts a float");
+        assert!(applied.issues.is_empty());
+        let graph = resolve_network(&applied.document, &path).expect("network");
+        let value = graph
+            .node(in_id)
+            .expect("the In node")
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == "amount")
+            .expect("the bound parameter")
+            .value
+            .clone();
+        assert_eq!(value, ParameterValue::Float(4.0));
     }
 }

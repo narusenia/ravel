@@ -462,6 +462,72 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 プロキシ（`ProxyInfo`）とハッシュによる同一性判定は未実装。将来
 `MediaAssetEntry` の予約フィールドとして再導入する。
 
+## 公開パラメータ宣言モデル (REQ-PROJ-006)
+
+プロジェクトの**外部契約**。CLI のテンプレートレンダリング（REQ-RENDER-005）、
+サブグラフテンプレートの公開入力（REQ-PLUGIN-005 (2)）、シェーダ manifest
+（REQ-GPU-003 / REQ-PLUGIN-002）が**同じ 1 つの機構**に乗る
+（`ravel-core::exposed`）。
+
+```rust
+struct ExposedParameter {
+    name: String,            // 契約名。一意・トリム済み
+    value_type: ExposedType, // float / int / bool / string /
+                             // vec2 / vec3 / vec4 / color / media
+    default: ExposedValue,   // value_type と一致し、有限
+    description: String,     // 呼び出し側に見せる説明（省略可）
+    binding: ExposedBinding, // { node: NodeId, key: String }
+}
+
+struct ExposedParameters { entries: Vec<ExposedParameter> }  // 順序＝提示順
+```
+
+- **契約は名前であってパスではない。** 束縛は `NodeId` + パラメータキーで、
+  ノード ID は文書全体で一意（REQ-LAYER-009）かつ改名・再配線で変わらない。
+  レイヤー名やノードパスは外部契約に出さないので、レイヤーを改名しても
+  呼び出し側の `--param` は壊れない。
+- **不変条件は 3 つ**: 名前の一意性、既定値が宣言型と一致すること、既定値が
+  有限であること。コンストラクタと `Deserialize` の両方が強制する。
+  `.ravprj` は手編集・マージされるテキストなので、不変条件を破る宣言は
+  **その宣言だけを捨てて**プロジェクトは開く（警告に出す）。
+- **追従が要るのはパラメータキーの改名だけ。** ポート改名は「4 箇所を 1 操作で
+  書き換える」（`network-interface-editing-plan.md`）に宣言の束縛を 5 番目として
+  加え、`KeyRename` が同一 Document スナップショットで運ばれる。
+- **値の範囲は定数と素材参照に限る。** キーフレーム・式・`PathPoints` ・
+  `Curve` は非対象で、宣言は値ソースを置き換えず `ChannelSource::Constant` の
+  値だけを書き換える。定数でない成分は据え置き、`BindingIssueReason` として
+  報告する（`ravel-core::exposed::apply`）。
+- **束縛先が消えても宣言は残る。** 解決不能として `apply::resolve` が報告し、
+  機械可読な列挙（`ExposedListing`）は `resolved: false` を付ける。隠すと
+  「そんな名前は無い」と「その名前の裏側が壊れている」が区別できない。
+
+### サブグラフテンプレート (REQ-PLUGIN-005 (2))
+
+サブネットの内部グラフ + そのサブネット内に束縛された宣言を 1 ファイルに
+まとめたもの（`ravel-core::subgraph_template::SubgraphTemplate`）。
+
+```rust
+struct SubgraphTemplate {
+    name: String,
+    inner: Graph,                    // net.in / net.out を含む内部グラフ
+    declarations: ExposedParameters, // 上と同じ型・同じ検証
+}
+```
+
+- **宣言の型を 2 系統に分岐させない。** テンプレートの公開入力は
+  `ExposedParameters` そのもので、読み込み時に通る検証も `.ravprj` と同一。
+- **インスタンス化は ID を振り直す**（`Graph::duplicate_with_fresh_ids`。
+  入れ子サブネットとノード出力束縛も追従）。宣言の束縛も同じ対応表で書き換わる
+  ので、同じテンプレートを何度貼っても互いを踏まない。
+- **書き換えられない束縛はインスタンス化を失敗させる。** 内側グラフに無い
+  ノードを指す宣言（手編集や古いファイル）を元の `NodeId` のまま残すと、
+  貼り付け先の文書が同じ整数の ID を持っていた場合にそのノードを掴む。
+  読み込みは通し、拒否はインスタンス化で行う。
+- 生成された宣言は `Document.exposed_parameters` に**加える**ので、
+  `.ravprj` のフォーマットは変わらない。名前が衝突したときは
+  `subgraph_template::add_declarations` が `<name>_2` / `_3` へ付番し、
+  行った改名を呼び出し側へ返す。
+
 ## 永続化形式
 
 ### manifest.json

@@ -19,5 +19,6 @@ pub mod param_curve;
 pub mod registry;
 pub mod runtime;
 pub mod scene;
+pub mod subgraph_template;
 pub mod types;
 pub mod undo;

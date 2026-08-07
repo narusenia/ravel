@@ -203,6 +203,10 @@ impl MenuBar {
                 // Project-level settings (REQ-PROJ-004), one menu away from the
                 // composition-level settings above.
                 MenuItem::action(CommandId::ProjectSettings),
+                // The project's external parameter contract (REQ-PROJ-006).
+                // It sits beside the project settings because both address the
+                // project rather than the composition the menu is named after.
+                MenuItem::action(CommandId::ProjectExposedParameters),
             ],
         );
 

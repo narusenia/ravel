@@ -1041,8 +1041,23 @@ fn seed_subnet_node_with(node: &mut Node, mut mint: impl FnMut() -> NodeId) {
             return id;
         }
     };
-    let inner = new_subnet_inner_graph(next(), next());
-    let (inputs, outputs) = subnet_pins(&inner).expect("the seeded inner graph has In and Out");
+    adopt_subnet_inner(node, new_subnet_inner_graph(next(), next()));
+}
+
+/// Make `node` a subnet node owning `inner`: derive its pins from the inner
+/// In / Out and promote the inner In's parameters onto it.
+///
+/// This is the one way to attach an inner graph, so a node built from a
+/// template ([`crate::subgraph_template`]) declares the same interface a node
+/// seeded by [`seed_subnet_node`] and then edited would. Setting `subnet`
+/// directly and leaving the pins alone produces a node the outer graph cannot
+/// wire and whose promoted parameters do not exist.
+///
+/// `inner` without an In or an Out node leaves the node without pins rather
+/// than failing: that is the same graph [`subnet_pins`] declines to describe,
+/// and it is `SubnetProcessor` that reports it at evaluation time.
+pub fn adopt_subnet_inner(node: &mut Node, inner: Graph) {
+    let (inputs, outputs) = subnet_pins(&inner).unwrap_or_default();
     node.parameters = promote_parameters(&inner, &[]);
     node.inputs = inputs;
     node.outputs = outputs;

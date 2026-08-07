@@ -53,6 +53,7 @@ settings = "コンポジション設定…"
 duplicate = "コンポジションを複製"
 delete = "コンポジションを削除"
 project_settings = "プロジェクト設定…"
+project_exposed_parameters = "公開パラメータ"
 
 [menu.layer]
 _self = "レイヤー"
@@ -165,7 +166,7 @@ scene = "シーン"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
-expose_parameter = "パラメータを公開"
+expose_parameter = "パラメータを入力ポートに公開"
 delete_node = "ノードを削除"
 delete_edge = "エッジを削除"
 rename_port = "ポート名を変更"
@@ -333,6 +334,7 @@ audio = "オーディオ"
 node_info = "ノード情報"
 parameters = "パラメータ"
 ports = "ポート"
+exposed = "公開パラメータ"
 
 [properties.value]
 on = "オン"
@@ -346,6 +348,7 @@ duration_frames = "{count} フレーム"
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"
 port = "入力ポート公開を切替"
+exposed = "このパラメータをプロジェクトの入力として公開"
 
 [properties.ports]
 new_name = "新しいポート名"
@@ -375,6 +378,28 @@ reserved = "組み込みポートの名前は使えません"
 type_not_allowed = "レイヤーの In ノードが持てるのは値型のみ — 配線専用の型はサブネット内で使えます"
 builtin = "組み込みポートは編集できません"
 failed = "ポートを変更できませんでした"
+
+[properties.exposed]
+empty = "このプロジェクトは何も宣言していません。プロパティのパラメータ行から公開すると宣言が追加されます。"
+description = "この入力について呼び出し側に伝えること"
+remove = "この宣言を削除"
+move_up = "この宣言を 1 つ前へ"
+move_down = "この宣言を 1 つ後ろへ"
+
+[properties.exposed.issue]
+node_missing = "束縛先のノードがありません"
+parameter_missing = "束縛先のパラメータがノードにありません"
+kind_mismatch = "宣言の型がパラメータの種別と一致しません"
+animated_components = "キーフレームまたは式で駆動中 — 渡した値では上書きされません"
+not_a_media_node = "メディア宣言はメディアノードにしか束縛できません"
+not_an_asset_reference = "メディア宣言はメディアノードの素材参照にしか束縛できません"
+
+[properties.exposed.error]
+empty_name = "宣言名を入力してください"
+duplicate = "同名の宣言が既にあります"
+not_exposable = "このパラメータは外部契約にできません"
+already_exposed = "このパラメータは既に公開されています"
+failed = "宣言を変更できませんでした"
 
 [properties.curve]
 expand = "カーブエディタを開く — ダブルクリックで点を追加・削除、ドラッグで移動、クリックで選択"

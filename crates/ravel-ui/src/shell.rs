@@ -326,6 +326,34 @@ impl AppShell {
     /// Opening a panel returns [`CommandOutcome::OpenPanel`] so the host moves
     /// the keyboard focus to the new pane. The shell does not mark it focused
     /// itself — the focus event the host produces is what updates this state.
+    /// Make `panel` the panel the user is looking at, opening it if it is not
+    /// docked in the main window.
+    ///
+    /// A command that puts something *into* a panel (the exposed parameter
+    /// declarations into Properties) has to answer for the panel being closed,
+    /// or behind another tab: pointing a hidden panel at a new subject
+    /// looks like the command did nothing. The answer is always an
+    /// [`CommandOutcome::OpenPanel`], including when the panel was already
+    /// there — the host turns that into a real GPUI focus change, which is what
+    /// raises the tab and repoints `FocusedPanelGlobal` (see
+    /// `.agents/rules/gpui.md`, "Focus ownership"). [`Self::toggle_panel`]
+    /// cannot be reused for this: on a visible panel it would close it.
+    pub fn reveal_panel(&mut self, panel: PanelKind) -> CommandOutcome {
+        if let Some(existing) = self.first_main_instance_of(panel) {
+            return CommandOutcome::OpenPanel {
+                instance: existing.id,
+            };
+        }
+        let main = self.layout.main_window().id;
+        match self.layout.insert_instance(main, panel) {
+            Ok(instance) => {
+                self.clear_stale_focus();
+                CommandOutcome::OpenPanel { instance }
+            }
+            Err(_) => CommandOutcome::Handled,
+        }
+    }
+
     pub fn toggle_panel(&mut self, panel: PanelKind) -> CommandOutcome {
         let mut outcome = CommandOutcome::Handled;
         if let Some(existing) = self.first_main_instance_of(panel) {

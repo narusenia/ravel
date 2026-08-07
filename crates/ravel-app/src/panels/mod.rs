@@ -154,6 +154,15 @@ pub enum PropertiesTarget {
     /// only identifies the subject — the full inspector (metadata, path
     /// editing, relink) is unit 6.
     MediaAsset { id: String },
+    /// The project's exposed parameter declarations (REQ-PROJ-006), reached
+    /// through `CommandId::ProjectExposedParameters`.
+    ///
+    /// The other targets name something the user selected; this one names the
+    /// project itself, because the declarations are the project's external
+    /// contract and belong to no composition, layer or node. It carries no
+    /// identifier for the same reason — a document has exactly one set of
+    /// declarations.
+    Project,
 }
 
 /// Durable shared state identifying what the Properties panel should resolve

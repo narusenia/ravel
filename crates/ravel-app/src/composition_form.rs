@@ -219,6 +219,9 @@ fn placeholder_value(field: &PropertyField) -> String {
         // A port list belongs to a network interface node, never to
         // composition settings — the count is a placeholder, not a UI.
         PropertyField::PortList { rows, .. } => format!("{} ports", rows.len()),
+        // Declarations belong to the project, never to composition settings —
+        // likewise a placeholder rather than a UI.
+        PropertyField::ExposedList { rows, .. } => format!("{} declarations", rows.len()),
     }
 }
 

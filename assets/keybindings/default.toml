@@ -44,6 +44,9 @@ toggle_media_bin = "Alt+8"
 [composition]
 settings = "Cmd+K"
 
+[project]
+exposed_parameters = "Cmd+Shift+K"
+
 [playback]
 toggle = "Space"
 stop = "K"

@@ -171,7 +171,21 @@ pub fn collect(
     }
 }
 
-/// Which composition, by id — a name can be ambiguous, an id never is.
+/// Which composition, spelled the way `--comp` will resolve back to it.
+///
+/// `--comp` reads a **name first** and only then an id, because a composition
+/// called "2" must not be shadowed by the composition whose id is 2
+/// (`plan::resolve_comp`). Handing back the id unconditionally would
+/// therefore turn a chosen composition into a different one whenever some
+/// other composition is named with those digits — silently, since planning
+/// would succeed. So a name that only one composition answers to is used as
+/// it is, and the id is the fallback for a shared name.
+///
+/// The fallback is still wrong for one document: a name two compositions
+/// share *and* a third composition named with the chosen one's id digits.
+/// Nothing spellable resolves to the right composition there — that document
+/// is what `CliError::AmbiguousComposition` exists for — and the user can
+/// rename either one and start again.
 fn ask_composition(prompt: &mut dyn Prompt, document: &Document) -> Result<String, CliError> {
     let entries = listing::compositions(document);
     if entries.is_empty() {
@@ -192,8 +206,16 @@ fn ask_composition(prompt: &mut dyn Prompt, document: &Document) -> Result<Strin
         })
         .collect();
     let default = entries.iter().position(|entry| entry.root).unwrap_or(0);
-    let chosen = prompt.select(&t!("cli.prompt.comp"), &options, default)?;
-    Ok(entries[chosen].id.to_string())
+    let chosen = &entries[prompt.select(&t!("cli.prompt.comp"), &options, default)?];
+    let unique = entries
+        .iter()
+        .filter(|entry| entry.name == chosen.name)
+        .count()
+        == 1;
+    match unique {
+        true => Ok(chosen.name.clone()),
+        false => Ok(chosen.id.to_string()),
+    }
 }
 
 /// Which output format, out of the ones that can actually be written.
@@ -796,6 +818,87 @@ mod tests {
         ]);
         let args = collect_with(&mut prompt, &document, &available_encoders()).expect("a session");
         assert!(args.params.is_empty(), "{:?}", args.params);
+    }
+
+    /// The composition that was pointed at is the composition that renders,
+    /// including in the document where a name and an id disagree: `--comp`
+    /// reads names before ids, so a composition *named* "1" owns that
+    /// spelling and the composition whose *id* is 1 has to be named instead.
+    #[test]
+    fn the_chosen_composition_is_the_one_that_renders() {
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::new(1),
+                "Main",
+                (16, 16),
+                FrameRate::new(30, 1),
+                50,
+            ))
+            .with_composition(Composition::new(
+                CompId::new(7),
+                // A name that is another composition's id.
+                "1",
+                (8, 8),
+                FrameRate::new(30, 1),
+                10,
+            ));
+        let encoders = available_encoders();
+
+        for (index, expected) in [(0usize, CompId::new(1)), (1, CompId::new(7))] {
+            let mut prompt = Scripted::new([
+                Answer::Select(index),
+                Answer::Select(0),
+                Answer::Select(0),
+                text("/tmp/out-7"),
+                Answer::Confirm(true),
+            ]);
+            let args = collect_with(&mut prompt, &document, &encoders).expect("a session");
+            assert_eq!(
+                plan_render(&args, &document, None, &encoders)
+                    .expect("plans")
+                    .comp,
+                expected,
+                "chose entry {index}, and --comp said {:?}",
+                args.comp
+            );
+        }
+    }
+
+    /// A name two compositions share cannot be handed to `--comp` — it is
+    /// what `AmbiguousComposition` refuses — so the id is used instead.
+    #[test]
+    fn a_shared_name_falls_back_to_the_id() {
+        let document = Document::default()
+            .with_composition(Composition::new(
+                CompId::new(1),
+                "Main",
+                (16, 16),
+                FrameRate::new(30, 1),
+                50,
+            ))
+            .with_composition(Composition::new(
+                CompId::new(4),
+                "Main",
+                (8, 8),
+                FrameRate::new(30, 1),
+                10,
+            ));
+        let encoders = available_encoders();
+        let mut prompt = Scripted::new([
+            Answer::Select(1),
+            Answer::Select(0),
+            Answer::Select(0),
+            text("/tmp/out-7"),
+            Answer::Confirm(true),
+        ]);
+        let args = collect_with(&mut prompt, &document, &encoders).expect("a session");
+        assert_eq!(args.comp.as_deref(), Some("4"));
+        assert_eq!(
+            plan_render(&args, &document, None, &encoders)
+                .expect("an id is never ambiguous")
+                .comp,
+            CompId::new(4)
+        );
     }
 
     // -------------------------------------------------------------------

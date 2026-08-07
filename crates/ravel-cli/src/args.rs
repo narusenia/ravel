@@ -238,7 +238,15 @@ impl FrameRange {
                 end: self.last,
             });
         }
-        Ok(self.first..self.last + 1)
+        // `u64::MAX` as the last frame parses and is not backwards, but has
+        // no half-open spelling. Classified rather than left to `+ 1`, which
+        // panics in a debug build and wraps to an "empty range" — a wrong
+        // sentence — in a release one. Reported as a bad range because that
+        // is what it is: a range no render can be expressed over.
+        let end = self.last.checked_add(1).ok_or_else(|| CliError::BadRange {
+            raw: format!("{}-{}", self.first, self.last),
+        })?;
+        Ok(self.first..end)
     }
 }
 
@@ -298,6 +306,28 @@ mod tests {
             range.to_range(),
             Err(CliError::EmptyRange { start: 20, end: 10 })
         ));
+    }
+
+    /// The last representable frame has no half-open spelling. It must be a
+    /// classified refusal, not a debug panic and not a release wrap into a
+    /// message about an empty range.
+    #[test]
+    fn a_range_that_cannot_be_made_half_open_is_refused() {
+        let pair: FrameRange = "0-18446744073709551615".parse().expect("parses");
+        let error = pair.to_range().expect_err("u64::MAX + 1 does not exist");
+        assert!(matches!(error, CliError::BadRange { .. }), "{error:?}");
+        assert_eq!(error.code(), crate::error::EXIT_USAGE);
+
+        let single: FrameRange = "18446744073709551615".parse().expect("parses");
+        assert!(matches!(single.to_range(), Err(CliError::BadRange { .. })));
+
+        // One below still works, so the refusal is the boundary and not an
+        // off-by-one that lost the last usable frame.
+        let usable: FrameRange = "18446744073709551614".parse().expect("parses");
+        assert_eq!(
+            usable.to_range().expect("representable"),
+            u64::MAX - 1..u64::MAX
+        );
     }
 
     #[test]

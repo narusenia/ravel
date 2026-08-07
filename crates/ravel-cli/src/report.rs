@@ -74,6 +74,21 @@ fn resolve(mode: ProgressMode, stdout_is_terminal: bool) -> ProgressMode {
     }
 }
 
+/// Write one line to stdout, ignoring a write that cannot land.
+///
+/// **Every stdout write of this crate goes through here.** `println!` panics
+/// on a write error, and Rust ignores `SIGPIPE`, so a consumer that leaves
+/// early — `ravel-cli list codecs | head -1`, a `jq -e` that exits on the
+/// first match, a closed pager — would turn a command that did its job into
+/// a panic with status 101. The exit code is this crate's contract with the
+/// script calling it, and a broken pipe is the reader's decision, not a
+/// render failure.
+pub fn print_line(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{text}");
+    let _ = stdout.flush();
+}
+
 /// The identifier and the sentence for a warning.
 ///
 /// The identifier is stable and is what a script matches on; the sentence is
@@ -131,11 +146,10 @@ impl Reporter for HumanReporter {
         if let Some(bar) = self.bar.take() {
             bar.finish_and_clear();
         }
-        println!(
-            "{}",
-            t!("cli.result.completed")
+        print_line(
+            &t!("cli.result.completed")
                 .replace("{count}", &summary.frames.to_string())
-                .replace("{path}", &summary.directory.display().to_string())
+                .replace("{path}", &summary.directory.display().to_string()),
         );
     }
 
@@ -160,11 +174,7 @@ struct JsonReporter;
 
 impl JsonReporter {
     fn emit(value: serde_json::Value) {
-        let mut stdout = std::io::stdout().lock();
-        // A closed pipe (`| head`) is not a render failure, so it is ignored
-        // rather than propagated.
-        let _ = writeln!(stdout, "{value}");
-        let _ = stdout.flush();
+        print_line(&value.to_string());
     }
 }
 
@@ -188,12 +198,16 @@ impl Reporter for JsonReporter {
     }
 
     fn success(&mut self, summary: &Summary) {
+        // `display()` rather than the paths themselves: `PathBuf`'s
+        // `Serialize` fails on a path that is not UTF-8, and `json!` panics
+        // on a value it cannot serialize. Panicking *after* the frames are
+        // written would throw away a render that succeeded.
         Self::emit(serde_json::json!({
             "event": "completed",
             "frames": summary.frames,
-            "directory": summary.directory,
-            "first": summary.first,
-            "last": summary.last,
+            "directory": summary.directory.display().to_string(),
+            "first": summary.first.display().to_string(),
+            "last": summary.last.display().to_string(),
         }));
     }
 

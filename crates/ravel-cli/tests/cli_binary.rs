@@ -302,3 +302,33 @@ fn the_cli_does_not_depend_on_the_gui_stack() {
         );
     }
 }
+
+/// A reader that leaves early is the reader's business, not a render failure.
+///
+/// `println!` panics when the write fails and Rust ignores `SIGPIPE`, so
+/// `ravel-cli list codecs | head -1` used to exit 101 with a panic message
+/// after doing exactly what it was asked. The exit code is what a script
+/// reads, so it has to stay the code for "this worked".
+#[test]
+fn a_closed_stdout_is_not_a_failure() {
+    use std::process::Stdio;
+
+    let mut child = cli()
+        .args(["list", "codecs"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns");
+
+    // Closing the read end before the child writes is what `| head -1` does
+    // once it has the line it wanted.
+    drop(child.stdout.take().expect("piped"));
+
+    let output = child.wait_with_output().expect("waits");
+    assert!(
+        output.status.success(),
+        "a closed pipe turned a successful listing into {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

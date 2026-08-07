@@ -233,7 +233,7 @@ pub fn run(cli: Cli) -> u8 {
         Command::Render(args) => run_render(&args),
         Command::List(command) => match run_list(command) {
             Ok(json) => {
-                println!("{json}");
+                report::print_line(&json);
                 EXIT_OK
             }
             Err(error) => {

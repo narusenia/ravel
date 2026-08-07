@@ -136,13 +136,21 @@ impl WavWriter {
         }
 
         let file = self.file.as_mut().ok_or_else(finished)?;
-        // One buffer per call rather than per sample: `BufWriter` would
-        // otherwise pay a bounds check and a copy for every four bytes.
-        let mut bytes = Vec::with_capacity(size_of_val(samples));
-        for sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
+        // A fixed scratch buffer rather than one sized to `samples`: the
+        // caller hands over a whole render's mix in one call, and a buffer
+        // that matched it would double the peak memory of the very path
+        // `MAX_DECODE_BYTES` exists to bound. Still a buffer rather than a
+        // sample at a time, because `BufWriter` would otherwise pay a bounds
+        // check and a copy for every four bytes.
+        const CHUNK_SAMPLES: usize = 8 * 1024;
+        let mut bytes = Vec::with_capacity(CHUNK_SAMPLES * size_of::<f32>());
+        for chunk in samples.chunks(CHUNK_SAMPLES) {
+            bytes.clear();
+            for sample in chunk {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            file.write_all(&bytes)?;
         }
-        file.write_all(&bytes)?;
         self.data_bytes += added;
         Ok(())
     }

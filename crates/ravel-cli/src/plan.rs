@@ -37,9 +37,10 @@ use ravel_core::id::CompId;
 use ravel_core::media::encode::{
     Availability, EncoderAvailability, ImageSequenceOutput, SequenceCodec,
 };
-use ravel_core::runtime::{OverwritePolicy, RenderOutput};
+use ravel_core::runtime::{OverwritePolicy, RenderOutput, occupied};
 
 use crate::args::{OutputFormat, RenderArgs};
+use crate::audio::{AudioPlan, NoAudio};
 use crate::error::CliError;
 
 /// A render that has been fully decided.
@@ -54,6 +55,10 @@ pub struct RenderPlan {
     pub codec: SequenceCodec,
     pub output: ImageSequenceOutput,
     pub overwrite: OverwritePolicy,
+    /// The soundtrack to write beside the frames, or `None` when this render
+    /// has none — either because the composition is silent or because
+    /// [`warnings`](Self::warnings) says why it will not be rendered.
+    pub audio: Option<AudioPlan>,
     /// Everything the user should know but that does not stop the render.
     pub warnings: Vec<Warning>,
 }
@@ -67,15 +72,48 @@ impl RenderPlan {
     pub fn frame_count(&self) -> u64 {
         self.range.end.saturating_sub(self.range.start)
     }
+
+    /// Every path this render will occupy, the soundtrack included.
+    ///
+    /// The worker only knows about the frames — the WAV is written by the
+    /// front end — so the overwrite refusal has to ask both. One list rather
+    /// than two questions, **asked the same way**: `occupied` is the frames'
+    /// own predicate, and answering it with `Path::exists` for the sound would
+    /// have called a dangling symlink free where the frames call it taken. A
+    /// weaker question there is not a smaller refusal, it is a render that
+    /// starts and then writes through the link, outside its own output
+    /// directory.
+    pub fn conflicts(&self) -> Vec<std::path::PathBuf> {
+        let mut conflicts = self.render_output().conflicts(self.range.clone());
+        if let Some(audio) = &self.audio
+            && occupied(&audio.path)
+        {
+            conflicts.push(audio.path.clone());
+        }
+        conflicts
+    }
 }
 
 /// Something worth saying that is not a reason to stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Warning {
-    /// The project has layers with audio and this build renders picture
-    /// only. Said out loud so a silent deliverable is never a surprise;
-    /// `EXPORT-4` is what removes this.
-    AudioNotRendered { layers: usize },
+    /// The composition has layers with audio and the deliverable will have
+    /// none. Said out loud so a silent render is never a surprise; the
+    /// reason distinguishes "you asked for that" from "this build cannot".
+    AudioNotRendered { layers: usize, reason: NoAudio },
+    /// One audio layer's source could not be loaded, so its sound is missing
+    /// from an otherwise complete mix. A warning rather than a failure — the
+    /// picture is still worth having and the mix is still the right length —
+    /// but never silent, which is the point of `MAX_DECODE_BYTES` having a
+    /// visible consequence.
+    AudioSourceSkipped {
+        /// The layer's name, or its id when the layer is gone.
+        layer: String,
+        /// The media asset it names.
+        asset: String,
+        /// Why it could not be loaded.
+        detail: String,
+    },
     /// A supplied value did not (fully) reach the parameter it names — the
     /// node was deleted, or the parameter is animated where the value would
     /// have gone. `apply` reports these rather than failing, because the
@@ -136,9 +174,9 @@ pub fn plan_render(
     let values = crate::params::parse(&args.params, &listing)?;
     let (document, mut warnings) = apply_values(document.clone(), &values, project_root)?;
 
-    if let Some(layers) = audio_layers(&document, comp) {
-        warnings.push(Warning::AudioNotRendered { layers });
-    }
+    let (audio, audio_warnings) =
+        crate::audio::plan_audio(&document, comp, &output, range.clone(), !args.no_audio);
+    warnings.extend(audio_warnings);
 
     Ok(RenderPlan {
         document: Arc::new(document),
@@ -152,6 +190,7 @@ pub fn plan_render(
         } else {
             OverwritePolicy::Refuse
         },
+        audio,
         warnings,
     })
 }
@@ -231,21 +270,6 @@ fn resolve_comp(document: &Document, requested: Option<&str>) -> Result<CompId, 
     Err(CliError::UnknownComposition(requested.to_string()))
 }
 
-/// How many layers of `comp` carry audio, or `None` when none do.
-///
-/// Scoped to the composition being rendered rather than to the whole
-/// document: a warning about audio in a composition nobody asked for would
-/// train the reader to ignore it.
-fn audio_layers(document: &Document, comp: CompId) -> Option<usize> {
-    let count = document
-        .get_composition(comp)?
-        .layers
-        .iter()
-        .filter(|layer| layer.audio.is_some())
-        .count();
-    (count > 0).then_some(count)
-}
-
 /// The writer for `format`, or why there is none.
 fn resolve_codec(
     format: OutputFormat,
@@ -312,6 +336,7 @@ mod tests {
             padding: 4,
             params: Vec::new(),
             overwrite: false,
+            no_audio: false,
             progress: crate::args::ProgressMode::Quiet,
         }
     }
@@ -492,10 +517,11 @@ mod tests {
             && row.is_available()));
     }
 
-    /// A project with audio renders picture only until `EXPORT-4`, and has
-    /// to say so rather than hand back a silent file without comment.
+    /// A project whose sound will not be in the deliverable has to say so
+    /// rather than hand back a silent file without comment. The planning
+    /// stage is where it is said, so the warning arrives before the render.
     #[test]
-    fn a_composition_with_audio_layers_warns() {
+    fn a_composition_rendered_without_its_audio_warns() {
         use ravel_core::composition::AudioSource;
 
         let mut composition = comp(1, "Main");
@@ -509,14 +535,91 @@ mod tests {
         composition = composition.add_layer(Layer::new(LayerId::new(2), "silent", Graph::new()));
 
         let document = Document::default().with_composition(composition);
-        let plan = plan_render(
-            &args(Path::new("/tmp/out")),
-            &document,
-            None,
-            &available_encoders(),
-        )
-        .expect("plans");
-        assert_eq!(plan.warnings, vec![Warning::AudioNotRendered { layers: 1 }]);
+        let mut args = args(Path::new("/tmp/out"));
+        args.no_audio = true;
+        let plan = plan_render(&args, &document, None, &available_encoders()).expect("plans");
+        assert_eq!(
+            plan.warnings,
+            vec![Warning::AudioNotRendered {
+                layers: 1,
+                reason: NoAudio::NotAsked
+            }]
+        );
+        assert!(plan.audio.is_none(), "and nothing is planned to be written");
+    }
+
+    /// Asked for, the same project plans a WAV named after the frame range —
+    /// or, in a build that cannot decode, says that instead. Both are the
+    /// "never silently silent" rule; which one applies is the build's.
+    #[test]
+    fn a_composition_with_audio_plans_a_companion_wav() {
+        use ravel_core::composition::AudioSource;
+
+        let mut composition = comp(1, "Main");
+        let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
+        layer.audio = Some(AudioSource::new("a", 0));
+        composition = composition.add_layer(layer);
+
+        let document = Document::default().with_composition(composition);
+        let mut args = args(Path::new("/tmp/out"));
+        args.range = Some("10-19".parse().expect("range"));
+        let plan = plan_render(&args, &document, None, &available_encoders()).expect("plans");
+
+        if crate::audio::DECODE_AVAILABLE {
+            let audio = plan.audio.as_ref().expect("an ffmpeg build renders it");
+            assert_eq!(
+                audio.path,
+                Path::new("/tmp/out/frame_0010-0019.wav"),
+                "the soundtrack is named after the same absolute frames as the pictures"
+            );
+            assert!(plan.warnings.is_empty());
+        } else {
+            assert!(plan.audio.is_none());
+            assert_eq!(
+                plan.warnings,
+                vec![Warning::AudioNotRendered {
+                    layers: 1,
+                    reason: NoAudio::NoDecoder
+                }]
+            );
+        }
+    }
+
+    /// A symlink pointing nowhere answers `false` to `Path::exists` and `Ok`
+    /// to `symlink_metadata`, and `WavWriter::create` follows it — so the
+    /// weaker question would call the soundtrack's path free and then truncate
+    /// whatever the link names, outside the output directory entirely. The
+    /// frames have always asked the stronger one.
+    ///
+    /// The plan is built and then given its soundtrack by hand, because a
+    /// build without FFmpeg plans none at all and this refusal is not a
+    /// property of the decoder.
+    #[cfg(unix)]
+    #[test]
+    fn a_soundtrack_path_that_is_a_dangling_symlink_conflicts() {
+        use crate::audio::{OUTPUT_CHANNELS, OUTPUT_SAMPLE_RATE};
+        use ravel_audio::MixerConfig;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wav = dir.path().join("frame_0000-0049.wav");
+        std::os::unix::fs::symlink(dir.path().join("elsewhere.wav"), &wav).expect("symlink");
+        assert!(!wav.exists(), "the fixture points at nothing");
+
+        let mut plan = plan_render(&args(dir.path()), &document(), None, &available_encoders())
+            .expect("plans");
+        assert!(plan.conflicts().is_empty(), "no frame is in the way");
+        plan.audio = Some(AudioPlan {
+            path: wav.clone(),
+            config: MixerConfig {
+                output_sample_rate: OUTPUT_SAMPLE_RATE,
+                output_channels: OUTPUT_CHANNELS,
+            },
+        });
+        assert_eq!(
+            plan.conflicts(),
+            vec![wav],
+            "a link to nothing occupies the name a render would write"
+        );
     }
 
     #[test]

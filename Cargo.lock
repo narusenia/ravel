@@ -5945,7 +5945,9 @@ dependencies = [
  "crossbeam-channel",
  "dasp_sample",
  "ravel-core",
+ "ravel-media",
  "rubato",
+ "tempfile",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -5960,6 +5962,7 @@ dependencies = [
  "ctrlc",
  "image",
  "indicatif",
+ "ravel-audio",
  "ravel-core",
  "ravel-gpu",
  "ravel-i18n",

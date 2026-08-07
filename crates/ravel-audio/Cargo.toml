@@ -6,9 +6,25 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["playback"]
+# CPAL output: the `device` and `engine` modules and everything they
+# re-export. On by default because playing sound is what an audio crate is
+# for — but separable, because an offline render is not playback and a
+# headless render node must not require CoreAudio or ALSA to link
+# (`docs/implementation/render-export-plan.md`, unit 4).
+playback = ["dep:cpal"]
+# FFmpeg-backed decoding for `mixdown::decode_full_audio`. Off by default so
+# a plain build needs no FFmpeg shared libraries; every other module works
+# without it.
+ffmpeg = ["ravel-media/ffmpeg"]
+
 [dependencies]
 ravel-core = { workspace = true }
-cpal = { workspace = true }
+# Audio decode for the document → track mapping (`mixdown`). `ravel-media`
+# depends on `ravel-core` alone, so this does not close a cycle.
+ravel-media = { workspace = true }
+cpal = { workspace = true, optional = true }
 dasp_sample = { workspace = true }
 rubato = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -17,3 +33,4 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }

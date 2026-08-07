@@ -41,6 +41,7 @@
 //! migrates in memory and is never saved back: a render is a read.
 
 pub mod args;
+pub mod audio;
 pub mod error;
 pub mod execute;
 pub mod listing;
@@ -156,7 +157,7 @@ fn refuse_existing_output(plan: &RenderPlan) -> Result<(), CliError> {
     if plan.overwrite != OverwritePolicy::Refuse {
         return Ok(());
     }
-    let conflicts = plan.render_output().conflicts(plan.range.clone());
+    let conflicts = plan.conflicts();
     if conflicts.is_empty() {
         return Ok(());
     }
@@ -198,12 +199,31 @@ where
         let (id, message) = warning_text(warning);
         reporter.note(id, &message);
     }
-    let frames = execute::execute(hooks()?, &plan, cancel, reporter)?;
+
+    // The device before anything is written. `hooks()` is the last refusal a
+    // render can make — a machine with no adapter — and evaluating it as an
+    // argument to `execute` would let it escape past the sound, which is
+    // already on disk by then.
+    let hooks = hooks()?;
+
+    // Sound first: its warnings are worth having before an hour of frames,
+    // and undoing one WAV is simpler than undoing however many frames the
+    // worker wrote. See `audio`'s module docs.
+    let audio = audio::render_audio(&plan, reporter)?;
+
+    // Every exit from here to the `publish` below drops `audio`, which takes
+    // its temporary file with it and never touches the soundtrack's real name
+    // — so a failed or cancelled render leaves neither a soundtrack without
+    // frames nor a `--overwrite` target destroyed for nothing.
+    let frames = execute::execute(hooks, &plan, cancel, reporter)?;
+    let audio = audio.map(audio::PendingAudio::publish).transpose()?;
+
     Ok(Summary {
         frames,
         directory: plan.output.directory().to_path_buf(),
         first: plan.output.frame_path(plan.range.start),
         last: plan.output.frame_path(plan.range.end.saturating_sub(1)),
+        audio,
     })
 }
 

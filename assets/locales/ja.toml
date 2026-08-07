@@ -582,11 +582,14 @@ no_platform_route = "この OS に経路が無い"
 not_offered = "Ravel は提供していない"
 
 [cli.warn]
-audio_not_rendered = "このコンポジションには音声を持つレイヤーが {count} 件あるが、書き出しは映像のみ"
+audio_not_rendered = "このコンポジションには音声を持つレイヤーが {count} 件あるが、--no-audio 指定のため書き出しは映像のみ"
+audio_no_decoder = "このコンポジションには音声を持つレイヤーが {count} 件あるが、このビルドには FFmpeg が無くデコードできないため書き出しは映像のみ"
+audio_source_skipped = "レイヤー「{layer}」はミックスで無音: メディアアセット「{asset}」を読み込めなかった: {detail}"
 binding_issue = "指定したパラメータがプロジェクトに完全には届いていない: {detail}"
 
 [cli.result]
 completed = "{count} フレームを {path} に書き出した"
+audio = "音声を {path} に書き出した"
 
 
 # ノード種別のラベル・説明・パラメータ説明。type_key がキー（ドットを含む

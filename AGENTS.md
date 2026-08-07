@@ -27,9 +27,13 @@ model is still current.
 - `crates/ravel-gpu`: shared wgpu device, compute pipelines, shader management,
   texture pooling, and transfers
 - `crates/ravel-media`: FFmpeg-backed media decode/encode, hardware acceleration,
-  format detection, and image sequences
-- `crates/ravel-audio`: CPAL output, mixing, resampling, synchronization, effects,
-  and waveform generation
+  format detection, image sequences, and the FFmpeg-free render writers
+  (PNG / EXR sequences and the 32-bit float `WavWriter` beside them)
+- `crates/ravel-audio`: mixing, resampling, synchronization, effects, waveform
+  generation, the document → mixer track mapping (`mixdown`), and the offline
+  range mixdown a render uses (`offline`). CPAL output lives behind the
+  default-on `playback` feature, so a headless caller such as `ravel-cli`
+  depends on this crate without linking an audio device library
 - `crates/ravel-i18n`: locale loading and the `t!` translation macro
 - `crates/ravel-ui`: headless shell state, commands, keybindings, panels,
   properties, menus, and workspace presets
@@ -48,7 +52,14 @@ model is still current.
   mode will sit on (`ravel-cli list comps | params | codecs`). GUI-free by
   construction: it does not depend on `gpui`, `ravel-ui`, `ravel-dock`, or
   `ravel-app`, so a headless host cannot link a window toolkit by accident.
-  Releases therefore ship **two** binaries, `ravel` and `ravel-cli`
+  Releases therefore ship **two** binaries, `ravel` and `ravel-cli`. A render
+  whose composition has audio writes a WAV beside the frames.
+  **Build it with `cargo build -p ravel-cli`, never as part of a
+  `--workspace` build.** Cargo unifies features across one build, so
+  `ravel-app`'s `ravel-audio/playback` reaches `ravel-cli` too and the
+  binary ends up linking CoreAudio / ALSA — the very thing the feature split
+  exists to avoid. `cargo build -p ravel-cli` links no audio framework;
+  `cargo build --workspace` links two. Whoever adds packaging owns this
 - `assets`: locales, keybindings, workspace preset data, and the bundled
   UI fonts (`assets/fonts/`). The fonts are SIL OFL 1.1: their license texts
   live beside them, must stay there, and — because the faces are compiled

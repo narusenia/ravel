@@ -265,6 +265,36 @@ impl ImageSequenceOutput {
             self.padding,
         ))
     }
+
+    /// Where the soundtrack for `range` goes.
+    ///
+    /// An image sequence carries no audio, so a render with sound writes a
+    /// WAV beside the frames (`render-export-plan.md`, unit 4). The name is
+    /// built from the same components as the frames — same directory, same
+    /// prefix and suffix, same padding — with the **absolute** first and last
+    /// frame numbers in place of one frame's: `frame_0100-0199.wav` sits
+    /// beside `frame_0100.png … frame_0199.png`.
+    ///
+    /// Naming it after the range rather than calling it `audio.wav` is the
+    /// same rule the frames follow, and for the same reason: several
+    /// processes rendering disjoint `--range` slices into one directory must
+    /// not collide, and a reader must be able to tell which slice a file
+    /// covers. Concatenating the WAVs in frame order reconstructs the whole
+    /// soundtrack.
+    ///
+    /// `range` is half-open, as the worker takes it; the name shows the
+    /// inclusive last frame, as the user typed it. An empty range names the
+    /// start frame at both ends rather than underflowing.
+    pub fn audio_path(&self, range: std::ops::Range<u64>) -> PathBuf {
+        let last = range.end.max(range.start.saturating_add(1)) - 1;
+        self.directory.join(format!(
+            "{prefix}{first:0>width$}-{last:0>width$}{suffix}.wav",
+            prefix = self.prefix,
+            first = range.start,
+            suffix = self.suffix,
+            width = self.padding,
+        ))
+    }
 }
 
 /// Reject a file-name fragment that could leave the output directory.
@@ -934,6 +964,56 @@ mod tests {
         assert_eq!(
             output.frame_path(123_456),
             PathBuf::from("/out/beauty_123456.exr"),
+        );
+    }
+
+    /// The soundtrack has to be findable next to the frames it belongs to,
+    /// and two processes writing disjoint slices into one directory must not
+    /// name the same file — which is the reason the frames are numbered
+    /// absolutely, applied to the sound.
+    #[test]
+    fn the_companion_audio_names_the_absolute_frame_range() {
+        let output =
+            ImageSequenceOutput::new("/out", "beauty_", "", SequenceCodec::Exr, 4).unwrap();
+        assert_eq!(
+            output.audio_path(100..200),
+            PathBuf::from("/out/beauty_0100-0199.wav"),
+            "the last frame is shown inclusively, as the user typed it"
+        );
+        assert_ne!(
+            output.audio_path(0..50),
+            output.audio_path(50..100),
+            "disjoint slices must not collide"
+        );
+        assert_eq!(
+            output.audio_path(7..8),
+            PathBuf::from("/out/beauty_0007-0007.wav"),
+            "one frame names itself at both ends"
+        );
+        // An empty range cannot underflow into a name full of nines.
+        assert_eq!(
+            output.audio_path(0..0),
+            PathBuf::from("/out/beauty_0000-0000.wav")
+        );
+
+        // The prefix and suffix are the sequence's, so the WAV sorts beside
+        // its frames and inherits the escape check they were built with.
+        let suffixed = ImageSequenceOutput::new(
+            "/out",
+            "shot_",
+            "_final",
+            SequenceCodec::Png(PngDepth::Eight),
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            suffixed.audio_path(1..3),
+            PathBuf::from("/out/shot_001-002_final.wav")
+        );
+        assert_eq!(
+            suffixed.audio_path(1..3).parent(),
+            Some(Path::new("/out")),
+            "the components were checked when the output was built"
         );
     }
 

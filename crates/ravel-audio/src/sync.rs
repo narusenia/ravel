@@ -20,11 +20,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 /// The prep thread may briefly spin while the callback commits a buffer. The
 /// callback only attempts the gate once; when a transport update owns it, the
 /// callback emits silence and leaves the clock untouched.
+///
+/// The real-time callback is the only thing this arbitrates, so it exists
+/// only where that callback does: behind the `playback` feature.
+#[cfg(feature = "playback")]
 pub(crate) struct TransportSync {
     epoch: AtomicU64,
     update_in_progress: AtomicBool,
 }
 
+#[cfg(feature = "playback")]
 impl TransportSync {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -220,7 +225,11 @@ impl SyncClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the transport-gate test spawns a racing thread, and that gate
+    // exists only with `playback`.
+    #[cfg(feature = "playback")]
     use std::sync::Barrier;
+    #[cfg(feature = "playback")]
     use std::thread;
 
     fn fps_30() -> FrameRate {
@@ -236,6 +245,7 @@ mod tests {
         assert!(!clock.is_playing());
     }
 
+    #[cfg(feature = "playback")]
     #[test]
     fn transport_update_excludes_a_racing_callback_commit() {
         let clock = SyncClock::new(48_000, fps_30());

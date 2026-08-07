@@ -907,7 +907,13 @@ fn check_preconditions(
 /// still counts: the encoder creates its frames with `create_new`, which such
 /// a link makes fail, and a job that would die on frame 7 should be refused
 /// at frame 0 instead.
-fn occupied(path: &Path) -> bool {
+///
+/// Public because a render's output is not only its frames — `ravel-cli` puts
+/// a WAV beside them ([`RenderOutput::conflicts`] does not know about it) and
+/// has to ask the same question about it. A front end that asks a weaker one
+/// declares a dangling link free and then writes through it, which is how a
+/// render comes to truncate a file outside its own output directory.
+pub fn occupied(path: &Path) -> bool {
     path.symlink_metadata().is_ok()
 }
 

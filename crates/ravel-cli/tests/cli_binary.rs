@@ -303,6 +303,54 @@ fn the_cli_does_not_depend_on_the_gui_stack() {
     }
 }
 
+/// The same argument one crate down: a render node mixes sound, so it needs
+/// `ravel-audio`, but it never *plays* any, so it must not drag in CPAL and
+/// with it the platform's audio device stack (CoreAudio, ALSA). That is what
+/// `ravel-audio`'s default-on `playback` feature separates.
+///
+/// Asserted against the manifest rather than by probing the built binary
+/// because Cargo unifies features across a `--workspace` build: `ravel-app`
+/// enables `playback`, so in the very test run that would check it, CPAL is
+/// compiled anyway. The dependency declaration is the thing that is actually
+/// true of a `cargo build -p ravel-cli`, and it is what a reviewer changing
+/// it would see fail.
+#[test]
+fn the_cli_does_not_link_the_audio_device_stack() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest =
+        std::fs::read_to_string(crate_dir.join("Cargo.toml")).expect("the crate's own manifest");
+    assert!(
+        !manifest.contains("cpal"),
+        "ravel-cli must not depend on cpal directly"
+    );
+
+    let audio = manifest
+        .lines()
+        .find(|line| line.starts_with("ravel-audio "))
+        .expect("ravel-cli depends on ravel-audio for the mixdown");
+    assert!(
+        !audio.contains("playback"),
+        "the ravel-audio dependency must not ask for the playback feature: {audio}"
+    );
+    assert!(
+        !manifest.contains("ravel-audio/playback"),
+        "no feature of ravel-cli may switch `playback` back on"
+    );
+
+    // Half the guarantee lives one level up: the workspace declaration is
+    // what makes "not asking for it" mean "not getting it".
+    let workspace = std::fs::read_to_string(crate_dir.join("../../Cargo.toml"))
+        .expect("the workspace manifest");
+    let declaration = workspace
+        .lines()
+        .find(|line| line.starts_with("ravel-audio "))
+        .expect("the workspace declares ravel-audio");
+    assert!(
+        declaration.contains("default-features = false"),
+        "playback must be opt-in workspace-wide, or this crate gets it by default: {declaration}"
+    );
+}
+
 /// A reader that leaves early is the reader's business, not a render failure.
 ///
 /// `println!` panics when the write fails and Rust ignores `SIGPIPE`, so
@@ -330,5 +378,74 @@ fn a_closed_stdout_is_not_a_failure() {
         "a closed pipe turned a successful listing into {:?}: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The soundtrack, through the shipped binary rather than the library.
+///
+/// `render_cli.rs` pins what the mix *is*; what only the binary can show is
+/// that the real entry point runs the audio path at all and reports the file
+/// in the record a script reads. **Needs a GPU adapter and a decoder**, so it
+/// is behind the `ffmpeg` feature like the mix's own tests.
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
+    use ravel_core::composition::{AudioSource, MediaAssetEntry};
+    use ravel_media::encode::WavWriter;
+
+    let dir = TempDir::new().expect("tempdir");
+
+    // Half a second of 44.1 kHz stereo silence: the content does not matter,
+    // only that a real decoder can open it.
+    let asset = dir.path().join("voice.wav");
+    let mut writer = WavWriter::create(&asset, 44_100, 2).expect("fixture WAV");
+    writer
+        .write_samples(&vec![0.0_f32; 44_100])
+        .expect("fixture samples");
+    writer.finish().expect("fixture finishes");
+
+    let mut comp = Composition::new(CompId::new(1), "Main", (64, 64), FrameRate::new(24, 1), 24)
+        .add_layer(Layer::new(LayerId::new(1), "shape", layer_network()).with_time(0, 0, 24));
+    let mut voice = Layer::new(LayerId::new(2), "voice", Graph::new()).with_time(0, 0, 24);
+    voice.audio = Some(AudioSource::new("voice", 0));
+    comp = comp.add_layer(voice);
+
+    let mut document = Document::default().with_composition(comp);
+    document
+        .media_assets
+        .insert("voice".into(), MediaAssetEntry::from_absolute(&asset));
+    let project = dir.path().join("sound.ravprj");
+    ProjectFile::from_document("Sound", "2026-01-01T00:00:00Z", document)
+        .save(&project)
+        .expect("fixture saves");
+
+    let out = dir.path().join("frames");
+    let output = cli()
+        .arg("render")
+        .arg(&project)
+        .args(["--range", "0-11", "--progress", "json", "-o"])
+        .arg(&out)
+        .output()
+        .expect("runs");
+    assert!(
+        output.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let wav = out.join("frame_0000-0011.wav");
+    assert!(wav.is_file(), "the soundtrack is beside the frames");
+
+    let last: serde_json::Value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .next_back()
+        .map(|line| serde_json::from_str(line).expect("the last line is JSON"))
+        .expect("at least one line");
+    assert_eq!(last["event"], "completed");
+    assert_eq!(
+        last["audio"],
+        serde_json::Value::from(wav.display().to_string()),
+        "the machine-readable record names the file a script has to collect"
     );
 }

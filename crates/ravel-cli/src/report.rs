@@ -18,6 +18,7 @@ use ravel_core::runtime::JobProgress;
 use ravel_i18n::t;
 
 use crate::args::ProgressMode;
+use crate::audio::NoAudio;
 use crate::error::CliError;
 use crate::plan::Warning;
 
@@ -28,6 +29,8 @@ pub struct Summary {
     pub directory: PathBuf,
     pub first: PathBuf,
     pub last: PathBuf,
+    /// The soundtrack written beside the frames, if this render had one.
+    pub audio: Option<PathBuf>,
 }
 
 /// Where the narration goes.
@@ -95,9 +98,24 @@ pub fn print_line(text: &str) {
 /// localized and is what a person reads.
 pub fn warning_text(warning: &Warning) -> (&'static str, String) {
     match warning {
-        Warning::AudioNotRendered { layers } => (
+        Warning::AudioNotRendered { layers, reason } => (
             "audio-not-rendered",
-            t!("cli.warn.audio_not_rendered").replace("{count}", &layers.to_string()),
+            match reason {
+                NoAudio::NotAsked => t!("cli.warn.audio_not_rendered"),
+                NoAudio::NoDecoder => t!("cli.warn.audio_no_decoder"),
+            }
+            .replace("{count}", &layers.to_string()),
+        ),
+        Warning::AudioSourceSkipped {
+            layer,
+            asset,
+            detail,
+        } => (
+            "audio-source-skipped",
+            t!("cli.warn.audio_source_skipped")
+                .replace("{layer}", layer)
+                .replace("{asset}", asset)
+                .replace("{detail}", detail),
         ),
         Warning::BindingIssue { detail } => (
             "binding-issue",
@@ -151,6 +169,9 @@ impl Reporter for HumanReporter {
                 .replace("{count}", &summary.frames.to_string())
                 .replace("{path}", &summary.directory.display().to_string()),
         );
+        if let Some(audio) = &summary.audio {
+            print_line(&t!("cli.result.audio").replace("{path}", &audio.display().to_string()));
+        }
     }
 
     fn failure(&mut self, error: &CliError) {
@@ -208,6 +229,7 @@ impl Reporter for JsonReporter {
             "directory": summary.directory.display().to_string(),
             "first": summary.first.display().to_string(),
             "last": summary.last.display().to_string(),
+            "audio": summary.audio.as_ref().map(|path| path.display().to_string()),
         }));
     }
 
@@ -244,9 +266,21 @@ mod tests {
     /// the sentence, which is the whole reason the identifier exists.
     #[test]
     fn every_warning_has_a_stable_identifier() {
+        for reason in [NoAudio::NotAsked, NoAudio::NoDecoder] {
+            assert_eq!(
+                warning_text(&Warning::AudioNotRendered { layers: 2, reason }).0,
+                "audio-not-rendered",
+                "both reasons for a silent deliverable read the same to a script"
+            );
+        }
         assert_eq!(
-            warning_text(&Warning::AudioNotRendered { layers: 2 }).0,
-            "audio-not-rendered"
+            warning_text(&Warning::AudioSourceSkipped {
+                layer: "voice".into(),
+                asset: "a".into(),
+                detail: "offline".into(),
+            })
+            .0,
+            "audio-source-skipped"
         );
         assert_eq!(
             warning_text(&Warning::BindingIssue { detail: "x".into() }).0,

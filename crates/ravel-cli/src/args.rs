@@ -104,6 +104,13 @@ pub struct RenderArgs {
     #[arg(long)]
     pub overwrite: bool,
 
+    /// Render picture only. An image sequence carries no sound, so a
+    /// composition with audio layers otherwise gets a WAV beside its frames,
+    /// covering the same range; this leaves it out. Either way a project
+    /// whose sound is not in the deliverable says so.
+    #[arg(long)]
+    pub no_audio: bool,
+
     /// How progress is reported.
     #[arg(long, value_enum, default_value_t = ProgressMode::Auto)]
     pub progress: ProgressMode,

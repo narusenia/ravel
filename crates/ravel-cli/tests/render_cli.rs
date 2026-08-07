@@ -160,6 +160,7 @@ fn args(project: &Path, output: &Path) -> RenderArgs {
         padding: 4,
         params: Vec::new(),
         overwrite: false,
+        no_audio: true,
         progress: ProgressMode::Quiet,
     }
 }
@@ -325,7 +326,12 @@ fn run_with(
     Run { result, recorder }
 }
 
-/// The sequence files in `dir`, sorted by name.
+/// The **picture** files in `dir`, sorted by name.
+///
+/// The companion WAV shares the directory and is deliberately not counted:
+/// "the render wrote ten frames" and "the render wrote nothing" are both
+/// statements about pictures, and a soundtrack sitting beside them must not
+/// change either answer.
 fn frames(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -334,6 +340,7 @@ fn frames(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
+        .filter(|path| path.extension().is_none_or(|ext| ext != "wav"))
         .collect();
     paths.sort();
     paths
@@ -638,8 +645,9 @@ fn a_format_ravel_does_not_offer_is_refused_with_that_reason() {
     ));
 }
 
-/// Audio is not rendered until `EXPORT-4`, so a project that has some must
-/// be told rather than handed a silent deliverable without comment.
+/// `--no-audio` on a project that has some must be told rather than handed a
+/// silent deliverable without comment. (The audio path itself needs a decoder
+/// and lives in the `sound` module below.)
 #[test]
 fn a_project_with_audio_warns_that_the_render_is_silent() {
     let dir = TempDir::new().expect("tempdir");
@@ -812,4 +820,512 @@ fn the_evaluation_hooks_are_not_built_until_the_render_is_decided() {
         1,
         "a render that does start has to build them exactly once"
     );
+}
+
+// ===========================================================================
+// Sound
+// ===========================================================================
+
+/// The soundtrack an image sequence cannot carry, written beside it.
+///
+/// **Every test here needs a decoder**, so the module is behind the `ffmpeg`
+/// feature and neither CI nor a plain `cargo test` runs it — the reason
+/// `cargo test --workspace --features ffmpeg` is the only way to see this
+/// unit verified. What they check is the part that is *not* the mixer's:
+/// that the range of sound matches the range of picture, that a split render
+/// joins back up, and that an asset at another sample rate arrives where it
+/// belongs.
+#[cfg(feature = "ffmpeg")]
+mod sound {
+    use super::*;
+    use ravel_core::composition::MediaAssetEntry;
+
+    /// Sample rate of the fixture asset: deliberately **not** the render's
+    /// 48 kHz, so every test here also exercises the conversion.
+    const SOURCE_RATE: u32 = 44_100;
+    /// The render's own rate (`ravel_cli::audio::OUTPUT_SAMPLE_RATE`).
+    const OUT_RATE: u32 = 48_000;
+    /// Composition frame rate: 24 fps divides both rates evenly, so the
+    /// expected sample counts are exact rather than approximate.
+    const FPS: u32 = 24;
+    /// Seconds of source audio, and of composition.
+    const SECONDS: u32 = 4;
+    /// Where the fixture's marker sits, in seconds. Off a frame-range
+    /// boundary so a test can tell "the range started here" from "the range
+    /// happened to be empty".
+    const MARKER_SECS: f32 = 1.5;
+    /// Length of the marker in source sample frames — long enough to survive
+    /// resampling as an unmistakable peak, short enough to locate.
+    const MARKER_FRAMES: usize = 441;
+
+    // -----------------------------------------------------------------------
+    // Fixture
+    // -----------------------------------------------------------------------
+
+    /// Write a 44.1 kHz stereo WAV that is silent except for a full-scale
+    /// burst at [`MARKER_SECS`].
+    ///
+    /// Silence-with-a-marker rather than a tone: "where did this end up" is
+    /// answerable by finding one peak, without reimplementing the resampler
+    /// in the assertions.
+    fn source_asset(dir: &Path) -> PathBuf {
+        use ravel_media::encode::WavWriter;
+
+        let path = dir.join("voice.wav");
+        let frames = (SOURCE_RATE * SECONDS) as usize;
+        let marker_at = (MARKER_SECS * SOURCE_RATE as f32) as usize;
+        let mut samples = vec![0.0_f32; frames * 2];
+        for frame in marker_at..marker_at + MARKER_FRAMES {
+            samples[frame * 2] = 1.0;
+            samples[frame * 2 + 1] = 1.0;
+        }
+        let mut writer = WavWriter::create(&path, SOURCE_RATE, 2).expect("fixture WAV");
+        writer.write_samples(&samples).expect("fixture samples");
+        writer.finish().expect("fixture finishes");
+        path
+    }
+
+    /// The picture document, plus one layer whose sound is `asset`.
+    fn document_with_sound(asset: &Path) -> Document {
+        let mut comp = Composition::new(
+            CompId::new(COMP),
+            "Main",
+            (8, 4),
+            FrameRate::new(FPS, 1),
+            (FPS * SECONDS) as u64,
+        );
+        comp.background_color = Color::new(0.0, 0.0, 0.0, 1.0);
+        comp = comp.add_layer(
+            Layer::new(LayerId::new(1), "picture", layer_network(source().raw())).with_time(
+                0,
+                0,
+                (FPS * SECONDS) as u64,
+            ),
+        );
+        let mut voice = Layer::new(LayerId::new(2), "voice", layer_network(100)).with_time(
+            0,
+            0,
+            (FPS * SECONDS) as u64,
+        );
+        voice.audio = Some(AudioSource::new("voice", 0));
+        comp = comp.add_layer(voice);
+
+        let mut document = Document::default().with_composition(comp);
+        document
+            .media_assets
+            .insert("voice".into(), MediaAssetEntry::from_absolute(asset));
+        document
+    }
+
+    /// A project on disk whose audio layer resolves to a real file.
+    fn sounding_project(dir: &Path) -> PathBuf {
+        let asset = source_asset(dir);
+        project_file(dir, document_with_sound(&asset))
+    }
+
+    fn sound_args(project: &Path, output: &Path, range: &str) -> RenderArgs {
+        let mut args = args(project, output);
+        args.range = Some(range.parse().expect("range"));
+        args.no_audio = false;
+        args
+    }
+
+    // -----------------------------------------------------------------------
+    // Reading a WAV back
+    // -----------------------------------------------------------------------
+
+    struct Wav {
+        rate: u32,
+        channels: u32,
+        /// Interleaved samples.
+        samples: Vec<f32>,
+    }
+
+    impl Wav {
+        fn frame_count(&self) -> usize {
+            self.samples.len() / self.channels as usize
+        }
+
+        /// The first sample frame at or above `threshold` on channel 0.
+        fn peak_frame(&self, threshold: f32) -> Option<usize> {
+            self.samples
+                .chunks_exact(self.channels as usize)
+                .position(|frame| frame[0] >= threshold)
+        }
+    }
+
+    /// Walk the RIFF chunks rather than assuming a header size, so this
+    /// reader would notice the writer changing the layout under it.
+    fn read_wav(path: &Path) -> Wav {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+
+        let (mut rate, mut channels, mut samples) = (0, 0, Vec::new());
+        let mut at = 12;
+        while at + 8 <= bytes.len() {
+            let id = &bytes[at..at + 4];
+            let size = u32_at(at + 4) as usize;
+            let body = at + 8;
+            match id {
+                b"fmt " => {
+                    assert_eq!(u16_at(body), 3, "WAVE_FORMAT_IEEE_FLOAT");
+                    channels = u16_at(body + 2) as u32;
+                    rate = u32_at(body + 4);
+                    assert_eq!(u16_at(body + 14), 32, "32 bits per sample");
+                }
+                b"data" => {
+                    samples = bytes[body..body + size]
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                        .collect();
+                }
+                _ => {}
+            }
+            at = body + size + (size % 2);
+        }
+        assert!(rate > 0 && channels > 0, "the WAV has a fmt chunk");
+        Wav {
+            rate,
+            channels,
+            samples,
+        }
+    }
+
+    /// Every name in `dir`, so a test can say "and nothing else" — the
+    /// soundtrack's temporary file included, which [`frames`] would count and
+    /// [`read_wav`] would never look for.
+    fn entries(dir: &Path) -> Vec<String> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = read
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    /// The headline: sound and picture cover the same span, and the file is
+    /// where a reader would look for it — beside the frames, named after the
+    /// same absolute range.
+    #[test]
+    fn the_soundtrack_covers_exactly_the_rendered_frames() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        let run = run(&sound_args(&project, &out, "0-9"));
+
+        assert_eq!(run.code(), 0, "{:?}", run.result.as_ref().err());
+        assert_eq!(frames(&out).len(), 10, "ten pictures");
+
+        let path = out.join("frame_0000-0009.wav");
+        assert_eq!(
+            run.summary().audio.as_deref(),
+            Some(path.as_path()),
+            "the summary names the soundtrack it wrote"
+        );
+        let wav = read_wav(&path);
+        assert_eq!(wav.rate, OUT_RATE);
+        assert_eq!(wav.channels, 2);
+        assert_eq!(
+            wav.frame_count(),
+            (10 * OUT_RATE / FPS) as usize,
+            "ten frames of 24 fps is ten frames of 48 kHz sound"
+        );
+        assert!(
+            run.recorder.notes.is_empty(),
+            "a render that carries its sound has nothing to warn about: {:?}",
+            run.recorder.notes
+        );
+    }
+
+    /// A 44.1 kHz asset has to arrive at the output rate with its content in
+    /// the right place — which is what `MED-MED-03`'s decoder-delay
+    /// compensation buys. The marker is at 1.5 s of the source, so it must
+    /// be at 1.5 s of the render, not at `1.5 × 48000/44100` s.
+    #[test]
+    fn a_source_at_another_rate_lands_at_the_same_moment() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        let run = run(&sound_args(&project, &out, "0-95"));
+        assert_eq!(run.code(), 0, "{:?}", run.result.as_ref().err());
+
+        let wav = read_wav(&out.join("frame_0000-0095.wav"));
+        assert_eq!(wav.rate, OUT_RATE);
+        let expected = (MARKER_SECS * OUT_RATE as f32) as usize;
+        let found = wav.peak_frame(0.5).expect("the marker survives the render");
+        assert!(
+            found.abs_diff(expected) < OUT_RATE as usize / 100,
+            "the 1.5 s marker landed at {found} instead of {expected} \
+             (a rate error would put it near {})",
+            (MARKER_SECS * SOURCE_RATE as f32) as usize
+        );
+    }
+
+    /// `--range` moves the window over the sound exactly as it moves it over
+    /// the picture: the marker at 1.5 s belongs to the second of the four
+    /// one-second slices, half a second into it, and to no other.
+    #[test]
+    fn a_range_starts_the_sound_at_its_own_position() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+
+        let mut where_found = Vec::new();
+        for (index, range) in ["0-23", "24-47", "48-71", "72-95"].iter().enumerate() {
+            let out = dir.path().join(format!("slice{index}"));
+            let run = run(&sound_args(&project, &out, range));
+            assert_eq!(run.code(), 0, "{:?}", run.result.as_ref().err());
+
+            let wav = read_wav(run.summary().audio.as_ref().expect("a soundtrack"));
+            assert_eq!(
+                wav.frame_count(),
+                (24 * OUT_RATE / FPS) as usize,
+                "every slice is one second long"
+            );
+            where_found.push(wav.peak_frame(0.5));
+        }
+
+        assert_eq!(where_found[0], None, "nothing in the first second");
+        assert_eq!(where_found[2], None, "nor in the third");
+        assert_eq!(where_found[3], None, "nor in the fourth");
+        let found = where_found[1].expect("the marker is in the second second");
+        let expected = OUT_RATE as usize / 2;
+        assert!(
+            found.abs_diff(expected) < OUT_RATE as usize / 100,
+            "the marker is half a second into the slice, not at {found}"
+        );
+    }
+
+    /// The split guarantee, for sound: concatenating the WAVs of two
+    /// disjoint ranges reproduces the WAV of the whole, sample for sample.
+    /// Without boundary-converted sample positions this drifts.
+    #[test]
+    fn split_soundtracks_concatenate_into_the_whole_one() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+
+        let whole_dir = dir.path().join("whole");
+        assert_eq!(run(&sound_args(&project, &whole_dir, "0-47")).code(), 0);
+        let whole = read_wav(&whole_dir.join("frame_0000-0047.wav"));
+
+        // Split at a frame that is not a round number of seconds, so an
+        // off-by-one in the boundary arithmetic has somewhere to show.
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        assert_eq!(run(&sound_args(&project, &first_dir, "0-18")).code(), 0);
+        assert_eq!(run(&sound_args(&project, &second_dir, "19-47")).code(), 0);
+        let first = read_wav(&first_dir.join("frame_0000-0018.wav"));
+        let second = read_wav(&second_dir.join("frame_0019-0047.wav"));
+
+        assert_eq!(
+            first.frame_count() + second.frame_count(),
+            whole.frame_count(),
+            "the halves are exactly the whole, with no sample lost or repeated"
+        );
+        let joined: Vec<f32> = first
+            .samples
+            .iter()
+            .chain(second.samples.iter())
+            .copied()
+            .collect();
+        assert_eq!(
+            joined, whole.samples,
+            "and they are the same samples, in the same places"
+        );
+    }
+
+    /// A soundtrack for frames that are not there is exactly the partial
+    /// output an interrupted render promises not to leave.
+    #[test]
+    fn an_interrupted_render_takes_the_soundtrack_with_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        let cancel = CancelFlag::new();
+
+        let run = run_with(
+            &sound_args(&project, &out, "0-9"),
+            StubHooks::slow(),
+            Recorder::cancelling(2, &cancel),
+            &cancel,
+        );
+
+        assert_eq!(run.code(), EXIT_CANCELLED);
+        assert!(frames(&out).is_empty(), "no frames survive");
+        assert!(
+            !out.join("frame_0000-0009.wav").exists(),
+            "and neither does the sound that was written before them"
+        );
+        assert!(
+            entries(&out).is_empty(),
+            "nor the temporary file it was written through: {:?}",
+            entries(&out)
+        );
+    }
+
+    /// The failure that happens **before** a frame rather than during one: no
+    /// GPU adapter, which is the ordinary state of a render node that has been
+    /// handed the wrong job. The sound is decoded first, so the only thing
+    /// keeping a soundtrack for a picture that does not exist off the disk is
+    /// that the device is built before the mix and the mix lands on a
+    /// temporary name.
+    #[test]
+    fn a_render_that_cannot_build_its_evaluator_writes_no_soundtrack() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+
+        let error = render_with_hooks(
+            &sound_args(&project, &out, "0-9"),
+            || Err::<StubHooks, _>(CliError::Gpu("no adapter on this machine".into())),
+            &CancelFlag::new(),
+            &mut Recorder::default(),
+        )
+        .expect_err("a render with no evaluator cannot succeed");
+
+        assert_eq!(error.id(), "no-gpu");
+        assert!(
+            !out.exists(),
+            "not even a directory: nothing may be written before the render can start, \
+             and least of all a soundtrack — {:?}",
+            entries(&out)
+        );
+    }
+
+    /// `--overwrite` is permission to replace the previous soundtrack with a
+    /// new one. It is not permission to destroy it on behalf of a render that
+    /// then does not finish — which is what truncating the real name up front
+    /// would do, leaving neither the old sound nor the new.
+    #[test]
+    fn an_interrupted_overwrite_leaves_the_previous_soundtrack_whole() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("output directory");
+        let soundtrack = out.join("frame_0000-0009.wav");
+        std::fs::write(&soundtrack, b"the previous render").expect("an earlier soundtrack");
+
+        let cancel = CancelFlag::new();
+        let mut overwriting = sound_args(&project, &out, "0-9");
+        overwriting.overwrite = true;
+        let run = run_with(
+            &overwriting,
+            StubHooks::slow(),
+            Recorder::cancelling(2, &cancel),
+            &cancel,
+        );
+
+        assert_eq!(run.code(), EXIT_CANCELLED);
+        assert!(frames(&out).is_empty(), "no frames survive");
+        assert_eq!(
+            std::fs::read(&soundtrack).expect("the previous soundtrack is still readable"),
+            b"the previous render".to_vec(),
+            "an interrupted overwrite must not cost the old sound as well as the new"
+        );
+        assert_eq!(
+            entries(&out),
+            vec!["frame_0000-0009.wav".to_string()],
+            "and the temporary file the new mix went to is gone"
+        );
+    }
+
+    /// An asset the render cannot load is a warning, not a failure — the
+    /// picture is still worth having — but it is never silence without a
+    /// word. This is the visible consequence `MAX_DECODE_BYTES` and every
+    /// other decode refusal come out through.
+    #[test]
+    fn a_source_that_cannot_be_loaded_is_reported_and_the_render_goes_on() {
+        let dir = TempDir::new().expect("tempdir");
+        let asset = dir.path().join("gone.wav");
+        let mut document = document_with_sound(&asset);
+        // Present in the document, absent from the disk: the shape every
+        // decode refusal reaches the CLI in.
+        document
+            .media_assets
+            .get_mut("voice")
+            .expect("the fixture asset")
+            .resolved = None;
+        let project = project_file(dir.path(), document);
+        let out = dir.path().join("out");
+
+        let run = run(&sound_args(&project, &out, "0-9"));
+        assert_eq!(run.code(), 0, "the picture still renders");
+        assert!(
+            run.recorder
+                .notes
+                .contains(&"audio-source-skipped".to_string()),
+            "the missing sound has to be said out loud: {:?}",
+            run.recorder.notes
+        );
+        // Still the right length, so the silent stretch stays in sync with
+        // the picture rather than shortening the deliverable.
+        let wav = read_wav(&out.join("frame_0000-0009.wav"));
+        assert_eq!(wav.frame_count(), (10 * OUT_RATE / FPS) as usize);
+        assert!(wav.samples.iter().all(|s| *s == 0.0));
+    }
+
+    /// A soundtrack already on disk is output like any other, so it is
+    /// refused before a frame is evaluated unless overwriting was asked for.
+    #[test]
+    fn an_existing_soundtrack_is_refused_like_an_existing_frame() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("output directory");
+        std::fs::write(out.join("frame_0000-0009.wav"), b"previous render")
+            .expect("the earlier soundtrack");
+
+        let refused = run(&sound_args(&project, &out, "0-9"));
+        assert_eq!(refused.code(), EXIT_OUTPUT_EXISTS);
+        assert!(frames(&out).is_empty(), "nothing was evaluated");
+
+        let mut overwriting = sound_args(&project, &out, "0-9");
+        overwriting.overwrite = true;
+        assert_eq!(run(&overwriting).code(), 0, "asked for, it is replaced");
+        assert!(read_wav(&out.join("frame_0000-0009.wav")).frame_count() > 0);
+    }
+
+    /// A link to nothing is not a free name: `WavWriter::create` follows it,
+    /// so calling it free is a render that starts and then truncates a file
+    /// outside its own output directory. The frames have always counted such a
+    /// link as occupied; the sound now asks the same question.
+    #[cfg(unix)]
+    #[test]
+    fn a_soundtrack_path_that_is_a_dangling_symlink_is_refused() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = sounding_project(dir.path());
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("output directory");
+        let elsewhere = dir.path().join("someone-elses.wav");
+        std::os::unix::fs::symlink(&elsewhere, out.join("frame_0000-0009.wav")).expect("symlink");
+
+        let refused = run(&sound_args(&project, &out, "0-9"));
+        assert_eq!(refused.code(), EXIT_OUTPUT_EXISTS);
+        assert!(frames(&out).is_empty(), "nothing was evaluated");
+        assert!(
+            !elsewhere.exists(),
+            "and nothing was written through the link"
+        );
+
+        // Asked for, the link is *replaced* rather than written through:
+        // publication is a rename, which swaps the name and does not follow
+        // it.
+        let mut overwriting = sound_args(&project, &out, "0-9");
+        overwriting.overwrite = true;
+        assert_eq!(run(&overwriting).code(), 0);
+        assert!(
+            !elsewhere.exists(),
+            "the render replaced the link, not what it pointed at"
+        );
+        assert!(read_wav(&out.join("frame_0000-0009.wav")).frame_count() > 0);
+    }
 }

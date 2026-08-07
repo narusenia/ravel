@@ -535,4 +535,50 @@ mod ffmpeg_tests {
         assert_eq!(info.end_frame, 5);
         assert_eq!(info.frame_count(), 5);
     }
+
+    // ---- WAV writing -------------------------------------------------------
+
+    /// The WAV `ravel-media` writes has to be a WAV as everyone else defines
+    /// one. Our own reader agreeing with our own writer would prove nothing,
+    /// so the check is that FFmpeg — which knows the format and did not learn
+    /// it from us — reads back the samples that went in.
+    #[test]
+    fn ffmpeg_reads_back_the_wav_we_write() {
+        use ravel_media::encode::WavWriter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tone.wav");
+
+        // A quarter second of 44.1 kHz stereo: a rate that is *not* the
+        // 48 kHz render default, so the file also serves as the fixture for
+        // "does a 44.1 kHz asset reach the output rate correctly".
+        let frames = 11_025;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for frame in 0..frames {
+            let phase = frame as f32 / 44_100.0 * 440.0 * std::f32::consts::TAU;
+            samples.push(phase.sin() * 0.5);
+            samples.push(phase.sin() * -0.5);
+        }
+        let mut writer = WavWriter::create(&path, 44_100, 2).expect("creates");
+        writer.write_samples(&samples).expect("writes");
+        writer.finish().expect("finishes");
+
+        let info = FfmpegDecoder::probe(&path).expect("FFmpeg probes our WAV");
+        let stream = info.first_audio().expect("an audio stream");
+        assert_eq!(stream.sample_rate, 44_100);
+        assert_eq!(stream.channels, 2);
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("opens");
+        let buffer = decoder
+            .decode_audio_chunk(stream.stream_index, 0, frames)
+            .expect("decodes");
+        assert_eq!(buffer.sample_rate, 44_100);
+        assert_eq!(buffer.channels, 2);
+        assert_eq!(buffer.data.len(), samples.len());
+        // `f32` in, `f32` out: no format conversion happens on either side,
+        // so the values are the ones that were written.
+        for (decoded, written) in buffer.data.iter().zip(&samples) {
+            assert!((decoded - written).abs() < 1e-6, "{decoded} != {written}");
+        }
+    }
 }

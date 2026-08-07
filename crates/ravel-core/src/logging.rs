@@ -16,8 +16,24 @@
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Directive;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
+
+/// Targets whose diagnostics are pinned quieter than whatever the filter asks
+/// for, because they report a condition Ravel is not in a position to act on
+/// and repeat it often enough to bury the rest of the log.
+///
+/// Applied on top of the caller's directives rather than folded into the
+/// default, so `RAVEL_LOG=debug` stays usable: raising the level to chase a
+/// Ravel bug must not also turn one of these back on.
+const PINNED_QUIET: &[&str] = &[
+    // gpui emits this per accessibility tree update because Zed — whose
+    // widgets gpui was extracted from — exposes no accessible elements yet.
+    // It says nothing about Ravel's own tree and fires while the window is
+    // merely open.
+    "gpui::window::a11y=error",
+];
 
 /// Guard that must be held alive for the lifetime of the application to keep
 /// the non-blocking file writer flushing. Drop it to flush and close the log
@@ -39,7 +55,17 @@ pub fn init_logging(
     env_key: &str,
     log_dir: Option<&std::path::Path>,
 ) -> Result<LogGuard, anyhow::Error> {
-    let env_filter = EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
+    let mut env_filter =
+        EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
+    for directive in PINNED_QUIET {
+        // Parsed from a literal the test below pins, so a typo is a test
+        // failure rather than a silently ignored directive.
+        env_filter = env_filter.add_directive(
+            directive
+                .parse::<Directive>()
+                .expect("a pinned-quiet directive is a literal"),
+        );
+    }
 
     // `with_writer` is not optional here: `fmt::layer()` defaults to
     // **stdout**, and a diagnostic on stdout is indistinguishable from
@@ -73,4 +99,21 @@ pub fn init_logging(
     Ok(LogGuard {
         _file_guard: file_guard,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `init_logging` unwraps these, so a malformed one would panic at startup
+    /// — in a release build, on a user's machine, before any window exists.
+    #[test]
+    fn every_pinned_quiet_directive_parses() {
+        for directive in PINNED_QUIET {
+            assert!(
+                directive.parse::<Directive>().is_ok(),
+                "{directive:?} is not a filter directive"
+            );
+        }
+    }
 }

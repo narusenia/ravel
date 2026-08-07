@@ -383,6 +383,22 @@ pub fn panel_bound_commands() -> HashSet<CommandId> {
         .collect()
 }
 
+/// Where a modal's top edge goes, as a share of the viewport height.
+///
+/// gpui-component defaults to `1/10`, which reads as pinned to the top of the
+/// window rather than presented in it. A dialog cannot be *centred* from here:
+/// its height is content-driven and only known after layout, and `margin_top`
+/// is the only lever the widget offers. A quarter down puts a typical dialog
+/// close to the optical centre while leaving room for one three times taller —
+/// past that the default is the safer number, which is why the settings screen
+/// keeps it.
+const DIALOG_TOP_FRACTION: f32 = 4.0;
+
+/// The `margin_top` for a dialog whose height is a modest share of the window.
+fn dialog_margin_top(window: &Window) -> Pixels {
+    window.viewport_size().height / DIALOG_TOP_FRACTION
+}
+
 /// Build GPUI keybindings from the headless table and panel-local contexts.
 pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
     let mut out = Vec::new();
@@ -754,11 +770,12 @@ impl RavelWorkspace {
         let session = cx.entity().downgrade();
         let form =
             cx.new(|cx| crate::workspace_layouts::WorkspaceLayoutsForm::new(session, window, cx));
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
             let content = form.clone();
             dialog
                 .title(SharedString::from(t!("workspace.layouts.title")))
                 .w(px(420.0))
+                .margin_top(dialog_margin_top(window))
                 .content(move |body, _window, _cx| body.child(content.clone()))
                 .footer(
                     DialogFooter::new().child(
@@ -1100,13 +1117,14 @@ impl RavelWorkspace {
         }
 
         let workspace = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
             let save_workspace = workspace.clone();
             let discard_workspace = workspace.clone();
             let button_workspace = workspace.clone();
             dialog
                 .title(SharedString::from(t!("project.unsaved.title")))
                 .w(px(448.0))
+                .margin_top(dialog_margin_top(window))
                 .content(|body, _window, _cx| {
                     body.child(SharedString::from(t!("project.unsaved.message")))
                 })
@@ -1341,7 +1359,7 @@ impl RavelWorkspace {
         let form = cx.new(|cx| CompositionForm::new(initial, window, cx));
         let project = self.project.downgrade();
         let confirm = std::rc::Rc::new(confirm);
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
             let content = form.clone();
             let ok_form = form.clone();
             let project = project.clone();
@@ -1350,6 +1368,7 @@ impl RavelWorkspace {
             dialog
                 .title(title.clone())
                 .w(px(360.0))
+                .margin_top(dialog_margin_top(window))
                 .content(move |body, _window, _cx| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
@@ -1456,7 +1475,7 @@ impl RavelWorkspace {
             )
         });
         let service = self.render.downgrade();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
             let content = form.clone();
             let ok_form = form.clone();
             let document = document.clone();
@@ -1464,6 +1483,7 @@ impl RavelWorkspace {
             dialog
                 .title(SharedString::from(t!("export.title")))
                 .w(px(420.0))
+                .margin_top(dialog_margin_top(window))
                 .content(move |body, _window, _cx| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()

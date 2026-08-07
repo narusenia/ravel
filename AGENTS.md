@@ -53,7 +53,13 @@ model is still current.
   construction: it does not depend on `gpui`, `ravel-ui`, `ravel-dock`, or
   `ravel-app`, so a headless host cannot link a window toolkit by accident.
   Releases therefore ship **two** binaries, `ravel` and `ravel-cli`. A render
-  whose composition has audio writes a WAV beside the frames
+  whose composition has audio writes a WAV beside the frames.
+  **Build it with `cargo build -p ravel-cli`, never as part of a
+  `--workspace` build.** Cargo unifies features across one build, so
+  `ravel-app`'s `ravel-audio/playback` reaches `ravel-cli` too and the
+  binary ends up linking CoreAudio / ALSA — the very thing the feature split
+  exists to avoid. `cargo build -p ravel-cli` links no audio framework;
+  `cargo build --workspace` links two. Whoever adds packaging owns this
 - `assets`: locales, keybindings, workspace preset data, and the bundled
   UI fonts (`assets/fonts/`). The fonts are SIL OFL 1.1: their license texts
   live beside them, must stay there, and — because the faces are compiled

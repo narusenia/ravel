@@ -68,6 +68,7 @@
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
+| SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
@@ -516,6 +517,14 @@ Timeline の `widgets/curve_editor.rs` とは座標変換と評価関数を共�
 | SHELL-3 | ⬜ | UI 露出 | SHELL-1, SHELL-2 |
 | SHELL-5 | ✅ | `parent` の設定 UI（Properties の Parent ドロップダウン、循環候補を除外）（#303） | — |
 | SHELL-4 | ⬜ | 文書更新 | SHELL-3, SHELL-5 |
+| SHELL-6 | 🟡 | レイヤー殻プロパティの式入力 UI | EXPR-4 ✅ |
+
+SHELL-6 は SHELL-5 と**同じ向きの取り残し**。殻のチャネル（位置・スケール・
+回転・不透明度・アンカー）は**既に式を評価する**のに、式を付け外しする経路が
+ノードパラメータ側にしか無い（`EXPR-4`、#320）。作業は `EXPR-4` が作った
+draft / attach / detach の機構を殻のコミット経路へ載せ替えることで、
+`EXPR-4` 本体とは独立に閉じられる。**AE 的には位置と不透明度こそ式の主戦場**
+なので、REQ-MOGRAPH-001 を実質満たしたと言えるのはこの単位が入ってから。
 
 SHELL-5 は他の 3 つと**向きが逆の取り残し** — `parent` は評価では効くのに
 設定 UI がどこにも無い（基準 4「評価はできるが編集できない」）。Viewer の
@@ -556,10 +565,10 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | EXPR-1 | ✅ | 式言語コア（字句・AST・定数畳み込み・依存抽出） | #312 |
 | EXPR-2 | ✅ | パラメータ式の配線（`ChannelSource::Expression`） | #316 |
 | EXPR-3 | ✅ | キャッシュキーと dirty 伝播への統合 | #316 |
-| EXPR-4 | 🟡 | Properties の式入力 UI | EXPR-2 ✅ |
+| EXPR-4 | ✅ | Properties の式入力 UI | #320 |
 | EXPR-5 | ✅ | フィールド式（`field.expression`） | #316 |
-| EXPR-6 | 🟡 | 属性アクセス（`@attr` 相当） | EXPR-5 ✅ |
-| EXPR-7 | ⬜ | 文書更新 | EXPR-4, EXPR-6 |
+| EXPR-6 | ✅ | 属性アクセス（`@attr` 相当） | #320 |
+| EXPR-7 | ✅ | 文書更新 | #320 |
 
 ### 公開パラメータ宣言（REQ-PROJ-006）
 
@@ -569,9 +578,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | EXPO-2 | ✅ | 束縛の解決と適用 | #315 |
 | EXPO-3 | ✅ | 宣言の機械可読な列挙 | #315 |
 | EXPO-4 | ✅ | 素材参照の宣言と差し替え | #315 |
-| EXPO-5 | 🟡 | 宣言の編集 UI | EXPO-2 ✅ |
-| EXPO-6 | 🟡 | サブグラフテンプレートで同じ宣言を使う | EXPO-2 ✅, NETIF-6 ✅ |
-| EXPO-7 | ⬜ | 文書更新 | EXPO-5 |
+| EXPO-5 | ✅ | 宣言の編集 UI | #321 |
+| EXPO-6 | ✅ | サブグラフテンプレートで同じ宣言を使う | #321 |
+| EXPO-7 | ✅ | 文書更新 | #321 |
 
 ### カラーマネジメント（REQ-RENDER-003 / REQ-CORE-009）
 

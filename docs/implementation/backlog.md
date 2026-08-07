@@ -72,9 +72,8 @@
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
-| EXPORT-2 | レンダーワーカーとキュー（`EXPORT-1` 完了で着手可能） | `render-export-plan.md` |
-| EXPR-2 | パラメータ式の配線（`EXPR-1` 完了で着手可能） | `expression-language-plan.md` |
-| EXPR-5 | フィールド式 `field.expression`（`EXPR-1` 完了で着手可能） | `expression-language-plan.md` |
+| EXPORT-3 | CLI `ravel-cli render`（`EXPORT-2` / `EXPO-3` 完了で着手可能） | `render-export-plan.md` |
+| EXPORT-4 | 音声のミックスダウンと多重化（`EXPORT-2` 完了で着手可能） | `render-export-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |

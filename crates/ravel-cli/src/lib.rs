@@ -311,6 +311,13 @@ mod tests {
             Some(cwd.join("nested")),
             "a relative directory is absolutised, not left relative"
         );
+        // Unix only: on Windows `/abs/…` has a root but no drive prefix, so
+        // joining it onto the working directory keeps that drive and the
+        // literal `/abs` is not what comes back. The rule being pinned here —
+        // an already-absolute path keeps its own parent — belongs to
+        // `project_root_of` and is unchanged by this function on any platform;
+        // the two assertions above are the regression it exists to catch.
+        #[cfg(unix)]
         assert_eq!(
             project_root(Path::new("/abs/project.ravprj")),
             Some(PathBuf::from("/abs")),

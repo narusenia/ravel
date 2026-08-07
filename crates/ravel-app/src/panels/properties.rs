@@ -820,11 +820,15 @@ fn build_field_row(
         // editable.
         PropertyField::PortList { rows, .. } => {
             let mut list = div().flex().flex_col();
-            // A single custom port has no neighbour to swap with, so no handle
-            // in the list can ever be enabled and the column it would sit in is
-            // dead space. Decided once for the whole list rather than per row,
-            // so the names stay in one column.
-            let gutter = rows.iter().filter(|row| !row.fixed).count() > 1;
+            // The gutter is reserved only when some handle in the list will
+            // actually be enabled — that is, when two custom rows are
+            // *adjacent*, which is the exact condition `movable` below tests.
+            // Counting custom rows instead would reserve dead space whenever
+            // they are separated by a fixed row (a renamed legacy port sitting
+            // beside the restored built-in one), since neither can move.
+            // Decided once for the whole list rather than per row, so the names
+            // stay in one column.
+            let gutter = rows.windows(2).any(|pair| !pair[0].fixed && !pair[1].fixed);
             for (index, row) in rows.iter().enumerate() {
                 if row.fixed {
                     list = list.child(fixed_port_row(row, gutter, muted));

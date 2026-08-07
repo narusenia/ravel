@@ -42,6 +42,26 @@ pub struct LogGuard {
     _file_guard: Option<WorkerGuard>,
 }
 
+/// Applies [`PINNED_QUIET`] on top of `base`.
+///
+/// Separate from [`init_logging`] because that function installs a *global*
+/// subscriber, which a test can neither install twice nor observe. The
+/// suppression is the whole point of the list, so it has to be assertable on
+/// its own.
+fn pin_quiet_targets(base: EnvFilter) -> EnvFilter {
+    let mut filter = base;
+    for directive in PINNED_QUIET {
+        // Parsed from a literal the test below pins, so a typo is a test
+        // failure rather than a silently ignored directive.
+        filter = filter.add_directive(
+            directive
+                .parse::<Directive>()
+                .expect("a pinned-quiet directive is a literal"),
+        );
+    }
+    filter
+}
+
 /// Initialize the global tracing subscriber.
 ///
 /// * `env_key` — environment variable name for the filter directive
@@ -55,17 +75,9 @@ pub fn init_logging(
     env_key: &str,
     log_dir: Option<&std::path::Path>,
 ) -> Result<LogGuard, anyhow::Error> {
-    let mut env_filter =
-        EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
-    for directive in PINNED_QUIET {
-        // Parsed from a literal the test below pins, so a typo is a test
-        // failure rather than a silently ignored directive.
-        env_filter = env_filter.add_directive(
-            directive
-                .parse::<Directive>()
-                .expect("a pinned-quiet directive is a literal"),
-        );
-    }
+    let env_filter = pin_quiet_targets(
+        EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info")),
+    );
 
     // `with_writer` is not optional here: `fmt::layer()` defaults to
     // **stdout**, and a diagnostic on stdout is indistinguishable from
@@ -104,6 +116,38 @@ pub fn init_logging(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts the events that survive the filter.
+    struct CountEvents(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
+        fn on_event(
+            &self,
+            _event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Emits one a11y warning and one ordinary warning under `directives`,
+    /// returning how many reached a layer.
+    fn events_passing(directives: &str) -> usize {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(pin_quiet_targets(EnvFilter::new(directives)))
+            .with(CountEvents(count.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                target: "gpui::window::a11y",
+                "expected an empty a11y tree update (only the root node), but got 47 nodes"
+            );
+            tracing::warn!(target: "ravel_core::logging", "something Ravel can act on");
+        });
+        count.load(Ordering::Relaxed)
+    }
 
     /// `init_logging` unwraps these, so a malformed one would panic at startup
     /// — in a release build, on a user's machine, before any window exists.
@@ -114,6 +158,23 @@ mod tests {
                 directive.parse::<Directive>().is_ok(),
                 "{directive:?} is not a filter directive"
             );
+        }
+    }
+
+    /// The warning the pinned list exists to silence is gone at the default
+    /// level, and Ravel's own warnings are not collateral.
+    #[test]
+    fn the_a11y_warning_is_dropped_and_other_warnings_are_not() {
+        assert_eq!(events_passing("info"), 1);
+    }
+
+    /// Raising the level to chase a Ravel bug must not bring it back — that is
+    /// the reason the directive is applied on top of the caller's rather than
+    /// folded into the default.
+    #[test]
+    fn raising_the_level_does_not_unmute_the_a11y_warning() {
+        for directives in ["debug", "trace", "ravel_core=trace,warn"] {
+            assert_eq!(events_passing(directives), 1, "{directives}");
         }
     }
 }

@@ -52,10 +52,10 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::{AssetMetadata, Layer};
+use ravel_core::eval::EvalContext;
 use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
 };
-use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
@@ -5843,6 +5843,10 @@ mod tests {
                 panel.refresh_values(cx);
                 panel.rebuild_widgets(window, cx);
                 rows
+            })
+            .unwrap()
+    }
+
     // ---- expression rows --------------------------------------------------
 
     fn node_param(
@@ -6441,6 +6445,8 @@ mod tests {
             .value
             .clone();
         assert_eq!(value, ParameterValue::Float(4.0));
+    }
+
     fn ramp_curve() -> ravel_core::animation::curve::KeyframeCurve {
         use ravel_core::animation::interpolation::Interpolation;
         let mut curve = ravel_core::animation::curve::KeyframeCurve::with_default(0.0);

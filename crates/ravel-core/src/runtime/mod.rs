@@ -32,7 +32,8 @@ pub use eval_service::{
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};
 pub use playback::{PlaybackClock, PlaybackState};
 pub use render::{
-    OverwritePolicy, RenderError, RenderEvent, RenderJob, RenderJobId, RenderOutput, RenderQueue,
+    JobProgress, JobState, OverwritePolicy, RenderError, RenderEvent, RenderJob, RenderJobId,
+    RenderOutput, RenderQueue,
 };
 
 /// Top-level configuration for all runtime pools.

@@ -307,6 +307,147 @@ impl RenderEvent {
 }
 
 // ===========================================================================
+// Presenting the events
+// ===========================================================================
+
+/// Where a job has got to, as the last event about it left it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobState {
+    /// Picked up; frames are being written.
+    Running,
+    /// Every frame of the range was written.
+    Completed,
+    /// Stopped at a frame boundary; the partial output is gone.
+    Cancelled,
+    /// Failed. The message is [`RenderError`]'s own `Display`, because a
+    /// presenter outlives the borrowed event and the error is not `Clone`.
+    /// It is a diagnostic, not a user-facing sentence: a caller that wants a
+    /// localized one classifies from the [`RenderError`] before it folds the
+    /// event in.
+    Failed { message: String },
+}
+
+/// One job's progress, folded from the [`RenderEvent`]s about it.
+///
+/// **Deliberately not in the CLI.** Turning a stream of events into "job 3,
+/// 47 of 120 frames, running" is the same arithmetic for `ravel-cli`'s
+/// progress line and for the render queue panel (`EXPORT-5`), and a copy in
+/// each is a copy that drifts. What stays with the caller is the presentation
+/// — text through `t!`, a bar, a table row — because `ravel-core` holds no
+/// user-visible strings.
+///
+/// Events for another job are ignored rather than merged, so a consumer can
+/// hand every event to every tracker it owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobProgress {
+    job: RenderJobId,
+    total_frames: u64,
+    rendered: u64,
+    last_frame: Option<u64>,
+    state: JobState,
+}
+
+impl JobProgress {
+    /// Start tracking from a [`RenderEvent::Started`], which is the only
+    /// event that carries the frame total. Returns `None` for any other
+    /// event, so a consumer can drive creation straight off the stream.
+    pub fn started(event: &RenderEvent) -> Option<Self> {
+        match event {
+            RenderEvent::Started { job, total_frames } => Some(Self {
+                job: *job,
+                total_frames: *total_frames,
+                rendered: 0,
+                last_frame: None,
+                state: JobState::Running,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Fold `event` in. Returns whether it was about this job.
+    pub fn observe(&mut self, event: &RenderEvent) -> bool {
+        if event.job() != self.job {
+            return false;
+        }
+        match event {
+            RenderEvent::Started { total_frames, .. } => {
+                self.total_frames = *total_frames;
+                self.rendered = 0;
+                self.last_frame = None;
+                self.state = JobState::Running;
+            }
+            RenderEvent::Progress {
+                frame,
+                rendered,
+                total_frames,
+                ..
+            } => {
+                self.total_frames = *total_frames;
+                self.rendered = *rendered;
+                self.last_frame = Some(*frame);
+            }
+            RenderEvent::Completed { frames, .. } => {
+                self.rendered = *frames;
+                self.state = JobState::Completed;
+            }
+            RenderEvent::Cancelled {
+                frames_rendered, ..
+            } => {
+                self.rendered = *frames_rendered;
+                self.state = JobState::Cancelled;
+            }
+            RenderEvent::Failed { error, .. } => {
+                self.state = JobState::Failed {
+                    message: error.to_string(),
+                };
+            }
+        }
+        true
+    }
+
+    pub fn job(&self) -> RenderJobId {
+        self.job
+    }
+
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
+
+    /// Frames written so far. After a cancellation this is how far the job
+    /// got, not how many files remain — there are none.
+    pub fn rendered(&self) -> u64 {
+        self.rendered
+    }
+
+    /// Absolute number of the most recently written frame.
+    pub fn last_frame(&self) -> Option<u64> {
+        self.last_frame
+    }
+
+    pub fn state(&self) -> &JobState {
+        &self.state
+    }
+
+    /// Whether the job has stopped, however it stopped.
+    pub fn is_finished(&self) -> bool {
+        !matches!(self.state, JobState::Running)
+    }
+
+    /// Fraction of the range written, in `0.0..=1.0`.
+    ///
+    /// A job with no frames reads as complete rather than as a division by
+    /// zero; the worker refuses such a range anyway
+    /// ([`RenderError::EmptyRange`]), so this only shields a presenter that
+    /// built a tracker before the refusal arrived.
+    pub fn fraction(&self) -> f32 {
+        if self.total_frames == 0 {
+            return 1.0;
+        }
+        (self.rendered as f32 / self.total_frames as f32).clamp(0.0, 1.0)
+    }
+}
+
+// ===========================================================================
 // Queue
 // ===========================================================================
 
@@ -2084,5 +2225,118 @@ mod tests {
     fn dropping_the_queue_does_not_hang() {
         let h = spawn(StubHooks::new());
         drop(h);
+    }
+
+    // ---- JobProgress ------------------------------------------------------
+
+    fn job_id(raw: u64) -> RenderJobId {
+        RenderJobId(raw)
+    }
+
+    #[test]
+    fn progress_starts_only_from_a_started_event() {
+        let started = RenderEvent::Started {
+            job: job_id(1),
+            total_frames: 10,
+        };
+        let tracker = JobProgress::started(&started).expect("Started begins a tracker");
+        assert_eq!(tracker.total_frames(), 10);
+        assert_eq!(tracker.rendered(), 0);
+        assert_eq!(tracker.state(), &JobState::Running);
+        assert!(!tracker.is_finished());
+
+        assert!(
+            JobProgress::started(&RenderEvent::Completed {
+                job: job_id(1),
+                frames: 10,
+            })
+            .is_none(),
+            "only Started carries the frame total"
+        );
+    }
+
+    #[test]
+    fn progress_folds_frames_and_reaches_a_terminal_state() {
+        let mut tracker = JobProgress::started(&RenderEvent::Started {
+            job: job_id(1),
+            total_frames: 4,
+        })
+        .expect("started");
+
+        for (rendered, frame) in (100u64..102).enumerate() {
+            assert!(tracker.observe(&RenderEvent::Progress {
+                job: job_id(1),
+                frame,
+                rendered: rendered as u64 + 1,
+                total_frames: 4,
+            }));
+        }
+        assert_eq!(tracker.rendered(), 2);
+        assert_eq!(tracker.last_frame(), Some(101));
+        assert!((tracker.fraction() - 0.5).abs() < f32::EPSILON);
+
+        assert!(tracker.observe(&RenderEvent::Completed {
+            job: job_id(1),
+            frames: 4,
+        }));
+        assert_eq!(tracker.state(), &JobState::Completed);
+        assert!(tracker.is_finished());
+        assert!((tracker.fraction() - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// A consumer hands every event to every tracker it owns, so one that is
+    /// not addressed to this job must change nothing at all.
+    #[test]
+    fn progress_ignores_another_jobs_events() {
+        let mut tracker = JobProgress::started(&RenderEvent::Started {
+            job: job_id(1),
+            total_frames: 4,
+        })
+        .expect("started");
+        let before = tracker.clone();
+
+        assert!(!tracker.observe(&RenderEvent::Progress {
+            job: job_id(2),
+            frame: 0,
+            rendered: 1,
+            total_frames: 4,
+        }));
+        assert_eq!(tracker, before);
+    }
+
+    /// A failure keeps the frame count it had reached and carries the error's
+    /// own text, which is what a log line or a panel row needs.
+    #[test]
+    fn progress_records_a_failure_message() {
+        let mut tracker = JobProgress::started(&RenderEvent::Started {
+            job: job_id(1),
+            total_frames: 4,
+        })
+        .expect("started");
+        tracker.observe(&RenderEvent::Failed {
+            job: job_id(1),
+            error: RenderError::EmptyRange { start: 5, end: 5 },
+        });
+        let JobState::Failed { message } = tracker.state() else {
+            panic!("expected a failed state, got {:?}", tracker.state());
+        };
+        assert!(message.contains("5..5"), "unexpected message: {message}");
+        assert!(tracker.is_finished());
+    }
+
+    /// A cancelled job reports how far it got even though its output is gone.
+    #[test]
+    fn progress_keeps_the_reached_frame_count_after_a_cancellation() {
+        let mut tracker = JobProgress::started(&RenderEvent::Started {
+            job: job_id(1),
+            total_frames: 8,
+        })
+        .expect("started");
+        tracker.observe(&RenderEvent::Cancelled {
+            job: job_id(1),
+            frames_rendered: 3,
+        });
+        assert_eq!(tracker.rendered(), 3);
+        assert_eq!(tracker.state(), &JobState::Cancelled);
     }
 }

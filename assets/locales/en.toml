@@ -16,6 +16,7 @@ _self = "File"
 new = "New"
 open = "Open…"
 import = "Import…"
+export = "Export…"
 save = "Save"
 save_as = "Save As…"
 quit = "Quit"
@@ -941,3 +942,60 @@ amount = "Strength of the application (0 leaves the old value, 1 applies fully).
 combine = "How the sampled value combines with the existing one: set, add, multiply, min, max."
 components = "Components to affect (empty for all; for example xy, rgb, a)."
 group = "Name of a bool attribute limiting the affected elements (empty for all)."
+
+[export]
+title = "Export"
+submit = "Export"
+browse = "Browse…"
+
+[export.field]
+composition = "Composition"
+range = "Frame Range"
+format = "Format"
+directory = "Output Folder"
+prefix = "File Prefix"
+suffix = "File Suffix"
+padding = "Number Padding"
+overwrite = "Replace existing files"
+audio = "Write a soundtrack (WAV)"
+audio_hint = "This build cannot decode audio, or the composition has no audio layers."
+
+[export.error]
+no_composition = "This project has no composition to export."
+invalid_start = "The first frame must be a whole number."
+invalid_end = "The last frame must be a whole number."
+empty_range = "The last frame is before the first."
+no_writer = "This format cannot be written yet."
+missing_directory = "Choose an output folder."
+invalid_padding = "The number padding must be between 1 and 12 digits."
+output_name = "The prefix or suffix would put the frames outside the output folder."
+no_gpu = "Rendering needs a GPU, and this session could not open one."
+
+[export.unavailable]
+no_writer = "no writer yet"
+ffmpeg_not_linked = "this build has no FFmpeg"
+ffmpeg_encoder_missing = "FFmpeg has no encoder for it"
+platform_api = "the hardware encoder is unavailable"
+no_platform_route = "no hardware encoder on this system"
+not_offered = "not offered"
+
+[export.notice]
+completed_title = "Export finished"
+completed_message = "Frames written to"
+failed_title = "Export failed"
+failed_message = "The render did not finish."
+audio_failed_message = "The frames were written, but the soundtrack could not be put in place."
+audio_exists_message = "A soundtrack is already there; turn on \"Replace existing files\" to overwrite it."
+
+[render_queue]
+empty = "No renders yet"
+clear_finished = "Clear Finished"
+cancel = "Cancel"
+frames = "frames"
+
+[render_queue.state]
+queued = "Queued"
+running = "Rendering"
+completed = "Done"
+cancelled = "Cancelled"
+failed = "Failed"

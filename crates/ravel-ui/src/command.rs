@@ -25,6 +25,9 @@ pub enum CommandId {
     FileNew,
     FileOpen,
     FileImport,
+    /// File ▸ Export…: the render dialog that submits a job to the session's
+    /// render queue (`render-export-plan.md`, unit 5).
+    FileExport,
     FileSave,
     FileSaveAs,
     FileQuit,
@@ -170,6 +173,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::FileNew, "file.new"),
     (CommandId::FileOpen, "file.open"),
     (CommandId::FileImport, "file.import"),
+    (CommandId::FileExport, "file.export"),
     (CommandId::FileSave, "file.save"),
     (CommandId::FileSaveAs, "file.save_as"),
     (CommandId::FileQuit, "file.quit"),
@@ -268,6 +272,7 @@ impl CommandId {
             CommandId::FileNew => "menu.file.new",
             CommandId::FileOpen => "menu.file.open",
             CommandId::FileImport => "menu.file.import",
+            CommandId::FileExport => "menu.file.export",
             CommandId::FileSave => "menu.file.save",
             CommandId::FileSaveAs => "menu.file.save_as",
             CommandId::FileQuit => "menu.file.quit",

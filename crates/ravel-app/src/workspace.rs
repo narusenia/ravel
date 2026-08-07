@@ -55,6 +55,7 @@ macro_rules! for_each_command {
             FileNew,
             FileOpen,
             FileImport,
+            FileExport,
             FileSave,
             FileSaveAs,
             FileQuit,
@@ -506,6 +507,12 @@ pub struct RavelWorkspace {
     audio: Entity<crate::audio::AudioService>,
     #[allow(dead_code)]
     audio_event_sub: Subscription,
+    /// Strong owner of the render queue; dropping the workspace on window
+    /// close cancels what it was still working on (see
+    /// [`crate::export::RenderService`]'s note on a discarded queue).
+    render: Entity<crate::export::RenderService>,
+    #[allow(dead_code)]
+    render_event_sub: Subscription,
     /// Last OS window title we applied; project observers compare against
     /// it so a title write (and workspace re-render) only happens when the
     /// project path actually changes, not on every document edit.
@@ -560,6 +567,20 @@ impl RavelWorkspace {
             window,
             |_this, _audio, event: &crate::audio::AudioServiceEvent, window, cx| {
                 show_audio_event(event, window, cx);
+            },
+        );
+
+        // The render queue (`render-export-plan.md`, unit 5): a second
+        // evaluation worker on the shared device, spawned lazily on the first
+        // export. Owned here so it outlives every panel — a render keeps
+        // going when the render queue panel is closed.
+        let render = cx.new(crate::export::RenderService::new);
+        cx.set_global(crate::export::RenderServiceHandle(render.downgrade()));
+        let render_event_sub = cx.subscribe_in(
+            &render,
+            window,
+            |_this, _render, event: &crate::export::RenderServiceEvent, window, cx| {
+                show_render_event(event, window, cx);
             },
         );
 
@@ -634,6 +655,8 @@ impl RavelWorkspace {
             project,
             audio,
             audio_event_sub,
+            render,
+            render_event_sub,
             window_title,
             title_sub,
             project_event_sub,
@@ -941,6 +964,7 @@ impl RavelWorkspace {
                 }
                 CommandId::FileSaveAs => self.prompt_save_as(cx),
                 CommandId::FileImport => self.prompt_import(cx),
+                CommandId::FileExport => self.prompt_export(window, cx),
                 CommandId::FileOpen => {
                     self.request_project_action(PendingProjectAction::Open, window, cx);
                 }
@@ -1355,6 +1379,141 @@ impl RavelWorkspace {
         });
     }
 
+    /// File ▸ Export…: collect a render request and hand it to the session's
+    /// render queue (`render-export-plan.md`, unit 5).
+    ///
+    /// The dialog is opened around [`ExportForm`] exactly as the composition
+    /// dialogs are opened around `CompositionForm`, with one difference: OK
+    /// can **fail**. A form that does not resolve leaves the dialog open with
+    /// the refusal under it, because closing it would make the user retype
+    /// everything to fix one field.
+    fn prompt_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        // Everything the dialog needs, read out in one borrow so the entity
+        // is free again before the form is built.
+        let opened = {
+            let project = self.project.read(cx);
+            let document = project.document();
+            let mut comps: Vec<(ravel_core::id::CompId, String)> = document
+                .compositions
+                .iter()
+                .map(|(id, comp)| (*id, comp.name.clone()))
+                .collect();
+            // The map iterates in hash order; the picker shows the same order
+            // every time rather than one that depends on insertion history.
+            comps.sort_by_key(|(id, _)| *id);
+            panels::active_composition(cx)
+                .filter(|id| document.get_composition(*id).is_some())
+                .or_else(|| comps.first().map(|(id, _)| *id))
+                .map(|active| {
+                    let comp = document
+                        .get_composition(active)
+                        .expect("checked by the filter above");
+                    let initial = crate::export_dialog::initial_settings(
+                        active,
+                        &comp.name,
+                        comp.duration_frames,
+                        project.project_path(),
+                    );
+                    let audio_possible = crate::export::AUDIO_DECODE_AVAILABLE
+                        && crate::export::composition_has_audio(document, active);
+                    // `Document` is immutable-by-clone, so this is the
+                    // snapshot the job renders: later edits to the session's
+                    // copy cannot reach it.
+                    (
+                        comps,
+                        initial,
+                        audio_possible,
+                        std::sync::Arc::new(document.clone()),
+                    )
+                })
+        };
+        let Some((comps, initial, audio_possible, document)) = opened else {
+            // Nothing to render. The menu entry stays enabled — a project
+            // with no composition is a state the user can leave — so say why
+            // instead of doing nothing.
+            show_export_failure(
+                SharedString::from(t!("export.error.no_composition")),
+                window,
+                cx,
+            );
+            return;
+        };
+
+        let choices =
+            crate::export_dialog::format_choices(&ravel_media::encode::available_encoders());
+        let form = cx.new(|cx| {
+            crate::export_dialog::ExportForm::new(
+                comps,
+                initial,
+                choices,
+                audio_possible,
+                window,
+                cx,
+            )
+        });
+        let service = self.render.downgrade();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let content = form.clone();
+            let ok_form = form.clone();
+            let document = document.clone();
+            let service = service.clone();
+            dialog
+                .title(SharedString::from(t!("export.title")))
+                .w(px(420.0))
+                .content(move |body, _window, _cx| body.child(content.clone()))
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("export-dialog-cancel")
+                                .label(SharedString::from(t!("ui.cancel")))
+                                .on_click(|_event, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("export-dialog-ok")
+                                .primary()
+                                .label(SharedString::from(t!("export.submit")))
+                                .on_click({
+                                    let document = document.clone();
+                                    let service = service.clone();
+                                    move |_event, window, cx| {
+                                        let settings = ok_form.read(cx).settings(cx);
+                                        let composition = ok_form.read(cx).composition_name(cx);
+                                        let request = match settings.resolve() {
+                                            Ok(request) => request,
+                                            Err(error) => {
+                                                let message = SharedString::from(t!(
+                                                    error.message_key()
+                                                ));
+                                                ok_form.update(cx, |form, cx| {
+                                                    form.show_error(message, cx)
+                                                });
+                                                return;
+                                            }
+                                        };
+                                        let job = crate::export::ExportJob {
+                                            request,
+                                            document: document.clone(),
+                                            composition,
+                                        };
+                                        if service
+                                            .update(cx, |service, cx| service.submit(job, cx))
+                                            .is_err()
+                                        {
+                                            tracing::warn!(
+                                                "the render queue was dropped before the export dialog was confirmed"
+                                            );
+                                        }
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        ),
+                )
+        });
+    }
+
     /// Composition ▸ Delete: a composition holding layers is confirmed first;
     /// an empty one is deleted straight away (undo restores either).
     fn prompt_delete_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1626,6 +1785,44 @@ fn show_audio_event(event: &crate::audio::AudioServiceEvent, window: &mut Window
                 "{}\n{asset_id}\n{error}",
                 t!("audio.notice.prepare_message")
             )))
+            .autohide(false),
+        cx,
+    );
+}
+
+/// Show what became of a render.
+fn show_render_event(event: &crate::export::RenderServiceEvent, window: &mut Window, cx: &mut App) {
+    match event {
+        crate::export::RenderServiceEvent::Completed { directory, frames } => {
+            window.push_notification(
+                Notification::new()
+                    .with_type(NotificationType::Success)
+                    .title(SharedString::from(t!("export.notice.completed_title")))
+                    .message(SharedString::from(format!(
+                        "{frames} {}\n{} {}",
+                        t!("render_queue.frames"),
+                        t!("export.notice.completed_message"),
+                        directory.display()
+                    ))),
+                cx,
+            );
+        }
+        crate::export::RenderServiceEvent::Failed { message } => {
+            show_export_failure(message.clone(), window, cx);
+        }
+    }
+}
+
+/// A refusal the export path produces, as a notification.
+///
+/// Shared by the dialog's early exits and by the queue's failure events, so
+/// one kind of problem reads the same wherever it was noticed.
+fn show_export_failure(message: SharedString, window: &mut Window, cx: &mut App) {
+    window.push_notification(
+        Notification::new()
+            .with_type(NotificationType::Error)
+            .title(SharedString::from(t!("export.notice.failed_title")))
+            .message(message)
             .autohide(false),
         cx,
     );

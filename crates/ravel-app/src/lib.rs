@@ -9,6 +9,8 @@ pub mod app_settings;
 pub mod assets;
 pub mod audio;
 pub mod composition_form;
+pub mod export;
+pub mod export_dialog;
 pub mod fonts;
 pub mod keybindings;
 pub mod layout_persist;

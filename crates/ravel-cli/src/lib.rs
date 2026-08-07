@@ -33,7 +33,9 @@
 //!   binary passes the GPU ones and the tests pass a stub. That is what lets
 //!   the guarantees the plan names — absolute frame numbering, split-range
 //!   equivalence, no partial output after an interrupt — be tested without a
-//!   device.
+//!   device. The hooks arrive as a *factory* rather than as a value, which
+//!   is what keeps the device out of the picture until every refusal the
+//!   arguments and the project can produce has already happened.
 //!
 //! Nothing here writes to the project. A `.ravprj` from an older format
 //! migrates in memory and is never saved back: a render is a read.
@@ -49,6 +51,7 @@ pub mod report;
 use std::path::{Path, PathBuf};
 
 use ravel_core::runtime::eval_service::EvalWorkerHooks;
+use ravel_core::runtime::{CONFLICT_SAMPLE, OverwritePolicy};
 use ravel_gpu::GpuContext;
 use ravel_media::encode::available_encoders;
 use ravel_nodes::GpuEvalHooks;
@@ -122,22 +125,62 @@ pub fn plan_from_args(args: &RenderArgs) -> Result<RenderPlan, CliError> {
     )
 }
 
-/// Render with the given evaluation hooks.
+/// Refuse a render that would land on files that are already there.
+///
+/// The worker performs this check too, and its copy is the authoritative one:
+/// it runs at the instant the job starts, which is the only moment the answer
+/// is not already stale. This one runs earlier so the refusal does not queue
+/// behind building a GPU context — on a machine with no adapter that would
+/// report "no usable GPU" for a question that has nothing to do with one.
+/// Both call [`RenderOutput::conflicts`](ravel_core::runtime::RenderOutput::conflicts),
+/// so "already there" has one definition rather than two.
+fn refuse_existing_output(plan: &RenderPlan) -> Result<(), CliError> {
+    if plan.overwrite != OverwritePolicy::Refuse {
+        return Ok(());
+    }
+    let conflicts = plan.render_output().conflicts(plan.range.clone());
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    let total = conflicts.len();
+    let mut sample = conflicts;
+    sample.truncate(CONFLICT_SAMPLE);
+    Err(CliError::OutputExists {
+        first: sample.first().cloned().unwrap_or_default(),
+        total,
+        sample,
+    })
+}
+
+/// Render with evaluation hooks built by `hooks`.
 ///
 /// Split from [`render`] so a test can supply hooks that need no GPU while
 /// exercising the same planning, the same worker and the same encoder.
-pub fn render_with_hooks<H: EvalWorkerHooks>(
+///
+/// `hooks` is a factory rather than a value because **the order is the
+/// guarantee**: the project is loaded, the plan is decided and the output is
+/// checked first, and only then is anything expensive built. Handing over a
+/// constructed `H` would let the caller pay for a device before the CLI knows
+/// whether it has a render to run — which is how a headless machine came to
+/// report a misspelled `--param` as "no usable GPU adapter", collapsing every
+/// classified exit code into `1`.
+pub fn render_with_hooks<H, F>(
     args: &RenderArgs,
-    hooks: H,
+    hooks: F,
     cancel: &CancelFlag,
     reporter: &mut dyn Reporter,
-) -> Result<Summary, CliError> {
+) -> Result<Summary, CliError>
+where
+    H: EvalWorkerHooks,
+    F: FnOnce() -> Result<H, CliError>,
+{
     let plan = plan_from_args(args)?;
+    refuse_existing_output(&plan)?;
     for warning in &plan.warnings {
         let (id, message) = warning_text(warning);
         reporter.note(id, &message);
     }
-    let frames = execute::execute(hooks, &plan, cancel, reporter)?;
+    let frames = execute::execute(hooks()?, &plan, cancel, reporter)?;
     Ok(Summary {
         frames,
         directory: plan.output.directory().to_path_buf(),
@@ -154,10 +197,16 @@ pub fn render(
     cancel: &CancelFlag,
     reporter: &mut dyn Reporter,
 ) -> Result<Summary, CliError> {
-    // Before the project is read: a machine with no adapter cannot render
-    // anything, and saying so up front beats failing after a long load.
-    let gpu = GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
-    render_with_hooks(args, GpuEvalHooks::new(gpu), cancel, reporter)
+    render_with_hooks(
+        args,
+        || {
+            let gpu =
+                GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
+            Ok(GpuEvalHooks::new(gpu))
+        },
+        cancel,
+        reporter,
+    )
 }
 
 /// Run one command line and return the process exit code.
@@ -188,6 +237,7 @@ fn run_list(command: ListCommand) -> Result<String, CliError> {
 fn run_render(args: &RenderArgs) -> u8 {
     let mut reporter = report::reporter(args.progress);
     let cancel = CancelFlag::new();
+
     install_interrupt_handler(&cancel);
 
     match render(args, &cancel, reporter.as_mut()) {

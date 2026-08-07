@@ -2451,8 +2451,10 @@ ravel-cli list codecs                      // every target, with route or reason
 locale_dir() -> PathBuf / init_locale()
 load_project(&Path) -> Result<ProjectFile, CliError>   // never writes
 plan_from_args(&RenderArgs) -> Result<RenderPlan, CliError>
-render_with_hooks<H: EvalWorkerHooks>(&RenderArgs, H, &CancelFlag,
-    &mut dyn Reporter) -> Result<Summary, CliError>
+render_with_hooks<H: EvalWorkerHooks, F: FnOnce() -> Result<H, CliError>>(
+    &RenderArgs, F, &CancelFlag, &mut dyn Reporter)
+    -> Result<Summary, CliError>   // hooks are a factory: plan, then refuse
+                                   // an existing output, only then build them
 render(&RenderArgs, &CancelFlag, &mut dyn Reporter)    // GpuEvalHooks
 run(Cli) -> u8                                          // the exit code
 
@@ -2470,15 +2472,20 @@ an unknown composition or empty range), `3` load, `4` `--param`, `5` codec,
 than `130`: Windows has no `128 + signal` convention and the code has to mean
 one thing everywhere.
 
-Three seams are load-bearing for later units:
+Four seams are load-bearing for later units:
 
-- **`plan_render` is a pure function** of arguments plus a document, so every
-  refusal happens before a job exists. `EXPORT-7`'s interactive mode builds
-  the same `RenderArgs` from answers and calls it after each one.
+- **`plan_render` is a pure function** of arguments plus a document — no
+  filesystem — so every refusal it can make happens before a job exists.
+  `EXPORT-7`'s interactive mode builds the same `RenderArgs` from answers and
+  calls it after each one.
 - **`execute` is generic over `EvalWorkerHooks`**, so the binary passes
   `ravel_nodes::GpuEvalHooks` and tests pass a CPU stub — the plan's
   guarantees are verified without a device (`tests/render_cli.rs`), and the
   binary's own wiring separately (`tests/cli_binary.rs`, needs a GPU).
+- **The hooks are built last**, after loading, planning and the output-conflict
+  scan. A machine with no adapter therefore still reports a bad `--param` as
+  `4` and an existing output as `6`, instead of collapsing every class into
+  the `1` a failed `GpuContext::new_blocking` would produce.
 - **Progress arithmetic is `ravel_core::runtime::JobProgress`**, not a CLI
   type, so `EXPORT-5`'s render queue panel reads the same projection.
 

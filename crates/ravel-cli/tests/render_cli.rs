@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use ravel_cli::args::{OutputFormat, PngBits, ProgressMode, RenderArgs};
 use ravel_cli::error::{
-    CliError, EXIT_CANCELLED, EXIT_CODEC, EXIT_OUTPUT_EXISTS, EXIT_PARAM, EXIT_USAGE,
+    CliError, EXIT_CANCELLED, EXIT_CODEC, EXIT_LOAD, EXIT_OUTPUT_EXISTS, EXIT_PARAM, EXIT_USAGE,
 };
 use ravel_cli::execute::CancelFlag;
 use ravel_cli::render_with_hooks;
@@ -321,7 +321,7 @@ fn run_with(
     mut recorder: Recorder,
     cancel: &CancelFlag,
 ) -> Run {
-    let result = render_with_hooks(args, hooks, cancel, &mut recorder);
+    let result = render_with_hooks(args, || Ok(hooks), cancel, &mut recorder);
     Run { result, recorder }
 }
 
@@ -691,6 +691,121 @@ fn a_missing_project_fails_as_a_load() {
     let dir = TempDir::new().expect("tempdir");
     let missing = dir.path().join("nothing.ravprj");
     let run = run(&args(&missing, &dir.path().join("out")));
-    assert_eq!(run.code(), ravel_cli::error::EXIT_LOAD);
+    assert_eq!(run.code(), EXIT_LOAD);
     assert!(matches!(run.result, Err(CliError::Load { .. })));
+}
+
+// ===========================================================================
+// Through `render` itself
+// ===========================================================================
+
+/// Everything above goes through `render_with_hooks`, which is the seam the
+/// stub processor plugs into — and which therefore never exercises the order
+/// `render` puts things in. That order is load-bearing: a headless runner or
+/// a render-farm node may have no adapter at all, and if the GPU context is
+/// built first then a misspelled `--param`, an unreadable project, a codec
+/// this build cannot write and an output that is already there all come back
+/// as "no usable GPU adapter" with exit code 1, collapsing every classified
+/// code the plan promises.
+///
+/// These call `render` — the real entry point, GPU factory and all — and
+/// assert the classification. They pass on a machine with an adapter and on
+/// one without, because none of them may reach the device.
+#[test]
+fn the_real_entry_point_classifies_before_it_builds_a_device() {
+    let dir = TempDir::new().expect("tempdir");
+    let project = project_file(dir.path(), document(false));
+    let out = dir.path().join("out");
+
+    let render = |args: &RenderArgs| {
+        let mut recorder = Recorder::default();
+        ravel_cli::render(args, &CancelFlag::new(), &mut recorder)
+            .err()
+            .map(|error| (error.code(), error.id()))
+    };
+
+    let missing = args(&dir.path().join("nothing.ravprj"), &out);
+    assert_eq!(render(&missing), Some((EXIT_LOAD, "load-failed")));
+
+    let mut undeclared = args(&project, &out);
+    undeclared.params = vec!["nosuch=1".to_string()];
+    assert_eq!(render(&undeclared), Some((EXIT_PARAM, "param-rejected")));
+
+    let mut mistyped = args(&project, &out);
+    mistyped.params = vec!["scale=large".to_string()];
+    assert_eq!(render(&mistyped), Some((EXIT_PARAM, "param-type")));
+
+    let mut unknown_comp = args(&project, &out);
+    unknown_comp.comp = Some("Nope".into());
+    assert_eq!(
+        render(&unknown_comp),
+        Some((EXIT_USAGE, "unknown-composition"))
+    );
+
+    // H.265 is refused as policy everywhere, so this one refusal does not
+    // depend on what FFmpeg the machine has.
+    let mut unwritable = args(&project, &out);
+    unwritable.format = OutputFormat::H265;
+    assert_eq!(render(&unwritable), Some((EXIT_CODEC, "codec-unavailable")));
+
+    // An output that is already there, without a render having to produce it:
+    // the file name is the one the plan would write for frame 0.
+    let occupied = dir.path().join("occupied");
+    std::fs::create_dir_all(&occupied).expect("output directory");
+    std::fs::write(occupied.join("frame_0000.png"), b"not a png").expect("an existing frame");
+    assert_eq!(
+        render(&args(&project, &occupied)),
+        Some((EXIT_OUTPUT_EXISTS, "output-exists"))
+    );
+
+    assert!(
+        !out.exists(),
+        "not one of these refusals may have created an output directory"
+    );
+}
+
+/// The same ordering, stated as the invariant rather than as its symptoms:
+/// nothing expensive is built until the render is known to be worth starting.
+#[test]
+fn the_evaluation_hooks_are_not_built_until_the_render_is_decided() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = TempDir::new().expect("tempdir");
+    let project = project_file(dir.path(), document(false));
+    let built = AtomicUsize::new(0);
+    // Captures only `&built`, so the closure is `Copy` and can be handed to
+    // both calls even though the parameter takes it by value.
+    let hooks = || -> Result<StubHooks, CliError> {
+        built.fetch_add(1, Ordering::SeqCst);
+        Ok(StubHooks::new())
+    };
+
+    let mut refused = args(&project, &dir.path().join("refused"));
+    refused.params = vec!["nosuch=1".to_string()];
+    let result = render_with_hooks(
+        &refused,
+        hooks,
+        &CancelFlag::new(),
+        &mut Recorder::default(),
+    );
+    assert_eq!(result.err().map(|error| error.code()), Some(EXIT_PARAM));
+    assert_eq!(
+        built.load(Ordering::SeqCst),
+        0,
+        "a refused render built the evaluation hooks anyway"
+    );
+
+    let accepted = args(&project, &dir.path().join("accepted"));
+    render_with_hooks(
+        &accepted,
+        hooks,
+        &CancelFlag::new(),
+        &mut Recorder::default(),
+    )
+    .expect("the render runs");
+    assert_eq!(
+        built.load(Ordering::SeqCst),
+        1,
+        "a render that does start has to build them exactly once"
+    );
 }

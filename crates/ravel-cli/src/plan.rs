@@ -14,11 +14,17 @@
 //! `argv` and calls [`plan_render`] after each one to say whether the answer
 //! so far is renderable.
 //!
-//! The one thing not decided here is whether the output already exists. That
-//! check belongs to the worker ([`OverwritePolicy`]), which performs it
-//! under the same lockless assumptions as the encoder that writes; a second
-//! copy here would be a second answer to the same question, and the earlier
-//! one at that.
+//! The one thing not decided here is whether the output already exists,
+//! because that is a question about the filesystem rather than about the
+//! arguments and the document — and keeping this function free of the
+//! filesystem is what lets `EXPORT-7` call it after every answer. The
+//! authoritative check belongs to the worker ([`OverwritePolicy`]), which
+//! performs it at the instant the job starts, under the same lockless
+//! assumptions as the encoder that writes. [`crate::render_with_hooks`] scans
+//! for conflicts once more before that, early enough that the refusal does
+//! not queue behind building a GPU context; both go through
+//! [`RenderOutput::conflicts`], so it is one answer asked twice rather than
+//! two answers.
 
 use std::collections::HashMap;
 use std::path::Path;

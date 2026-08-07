@@ -6,8 +6,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# FFmpeg-backed decoding for `mixdown::decode_full_audio`. Off by default so
+# a plain build needs no FFmpeg shared libraries; every other module works
+# without it.
+ffmpeg = ["ravel-media/ffmpeg"]
+
 [dependencies]
 ravel-core = { workspace = true }
+# Audio decode for the document → track mapping (`mixdown`). `ravel-media`
+# depends on `ravel-core` alone, so this does not close a cycle.
+ravel-media = { workspace = true }
 cpal = { workspace = true }
 dasp_sample = { workspace = true }
 rubato = { workspace = true }

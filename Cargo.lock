@@ -5945,6 +5945,7 @@ dependencies = [
  "crossbeam-channel",
  "dasp_sample",
  "ravel-core",
+ "ravel-media",
  "rubato",
  "thiserror 2.0.19",
  "tracing",

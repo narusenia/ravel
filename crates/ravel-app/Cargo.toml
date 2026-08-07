@@ -15,7 +15,7 @@ path = "src/main.rs"
 default = []
 # FFmpeg-backed decoding for media nodes and thumbnails. Off by default so
 # development builds do not require FFmpeg shared libraries; enable for distribution.
-ffmpeg = ["ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
+ffmpeg = ["ravel-audio/ffmpeg", "ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
 
 [dependencies]
 gpui-component-assets = { workspace = true }

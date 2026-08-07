@@ -1,13 +1,14 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Document → mixer track mapping for audio playback
+//! Document → mixer track mapping
 //! (`docs/implementation/audio-plan.md`, unit 3).
 //!
-//! [`AudioMixdown`] turns the audio-carrying layers of the active
-//! composition into [`TrackSpec`]s (desired mixer state) and, once the
-//! source audio has been decoded and cached, into concrete
-//! [`ravel_audio::Track`]s for `AudioCommand::SetTrack`.
+//! [`AudioMixdown`] turns the audio-carrying layers of a composition into
+//! [`TrackSpec`]s (desired mixer state) and, once the source audio has been
+//! decoded and cached, into concrete [`Track`]s for the
+//! [`Mixer`](crate::Mixer) — whether that mixer feeds an output device
+//! (`AudioCommand::SetTrack`) or an offline render.
 //!
 //! Unit contract (enforced here, relied on by the mixer):
 //!
@@ -21,11 +22,12 @@
 //!   rate. The gain curve is automation, not audio, and is evaluated
 //!   straight onto the same output-rate frames.
 //!
-//! The pure functions in this module are GPUI-free so the mapping is
-//! testable headlessly; [`crate::audio::AudioService`] owns the cache, the
-//! diffing, and the decode scheduling.
+//! The functions here are pure and GUI-free, so the mapping is testable
+//! headlessly and is shared by both consumers: `ravel-app`'s `AudioService`
+//! owns the cache, the diffing, and the decode scheduling for playback,
+//! while the offline render path builds the same tracks in one pass.
 
-use ravel_audio::{Track, TrackGain};
+use crate::{Track, TrackGain};
 use ravel_core::animation::AnimationChannel;
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::composition::Composition;
@@ -113,7 +115,7 @@ pub fn prepare_audio_at_rate(
     if audio.sample_rate == output_rate {
         return Ok(audio);
     }
-    let samples = ravel_audio::resampler::resample_buffer(
+    let samples = crate::resampler::resample_buffer(
         &audio.samples,
         audio.sample_rate,
         output_rate,
@@ -377,7 +379,7 @@ pub fn decode_full_audio(
     _stream_index: usize,
 ) -> anyhow::Result<DecodedAudio> {
     let _ = path;
-    anyhow::bail!("the `ffmpeg` feature of ravel-app is disabled")
+    anyhow::bail!("the `ffmpeg` feature of ravel-audio is disabled")
 }
 
 // ===========================================================================

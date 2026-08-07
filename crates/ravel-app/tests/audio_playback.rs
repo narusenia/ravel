@@ -21,10 +21,10 @@
 use core::prelude::v1::test;
 
 use gpui::{AppContext as _, TestAppContext};
-use ravel_app::audio::mixdown::{AudioMixdown, CacheKey, DecodedAudio};
 use ravel_app::audio::{AudioService, AudioServiceHandle, AudioSink};
 use ravel_app::playback::{ClockSource, Transport};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
+use ravel_audio::mixdown::{AudioMixdown, CacheKey, DecodedAudio};
 use ravel_audio::{AudioCommand, AudioError, SyncClock};
 use ravel_core::composition::{AudioSource, Composition, Layer};
 use ravel_core::graph::Graph;

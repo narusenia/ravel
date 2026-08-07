@@ -26,10 +26,8 @@
 //! has audio tracks **and** an engine is running; everything else falls
 //! back to `ClockSource::Wall`.
 
-pub mod mixdown;
-
 use gpui::{App, Context, Entity, EventEmitter, Global, WeakEntity};
-use mixdown::{AudioMixdown, CacheKey, DecodedAudio, TrackSpec};
+use ravel_audio::mixdown::{self, AudioMixdown, CacheKey, DecodedAudio, TrackSpec};
 use ravel_audio::{
     AudioCommand, AudioEngine, AudioEngineConfig, AudioError, OutputConfig, SyncClock, Track,
 };
@@ -97,7 +95,7 @@ pub struct AudioService {
     /// Engine startup failed once (no device); do not retry on every edit.
     engine_unavailable: bool,
     /// Sample rate the engine runs at; every placement value is converted
-    /// into these frames (see [`mixdown`]).
+    /// into these frames (see [`ravel_audio::mixdown`]).
     output_rate: u32,
     /// Fully decoded source audio per asset + stream (decision 8).
     cache: HashMap<CacheKey, Arc<DecodedAudio>>,

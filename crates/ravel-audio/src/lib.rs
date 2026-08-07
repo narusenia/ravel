@@ -28,6 +28,7 @@ pub mod device;
 pub mod effects;
 pub mod engine;
 pub mod error;
+pub mod mixdown;
 pub mod mixer;
 pub mod resampler;
 pub mod sync;

@@ -303,7 +303,10 @@ fn ask_output(prompt: &mut dyn Prompt) -> Result<std::path::PathBuf, CliError> {
             prompt.note(&t!("cli.prompt.output_required"));
             continue;
         }
-        return Ok(std::path::PathBuf::from(answer.trim()));
+        // No shell has seen this string, so `~` is still a tilde here — the
+        // one place expansion is not merely a convenience for a quoted
+        // argument.
+        return Ok(crate::args::expand_tilde(answer.trim()));
     }
 }
 

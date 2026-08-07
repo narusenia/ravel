@@ -63,7 +63,7 @@ use crate::widgets::{
     keyframes_in_rect_with_offsets,
 };
 use crate::workspace::{
-    EditDelete, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
+    EditDelete, EditDuplicate, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
     KeyframeInterpolationLinear, KeyframeInterpolationStep, PlaybackStop, PlaybackToggle,
 };
 use ravel_ui::command::CommandId;
@@ -809,6 +809,16 @@ impl TimelineGpuiPanel {
         self.delete_layer(lid, cx);
     }
 
+    /// Duplicate the selected layers as one undo step, the same way the row's
+    /// context menu does — `duplicate_layers_from_row` expands the row it is
+    /// given to the whole selection when the row is part of it.
+    fn duplicate_selected_layers(&mut self, cx: &mut Context<Self>) {
+        let Some(lid) = self.selected_layer(cx) else {
+            return;
+        };
+        self.duplicate_layers_from_row(lid, cx);
+    }
+
     /// Remove all selected keyframes as one Document undo step. Locked-layer
     /// refs stay selected; deleted and stale refs are dropped.
     fn delete_selected_keyframes(&mut self, cx: &mut Context<Self>) {
@@ -1065,6 +1075,27 @@ impl TimelineGpuiPanel {
                 self.select_layer(layer, cx);
             }
         }
+    }
+
+    /// Cmd+D with the Timeline focused: duplicate the selected layers.
+    ///
+    /// Unlike Delete this does not branch on the keyframe selection — there is
+    /// no "duplicate a keyframe in place" that means anything, so a selected
+    /// keyframe leaves the layer as the target rather than doing nothing.
+    fn on_duplicate(&mut self, _: &EditDuplicate, _window: &mut Window, cx: &mut Context<Self>) {
+        self.duplicate_selected_layers(cx);
+        let focused_instance = crate::trace::focused_instance(cx);
+        crate::trace::record(
+            cx,
+            crate::trace::TraceEntry {
+                source: crate::trace::TraceSource::PanelKeyDown,
+                command: Some(CommandId::EditDuplicate),
+                focused_instance,
+                handler: "TimelineGpuiPanel::on_duplicate",
+                outcome: Some("duplicate_selected_layers".to_string()),
+            },
+        );
+        cx.notify();
     }
 
     fn on_delete(&mut self, _: &EditDelete, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3656,6 +3687,7 @@ impl Render for TimelineGpuiPanel {
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_duplicate))
             .on_action(cx.listener(Self::on_keyframe_bezier))
             .on_action(cx.listener(Self::on_keyframe_linear))
             .on_action(cx.listener(Self::on_keyframe_step))
@@ -5389,6 +5421,55 @@ mod tests {
             assert!(project.undo(cx));
         });
         assert_eq!(layer(&project, comp_id, a, cx).name, "A");
+    }
+
+    /// Cmd+D reaches the Timeline: the `EditDuplicate` action duplicates the
+    /// selection, which before this was only reachable from the row's context
+    /// menu (the binding existed for the node editor only).
+    #[gpui::test]
+    fn the_duplicate_action_duplicates_the_selected_layer(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let before = project.read_with(cx, |project, _| {
+            project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .layers
+                .len()
+        });
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.select_layer(a, cx);
+                panel.on_duplicate(&EditDuplicate, window, cx);
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let layers = &project.document().get_composition(comp_id).unwrap().layers;
+            assert_eq!(layers.len(), before + 1);
+            // The copy lands directly above its source, named after it.
+            let source = layers.iter().position(|l| l.id == a).unwrap();
+            assert_eq!(layers[source].name, "A");
+            assert_eq!(layers[source + 1].name, "A copy");
+            assert_ne!(layers[source + 1].id, a);
+        });
+
+        // One undo step, not one per layer touched.
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+        });
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .len(),
+                before
+            );
+        });
     }
 
     /// The context-menu duplication handler inserts above the source,

@@ -26,6 +26,11 @@ earcut = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
+# The gpui warning `logging::PINNED_QUIET` silences arrives through the
+# `log` facade, so the test that proves it is silenced has to emit it that
+# way. Test-only: nothing in the crate logs through `log`.
+log = { workspace = true }
+tracing-log = "0.2"
 
 [[bench]]
 name = "eval_bench"

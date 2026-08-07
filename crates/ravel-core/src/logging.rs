@@ -16,14 +16,50 @@
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Directive;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
+
+/// Targets whose diagnostics are pinned quieter than whatever the filter asks
+/// for, because they report a condition Ravel is not in a position to act on
+/// and repeat it often enough to bury the rest of the log.
+///
+/// Applied on top of the caller's directives rather than folded into the
+/// default, so `RAVEL_LOG=debug` stays usable: raising the level to chase a
+/// Ravel bug must not also turn one of these back on.
+const PINNED_QUIET: &[&str] = &[
+    // gpui emits this per accessibility tree update because Zed — whose
+    // widgets gpui was extracted from — exposes no accessible elements yet.
+    // It says nothing about Ravel's own tree and fires while the window is
+    // merely open.
+    "gpui::window::a11y=error",
+];
 
 /// Guard that must be held alive for the lifetime of the application to keep
 /// the non-blocking file writer flushing. Drop it to flush and close the log
 /// file.
 pub struct LogGuard {
     _file_guard: Option<WorkerGuard>,
+}
+
+/// Applies [`PINNED_QUIET`] on top of `base`.
+///
+/// Separate from [`init_logging`] because that function installs a *global*
+/// subscriber, which a test can neither install twice nor observe. The
+/// suppression is the whole point of the list, so it has to be assertable on
+/// its own.
+fn pin_quiet_targets(base: EnvFilter) -> EnvFilter {
+    let mut filter = base;
+    for directive in PINNED_QUIET {
+        // Parsed from a literal the test below pins, so a typo is a test
+        // failure rather than a silently ignored directive.
+        filter = filter.add_directive(
+            directive
+                .parse::<Directive>()
+                .expect("a pinned-quiet directive is a literal"),
+        );
+    }
+    filter
 }
 
 /// Initialize the global tracing subscriber.
@@ -39,7 +75,9 @@ pub fn init_logging(
     env_key: &str,
     log_dir: Option<&std::path::Path>,
 ) -> Result<LogGuard, anyhow::Error> {
-    let env_filter = EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = pin_quiet_targets(
+        EnvFilter::try_from_env(env_key).unwrap_or_else(|_| EnvFilter::new("info")),
+    );
 
     // `with_writer` is not optional here: `fmt::layer()` defaults to
     // **stdout**, and a diagnostic on stdout is indistinguishable from
@@ -73,4 +111,106 @@ pub fn init_logging(
     Ok(LogGuard {
         _file_guard: file_guard,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts the events that survive the filter.
+    struct CountEvents(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
+        fn on_event(
+            &self,
+            _event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Emits one a11y warning and one ordinary warning under `directives`,
+    /// returning how many reached a layer.
+    fn events_passing(directives: &str) -> usize {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(pin_quiet_targets(EnvFilter::new(directives)))
+            .with(CountEvents(count.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                target: "gpui::window::a11y",
+                "expected an empty a11y tree update (only the root node), but got 47 nodes"
+            );
+            tracing::warn!(target: "ravel_core::logging", "something Ravel can act on");
+        });
+        count.load(Ordering::Relaxed)
+    }
+
+    /// `init_logging` unwraps these, so a malformed one would panic at startup
+    /// — in a release build, on a user's machine, before any window exists.
+    #[test]
+    fn every_pinned_quiet_directive_parses() {
+        for directive in PINNED_QUIET {
+            assert!(
+                directive.parse::<Directive>().is_ok(),
+                "{directive:?} is not a filter directive"
+            );
+        }
+    }
+
+    /// The warning the pinned list exists to silence is gone at the default
+    /// level, and Ravel's own warnings are not collateral.
+    #[test]
+    fn the_a11y_warning_is_dropped_and_other_warnings_are_not() {
+        assert_eq!(events_passing("info"), 1);
+    }
+
+    /// Raising the level to chase a Ravel bug must not bring it back — that is
+    /// the reason the directive is applied on top of the caller's rather than
+    /// folded into the default.
+    #[test]
+    fn raising_the_level_does_not_unmute_the_a11y_warning() {
+        for directives in ["debug", "trace", "ravel_core=trace,warn"] {
+            assert_eq!(events_passing(directives), 1, "{directives}");
+        }
+    }
+
+    /// The real path, which the two tests above do **not** exercise: gpui emits
+    /// this warning with `log::warn!`, not `tracing::warn!`
+    /// (`gpui/src/window/a11y.rs`). It reaches the filter at all only because
+    /// `SubscriberInitExt::try_init` installs a `LogTracer` when the
+    /// `tracing-log` feature is on — which it is, by default, through
+    /// `tracing-subscriber`. That is an implicit dependency of the suppression
+    /// on a default feature of a transitive crate, so it is pinned here: if the
+    /// bridge ever goes away, the directive silently stops doing anything and
+    /// only this test notices.
+    ///
+    /// Global rather than scoped because `log` has no thread-local default —
+    /// `LogTracer` routes into whichever subscriber is globally installed. This
+    /// is the only test in the crate that sets one.
+    #[test]
+    fn the_a11y_warning_is_dropped_when_it_arrives_through_the_log_facade() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(pin_quiet_targets(EnvFilter::new("info")))
+            .with(CountEvents(count.clone()));
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a global subscriber");
+        tracing_log::LogTracer::init().expect("the log bridge installs once");
+
+        log::warn!(
+            target: "gpui::window::a11y",
+            "expected an empty a11y tree update (only the root node), but got 47 nodes"
+        );
+        log::warn!(target: "ravel_core::logging", "something Ravel can act on");
+
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "the a11y warning must be dropped and the ordinary one kept"
+        );
+    }
 }

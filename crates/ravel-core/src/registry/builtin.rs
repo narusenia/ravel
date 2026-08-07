@@ -598,6 +598,26 @@ fn math_scalar() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::SCALAR,
         })
+        // `a` starts exposed as an input port. Every op reads it — the unary
+        // ones read nothing else — so a `math.scalar` that is not driven
+        // through `a` is the exception, and making the common case cost a
+        // right-click on a node whose whole purpose is to sit mid-chain is
+        // backwards. `b` stays a plain parameter: it is the constant of a
+        // binary op far more often than it is a wire.
+        //
+        // Declared as an input rather than exposed after creation because a
+        // template cannot run graph operations — the same shape `rasterize`
+        // uses for its `color` pin. `is_param` ports must follow the fixed and
+        // variadic ones (see `Graph::expose_param_port`), which holds here
+        // because this template declares neither. The accepted types come from
+        // the parameter's own value so this port and the one
+        // `expose_param_port` would push cannot drift apart.
+        .with_input(InputPort {
+            name: "a".into(),
+            accepted_types: ParameterValue::Float(0.0).port_accepted_types(),
+            is_param: true,
+            is_variadic: false,
+        })
         .with_param(string_parameter("op", "add"))
         .with_param_options("op", MATH_SCALAR_OPS)
         .with_param(float_parameter("a", 0.0))
@@ -1182,6 +1202,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `math.scalar` ships with `a` already exposed. Pinned two ways because
+    /// the template writes the port by hand: it has to be the *only* input, so
+    /// the `is_param` ports still come last, and it has to be byte-identical to
+    /// what `expose_param_port` would have pushed — a port that differs is one
+    /// the graph would refuse to re-create after a remove.
+    #[test]
+    fn math_scalar_ships_with_a_exposed() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let id = crate::id::NodeId::new(1);
+        let node = reg.create_node("math.scalar", id).unwrap();
+        assert_eq!(node.inputs.len(), 1, "`a` is the only input");
+        assert_eq!(node.inputs[0].name, "a");
+        assert!(node.inputs[0].is_param);
+
+        // The same node with the port removed and re-exposed the ordinary way
+        // must be indistinguishable from the one the template built.
+        let graph = crate::graph::Graph::new()
+            .add_node(node.clone())
+            .expect("a fresh graph accepts the node")
+            .remove_param_port(id, "a")
+            .expect("the template's port is removable")
+            .expose_param_port(id, "a")
+            .expect("and re-exposable");
+        assert_eq!(graph.node(id).unwrap().inputs, node.inputs);
     }
 
     #[test]

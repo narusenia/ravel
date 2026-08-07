@@ -5984,6 +5984,7 @@ dependencies = [
  "crossbeam-channel",
  "ctrlc",
  "dialoguer",
+ "dirs 6.0.0",
  "image",
  "indicatif",
  "ravel-audio",
@@ -6011,6 +6012,7 @@ dependencies = [
  "crossbeam-channel",
  "earcut",
  "im",
+ "log",
  "rayon",
  "ron",
  "serde",
@@ -6020,6 +6022,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

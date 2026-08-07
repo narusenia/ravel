@@ -78,6 +78,9 @@ pub enum CliError {
     #[error("the project has no composition called {0:?}")]
     UnknownComposition(String),
 
+    #[error("the project has {} compositions called {name:?}: {ids:?}", ids.len())]
+    AmbiguousComposition { name: String, ids: Vec<u64> },
+
     #[error("the project has no composition to render")]
     NoComposition,
 
@@ -136,6 +139,7 @@ impl CliError {
                 EXIT_PARAM
             }
             Self::UnknownComposition(_)
+            | Self::AmbiguousComposition { .. }
             | Self::NoComposition
             | Self::BadRange { .. }
             | Self::EmptyRange { .. }
@@ -159,6 +163,7 @@ impl CliError {
             Self::ParamValue { .. } => "param-type",
             Self::ParamRejected(_) => "param-rejected",
             Self::UnknownComposition(_) => "unknown-composition",
+            Self::AmbiguousComposition { .. } => "ambiguous-composition",
             Self::NoComposition => "no-composition",
             Self::BadRange { .. } => "bad-range",
             Self::EmptyRange { .. } => "empty-range",
@@ -195,6 +200,18 @@ impl CliError {
             }
             Self::UnknownComposition(name) => {
                 t!("cli.error.unknown_composition").replace("{name}", name)
+            }
+            Self::AmbiguousComposition { name, ids } => {
+                let ids = ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // The ids go in the sentence so the next command can be typed
+                // straight from it: `--comp <id>` is the way out.
+                t!("cli.error.ambiguous_composition")
+                    .replace("{name}", name)
+                    .replace("{ids}", &ids)
             }
             Self::NoComposition => t!("cli.error.no_composition"),
             Self::BadRange { raw } => t!("cli.error.bad_range").replace("{raw}", raw),
@@ -289,6 +306,14 @@ mod tests {
             EXIT_PARAM
         );
         assert_eq!(CliError::UnknownComposition("x".into()).code(), EXIT_USAGE);
+        assert_eq!(
+            CliError::AmbiguousComposition {
+                name: "x".into(),
+                ids: vec![1, 2]
+            }
+            .code(),
+            EXIT_USAGE
+        );
         assert_eq!(CliError::InterruptHandler("x".into()).code(), EXIT_INTERNAL);
         assert_eq!(CliError::CodecNoWriter { format: "vp9" }.code(), EXIT_CODEC);
         assert_eq!(

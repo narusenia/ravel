@@ -2467,12 +2467,14 @@ error::CliError.code() / .id() / .localized()
 ```
 
 Exit codes (`error::EXIT_*`): `0` ok, `1` internal (no adapter, no interrupt
-handler), `2` usage (clap's own, and an unknown composition or an
+handler), `2` usage (clap's own, and an unknown or ambiguous composition or an
 empty range), `3` load, `4` `--param`, `5` codec, `6` output exists, `7`
 evaluation, `8` encoding, `9` cancelled. `9` rather than `130`: Windows has no
 `128 + signal` convention and the code has to mean one thing everywhere.
 
-An interrupt handler that cannot be installed is fatal *before* the render, since
+A composition named by a name two compositions share is `AmbiguousComposition`
+rather than a silent pick, and the message lists the ids `--comp` accepts. An
+interrupt handler that cannot be installed is fatal *before* the render, since
 "an interrupt leaves nothing behind" cannot hold without one.
 
 Four seams are load-bearing for later units:

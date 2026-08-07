@@ -206,8 +206,21 @@ fn resolve_comp(document: &Document, requested: Option<&str>) -> Result<CompId, 
         .map(|(id, _)| *id)
         .collect::<Vec<_>>();
     by_name.sort();
-    if let Some(id) = by_name.first() {
-        return Ok(*id);
+    match by_name.as_slice() {
+        [id] => return Ok(*id),
+        // Names are not unique in a document, and picking one — the lowest
+        // id, say — is deterministic without being *predictable*: a script
+        // would render a different composition than its author meant and
+        // never learn. Everything else this unit refuses, it refuses out
+        // loud (an existing output, an unwritable codec), so this does too,
+        // and it names the ids so the retry can be typed from the message.
+        [_, _, ..] => {
+            return Err(CliError::AmbiguousComposition {
+                name: requested.to_string(),
+                ids: by_name.iter().map(|id| id.raw()).collect(),
+            });
+        }
+        [] => {}
     }
     if let Ok(raw) = requested.parse::<u64>() {
         let id = CompId::new(raw);
@@ -344,6 +357,44 @@ mod tests {
             plan_render(&unknown, &document(), None, &available_encoders()),
             Err(CliError::UnknownComposition(_))
         ));
+    }
+
+    /// Names are not unique in a document. Picking the lowest id would be
+    /// deterministic and still wrong: the script renders something its author
+    /// did not name and never finds out.
+    #[test]
+    fn a_name_two_compositions_share_is_refused_and_offers_the_ids() {
+        let document = Document::default()
+            .with_composition(comp(1, "Main"))
+            .with_composition(comp(4, "Main"));
+        let mut ambiguous = args(Path::new("/tmp/out"));
+        ambiguous.comp = Some("Main".into());
+
+        let error = match plan_render(&ambiguous, &document, None, &available_encoders()) {
+            Err(error) => error,
+            Ok(plan) => panic!(
+                "two compositions answer to that name, yet {:?} was chosen",
+                plan.comp
+            ),
+        };
+        match &error {
+            CliError::AmbiguousComposition { name, ids } => {
+                assert_eq!(name, "Main");
+                assert_eq!(ids, &vec![1, 4], "the ids are offered, in order");
+            }
+            other => panic!("expected an ambiguity refusal, got {other:?}"),
+        }
+        assert_eq!(error.code(), crate::error::EXIT_USAGE);
+
+        // The way out the message names has to actually work.
+        let mut by_id = args(Path::new("/tmp/out"));
+        by_id.comp = Some("4".into());
+        assert_eq!(
+            plan_render(&by_id, &document, None, &available_encoders())
+                .expect("an id is never ambiguous")
+                .comp,
+            CompId::new(4)
+        );
     }
 
     /// A composition whose *name* is a number must win over the id that

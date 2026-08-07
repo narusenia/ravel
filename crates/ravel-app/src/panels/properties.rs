@@ -1257,6 +1257,7 @@ fn expression_editor_body(
     row: &ExpressionRow,
     inputs: &[(String, usize, Entity<InputState>)],
     drafts: &[(String, usize, ExpressionDraft)],
+    mono: SharedString,
     muted: Hsla,
     danger: Hsla,
 ) -> Div {
@@ -1297,6 +1298,13 @@ fn expression_editor_body(
                 div()
                     .flex_grow()
                     .min_w_0()
+                    // Expression source is code: monospaced so operators and
+                    // nesting line up, and so the column a compile error points
+                    // at is countable. `font_family` replaces the family without
+                    // clearing the inherited Japanese fallbacks (see
+                    // `crate::fonts`), which an expression can contain through a
+                    // string literal.
+                    .font_family(mono.clone())
                     .child(Input::new(state).small().w_full()),
             ),
         );
@@ -1311,6 +1319,9 @@ fn expression_editor_body(
                     .py(px(1.0))
                     .text_xs()
                     .text_color(danger)
+                    // Same family as the source above it: the message quotes
+                    // fragments of the expression.
+                    .font_family(mono.clone())
                     .child(SharedString::from(error.clone())),
             );
         }
@@ -3682,6 +3693,7 @@ impl Render for PropertiesGpuiPanel {
             let muted = cx.theme().colors.muted_foreground;
             let fg = cx.theme().colors.foreground;
             let danger = cx.theme().colors.danger;
+            let mono_family = cx.theme().mono_font_family.clone();
             // Dimmer than `muted`: a control that is present but cannot act.
             let disabled = cx.theme().colors.border;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
@@ -3816,6 +3828,7 @@ impl Render for PropertiesGpuiPanel {
                 let expression_entities = expression_entities.clone();
                 let expression_rows = expression_rows.clone();
                 let expression_drafts = expression_drafts.clone();
+                let mono_family = mono_family.clone();
 
                 accordion = accordion.item(move |item| {
                     let mut container = div().flex().flex_col().w_full();
@@ -3872,6 +3885,7 @@ impl Render for PropertiesGpuiPanel {
                                     row,
                                     &expression_entities,
                                     &expression_drafts,
+                                    mono_family.clone(),
                                     muted,
                                     danger,
                                 ))

@@ -527,6 +527,234 @@ pub fn initial_settings(
 // proc macros crashes rustc 1.95 (SIGBUS); name what the tests need instead —
 // the same constraint `panels/mod.rs` records.
 #[cfg(test)]
+mod form_tests {
+    use super::{ExportForm, format_choices, initial_settings};
+    use ravel_core::id::CompId;
+    use ravel_core::media::ImageFormat;
+    use ravel_ui::export::{ExportError, ExportSettings};
+
+    fn comp() -> CompId {
+        CompId::new(3)
+    }
+
+    fn initial() -> ExportSettings {
+        let mut settings = initial_settings(comp(), "shot 010", 120, None);
+        settings.directory = "/tmp/ravel-export-form-test".to_owned();
+        settings
+    }
+
+    fn form(window: &mut gpui::Window, cx: &mut gpui::Context<ExportForm>) -> ExportForm {
+        ExportForm::new(
+            vec![
+                (comp(), "shot 010".to_owned()),
+                (CompId::new(4), "b".into()),
+            ],
+            initial(),
+            format_choices(&ravel_media::encode::available_encoders()),
+            true,
+            window,
+            cx,
+        )
+    }
+
+    /// The form hands back what it was opened with, so a dialog that is
+    /// confirmed untouched exports exactly what it offered.
+    #[gpui::test]
+    fn the_form_returns_the_settings_it_opened_with(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(form);
+        window
+            .update(cx, |form, _window, cx| {
+                let settings = form.settings(cx);
+                assert_eq!(settings, initial());
+                assert_eq!(form.composition_name(cx), "shot 010");
+                // The row the form opens on is one that can actually be
+                // written, whatever this machine's encoder table looks like.
+                settings.resolve().expect("the opening form is exportable");
+            })
+            .unwrap();
+    }
+
+    /// The dialog's own half of the "out before in" criterion: what the
+    /// widgets hold resolves to the same refusal the headless form gives.
+    #[gpui::test]
+    fn an_inverted_range_typed_into_the_form_is_refused(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(form);
+        window
+            .update(cx, |form, window, cx| {
+                form.start
+                    .update(cx, |state, cx| state.set_value("100", window, cx));
+                form.end
+                    .update(cx, |state, cx| state.set_value("99", window, cx));
+                assert_eq!(form.settings(cx).resolve(), Err(ExportError::EmptyRange));
+
+                // And the other way round, so the assertion above is about
+                // the order rather than about the field being read at all.
+                form.end
+                    .update(cx, |state, cx| state.set_value("120", window, cx));
+                let request = form.settings(cx).resolve().expect("a forward range");
+                assert_eq!(request.range, 100..121);
+            })
+            .unwrap();
+    }
+
+    /// Typed output fields reach the resolved job description.
+    #[gpui::test]
+    fn typed_output_fields_reach_the_job_description(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(form);
+        window
+            .update(cx, |form, window, cx| {
+                form.directory
+                    .update(cx, |state, cx| state.set_value("/tmp/renders", window, cx));
+                form.prefix
+                    .update(cx, |state, cx| state.set_value("beauty_", window, cx));
+                form.suffix
+                    .update(cx, |state, cx| state.set_value("_v2", window, cx));
+                form.padding
+                    .update(cx, |state, cx| state.set_value("6", window, cx));
+                form.overwrite = true;
+
+                let settings = form.settings(cx);
+                assert_eq!(settings.format, ImageFormat::Png);
+                let request = settings.resolve().expect("resolves");
+                assert_eq!(
+                    request.output.frame_path(42),
+                    std::path::PathBuf::from("/tmp/renders/beauty_000042_v2.png"),
+                );
+                assert_eq!(
+                    request.overwrite,
+                    ravel_core::runtime::OverwritePolicy::Replace,
+                );
+            })
+            .unwrap();
+    }
+
+    /// A build that cannot decode audio, or a composition without any, must
+    /// not produce a request that asks for a soundtrack.
+    #[gpui::test]
+    fn a_render_with_no_possible_soundtrack_does_not_ask_for_one(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(|window, cx| {
+            ExportForm::new(
+                vec![(comp(), "shot 010".to_owned())],
+                initial(),
+                format_choices(&ravel_media::encode::available_encoders()),
+                false,
+                window,
+                cx,
+            )
+        });
+        window
+            .update(cx, |form, _window, cx| {
+                assert!(!form.settings(cx).audio);
+                assert!(!form.settings(cx).resolve().expect("resolves").audio);
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use ravel_ui::export::ExportError;
+
+    fn catalog(locale: &str) -> toml::Table {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/locales")
+            .join(format!("{locale}.toml"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+            .parse::<toml::Table>()
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    fn has_key(table: &toml::Table, dotted_key: &str) -> bool {
+        let mut current = toml::Value::Table(table.clone());
+        for segment in dotted_key.split('.') {
+            match current.as_table().and_then(|t| t.get(segment)) {
+                Some(value) => current = value.clone(),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Every string the export dialog and the render queue panel render
+    /// exists in **every** locale, not just the English fallback: the
+    /// `ravel-ui` coverage tests only walk `en.toml`, so a missing Japanese
+    /// entry would otherwise show English silently.
+    #[test]
+    fn every_locale_carries_the_export_keys() {
+        let mut keys: Vec<&'static str> = vec![
+            "menu.file.export",
+            "export.title",
+            "export.submit",
+            "export.browse",
+            "export.field.composition",
+            "export.field.range",
+            "export.field.format",
+            "export.field.directory",
+            "export.field.prefix",
+            "export.field.suffix",
+            "export.field.padding",
+            "export.field.overwrite",
+            "export.field.audio",
+            "export.field.audio_hint",
+            "export.error.no_gpu",
+            "export.unavailable.no_writer",
+            "export.unavailable.ffmpeg_not_linked",
+            "export.unavailable.ffmpeg_encoder_missing",
+            "export.unavailable.platform_api",
+            "export.unavailable.no_platform_route",
+            "export.unavailable.not_offered",
+            "export.notice.completed_title",
+            "export.notice.completed_message",
+            "export.notice.failed_title",
+            "export.notice.failed_message",
+            "export.notice.audio_failed_message",
+            "export.notice.audio_exists_message",
+            "panel.render_queue",
+            "render_queue.empty",
+            "render_queue.clear_finished",
+            "render_queue.cancel",
+            "render_queue.frames",
+            "render_queue.state.queued",
+            "render_queue.state.running",
+            "render_queue.state.completed",
+            "render_queue.state.cancelled",
+            "render_queue.state.failed",
+        ];
+        // Driven off the enum rather than listed, so a refusal added later
+        // cannot reach the dialog without a sentence behind it.
+        keys.extend(
+            [
+                ExportError::NoComposition,
+                ExportError::InvalidStart,
+                ExportError::InvalidEnd,
+                ExportError::EmptyRange,
+                ExportError::NoWriter,
+                ExportError::MissingDirectory,
+                ExportError::InvalidPadding,
+                ExportError::OutputName,
+            ]
+            .into_iter()
+            .map(ExportError::message_key),
+        );
+
+        for locale in ["en", "ja"] {
+            let catalog = catalog(locale);
+            for key in &keys {
+                assert!(
+                    has_key(&catalog, key),
+                    "{locale}.toml is missing the export key \"{key}\""
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod format_tests {
     use super::{FormatChoice, format_choices};
     use gpui::SharedString;

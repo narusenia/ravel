@@ -1,14 +1,23 @@
 # 公開パラメータ宣言 実装計画（REQ-PROJ-006）
 
-> **Status**: Done — 2026-08-07（`EXPO-1`〜`EXPO-7` 完了）
+> **Status**: Done — 2026-08-07（`EXPO-1`〜`EXPO-7` 完了。**完了条件はすべて検証済み**）
 >
-> **1 つだけ未検証の完了条件がある**: `EXPO-5` の「実機で宣言を作り、CLI から
-> 差し替えて書き出す確認」のうち **CLI 側**。`ravel-cli render` は
-> `render-export-plan.md` の `EXPORT-3` でまだ存在しない。代わりに
-> 「UI が作った宣言が CLI の読む形と同じ型・同じ検証を通る」ことを
-> ヘッドレステストで示してある
-> （`ravel-app` の `a_declaration_made_in_the_panel_is_one_the_headless_path_applies`）。
-> **`EXPORT-3` が入ったら実機で 1 往復して閉じること。**
+> `EXPO-5` の「実機で宣言を作り、CLI から差し替えて書き出す確認」は、
+> `render-export-plan.md` の `EXPORT-3`（`ravel-cli`、#325）がマージされた
+> 直後に 1 往復して閉じた（2026-08-07）。実機で辿った経路:
+>
+> 1. GUI でシェイプレイヤーを足し、`shape.rect` の `width` を
+>    Properties のトグルからプロジェクトの入力として公開して保存
+> 2. `ravel-cli list params` が `{"name":"width","type":"float",
+>    "default":100.0,"resolved":true}` を返す（**UI が書いた宣言を
+>    CLI がそのまま読めた**）
+> 3. `ravel-cli render --param width=600` の出力が既定の出力と
+>    バイト単位で異なり、絵の矩形が実際に 600 幅で描かれた
+> 4. `.ravprj` の mtime が保存時のまま（レンダーが書き戻していない）
+>
+> ヘッドレス側は `ravel-app` の
+> `a_declaration_made_in_the_panel_is_one_the_headless_path_applies` が
+> 引き続き固定している。
 
 対象要件: REQ-PROJ-006（公開パラメータ宣言）。
 関連: REQ-RENDER-005、REQ-PLUGIN-002、REQ-PLUGIN-004、REQ-PLUGIN-005、

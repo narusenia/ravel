@@ -197,20 +197,36 @@ Linux では出せない。
 ## 目標構成
 
 ```text
-  ravel-cli render    ─┐
-                       ├─→ RenderJob ─→ RenderQueue ─┐
-  書き出しダイアログ  ─┘   (Arc<Document> + comp /   │
-                            range / encoder / params) ▼
+  ravel-cli render    ─┬─→ 音声 ravel_audio::offline::mix_range
+                       │     （範囲まとめて 1 回、AudioBuffer）
+  書き出しダイアログ  ─┤        └→ WAV 併置（連番）/ 将来 mux（動画）
+                       │
+                       └─→ RenderJob ─→ RenderQueue
+                            (Arc<Document> + comp /      │
+                             range / encoder / params)   ▼
                                               レンダーワーカー
                                          （専用 Evaluator、GpuContext 共有）
-                                            │ フレームごと     │ 範囲まとめて
-                                            ▼                 ▼
-                                    映像 Encoder        音声 Mixer → Encoder
-                                    （連番 or 動画）      （mux or WAV 併置）
+                                            │ フレームごと
+                                            ▼
+                                    映像 Encoder（連番 or 動画）
 
-すべて GUI 非依存クレートに置く（永続化・ワーカー・エンコーダ）。
+すべて GUI 非依存クレートに置く（永続化・ワーカー・エンコーダ・音声）。
 GUI ダイアログと CLI は同じ層の利用者。
 ```
+
+**音声はワーカーの中ではなく横に置く**（`EXPORT-4` で確定）。当初はワーカーが
+映像と音声の両方を回す形に描いていたが、ワーカーは `ravel-core`
+（`runtime::render`）にあり、`Mixer` は `ravel-audio` にある。`ravel-audio` →
+`ravel-core` が依存の向きなので、ワーカーから `Mixer` は呼べない。依存を逆転
+させると評価コアが音声デバイス層を引くことになり、`.agents/rules/rust.md` の
+層分離に反する。
+
+したがって音声は**ワーカーの呼び出し側**（CLI、そして `EXPORT-5` のダイアログ）
+が `ravel_audio::offline::mix_range` を呼んで作る。範囲まとめて 1 回なので
+フレームループに入る必要はなく、ワーカーの純粋性も保たれる。`mix_range` が
+返すのは `ravel_core::types::AudioBuffer` — `MediaWriter::write_audio_chunk`
+が取る型そのものなので、動画コンテナの書き手ができた時に多重化へ回す配線は
+最後の 1 段を差し替えるだけになる。
 
 - ジョブは順次実行（プロセス内並列レンダリングは非対象）
 - **`--range` で分割でき、連番のファイル名は絶対フレーム番号**。外部から
@@ -364,6 +380,27 @@ GUI ダイアログ（単位 5）は後から載せる。
 - 動画コンテナ出力では多重化、連番出力では WAV を併置する
 - 音声トラックを持つのに音声を出さない設定で警告する
 - `MAX_DECODE_BYTES` 超過時の挙動を明示する（黙って無音にしない）
+
+**実装上の決定**（上の「目標構成」の注も参照）:
+
+- `Document` → `TrackSpec` の対応付け（旧 `ravel-app/src/audio/mixdown.rs`）を
+  `ravel-audio` の `mixdown` モジュールへ移設した。再生と書き出しが同じ写像を
+  通る前提が `EXPORT-5` の完了条件「CLI と同じワーカー・同じエンコーダを通る」
+  に要る
+- `ravel-audio` に `playback` フィーチャ（既定 on）を作り、`cpal` と
+  `device` / `engine` をその下に置いた。`ravel-cli` は `playback` を要求せず、
+  ヘッドレスなレンダーノードが CoreAudio / ALSA をリンクしない
+- WAV ライタは `ravel-media` の `encode::wav`。**`ffmpeg` フィーチャの外**に
+  置く（連番と同じく全ビルドで動く経路である必要がある）。形式は 32bit float
+  （`WAVE_FORMAT_IEEE_FLOAT`）— EXR と同じ「保証するのは精度」の判断
+- WAV のファイル名は連番と同じ規則で**絶対フレーム番号の範囲**
+  （`frame_0100-0199.wav`）。`--range` 分割時に衝突せず、フレーム順に連結すると
+  全体になる
+- 出力レートは 48kHz ステレオ固定。問い合わせる装置が無く、フラグも増やさない
+- 上限超過・オフライン・デコード失敗は**警告**（`audio-source-skipped`）で、
+  失敗にはしない。尺は保つので映像との同期は崩れない
+- **動画コンテナのコーデックはこの単位では開通させない。** `CodecNoWriter` は
+  残る
 
 **完了条件**
 

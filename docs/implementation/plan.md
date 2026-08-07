@@ -80,15 +80,19 @@ through File ▸ Import and OS file drops, assets persist as runtime-resolved
 relative paths, and the MediaBin panel browses them with cached thumbnails.
 
 Rendering to disk exists headlessly: `ravel-cli render` drives the render
-queue and writes PNG / EXR sequences without FFmpeg
-(`crates/ravel-cli`). Media properties and relinking, offline-asset display,
-video-container output, audio in the render, and the in-application export
-workflow are not implemented (`render-export-plan.md`, units 4–6).
+queue and writes PNG / EXR sequences without FFmpeg (`crates/ravel-cli`), with
+the composition's soundtrack in a WAV beside them (32-bit float, same absolute
+frame range, so split renders concatenate). Media properties and relinking,
+offline-asset display, video-container output, and the in-application export
+workflow are not implemented (`render-export-plan.md`, units 5–6).
 
 ### Audio
 
-`crates/ravel-audio` contains CPAL device/output support, mixing, resampling,
-synchronization helpers, effects, and waveform generation. `ravel-app` wires it
+`crates/ravel-audio` contains mixing, resampling, synchronization helpers,
+effects, waveform generation, the document → track mapping (`mixdown`), and
+the offline range mixdown a render uses (`offline`); CPAL device/output
+support sits behind the default-on `playback` feature, which headless callers
+leave off. `ravel-app` wires it
 up: audio-carrying layers become mixer tracks through `AudioMixdown`, the
 engine starts lazily (a missing device falls back to the wall clock), and the
 playback clock follows the device's `SyncClock` while audio tracks exist.
@@ -96,8 +100,9 @@ Importing media with sound binds the layer shell's `AudioSource`, and the
 Properties panel picks which container stream plays
 (`docs/implementation/audio-plan.md`, units 1–4).
 
-Waveform display, audio analysis nodes, the tagged sound bank, and audio
-export are not implemented.
+`ravel-cli render` writes the same mix offline (`render-export-plan.md`,
+`EXPORT-4`). Waveform display, audio analysis nodes, and the tagged sound bank
+are not implemented.
 
 ### GPU and rendering
 

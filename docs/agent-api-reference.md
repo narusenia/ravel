@@ -1399,6 +1399,9 @@ ImageSequenceOutput::new(directory, prefix, suffix, codec, padding)
     -> MediaResult<Self>              // Err: prefix/suffix could escape the dir
     .directory() / .prefix() / .suffix() / .codec() / .padding()
     .frame_path(frame: u64) -> PathBuf   // always inside .directory()
+    .audio_path(Range<u64>) -> PathBuf   // the companion WAV: same directory,
+        // prefix, suffix and padding, named for the absolute *inclusive*
+        // range — `frame_0100-0199.wav` beside `frame_0100.png …`
 remove_partial_output(paths) -> MediaResult<()>   // shared abort helper
 ```
 
@@ -1451,6 +1454,15 @@ that explains itself. Reasons carry no prose — the caller renders them with
 (PNG / EXR, no FFmpeg, so it works in every build) and `available_encoders()`
 = `enumerate_encoders(&RuntimeProbe)`. `docs/implementation/render-export-plan.md`
 unit `EXPORT-1`.
+
+An image sequence carries no sound, so the same module holds
+`WavWriter::create(path, sample_rate, channels)` / `.write_samples(&[f32])` /
+`.finish()` — 32-bit float (`WAVE_FORMAT_IEEE_FLOAT`), FFmpeg-free for the
+same reason the sequence writer is, and **removed on drop unless `finish` ran**,
+so an abandoned render leaves no soundtrack either. Float rather than 16-bit
+PCM: `Mixer::mix` produces `f32`, so the delivered file neither quantises nor
+clips, matching the precision argument EXR rests on. RIFF sizes are `u32`, so
+past ~4 GiB it refuses rather than wrapping (`EXPORT-4`).
 
 **No transfer function is applied on the way out**, matching ingest, the
 viewer, and the FFmpeg encoder — so the written values are display-referred,
@@ -2393,7 +2405,8 @@ Unknown type keys are skipped silently (plugin space).
   first audio layer; a missing device is a fallback, not an error. Every
   document change reaches `AudioService::sync` through `ProjectState`'s
   document observer; `AudioMixdown::desired_tracks(comp, output_rate)`
-  (`src/audio/mixdown.rs`) maps audio-carrying layers to `TrackSpec`s in
+  (`ravel_audio::mixdown`, moved out of `ravel-app` by `EXPORT-4` so a
+  headless render shares it) maps audio-carrying layers to `TrackSpec`s in
   output-rate sample frames (start/gain-curve/fades are converted
   `frame / comp_fps × output_rate`; mute/solo follow the compositor's
   `active_layers` rule), and only diffs go out as `SetTrack`/`RemoveTrack`.
@@ -2406,7 +2419,9 @@ Unknown type keys are skipped silently (plugin space).
   fade edits reuse the cached asset instead of starting another full-track job.
   Decoding is full-length (`MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
   builds decode via `MediaReader::decode_audio_chunk`, non-FFmpeg builds
-  skip tracks with a visible warning. `TrackSpec::shares_build_with` keys the
+  skip tracks with a visible warning. The `ffmpeg` feature that gates
+  `mixdown::decode_full_audio` is now `ravel-audio`'s, forwarded by
+  `ravel-app/ffmpeg` and `ravel-cli/ffmpeg`. `TrackSpec::shares_build_with` keys the
   expensive rebuild on asset + stream + trim + gain, so changing a layer's
   `stream_index` re-decodes and re-sends the track (the other stream is what
   then plays) while a timeline drag only patches placement. Picture and sound
@@ -2441,7 +2456,8 @@ or `ravel-app` dependency** — that absence is the design, not an accident
 ravel-cli render <project.ravprj> -o <DIR>
     [--comp NAME_OR_ID] [--range START-END] [--format png|exr|vp9|…]
     [--png-depth 8|16] [--prefix …] [--suffix …] [--padding N]
-    [--param NAME=VALUE]… [--overwrite] [--progress auto|bar|json|quiet]
+    [--param NAME=VALUE]… [--overwrite] [--no-audio]
+    [--progress auto|bar|json|quiet]
 ravel-cli list comps  <project.ravprj>     // JSON
 ravel-cli list params <project.ravprj>     // ExposedListing's own JSON
 ravel-cli list codecs                      // every target, with route or reason
@@ -2461,7 +2477,16 @@ run(Cli) -> u8                                          // the exit code
 
 plan::plan_render(&RenderArgs, &Document, project_root, &[EncoderAvailability])
     -> Result<RenderPlan, CliError>                     // pure decision
-plan::Warning::{AudioNotRendered { layers }, BindingIssue { detail }}
+plan::Warning::{AudioNotRendered { layers, reason: audio::NoAudio },
+                AudioSourceSkipped { layer, asset, detail },
+                BindingIssue { detail }}
+audio::plan_audio(&Document, CompId, &ImageSequenceOutput, Range<u64>, bool)
+    -> (Option<AudioPlan>, Vec<Warning>)        // called by plan_render
+audio::render_audio(&RenderPlan, &mut dyn Reporter)
+    -> Result<Option<PathBuf>, CliError>        // mixes and writes the WAV
+audio::discard_audio(&Path)                     // the failure-path cleanup
+audio::DECODE_AVAILABLE: bool                   // cfg!(feature = "ffmpeg")
+audio::{OUTPUT_SAMPLE_RATE = 48_000, OUTPUT_CHANNELS = 2}
 execute::CancelFlag  // .request() / .is_requested(); safe in a signal handler
 report::Reporter { note / update / success / failure }  // bar, JSON, quiet
 error::CliError.code() / .id() / .localized()
@@ -2504,6 +2529,33 @@ frames) and becomes the worker's half-open range.
 
 Video targets are enumerated but not writable: there is no container
 `Encoder` yet, so `--format vp9` fails with `CodecUnavailable` (no FFmpeg) or
-`CodecNoWriter` (FFmpeg present) — both exit 5. `EXPORT-4` is what removes
-the second. A composition with audio layers renders picture only and says so
-(`Warning::AudioNotRendered`).
+`CodecNoWriter` (FFmpeg present) — both exit 5. `EXPORT-4` did **not** remove
+the second; opening a video codec is a later unit.
+
+**Sound** (`EXPORT-4`): a composition with audio layers gets a WAV beside its
+frames, `output.audio_path(range)`, covering the same absolute range — so `N`
+processes rendering disjoint `--range` slices produce WAVs that concatenate
+into the whole, exactly as their frames do. The mix is
+`ravel_audio::offline::mix_range` at 48 kHz stereo (fixed: there is no device
+to ask, and no flag exposes it), written by `ravel_media::encode::WavWriter`.
+
+The soundtrack is produced **before** the frames — a decode warning is worth
+having before an hour of rendering, and undoing one WAV on failure or
+cancellation is simpler than undoing frames the worker wrote — and
+`render_with_hooks` removes it if the render then fails, so an interrupted
+render still leaves nothing. `RenderPlan::conflicts()` includes it, so an
+existing soundtrack is refused like an existing frame.
+
+Two things are said rather than silently done. `--no-audio`, or a build
+without FFmpeg, yields `Warning::AudioNotRendered` (id `audio-not-rendered`,
+`reason` distinguishing them); an individual source that cannot be loaded —
+offline, relinked away, past `MAX_DECODE_BYTES` — yields
+`Warning::AudioSourceSkipped` (id `audio-source-skipped`) and the render
+continues, with the mix still the full length so picture and sound stay in
+sync.
+
+The mixdown returns a `ravel_core::types::AudioBuffer`, which is what
+`MediaWriter::write_audio_chunk` takes: when a container `Encoder` exists its
+audio stream comes from the same call, and only the last step changes. That
+is the whole of the muxing wiring — there is no container branch yet, because
+one would be dead code behind `CodecNoWriter`.

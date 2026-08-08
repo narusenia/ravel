@@ -6609,6 +6609,50 @@ mod tests {
         assert!(after_empty.0 > after_first.0 && after_empty.1 > after_first.1);
     }
 
+    /// The guard that matters to every caller, seen on its own: the band test
+    /// above stops at `publish_band_selection`, so it would still pass with
+    /// the drop inside `set_selected_nodes` removed. `CanvasSelection` is a
+    /// durable global — writing the set it already holds wakes the Viewer and
+    /// the Outliner for nothing — so the drop lives where all callers pass.
+    #[gpui::test]
+    fn republishing_the_same_selection_writes_nothing(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        struct Probe {
+            publishes: usize,
+            _sub: Subscription,
+        }
+        let probe = cx.new(|cx| Probe {
+            publishes: 0,
+            _sub: cx.observe_global::<crate::panels::CanvasSelection>(|this: &mut Probe, _cx| {
+                this.publishes += 1
+            }),
+        });
+        cx.run_until_parked();
+        let publishes = |cx: &mut TestAppContext| probe.read_with(cx, |probe, _| probe.publishes);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let after_first = publishes(cx);
+        assert!(after_first > 0, "the first selection is published");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            publishes(cx),
+            after_first,
+            "the same set published twice must write the global once"
+        );
+    }
+
     /// The hover popover opens only once the dwell timer actually fires, and
     /// stays closed when a gesture is active at fire time (DISC-2). The
     /// state-machine transitions are unit-tested in

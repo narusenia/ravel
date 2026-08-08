@@ -468,3 +468,68 @@ TimelineDrag::MoveBar { layer, origin_start, grab_x, .. } => {
 **修正方針**: `MoveBar` に対象集合を持たせ、`operation_targets` で決める。
 1 ジェスチャ = 1 undo は維持する（各レイヤーに同じ差分を当てて 1 コミット）。
 ロックされたレイヤーは `delete_layer` と同じく保護する。
+
+---
+
+## MED-APP-31 | bug | ポップアップメニューが開いている間もワークスペースのショートカットが勝つ
+
+> **解決済み**: PR #349（2026-08-09）。**個票の診断は半分だけ当たっていた。**
+>
+> - **矢印は個票どおり。** gpui は同じ深さのバインドを登録順で決め
+>   （`Keymap::bindings_for_input` は深さ降順 → index 降順）、Ravel は
+>   `gpui_component::init` の後に束縛する。述語を
+>   `!Input && !PopupMenu && !AppMenuBar` に広げて降りるようにした。
+>   組み立ては `workspace::workspace_binding_context` の 1 箇所で、
+>   文脈名は `gpui_component::menu` の `POPUP_MENU_CONTEXT` /
+>   `APP_MENU_BAR_CONTEXT`（この PR でフォークに `pub` として生やした）を
+>   参照するので、Ravel は文字列を二重に持たない
+> - **Escape は別原因だった。** `DropdownMenuPopover` は `PopupMenu` を
+>   **初回生成時にしか focus していなかった**（`dropdown_menu.rs` の `None`
+>   分岐）。キャッシュを捨てるのはメニュー自身の `DismissEvent` のときだけで、
+>   トリガー再クリックや外側クリックで閉じた場合は残る。一方
+>   `Popover::toggle_open` は開くたび**自分の** focus handle を取る
+>   （`DropdownMenu` は `track_focus` を呼ばない）。結果、**2 回目以降に開いた
+>   ドロップダウンは PopupMenu が focus を持たず**、矢印も Enter も Escape も
+>   死ぬ。フォーク側で `on_open_change` を足し、閉じたらキャッシュを捨てて
+>   次の開閉で必ず組み直して focus するようにした
+>
+> **述語の副作用を意図として記録する**: 否定文脈はその文脈がスタックにある間
+> バインドを丸ごと無効にするので、メニューが開いている間は Space も含め
+> どのワークスペース chord も発火しない。開いているメニューはキーボードに
+> 対してモーダル、という判断。
+
+**該当**: `crates/ravel-app/src/workspace.rs:424`（`build_keybindings` が
+アセット由来のバインドに与える文脈 `"!Input"`）、
+`crates/ravel-app/src/main.rs:64` / `:100`（登録順）、
+`assets/keybindings/default.toml`（`playback.step_forward` = `Right`、
+`step_backward` = `Left`）
+
+`gpui_component` のポップアップは自前のキー操作を持っている。
+`PopupMenu` は上下と Enter、`AppMenuBar` は左右でのトップレベル移動を
+それぞれ専用の文脈（`PopupMenu` / `AppMenuBar`）に登録する
+（`gpui_component::init` 内）。
+
+**それが Ravel 側のバインドに潰される。** アセット由来のコマンドは
+すべて `"!Input"` 文脈で登録され、これは**テキスト入力しか避けていない**。
+ポップアップの文脈は除外していないうえ、Ravel の `cx.bind_keys` は
+`gpui_component::init` より**後**に走るので、同じ和音では Ravel 側が勝つ。
+
+結果、**メニューを開いた状態で ← → を押すとトップレベルが動かずフレームが
+送られ、メニューが閉じる**。
+
+在窓のアプリメニューバー（非 macOS、`HIGH-29` で入った）で目に見えるが、
+**バー固有ではない**。パネルの `…` ドロップダウンなど、**すべての
+`PopupMenu` に同じことが起きる**。到達不能にはならず（マウスで操作できる）、
+macOS では OS のメニューバーなので影響しない。
+
+**未確認**: **Escape でポップアップが閉じない**現象も同時に観測されている
+（既存のパネル `…` ドロップダウンでも同じ）。ただし Ravel は Escape を
+アセットにもコードにも束縛しておらず、`DockRoot` の `observe_keystrokes`
+（`crates/ravel-dock/src/dock.rs:223`）はキーを消費しない観測なので、
+**上記の登録順とは別の原因**。着手時に切り分けること。
+
+**修正方針**: アセット由来のバインドの文脈述語を、テキスト入力だけでなく
+**ポップアップの文脈も避ける**形にする。文脈名は `gpui_component` 側の
+定数が正で、Ravel が文字列を二重に持たないこと。
+全ワークスペースコマンドの経路に触るので、`for_each_command!` の 1 表を
+通る変更として入れる。

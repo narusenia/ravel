@@ -21,7 +21,7 @@
 
 | ID | 内容 | 重さ |
 |---|---|---|
-| [`HIGH-27`](../../issues/high/HIGH-27-timeline-keyframes-invisible-inside-subnets.md) | Subnet に畳むとキーフレームが Timeline から消えるのに評価は続く | 文書と UI が食い違う |
+| [`HIGH-27`](../../issues/closed/HIGH-27-timeline-keyframes-invisible-inside-subnets.md) | Subnet に畳むとキーフレームが Timeline から消えるのに評価は続く | 文書と UI が食い違う |
 | [`HIGH-28`](../../issues/closed/HIGH-28-scrub-commit-lost-when-properties-rebuilds.md) | スクラブ中の再構築で `Commit` が失われ undo が効かない | 編集が取り消せない |
 | [`HIGH-29`](../../issues/high/HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | **リリース阻害** |
 | `MED-APP-26` | 「プロジェクトへ露出」のトグルが片道 | 解除不能 |

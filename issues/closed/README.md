@@ -49,10 +49,12 @@
 | [HIGH-23](HIGH-23-resampled-audio-not-cached.md) | リサンプル結果が未キャッシュ | フェーズ A4 |
 | [HIGH-24](HIGH-24-timeline-end-pause-not-forwarded-to-audio.md) | 終端の自動 Pause が音声へ転送されない | フェーズ A4 |
 | [HIGH-28](HIGH-28-scrub-commit-lost-when-properties-rebuilds.md) | スクラブの `Commit` が再構築で失われ undo が飛ぶ | 実機フィードバック |
+| [HIGH-27](HIGH-27-timeline-keyframes-invisible-inside-subnets.md) | Subnet の中のキーフレームが Timeline から消える | 実機フィードバック |
+| [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |
 
-## medium（23件）
+## medium（24件）
 
-- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `30`
+- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `30`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）

@@ -1,5 +1,26 @@
 # HIGH-30 | bug | Subnet の中でポート名を変えると、外側のエッジと promoted パラメータのキーフレームが黙って消える
 
+**解決済み**: PR #346（2026-08-08）。個票の修正方針どおり、`PortEdit` /
+`KeyRename` と同型の伝播路を 1 段上げた。`rename_custom_port` が返す
+「旧名 → 新名」を `PortEdit.pin_rename` で運び、`rebuild_subnets` が
+**編集されたグラフを直接所有するサブネットの階層でだけ**
+（`rest.is_empty()`）`rename_subnet_pin` を適用する pre-pass にした。
+名前が先に揃うので、続く `sync_subnet_pins` の削除枝が構造的に空振りする。
+`sync_subnet_pins` のシグネチャは無変更（呼び出し元 15 箇所そのまま）。
+
+**実装で分かった要点**: `rename_subnet_pin` は `Graph::rename_port` に加えて
+**promoted パラメータのキーを自分で動かす**必要がある。サブネットのピンは
+`is_param: false` なので `rename_port` の「ペア」判定に掛からず、キーが旧名の
+まま残ると `promote_parameters` がそれを捨てて inner In のデフォルトから
+再シードし、**値とキーフレームが静かに消える**。ポート名リネームだけを残して
+キー移動を無効化する変異検査で、エッジ系は通りキーフレームだけ落ちることを
+実測して確かめた。
+
+**ロード時の警告も入れた**（個票の指示どおり）。ただし置き場所は
+`Document::sync_subnet_pins` の側で、同期の前後のピン集合を比べて消えた分だけ
+`warn!` を出す。ユーザーが意図して `remove_custom_port` したときは `debug!` に
+留める — 期待された削除を `warn` にすると警告の意味が薄れるため。
+
 `crates/ravel-core/src/network.rs:1231-1245`（`sync_subnet_pins` の名前照合）、
 `crates/ravel-ui/src/document.rs:766-770`（内側コミットのたびに発火）、
 `crates/ravel-core/src/graph.rs:1682-1683`（エッジ削除）、

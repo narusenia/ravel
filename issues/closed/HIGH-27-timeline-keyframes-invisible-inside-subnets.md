@@ -1,5 +1,20 @@
 # HIGH-27 | bug | Subnet に畳んだノードのキーフレームが Timeline から消えるのに、アニメーションは続く
 
+**解決済み**: PR #346（2026-08-08）。`MED-APP-25` / `HIGH-30` と同じ PR で、
+依存順に直した。Timeline のプロパティ行の列挙・解決・変更（`property_rows` /
+`row_channels` / `mutate_channel`）を再帰化し、深さ制限なしで Subnet の中へ降りる。
+停止条件は `node.subnet` が `None`（ノードが自分のサブネットを所有する木なので
+循環しえない）。書き戻しは `Graph::replace_nested_node` が所有チェーンだけを
+再構築する。
+
+行の宛先を bare `NodeId` のままにできたのは、**`MED-APP-25` が全階層一意を
+保証したから**。個票が挙げていた前提がそのまま効いている。
+
+**外側が promote しているキーの inner In パラメータは列挙から外した**（個票に
+無い判断）。`SubnetProcessor` は外側の promoted 値を束縛するので inner In は
+読まれず、行を出しても編集が効かない — 「見えない」より「偽の編集口」のほうが
+害が大きい。
+
 `crates/ravel-ui/src/keyframes.rs:150`（`property_rows`）、`:184`（`row_channels`）、
 `:748`（`mutate_channel`）
 

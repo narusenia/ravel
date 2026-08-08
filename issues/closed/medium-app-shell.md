@@ -320,3 +320,51 @@ Histogram / Parade の 4 種をまとめて動かすので、**到達できる�
 
 **修正方針**: バンド中は選択の公開をドラッグ終了までまとめる。
 最低でも、前回公開した集合と同じなら公開しない。
+
+## MED-APP-25 | bug | Subnet のコピー＆ペーストが内部グラフの `NodeId` を複製しない
+
+**解決済み**: PR #346。個票が名指ししていたとおり、採番規則を 2 本にせず
+既存の再帰に載せた。`Graph::duplicate_nodes_with_fresh_ids` がエッジ無しの
+scratch `Graph` を組んで `allocate_duplicate_node_ids` →
+`duplicate_with_id_map` → `remap_parameter_node_outputs` にそのまま流すので、
+入れ子の全階層の採番も `ChannelSource::NodeOutput` の付け替えも既存コードが担う。
+
+`HIGH-27`（Timeline が Subnet の中へ降りる）の前提でもあった — 行を bare
+`NodeId` でアドレスする前提が、内部 ID の重複があると崩れるため。
+
+`NodeEditorPanel::paste_content`（`crates/ravel-app/src/panels/node_editor.rs:1735`）は
+ノード自身に `NodeId::next()` を採るが、`node.clone()` が `node.subnet`
+（`Arc<Graph>`）を丸ごと写すため、**内部グラフのノード ID が複製元と同一のまま
+残る**。
+
+これは `Evaluator` が明文化している不変条件を破る:
+
+```rust
+/// (`NodeId::next`), so nodes from every graph (root graph, layer networks)
+/// share one registry while cache/dirty state is keyed by full path.
+processors: HashMap<NodeId, Arc<dyn NodeProcessor>>,   // crates/ravel-core/src/eval.rs:1348
+```
+
+プロセッサ表は平坦な `NodeId → Processor` の写像なので、複製元と複製先の内部
+ノードが 1 エントリを奪い合う。
+
+正しい形は既にある。`Graph::duplicate_with_fresh_ids`（レイヤー複製が使う）は
+`allocate_duplicate_node_ids`（`crates/ravel-core/src/graph.rs:663`）で
+`node.subnet` を**再帰走査して採番し直す**。`paste_content` だけがその再帰を
+していない。
+
+**いつから踏めるようになったか**: `NETIF-5`（Add Node から Subnet を作る）と
+`NETIF-6`（Collapse to Subnet）が入るまで、Subnet はテストフィクスチャと
+デモデータの外に存在できなかった。**ユーザーが Subnet を作れるようになった
+時点で初めて到達可能になった**。
+
+**修正方針**: `paste_content` の ID 採番を `allocate_duplicate_node_ids` と
+同じ再帰形に寄せる。写像を先に全階層ぶん作ってから
+`duplicate_with_id_map` 相当で写すのが既存の形。**2 箇所に別々の採番規則を
+置かない**こと。
+
+**検証**: Subnet ノードをコピー＆ペーストして、複製元と複製先の内部ノード ID が
+交わらないテスト（`ravel-app` のパネルテストで書ける）。入れ子の Subnet
+（Subnet の中の Subnet）でも交わらないこと。
+
+---

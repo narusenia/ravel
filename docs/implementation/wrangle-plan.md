@@ -117,7 +117,7 @@ Wrangle 専用のパラメータ機構を作らない。**任意のノードに�
 
 ### `HIGH-30` を先に直すのが前提
 
-[`HIGH-30`](../../issues/high/HIGH-30-subnet-port-rename-drops-outer-edges.md)
+[`HIGH-30`](../../issues/closed/HIGH-30-subnet-port-rename-drops-outer-edges.md)
 は Subnet のポート改名が外側のエッジを落とす。**カスタムパラメータを
 持てるノードが増えるほど、リネーム伝播の穴が広がる。**今は境界ノードだけの
 問題だが、任意のノードが改名対象になれば同じ穴が全ノードに開く。

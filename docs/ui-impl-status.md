@@ -52,12 +52,13 @@ Popover・検索パレット・種別アイコン）Done
 | コンテキストメニュー (バイパス) | ✅ | 右クリック → Bypass Node (フラグトグル・チェック表示、評価器が入力をパススルー。Bypass 不可ノードでは無効化、Bypass 中は半透明描画) |
 | コンテキストメニュー (ポート) | ✅ | ポート上で右クリック → Rename Port / Delete Port（network-interface-editing 計画 単位 4）。**項目はどのポートでも出し、編集できないポートでは無効化する**（固定ポート・通常ノードのポート・Subnet ノードのピン）。判定は `network::is_fixed_port` と In/Out 判定のみ（legacy `f` の例外もそこが持つ）。Rename は Outliner のレイヤー改名と同じ一回きりの `InputState` を、行ではなくポート位置に浮かせる（Enter / blur で確定、Escape で破棄）。Delete は Properties と同じ `remove_custom_port` 経路なので **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット、残るポートのエッジは新しい index へ追随）。拒否された編集はキャンバス左下に理由を出し（Properties と同じ文言）、Rename は入力を開いたまま残す。Delete はメニュー構築時の名前を実行時に引き直し、名前が消えていれば何もしない（枠から推測して別のポートを消さない）。**ポート一覧が変わる編集（このパネル・Properties・undo/redo のいずれでも）は進行中のワイヤードラッグを取り消す** — `PortHit` は index 参照で、`add_edge` が index も型も検証しないため、ずれたままドロップすると誰も読まないエッジが黙って作られる |
 | コンテキストメニュー (エッジスタイル切替) | ✅ | Edge Style → Bezier/Straight/Step |
-| エッジスタイル描画 | ✅ | Bezier(S字), Straight(直線), Step(直角折れ線) + 各ヒットテスト |
+| エッジスタイル描画 | ✅ | Bezier(S字), Straight(直線), Step(直角折れ線) + 各ヒットテスト。**設定に永続化される**（`settings.toml` の `[node_editor] edge_style`、既定 `bezier`）。コンテキストメニューでの変更は global 層へ書き戻し、パネルは起動時に解決済み設定から読むので、パネルを開き直しても再起動しても残る。設定ダイアログへの露出はまだ無い（`SET-*`）。`flow_direction` は上→下フローモード（`NGR-5`）と同時に入る |
 | Copy/Paste (Cmd+C/V) | ✅ | ノード群+内部エッジをコピー、新IDでペースト |
 | Duplicate (Cmd+D) | ✅ | 即時複製 (20,20) オフセット |
 | ポート型フィルタリング | ✅ | 接続ドラッグ中に非互換ポートをスナップスキップ |
 | 単一入力制約 | ✅ | 既存エッジを自動置換 |
 | Fit View (F key) | ✅ | 全ノードが画面に収まるようズーム+パン |
+| 自動整列 (L key) | ✅ | `CommandId::NodeAutoLayout`（`NodeEditor` キーコンテキストの `L`。パネル固有なのでユーザー再割り当ての対象外）。**選択が 2 個未満ならネットワーク全体**、2 個以上あればその集合だけを DAG の深さで層に分け、層は右へ、層の中は下へ並べる。層内の順は現在の Y 座標（同値ならノード ID）で決まり、結果は元のバウンディングボックス左上に揃うので選択の一部を整列しても飛ばない。synthetic ノードは動かさない。1 ノードだけの整列は並べる相手が無く定義上何もできないので、空選択と同じく全体へ倒れる — collapse 直後（新しい Subnet ノードが選択されたまま）に押しても重なりが解ける理由。**Document コミット 1 回**（`NodeMetadata::position` は保存データなので undo 1 回で全位置が戻る）。位置が 1 つも変わらないときは undo ステップを作らない。**自動では走らない** — collapse / extract / ノード追加のどの経路からも呼ばない（node-graph-readability 計画の決定事項） |
 | Evaluator 連携 | ✅ | ProjectState の EvalService 経由（Document-aware、バックグラウンド） |
 | ネットワークコンテキスト | ✅ | 所有パス（Comp/Layer/[Subnet...]）で 1 ネットワークを編集（REQ-LAYER-011）。`LayerSelection` を observe し、**レイヤー 1 つだけ選択中**のときそのネットワークを開く。0 個と複数個は同じ閉じた状態（中央メッセージのみ差し替え、閉じるとき `CanvasSelection` もクリア。REQ-UI-013 単位 6） |
 | サブネットへの潜り | ✅ | サブネットノードをダブルクリックで内部 Graph へ |

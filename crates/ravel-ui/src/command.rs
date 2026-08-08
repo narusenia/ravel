@@ -109,6 +109,16 @@ pub enum CommandId {
     NodeCollapseToSubnet,
     /// Move a selected subnet node's contents back into the open network.
     NodeExtractSubnet,
+    /// Re-position the selected nodes into layers (`NGR-2`).
+    ///
+    /// Fewer than two selected nodes lays out the whole network — a single
+    /// node has nothing to be arranged against, so there is no meaningful
+    /// one-node layout to lose. That is what makes the shortcut useful right
+    /// after a collapse, which leaves the new subnet node selected.
+    ///
+    /// Never runs by itself: node positions are saved data, so only the user
+    /// decides when they move.
+    NodeAutoLayout,
     // Panel window management
     PanelDetach,
     PanelReattach,
@@ -249,6 +259,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::NodeSearchPalette, "node.search_palette"),
     (CommandId::NodeCollapseToSubnet, "node.collapse_to_subnet"),
     (CommandId::NodeExtractSubnet, "node.extract_subnet"),
+    (CommandId::NodeAutoLayout, "node.auto_layout"),
     (CommandId::PanelDetach, "panel.detach"),
     (CommandId::PanelReattach, "panel.reattach"),
     (CommandId::HelpAbout, "help.about"),
@@ -330,6 +341,7 @@ impl CommandId {
             CommandId::NodeSearchPalette => "menu.node.search_palette",
             CommandId::NodeCollapseToSubnet => "menu.node.collapse_to_subnet",
             CommandId::NodeExtractSubnet => "menu.node.extract_subnet",
+            CommandId::NodeAutoLayout => "menu.node.auto_layout",
             CommandId::PanelDetach => "menu.panel.detach",
             CommandId::PanelReattach => "menu.panel.reattach",
             CommandId::HelpAbout => "menu.help.about",

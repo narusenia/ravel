@@ -17,6 +17,7 @@
 //! values using built-in defaults for anything still unset.
 
 use ravel_core::cache_budget::CacheBudgetConfig;
+use ravel_ui::node_editor::EdgeStyle;
 use serde::{Deserialize, Serialize};
 
 /// Bytes in one mebibyte. Limits are written in MiB in `settings.toml` — the
@@ -235,6 +236,30 @@ impl CacheLayer {
     }
 }
 
+/// Node editor settings (all fields optional for layering).
+///
+/// The edge style is a *preference*, not a property of a project or of one
+/// window: it belongs wherever the user last chose it and should hold across
+/// projects, which is what the global layer expresses and neither the panel's
+/// own state nor `ui_state.json` can (`node-graph-readability-plan.md`).
+///
+/// `flow_direction` joins this section with the top-down flow mode (`NGR-5`).
+/// It is deliberately absent until then: a setting that changes nothing is a
+/// dead row on the settings screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEditorLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_style: Option<EdgeStyle>,
+}
+
+impl NodeEditorLayer {
+    fn merge(&self, over: &NodeEditorLayer) -> NodeEditorLayer {
+        NodeEditorLayer {
+            edge_style: over.edge_style.or(self.edge_style),
+        }
+    }
+}
+
 /// A single, partial settings layer as read from one `settings.toml`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsLayer {
@@ -250,6 +275,8 @@ pub struct SettingsLayer {
     pub auto_save: AutoSaveLayer,
     #[serde(default)]
     pub cache: CacheLayer,
+    #[serde(default)]
+    pub node_editor: NodeEditorLayer,
 }
 
 impl SettingsLayer {
@@ -262,6 +289,7 @@ impl SettingsLayer {
             playback: self.playback.merge(&over.playback),
             auto_save: self.auto_save.merge(&over.auto_save),
             cache: self.cache.merge(&over.cache),
+            node_editor: self.node_editor.merge(&over.node_editor),
         }
     }
 
@@ -317,6 +345,8 @@ pub struct ResolvedSettings {
     pub cache_disk_limit_mb: u64,
     pub cache_sim_reserve_ratio: f32,
     pub cache_disk_enabled: bool,
+    /// How the node editor draws its edges.
+    pub node_editor_edge_style: EdgeStyle,
 }
 
 impl Default for ResolvedSettings {
@@ -345,6 +375,8 @@ impl Default for ResolvedSettings {
             cache_sim_reserve_ratio: CacheBudgetConfig::DEFAULT_SIM_RESERVE_RATIO,
             // `CACHE-11` builds the disk tier; nothing writes it yet.
             cache_disk_enabled: false,
+            // The style the editor has always started on.
+            node_editor_edge_style: EdgeStyle::Bezier,
         }
     }
 }
@@ -394,6 +426,10 @@ impl ResolvedSettings {
                 .sim_reserve_ratio
                 .unwrap_or(d.cache_sim_reserve_ratio),
             cache_disk_enabled: merged.cache.disk_enabled.unwrap_or(d.cache_disk_enabled),
+            node_editor_edge_style: merged
+                .node_editor
+                .edge_style
+                .unwrap_or(d.node_editor_edge_style),
         }
     }
 
@@ -643,6 +679,61 @@ disk_enabled = false
         let serialized = layer.to_toml().unwrap();
         let back = SettingsLayer::from_toml(&serialized).unwrap();
         assert_eq!(layer, back);
+    }
+
+    /// Without a settings file the editor draws what it always drew.
+    #[test]
+    fn the_edge_style_default_is_the_current_behaviour() {
+        assert_eq!(
+            ResolvedSettings::from_layers(&[]).node_editor_edge_style,
+            EdgeStyle::Bezier
+        );
+    }
+
+    /// A new section has to ride the same merge direction as the old ones —
+    /// later layers win, earlier layers still supply what the later one left
+    /// unset. Both halves are pinned here because `merge_all`'s direction
+    /// cannot be restated per section.
+    #[test]
+    fn the_node_editor_section_inherits_and_is_overridden_like_every_other() {
+        let global = SettingsLayer {
+            node_editor: NodeEditorLayer {
+                edge_style: Some(EdgeStyle::Step),
+            },
+            ..Default::default()
+        };
+
+        // Inheritance: the project layer says nothing, so global stands.
+        let inherited = ResolvedSettings::from_layers(&[global.clone(), SettingsLayer::default()]);
+        assert_eq!(inherited.node_editor_edge_style, EdgeStyle::Step);
+
+        // Override: the later layer wins.
+        let project = SettingsLayer {
+            node_editor: NodeEditorLayer {
+                edge_style: Some(EdgeStyle::Straight),
+            },
+            ..Default::default()
+        };
+        let overridden = ResolvedSettings::from_layers(&[global, project]);
+        assert_eq!(overridden.node_editor_edge_style, EdgeStyle::Straight);
+    }
+
+    /// The section round-trips through the file, and a settings file written
+    /// before it existed still reads — which is why no format version moves.
+    #[test]
+    fn the_node_editor_section_round_trips_and_is_optional() {
+        let layer = SettingsLayer::from_toml("[node_editor]\nedge_style = \"straight\"\n")
+            .expect("the section parses");
+        assert_eq!(layer.node_editor.edge_style, Some(EdgeStyle::Straight));
+        let back = SettingsLayer::from_toml(&layer.to_toml().unwrap()).unwrap();
+        assert_eq!(layer, back);
+
+        let older = SettingsLayer::from_toml("locale = \"ja\"\n").expect("an older file parses");
+        assert_eq!(older.node_editor, NodeEditorLayer::default());
+        assert_eq!(
+            ResolvedSettings::resolve(&older).node_editor_edge_style,
+            EdgeStyle::Bezier
+        );
     }
 
     #[test]

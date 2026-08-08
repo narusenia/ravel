@@ -51,13 +51,14 @@ use crate::node_editor::EdgeStyle;
 use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
+use crate::node_editor::layout::{LayoutAxis, auto_layout};
 use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size, node_width};
 use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
 use crate::workspace::{
-    EditCopy, EditDelete, EditDuplicate, EditPaste, NodeCollapseToSubnet, NodeExtractSubnet,
-    NodeSearchPalette, ViewFit,
+    EditCopy, EditDelete, EditDuplicate, EditPaste, NodeAutoLayout, NodeCollapseToSubnet,
+    NodeExtractSubnet, NodeSearchPalette, ViewFit,
 };
 use ravel_ui::command::CommandId;
 
@@ -781,7 +782,7 @@ impl NodeEditorPanel {
             node_sizes: HashMap::new(),
             node_categories: HashMap::new(),
             node_labels: HashMap::new(),
-            edge_style: EdgeStyle::default(),
+            edge_style: crate::app_settings::resolved(cx).node_editor_edge_style,
             clipboard: None,
             drag: DragMode::None,
             pointer_hint: PointerHint::default(),
@@ -2087,6 +2088,56 @@ impl NodeEditorPanel {
         Self::trace_action(cx, CommandId::NodeExtractSubnet, "extract_subnet");
     }
 
+    fn on_auto_layout(&mut self, _: &NodeAutoLayout, _window: &mut Window, cx: &mut Context<Self>) {
+        self.auto_layout_nodes(cx);
+        Self::trace_action(cx, CommandId::NodeAutoLayout, "auto_layout_nodes");
+        cx.notify();
+    }
+
+    /// Lay the selected nodes out in layers — the whole network when nothing
+    /// is selected — as one structural Document undo step.
+    ///
+    /// Nothing calls this but the command: `NodeMetadata::position` is saved
+    /// data, and a collapse, an extract or a node insertion must not silently
+    /// rewrite where the user put things (`node-graph-readability-plan.md`).
+    /// A layout that moves nothing records no undo step, for the same reason
+    /// [`Self::set_bypass`] does not.
+    fn auto_layout_nodes(&mut self, cx: &mut Context<Self>) {
+        // `node_sizes` is measured in screen pixels; positions live in network
+        // coordinates, which is what `fit_view` un-zooms for the same reason.
+        let zoom = self.viewport.zoom;
+        let sizes = self
+            .node_sizes
+            .iter()
+            .map(|(&id, &(w, h))| (id, (w / zoom, h / zoom)))
+            .collect();
+        let positions = auto_layout(
+            &self.graph,
+            &Self::selected_nodes(cx),
+            &sizes,
+            LayoutAxis::Horizontal,
+        );
+
+        let mut changed = false;
+        let graph = positions
+            .into_iter()
+            .fold(self.graph.clone(), |graph, (id, position)| {
+                let Some(node) = graph.node(id) else {
+                    return graph;
+                };
+                if node.metadata.position == position {
+                    return graph;
+                }
+                let mut moved = (**node).clone();
+                moved.metadata.position = position;
+                changed = true;
+                graph.replace_node(Arc::new(moved))
+            });
+        if changed {
+            self.commit_graph(graph, None, cx);
+        }
+    }
+
     fn on_fit_view(&mut self, _: &ViewFit, _window: &mut Window, cx: &mut Context<Self>) {
         self.fit_view();
         Self::trace_action(cx, CommandId::ViewFit, "fit_view");
@@ -2179,6 +2230,23 @@ impl NodeEditorPanel {
             }
         };
         cx.set_global(super::SelectedPropertiesTarget(target));
+    }
+
+    /// Adopt `style` and remember it.
+    ///
+    /// The choice is a preference rather than a property of this panel, this
+    /// window or this project, so it is written to the global settings layer
+    /// and read back by whatever node editor is built next
+    /// (`node-graph-readability-plan.md`, `NGR-3`). The field is kept in step
+    /// so the current panel repaints without waiting to be rebuilt.
+    fn set_edge_style(&mut self, style: EdgeStyle, cx: &mut Context<Self>) {
+        self.edge_style = style;
+        crate::app_settings::update(
+            crate::app_settings::SettingsScope::Global,
+            |layer| layer.node_editor.edge_style = Some(style),
+            cx,
+        );
+        cx.notify();
     }
 
     fn refresh_node_sizes(&mut self) {
@@ -3467,8 +3535,7 @@ impl Render for NodeEditorPanel {
                                 PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_bezier"))
                                     .on_click(move |_, _window, cx| {
                                         e1.update(cx, |this, cx| {
-                                            this.edge_style = EdgeStyle::Bezier;
-                                            cx.notify();
+                                            this.set_edge_style(EdgeStyle::Bezier, cx);
                                         })
                                         .ok();
                                     }),
@@ -3477,8 +3544,7 @@ impl Render for NodeEditorPanel {
                                 PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_straight"))
                                     .on_click(move |_, _window, cx| {
                                         e2.update(cx, |this, cx| {
-                                            this.edge_style = EdgeStyle::Straight;
-                                            cx.notify();
+                                            this.set_edge_style(EdgeStyle::Straight, cx);
                                         })
                                         .ok();
                                     }),
@@ -3487,8 +3553,7 @@ impl Render for NodeEditorPanel {
                                 PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_step"))
                                     .on_click(move |_, _window, cx| {
                                         e3.update(cx, |this, cx| {
-                                            this.edge_style = EdgeStyle::Step;
-                                            cx.notify();
+                                            this.set_edge_style(EdgeStyle::Step, cx);
                                         })
                                         .ok();
                                     }),
@@ -3643,6 +3708,7 @@ impl Render for NodeEditorPanel {
             .on_action(cx.listener(Self::on_search_palette))
             .on_action(cx.listener(Self::on_collapse_to_subnet))
             .on_action(cx.listener(Self::on_extract_subnet))
+            .on_action(cx.listener(Self::on_auto_layout))
             .child(breadcrumb)
             .child(canvas_area)
             .children(palette_overlay)
@@ -5866,6 +5932,191 @@ mod tests {
                         .any(|node| ravel_core::network::is_subnet_node(node)),
                     "one undo puts the subnet node back"
                 );
+            })
+            .unwrap();
+    }
+
+    // ----- auto layout (NGR-2) ----------------------------------------------
+
+    /// Every drawn node as `(x, y, w, h)` in network coordinates.
+    fn drawn_rects(panel: &NodeEditorPanel) -> Vec<(f32, f32, f32, f32)> {
+        panel
+            .graph
+            .nodes()
+            .filter(|node| !node.metadata.synthetic)
+            .map(|node| {
+                let (w, h) = panel
+                    .node_sizes
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or((160.0, 60.0));
+                let zoom = panel.viewport.zoom;
+                (
+                    node.metadata.position.0,
+                    node.metadata.position.1,
+                    w / zoom,
+                    h / zoom,
+                )
+            })
+            .collect()
+    }
+
+    fn rects_overlap(rects: &[(f32, f32, f32, f32)]) -> bool {
+        rects.iter().enumerate().any(|(i, a)| {
+            rects[i + 1..]
+                .iter()
+                .any(|b| a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3)
+        })
+    }
+
+    fn positions(panel: &NodeEditorPanel) -> HashMap<NodeId, (f32, f32)> {
+        panel
+            .graph
+            .nodes()
+            .map(|node| (node.id, node.metadata.position))
+            .collect()
+    }
+
+    /// Add `count` extra blur nodes, all stacked on the origin with the one
+    /// `setup` already made.
+    fn pile_up_nodes(
+        project: &Entity<ProjectState>,
+        path: &NetworkPath,
+        count: usize,
+        cx: &mut TestAppContext,
+    ) -> Vec<NodeId> {
+        let ids: Vec<NodeId> = (0..count).map(|_| NodeId::next()).collect();
+        project.update(cx, |project, cx| {
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let mut graph = resolve_network(project.document(), path).unwrap().clone();
+            for &id in &ids {
+                let node = registry.create_node("blur", id).expect("blur node");
+                graph = graph.add_node(node).unwrap();
+            }
+            let doc = replace_network(project.document(), path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        ids
+    }
+
+    /// The alignment writes `NodeMetadata::position`, so it is a document edit
+    /// like any other: one undo puts every node back where it was.
+    #[gpui::test]
+    fn one_undo_restores_every_position_the_alignment_moved(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+        pile_up_nodes(&project, &path, 3, cx);
+
+        let before = window
+            .update(cx, |panel, _window, _cx| positions(panel))
+            .unwrap();
+        assert!(
+            rects_overlap(
+                &window
+                    .update(cx, |panel, _window, _cx| drawn_rects(panel))
+                    .unwrap()
+            ),
+            "the fixture starts with nodes on top of each other"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.clear_selected_nodes(cx);
+                panel.auto_layout_nodes(cx);
+                assert_ne!(positions(panel), before, "the alignment moved something");
+                assert!(!rects_overlap(&drawn_rects(panel)));
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(positions(panel), before, "one undo is the whole alignment");
+            })
+            .unwrap();
+    }
+
+    /// A partial selection is a promise: nothing outside it moves.
+    #[gpui::test]
+    fn aligning_a_selection_leaves_every_other_node_alone(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        let extra = pile_up_nodes(&project, &path, 3, cx);
+
+        let before = window
+            .update(cx, |panel, _window, _cx| positions(panel))
+            .unwrap();
+        let selected: HashSet<NodeId> = [blur, extra[0]].into_iter().collect();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes(selected.clone(), cx);
+                panel.auto_layout_nodes(cx);
+                let after = positions(panel);
+                for (id, position) in &before {
+                    if selected.contains(id) {
+                        continue;
+                    }
+                    assert_eq!(after.get(id), Some(position), "{id:?} must not move");
+                }
+                assert_ne!(after[&extra[0]], before[&extra[0]]);
+            })
+            .unwrap();
+    }
+
+    /// The case the command exists for, in the gesture the user actually
+    /// makes: collapse, then press the alignment key. The collapse leaves its
+    /// new subnet node *selected*, and that one-node selection has to reach
+    /// the whole network or the alignment would move nothing.
+    #[gpui::test]
+    fn aligning_right_after_a_collapse_pulls_the_nodes_apart(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        let extra = pile_up_nodes(&project, &path, 2, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.collapse_to_subnet(&[blur], cx);
+                assert_eq!(
+                    NodeEditorPanel::selected_nodes(cx).len(),
+                    1,
+                    "the collapse leaves its subnet node selected"
+                );
+                assert!(
+                    rects_overlap(&drawn_rects(panel)),
+                    "the collapse left the subnet node overlapping"
+                );
+
+                panel.auto_layout_nodes(cx);
+                assert!(!rects_overlap(&drawn_rects(panel)));
+                assert_eq!(panel.graph.nodes().count(), extra.len() + 1);
+            })
+            .unwrap();
+    }
+
+    // ----- edge style persistence (NGR-3) ------------------------------------
+
+    /// The style used to live and die with the panel. It is a setting now, so
+    /// a panel built after the choice starts on it.
+    #[gpui::test]
+    fn the_chosen_edge_style_outlives_the_panel_that_chose_it(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(panel.edge_style, EdgeStyle::Bezier, "the default is Bezier");
+                panel.set_edge_style(EdgeStyle::Step, cx);
+            })
+            .unwrap();
+
+        // A second panel is what "close it and open it again" amounts to.
+        let reopened = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        reopened
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.edge_style, EdgeStyle::Step);
             })
             .unwrap();
     }

@@ -292,6 +292,7 @@ fn node_editor_keybindings_are_context_scoped() {
             ("tab", false, false, "ravel::NodeSearchPalette"),
             ("delete", false, false, "ravel::EditDelete"),
             ("backspace", false, false, "ravel::EditDelete"),
+            ("l", false, false, "ravel::NodeAutoLayout"),
         ]
     );
 }

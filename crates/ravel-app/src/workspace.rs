@@ -114,6 +114,7 @@ macro_rules! for_each_command {
             NodeSearchPalette,
             NodeCollapseToSubnet,
             NodeExtractSubnet,
+            NodeAutoLayout,
             PanelDetach,
             PanelReattach,
             HelpAbout,
@@ -318,6 +319,15 @@ pub const PANEL_BINDINGS: &[PanelBinding] = &[
     PanelBinding {
         command: CommandId::EditDelete,
         chord: "Backspace",
+        panel: PanelKind::NodeGraph,
+        context: panels::node_editor::KEY_CONTEXT,
+    },
+    // Houdini's alignment key, context-scoped for the same reason as the rest
+    // of this block: it acts on the node editor's selection and means nothing
+    // anywhere else.
+    PanelBinding {
+        command: CommandId::NodeAutoLayout,
+        chord: "L",
         panel: PanelKind::NodeGraph,
         context: panels::node_editor::KEY_CONTEXT,
     },

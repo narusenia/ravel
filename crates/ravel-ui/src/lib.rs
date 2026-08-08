@@ -27,6 +27,7 @@ pub mod keyframes;
 pub mod layout;
 pub mod layout_doc;
 pub mod menu;
+pub mod node_editor;
 pub mod node_locale;
 pub mod node_search;
 pub mod panel;

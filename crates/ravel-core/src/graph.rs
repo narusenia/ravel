@@ -660,6 +660,44 @@ impl Graph {
         (self.duplicate_with_id_map(&id_map), id_map)
     }
 
+    /// Deep-copy a loose set of nodes — each with its whole subnet hierarchy —
+    /// under globally fresh node ids, in the order they were given.
+    ///
+    /// The clipboard holds nodes rather than a graph, so this is
+    /// [`Graph::duplicate_with_fresh_ids`] reached without one: the same
+    /// recursion allocates the ids and the same rewrite applies them, which is
+    /// what keeps a pasted subnet's inner nodes from sharing identity (and
+    /// therefore an [`crate::eval::Evaluator`] processor entry) with the nodes
+    /// they were copied from. Edges are the caller's to re-point through the
+    /// returned map.
+    pub fn duplicate_nodes_with_fresh_ids<'a>(
+        nodes: impl IntoIterator<Item = &'a Node>,
+    ) -> (Vec<Node>, HashMap<NodeId, NodeId>) {
+        // The edgeless scratch graph is only a carrier for the recursion:
+        // duplicating a loose set of nodes walks the same hierarchy as
+        // duplicating a graph, so it runs through the same two passes rather
+        // than growing a second numbering rule beside them.
+        let originals: Vec<&Node> = nodes.into_iter().collect();
+        let scratch = Graph {
+            nodes: originals
+                .iter()
+                .map(|node| (node.id, Arc::new((*node).clone())))
+                .collect(),
+            edges: im::HashMap::new(),
+        };
+        let (copies, id_map) = scratch.duplicate_with_fresh_ids();
+        let ordered = originals
+            .iter()
+            .map(|node| {
+                (**copies
+                    .node(id_map[&node.id])
+                    .expect("every scratch node was duplicated under its mapped id"))
+                .clone()
+            })
+            .collect();
+        (ordered, id_map)
+    }
+
     fn allocate_duplicate_node_ids(&self, id_map: &mut HashMap<NodeId, NodeId>) {
         for node in self.nodes.values() {
             id_map.insert(node.id, NodeId::next());
@@ -2186,6 +2224,44 @@ mod tests {
         let inner_copy = outer_copy.subnet.as_ref().unwrap();
         assert!(inner_copy.node(id_map[&inner_id]).is_some());
         assert!(inner_copy.node(inner_id).is_none());
+    }
+
+    #[test]
+    fn duplicate_nodes_with_fresh_ids_keeps_order_and_recurses() {
+        let deep_id = NodeId::next();
+        let mid_id = NodeId::next();
+        let outer_id = NodeId::next();
+        let plain_id = NodeId::next();
+        let deep = Graph::new()
+            .add_node(Node::new(deep_id, "constant"))
+            .unwrap();
+        let mid = Graph::new()
+            .add_node(Node::new(mid_id, "subnet").with_subnet(deep))
+            .unwrap();
+        let outer = Node::new(outer_id, "subnet").with_subnet(mid);
+        let plain = Node::new(plain_id, "constant");
+
+        let (copies, id_map) = Graph::duplicate_nodes_with_fresh_ids([&outer, &plain]);
+
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies[0].id, id_map[&outer_id], "input order is preserved");
+        assert_eq!(copies[1].id, id_map[&plain_id]);
+        let mid_copy = copies[0].subnet.as_deref().unwrap();
+        assert!(
+            mid_copy.node(mid_id).is_none(),
+            "the inner node was renumbered"
+        );
+        let deep_copy = mid_copy
+            .node(id_map[&mid_id])
+            .unwrap()
+            .subnet
+            .as_deref()
+            .unwrap();
+        assert!(
+            deep_copy.node(deep_id).is_none(),
+            "and so was the deeper one"
+        );
+        assert!(deep_copy.node(id_map[&deep_id]).is_some());
     }
 
     #[test]

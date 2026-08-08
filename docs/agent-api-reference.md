@@ -225,6 +225,15 @@ node.parameter_sources() -> Vec<(NodeId, OutputPortIndex)>
 graph.downstream_adjacency() -> HashMap<NodeId, Vec<NodeId>>
     // One pass, spanning edges AND parameter_sources. For flooding from
     // several seeds without re-walking the graph per seed.
+graph.duplicate_with_fresh_ids() -> (Graph, HashMap<NodeId, NodeId>)
+Graph::duplicate_nodes_with_fresh_ids(iter of &Node)
+    -> (Vec<Node>, HashMap<NodeId, NodeId>)   // copies in the given order
+    // The clipboard holds NODES, not a graph, and a subnet node clones its
+    // inner `Arc<Graph>` wholesale — so a copy made by hand keeps the inner
+    // ids and the original and the copy then share one `Evaluator` processor
+    // entry. Both entry points run the same recursion over the same
+    // hierarchy; do NOT mint ids per node beside them. The map covers every
+    // depth, so the caller re-points its own edges through it.
 graph.ptr_eq(&other) -> bool          // O(1) structural-sharing check
     // true PROVES identical content (same persistent-map roots), so a
     // derived index may be reused; false is inconclusive. Lets a caller

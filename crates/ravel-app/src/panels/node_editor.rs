@@ -691,6 +691,11 @@ pub struct NodeEditorPanel {
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
     last_right_click: Rc<Cell<(f32, f32)>>,
+    /// Last pointer position in canvas-local pixels, so the keyboard-opened
+    /// search palette lands where the hand already is. `None` until the
+    /// pointer has been over the canvas once; a position outside the canvas
+    /// (the pointer left, or a drag carried it away) is rejected at use.
+    last_pointer: Option<(f32, f32)>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -792,6 +797,7 @@ impl NodeEditorPanel {
             port_error: None,
             recent_types: Vec::new(),
             canvas_origin: Rc::new(Cell::new((0.0, 0.0))),
+            last_pointer: None,
             canvas_size: Rc::new(Cell::new((800.0, 600.0))),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             focus_handle,
@@ -2496,6 +2502,15 @@ impl NodeEditorPanel {
         result
     }
 
+    /// Where a keyboard-opened overlay belongs: under the pointer when it is
+    /// over the canvas, the canvas center otherwise.
+    fn pointer_or_canvas_center(&self) -> (f32, f32) {
+        let (w, h) = self.canvas_size.get();
+        self.last_pointer
+            .filter(|&(x, y)| (0.0..=w).contains(&x) && (0.0..=h).contains(&y))
+            .unwrap_or((w * 0.5, h * 0.5))
+    }
+
     fn local_from_event(&self, pos: Point<Pixels>) -> (f32, f32) {
         let origin = self.canvas_origin.get();
         let mx: f32 = pos.x.into();
@@ -2652,7 +2667,12 @@ impl NodeEditorPanel {
         cx.notify();
     }
 
-    /// Tab in the node editor toggles the palette at the canvas center.
+    /// Tab in the node editor toggles the palette under the pointer.
+    ///
+    /// The double-click path opens the same palette at the click, so a fixed
+    /// canvas center made one palette appear in two places and put the node it
+    /// places somewhere the hand was not (`MED-APP-27`). With the pointer off
+    /// the canvas there is no better answer than the center.
     fn on_search_palette(
         &mut self,
         _: &NodeSearchPalette,
@@ -2663,8 +2683,7 @@ impl NodeEditorPanel {
             self.dismiss_palette(cx);
             return;
         }
-        let (w, h) = self.canvas_size.get();
-        let local = (w * 0.5, h * 0.5);
+        let local = self.pointer_or_canvas_center();
         let origin = self.canvas_origin.get();
         self.open_search_palette(
             None,
@@ -3137,6 +3156,7 @@ impl Render for NodeEditorPanel {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 let (lx, ly) = this.local_from_event(event.position);
+                this.last_pointer = Some((lx, ly));
 
                 // Gestures suppress the hover popover (DISC-2); the drag
                 // branches below repaint anyway.
@@ -4686,6 +4706,44 @@ mod tests {
             let graph = resolve_network(project.document(), &path).expect("network");
             assert_eq!(graph.nodes().count(), 1);
         });
+    }
+
+    /// `MED-APP-27`: Tab opens the palette where the pointer is, so the same
+    /// palette does not appear in two different places depending on how it
+    /// was invoked. Off the canvas it still falls back to the center.
+    #[gpui::test]
+    fn the_keyboard_palette_opens_under_the_pointer(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.canvas_size.set((800.0, 600.0));
+
+                panel.last_pointer = Some((210.0, 90.0));
+                assert_eq!(panel.pointer_or_canvas_center(), (210.0, 90.0));
+
+                panel.last_pointer = Some((-30.0, 90.0));
+                assert_eq!(
+                    panel.pointer_or_canvas_center(),
+                    (400.0, 300.0),
+                    "a pointer off the canvas falls back to the center"
+                );
+
+                panel.last_pointer = Some((210.0, 1000.0));
+                assert_eq!(
+                    panel.pointer_or_canvas_center(),
+                    (400.0, 300.0),
+                    "a drag that carried the pointer past the bottom edge too"
+                );
+
+                panel.last_pointer = None;
+                assert_eq!(
+                    panel.pointer_or_canvas_center(),
+                    (400.0, 300.0),
+                    "a pointer that never entered the canvas falls back too"
+                );
+            })
+            .unwrap();
     }
 
     /// A wire-invoked palette offers only connectable types, and its accept

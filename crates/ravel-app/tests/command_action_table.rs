@@ -6,6 +6,13 @@
 //! refactor plan). The table's generated `match` expressions already make a
 //! *missing* entry a compile error; this test additionally catches duplicates
 //! and ordering drift against the canonical `CommandId` table.
+//!
+//! It also pins the menu snapshot both bars are drawn from: `build_menus`
+//! feeds the macOS menu bar directly and gpui-component's in-window
+//! `AppMenuBar` through `Menu::owned`, so anything the conversion drops is
+//! missing from both.
+
+use ravel_i18n::t;
 
 use ravel_app::panels::node_editor::KEY_CONTEXT;
 use ravel_app::workspace::{build_keybindings, build_menus, mapped_commands};
@@ -105,6 +112,151 @@ fn menus_keybindings_and_the_action_table_name_the_same_actions() {
     assert!(menu_actions.contains(&action_name(CommandId::AppPreferences)));
     assert!(menu_actions.contains(&action_name(CommandId::ProjectSettings)));
     assert!(binding_actions.contains(&action_name(CommandId::AppPreferences).as_str()));
+}
+
+/// A menu tree flattened to a comparable shape: one entry per item, in order,
+/// nesting spelled out by the submenu's own name.
+#[derive(Debug, PartialEq)]
+enum Flat {
+    Action { label: String, checked: bool },
+    Separator,
+    Submenu(String, Vec<Flat>),
+    Other,
+}
+
+fn flatten(items: &[gpui::MenuItem]) -> Vec<Flat> {
+    items
+        .iter()
+        .map(|item| match item {
+            gpui::MenuItem::Action { name, .. } => Flat::Action {
+                label: name.to_string(),
+                checked: item.is_checked(),
+            },
+            gpui::MenuItem::Separator => Flat::Separator,
+            gpui::MenuItem::Submenu(menu) => {
+                Flat::Submenu(menu.name.to_string(), flatten(&menu.items))
+            }
+            gpui::MenuItem::SystemMenu(_) => Flat::Other,
+        })
+        .collect()
+}
+
+fn flatten_owned(items: &[gpui::OwnedMenuItem]) -> Vec<Flat> {
+    items
+        .iter()
+        .map(|item| match item {
+            gpui::OwnedMenuItem::Action { name, checked, .. } => Flat::Action {
+                label: name.to_string(),
+                checked: *checked,
+            },
+            gpui::OwnedMenuItem::Separator => Flat::Separator,
+            gpui::OwnedMenuItem::Submenu(menu) => {
+                Flat::Submenu(menu.name.to_string(), flatten_owned(&menu.items))
+            }
+            gpui::OwnedMenuItem::SystemMenu(_) => Flat::Other,
+        })
+        .collect()
+}
+
+fn flatten_headless(items: &[ravel_ui::menu::MenuItem]) -> Vec<Flat> {
+    items
+        .iter()
+        .map(|item| match item {
+            ravel_ui::menu::MenuItem::Action { command, check } => Flat::Action {
+                label: t!(command.label_key()).to_string(),
+                checked: check.unwrap_or(false),
+            },
+            ravel_ui::menu::MenuItem::Separator => Flat::Separator,
+            ravel_ui::menu::MenuItem::Submenu(menu) => Flat::Submenu(
+                t!(menu.label_key).to_string(),
+                flatten_headless(&menu.items),
+            ),
+        })
+        .collect()
+}
+
+/// `AppMenuBar` reads a `Menu::owned` snapshot rather than the `Menu`s the
+/// macOS bar gets. Names, separators, submenu nesting, and the checkboxes have
+/// to survive that conversion, or the in-window bar quietly differs from the
+/// OS one it is supposed to replace.
+///
+/// The expectation is the headless model itself, not another `build_menus`
+/// call: comparing the conversion against its own output would pass with
+/// `convert_menu_item` dropping every check or flattening every submenu.
+#[test]
+fn owned_menus_keep_names_structure_and_checkmarks() {
+    let shell = AppShell::default();
+
+    let expected: Vec<(String, Vec<Flat>)> = shell
+        .menu_bar()
+        .menus
+        .iter()
+        .map(|menu| {
+            (
+                t!(menu.label_key).to_string(),
+                flatten_headless(&menu.items),
+            )
+        })
+        .collect();
+    // Past the synthetic application menu, which the in-window bar drops.
+    let owned: Vec<(String, Vec<Flat>)> = build_menus(&shell)
+        .into_iter()
+        .skip(1)
+        .map(gpui::Menu::owned)
+        .map(|menu| (menu.name.to_string(), flatten_owned(&menu.items)))
+        .collect();
+
+    assert_eq!(owned, expected);
+
+    // The macOS bar is handed the `Menu`s directly, so it has to agree too.
+    let native: Vec<(String, Vec<Flat>)> = build_menus(&shell)
+        .iter()
+        .skip(1)
+        .map(|menu| (menu.name.to_string(), flatten(&menu.items)))
+        .collect();
+    assert_eq!(native, expected);
+
+    // Non-vacuous: the default shell has visible panels, so the View menu
+    // carries checked toggles. Without this the comparison above would still
+    // pass with `convert_menu_item` dropping every `check`.
+    let checked = owned
+        .iter()
+        .flat_map(|(_, items)| items)
+        .filter(|item| matches!(item, Flat::Action { checked: true, .. }))
+        .count();
+    assert!(
+        checked > 0,
+        "the default menu bar should carry at least one checked item"
+    );
+}
+
+/// The in-window bar drops the synthetic macOS application menu, because Quit
+/// and About already live in the headless File and Help menus.
+#[test]
+fn the_synthetic_application_menu_only_duplicates_headless_entries() {
+    let shell = AppShell::default();
+    let commands = shell.menu_bar().commands();
+    assert!(commands.contains(&CommandId::FileQuit));
+    assert!(commands.contains(&CommandId::HelpAbout));
+
+    // `install_menus` drops it by skipping exactly one leading menu, so a
+    // second synthetic one would reach the in-window bar unnoticed. Names
+    // rather than a count: two synthetic menus and one headless menu fewer
+    // would keep the count right.
+    let menus = build_menus(&shell);
+    assert_eq!(
+        menus.first().map(|menu| menu.name.to_string()),
+        Some(t!("app.title").to_string()),
+        "the synthetic application menu should lead"
+    );
+    let rest: Vec<String> = menus.iter().skip(1).map(|m| m.name.to_string()).collect();
+    let headless: Vec<String> = shell
+        .menu_bar()
+        .menus
+        .iter()
+        .map(|m| t!(m.label_key).to_string())
+        .collect();
+    assert_eq!(rest, headless);
 }
 
 #[test]

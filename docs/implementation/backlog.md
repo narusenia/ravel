@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-08-06
+最終更新: 2026-08-08
 
 ## 凡例
 
@@ -75,6 +75,21 @@
 | AID-1 | `AssetId` 型と `MediaAssetEntry` の分離 | `asset-identity-plan.md` |
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
+| UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
+| UX-4 | ノード検索を `type_key` でも引く | `refactor-plan-0808.md` |
+| UX-5 | Timeline のプロパティ行の絞り込み（U / P / R） | `refactor-plan-0808.md` |
+| UX-6 | Timeline 上での値スクラブ | `refactor-plan-0808.md` |
+| UX-7 | プレイヘッド操作（キースナップ / ショートカット） | `refactor-plan-0808.md` |
+| UX-8 | 時間ルーラ（コンポ終端と BPM グリッド） | `refactor-plan-0808.md` |
+| UX-9 | ループ範囲とループ再生 | `refactor-plan-0808.md` |
+| UX-10 | 素材からレイヤーへの経路 | `refactor-plan-0808.md` |
+| UX-11 | 再生停止位置と起動時コンポの設定 | `refactor-plan-0808.md` |
+| NGR-1 | 自動整列の計算（ヘッドレス） | `node-graph-readability-plan.md` |
+| NGR-3 | `node_editor` 設定節と `edge_style` の永続化 | `node-graph-readability-plan.md` |
+| NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
+| NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
+| NGR-7 | エッジへのドロップでノードを挟む | `node-graph-readability-plan.md` |
+| WRG-1 | 式言語の複数文とローカル変数 | `wrangle-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
@@ -598,6 +613,58 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | PGRP-5 | 🟡 | ノードエディタのパラメータ値表示トグル | — |
 | PGRP-6 | ⬜ | ロケール / 文書 | PGRP-2〜5 |
 
+### ワークフロー貫通の UX（`refactor-plan-0808.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| UX-1 | 🟡 | 情報の所在表と往復候補の列挙 | — |
+| UX-2 | ⬜ | シナリオ 2 本の台本と集計表 | UX-1 |
+| UX-3 | ❓ | 測定結果の取り込みと単位化 | UX-2（測定の実施） |
+| UX-4 | 🟡 | ノード検索を `type_key` でも引く | — |
+| UX-5 | 🟡 | Timeline のプロパティ行の絞り込み（AE の U / P / R） | — |
+| UX-6 | 🟡 | Timeline 上での値スクラブ | — |
+| UX-7 | 🟡 | プレイヘッド操作（キーへのスナップ、AE 相当のショートカット） | — |
+| UX-8 | 🟡 | 時間ルーラ（コンポ終端の可視化と BPM グリッド） | — |
+| UX-9 | 🟡 | ループ範囲とループ再生 | — |
+| UX-10 | 🟡 | 素材からレイヤーへの経路（自動配置の廃止 / ドラッグ / Outliner） | — |
+| UX-11 | 🟡 | 再生停止位置と起動時コンポの設定 2 つ | — |
+| UX-12 | ⬜ | ロケール / 文書 | UX-4〜11 |
+
+**`UX-4` 以降は `UX-1`〜`UX-3` に依存しない。** 測定は優先順位付けと
+見落としの発見に使うもので、実装の前提条件ではない（計画書の決定事項）。
+
+### ノードグラフの可読性（`node-graph-readability-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| NGR-1 | 🟡 | 自動整列の計算（ヘッドレス） | — |
+| NGR-2 | ⬜ | 整列コマンドと undo | NGR-1 |
+| NGR-3 | 🟡 | `SettingsLayer` の `node_editor` 節と `edge_style` の永続化 | — |
+| NGR-4 | 🟡 | 型によるエッジ配色 | — |
+| NGR-5 | ⬜ | 上→下フローモード（描画・整列軸・`flow_direction`） | NGR-1, NGR-3 |
+| NGR-6 | 🟡 | Reroute ノード | — |
+| NGR-7 | 🟡 | エッジへのドロップでノードを挟む | — |
+| NGR-8 | ⬜ | ロケール / 文書 | NGR-2〜7 |
+
+**リリース前は `NGR-1`〜`NGR-3` だけ**、`NGR-4` 以降はリリース後
+（`roadmap.md` のフェーズ UX）。
+
+### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| WRG-1 | 🟡 | 式言語の複数文とローカル変数（`;` と代入） | — |
+| WRG-2 | ⬜ | 属性への書き戻し（`@attr = …` の左辺） | WRG-1 |
+| WRG-3 | ⬜ | `attribute.wrangle` ノード | WRG-2 |
+| WRG-4 | ❓ | spare parameter の機構（任意ノードのユーザー定義パラメータ） | `HIGH-30`、露出モデルの分岐の決着 |
+| WRG-5 | ⬜ | spare parameter の編集 UI | WRG-4 |
+| WRG-6 | ⬜ | spare parameter を式から名前で引く | WRG-3, WRG-4 |
+| WRG-7 | ⬜ | ロケール / 文書 | WRG-1〜6 |
+
+**この計画書は丸ごとリリース後。** リリース前に要るのは前提の `HIGH-30`
+だけ。`WRG-4` が `❓` なのは、spare parameter が既存の露出モデル
+（`EXPO-*`）に乗るかどうかが未決定のため（計画書の「未決定の分岐」）。
+
 ### 式言語（REQ-CORE-014 / REQ-CORE-015）
 
 | ID | 状態 | 単位 | 依存 |
@@ -968,31 +1035,46 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 （バグとして起票したものは `issues/` 側にある — `HIGH-27`〜`HIGH-29`、
 `MED-APP-26`〜`MED-APP-30`、`LOW-APP-23`）
 
+**2026-08-08 の grill で 18 件に計画が付いた。** 下の第 1 表がその行き先で、
+中身は各計画書が正（ここには単位 ID だけを残す）。第 2 表がまだ計画の
+無い残り 5 件。
+
+#### 計画書が引き受けたもの
+
+| 項目 | 担当計画 | 単位 |
+|---|---|---|
+| ノード検索を type 名でも引く | `refactor-plan-0808.md` | UX-4 |
+| AE の U / P / R | `refactor-plan-0808.md` | UX-5 |
+| Timeline に値のスクラブ | `refactor-plan-0808.md` | UX-6 |
+| Shift + プレイヘッド移動でキーへスナップ | `refactor-plan-0808.md` | UX-7 |
+| AE 相当の Timeline ショートカット | `refactor-plan-0808.md` | UX-7 |
+| コンポの Duration を可視化 | `refactor-plan-0808.md` | UX-8 |
+| Timeline の BPM グリッド | `refactor-plan-0808.md` | UX-8 |
+| ループ範囲の指定とループ再生 | `refactor-plan-0808.md` | UX-9 |
+| AssetImport 時の自動配置をやめる | `refactor-plan-0808.md` | UX-10 |
+| Outliner からのレイヤー追加 | `refactor-plan-0808.md` | UX-10 |
+| 停止したら再生開始位置へ戻す | `refactor-plan-0808.md` | UX-11 |
+| 起動時にコンポを作るかの on/off | `refactor-plan-0808.md` | UX-11 |
+| ノードの自動整列 | `node-graph-readability-plan.md` | NGR-1, NGR-2 |
+| 型でエッジの色を変える | `node-graph-readability-plan.md` | NGR-4 |
+| NodeEditor の上→下フローモード | `node-graph-readability-plan.md` | NGR-5 |
+| Reroute ノード | `node-graph-readability-plan.md` | NGR-6 |
+| エッジの間にノードを挟む | `node-graph-readability-plan.md` | NGR-7 |
+| Wrangle 相当 | `wrangle-plan.md` | WRG-1〜7 |
+
+`Wrangle 相当` の元の記述は「式言語（`EXPR-*`）と WGSL シェーダノード
+（`PLUG-3`）の交差点」だったが、**`PLUG-3` は要らない**というのが調査の
+結論。根拠は `wrangle-plan.md` の「調査で分かったこと」。
+
+#### まだ計画の無いもの
+
 | 項目 | 内容 |
 |---|---|
-| ノード検索を type 名でも引く | `node_search.rs:46` は `label` と `description` しか照合しない。`type_key` は同点時の並べ替えにしか使われないので `shape.rect` のような型名で引けない。日本語 UI では特に困る（`DISC-3` の後追い） |
-| 停止したら再生開始位置へ戻す | 再生を止めたときプレイヘッドを開始位置へ戻すオプション。設定 1 つ |
-| 起動時にコンポを作るかの on/off | 現在は必ず作る。設定 1 つ |
-| Timeline に値のスクラブ | プロパティ行の値を Timeline 上で直接いじる。Properties へ往復しないで済む |
-| AssetImport 時の自動配置をやめる | インポートはインポートだけにする。配置は Add as Layer をドラッグでできるようにする（現在はメニュー経由のみ） |
-| コンポの Duration を可視化 | Timeline 上で終端が分かりづらい。ズームの制限か、範囲外を落とす帯 |
-| ループ範囲の指定とループ再生 | イン / アウトを決めてその区間だけ繰り返す |
-| Timeline の BPM グリッド | 音楽に合わせる用途。フレームグリッドと別に持つ |
-| AE 相当の Timeline ショートカット | レイヤーの分割、始端 / 終端をプレイヘッドに合わせる、プレイヘッドへ移動 |
-| AE の U / P / R | キーの打たれた行だけ / Position だけ / Rotation だけを開く。`property_rows` の絞り込み |
-| Shift + プレイヘッド移動でキーへスナップ | 表示中のキーフレームに吸着させる |
-| 型でエッジの色を変える | ポートの色は型で決まっているのにエッジは一色。`DISC-5` のカテゴリ配色と揃える |
 | スカラ → 全成分同値の Vec | broadcast。`VEC-6`（`constant.vec2/3/4`）の隣 |
 | Vec の全軸同時操作 | Shift 押下で全成分を一緒に動かす。`MED-APP-20`（成分ラベルとリンクトグル）と同じ範囲 |
 | `field.apply` の domain / target 補完 | 自由文字列なので候補を出す。`MED-APP-29` の Select 化と同型 |
-| Outliner からのレイヤー追加 | 現在は Timeline / Layer メニューのみ |
-| エッジの間にノードを挟む | エッジへドロップすると分割して繋ぎ直す |
-| Reroute ノード | 配線の折り返し。見た目は小さく |
-| ノードの自動整列 | Subnet の collapse / extract / 挟み込みでレイアウトが崩れる。`NETIF-6` の後始末 |
 | Noise フィールドの evolution / flow | 時間で連続変化させるシード軸 |
 | ベジエ Ellipse と Arc | 内半径を持つ Arc（ドーナツ）を含む |
-| NodeEditor の上→下フローモード | Houdini 風の縦方向レイアウト |
-| Wrangle 相当 | 式言語（`EXPR-*`）と WGSL シェーダノード（`PLUG-3`）の交差点。要設計 |
 
 ## 要件の残り（Must のみ）
 

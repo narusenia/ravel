@@ -156,17 +156,31 @@ pub fn window_title(path: Option<&Path>) -> String {
 }
 
 /// Renders the main window's title bar: the project name centered, the
-/// application name leading.
+/// application name leading, and — off macOS — the application menus beside
+/// it.
 ///
 /// Workspace presets are switched through `Cmd+F1`–`F4` and the Workspace
 /// menu; the bar deliberately carries no preset buttons.
 pub fn render_main_title_bar(project_name: &str, cx: &App) -> impl IntoElement {
-    RavelTitleBar::new(project_name.to_owned()).leading(
+    let bar = RavelTitleBar::new(project_name.to_owned()).leading(
         div()
             .text_sm()
             .text_color(cx.theme().colors.foreground)
             .child(t!("app.title")),
-    )
+    );
+    // macOS keeps the menus where they belong, in the OS menu bar that
+    // `App::set_menus` fills. No other platform implements that call, so
+    // gpui-component's in-window `AppMenuBar` is the only place they can go.
+    // This is the single platform branch for the menus, and `cfg!` rather than
+    // `#[cfg]` keeps both arms type-checked everywhere.
+    match crate::workspace::app_menu_bar(cx) {
+        Some(menu_bar) if !cfg!(target_os = "macos") => bar.leading(
+            // The bar renders `size_full`, which would claim the whole title
+            // bar row; this wrapper keeps it to its content's width.
+            h_flex().items_center().child(menu_bar),
+        ),
+        _ => bar,
+    }
 }
 
 #[cfg(test)]

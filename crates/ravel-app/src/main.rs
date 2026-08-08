@@ -96,7 +96,7 @@ fn main() {
             ravel_app::keybindings::install(keybindings, cx);
             let restored_windows =
                 ravel_app::layout_persist::restore_into(&mut shell, saved_layout.as_ref());
-            cx.set_menus(workspace::build_menus(&shell));
+            workspace::install_menus(&shell, cx);
             cx.bind_keys(workspace::build_keybindings(&shell));
 
             if let Err(e) = ravel_app::window_host::open_main(shell, cx) {

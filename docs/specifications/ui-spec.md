@@ -109,9 +109,10 @@ Render Queue はどのプリセットにも無いが実装済みで、View メ�
 
 - UI フレームワークは **gpui-ce**（`Cargo.toml` で rev 固定）と
   gpui-component。ネイティブメニューの挙動は OS 間で差がある
-- ネイティブメニューのチェックマーク表示は `gpui::MenuItem::Action` に
-  checked variant が無いため未対応。ヘッドレスモデル層（`ravel_ui::menu`）では
-  正しく追跡している。カスタムメニュー描画での対応は将来
+- メニューのチェックマークはヘッドレスモデル層（`ravel_ui::menu`）が正で、
+  `gpui::MenuItem::checked` を通して macOS のネイティブメニューにも
+  非 macOS の自前バー（`gpui_component::menu::AppMenuBar`）にも出る。
+  変換は `workspace::convert_menu_item` の 1 箇所
 - スクリーンリーダー対応は GPUI のカスタムレンダリング特性上テキスト要素に限る
 - ドッキングの残る制約（ビュー状態のウィンドウ間移送、ドラッグプレビュー、
   ビューア専用全画面ウィンドウ、分離ウィンドウへの OCIO 適用）は

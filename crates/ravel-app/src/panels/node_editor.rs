@@ -31,14 +31,15 @@ use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, PortSide};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::network::{
-    CustomPortType, NetworkContext, NetworkError, PortEdit, is_fixed_port, is_in_node, is_out_node,
+    CustomPortType, NetworkContext, NetworkError, PinRename, PortEdit, is_fixed_port, is_in_node,
+    is_out_node,
 };
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
-use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
+use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_network};
 use ravel_ui::properties::expression;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1136,7 +1137,26 @@ impl NodeEditorPanel {
         key_rename: Option<KeyRename>,
         cx: &mut Context<Self>,
     ) {
-        self.commit_to_document(graph, key_rename, InvalidationHint::Structural, true, cx);
+        self.commit_port_edit(graph, key_rename, None, cx);
+    }
+
+    /// [`Self::commit_graph`] for the one edit that also moves a pin of the
+    /// subnet node enclosing the open network ([`PinRename`]).
+    fn commit_port_edit(
+        &mut self,
+        graph: Graph,
+        key_rename: Option<KeyRename>,
+        pin_rename: Option<PinRename>,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_to_document(
+            graph,
+            key_rename,
+            pin_rename,
+            InvalidationHint::Structural,
+            true,
+            cx,
+        );
         self.notify_properties_selection(cx);
     }
 
@@ -1209,8 +1229,8 @@ impl NodeEditorPanel {
         let Some(context) = self.context.as_ref().map(NetworkPath::context) else {
             return Ok(());
         };
-        let (graph, key_rename) = edit(self.graph.clone(), context)?.into_parts();
-        self.commit_graph(graph, key_rename, cx);
+        let (graph, key_rename, pin_rename) = edit(self.graph.clone(), context)?.into_parts();
+        self.commit_port_edit(graph, key_rename, pin_rename, cx);
         // The edit went straight into `self.graph`, so the document observer
         // will find nothing to re-sync and the teardown in
         // `refresh_from_document` never runs. Every caller of this funnel —
@@ -1524,6 +1544,7 @@ impl NodeEditorPanel {
         &mut self,
         graph: Graph,
         key_rename: Option<KeyRename>,
+        pin_rename: Option<PinRename>,
         hint: InvalidationHint,
         commit: bool,
         cx: &mut Context<Self>,
@@ -1534,7 +1555,14 @@ impl NodeEditorPanel {
             return;
         };
         project.update(cx, |project, cx| {
-            let Some(doc) = replace_network(project.document(), &context, graph) else {
+            // `pin_rename` is what the enclosing subnet node's pin sync needs
+            // to read the edit as a rename instead of a delete plus an add.
+            let Some(doc) = replace_network_renaming_pin(
+                project.document(),
+                &context,
+                graph,
+                pin_rename.as_ref(),
+            ) else {
                 return;
             };
             // The declarations move with the parameter key in the same
@@ -1668,6 +1696,7 @@ impl NodeEditorPanel {
         self.commit_to_document(
             graph,
             None,
+            None,
             InvalidationHint::Params(vec![node_id]),
             true,
             cx,
@@ -1770,6 +1799,7 @@ impl NodeEditorPanel {
         self.commit_to_document(
             graph,
             None,
+            None,
             InvalidationHint::Params(vec![node_id]),
             true,
             cx,
@@ -1843,6 +1873,7 @@ impl NodeEditorPanel {
 
         self.commit_to_document(
             graph,
+            None,
             None,
             InvalidationHint::Params(node_ids.to_vec()),
             commit,
@@ -1920,14 +1951,14 @@ impl NodeEditorPanel {
             return;
         }
 
-        let mut id_map: HashMap<NodeId, NodeId> = HashMap::new();
+        // Fresh ids for the whole hierarchy, not just the pasted nodes: a
+        // subnet node clones its inner `Arc<Graph>`, and an inner node that
+        // kept its id would share the evaluator's one processor entry (and its
+        // cache path) with the node it was copied from.
+        let (copies, id_map) = Graph::duplicate_nodes_with_fresh_ids(&content.nodes);
         let mut graph = self.graph.clone();
 
-        for (z, node) in (Self::next_z(&graph)..).zip(content.nodes.iter()) {
-            let new_id = NodeId::next();
-            id_map.insert(node.id, new_id);
-            let mut new_node = node.clone();
-            new_node.id = new_id;
+        for (z, mut new_node) in (Self::next_z(&graph)..).zip(copies) {
             new_node.metadata.position.0 += offset.0;
             new_node.metadata.position.1 += offset.1;
             new_node.metadata.z = z;
@@ -1954,7 +1985,14 @@ impl NodeEditorPanel {
             }
         }
 
-        let new_sel: HashSet<NodeId> = id_map.values().copied().collect();
+        // Only the pasted nodes themselves: `id_map` also carries the inner
+        // nodes of every pasted subnet, which live in another graph and are
+        // not selectable here.
+        let new_sel: HashSet<NodeId> = content
+            .nodes
+            .iter()
+            .filter_map(|node| id_map.get(&node.id).copied())
+            .collect();
         self.set_selected_nodes(new_sel, cx);
         self.commit_graph(graph, None, cx);
     }
@@ -3624,6 +3662,7 @@ mod tests {
     use ravel_core::graph::ParameterValue;
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::registry::NodeTemplate;
+    use ravel_ui::document::replace_network;
     use ravel_ui::properties::PropertyValue;
     #[test]
     fn add_node_menu_model_groups_and_sorts_templates() {
@@ -6403,6 +6442,211 @@ mod tests {
                         .count(),
                     2,
                     "Duplicate created the independently selected node"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Every node id in a graph hierarchy, the subnet graphs included.
+    fn hierarchy_ids(graph: &Graph, out: &mut HashSet<NodeId>) {
+        for node in graph.nodes() {
+            out.insert(node.id);
+            if let Some(inner) = node.subnet.as_deref() {
+                hierarchy_ids(inner, out);
+            }
+        }
+    }
+
+    /// Pasting a subnet has to renumber the graph it owns, at every depth.
+    /// `NodeId`s are global and the evaluator keys its processor registry by
+    /// the bare id, so a copy whose inner nodes kept their ids would make the
+    /// original and the copy fight over one entry.
+    #[gpui::test]
+    fn pasting_a_subnet_renumbers_its_whole_inner_hierarchy(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        let deep = Node::new(NodeId::next(), "math.scalar");
+        let deep_id = deep.id;
+        let inner_inner = Graph::new().add_node(deep).unwrap();
+        let mid = Node::new(NodeId::next(), "subnet").with_subnet(inner_inner);
+        let mid_id = mid.id;
+        let inner = Graph::new().add_node(mid).unwrap();
+        let outer_id = NodeId::next();
+
+        let (original, pasted) = window
+            .update(cx, |panel, _window, cx| {
+                let graph = panel
+                    .graph
+                    .clone()
+                    .add_node(Node::new(outer_id, "subnet").with_subnet(inner))
+                    .unwrap();
+                panel.commit_graph(graph, None, cx);
+
+                panel.set_selected_nodes(HashSet::from([outer_id]), cx);
+                panel.copy_selected(cx);
+                panel.paste((20.0, 20.0), cx);
+
+                let subnets: Vec<NodeId> = panel
+                    .graph
+                    .nodes()
+                    .filter(|node| node.type_key == "subnet")
+                    .map(|node| node.id)
+                    .collect();
+                assert_eq!(subnets.len(), 2, "the paste added a second subnet node");
+                let copy_id = *subnets
+                    .iter()
+                    .find(|id| **id != outer_id)
+                    .expect("the copy is the subnet that is not the original");
+
+                let ids = |root: NodeId| {
+                    let mut set = HashSet::new();
+                    let node = panel.graph.node(root).expect("subnet node");
+                    set.insert(node.id);
+                    hierarchy_ids(node.subnet.as_deref().expect("inner graph"), &mut set);
+                    set
+                };
+                (ids(outer_id), ids(copy_id))
+            })
+            .unwrap();
+
+        assert_eq!(original.len(), 3, "outer + mid + deep");
+        assert_eq!(pasted.len(), 3);
+        assert!(
+            original.is_disjoint(&pasted),
+            "the copy shares no node id with the original at any depth \
+             (original {original:?}, copy {pasted:?})"
+        );
+        assert!(!pasted.contains(&mid_id) && !pasted.contains(&deep_id));
+    }
+
+    /// A pasted subnet's inner edges point at the pasted inner nodes.
+    #[gpui::test]
+    fn pasting_a_subnet_repoints_its_inner_edges(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        let source =
+            Node::new(NodeId::next(), "math.scalar").with_output("out", DataTypeId::SCALAR);
+        let source_id = source.id;
+        let sink = Node::new(NodeId::next(), "math.scalar").with_input("in", &[DataTypeId::SCALAR]);
+        let sink_id = sink.id;
+        let inner = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                sink_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let outer_id = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let graph = panel
+                    .graph
+                    .clone()
+                    .add_node(Node::new(outer_id, "subnet").with_subnet(inner))
+                    .unwrap();
+                panel.commit_graph(graph, None, cx);
+                panel.set_selected_nodes(HashSet::from([outer_id]), cx);
+                panel.copy_selected(cx);
+                panel.paste((20.0, 20.0), cx);
+
+                let copy = panel
+                    .graph
+                    .nodes()
+                    .find(|node| node.type_key == "subnet" && node.id != outer_id)
+                    .expect("the pasted subnet");
+                let copied_inner = copy.subnet.as_deref().expect("inner graph");
+                let edge = copied_inner
+                    .edges()
+                    .next()
+                    .expect("the inner edge survived");
+                assert!(
+                    copied_inner.node(edge.source).is_some()
+                        && copied_inner.node(edge.target).is_some(),
+                    "the inner edge stays inside the copy"
+                );
+                assert_ne!(edge.source, source_id);
+                assert_ne!(edge.target, sink_id);
+            })
+            .unwrap();
+    }
+
+    /// A parameter inside a pasted subnet that is driven by another node
+    /// inside the same subnet has to follow the copy.
+    ///
+    /// `ChannelSource::NodeOutput` is a second way a graph names a node, one
+    /// the edge list does not carry, and it is remapped by the same pass that
+    /// renumbers the nodes. Left pointing at the original, the copy would be
+    /// animated by a node in a different subnet — a dependency the user cannot
+    /// see anywhere in the network they are looking at.
+    #[gpui::test]
+    fn pasting_a_subnet_repoints_its_inner_node_output_bindings(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        let driver =
+            Node::new(NodeId::next(), "math.scalar").with_output("out", DataTypeId::SCALAR);
+        let driver_id = driver.id;
+        let driven = Node::new(NodeId::next(), "math.scalar").with_param(
+            "value",
+            ParameterValue::Channel(ravel_core::animation::channel::AnimationChannel::new(
+                ravel_core::animation::channel::ChannelSource::NodeOutput(
+                    driver_id,
+                    OutputPortIndex(0),
+                ),
+            )),
+        );
+        let inner = Graph::new()
+            .add_node(driver)
+            .unwrap()
+            .add_node(driven)
+            .unwrap();
+        let outer_id = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let graph = panel
+                    .graph
+                    .clone()
+                    .add_node(Node::new(outer_id, "subnet").with_subnet(inner))
+                    .unwrap();
+                panel.commit_graph(graph, None, cx);
+                panel.set_selected_nodes(HashSet::from([outer_id]), cx);
+                panel.copy_selected(cx);
+                panel.paste((20.0, 20.0), cx);
+
+                let copy = panel
+                    .graph
+                    .nodes()
+                    .find(|node| node.type_key == "subnet" && node.id != outer_id)
+                    .expect("the pasted subnet");
+                let copied_inner = copy.subnet.as_deref().expect("inner graph");
+                // Found by shape, not by id: an id-keyed lookup would fail on
+                // the renumbering this test is not about and never reach the
+                // binding assertion below.
+                let bound = copied_inner
+                    .nodes()
+                    .find(|node| !node.parameters.is_empty())
+                    .expect("the driven node came across");
+                let source_kind = match &bound.parameters[0].value {
+                    ParameterValue::Channel(channel) => channel.source.clone(),
+                    other => panic!("unexpected parameter: {other:?}"),
+                };
+                let ravel_core::animation::channel::ChannelSource::NodeOutput(source, port) =
+                    source_kind
+                else {
+                    panic!("the binding collapsed instead of being remapped");
+                };
+                assert_eq!(port, OutputPortIndex(0));
+                assert_ne!(source, driver_id, "the copy does not name the original");
+                assert!(
+                    copied_inner.node(source).is_some(),
+                    "it names the driver inside the copy"
                 );
             })
             .unwrap();

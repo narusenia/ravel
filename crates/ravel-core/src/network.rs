@@ -701,7 +701,32 @@ pub fn rename_custom_port(
     Ok(PortEdit {
         graph,
         key_rename: moved.then(|| KeyRename::new(node_id, old_name, new_name)),
+        // Every renameable interface port is a pin of an enclosing subnet
+        // ([`subnet_pins`] filters on the same [`is_fixed_port`]), and the two
+        // sides invert: an In node's *output* port is an input pin, an Out
+        // node's *input* port is an output pin. Whether there IS an enclosing
+        // subnet is the document layer's question, not this graph's.
+        pin_rename: Some(PinRename {
+            side: match side {
+                PortSide::Input => PortSide::Output,
+                PortSide::Output => PortSide::Input,
+            },
+            old_name: old_name.to_string(),
+            new_name: new_name.to_string(),
+        }),
     })
+}
+
+/// How a custom-port rename inside a network moves the pin of the subnet node
+/// that owns that network.
+///
+/// `side` is the side **on the subnet node**, already inverted from the
+/// interface node's own side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinRename {
+    pub side: PortSide,
+    pub old_name: String,
+    pub new_name: String,
 }
 
 /// A custom-port edit, and what it implies beyond the graph it produced.
@@ -714,6 +739,7 @@ pub fn rename_custom_port(
 pub struct PortEdit {
     graph: Graph,
     key_rename: Option<KeyRename>,
+    pin_rename: Option<PinRename>,
 }
 
 impl PortEdit {
@@ -732,9 +758,14 @@ impl PortEdit {
         self.key_rename.as_ref()
     }
 
-    /// Both halves, for a caller that commits them together.
-    pub fn into_parts(self) -> (Graph, Option<KeyRename>) {
-        (self.graph, self.key_rename)
+    /// The enclosing subnet node's pin this edit moved, if it moved one.
+    pub fn pin_rename(&self) -> Option<&PinRename> {
+        self.pin_rename.as_ref()
+    }
+
+    /// All three halves, for a caller that commits them together.
+    pub fn into_parts(self) -> (Graph, Option<KeyRename>, Option<PinRename>) {
+        (self.graph, self.key_rename, self.pin_rename)
     }
 }
 
@@ -743,6 +774,7 @@ impl From<Graph> for PortEdit {
         Self {
             graph,
             key_rename: None,
+            pin_rename: None,
         }
     }
 }
@@ -1183,6 +1215,77 @@ fn promote_parameters(inner: &Graph, existing: &[Parameter]) -> Vec<Parameter> {
         .collect()
 }
 
+/// Carry a [`PinRename`] onto the subnet node `subnet_id` **before**
+/// [`sync_subnet_pins`] matches its pins against the inner declaration.
+///
+/// Pin sync matches by name, so a rename it has not been told about reads as a
+/// deletion plus an addition: the old pin is removed — taking the outer edges
+/// and, on the output side, the `ChannelSource::NodeOutput` bindings that named
+/// it — and the new one appears unwired at the end. Renaming the pin here makes
+/// the two lists agree by name again, and the sync that follows has nothing
+/// left to remove.
+///
+/// The promoted parameter moves in the same call. A subnet pin is not a
+/// *paired* port as [`Graph::rename_port`] means it (`is_param` is false on a
+/// pin), so the promotion parameter would otherwise be left under the old key
+/// for [`promote_parameters`] to discard and re-seed from the inner In's own
+/// default — silently dropping the value and every keyframe the user put on it.
+///
+/// Anything that does not line up — a missing old pin, a taken new name, a node
+/// that is not a subnet — leaves the graph untouched **and is logged as a
+/// warning**, because the sync that runs next is the destructive one: it sees a
+/// pin the inner graph no longer declares, removes it, and takes the outer
+/// edges with it. That is what the caller was trying to prevent, so a pre-pass
+/// that could not place the rename is a warning about wiring that is about to
+/// disappear, not a debug note.
+///
+/// It is still only a log. Turning the mismatch into an error that
+/// `document::replace_network_renaming_pin` propagates would abort the whole
+/// document edit, so the user's rename would appear to do nothing at all —
+/// trading "a rare inconsistent state costs some edges" for "the edit vanishes",
+/// which is worse. The graph edit reaches the document either way, and undo
+/// covers the loss like every other graph edit.
+pub fn rename_subnet_pin(graph: Graph, subnet_id: NodeId, rename: &PinRename) -> Graph {
+    let Some(node) = graph.node(subnet_id) else {
+        return graph;
+    };
+    if !is_subnet_node(node) {
+        return graph;
+    }
+    let mut graph =
+        match graph
+            .clone()
+            .rename_port(subnet_id, rename.side, &rename.old_name, &rename.new_name)
+        {
+            Ok(renamed) => renamed,
+            Err(error) => {
+                tracing::warn!(
+                    node = ?subnet_id,
+                    side = ?rename.side,
+                    from = %rename.old_name,
+                    to = %rename.new_name,
+                    %error,
+                    "subnet pin rename could not be applied; the pin sync that \
+                     follows will drop the old pin and the outer edges drawn to it"
+                );
+                return graph;
+            }
+        };
+    // Promotion parameters exist for input pins only ([`promote_parameters`]).
+    if rename.side == PortSide::Input {
+        let mut updated = live_node(&graph, subnet_id);
+        if let Some(parameter) = updated
+            .parameters
+            .iter_mut()
+            .find(|p| p.key == rename.old_name)
+        {
+            parameter.key = rename.new_name.clone();
+            graph = graph.replace_node(Arc::new(updated));
+        }
+    }
+    graph
+}
+
 /// Re-derive the pins of the subnet node `subnet_id` from its own inner graph
 /// ([`subnet_pins`]), remapping the outer wiring onto the result.
 ///
@@ -1232,14 +1335,26 @@ pub fn sync_subnet_pins(graph: Graph, subnet_id: NodeId) -> Result<Graph, Networ
     // graph operation deletes their edges and re-indexes the rest), append
     // the new ones, then put the whole list into the declared order. Only
     // after that do the slots line up one-to-one with `inputs` / `outputs`.
+    //
+    // A removal destroys something the inner graph does not show — the outer
+    // edges, and on the output side the `NodeOutput` bindings. It is logged at
+    // debug here and nowhere louder, because this branch is shared: after a
+    // deliberate `remove_custom_port` the loss is exactly what the user asked
+    // for. The case that deserves a warning is the load-time one, where nobody
+    // asked, and that is announced by the caller that knows it is a load —
+    // [`crate::composition::Document::sync_subnet_pins`]. See
+    // [`rename_subnet_pin`] for the rename that must not reach this branch at
+    // all.
     let mut graph = graph;
     for (index, port) in node.inputs.iter().enumerate().rev() {
         if !inputs.iter().any(|p| p.name == port.name) {
+            log_dropped_pin(&graph, subnet_id, PortSide::Input, &port.name, index);
             graph = graph.remove_input_port(subnet_id, InputPortIndex(index as u32))?;
         }
     }
     for (index, port) in node.outputs.iter().enumerate().rev() {
         if !outputs.iter().any(|p| p.name == port.name) {
+            log_dropped_pin(&graph, subnet_id, PortSide::Output, &port.name, index);
             graph = graph.remove_output_port(subnet_id, OutputPortIndex(index as u32))?;
         }
     }
@@ -1337,6 +1452,25 @@ pub fn sync_subnet_pins_or_log(graph: Graph, subnet_id: NodeId) -> Graph {
             graph
         }
     }
+}
+
+/// Trace a pin the inner network no longer declares, with the number of outer
+/// edges its removal is about to delete. Debug, not warn — see the call site.
+fn log_dropped_pin(graph: &Graph, subnet_id: NodeId, side: PortSide, name: &str, index: usize) {
+    let dropped = graph
+        .edges()
+        .filter(|edge| match side {
+            PortSide::Input => edge.target == subnet_id && edge.target_port.0 as usize == index,
+            PortSide::Output => edge.source == subnet_id && edge.source_port.0 as usize == index,
+        })
+        .count();
+    tracing::debug!(
+        node = ?subnet_id,
+        ?side,
+        pin = %name,
+        dropped_edges = dropped,
+        "subnet pin removed; the inner network no longer declares it"
+    );
 }
 
 fn live_node(graph: &Graph, node_id: NodeId) -> Node {

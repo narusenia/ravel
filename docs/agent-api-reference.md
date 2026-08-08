@@ -225,6 +225,23 @@ node.parameter_sources() -> Vec<(NodeId, OutputPortIndex)>
 graph.downstream_adjacency() -> HashMap<NodeId, Vec<NodeId>>
     // One pass, spanning edges AND parameter_sources. For flooding from
     // several seeds without re-walking the graph per seed.
+graph.find_nested_node(id) -> Option<&Arc<Node>>     // this graph OR any
+graph.replace_nested_node(Arc<Node>) -> Option<Graph>  // subnet inside it
+    // `node` / `replace_node` see ONE graph. These walk the subnet hierarchy,
+    // which a NodeId can address on its own because ids are globally unique
+    // (REQ-LAYER-009). `replace_nested_node` re-wraps only the owning chain
+    // and does NOT re-derive pins — it cannot move one. A caller editing an
+    // inner In / Out PORT goes through `network::*_custom_port` and
+    // `document::replace_network` instead.
+graph.duplicate_with_fresh_ids() -> (Graph, HashMap<NodeId, NodeId>)
+Graph::duplicate_nodes_with_fresh_ids(iter of &Node)
+    -> (Vec<Node>, HashMap<NodeId, NodeId>)   // copies in the given order
+    // The clipboard holds NODES, not a graph, and a subnet node clones its
+    // inner `Arc<Graph>` wholesale — so a copy made by hand keeps the inner
+    // ids and the original and the copy then share one `Evaluator` processor
+    // entry. Both entry points run the same recursion over the same
+    // hierarchy; do NOT mint ids per node beside them. The map covers every
+    // depth, so the caller re-points its own edges through it.
 graph.ptr_eq(&other) -> bool          // O(1) structural-sharing check
     // true PROVES identical content (same persistent-map roots), so a
     // derived index may be reused; false is inconclusive. Lets a caller
@@ -750,6 +767,10 @@ Document::sync_subnet_pins()   // load-time DRIFT REPAIR, not a format upgrade
     // ports the derivation reads. Idempotent. MINTS NO IDS, so it cannot
     // repair a subnet whose `subnet` field is `None` (that needs two fresh
     // node ids, and the chain runs before `advance_id_counters`).
+    // Diffs each subnet node's pins across the call and `tracing::warn!`s the
+    // ones the repair DELETED, with the outer edges each one cost. This is the
+    // only place that warning is emitted: the same removal reached through
+    // `remove_custom_port` is what the user asked for and logs at debug.
 Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
     // Folds `_x` / `_y` component parameters (the scalar
     // `geometry.transform` `rotation`, and `attribute.set`'s `value` family
@@ -830,13 +851,17 @@ add_custom_port(graph, node_id, name, CustomPortType, NetworkContext)
     // port landing on an occupied key would answer with the wrong type.
 remove_custom_port(graph, node_id, name, NetworkContext)  // drops the parameter
 rename_custom_port(graph, node_id, old, new, NetworkContext) -> PortEdit
-    // The parameter moves with the port, and the PortEdit says so:
-    // .graph() / .into_graph() / .key_rename() -> Option<&KeyRename> /
-    // .into_parts(). A parameter key can be named from OUTSIDE the graph (an
+    // A rename reaches TWO things the graph cannot: .graph() / .into_graph() /
+    // .key_rename() -> Option<&KeyRename> / .pin_rename() -> Option<&PinRename>
+    // / .into_parts() -> (Graph, Option<KeyRename>, Option<PinRename>).
+    // KeyRename: a parameter key can be named from OUTSIDE the graph (an
     // exposed parameter declaration binds to node id + key), so the caller
-    // hands the KeyRename to `exposed::apply::follow_key_rename` in the SAME
-    // Document commit. Every other port edit returns a plain Graph and
-    // converts with `PortEdit::from`.
+    // hands it to `exposed::apply::follow_key_rename` in the SAME Document
+    // commit. PinRename: an interface port IS a pin of the ENCLOSING subnet
+    // node, so the caller hands it to `document::replace_network_renaming_pin`
+    // — without it the name-matched pin sync reads the rename as a delete plus
+    // an add and takes the outer edges with it. Every other port edit returns a
+    // plain Graph and converts with `PortEdit::from`.
     // Both take the context because editing a legacy custom `f` away from a
     // LAYER-ROOT In re-appends the BUILTIN `f` in the same call — otherwise
     // the layer cannot read its frame index until `append_missing_in_ports`
@@ -903,6 +928,20 @@ sync_subnet_pins(graph, subnet_id) -> Result<Graph, NetworkError>
     // back untouched, so it is idempotent and cheap. MINTS NO IDS — which is
     // why a subnet with `subnet: None` is left broken rather than repaired.
     // Errs on a missing node or a node that is not a subnet.
+    // A pin REMOVAL logs at DEBUG here — after a deliberate `remove_custom_port`
+    // the lost edges are what the user asked for. The load-time caller
+    // (`Document::sync_subnet_pins`) diffs the pins across the call and WARNS
+    // about what it lost, because there nobody asked.
+rename_subnet_pin(graph, subnet_id, &PinRename) -> Graph   // the PRE-pass
+    // Renames the pin (and, on the input side, its promotion parameter's KEY —
+    // a pin is not an `is_param` port, so `Graph::rename_port` would not move
+    // it and `promote_parameters` would re-seed the value, losing its
+    // keyframes) so the sync that follows sees the two lists agreeing by name
+    // and has nothing to remove. Anything that does not line up leaves the
+    // graph alone and WARNS: the sync that runs next is the destructive one, so
+    // a pre-pass that could not place the rename means outer edges are about to
+    // go. Deliberately not an error — propagating it would abort the document
+    // edit, turning "some edges are lost" into "the rename does nothing".
 sync_subnet_pins_or_log(graph, subnet_id) -> Graph   // for callers that have
     // already established the node is a subnet; logs a refusal, returns the
     // graph unchanged. Used by `sync_subnet_pins_in` and `replace_network`.
@@ -1724,7 +1763,12 @@ Unknown type keys are skipped silently (plugin space).
   `audio_stream_index: Some(i)` also gives the shell an `AudioSource` for the
   same asset id, which is how a video layer's sound is wired — audio-plan
   unit 4),
-  `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
+  `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`,
+  `replace_network_renaming_pin(doc, &path, graph, Option<&PinRename>)` (the
+  same, told that the edit renamed one of the network's own In / Out custom
+  ports — it moves the enclosing subnet node's pin BEFORE the name-matched pin
+  sync runs, and follows the promoted parameter's key into the exposed
+  declarations in the same snapshot; `replace_network` is this with `None`).
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
   `CommandOutcome::{Handled, OpenPanel { instance },
@@ -1823,10 +1867,19 @@ Unknown type keys are skipped silently (plugin space).
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
-  the shell groups plus every keyframed parameter of the layer's
-  **top-level** network (In custom params and subnet-promoted params
-  included; nodes inside subnets are keyed via the node editor's subnet
-  context and are not listed — v1). All edit frames are layer-local:
+  the shell groups plus every keyframed parameter of the layer's network
+  **and of every subnet nested inside it, at any depth** — enumeration is
+  recursive because evaluation is, and a flat list beside a recursive
+  evaluator is what hid a collapsed node's keyframes while its animation kept
+  running. Row labels are prefixed by the enclosing subnet names
+  (`"Outer / Inner / blur · radius"`). A row is addressed by a bare `NodeId`,
+  which suffices at any depth (ids are globally unique, REQ-LAYER-009), and
+  `row_channels` / `mutate_channel` reach it through
+  `Graph::find_nested_node` / `replace_nested_node`. The one exclusion: an
+  inner In's custom parameter under a key its owning subnet node **promotes**
+  gets no row — `SubnetProcessor` binds the promoted value and never reads the
+  inner default, so the row would edit nothing. All edit frames are
+  layer-local:
   `layer_local_frame(layer, comp_frame)` /
   `comp_frame_for_key(layer, local)`. Edits rebuild the layer immutably:
   `insert_keyframe` (converts a constant channel), `remove_keyframe` (the

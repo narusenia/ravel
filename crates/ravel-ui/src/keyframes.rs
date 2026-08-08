@@ -12,6 +12,14 @@
 //! parameters and subnet-promoted parameters (both are plain node parameters
 //! of the layer network).
 //!
+//! Enumeration follows the network **into its subnets**, at any depth, because
+//! evaluation does (AGENTS.md: layer networks are evaluated recursively through
+//! the network boundary node). A flat listing beside a recursive evaluator is
+//! what made keyframes vanish from the tree while the animation kept running
+//! after a Collapse to Subnet. Rows are addressed by a bare [`NodeId`], which
+//! is enough at any depth: ids come from one global counter, so an id names one
+//! node in the whole hierarchy (REQ-LAYER-009).
+//!
 //! All editing functions take and return **layer-local frames**
 //! (`comp_frame - start_frame + in_frame`, REQ-LAYER-006) and rebuild the
 //! layer through the immutable graph API, so a whole edit lands in the
@@ -35,7 +43,9 @@ use ravel_core::types::Vec2;
 use crate::panels::timeline::PropertyGroup;
 
 /// Identity of one property-tree row: a shell channel group or a network
-/// parameter (`node` id + parameter key) of the layer's owned network.
+/// parameter (`node` id + parameter key) of the layer's owned network,
+/// including the networks its subnets own at any depth. The id needs no path:
+/// a `NodeId` is unique across the whole document (REQ-LAYER-009).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PropertyRowId {
     Shell(PropertyGroup),
@@ -47,8 +57,10 @@ pub enum PropertyRowId {
 pub struct PropertyRow {
     pub id: PropertyRowId,
     /// Display label for network rows (the In node's custom parameters show
-    /// the bare key; other nodes show `"<label or type> · <key>"`). `None`
-    /// for shell rows — the host localizes them (`timeline.property.*`).
+    /// the bare key; other nodes show `"<label or type> · <key>"`), prefixed
+    /// by the chain of enclosing subnet names for a row inside a subnet
+    /// (`"Subnet 1 / Blur · radius"`). `None` for shell rows — the host
+    /// localizes them (`timeline.property.*`).
     pub label: Option<String>,
     /// Per-component channel names, in component order.
     ///
@@ -123,7 +135,8 @@ pub const SHELL_GROUPS: [PropertyGroup; 4] = [
 
 /// The property-tree rows of a layer: the shell groups, then every network
 /// parameter with at least one keyframed component (REQ-LAYER-004), ordered
-/// deterministically by node id then parameter position.
+/// deterministically by node id then parameter position — subnets included,
+/// each subnet's rows following the node that owns them ([`network_rows`]).
 pub fn property_rows(layer: &Layer) -> Vec<PropertyRow> {
     let mut rows: Vec<PropertyRow> = SHELL_GROUPS
         .iter()
@@ -148,18 +161,53 @@ pub fn property_rows(layer: &Layer) -> Vec<PropertyRow> {
         });
     }
 
-    let mut nodes: Vec<_> = layer.network.nodes().collect();
+    network_rows(&layer.network, "", None, &mut rows);
+    rows
+}
+
+/// Append the keyframed parameters of `graph` and of every subnet nested
+/// inside it, node-id ordered at each level and each level's rows placed
+/// directly after the subnet node that owns them.
+///
+/// `prefix` is the chain of enclosing subnet labels (`"Subnet 1 / "`). Without
+/// it two identically named parameters in different subnets produce the same
+/// row label and the tree stops being readable.
+///
+/// `owner` is the subnet node holding `graph`, and it decides one exclusion:
+/// an inner In node's custom parameter under a key the owner **promotes** is
+/// dead at evaluation time — `SubnetProcessor::process` binds the promoted
+/// value and the inner In's own default is never read (REQ-LAYER-003) — so a
+/// row for it would be a control that animates nothing. The layer-root In has
+/// no owner and keeps all of its rows.
+///
+/// The recursion stops at any node without a `subnet`, and the hierarchy is a
+/// tree of owned graphs, so no branch repeats: there is no depth limit, as
+/// REQ-LAYER requires.
+fn network_rows(
+    graph: &ravel_core::graph::Graph,
+    prefix: &str,
+    owner: Option<&ravel_core::graph::Node>,
+    rows: &mut Vec<PropertyRow>,
+) {
+    let mut nodes: Vec<_> = graph.nodes().collect();
     nodes.sort_by_key(|n| n.id);
     for node in nodes {
+        let promoted_by_owner = |key: &str| {
+            node.type_key == net::NET_IN_TYPE_KEY
+                && owner.is_some_and(|owner| owner.parameters.iter().any(|p| p.key == key))
+        };
         for param in &node.parameters {
+            if promoted_by_owner(&param.key) {
+                continue;
+            }
             let Some(names) = keyframed_channel_names(&param.value) else {
                 continue;
             };
             let label = if node.type_key == net::NET_IN_TYPE_KEY {
-                param.key.clone()
+                format!("{prefix}{}", param.key)
             } else {
                 let node_label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
-                format!("{node_label} · {}", param.key)
+                format!("{prefix}{node_label} · {}", param.key)
             };
             rows.push(PropertyRow {
                 id: PropertyRowId::Network {
@@ -170,8 +218,11 @@ pub fn property_rows(layer: &Layer) -> Vec<PropertyRow> {
                 channel_names: names,
             });
         }
+        if let Some(inner) = node.subnet.as_deref() {
+            let node_label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
+            network_rows(inner, &format!("{prefix}{node_label} / "), Some(node), rows);
+        }
     }
-    rows
 }
 
 /// The component channels of a row, in component order. Resolves regardless
@@ -182,7 +233,7 @@ pub fn row_channels<'a>(layer: &'a Layer, id: &PropertyRowId) -> Option<Vec<&'a 
     match id {
         PropertyRowId::Shell(group) => Some(shell_channels(layer, *group)),
         PropertyRowId::Network { node, key } => {
-            let node_ref = layer.network.node(*node)?;
+            let node_ref = layer.network.find_nested_node(*node)?;
             let param = node_ref.parameters.iter().find(|p| p.key == *key)?;
             channel_components(&param.value)
         }
@@ -746,7 +797,7 @@ fn mutate_channel(
             f(channel)
         }
         PropertyRowId::Network { node, key } => {
-            let Some(node_ref) = layer.network.node(*node) else {
+            let Some(node_ref) = layer.network.find_nested_node(*node) else {
                 return false;
             };
             let mut updated = (**node_ref).clone();
@@ -766,7 +817,13 @@ fn mutate_channel(
             if !f(channel) {
                 return false;
             }
-            layer.network = layer.network.clone().replace_node(Arc::new(updated));
+            // The node may live in a subnet; only a parameter VALUE changed,
+            // so no pin moved and the subnets on the way back up keep the
+            // interface they had.
+            let Some(network) = layer.network.replace_nested_node(Arc::new(updated)) else {
+                return false;
+            };
+            layer.network = network;
             true
         }
     }
@@ -1348,5 +1405,144 @@ mod tests {
         );
         assert!(curve.move_keyframe(4, 10));
         assert_eq!(curve.keyframes()[0].tangent_out, Vec2(8.0, 1.0));
+    }
+
+    // ----- subnets (HIGH-27 regression guards) ------------------------------
+
+    /// [`test_layer`] with its `blur` collapsed two subnets deep, the way
+    /// Collapse to Subnet run twice leaves it. The inner In of each subnet
+    /// carries a keyframed `amount` that its owner promotes — the shadowed
+    /// case the enumeration has to leave out.
+    fn layer_with_nested_subnets() -> Layer {
+        let inner_in = |id: NodeId| {
+            Node::new(id, net::NET_IN_TYPE_KEY)
+                .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+                .with_output("amount", DataTypeId::SCALAR)
+                .with_param(
+                    "amount",
+                    ParameterValue::Channel(AnimationChannel::keyframes(curve_0_to_10())),
+                )
+        };
+        let blur = Node::new(NodeId::new(20), "blur").with_param(
+            "radius",
+            ParameterValue::Channel(AnimationChannel::keyframes(curve_0_to_10())),
+        );
+        // Deepest network: net.in / net.out plus the blur.
+        let deep = Graph::new()
+            .add_node(inner_in(NodeId::new(30)))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(31), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(blur)
+            .unwrap();
+        let mut deep_subnet = Node::new(NodeId::new(21), net::SUBNET_TYPE_KEY);
+        deep_subnet.metadata.label = Some("Inner".into());
+        net::adopt_subnet_inner(&mut deep_subnet, deep);
+
+        let middle = Graph::new()
+            .add_node(inner_in(NodeId::new(40)))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(41), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(deep_subnet)
+            .unwrap();
+        let mut outer_subnet = Node::new(NodeId::new(11), net::SUBNET_TYPE_KEY);
+        outer_subnet.metadata.label = Some("Outer".into());
+        net::adopt_subnet_inner(&mut outer_subnet, middle);
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_TIME, DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(outer_subnet)
+            .unwrap();
+        Layer::new(LayerId::new(1), "L", network).with_time(10, 5, 300)
+    }
+
+    /// A keyframed parameter that a Collapse to Subnet moved out of the top
+    /// level still has a row, at any depth, named by the subnets it sits in.
+    #[test]
+    fn rows_reach_keyframes_inside_nested_subnets() {
+        let rows = property_rows(&layer_with_nested_subnets());
+        let network: Vec<(&PropertyRowId, Option<&str>)> = rows
+            .iter()
+            .filter(|row| matches!(row.id, PropertyRowId::Network { .. }))
+            .map(|row| (&row.id, row.label.as_deref()))
+            .collect();
+
+        let blur = network
+            .iter()
+            .find(|(id, _)| {
+                matches!(id, PropertyRowId::Network { node, key }
+                    if *node == NodeId::new(20) && key == "radius")
+            })
+            .expect("the collapsed blur's keyframes are visible two levels down");
+        assert_eq!(blur.1, Some("Outer / Inner / blur · radius"));
+
+        // The promoted parameters of both subnet nodes are the live controls
+        // and keep their rows; the inner In parameters they shadow do not get
+        // one, because editing those would animate nothing.
+        assert!(
+            network.iter().any(|(id, _)| matches!(id,
+                PropertyRowId::Network { node, key }
+                    if *node == NodeId::new(11) && key == "amount")),
+            "the outer subnet's promoted parameter is a row"
+        );
+        assert!(
+            !network.iter().any(|(id, _)| matches!(id,
+                PropertyRowId::Network { node, .. } if *node == NodeId::new(40))),
+            "the inner In it shadows is not"
+        );
+        assert!(
+            !network.iter().any(|(id, _)| matches!(id,
+                PropertyRowId::Network { node, .. } if *node == NodeId::new(30))),
+            "and neither is the one a level deeper"
+        );
+    }
+
+    /// The row is editable: a key inserted through it reaches the parameter in
+    /// the subnet's own graph, and removing it again reverts the channel.
+    #[test]
+    fn keyframes_inside_a_subnet_are_editable_through_their_row() {
+        let mut layer = layer_with_nested_subnets();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+        assert!(row_channels(&layer, &row).is_some(), "the row resolves");
+
+        assert!(insert_keyframe(&mut layer, &row, 0, 5));
+        assert!(has_keyframe_at(&layer, &row, 0, 5));
+        let stored = layer
+            .network
+            .find_nested_node(NodeId::new(20))
+            .expect("the blur is still inside the nested subnet")
+            .parameters
+            .iter()
+            .find(|p| p.key == "radius")
+            .map(|p| p.value.clone());
+        assert!(
+            matches!(stored, Some(ParameterValue::Channel(ref ch))
+                if matches!(&ch.source, ChannelSource::Keyframes(curve)
+                    if curve.keyframes().iter().any(|k| k.frame == 5))),
+            "the edit landed in the inner graph, not on a discarded copy"
+        );
+
+        assert!(move_keyframe(&mut layer, &row, 0, 5, 6));
+        assert!(has_keyframe_at(&layer, &row, 0, 6));
+        assert!(remove_keyframe(&mut layer, &row, 0, 6));
+        assert!(!has_keyframe_at(&layer, &row, 0, 6));
+
+        // The layer's own top-level structure is untouched by all of it.
+        assert!(layer.network.node(NodeId::new(11)).is_some());
+        assert!(layer.network.node(NodeId::new(20)).is_none());
     }
 }

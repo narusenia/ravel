@@ -31,14 +31,15 @@ use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, PortSide};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::network::{
-    CustomPortType, NetworkContext, NetworkError, PortEdit, is_fixed_port, is_in_node, is_out_node,
+    CustomPortType, NetworkContext, NetworkError, PinRename, PortEdit, is_fixed_port, is_in_node,
+    is_out_node,
 };
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
-use ravel_ui::document::{NetworkPath, replace_network, resolve_network};
+use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_network};
 use ravel_ui::properties::expression;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1136,7 +1137,26 @@ impl NodeEditorPanel {
         key_rename: Option<KeyRename>,
         cx: &mut Context<Self>,
     ) {
-        self.commit_to_document(graph, key_rename, InvalidationHint::Structural, true, cx);
+        self.commit_port_edit(graph, key_rename, None, cx);
+    }
+
+    /// [`Self::commit_graph`] for the one edit that also moves a pin of the
+    /// subnet node enclosing the open network ([`PinRename`]).
+    fn commit_port_edit(
+        &mut self,
+        graph: Graph,
+        key_rename: Option<KeyRename>,
+        pin_rename: Option<PinRename>,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_to_document(
+            graph,
+            key_rename,
+            pin_rename,
+            InvalidationHint::Structural,
+            true,
+            cx,
+        );
         self.notify_properties_selection(cx);
     }
 
@@ -1209,8 +1229,8 @@ impl NodeEditorPanel {
         let Some(context) = self.context.as_ref().map(NetworkPath::context) else {
             return Ok(());
         };
-        let (graph, key_rename) = edit(self.graph.clone(), context)?.into_parts();
-        self.commit_graph(graph, key_rename, cx);
+        let (graph, key_rename, pin_rename) = edit(self.graph.clone(), context)?.into_parts();
+        self.commit_port_edit(graph, key_rename, pin_rename, cx);
         // The edit went straight into `self.graph`, so the document observer
         // will find nothing to re-sync and the teardown in
         // `refresh_from_document` never runs. Every caller of this funnel —
@@ -1524,6 +1544,7 @@ impl NodeEditorPanel {
         &mut self,
         graph: Graph,
         key_rename: Option<KeyRename>,
+        pin_rename: Option<PinRename>,
         hint: InvalidationHint,
         commit: bool,
         cx: &mut Context<Self>,
@@ -1534,7 +1555,14 @@ impl NodeEditorPanel {
             return;
         };
         project.update(cx, |project, cx| {
-            let Some(doc) = replace_network(project.document(), &context, graph) else {
+            // `pin_rename` is what the enclosing subnet node's pin sync needs
+            // to read the edit as a rename instead of a delete plus an add.
+            let Some(doc) = replace_network_renaming_pin(
+                project.document(),
+                &context,
+                graph,
+                pin_rename.as_ref(),
+            ) else {
                 return;
             };
             // The declarations move with the parameter key in the same
@@ -1668,6 +1696,7 @@ impl NodeEditorPanel {
         self.commit_to_document(
             graph,
             None,
+            None,
             InvalidationHint::Params(vec![node_id]),
             true,
             cx,
@@ -1770,6 +1799,7 @@ impl NodeEditorPanel {
         self.commit_to_document(
             graph,
             None,
+            None,
             InvalidationHint::Params(vec![node_id]),
             true,
             cx,
@@ -1843,6 +1873,7 @@ impl NodeEditorPanel {
 
         self.commit_to_document(
             graph,
+            None,
             None,
             InvalidationHint::Params(node_ids.to_vec()),
             commit,
@@ -3631,6 +3662,7 @@ mod tests {
     use ravel_core::graph::ParameterValue;
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::registry::NodeTemplate;
+    use ravel_ui::document::replace_network;
     use ravel_ui::properties::PropertyValue;
     #[test]
     fn add_node_menu_model_groups_and_sorts_templates() {

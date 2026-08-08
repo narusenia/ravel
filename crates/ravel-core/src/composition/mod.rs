@@ -1755,11 +1755,10 @@ mod tests {
         assert_eq!(in_node.outputs.len(), 1);
     }
 
-    /// Load-time drift repair reaches every subnet the document owns, at any
-    /// depth: pins that disagree with the inner In / Out are rebuilt from it,
-    /// the outer edges follow by name, and a second pass changes nothing.
-    #[test]
-    fn sync_subnet_pins_repairs_nested_drift_on_load() {
+    /// A document whose innermost subnet declares a pin (`stale`, wired from a
+    /// constant) that its inner In does not: the drift load-time repair has to
+    /// resolve, at the cost of that one edge.
+    fn document_with_drifted_subnet_pins() -> Document {
         use crate::graph::Node;
         use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
         use crate::network as net;
@@ -1805,12 +1804,22 @@ mod tests {
         outer_subnet.subnet = Some(std::sync::Arc::new(middle));
         let network = Graph::new().add_node(outer_subnet).unwrap();
 
-        let doc = Document::default().with_composition(test_comp().add_layer(Layer::new(
+        Document::default().with_composition(test_comp().add_layer(Layer::new(
             LayerId::new(1),
             "L1",
             network,
-        )));
-        let doc = doc.sync_subnet_pins();
+        )))
+    }
+
+    /// Load-time drift repair reaches every subnet the document owns, at any
+    /// depth: pins that disagree with the inner In / Out are rebuilt from it,
+    /// the outer edges follow by name, and a second pass changes nothing.
+    #[test]
+    fn sync_subnet_pins_repairs_nested_drift_on_load() {
+        use crate::id::NodeId;
+        use crate::network as net;
+
+        let doc = document_with_drifted_subnet_pins().sync_subnet_pins();
 
         let comp = doc.get_composition(CompId::new(1)).unwrap();
         let outer = comp.layers[0].network.node(NodeId::new(10)).unwrap();
@@ -1847,6 +1856,50 @@ mod tests {
 
         let again = doc.clone().sync_subnet_pins();
         assert_eq!(again, doc, "the repair is idempotent");
+    }
+
+    /// A repair that deletes a pin deletes the outer edges drawn to it, and it
+    /// runs on load — so a stored document whose pins drifted loses wiring with
+    /// no user action to attribute it to. That has to leave a trace.
+    #[test]
+    fn a_load_time_pin_removal_is_logged() {
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            document_with_drifted_subnet_pins().sync_subnet_pins();
+        });
+
+        let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("subnet pin removed"),
+            "the removal was silent: {logged:?}"
+        );
+        assert!(
+            logged.contains("dropped_edges=1"),
+            "and it did not say what the removal cost: {logged:?}"
+        );
     }
 
     #[test]

@@ -17,8 +17,10 @@
 
 use ravel_core::composition::templates::{LayerTemplate, TemplateError};
 use ravel_core::composition::{Composition, Document, Layer};
-use ravel_core::graph::{Graph, Node, ParameterValue};
+use ravel_core::exposed::KeyRename;
+use ravel_core::graph::{Graph, Node, ParameterValue, PortSide};
 use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::network::PinRename;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::types::{Color, FrameRate};
 use ravel_core::undo::UndoStack;
@@ -743,24 +745,67 @@ pub fn resolve_network<'a>(doc: &'a Document, path: &NetworkPath) -> Option<&'a 
 /// commit, so one inner edit is still one undo step, and covers every writer
 /// of a nested network at once.
 pub fn replace_network(doc: &Document, path: &NetworkPath, network: Graph) -> Option<Document> {
+    replace_network_renaming_pin(doc, path, network, None)
+}
+
+/// [`replace_network`] told that the edit renamed a custom port of the
+/// network's own In / Out node.
+///
+/// Pin sync matches by name, so without this the enclosing subnet node's pin
+/// is removed and re-added: the outer edges, the promoted parameter's value
+/// and keyframes, and any `NodeOutput` binding that named the pin all go with
+/// it. [`ravel_core::network::rename_subnet_pin`] moves the pin first, and the
+/// declarations bound to the promoted parameter follow in the same snapshot —
+/// the same obligation [`ravel_core::network::rename_custom_port`] discharges
+/// one level down, one level up.
+///
+/// Only the subnet that **directly owns** the edited graph is affected: an
+/// ancestor's pins derive from its own In / Out, which this edit did not
+/// touch. A rename with no enclosing subnet (a layer root) changes nothing.
+pub fn replace_network_renaming_pin(
+    doc: &Document,
+    path: &NetworkPath,
+    network: Graph,
+    pin_rename: Option<&PinRename>,
+) -> Option<Document> {
     let layer = doc.get_composition(path.comp)?.get_layer(path.layer)?;
-    let rebuilt = rebuild_subnets(&layer.network, &path.subnets, network)?;
-    update_layer(doc, path.comp, path.layer, |l| l.network = rebuilt)
+    let rebuilt = rebuild_subnets(&layer.network, &path.subnets, network, pin_rename)?;
+    let doc = update_layer(doc, path.comp, path.layer, |l| l.network = rebuilt)?;
+    Some(match (pin_rename, path.subnets.last()) {
+        (Some(rename), Some(subnet)) if rename.side == PortSide::Input => {
+            ravel_core::exposed::apply::follow_key_rename(
+                doc,
+                &KeyRename::new(*subnet, rename.old_name.clone(), rename.new_name.clone()),
+            )
+        }
+        _ => doc,
+    })
 }
 
 /// Replace the graph reached through `subnets` inside `graph` with `leaf`,
 /// re-wrapping each ancestor subnet node on the way back up and re-deriving
 /// its pins from the graph it ends up owning.
-fn rebuild_subnets(graph: &Graph, subnets: &[NodeId], leaf: Graph) -> Option<Graph> {
+fn rebuild_subnets(
+    graph: &Graph,
+    subnets: &[NodeId],
+    leaf: Graph,
+    pin_rename: Option<&PinRename>,
+) -> Option<Graph> {
     let Some((first, rest)) = subnets.split_first() else {
         return Some(leaf);
     };
     let node = graph.node(*first)?;
     let inner = node.subnet.as_deref()?;
-    let new_inner = rebuild_subnets(inner, rest, leaf)?;
+    let new_inner = rebuild_subnets(inner, rest, leaf, pin_rename)?;
     let mut updated = (**node).clone();
     updated.subnet = Some(std::sync::Arc::new(new_inner));
     let rebuilt = graph.clone().replace_node(std::sync::Arc::new(updated));
+    // `rest.is_empty()` is the subnet that owns the edited graph — the only
+    // one whose pins the rename names.
+    let rebuilt = match pin_rename.filter(|_| rest.is_empty()) {
+        Some(rename) => ravel_core::network::rename_subnet_pin(rebuilt, *first, rename),
+        None => rebuilt,
+    };
     // A node that is not a subnet cannot be on this chain (`node.subnet` just
     // answered), so a refusal here would be a bug rather than a state to
     // carry. It is logged rather than dropped, and the edit still reaches the
@@ -1372,6 +1417,306 @@ mod tests {
         let doc = replace_network(&doc, &path, network).unwrap();
         let resolved = resolve_network(&doc, &path).unwrap();
         assert_eq!(resolved.edges().count(), 1);
+    }
+
+    // ----- subnet pin renames (HIGH-30 regression guards) -------------------
+
+    /// A subnet whose inner In declares one custom `Float` output.
+    fn subnet_with_amount(subnet_id: NodeId, in_id: NodeId, out_id: NodeId) -> Node {
+        let inner = net::add_custom_port(
+            net::new_subnet_inner_graph(in_id, out_id),
+            in_id,
+            "amount",
+            net::CustomPortType::Float,
+            net::NetworkContext::Subnet,
+        )
+        .unwrap();
+        let mut subnet = Node::new(subnet_id, net::SUBNET_TYPE_KEY);
+        net::adopt_subnet_inner(&mut subnet, inner);
+        subnet
+    }
+
+    /// A one-layer document holding `network`.
+    fn doc_with_network(network: Graph) -> (Document, NetworkPath) {
+        let comp_id = CompId::next();
+        let layer_id = LayerId::next();
+        let comp = Composition::new(comp_id, "Test", (16, 16), FrameRate::new(30, 1), 300)
+            .add_layer(Layer::new(layer_id, "L", network).with_time(0, 0, 300));
+        (
+            Document::default().with_composition(comp),
+            NetworkPath::layer(comp_id, layer_id),
+        )
+    }
+
+    /// Rename the custom port `old` on `node` of the network at `path`, the
+    /// way the node editor's commit path does.
+    fn rename_port_at(
+        doc: &Document,
+        path: &NetworkPath,
+        node: NodeId,
+        old: &str,
+        new: &str,
+    ) -> Document {
+        let inner = resolve_network(doc, path).unwrap().clone();
+        let (graph, _key_rename, pin_rename) =
+            net::rename_custom_port(inner, node, old, new, net::NetworkContext::Subnet)
+                .unwrap()
+                .into_parts();
+        replace_network_renaming_pin(doc, path, graph, pin_rename.as_ref()).unwrap()
+    }
+
+    fn node_output_channel(node: NodeId, port: OutputPortIndex) -> ParameterValue {
+        ParameterValue::Channel(ravel_core::animation::channel::AnimationChannel::new(
+            ravel_core::animation::channel::ChannelSource::NodeOutput(node, port),
+        ))
+    }
+
+    fn keyframed_float() -> ParameterValue {
+        let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
+        curve.insert(
+            7,
+            42.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        ParameterValue::Channel(ravel_core::animation::channel::AnimationChannel::keyframes(
+            curve,
+        ))
+    }
+
+    /// Renaming a custom port of a subnet's inner In renames the enclosing
+    /// node's **input pin**: the outer edge stays on it, and the promoted
+    /// parameter's keyframes move with the key rather than being re-seeded
+    /// from the inner In's default.
+    #[test]
+    fn renaming_an_inner_in_port_keeps_the_outer_input_edge_and_its_keyframes() {
+        let (subnet_id, in_id, out_id) = (NodeId::next(), NodeId::next(), NodeId::next());
+        let (source_id, sink_id) = (NodeId::next(), NodeId::next());
+        let mut subnet = subnet_with_amount(subnet_id, in_id, out_id);
+        subnet.parameters = vec![ravel_core::graph::Parameter {
+            key: "amount".to_string(),
+            value: keyframed_float(),
+        }];
+        let network = Graph::new()
+            .add_node(Node::new(source_id, "constant").with_output("value", DataTypeId::SCALAR))
+            .unwrap()
+            .add_node(subnet)
+            .unwrap()
+            .add_node(
+                Node::new(sink_id, net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                subnet_id,
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                subnet_id,
+                OutputPortIndex(0),
+                sink_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let (doc, path) = doc_with_network(network);
+
+        let doc = rename_port_at(&doc, &path.entered(subnet_id), in_id, "amount", "gain");
+
+        let outer = resolve_network(&doc, &path).unwrap();
+        let subnet = outer.node(subnet_id).unwrap();
+        assert_eq!(
+            subnet
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gain"],
+            "the pin was renamed, not replaced"
+        );
+        let feed = outer
+            .edges()
+            .find(|edge| edge.target == subnet_id)
+            .expect("the outer input edge survived the rename");
+        assert_eq!(feed.source, source_id);
+        assert_eq!(feed.target_port, InputPortIndex(0));
+        let promoted = subnet
+            .parameters
+            .iter()
+            .find(|p| p.key == "gain")
+            .expect("the promotion parameter moved to the new key");
+        assert_eq!(
+            promoted.value,
+            keyframed_float(),
+            "with its keyframes, not re-seeded from the inner default"
+        );
+    }
+
+    /// The output side: renaming a custom input of the subnet's inner Out
+    /// renames the enclosing node's **output pin**, so both the outer edge and
+    /// the `ChannelSource::NodeOutput` binding that named the slot survive.
+    #[test]
+    fn renaming_an_inner_out_port_keeps_the_outer_output_edge_and_binding() {
+        let (subnet_id, in_id, out_id) = (NodeId::next(), NodeId::next(), NodeId::next());
+        let consumer_id = NodeId::next();
+        let inner = net::add_custom_port(
+            net::new_subnet_inner_graph(in_id, out_id),
+            out_id,
+            "mask",
+            net::CustomPortType::Float,
+            net::NetworkContext::Subnet,
+        )
+        .unwrap();
+        let mut subnet = Node::new(subnet_id, net::SUBNET_TYPE_KEY);
+        net::adopt_subnet_inner(&mut subnet, inner);
+        let mask_slot = OutputPortIndex(
+            subnet
+                .outputs
+                .iter()
+                .position(|p| p.name == "mask")
+                .expect("the inner Out port became a pin") as u32,
+        );
+        let consumer = Node::new(consumer_id, "constant")
+            .with_input("driver", &[DataTypeId::SCALAR])
+            .with_param("driver", node_output_channel(subnet_id, mask_slot));
+        let network = Graph::new()
+            .add_node(subnet)
+            .unwrap()
+            .add_node(consumer)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                subnet_id,
+                mask_slot,
+                consumer_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let (doc, path) = doc_with_network(network);
+
+        let doc = rename_port_at(&doc, &path.entered(subnet_id), out_id, "mask", "matte");
+
+        let outer = resolve_network(&doc, &path).unwrap();
+        let subnet = outer.node(subnet_id).unwrap();
+        assert_eq!(
+            subnet.outputs[mask_slot.0 as usize].name, "matte",
+            "the pin was renamed in place"
+        );
+        let edge = outer
+            .edges()
+            .find(|edge| edge.source == subnet_id)
+            .expect("the outer output edge survived the rename");
+        assert_eq!(edge.source_port, mask_slot);
+        let binding = &outer.node(consumer_id).unwrap().parameters[0].value;
+        assert_eq!(
+            binding,
+            &node_output_channel(subnet_id, mask_slot),
+            "the NodeOutput binding did not collapse to a constant"
+        );
+    }
+
+    /// The same, two levels down: only the subnet that directly owns the
+    /// edited network has a pin to rename, and the one above it keeps the
+    /// wiring it derives from its own In / Out.
+    #[test]
+    fn renaming_a_pin_inside_a_nested_subnet_keeps_both_levels_wired() {
+        let (outer_id, outer_in, outer_out) = (NodeId::next(), NodeId::next(), NodeId::next());
+        let (mid_id, mid_in, mid_out) = (NodeId::next(), NodeId::next(), NodeId::next());
+        let source_id = NodeId::next();
+
+        // Inner subnet, placed inside the outer subnet's own network.
+        let mut mid = subnet_with_amount(mid_id, mid_in, mid_out);
+        mid.parameters = vec![ravel_core::graph::Parameter {
+            key: "amount".to_string(),
+            value: keyframed_float(),
+        }];
+        let outer_inner = net::add_custom_port(
+            net::new_subnet_inner_graph(outer_in, outer_out),
+            outer_in,
+            "level",
+            net::CustomPortType::Float,
+            net::NetworkContext::Subnet,
+        )
+        .unwrap()
+        .add_node(mid)
+        .unwrap();
+        let level_slot = net::output_port_index(outer_inner.node(outer_in).unwrap(), "level")
+            .expect("the custom port was just added");
+        let outer_inner = outer_inner
+            .add_edge(
+                EdgeId::next(),
+                outer_in,
+                level_slot,
+                mid_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut outer = Node::new(outer_id, net::SUBNET_TYPE_KEY);
+        net::adopt_subnet_inner(&mut outer, outer_inner);
+        let network = Graph::new()
+            .add_node(Node::new(source_id, "constant").with_output("value", DataTypeId::SCALAR))
+            .unwrap()
+            .add_node(outer)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                outer_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let (doc, path) = doc_with_network(network);
+
+        let deep = path.entered(outer_id).entered(mid_id);
+        let doc = rename_port_at(&doc, &deep, mid_in, "amount", "gain");
+
+        // The inner subnet node's pin moved, keeping its feed and keyframes.
+        let mid_graph = resolve_network(&doc, &path.entered(outer_id)).unwrap();
+        let mid = mid_graph.node(mid_id).unwrap();
+        assert_eq!(
+            mid.inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gain"]
+        );
+        assert_eq!(
+            mid_graph
+                .edges()
+                .filter(|edge| edge.target == mid_id)
+                .count(),
+            1,
+            "the edge from the enclosing network's In survived"
+        );
+        assert_eq!(
+            mid.parameters
+                .iter()
+                .find(|p| p.key == "gain")
+                .map(|p| &p.value),
+            Some(&keyframed_float())
+        );
+
+        // The level above is untouched: its own pins come from its own In.
+        let outer_graph = resolve_network(&doc, &path).unwrap();
+        let outer = outer_graph.node(outer_id).unwrap();
+        assert_eq!(
+            outer
+                .inputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["level"],
+            "an ancestor's pins derive from its own In, which nothing renamed"
+        );
+        assert_eq!(
+            outer_graph.edges().count(),
+            1,
+            "and its outer edge is still attached"
+        );
     }
 
     // ----- composition management (REQ-UI-013) ------------------------------

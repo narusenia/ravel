@@ -839,13 +839,17 @@ add_custom_port(graph, node_id, name, CustomPortType, NetworkContext)
     // port landing on an occupied key would answer with the wrong type.
 remove_custom_port(graph, node_id, name, NetworkContext)  // drops the parameter
 rename_custom_port(graph, node_id, old, new, NetworkContext) -> PortEdit
-    // The parameter moves with the port, and the PortEdit says so:
-    // .graph() / .into_graph() / .key_rename() -> Option<&KeyRename> /
-    // .into_parts(). A parameter key can be named from OUTSIDE the graph (an
+    // A rename reaches TWO things the graph cannot: .graph() / .into_graph() /
+    // .key_rename() -> Option<&KeyRename> / .pin_rename() -> Option<&PinRename>
+    // / .into_parts() -> (Graph, Option<KeyRename>, Option<PinRename>).
+    // KeyRename: a parameter key can be named from OUTSIDE the graph (an
     // exposed parameter declaration binds to node id + key), so the caller
-    // hands the KeyRename to `exposed::apply::follow_key_rename` in the SAME
-    // Document commit. Every other port edit returns a plain Graph and
-    // converts with `PortEdit::from`.
+    // hands it to `exposed::apply::follow_key_rename` in the SAME Document
+    // commit. PinRename: an interface port IS a pin of the ENCLOSING subnet
+    // node, so the caller hands it to `document::replace_network_renaming_pin`
+    // — without it the name-matched pin sync reads the rename as a delete plus
+    // an add and takes the outer edges with it. Every other port edit returns a
+    // plain Graph and converts with `PortEdit::from`.
     // Both take the context because editing a legacy custom `f` away from a
     // LAYER-ROOT In re-appends the BUILTIN `f` in the same call — otherwise
     // the layer cannot read its frame index until `append_missing_in_ports`
@@ -912,6 +916,16 @@ sync_subnet_pins(graph, subnet_id) -> Result<Graph, NetworkError>
     // back untouched, so it is idempotent and cheap. MINTS NO IDS — which is
     // why a subnet with `subnet: None` is left broken rather than repaired.
     // Errs on a missing node or a node that is not a subnet.
+    // A pin REMOVAL is `tracing::warn!`ed with the number of outer edges it
+    // deletes: it also runs on load, where a drifted stored pin list costs
+    // wiring with no user action to attribute it to.
+rename_subnet_pin(graph, subnet_id, &PinRename) -> Graph   // the PRE-pass
+    // Renames the pin (and, on the input side, its promotion parameter's KEY —
+    // a pin is not an `is_param` port, so `Graph::rename_port` would not move
+    // it and `promote_parameters` would re-seed the value, losing its
+    // keyframes) so the sync that follows sees the two lists agreeing by name
+    // and has nothing to remove. Anything that does not line up leaves the
+    // graph alone, so a stale or repeated call costs nothing.
 sync_subnet_pins_or_log(graph, subnet_id) -> Graph   // for callers that have
     // already established the node is a subnet; logs a refusal, returns the
     // graph unchanged. Used by `sync_subnet_pins_in` and `replace_network`.
@@ -1733,7 +1747,12 @@ Unknown type keys are skipped silently (plugin space).
   `audio_stream_index: Some(i)` also gives the shell an `AudioSource` for the
   same asset id, which is how a video layer's sound is wired — audio-plan
   unit 4),
-  `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`.
+  `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`,
+  `replace_network_renaming_pin(doc, &path, graph, Option<&PinRename>)` (the
+  same, told that the edit renamed one of the network's own In / Out custom
+  ports — it moves the enclosing subnet node's pin BEFORE the name-matched pin
+  sync runs, and follows the promoted parameter's key into the exposed
+  declarations in the same snapshot; `replace_network` is this with `None`).
 - `AppShell::handle_command(CommandId) -> CommandOutcome` (shell.rs):
   the single headless command entry.
   `CommandOutcome::{Handled, OpenPanel { instance },

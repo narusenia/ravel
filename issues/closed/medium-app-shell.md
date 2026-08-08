@@ -368,3 +368,97 @@ processors: HashMap<NodeId, Arc<dyn NodeProcessor>>,   // crates/ravel-core/src/
 （Subnet の中の Subnet）でも交わらないこと。
 
 ---
+
+## MED-APP-26 | bug | 「プロジェクトへ露出」のトグルが片道 — チェックボックスに見えて解除できない
+
+> **解決済み**: PR #348（2026-08-09）。`toggle_exposed_parameter` が
+> `declared` で分岐し、宣言済みなら既にあった `remove_declaration` を呼ぶ。
+> どちらの半分が走るかは**描画時のフラグではなくドキュメントを読み直して**
+> 決めるので、1 フレーム前の状態で撤回が二重宣言に化けることがない。
+> 束縛を辿って名前を取るため、改名済みの宣言も正しく外れる。
+> ツールチップは状態で出し分ける（`properties.toggle.exposed_remove`）。
+> `exposed-parameters-plan.md` の「押し戻しで取り消さない」という判断は
+> **この修正で撤回した**（理由は同計画書に記録）。
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:598-631`（`exposed_toggle_button`）、
+解除の実体は同ファイル `:2548`（`remove_declaration`）
+
+ボタンは `declared` で `SquareFilled` / `Square` を塗り分け、**チェックボックスとして
+描かれている**のに、`on_mouse_down` は状態を見ずに常に `expose_parameter` を呼ぶ。
+
+```rust
+let (icon, color) = if declared { (SquareFilled, active) } else { (Square, muted) };
+…
+.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+    …this.expose_parameter(node_id, &key, cx);   // declared でも同じ
+})
+```
+
+一度露出させると、その場では戻せない。`remove_declaration` は同じパネルに
+既にあり、宣言セクション側の削除ボタン（`:513`）からは呼ばれている
+— **繋がっていないだけ**。
+
+対比: ポートの露出は `node_editor.rs:1147` の `toggle_param_port` が
+`param_port_index(key).is_some()` で分岐して正しくトグルする。
+
+**修正方針**: `declared` で分岐し、真なら `remove_declaration` を呼ぶ。
+`toggle_param_port` と同じ形にする。ツールチップも状態で出し分ける。
+
+---
+
+## MED-APP-27 | bug | Tab で開くノード検索パレットがカーソル位置に来ない（キャンバス中央固定）
+
+> **解決済み**: PR #348（2026-08-09）。`last_pointer`（キャンバスローカル）を
+> `on_mouse_move` で持ち、`pointer_or_canvas_center` が使用時にキャンバス矩形の
+> 内側かを検査して返す。ポインタがキャンバス外、または一度も乗っていない
+> ときだけ従来どおり中央へ落とす。
+
+**該当**: `crates/ravel-app/src/panels/node_editor.rs:2517-2536`（`on_search_palette`）
+
+```rust
+let (w, h) = self.canvas_size.get();
+let local = (w * 0.5, h * 0.5);      // ← 常にキャンバス中央
+```
+
+ダブルクリック経路（`:2816`）は `event.position` を渡しているので、
+**同じパレットが開き方によって違う場所に出る**。Tab は手を止めずに使う操作なので、
+毎回中央へ視線が飛ぶ。置かれるノードの位置も中央になる。
+
+**修正方針**: 最後のポインタ位置を持っておき、Tab のときそれを渡す。
+ポインタがキャンバス外なら現在どおり中央へ落とす。
+
+---
+
+## MED-APP-28 | bug | Timeline のバードラッグが複数選択を無視して 1 レイヤーしか動かさない
+
+> **解決済み**: PR #348（2026-08-09）。**個票の修正方針だけでは足りなかった**:
+> バーの mousedown は `LayerClickMode::Replace` で
+> `layer_selection_after_click` を通しており、**ドラッグが始まる前に選択が
+> 1 枚へ潰れていた**。押下時点で「掴んだバーが既に選択に含まれるなら選択を
+> 保つ」に変え、動かさずに離したときだけ mouseup で 1 枚へ絞る
+> （`MoveKeyframe` が既に使っていた `collapse_on_click` と同じ規則）。
+> そのうえで `MoveBar` / `TrimIn` / `TrimOut` の 3 つが
+> `Vec<BarBaseline>` を持ち、`operation_targets` からロック済みを除いて作る。
+> **トリムも含めた**（個票が「同じ形」と書いていたもの）。制限は
+> レイヤーごとに自分の表示区間で掛かる。1 マウス移動 = 1 `apply_document`。
+
+**該当**: `crates/ravel-app/src/panels/timeline.rs:1491-1512`（`drag_moved` の
+`TimelineDrag::MoveBar`）
+
+```rust
+TimelineDrag::MoveBar { layer, origin_start, grab_x, .. } => {
+    …
+    self.edit_layer(layer, …, |l| l.start_frame = new_start, …)
+}
+```
+
+`MoveBar` は**単一の `LayerId`** を持ち、ドラッグはその 1 つだけを動かす。
+複数レイヤーを選択してバーを掴んでも、掴んだ 1 本しか動かない。
+
+削除（`delete_layer`）と複製（`duplicate_layers_from_row`）は
+`operation_targets` を通して選択全体へ広げているので、**バードラッグだけが
+選択の規約から外れている**。トリム（in / out）も同じ形。
+
+**修正方針**: `MoveBar` に対象集合を持たせ、`operation_targets` で決める。
+1 ジェスチャ = 1 undo は維持する（各レイヤーに同じ差分を当てて 1 コミット）。
+ロックされたレイヤーは `delete_layer` と同じく保護する。

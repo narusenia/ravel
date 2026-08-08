@@ -239,16 +239,6 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 → 位置を固定（キャンバス左上）にするか、少なくとも下のノードと重なるときは
 出さない。再生中だけ出す案も実機報告に含まれている。
 
-**LOW-APP-24 | bug | Collapse to Subnet が `net.out` の予約名 `frame` を採番から除外していない**
-`crates/ravel-core/src/network.rs:1566`（`outbound_names` が空の `HashSet` で始まる）
-入力ポート名が `frame` のノードへ抜けるエッジを畳むと、`net.out` に `frame` という
-名前の入力ポートが作られる。`is_fixed_port`（`:441`）がそれを fixed と判定するので、
-**ユーザーは削除もリネームもできない**。型も本来の `frame` と違いうる。
-inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
-`PORT_FRAME_INDEX` / `PORT_SOURCE` で正しく seed され、コメントもその理由を
-書いている。**outbound だけが対称性を欠いている。**
-→ `outbound_names` を `[PORT_FRAME]` で seed する。1 行。
-
 ## 参考: 監査で問題なしと確認された箇所
 
 - 永続化のマイグレーション連鎖 v1→v4 は防御的でテスト十分

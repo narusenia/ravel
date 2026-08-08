@@ -103,3 +103,15 @@ i18n に依存しないため `properties::counted_value` でキーと数を一�
 300ms の静穏ウィンドウ内でターゲット切替または2回目の色ジェスチャーが起きると、
 `apply_document` は既に行われた後で pending コミットが破棄される。
 → スロットをクリア / 上書きする前に pending コミットを flush。
+
+**LOW-APP-24 | bug | Collapse to Subnet が `net.out` の予約名 `frame` を採番から除外していない**
+（**解決済み**: PR #348（2026-08-09）。`outbound_names` を `[PORT_FRAME]` で seed し、
+inbound 側と対称にした。衝突した pin は `frame_2` になる）
+`crates/ravel-core/src/network.rs:1566`（`outbound_names` が空の `HashSet` で始まる）
+入力ポート名が `frame` のノードへ抜けるエッジを畳むと、`net.out` に `frame` という
+名前の入力ポートが作られる。`is_fixed_port`（`:441`）がそれを fixed と判定するので、
+**ユーザーは削除もリネームもできない**。型も本来の `frame` と違いうる。
+inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
+`PORT_FRAME_INDEX` / `PORT_SOURCE` で正しく seed され、コメントもその理由を
+書いている。**outbound だけが対称性を欠いている。**
+→ `outbound_names` を `[PORT_FRAME]` で seed する。1 行。

@@ -14,8 +14,8 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 22 | 1件1ファイル |
-| medium | 22 | 領域別4ファイル（`medium-*.md`） |
-| low | 7 | [low.md](low.md) 1ファイル |
+| medium | 27 | 領域別4ファイル（`medium-*.md`） |
+| low | 9 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
 
@@ -53,15 +53,15 @@
 | [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
-## medium（24件）
+## medium（27件）
 
-- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `30`
+- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `07`
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` / `MED-AUD-01` `02` `03`
 
-## low（8件）
+## low（9件）
 
-[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `07` `11` `14` `15` `17`
+[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `07` `11` `14` `15` `17` `24`

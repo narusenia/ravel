@@ -656,14 +656,14 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | WRG-1 | 🟡 | 式言語の複数文とローカル変数（`;` と代入） | — |
 | WRG-2 | ⬜ | 属性への書き戻し（`@attr = …` の左辺） | WRG-1 |
 | WRG-3 | ⬜ | `attribute.wrangle` ノード | WRG-2 |
-| WRG-4 | ❓ | spare parameter の機構（任意ノードのユーザー定義パラメータ） | `HIGH-30`、露出モデルの分岐の決着 |
+| WRG-4 | ⬜ | spare parameter の機構（任意ノードのユーザー定義パラメータ） | — |
 | WRG-5 | ⬜ | spare parameter の編集 UI | WRG-4 |
 | WRG-6 | ⬜ | spare parameter を式から名前で引く | WRG-3, WRG-4 |
 | WRG-7 | ⬜ | ロケール / 文書 | WRG-1〜6 |
 
-**この計画書は丸ごとリリース後。** リリース前に要るのは前提の `HIGH-30`
-だけ。`WRG-4` が `❓` なのは、spare parameter が既存の露出モデル
-（`EXPO-*`）に乗るかどうかが未決定のため（計画書の「未決定の分岐」）。
+**この計画書は丸ごとリリース後。** リリース前に要った前提の `HIGH-30` は
+#346 で解消し、`WRG-4` の分岐（spare parameter が既存の露出モデルに乗るか）は
+**案 A（2 段）で決着**した（2026-08-09）。着手条件は残っていない。
 
 ### 式言語（REQ-CORE-014 / REQ-CORE-015）
 

@@ -225,6 +225,14 @@ node.parameter_sources() -> Vec<(NodeId, OutputPortIndex)>
 graph.downstream_adjacency() -> HashMap<NodeId, Vec<NodeId>>
     // One pass, spanning edges AND parameter_sources. For flooding from
     // several seeds without re-walking the graph per seed.
+graph.find_nested_node(id) -> Option<&Arc<Node>>     // this graph OR any
+graph.replace_nested_node(Arc<Node>) -> Option<Graph>  // subnet inside it
+    // `node` / `replace_node` see ONE graph. These walk the subnet hierarchy,
+    // which a NodeId can address on its own because ids are globally unique
+    // (REQ-LAYER-009). `replace_nested_node` re-wraps only the owning chain
+    // and does NOT re-derive pins — it cannot move one. A caller editing an
+    // inner In / Out PORT goes through `network::*_custom_port` and
+    // `document::replace_network` instead.
 graph.duplicate_with_fresh_ids() -> (Graph, HashMap<NodeId, NodeId>)
 Graph::duplicate_nodes_with_fresh_ids(iter of &Node)
     -> (Vec<Node>, HashMap<NodeId, NodeId>)   // copies in the given order
@@ -1851,10 +1859,19 @@ Unknown type keys are skipped silently (plugin space).
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
-  the shell groups plus every keyframed parameter of the layer's
-  **top-level** network (In custom params and subnet-promoted params
-  included; nodes inside subnets are keyed via the node editor's subnet
-  context and are not listed — v1). All edit frames are layer-local:
+  the shell groups plus every keyframed parameter of the layer's network
+  **and of every subnet nested inside it, at any depth** — enumeration is
+  recursive because evaluation is, and a flat list beside a recursive
+  evaluator is what hid a collapsed node's keyframes while its animation kept
+  running. Row labels are prefixed by the enclosing subnet names
+  (`"Outer / Inner / blur · radius"`). A row is addressed by a bare `NodeId`,
+  which suffices at any depth (ids are globally unique, REQ-LAYER-009), and
+  `row_channels` / `mutate_channel` reach it through
+  `Graph::find_nested_node` / `replace_nested_node`. The one exclusion: an
+  inner In's custom parameter under a key its owning subnet node **promotes**
+  gets no row — `SubnetProcessor` binds the promoted value and never reads the
+  inner default, so the row would edit nothing. All edit frames are
+  layer-local:
   `layer_local_frame(layer, comp_frame)` /
   `comp_frame_for_key(layer, local)`. Edits rebuild the layer immutably:
   `insert_keyframe` (converts a constant channel), `remove_keyframe` (the

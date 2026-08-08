@@ -758,6 +758,50 @@ impl Graph {
         self.nodes.get(&id)
     }
 
+    /// Look up a node by id in this graph **or in any subnet nested inside
+    /// it**, at any depth.
+    ///
+    /// A [`NodeId`] comes from one global counter (REQ-LAYER-009), so it is
+    /// unique across the whole hierarchy and the first hit is the only one.
+    /// The walk terminates because the hierarchy is a tree of owned graphs: a
+    /// node either carries a `subnet` — a graph it alone owns, which cannot be
+    /// an ancestor of itself — or is a leaf.
+    pub fn find_nested_node(&self, id: NodeId) -> Option<&Arc<Node>> {
+        if let Some(node) = self.nodes.get(&id) {
+            return Some(node);
+        }
+        self.nodes
+            .values()
+            .filter_map(|node| node.subnet.as_deref())
+            .find_map(|inner| inner.find_nested_node(id))
+    }
+
+    /// [`Graph::replace_node`] for a node that may live in a nested subnet,
+    /// re-wrapping the owning chain on the way back up. `None` when no graph in
+    /// the hierarchy holds the id.
+    ///
+    /// Only the ancestors of the replaced node are rebuilt; every other branch
+    /// stays structurally shared. This does **not** re-derive the pins of the
+    /// subnets it re-wraps ([`crate::network::sync_subnet_pins`]) because it
+    /// cannot change them: `replace_node` keeps the node's own port lists as
+    /// given, and a caller that edits an inner In or Out **port** must go
+    /// through the network-interface operations instead. Editing a parameter
+    /// value — what this exists for — moves no pin.
+    pub fn replace_nested_node(&self, node: Arc<Node>) -> Option<Graph> {
+        if self.nodes.contains_key(&node.id) {
+            return Some(self.clone().replace_node(node));
+        }
+        self.nodes.values().find_map(|owner| {
+            let rebuilt = owner
+                .subnet
+                .as_deref()?
+                .replace_nested_node(Arc::clone(&node))?;
+            let mut updated = (**owner).clone();
+            updated.subnet = Some(Arc::new(rebuilt));
+            Some(self.clone().replace_node(Arc::new(updated)))
+        })
+    }
+
     /// Look up an edge by id.
     pub fn edge(&self, id: EdgeId) -> Option<&Edge> {
         self.edges.get(&id)

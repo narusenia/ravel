@@ -45,6 +45,9 @@ several plans here wait on its later units rather than on each other.
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
+| `discrete-keyframes-plan.md` | Keyframes for Int and String parameters (`IntChannel`, `StringSteps`) — animation stops being f32-only | — | REQ-CORE-010 |
+| `asset-identity-plan.md` | Stable `AssetId` separate from the display name, so a re-import cannot silently rebind an existing reference | — | REQ-PROJ-001, REQ-UI-008, REQ-UI-010 |
+| `parameter-groups-plan.md` | Parameter groups (Pages) declared by the node type; the shape `OFX-5` reads plugin Group/Page into | — | REQ-PLUGIN-001 |
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract — **prerequisite for `done/exposed-parameters-plan.md`** | — | REQ-LAYER-002, REQ-LAYER-003, REQ-PROJ-006 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1); `vector-field-plan.md` unit 5 (merged) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |

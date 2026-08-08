@@ -482,7 +482,11 @@ TimelineDrag::MoveBar { layer, origin_start, grab_x, .. } => {
 >   組み立ては `workspace::workspace_binding_context` の 1 箇所で、
 >   文脈名は `gpui_component::menu` の `POPUP_MENU_CONTEXT` /
 >   `APP_MENU_BAR_CONTEXT`（この PR でフォークに `pub` として生やした）を
->   参照するので、Ravel は文字列を二重に持たない
+>   参照するので、Ravel は文字列を二重に持たない。
+>   **パネル固有のバインドも同じ narrowing を受ける**（`yield_to_open_menus`。
+>   個票に無い判断）— ポップアップは開いたパネルの子として dispatch tree に
+>   載るので、パネルの文脈はメニューが開いている間もスタックに残り、
+>   narrowing が無いと `L`（自動整列）がメニューの裏で走る
 > - **Escape は別原因だった。** `DropdownMenuPopover` は `PopupMenu` を
 >   **初回生成時にしか focus していなかった**（`dropdown_menu.rs` の `None`
 >   分岐）。キャッシュを捨てるのはメニュー自身の `DismissEvent` のときだけで、

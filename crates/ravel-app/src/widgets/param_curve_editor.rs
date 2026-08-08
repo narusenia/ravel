@@ -1044,9 +1044,11 @@ impl ParamCurveEditorState {
         cx.notify();
     }
 
-    pub(crate) fn end_drag(&mut self, cx: &mut Context<Self>) {
+    /// Ends the drag phase and reports whether it emitted a `Commit`, so a
+    /// caller that has to take that undo step itself knows there is one.
+    pub(crate) fn end_drag(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(drag) = self.drag.take() else {
-            return;
+            return false;
         };
         let moved = self.moved_in_drag;
         self.moved_in_drag = false;
@@ -1068,12 +1070,14 @@ impl ParamCurveEditorState {
                 .iter()
                 .any(|point| point == &drag.origin),
         };
-        if moved && !settled {
+        let committed = moved && !settled;
+        if committed {
             cx.emit(ParamCurveEvent::Commit(self.curve.clone()));
         } else if moved {
             cx.emit(ParamCurveEvent::Change(self.curve.clone()));
         }
         cx.notify();
+        committed
     }
 
     /// Switch the interpolation of the segment leaving the selected point.

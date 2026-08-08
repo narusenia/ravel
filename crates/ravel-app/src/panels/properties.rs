@@ -1693,11 +1693,12 @@ impl PropertiesGpuiPanel {
                 // would edit through a read-only row.
                 this.refresh_values_checked(cx);
             } else {
-                // The pending color commit belongs to the target being left
-                // and its live value is already in the document: commit it
-                // here, while `self.target` still names the row it came from,
-                // instead of dropping it into an unrelated undo step.
-                this.flush_pending_color_commit(cx);
+                // An in-flight gesture belongs to the target being left and
+                // its live value is already in the document: end it here,
+                // while `self.target` still names the row it came from,
+                // instead of dropping it into an unrelated undo step — or,
+                // worse, onto the target being switched to.
+                this.end_gestures(cx);
                 this.target = target.0;
                 // A refusal names a port on the target that is going away,
                 // and a rename record names a row that is going with it.
@@ -1830,12 +1831,75 @@ impl PropertiesGpuiPanel {
     /// entirely. The rebuild waits instead — the gesture is short, and the
     /// stale-binding risk a rebuild guards against is already covered where it
     /// matters by the driven-parameter check in [`Self::route_change`].
+    ///
+    /// This only holds the rebuild off while the panel keeps pointing at the
+    /// same target. A target switch ends the gesture instead, on the row it
+    /// belongs to — see [`Self::end_gestures`].
     fn gesture_in_flight(&self, cx: &App) -> bool {
         self.pending_color_commit.is_some()
             || self
                 .scrubs
                 .iter()
                 .any(|(_, binding)| binding.state.read(cx).is_dragging())
+            || self
+                .curves
+                .iter()
+                .any(|(_, binding)| binding.state.read(cx).is_dragging())
+    }
+
+    /// End every in-flight edit gesture, taking the undo step it owes, before
+    /// the panel stops pointing at the row the gesture belongs to.
+    ///
+    /// A widget's `Commit` travels on a subscription, and GPUI delivers an
+    /// emitted event *after* the callback that triggered it returns — by then
+    /// `self.target` names the newly selected row, and `route_change` would
+    /// write a scrub of layer A onto layer B. So the drags end here and their
+    /// bindings are dropped, which leaves the queued event without a
+    /// subscriber, and the commit is taken directly: the gesture's value is
+    /// already in the live document, and `commit` differs from `apply` only in
+    /// recording the undo step, so committing the live document as it stands
+    /// is the snapshot the routed commit would have produced.
+    fn end_gestures(&mut self, cx: &mut Context<Self>) {
+        // The debounced color commit has no widget event racing the switch, so
+        // it routes normally — while `self.target` is still the old one.
+        let flushed = self.pending_color_commit.is_some();
+        self.flush_pending_color_commit(cx);
+
+        let mut ended = false;
+        let mut moved = false;
+        for (_, binding) in &self.scrubs {
+            if binding.state.read(cx).is_dragging() {
+                ended = true;
+                moved |= binding.state.update(cx, |state, cx| state.end_drag(cx)) == Some(true);
+            }
+        }
+        for (_, binding) in &self.curves {
+            if binding.state.read(cx).is_dragging() {
+                ended = true;
+                moved |= binding.state.update(cx, |state, cx| state.end_drag(cx));
+            }
+        }
+        if !ended {
+            return;
+        }
+        // Both `end_drag`s emit — a `Commit`, or a `Change` for a gesture that
+        // settled back where it started. Dropping the bindings now is what
+        // keeps either from reaching the target being switched to.
+        self.scrubs.clear();
+        self.curves.clear();
+        // The color flush already recorded a step over the same live document.
+        if !moved || flushed {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            let live = project.document().clone();
+            // The document is unchanged by this call, so nothing needs
+            // re-evaluating: only the undo step is new.
+            project.commit_document(live, InvalidationHint::None, cx);
+        });
     }
 
     /// The frame under the playhead from the shared `PlaybackPosition`
@@ -4927,6 +4991,90 @@ mod tests {
         );
     }
 
+    /// The other side of the same rule: keeping a widget alive across a
+    /// *target* switch would aim it at the wrong row.
+    ///
+    /// A `Commit` travels on a subscription and GPUI delivers it after the
+    /// callback that switched the target has returned, and a `ScrubBinding`
+    /// carries no target of its own — so a scrub of layer A, released after
+    /// layer B was selected, would route through `self.target` and silently
+    /// rewrite a value on B. The switch ends the gesture on A instead.
+    #[gpui::test]
+    fn a_scrub_in_flight_commits_on_the_target_it_started_on(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a) = setup(cx);
+        let b = project.update(cx, |project, cx| {
+            let b = LayerId::next();
+            let layer = Layer::new(b, "B", network_with_custom_param()).with_time(0, 0, 300);
+            let doc = ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            b
+        });
+        let position_x = |lid: LayerId, cx: &mut TestAppContext| {
+            let eval = ravel_core::eval::EvalContext::new(
+                0,
+                ravel_core::types::FrameRate::new(30, 1),
+                (16, 16),
+            );
+            layer(&project, comp_id, lid, cx).transform.position[0].evaluate(0.0, &eval)
+        };
+
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+        let scrub = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .scrubs
+                    .iter()
+                    .find(|(key, _)| key == "position_x")
+                    .map(|(_, binding)| binding.state.clone())
+                    .expect("a scrub widget for the layer's position")
+            })
+            .unwrap();
+
+        scrub.update(cx, |state, cx| {
+            state.begin_drag(0.0);
+            state.drag_to(120.0, &gpui::Modifiers::default(), cx);
+        });
+        cx.run_until_parked();
+        let scrubbed = scrub.read_with(cx, |state, _| state.value());
+        assert_ne!(scrubbed, 0.0, "the drag moved the value");
+
+        // The user selects another layer with the pointer still down.
+        cx.update(|cx| {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Layer {
+                comp_id,
+                layer_id: b,
+            }));
+        });
+        cx.run_until_parked();
+        // The pointer comes up on a widget the panel no longer owns.
+        scrub.update(cx, |state, cx| {
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            position_x(b, cx),
+            0.0,
+            "the layer selected mid-drag was never scrubbed"
+        );
+        assert!(
+            (position_x(a, cx) - scrubbed).abs() < 1e-6,
+            "the scrubbed value stayed on the layer it was scrubbed on"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            position_x(a, cx),
+            0.0,
+            "one undo returns the pre-scrub value"
+        );
+        // Only a committed step can be redone.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!((position_x(a, cx) - scrubbed).abs() < 1e-6);
+    }
+
     /// Enter followed by blur is still de-duplicated locally while the actual
     /// node write uses the deferred direct call.
     #[gpui::test]
@@ -5691,6 +5839,61 @@ mod tests {
                 .abs()
                 < 1e-3
         );
+    }
+
+    /// A curve drag is an edit gesture like any other: the target switch ends
+    /// it on the row it started on instead of letting its `Commit` land after
+    /// the panel has moved on (and, before that, instead of dropping it).
+    #[gpui::test]
+    fn a_curve_drag_commits_on_the_target_it_started_on(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_curve_expanded("points", cx)
+            })
+            .unwrap();
+
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+        let start = curve_widget_pos(&state, 0.5, 0.5, cx);
+        let end = curve_widget_pos(&state, 0.5, 0.9, cx);
+        state.update(cx, |state, cx| {
+            state.pointer_down(start, 1, cx);
+            state.drag_to(end, cx);
+        });
+        cx.run_until_parked();
+        window
+            .read_with(cx, |panel, cx| assert!(panel.gesture_in_flight(cx)))
+            .unwrap();
+
+        // Another target is selected with the pointer still down.
+        cx.update(|cx| {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Composition {
+                comp_id: path.comp,
+            }));
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+
+        let curve = |cx: &mut TestAppContext| {
+            node_curve(&project, &path, node_id, "points", cx).expect("curve")
+        };
+        assert!(
+            (curve(cx).evaluate(0.5) - 0.9).abs() < 1e-3,
+            "{:?}",
+            curve(cx)
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(curve(cx), original);
+        // Only a committed step can be redone.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!((curve(cx).evaluate(0.5) - 0.9).abs() < 1e-3);
     }
 
     /// The selected point's value fields write through to the Document with

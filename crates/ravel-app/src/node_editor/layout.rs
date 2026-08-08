@@ -46,10 +46,12 @@ const FALLBACK_SIZE: (f32, f32) = (160.0, 60.0);
 
 /// Lay `targets` out in layers and return their new positions.
 ///
-/// An empty `targets` means the whole network. Ids that name no node in
-/// `graph` are ignored, and a selection that survives only as such ids is
-/// treated as empty — node ids are unique across networks, but a selection
-/// published for another network must not decide what moves here.
+/// Fewer than two usable `targets` means the whole network — a single node
+/// has nothing to be aligned against, so there is no one-node alignment to
+/// lose (see [`layout_members`]). Ids that name no node in `graph` are
+/// ignored before that count is taken: node ids are unique across networks,
+/// but a selection published for another network must not decide what moves
+/// here.
 ///
 /// Synthetic nodes (the compositing chain the Composition compiler generates)
 /// are never moved: they are not drawn, so they have no position a user can
@@ -127,11 +129,18 @@ pub fn auto_layout(
 }
 
 /// The nodes an alignment moves: the target set restricted to nodes this graph
-/// actually has and a user can see, or all of them when the set is empty.
+/// actually has and a user can see, or all of them when fewer than two remain.
+///
+/// **Fewer than two is the whole network, not a one-node alignment.** Laying a
+/// single node out is undefined by construction — it has nothing to be lined
+/// up against, and the result is anchored at its own bounding box, so it would
+/// simply not move. There is no meaning to lose by widening it, and there is
+/// one to gain: a collapse leaves its new subnet node selected, so the very
+/// next alignment is a one-node selection that would otherwise do nothing.
 fn layout_members(graph: &Graph, targets: &HashSet<NodeId>) -> HashSet<NodeId> {
     let movable = |id: NodeId| graph.node(id).is_some_and(|node| !node.metadata.synthetic);
     let selected: HashSet<NodeId> = targets.iter().copied().filter(|id| movable(*id)).collect();
-    if !selected.is_empty() {
+    if selected.len() >= 2 {
         return selected;
     }
     graph
@@ -321,6 +330,19 @@ mod tests {
         let targets: HashSet<NodeId> = [id(1), id(2)].into_iter().collect();
         let layout = auto_layout(&graph, &targets, &sizes(&[1, 2]), LayoutAxis::Horizontal);
         assert_eq!(layout.keys().copied().collect::<HashSet<_>>(), targets);
+    }
+
+    /// One node cannot be aligned against anything, so a one-node selection
+    /// is the whole network — which is what makes the alignment right after a
+    /// collapse (whose new subnet node is the selection) do something.
+    #[test]
+    fn a_single_node_selection_lays_out_the_whole_network() {
+        let graph = chain_graph();
+        let sizes = sizes(&[1, 2, 3, 4]);
+        let targets: HashSet<NodeId> = [id(2)].into_iter().collect();
+        let layout = auto_layout(&graph, &targets, &sizes, LayoutAxis::Horizontal);
+        assert_eq!(layout.len(), 4);
+        assert!(!any_overlap(&rects(&layout, &sizes)));
     }
 
     /// Ids that name nothing here cannot decide what moves: a selection

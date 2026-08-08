@@ -6063,24 +6063,28 @@ mod tests {
             .unwrap();
     }
 
-    /// The case the command exists for: a collapse leaves the subnet node
-    /// sitting on top of what stayed behind, and one alignment untangles it.
+    /// The case the command exists for, in the gesture the user actually
+    /// makes: collapse, then press the alignment key. The collapse leaves its
+    /// new subnet node *selected*, and that one-node selection has to reach
+    /// the whole network or the alignment would move nothing.
     #[gpui::test]
-    fn aligning_after_a_collapse_pulls_the_nodes_apart(cx: &mut TestAppContext) {
+    fn aligning_right_after_a_collapse_pulls_the_nodes_apart(cx: &mut TestAppContext) {
         let (window, project, path, blur) = setup(cx);
         let extra = pile_up_nodes(&project, &path, 2, cx);
 
         window
             .update(cx, |panel, _window, cx| {
                 panel.collapse_to_subnet(&[blur], cx);
+                assert_eq!(
+                    NodeEditorPanel::selected_nodes(cx).len(),
+                    1,
+                    "the collapse leaves its subnet node selected"
+                );
                 assert!(
                     rects_overlap(&drawn_rects(panel)),
                     "the collapse left the subnet node overlapping"
                 );
 
-                // The alignment acts on the whole network, so the selection the
-                // collapse left on the subnet node is cleared first.
-                panel.clear_selected_nodes(cx);
                 panel.auto_layout_nodes(cx);
                 assert!(!rects_overlap(&drawn_rects(panel)));
                 assert_eq!(panel.graph.nodes().count(), extra.len() + 1);

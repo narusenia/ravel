@@ -2720,20 +2720,38 @@ impl PropertiesGpuiPanel {
     /// like every other declaration edit, and the declarations list has always
     /// offered the same removal without a confirmation, so the asymmetry was
     /// protecting nothing and only made the checkbox lie.
+    ///
+    /// A binding is not unique — [`ExposedParameters::bound_to`] says so, and
+    /// two declarations may drive one parameter. The checkbox is per
+    /// *parameter*, not per declaration, so unchecking it withdraws **every**
+    /// declaration bound to that parameter in one undo step. Removing only the
+    /// first would leave the box filled and the click looking ignored.
     fn toggle_exposed_parameter(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let declared = project
+        let declared: Vec<String> = project
             .read(cx)
             .document()
             .exposed_parameters
-            .bound_to(node_id, key)
-            .map(|declaration| declaration.name().to_string());
-        match declared {
-            Some(name) => self.remove_declaration(&name, cx),
-            None => self.expose_parameter(node_id, key, cx),
+            .iter()
+            .filter(|declaration| {
+                let binding = declaration.binding();
+                binding.node == node_id && binding.key == key
+            })
+            .map(|declaration| declaration.name().to_string())
+            .collect();
+        if declared.is_empty() {
+            self.expose_parameter(node_id, key, cx);
+            return;
         }
+        self.edit_declarations(cx, move |declarations| {
+            Ok(declared
+                .iter()
+                .filter(|name| declarations.remove(name).is_some())
+                .count()
+                > 0)
+        });
     }
 
     /// Route a field edit to its target: document-owned targets edit the
@@ -6731,6 +6749,45 @@ mod tests {
                     panel.exposed_error, None,
                     "withdrawing is the other half of the toggle, not a refusal"
                 );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(declaration_names(&properties, cx).is_empty());
+    }
+
+    /// A hand-written `.ravprj` may bind one parameter twice — the core says
+    /// so in `bound_to`. The checkbox is per parameter, so unchecking it has
+    /// to clear both, or the click looks ignored.
+    #[gpui::test]
+    fn the_exposed_checkbox_withdraws_every_declaration_on_the_parameter(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.edit_declarations(cx, |declarations| {
+                    let twin = ravel_core::exposed::ExposedParameter::inferred(
+                        "amount_again",
+                        ravel_core::exposed::ExposedValue::Float(1.0),
+                        ExposedBinding::new(in_id, "amount"),
+                    )?;
+                    declarations.insert(twin).map(|()| true)
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            declaration_names(&properties, cx),
+            ["amount", "amount_again"]
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
             })
             .unwrap();
         cx.run_until_parked();

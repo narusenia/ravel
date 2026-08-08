@@ -186,12 +186,6 @@ Delete でユーザーが見たことのないキーを削除する。
 次のスクラブまでミラーされたプレイヘッドが終端を超えたまま残る。
 → `sync_from_project` でクランプ。
 
-**LOW-APP-07 | bug | デバウンスされた色コミットが破棄され、ライブプレビューが無関係な undo ステップに畳み込まれる**
-`crates/ravel-app/src/panels/properties.rs:566-571`, `:1002-1028`
-300ms の静穏ウィンドウ内でターゲット切替または2回目の色ジェスチャーが起きると、
-`apply_document` は既に行われた後で pending コミットが破棄される。
-→ スロットをクリア / 上書きする前に pending コミットを flush。
-
 **LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（latent）**
 `crates/ravel-app/src/audio/mixdown.rs:44-53`, `crates/ravel-app/src/audio/mod.rs:94-96`, `:358-379`
 `CacheKey` が `(asset_id, stream)` でパスを含まないため、将来リリンクを実装すると

@@ -94,3 +94,12 @@ i18n に依存しないため `properties::counted_value` でキーと数を一�
   `ravel-ui/keyframes.rs:688-703` 由来のチャンネル名 "Value"/"X"/"Y"… も未翻訳で描画される
 
 → ロケールキーを追加する（または軸の文字は意図的な記法として文書化する）。
+
+**LOW-APP-07 | bug | デバウンスされた色コミットが破棄され、ライブプレビューが無関係な undo ステップに畳み込まれる**
+（**解決済み**: PR #344。`HIGH-28` / `MED-APP-30` と同じ規律でまとめて解いた。
+`flush_pending_color_commit` がスロットのクリア・上書きの前に走り、
+ターゲット切替では `end_gestures` が旧ターゲットのまま確定する）
+`crates/ravel-app/src/panels/properties.rs:566-571`, `:1002-1028`
+300ms の静穏ウィンドウ内でターゲット切替または2回目の色ジェスチャーが起きると、
+`apply_document` は既に行われた後で pending コミットが破棄される。
+→ スロットをクリア / 上書きする前に pending コミットを flush。

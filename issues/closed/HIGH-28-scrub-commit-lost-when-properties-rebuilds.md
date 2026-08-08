@@ -1,5 +1,18 @@
 # HIGH-28 | bug | Properties のスクラブ中にウィジェットが作り直されると、ジェスチャ終端の `Commit` が失われ undo が効かない
 
+**解決済み**: PR #344（2026-08-08）。`LOW-APP-07` / `MED-APP-30` と同じ
+PR で、「ジェスチャが飛んでいる間は入れ物を捨てない」という 1 つの規律に
+まとめて解いた。`gesture_in_flight`（スクラブ / カーブがドラッグ中、または
+色のコミットが保留）の間は `render` の `needs_rebuild` を遅らせる。
+
+**ただしターゲットが変わるときは遅らせるだけでは足りない** — 古い
+`ScrubBinding` が生き残り、その `Commit` が**新しいターゲット**に載って
+別のレイヤーの値を書き換える（レビューで発覚した、修正が入れた退行）。
+`end_gestures` が切替の**前**に旧 `self.target` のまま確定する。
+
+同一ターゲットで形が変わったら遅らせる / ターゲットが変わるなら確定してから
+切り替える、という切り分けになった。
+
 `crates/ravel-app/src/panels/properties.rs:1802-1810`（`refresh_values_checked`）、
 `:3068-3081`（スクラブの購読）、`:1339`（`fields_shape`）
 
@@ -42,9 +55,21 @@ if fields_shape(&self.sections) != before … {
 結果、`apply_document`（undo を記録しない）だけが走った状態で文書が確定し、
 **undo スタックにはそのジェスチャの入口が無い**。Undo は 1 つ前の操作へ飛ぶ。
 
-キーフレームを打っていると起きやすいのは、キーフレーム経路が
-「定数 `Float` → チャンネル」の変換を含む（`:2104` の `toggle_key` の doc が
-明言）ためで、**種別の変わる行がそこに集中している**。
+> **この段落は誤りだった**（修正時の調査で判明。記録として残す）。
+>
+> 起票時は「キーフレームを打っていると起きやすいのは、キーフレーム経路が
+> 『定数 `Float` → チャンネル』の変換を含むため、種別の変わる行がそこに
+> 集中している」と書いたが、**コード上そうなっていない**。
+> `ParameterValue::Float` と `ParameterValue::Channel` は
+> どちらも `PropertyField::Float` に落ちる
+> （`crates/ravel-ui/src/properties/node.rs:94` と `:128`）ので、
+> `std::mem::discriminant` を指紋にする `fields_shape` は動かない。
+>
+> **実際にジェスチャ中に形を変える経路は式（expression）駆動パラメータ**で、
+> 最初の `Change` がチャンネルを `Float` に潰し、`expression_shape`
+> （`properties.rs:1180`、`refresh_values_checked` が `fields_shape` と
+> 並べて比較している）が変わって再構築が予約される。
+> 回帰テストはこの経路を通している。
 
 ## 関連
 

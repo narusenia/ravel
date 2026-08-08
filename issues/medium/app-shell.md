@@ -473,28 +473,6 @@ TimelineDrag::MoveBar { layer, origin_start, grab_x, .. } => {
 
 ---
 
-## MED-APP-30 | perf | ノードエディタのラバーバンド選択中に Properties が作り直され続ける
-
-**該当**: `crates/ravel-app/src/panels/node_editor.rs:1760-1764`, `:1923-1949`
-（バンドの選択公開）、`crates/ravel-app/src/panels/properties.rs:1802`
-（`refresh_values_checked`）
-
-ラバーバンドでノードを囲っている間、Properties が目に見えて荒ぶる。
-
-バンドはドラッグ中に選択を公開し、Properties は選択が変わるたびに
-セクションを組み直す。`MED-UI-02`（Properties が再生中フレームあたり 2 回
-全セクションを再構築）と同じ経路で、**マウス移動のたびに**それが起きる。
-
-`HIGH-28` と同じ再構築経路なので、**ジェスチャ中の再構築を抑える修正が
-入れば一緒に収まる可能性がある**。
-
-**未確認**: 「マウス移動ごとに選択が公開されている」ことをソースで特定できて
-いない（バンドの公開箇所は `LOW-APP-03` が指す行を参照）。
-着手時にまずそこを確かめること。
-
-**修正方針**: バンド中は選択の公開をドラッグ終了までまとめる。
-最低でも、前回公開した集合と同じなら公開しない。
-
 ## MED-APP-31 | bug | ポップアップメニューが開いている間もワークスペースのショートカットが勝つ
 
 **該当**: `crates/ravel-app/src/workspace.rs:424`（`build_keybindings` が

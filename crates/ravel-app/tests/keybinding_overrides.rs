@@ -47,11 +47,30 @@ use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 
-/// The predicate every binding derived from the binding set must carry. Read
-/// from the one place that builds it, so widening the set of keyboard owners
-/// does not need this file edited in step.
+/// The contexts an open menu owns, spelled out rather than read from
+/// `gpui_component`.
+///
+/// Deliberate duplication: this file exists to catch the predicate narrowing
+/// **going away**, so deriving the expected value from the code under test
+/// would make every assertion here true by construction. Widening the set of
+/// keyboard owners is supposed to fail this test until someone confirms the
+/// widening was intended.
+const MENU_CONTEXTS: [&str; 2] = ["PopupMenu", "AppMenuBar"];
+
+/// The predicate every binding derived from the binding set must carry.
 fn workspace_context() -> String {
-    workspace::workspace_binding_context()
+    yielding("!Input")
+}
+
+/// `context` with the menu owners excluded — the shape `build_keybindings`
+/// gives every binding it registers.
+fn yielding(context: &str) -> String {
+    let mut out = context.to_string();
+    for menu in MENU_CONTEXTS {
+        out.push_str(" && !");
+        out.push_str(menu);
+    }
+    out
 }
 
 /// The panel key contexts the code-side bindings use. Everything else in the
@@ -133,7 +152,7 @@ fn no_binding_is_registered_without_a_context() {
         // the workspace one is: an open menu owns the keyboard whichever
         // binding set the chord came from (`MED-APP-31`).
         let mut allowed = vec![workspace_context()];
-        allowed.extend(panel_contexts().map(workspace::yield_to_open_menus));
+        allowed.extend(panel_contexts().map(yielding));
         for (key, predicate) in bindings_of(&shell) {
             let predicate = predicate.unwrap_or_else(|| {
                 panic!("'{key}' is bound with no key context (MED-APP-16 regression)")

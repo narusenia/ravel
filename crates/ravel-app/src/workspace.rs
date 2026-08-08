@@ -448,7 +448,7 @@ pub fn workspace_binding_context() -> String {
 /// Applies to the panel-scoped bindings too: a popup is a child of the panel
 /// that opened it, so the panel's own key context is still on the stack while
 /// its menu is up, and `L` would lay the graph out behind an open menu.
-pub fn yield_to_open_menus(context: &str) -> String {
+fn yield_to_open_menus(context: &str) -> String {
     format!("{context} && !{POPUP_MENU_CONTEXT} && !{APP_MENU_BAR_CONTEXT}")
 }
 

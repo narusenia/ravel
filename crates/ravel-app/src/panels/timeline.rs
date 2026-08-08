@@ -636,6 +636,91 @@ impl TimelineGpuiPanel {
         });
     }
 
+    /// Handle a press on the layer bar row `lid`: select, and start a gesture
+    /// when there is one to start.
+    ///
+    /// The order is the whole point. A gesture's targets come from the
+    /// selection, so the drag has to be built **before** anything narrows it
+    /// (`MED-APP-28`). A press that feeds no gesture — a modified click, a
+    /// locked layer, a press that missed the bar — is an ordinary click and
+    /// narrows the selection right away, the way one always did.
+    fn press_layer_bar(
+        &mut self,
+        lid: LayerId,
+        mode: LayerClickMode,
+        content_x: f64,
+        content_y: f32,
+        grab_x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        // A modified click builds a selection; it must not also move or trim
+        // the bar it landed on.
+        if mode.is_additive() {
+            self.select_layer_with_mode(lid, mode, cx);
+            return;
+        }
+        let kept = super::layer_selection(cx).contains(lid);
+        if self.begin_bar_drag(lid, kept, content_x, content_y, grab_x, cx) && kept {
+            // The selection stands for the length of the gesture; the mouse-up
+            // narrows it if nothing moved.
+            self.publish_selected_layer_target(cx);
+            cx.notify();
+        } else {
+            self.select_layer_with_mode(lid, mode, cx);
+        }
+    }
+
+    /// Start a bar gesture on the row `lid`, reporting whether one began.
+    ///
+    /// Nothing starts when the layer is locked, when the press missed the bar
+    /// itself, or when every target is locked. The caller narrows the
+    /// selection in exactly those cases, because a press that feeds no gesture
+    /// is an ordinary click and has to select the way one always did.
+    fn begin_bar_drag(
+        &mut self,
+        lid: LayerId,
+        collapse_on_click: bool,
+        content_x: f64,
+        content_y: f32,
+        grab_x: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.state.layer(lid).is_none_or(|layer| layer.locked) {
+            return false;
+        }
+        let Some((lid, zone)) = self.bar_hit(content_x, content_y) else {
+            return false;
+        };
+        let baselines = self.bar_baselines(lid, cx);
+        if baselines.is_empty() {
+            return false;
+        }
+        self.drag = match zone {
+            BarZone::Body => TimelineDrag::MoveBar {
+                baselines,
+                pressed: lid,
+                collapse_on_click,
+                grab_x,
+                changed: false,
+            },
+            BarZone::InEdge => TimelineDrag::TrimIn {
+                baselines,
+                pressed: lid,
+                collapse_on_click,
+                grab_x,
+                changed: false,
+            },
+            BarZone::OutEdge => TimelineDrag::TrimOut {
+                baselines,
+                pressed: lid,
+                collapse_on_click,
+                grab_x,
+                changed: false,
+            },
+        };
+        true
+    }
+
     /// The baselines a bar gesture starting on `lid` moves: the operation
     /// targets minus the locked ones, which a gesture must not move any more
     /// than a delete may remove them.
@@ -4316,78 +4401,10 @@ impl Render for TimelineGpuiPanel {
                                                             event.modifiers.shift,
                                                             event.modifiers.platform,
                                                         );
-                                                        // A plain press on a bar
-                                                        // that is already selected
-                                                        // keeps the selection, so
-                                                        // the gesture can move all
-                                                        // of it (MED-APP-28). The
-                                                        // narrowing a plain click
-                                                        // means still happens — on
-                                                        // mouse-up, if nothing was
-                                                        // dragged.
-                                                        let collapse_on_click = !mode.is_additive()
-                                                            && super::layer_selection(cx)
-                                                                .contains(lid);
-                                                        if collapse_on_click {
-                                                            this.publish_selected_layer_target(cx);
-                                                            cx.notify();
-                                                        } else {
-                                                            this.select_layer_with_mode(
-                                                                lid, mode, cx,
-                                                            );
-                                                        }
-                                                        // A modified click builds
-                                                        // a selection; it must not
-                                                        // also move or trim the
-                                                        // bar it landed on.
-                                                        if mode.is_additive() {
-                                                            return;
-                                                        }
-                                                        let locked = this
-                                                            .state
-                                                            .layer(lid)
-                                                            .is_none_or(|l| l.locked);
-                                                        if locked {
-                                                            return;
-                                                        }
-                                                        let Some((lid, zone)) =
-                                                            this.bar_hit(content_x, content_y)
-                                                        else {
-                                                            return;
-                                                        };
-                                                        let baselines = this.bar_baselines(lid, cx);
-                                                        if baselines.is_empty() {
-                                                            return;
-                                                        }
-                                                        this.drag = match zone {
-                                                            BarZone::Body => {
-                                                                TimelineDrag::MoveBar {
-                                                                    baselines,
-                                                                    pressed: lid,
-                                                                    collapse_on_click,
-                                                                    grab_x: click_x,
-                                                                    changed: false,
-                                                                }
-                                                            }
-                                                            BarZone::InEdge => {
-                                                                TimelineDrag::TrimIn {
-                                                                    baselines,
-                                                                    pressed: lid,
-                                                                    collapse_on_click,
-                                                                    grab_x: click_x,
-                                                                    changed: false,
-                                                                }
-                                                            }
-                                                            BarZone::OutEdge => {
-                                                                TimelineDrag::TrimOut {
-                                                                    baselines,
-                                                                    pressed: lid,
-                                                                    collapse_on_click,
-                                                                    grab_x: click_x,
-                                                                    changed: false,
-                                                                }
-                                                            }
-                                                        };
+                                                        this.press_layer_bar(
+                                                            lid, mode, content_x, content_y,
+                                                            click_x, cx,
+                                                        );
                                                     }
                                                     Some(RowHit::PropertyGroup(lid, row)) => {
                                                         this.state
@@ -5604,6 +5621,39 @@ mod tests {
             .unwrap();
         assert_eq!(layer(&project, comp_id, a, cx).start_frame, 10);
         assert_eq!(layer(&project, comp_id, b, cx).start_frame, 50);
+    }
+
+    /// A press that starts no gesture is an ordinary click: it narrows the
+    /// selection immediately, because no mouse-up will come along to do it.
+    /// A locked layer is the reachable case — it is selectable but not
+    /// draggable.
+    #[gpui::test]
+    fn a_press_that_starts_no_gesture_narrows_the_selection_at_once(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, b, |layer| {
+                layer.locked = true;
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.press_layer_bar(b, LayerClickMode::Replace, 0.0, 0.0, 0.0, cx);
+                assert!(
+                    matches!(panel.drag, TimelineDrag::None),
+                    "a locked layer starts no gesture"
+                );
+                assert_eq!(
+                    super::super::layer_selection(cx).layers(),
+                    [b],
+                    "so the press narrows the selection itself"
+                );
+            })
+            .unwrap();
     }
 
     /// The press keeps a multi-selection so the gesture can move it; a press

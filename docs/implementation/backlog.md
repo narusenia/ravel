@@ -71,6 +71,10 @@
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
 | CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
 | CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
+| DISK-1 | `IntChannel` と解決層（Int のキーフレーム） | `discrete-keyframes-plan.md` |
+| AID-1 | `AssetId` 型と `MediaAssetEntry` の分離 | `asset-identity-plan.md` |
+| PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
+| PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | CICACHE-2 | CI キャッシュの効果の計測と設定の詰め（`CICACHE-1` 完了で着手可能） | `ci-cache-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
@@ -563,6 +567,37 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
 | CICACHE-2 | 🟡 | 効果の計測と設定の詰め | CICACHE-1 ✅ |
+
+### 離散パラメータのキーフレーム（`discrete-keyframes-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| DISK-1 | 🟡 | `IntChannel` と解決層（フォーマット上げ） | — |
+| DISK-2 | ⬜ | `StepCurve<String>` と `StringSteps` | DISK-1 |
+| DISK-3 | ⬜ | Properties のキーフレームトグルと再型付け | DISK-1, DISK-2 |
+| DISK-4 | ⬜ | Timeline の行とキーフレーム編集 | DISK-3 |
+| DISK-5 | ⬜ | カーブエディタの階段描画（Int のみ） | DISK-4 |
+| DISK-6 | ⬜ | ロケール / 文書 | DISK-1〜5 |
+
+### 素材の同一性（`asset-identity-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| AID-1 | 🟡 | `AssetId` 型と `MediaAssetEntry` の分離（フォーマット上げ + 移行） | — |
+| AID-2 | ⬜ | 参照 3 系統の切り替え | AID-1 |
+| AID-3 | ⬜ | インポートの採番と MediaBin の改名 UI | AID-2 |
+| AID-4 | ⬜ | ロケール / 文書 | AID-1〜3 |
+
+### パラメータのグループ（`parameter-groups-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PGRP-1 | 🟡 | `NodeTemplate::param_groups` と Properties の分割（挙動不変） | — |
+| PGRP-2 | ⬜ | 組み込みノードへのグループ宣言 | PGRP-1 |
+| PGRP-3 | ⬜ | 開閉状態の永続化（`ui_state.json`） | PGRP-1 |
+| PGRP-4 | ⬜ | In ノードのインスタンスグループ（フォーマット上げ） | PGRP-1 |
+| PGRP-5 | 🟡 | ノードエディタのパラメータ値表示トグル | — |
+| PGRP-6 | ⬜ | ロケール / 文書 | PGRP-2〜5 |
 
 ### 式言語（REQ-CORE-014 / REQ-CORE-015）
 

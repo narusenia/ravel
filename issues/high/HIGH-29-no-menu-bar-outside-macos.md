@@ -46,7 +46,23 @@ TitleBar（`DOCK-7` で共通化済み）に置き、`build_menus` の同じ
 
 `cfg(target_os)` の分岐は 1 箇所に閉じること。
 
+## 対応状況
+
+**実機確認待ち**（PR #343 マージ済み、2026-08-08）。
+
+非 macOS では `gpui_component::menu::AppMenuBar` をメインウィンドウの
+タイトルバーに描くようになった。`workspace::install_menus` がメニューの
+唯一の出口で、macOS の OS メニューバーと同じ `build_menus` を配る。
+プラットフォーム分岐は `title_bar::render_main_title_bar` の `cfg!` 1 箇所。
+
+**閉じていない理由**: Windows / Linux の実機で見ていない。macOS 上で
+`cfg!` を反転させた確認と CI の `check (windows-latest)` は通っているが、
+どちらもコンパイルと非プラットフォーム依存の挙動までしか見ていない。
+
 ## 未確認
 
 - Linux でも同じかは**未確認**（実機が無い）。`set_menus` の実装が無いのは
   ソース上確かなので、同じ結果になる見込み
+- Windows 固有のタイトルバーの寸法 — 右側 3 ボタン分の幅と、狭いウィンドウで
+  中央ラベルとメニューが重なるか。中央ラベルはリスナを持たないオーバーレイ
+  なので機能には影響しない

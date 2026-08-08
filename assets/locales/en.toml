@@ -356,6 +356,7 @@ duration_frames = "{count} frames"
 keyframe = "Toggle keyframe at the current frame"
 port = "Toggle input port exposure"
 exposed = "Expose this parameter as a project input"
+exposed_remove = "Withdraw this parameter from the project inputs"
 expression = "Toggle expression on this parameter"
 expression_blocked = "An expression would replace what drives this parameter (keyframes, a node output or a blend). Clear it first."
 

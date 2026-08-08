@@ -238,6 +238,7 @@ fn the_declarations_section_reads_as_sentences_in_every_locale() {
     let keys = [
         ravel_ui::properties::exposed::SECTION_EXPOSED,
         "properties.toggle.exposed",
+        "properties.toggle.exposed_remove",
         "properties.exposed.empty",
         "properties.exposed.description",
         "properties.exposed.remove",

@@ -6,8 +6,10 @@
 //! `MED-APP-16` was asset-derived bindings registered with **no** key context:
 //! `default.toml` binds `Left` / `Right` to frame stepping, a context-free
 //! binding matches in every context, and so a focused text field lost its
-//! arrows to the transport. Phase A fixed it by giving every asset binding
-//! `Some("!Input")`.
+//! arrows to the transport. Phase A fixed it by giving every asset binding a
+//! context that yields to whoever owns the keyboard. `MED-APP-31` widened that
+//! set from text inputs alone to open menus as well, so the predicate is built
+//! by `workspace::workspace_binding_context` rather than written out here.
 //!
 //! A user override file is a second source of bare single-key chords, which is
 //! exactly the shape that caused the bug. What keeps it safe is that user
@@ -28,8 +30,8 @@
 //!
 //! The predicate check is not vacuous, and that was measured rather than
 //! assumed. To reproduce: in `crates/ravel-app/src/workspace.rs`, change the
-//! asset loop's `Some("!Input")` back to `None` — the shape `MED-APP-16`
-//! reported — and run `cargo test -p ravel-app --test keybinding_overrides`.
+//! asset loop's context back to `None` — the shape `MED-APP-16` reported — and
+//! run `cargo test -p ravel-app --test keybinding_overrides`.
 //! `no_binding_is_registered_without_a_context` fails with
 //! `'s' is bound with no key context`, and
 //! `asset_and_user_bindings_are_both_scoped_out_of_text_input` fails with
@@ -45,11 +47,15 @@ use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 
-/// The predicate every binding derived from the binding set must carry.
-const NOT_INPUT: &str = "!Input";
+/// The predicate every binding derived from the binding set must carry. Read
+/// from the one place that builds it, so widening the set of keyboard owners
+/// does not need this file edited in step.
+fn workspace_context() -> String {
+    workspace::workspace_binding_context()
+}
 
 /// The panel key contexts the code-side bindings use. Everything else in the
-/// table has to be `!Input`.
+/// table has to carry [`workspace_context`].
 fn panel_contexts() -> [&'static str; 3] {
     [
         panels::node_editor::KEY_CONTEXT,
@@ -92,7 +98,7 @@ fn bindings_of(shell: &AppShell) -> Vec<(String, Option<String>)> {
 fn keys_scoped_out_of_input(shell: &AppShell) -> Vec<String> {
     bindings_of(shell)
         .into_iter()
-        .filter(|(_, predicate)| predicate.as_deref() == Some(NOT_INPUT))
+        .filter(|(_, predicate)| predicate.as_deref() == Some(workspace_context().as_str()))
         .map(|(key, _)| key)
         .collect()
 }
@@ -123,7 +129,10 @@ fn no_binding_is_registered_without_a_context() {
 
     for loaded in &cases {
         let shell = shell_with(loaded);
-        let allowed: Vec<&str> = std::iter::once(NOT_INPUT).chain(panel_contexts()).collect();
+        let context = workspace_context();
+        let allowed: Vec<&str> = std::iter::once(context.as_str())
+            .chain(panel_contexts())
+            .collect();
         for (key, predicate) in bindings_of(&shell) {
             let predicate = predicate.unwrap_or_else(|| {
                 panic!("'{key}' is bound with no key context (MED-APP-16 regression)")

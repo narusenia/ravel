@@ -28,7 +28,7 @@
 //! - **There is one route from a chord to a GPUI binding.** The merged set goes
 //!   into [`AppShell`], and
 //!   [`build_keybindings`](crate::workspace::build_keybindings) turns it into
-//!   `KeyBinding`s that all carry the `!Input` context, so a user's `Right` is
+//!   `KeyBinding`s that all carry `workspace_binding_context()`, so a user's `Right` is
 //!   as harmless to a focused text field as the default one is (`MED-APP-16`).
 //!   Nothing here constructs a `KeyBinding`.
 //!

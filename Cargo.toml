@@ -40,8 +40,8 @@ ravel-cli = { path = "crates/ravel-cli" }
 # UI framework (gpui-ce community edition)
 gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3" }
 gpui_platform = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "645682ca1cfdf9fda42eef6173782bd30a369ac3", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/narusenia/gpui-component", rev = "8327eb48628fb073ec18729df98615aafb7a3c31" }
-gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", rev = "8327eb48628fb073ec18729df98615aafb7a3c31" }
+gpui-component = { git = "https://github.com/narusenia/gpui-component", rev = "94c9eadff5fc5063d74f69bfed8c1c7a6b8d59a4" }
+gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", rev = "94c9eadff5fc5063d74f69bfed8c1c7a6b8d59a4" }
 rust-embed = "8"
 
 # GPU

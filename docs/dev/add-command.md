@@ -64,8 +64,10 @@
 勝つ。ファイル内で同じ chord が衝突した場合は id の昇順で先のものが勝つ。
 解釈できない行はその行だけ警告して捨てるので、1 行の typo が起動や他の
 バインドを壊すことはない。**追加した経路は必ず `AppShell` 経由**にすること —
-`build_keybindings` が全バインドに `!Input` コンテキストを付けており、そこを
-迂回して `KeyBinding` を作ると `MED-APP-16`（テキスト入力から矢印を奪う）が戻る。
+`build_keybindings` が全バインドに `workspace_binding_context()`
+（`!Input && !PopupMenu && !AppMenuBar`）を付けており、そこを迂回して
+`KeyBinding` を作ると `MED-APP-16`（テキスト入力から矢印を奪う）と
+`MED-APP-31`（開いたメニューから矢印を奪う）が戻る。
 
 生の `on_key_down` で修飾キーを見るのは、テキスト入力や一時的なドラッグモード
 （Viewer の `H` ホールドなど）のような本当に低レベルな入力に限る。

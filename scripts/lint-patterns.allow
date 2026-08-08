@@ -18,6 +18,13 @@ observe-global crates/ravel-app/src/window_host.rs FocusedPanelGlobal
 # `set_global` wakes observers even for an identical value, so subscribing is
 # the only way to observe it.
 observe-global crates/ravel-app/src/panels/node_editor.rs CanvasSelection
+# Test probe, not a signal path (same reason as the entry above): the
+# rubber-band test asserts that a band move enclosing an unchanged node set
+# republishes neither global. `notify_properties_selection` calls `set_global`,
+# which wakes observers even for an identical value — the Properties panel then
+# re-resolves every section — so subscribing is the only way to count the
+# publications the guard removes.
+observe-global crates/ravel-app/src/panels/node_editor.rs SelectedPropertiesTarget
 
 # Durable shared UI state (REQ-UI-013): the Timeline mirrors the active
 # composition and highlights the shared layer selection, both of which the

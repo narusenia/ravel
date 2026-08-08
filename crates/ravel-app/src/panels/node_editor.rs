@@ -853,7 +853,17 @@ impl NodeEditorPanel {
             .is_some_and(|current| current.path == self.context && &current.nodes == nodes)
     }
 
+    /// Publish `nodes` as the canvas selection.
+    ///
+    /// Republishing a selection that is already current is dropped here rather
+    /// than at each caller: `CanvasSelection` is a durable global whose every
+    /// write wakes the Viewer's gesture-target walk and the Outliner's
+    /// repaint, and a caller that recomputes the same set on every mouse move
+    /// (the rubber band) would pay that wave per move for no change at all.
     fn set_selected_nodes(&self, nodes: HashSet<NodeId>, cx: &mut App) {
+        if self.selection_matches(&nodes, cx) {
+            return;
+        }
         cx.set_global(super::CanvasSelection {
             path: self.context.clone(),
             nodes,
@@ -862,6 +872,29 @@ impl NodeEditorPanel {
 
     fn clear_selected_nodes(&self, cx: &mut App) {
         self.set_selected_nodes(HashSet::new(), cx);
+    }
+
+    /// Publish the set a rubber band currently encloses, and report whether
+    /// anything was published.
+    ///
+    /// The band recomputes that set on every mouse move and most moves
+    /// enclose exactly what the previous one did. Both publications are
+    /// expensive on the other side — `CanvasSelection` wakes the Viewer and
+    /// the Outliner, and `PropertiesTarget` makes the Properties panel
+    /// re-resolve every section — so a band that has not changed what it
+    /// holds publishes nothing.
+    ///
+    /// This is deliberately narrower than the guard inside
+    /// [`Self::set_selected_nodes`]: [`Self::refresh_from_document`]
+    /// republishes the *Properties* target on purpose when the selection
+    /// stands still but its values, exposure or driven state moved.
+    fn publish_band_selection(&self, nodes: HashSet<NodeId>, cx: &mut App) -> bool {
+        if self.selection_matches(&nodes, cx) {
+            return false;
+        }
+        self.set_selected_nodes(nodes, cx);
+        self.notify_properties_selection(cx);
+        true
     }
 
     // ----- network context (REQ-LAYER-011) ----------------------------------
@@ -3082,8 +3115,9 @@ impl Render for NodeEditorPanel {
                                 sel.insert(node.id);
                             }
                         }
-                        this.set_selected_nodes(sel, cx);
-                        this.notify_properties_selection(cx);
+                        this.publish_band_selection(sel, cx);
+                        // The rectangle itself moved even when its contents
+                        // did not.
                         cx.notify();
                     }
                     DragMode::None => {
@@ -6498,6 +6532,124 @@ mod tests {
         assert!(
             sel.nodes.is_empty(),
             "the pruned node must not remain in the published selection"
+        );
+    }
+
+    /// A rubber band publishes only when the set it encloses actually
+    /// changes. Every mouse move recomputes that set, and republishing an
+    /// unchanged one wakes the Viewer and Outliner through `CanvasSelection`
+    /// and makes the Properties panel re-resolve every section through
+    /// `SelectedPropertiesTarget` — the visible thrash while dragging a band.
+    #[gpui::test]
+    fn a_band_move_over_the_same_nodes_publishes_nothing(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        struct Probe {
+            publishes: usize,
+            _sub: Subscription,
+        }
+        let selection = cx.new(|cx| Probe {
+            publishes: 0,
+            _sub: cx.observe_global::<crate::panels::CanvasSelection>(|this: &mut Probe, _cx| {
+                this.publishes += 1
+            }),
+        });
+        let properties = cx.new(|cx| Probe {
+            publishes: 0,
+            _sub: cx.observe_global::<crate::panels::SelectedPropertiesTarget>(
+                |this: &mut Probe, _cx| this.publishes += 1,
+            ),
+        });
+        cx.run_until_parked();
+        let counts = |cx: &mut TestAppContext| {
+            (
+                selection.read_with(cx, |probe, _| probe.publishes),
+                properties.read_with(cx, |probe, _| probe.publishes),
+            )
+        };
+        let before = counts(cx);
+
+        // The band first encloses the node: both globals move.
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.publish_band_selection([blur].into_iter().collect(), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let after_first = counts(cx);
+        assert!(
+            after_first.0 > before.0 && after_first.1 > before.1,
+            "the first enclosing move publishes both globals"
+        );
+
+        // Every later move that still encloses exactly the same node is
+        // silent — including the Properties target, which is what thrashed.
+        window
+            .update(cx, |panel, _window, cx| {
+                for _ in 0..5 {
+                    assert!(!panel.publish_band_selection([blur].into_iter().collect(), cx));
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            counts(cx),
+            after_first,
+            "a band that encloses the same nodes must publish nothing"
+        );
+
+        // Shrinking the band back to nothing is a real change again.
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.publish_band_selection(HashSet::new(), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let after_empty = counts(cx);
+        assert!(after_empty.0 > after_first.0 && after_empty.1 > after_first.1);
+    }
+
+    /// The guard that matters to every caller, seen on its own: the band test
+    /// above stops at `publish_band_selection`, so it would still pass with
+    /// the drop inside `set_selected_nodes` removed. `CanvasSelection` is a
+    /// durable global — writing the set it already holds wakes the Viewer and
+    /// the Outliner for nothing — so the drop lives where all callers pass.
+    #[gpui::test]
+    fn republishing_the_same_selection_writes_nothing(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        struct Probe {
+            publishes: usize,
+            _sub: Subscription,
+        }
+        let probe = cx.new(|cx| Probe {
+            publishes: 0,
+            _sub: cx.observe_global::<crate::panels::CanvasSelection>(|this: &mut Probe, _cx| {
+                this.publishes += 1
+            }),
+        });
+        cx.run_until_parked();
+        let publishes = |cx: &mut TestAppContext| probe.read_with(cx, |probe, _| probe.publishes);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let after_first = publishes(cx);
+        assert!(after_first > 0, "the first selection is published");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes([blur].into_iter().collect(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            publishes(cx),
+            after_first,
+            "the same set published twice must write the global once"
         );
     }
 

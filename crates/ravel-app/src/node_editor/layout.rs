@@ -200,6 +200,7 @@ mod tests {
     use super::*;
     use ravel_core::graph::Node;
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
+    use std::collections::BTreeMap;
 
     fn id(raw: u64) -> NodeId {
         NodeId::new(raw)
@@ -285,6 +286,62 @@ mod tests {
         let layout = auto_layout(&graph, &HashSet::new(), &sizes, LayoutAxis::Horizontal);
         assert_eq!(layout.len(), 4);
         assert!(!any_overlap(&rects(&layout, &sizes)));
+    }
+
+    /// The point of the whole unit: this computes positions, it does not
+    /// apply them. The caller splices the result into the document so the move
+    /// is one undo step — a function that also updated the graph would give
+    /// the edit a second, untracked path in.
+    #[test]
+    fn the_graph_is_left_exactly_as_it_was() {
+        let graph = chain_graph();
+        let snapshot = |graph: &Graph| -> BTreeMap<NodeId, (f32, f32)> {
+            graph
+                .nodes()
+                .map(|node| (node.id, node.metadata.position))
+                .collect()
+        };
+        let before = snapshot(&graph);
+        let layout = auto_layout(
+            &graph,
+            &HashSet::new(),
+            &sizes(&[1, 2, 3, 4]),
+            LayoutAxis::Horizontal,
+        );
+        // The fixture stacks every node on the origin, so a layout that
+        // returns anything but the origin really did compute new positions —
+        // without which "the graph did not change" would be vacuous.
+        assert!(layout.values().any(|&point| point != (0.0, 0.0)));
+        assert_eq!(snapshot(&graph), before);
+    }
+
+    /// Layers advance by the *widest* member, not by whatever node happened to
+    /// come first. Equal-sized nodes cannot tell the two apart, so the sizes
+    /// here differ by a factor of five and the layer-0 pair is deliberately
+    /// ordered narrow-then-wide.
+    #[test]
+    fn nodes_of_different_sizes_still_do_not_overlap() {
+        let graph = chain_graph();
+        // Layer 0 is [1, 4] (equal positions, so id order), layer 1 is [2],
+        // layer 2 is [3]. Node 2 is tall enough to reach node 4's band, so a
+        // layer advanced by node 1's width alone lands on top of node 4.
+        let sizes: HashMap<NodeId, (f32, f32)> = [
+            (id(1), (100.0, 400.0)),
+            (id(4), (500.0, 60.0)),
+            (id(2), (150.0, 600.0)),
+            (id(3), (80.0, 200.0)),
+        ]
+        .into_iter()
+        .collect();
+
+        let layout = auto_layout(&graph, &HashSet::new(), &sizes, LayoutAxis::Horizontal);
+        assert_eq!(layout.len(), 4);
+        assert!(!any_overlap(&rects(&layout, &sizes)));
+        assert_eq!(
+            layout,
+            auto_layout(&graph, &HashSet::new(), &sizes, LayoutAxis::Horizontal),
+            "uneven sizes do not make the result depend on iteration order"
+        );
     }
 
     #[test]

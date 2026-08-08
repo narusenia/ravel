@@ -2203,10 +2203,12 @@ Unknown type keys are skipped silently (plugin space).
   1:1 mapping.
 - Auto layout: `node_editor/layout.rs::auto_layout(&graph, &targets, &sizes,
   LayoutAxis) -> HashMap<NodeId, (f32, f32)>` (`NGR-1`) — a pure function that
-  returns new positions and never touches the `Graph`. Empty `targets` means
-  the whole network; ids the graph does not have are dropped, synthetic nodes
-  are never moved, and layering is the longest path over the subgraph the
-  targets induce. `sizes` are network-coordinate sizes, so a caller holding
+  returns new positions and never touches the `Graph`. **Fewer than two usable
+  targets means the whole network** — a one-node selection, or one that is all
+  synthetic or all foreign ids, lays the network out rather than returning a
+  single unmoved node. Ids the graph does not have are dropped and synthetic
+  nodes are never moved, both *before* that count is taken; layering is the
+  longest path over the subgraph the targets induce. `sizes` are network-coordinate sizes, so a caller holding
   the panel's zoomed `node_sizes` divides by the zoom first. Only
   `NodeEditorPanel::auto_layout_nodes` (behind `CommandId::NodeAutoLayout`)
   calls it, in one `commit_graph`; nothing runs it automatically.

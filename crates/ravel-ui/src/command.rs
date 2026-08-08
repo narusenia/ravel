@@ -109,9 +109,15 @@ pub enum CommandId {
     NodeCollapseToSubnet,
     /// Move a selected subnet node's contents back into the open network.
     NodeExtractSubnet,
-    /// Re-position the selected nodes — or the whole network when nothing is
-    /// selected — into layers (`NGR-2`). Never runs by itself: node positions
-    /// are saved data, so only the user decides when they move.
+    /// Re-position the selected nodes into layers (`NGR-2`).
+    ///
+    /// Fewer than two selected nodes lays out the whole network — a single
+    /// node has nothing to be arranged against, so there is no meaningful
+    /// one-node layout to lose. That is what makes the shortcut useful right
+    /// after a collapse, which leaves the new subnet node selected.
+    ///
+    /// Never runs by itself: node positions are saved data, so only the user
+    /// decides when they move.
     NodeAutoLayout,
     // Panel window management
     PanelDetach,

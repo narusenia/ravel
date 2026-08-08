@@ -589,12 +589,16 @@ fn exposed_row(
 }
 
 /// Per-parameter declaration toggle: exposes the parameter as a project input,
-/// or reveals the declaration that already does.
+/// or withdraws the declaration that already does.
 ///
 /// Sibling of [`port_toggle_button`] and deliberately a different affordance:
 /// a *port* makes a parameter drivable from inside the graph, a *declaration*
 /// makes it settable from outside the project. They are independent, so a
 /// parameter can carry both.
+///
+/// `declared` only picks the icon and the tooltip. The click reads the
+/// document again ([`PropertiesGpuiPanel::toggle_exposed_parameter`]) so a
+/// flag rendered one frame ago cannot decide which half runs.
 fn exposed_toggle_button(
     key: &str,
     declared: bool,
@@ -619,12 +623,19 @@ fn exposed_toggle_button(
         .w(px(14.0))
         .cursor_pointer()
         .child(Icon::new(icon).size_3().text_color(color))
-        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.exposed")).build(window, cx))
+        .tooltip(move |window, cx| {
+            let text = if declared {
+                t!("properties.toggle.exposed_remove")
+            } else {
+                t!("properties.toggle.exposed")
+            };
+            Tooltip::new(text).build(window, cx)
+        })
         .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
             let key = key.clone();
             panel
                 .update(cx, move |this, cx| {
-                    this.expose_parameter(node_id, &key, cx);
+                    this.toggle_exposed_parameter(node_id, &key, cx);
                     cx.notify();
                 })
                 .ok();
@@ -2669,11 +2680,11 @@ impl PropertiesGpuiPanel {
     /// nothing. That the animated components will not *take* a caller's value
     /// is reported by `resolve` in the declarations list, next to the row.
     ///
-    /// Exposing is **not** a toggle back off. Removing a declaration removes a
-    /// name callers may already be passing on a command line, so it is done
-    /// deliberately from the declarations list, not by clicking the same 14px
-    /// icon that created it. Clicking an already-exposed parameter says so
-    /// instead.
+    /// Declaring twice is refused rather than ignored: the caller that reaches
+    /// here with the parameter already declared (the node graph menu) has no
+    /// second declaration to make, and saying so beats a silent no-op.
+    /// The Properties checkbox does not take this path when declared — it
+    /// withdraws instead, through [`Self::toggle_exposed_parameter`].
     fn expose_parameter(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
         let Some(project) = self.project.clone() else {
             return;
@@ -2693,6 +2704,53 @@ impl PropertiesGpuiPanel {
         self.edit_declarations(cx, move |declarations| {
             let declaration = ExposedParameter::inferred(name, seed, binding)?;
             declarations.insert(declaration).map(|()| true)
+        });
+    }
+
+    /// Flip whether `key` on `node_id` is declared as a project input.
+    ///
+    /// The icon beside a parameter is drawn as a checkbox, so it has to behave
+    /// like one — the sibling `toggle_param_port` in the node editor branches
+    /// the same way. Which half runs is decided from the document, not from
+    /// the `declared` flag the row was rendered with, so a stale frame cannot
+    /// turn a withdrawal into a second declaration.
+    ///
+    /// Withdrawing removes a name a caller may already be passing on a command
+    /// line, which is why it stayed one-way for a while. It is one undo step
+    /// like every other declaration edit, and the declarations list has always
+    /// offered the same removal without a confirmation, so the asymmetry was
+    /// protecting nothing and only made the checkbox lie.
+    ///
+    /// A binding is not unique — [`ExposedParameters::bound_to`] says so, and
+    /// two declarations may drive one parameter. The checkbox is per
+    /// *parameter*, not per declaration, so unchecking it withdraws **every**
+    /// declaration bound to that parameter in one undo step. Removing only the
+    /// first would leave the box filled and the click looking ignored.
+    fn toggle_exposed_parameter(&mut self, node_id: NodeId, key: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let declared: Vec<String> = project
+            .read(cx)
+            .document()
+            .exposed_parameters
+            .iter()
+            .filter(|declaration| {
+                let binding = declaration.binding();
+                binding.node == node_id && binding.key == key
+            })
+            .map(|declaration| declaration.name().to_string())
+            .collect();
+        if declared.is_empty() {
+            self.expose_parameter(node_id, key, cx);
+            return;
+        }
+        self.edit_declarations(cx, move |declarations| {
+            Ok(declared
+                .iter()
+                .filter(|name| declarations.remove(name).is_some())
+                .count()
+                > 0)
         });
     }
 
@@ -6669,6 +6727,99 @@ mod tests {
             })
             .unwrap();
         assert_eq!(declaration_names(&properties, cx), ["amount"]);
+    }
+
+    /// `MED-APP-26`: the icon is drawn as a checkbox, so a second click has to
+    /// take the declaration back off rather than refuse.
+    #[gpui::test]
+    fn the_exposed_checkbox_declares_and_withdraws(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(declaration_names(&properties, cx), ["amount"]);
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+                assert_eq!(
+                    panel.exposed_error, None,
+                    "withdrawing is the other half of the toggle, not a refusal"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(declaration_names(&properties, cx).is_empty());
+    }
+
+    /// A hand-written `.ravprj` may bind one parameter twice — the core says
+    /// so in `bound_to`. The checkbox is per parameter, so unchecking it has
+    /// to clear both, or the click looks ignored.
+    #[gpui::test]
+    fn the_exposed_checkbox_withdraws_every_declaration_on_the_parameter(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.edit_declarations(cx, |declarations| {
+                    let twin = ravel_core::exposed::ExposedParameter::inferred(
+                        "amount_again",
+                        ravel_core::exposed::ExposedValue::Float(1.0),
+                        ExposedBinding::new(in_id, "amount"),
+                    )?;
+                    declarations.insert(twin).map(|()| true)
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            declaration_names(&properties, cx),
+            ["amount", "amount_again"]
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(declaration_names(&properties, cx).is_empty());
+    }
+
+    /// The toggle follows the declaration a rename moved, not the parameter
+    /// key: withdrawing has to remove the row that is actually bound.
+    #[gpui::test]
+    fn the_exposed_checkbox_withdraws_a_renamed_declaration(cx: &mut TestAppContext) {
+        let (properties, _project, _path, in_id) = setup_in_node_target(cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.rename_declaration("amount", "opacity".to_string(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(declaration_names(&properties, cx), ["opacity"]);
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_exposed_parameter(in_id, "amount", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(declaration_names(&properties, cx).is_empty());
     }
 
     /// EXPO-5's refusal case: the name is the contract, so two declarations may

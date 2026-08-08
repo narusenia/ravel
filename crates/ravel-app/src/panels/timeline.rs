@@ -186,6 +186,21 @@ struct KeyframeChannelBaseline {
     origin_frames: Vec<u64>,
 }
 
+/// One layer's time placement when a bar gesture began.
+///
+/// A bar gesture carries one of these per target rather than a single layer's
+/// numbers, because the same pointer delta lands differently on each layer:
+/// a trim clamps against that layer's own interval (`MED-APP-28`). Every move
+/// recomputes from the baseline, so clamping one layer can never ratchet the
+/// others.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BarBaseline {
+    layer: LayerId,
+    start: i64,
+    in_frame: u64,
+    out_frame: u64,
+}
+
 /// Active drag gesture over the layer area / headers. Live updates go
 /// through `ProjectState::apply_document`; the ending mouse-up records one
 /// Document undo step for the whole gesture.
@@ -197,28 +212,34 @@ enum TimelineDrag {
     /// mousedown" contract as `widgets/scrub_input.rs`). No document edits,
     /// so ending or cancelling commits nothing.
     Scrub,
-    /// Move the bar along the timeline (start_frame).
+    /// Move the bars along the timeline (start_frame), one baseline per
+    /// selected layer.
     MoveBar {
-        layer: LayerId,
-        origin_start: i64,
+        baselines: Vec<BarBaseline>,
+        /// The bar under the pointer, for the click-collapses-the-selection
+        /// rule below.
+        pressed: LayerId,
+        /// The press kept a multi-selection intact, so a click that never
+        /// became a drag narrows it to `pressed` on mouse-up (the same rule
+        /// [`TimelineDrag::MoveKeyframe`] follows).
+        collapse_on_click: bool,
         grab_x: f32,
         changed: bool,
     },
     /// Trim the display interval's in edge (start and in move together, the
     /// out edge stays fixed).
     TrimIn {
-        layer: LayerId,
-        origin_start: i64,
-        origin_in: u64,
-        origin_out: u64,
+        baselines: Vec<BarBaseline>,
+        pressed: LayerId,
+        collapse_on_click: bool,
         grab_x: f32,
         changed: bool,
     },
     /// Trim the display interval's out edge.
     TrimOut {
-        layer: LayerId,
-        origin_in: u64,
-        origin_out: u64,
+        baselines: Vec<BarBaseline>,
+        pressed: LayerId,
+        collapse_on_click: bool,
         grab_x: f32,
         changed: bool,
     },
@@ -580,13 +601,16 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
-    /// Apply `f` to a layer in the document. `commit` records one undo step.
-    fn edit_layer(
+    /// Apply `f` to every baseline's layer as **one** document change.
+    ///
+    /// A bar gesture emits one of these per mouse move, so folding the targets
+    /// into a single `apply_document` keeps the cost of dragging ten layers
+    /// the cost of dragging one — and keeps the panel from seeing a document
+    /// where half the selection has moved.
+    fn edit_bar_targets(
         &mut self,
-        lid: LayerId,
-        hint: InvalidationHint,
-        commit: bool,
-        f: impl FnOnce(&mut Layer),
+        baselines: &[BarBaseline],
+        f: impl Fn(&BarBaseline, &mut Layer),
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project.clone() else {
@@ -596,15 +620,122 @@ impl TimelineGpuiPanel {
             return;
         };
         project.update(cx, |project, cx| {
-            let Some(doc) = update_layer(project.document(), comp_id, lid, f) else {
-                return;
-            };
-            if commit {
-                project.commit_document(doc, hint, cx);
-            } else {
-                project.apply_document(doc, hint, cx);
+            let mut doc = project.document().clone();
+            let mut edited = false;
+            for baseline in baselines {
+                if let Some(next) =
+                    update_layer(&doc, comp_id, baseline.layer, |layer| f(baseline, layer))
+                {
+                    doc = next;
+                    edited = true;
+                }
+            }
+            if edited {
+                project.apply_document(doc, InvalidationHint::None, cx);
             }
         });
+    }
+
+    /// Handle a press on the layer bar row `lid`: select, and start a gesture
+    /// when there is one to start.
+    ///
+    /// The order is the whole point. A gesture's targets come from the
+    /// selection, so the drag has to be built **before** anything narrows it
+    /// (`MED-APP-28`). A press that feeds no gesture — a modified click, a
+    /// locked layer, a press that missed the bar — is an ordinary click and
+    /// narrows the selection right away, the way one always did.
+    fn press_layer_bar(
+        &mut self,
+        lid: LayerId,
+        mode: LayerClickMode,
+        content_x: f64,
+        content_y: f32,
+        grab_x: f32,
+        cx: &mut Context<Self>,
+    ) {
+        // A modified click builds a selection; it must not also move or trim
+        // the bar it landed on.
+        if mode.is_additive() {
+            self.select_layer_with_mode(lid, mode, cx);
+            return;
+        }
+        let kept = super::layer_selection(cx).contains(lid);
+        if self.begin_bar_drag(lid, kept, content_x, content_y, grab_x, cx) && kept {
+            // The selection stands for the length of the gesture; the mouse-up
+            // narrows it if nothing moved.
+            self.publish_selected_layer_target(cx);
+            cx.notify();
+        } else {
+            self.select_layer_with_mode(lid, mode, cx);
+        }
+    }
+
+    /// Start a bar gesture on the row `lid`, reporting whether one began.
+    ///
+    /// Nothing starts when the layer is locked, when the press missed the bar
+    /// itself, or when every target is locked. The caller narrows the
+    /// selection in exactly those cases, because a press that feeds no gesture
+    /// is an ordinary click and has to select the way one always did.
+    fn begin_bar_drag(
+        &mut self,
+        lid: LayerId,
+        collapse_on_click: bool,
+        content_x: f64,
+        content_y: f32,
+        grab_x: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.state.layer(lid).is_none_or(|layer| layer.locked) {
+            return false;
+        }
+        let Some((lid, zone)) = self.bar_hit(content_x, content_y) else {
+            return false;
+        };
+        let baselines = self.bar_baselines(lid, cx);
+        if baselines.is_empty() {
+            return false;
+        }
+        self.drag = match zone {
+            BarZone::Body => TimelineDrag::MoveBar {
+                baselines,
+                pressed: lid,
+                collapse_on_click,
+                grab_x,
+                changed: false,
+            },
+            BarZone::InEdge => TimelineDrag::TrimIn {
+                baselines,
+                pressed: lid,
+                collapse_on_click,
+                grab_x,
+                changed: false,
+            },
+            BarZone::OutEdge => TimelineDrag::TrimOut {
+                baselines,
+                pressed: lid,
+                collapse_on_click,
+                grab_x,
+                changed: false,
+            },
+        };
+        true
+    }
+
+    /// The baselines a bar gesture starting on `lid` moves: the operation
+    /// targets minus the locked ones, which a gesture must not move any more
+    /// than a delete may remove them.
+    fn bar_baselines(&self, lid: LayerId, cx: &App) -> Vec<BarBaseline> {
+        self.operation_targets(lid, cx)
+            .into_iter()
+            .filter_map(|id| self.state.layer(id))
+            .filter(|layer| !layer.locked)
+            .map(|layer| BarBaseline {
+                layer: layer.id,
+                start: layer.start_frame,
+                in_frame: layer.in_frame,
+                out_frame: layer.out_frame,
+            })
+            .collect()
     }
 
     /// The layers an operation on the row `lid` applies to: the whole selection
@@ -1496,79 +1627,78 @@ impl TimelineGpuiPanel {
                 self.scrub_playhead(frame, cx);
             }
             TimelineDrag::MoveBar {
-                layer,
-                origin_start,
+                baselines,
+                pressed,
+                collapse_on_click,
                 grab_x,
                 ..
             } => {
                 let delta = self.frames_delta(grab_x, x);
-                let new_start = origin_start + delta;
-                self.edit_layer(
-                    layer,
-                    InvalidationHint::None,
-                    false,
-                    |l| l.start_frame = new_start,
+                self.edit_bar_targets(
+                    &baselines,
+                    |baseline, layer| layer.start_frame = baseline.start + delta,
                     cx,
                 );
                 self.drag = TimelineDrag::MoveBar {
-                    layer,
-                    origin_start,
+                    baselines,
+                    pressed,
+                    collapse_on_click,
                     grab_x,
                     changed: true,
                 };
             }
             TimelineDrag::TrimIn {
-                layer,
-                origin_start,
-                origin_in,
-                origin_out,
+                baselines,
+                pressed,
+                collapse_on_click,
                 grab_x,
                 ..
             } => {
                 let delta = self.frames_delta(grab_x, x);
-                // The out edge stays fixed: start and in move together,
-                // clamped into [0, out) (REQ-LAYER-006 display interval).
-                let new_in = (origin_in as i64 + delta).clamp(0, origin_out as i64 - 1) as u64;
-                let new_start = origin_start + (new_in as i64 - origin_in as i64);
-                self.edit_layer(
-                    layer,
-                    InvalidationHint::None,
-                    false,
-                    |l| {
-                        l.in_frame = new_in;
-                        l.start_frame = new_start;
+                self.edit_bar_targets(
+                    &baselines,
+                    |baseline, layer| {
+                        // The out edge stays fixed: start and in move
+                        // together, clamped into [0, out) against *this*
+                        // layer's interval (REQ-LAYER-006 display interval).
+                        let new_in = (baseline.in_frame as i64 + delta)
+                            .clamp(0, baseline.out_frame as i64 - 1)
+                            as u64;
+                        layer.in_frame = new_in;
+                        layer.start_frame =
+                            baseline.start + (new_in as i64 - baseline.in_frame as i64);
                     },
                     cx,
                 );
                 self.drag = TimelineDrag::TrimIn {
-                    layer,
-                    origin_start,
-                    origin_in,
-                    origin_out,
+                    baselines,
+                    pressed,
+                    collapse_on_click,
                     grab_x,
                     changed: true,
                 };
             }
             TimelineDrag::TrimOut {
-                layer,
-                origin_in,
-                origin_out,
+                baselines,
+                pressed,
+                collapse_on_click,
                 grab_x,
                 ..
             } => {
                 let delta = self.frames_delta(grab_x, x);
-                let new_out = (origin_out as i64 + delta).max(origin_in as i64 + 1) as u64;
-                self.edit_layer(
-                    layer,
-                    InvalidationHint::None,
-                    false,
-                    |l| l.out_frame = new_out,
+                self.edit_bar_targets(
+                    &baselines,
+                    |baseline, layer| {
+                        layer.out_frame = (baseline.out_frame as i64 + delta)
+                            .max(baseline.in_frame as i64 + 1)
+                            as u64;
+                    },
                     cx,
                 );
                 self.drag = TimelineDrag::TrimOut {
-                    layer,
-                    origin_in,
-                    origin_out,
+                    baselines,
+                    pressed,
+                    collapse_on_click,
                     grab_x,
                     changed: true,
                 };
@@ -1841,6 +1971,30 @@ impl TimelineGpuiPanel {
             } => Some(pressed.clone()),
             _ => None,
         };
+        // The bar equivalent: the press kept a multi-selection so the gesture
+        // could move it, so a press that never moved anything still means
+        // "select just this one".
+        let collapse_layer_to = match &self.drag {
+            TimelineDrag::MoveBar {
+                pressed,
+                collapse_on_click: true,
+                changed: false,
+                ..
+            }
+            | TimelineDrag::TrimIn {
+                pressed,
+                collapse_on_click: true,
+                changed: false,
+                ..
+            }
+            | TimelineDrag::TrimOut {
+                pressed,
+                collapse_on_click: true,
+                changed: false,
+                ..
+            } => Some(*pressed),
+            _ => None,
+        };
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
@@ -1859,6 +2013,12 @@ impl TimelineGpuiPanel {
         cx.notify();
         if let Some(pressed) = collapse_to {
             self.selected_keyframes = HashSet::from([pressed]);
+        }
+        if let Some(pressed) = collapse_layer_to
+            && super::layer_selection(cx).layers() != [pressed]
+        {
+            super::set_layer_selection(vec![pressed], cx);
+            self.publish_selected_layer_target(cx);
         }
         if !changed {
             return;
@@ -4241,59 +4401,10 @@ impl Render for TimelineGpuiPanel {
                                                             event.modifiers.shift,
                                                             event.modifiers.platform,
                                                         );
-                                                        this.select_layer_with_mode(lid, mode, cx);
-                                                        // A modified click builds
-                                                        // a selection; it must not
-                                                        // also move or trim the
-                                                        // bar it landed on.
-                                                        if mode.is_additive() {
-                                                            return;
-                                                        }
-                                                        let locked = this
-                                                            .state
-                                                            .layer(lid)
-                                                            .is_none_or(|l| l.locked);
-                                                        if locked {
-                                                            return;
-                                                        }
-                                                        let Some((lid, zone)) =
-                                                            this.bar_hit(content_x, content_y)
-                                                        else {
-                                                            return;
-                                                        };
-                                                        let Some(layer) = this.state.layer(lid)
-                                                        else {
-                                                            return;
-                                                        };
-                                                        this.drag = match zone {
-                                                            BarZone::Body => {
-                                                                TimelineDrag::MoveBar {
-                                                                    layer: lid,
-                                                                    origin_start: layer.start_frame,
-                                                                    grab_x: click_x,
-                                                                    changed: false,
-                                                                }
-                                                            }
-                                                            BarZone::InEdge => {
-                                                                TimelineDrag::TrimIn {
-                                                                    layer: lid,
-                                                                    origin_start: layer.start_frame,
-                                                                    origin_in: layer.in_frame,
-                                                                    origin_out: layer.out_frame,
-                                                                    grab_x: click_x,
-                                                                    changed: false,
-                                                                }
-                                                            }
-                                                            BarZone::OutEdge => {
-                                                                TimelineDrag::TrimOut {
-                                                                    layer: lid,
-                                                                    origin_in: layer.in_frame,
-                                                                    origin_out: layer.out_frame,
-                                                                    grab_x: click_x,
-                                                                    changed: false,
-                                                                }
-                                                            }
-                                                        };
+                                                        this.press_layer_bar(
+                                                            lid, mode, content_x, content_y,
+                                                            click_x, cx,
+                                                        );
                                                     }
                                                     Some(RowHit::PropertyGroup(lid, row)) => {
                                                         this.state
@@ -5343,8 +5454,14 @@ mod tests {
         window
             .update(cx, |panel, _window, cx| {
                 panel.drag = TimelineDrag::MoveBar {
-                    layer: a,
-                    origin_start: 0,
+                    baselines: vec![BarBaseline {
+                        layer: a,
+                        start: 0,
+                        in_frame: 0,
+                        out_frame: 100,
+                    }],
+                    pressed: a,
+                    collapse_on_click: false,
                     grab_x: 0.0,
                     changed: false,
                 };
@@ -5377,10 +5494,14 @@ mod tests {
         window
             .update(cx, |panel, _window, cx| {
                 panel.drag = TimelineDrag::TrimIn {
-                    layer: a,
-                    origin_start: 0,
-                    origin_in: 0,
-                    origin_out: 100,
+                    baselines: vec![BarBaseline {
+                        layer: a,
+                        start: 0,
+                        in_frame: 0,
+                        out_frame: 100,
+                    }],
+                    pressed: a,
+                    collapse_on_click: false,
                     grab_x: 0.0,
                     changed: false,
                 };
@@ -5392,6 +5513,174 @@ mod tests {
         assert_eq!((l.start_frame, l.in_frame, l.out_frame), (10, 10, 100));
         // end_frame unchanged: 10 + (100 - 10) = 100.
         assert_eq!(l.end_frame(), 100);
+    }
+
+    /// `MED-APP-28`: a bar gesture broadcasts over the selection, the way
+    /// delete and duplicate already do (REQ-UI-013).
+    #[gpui::test]
+    fn bar_move_carries_the_whole_selection_in_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: panel.bar_baselines(a, cx),
+                    pressed: a,
+                    collapse_on_click: true,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(40.0, 0.0, false, false, cx); // +10 frames
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 10);
+        assert_eq!(layer(&project, comp_id, b, cx).start_frame, 60);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 0);
+        assert_eq!(
+            layer(&project, comp_id, b, cx).start_frame,
+            50,
+            "both layers move back on the one undo step"
+        );
+    }
+
+    /// Each layer clamps a trim against its own interval, so a drag past one
+    /// layer's limit does not stop the others.
+    #[gpui::test]
+    fn trimming_a_selection_clamps_each_layer_on_its_own_interval(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, b, |layer| {
+                layer.out_frame = 20;
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.drag = TimelineDrag::TrimIn {
+                    baselines: panel.bar_baselines(a, cx),
+                    pressed: a,
+                    collapse_on_click: true,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(200.0, 0.0, false, false, cx); // +50 frames
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+
+        let la = layer(&project, comp_id, a, cx);
+        assert_eq!((la.in_frame, la.out_frame), (50, 100));
+        let lb = layer(&project, comp_id, b, cx);
+        assert_eq!(
+            (lb.in_frame, lb.out_frame),
+            (19, 20),
+            "the shorter layer stops one frame inside its own out edge"
+        );
+    }
+
+    /// A locked layer is no more movable by a gesture aimed at the selection
+    /// than it is deletable by one.
+    #[gpui::test]
+    fn a_locked_layer_in_the_selection_is_left_where_it_is(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, b, |layer| {
+                layer.locked = true;
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                let baselines = panel.bar_baselines(a, cx);
+                assert_eq!(
+                    baselines.iter().map(|base| base.layer).collect::<Vec<_>>(),
+                    vec![a]
+                );
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines,
+                    pressed: a,
+                    collapse_on_click: true,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(40.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 10);
+        assert_eq!(layer(&project, comp_id, b, cx).start_frame, 50);
+    }
+
+    /// A press that starts no gesture is an ordinary click: it narrows the
+    /// selection immediately, because no mouse-up will come along to do it.
+    /// A locked layer is the reachable case — it is selectable but not
+    /// draggable.
+    #[gpui::test]
+    fn a_press_that_starts_no_gesture_narrows_the_selection_at_once(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, b, |layer| {
+                layer.locked = true;
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.press_layer_bar(b, LayerClickMode::Replace, 0.0, 0.0, 0.0, cx);
+                assert!(
+                    matches!(panel.drag, TimelineDrag::None),
+                    "a locked layer starts no gesture"
+                );
+                assert_eq!(
+                    super::super::layer_selection(cx).layers(),
+                    [b],
+                    "so the press narrows the selection itself"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The press keeps a multi-selection so the gesture can move it; a press
+    /// that never moved anything still narrows the selection on mouse-up.
+    #[gpui::test]
+    fn a_bar_press_that_never_dragged_collapses_the_selection(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: panel.bar_baselines(a, cx),
+                    pressed: a,
+                    collapse_on_click: true,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                assert_eq!(
+                    super::super::layer_selection(cx).layers(),
+                    [a, b],
+                    "the selection survives the press itself"
+                );
+                panel.drag_ended(cx);
+                assert_eq!(super::super::layer_selection(cx).layers(), [a]);
+            })
+            .unwrap();
     }
 
     /// Deleting the selected layer removes it (and its network) from the

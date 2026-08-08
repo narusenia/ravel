@@ -157,14 +157,14 @@ impl ScrubInputState {
         if self.integer { value.round() } else { value }
     }
 
-    fn begin_drag(&mut self, x: f32) {
+    pub(crate) fn begin_drag(&mut self, x: f32) {
         self.dragging = true;
         self.drag_start_x = x;
         self.drag_start_value = self.value;
         self.changed_in_drag = false;
     }
 
-    fn drag_to(&mut self, x: f32, modifiers: &Modifiers, cx: &mut Context<Self>) {
+    pub(crate) fn drag_to(&mut self, x: f32, modifiers: &Modifiers, cx: &mut Context<Self>) {
         if !self.dragging {
             return;
         }
@@ -192,7 +192,7 @@ impl ScrubInputState {
     /// pointer scrubbed at all. A drag that returns to its start value emits
     /// no Commit — the live Change events already restored the start value,
     /// so committing would only record a no-op undo snapshot.
-    fn end_drag(&mut self, cx: &mut Context<Self>) -> Option<bool> {
+    pub(crate) fn end_drag(&mut self, cx: &mut Context<Self>) -> Option<bool> {
         if !self.dragging {
             return None;
         }

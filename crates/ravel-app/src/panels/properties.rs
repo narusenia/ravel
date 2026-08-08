@@ -1645,9 +1645,14 @@ pub struct PropertiesGpuiPanel {
     expanded_curves: std::collections::HashSet<String>,
     curve_heights: std::collections::HashMap<String, f32>,
     curve_resize: Option<CurveResize>,
-    /// Uncommitted color edit awaiting its debounced undo commit, with the
-    /// generation guard that cancels superseded commits.
-    pending_color_commit: Option<(String, PropertyValue)>,
+    /// Uncommitted color edit awaiting its debounced undo commit — the key,
+    /// the value and the nodes it addresses — with the generation guard that
+    /// cancels superseded commits.
+    ///
+    /// The nodes travel with it because the commit may have to be *flushed*
+    /// from somewhere that no longer knows them (a target switch, a second
+    /// gesture on another row); see [`Self::flush_pending_color_commit`].
+    pending_color_commit: Option<(String, PropertyValue, Vec<NodeId>)>,
     color_commit_generation: u64,
     needs_rebuild: bool,
     focus_handle: FocusHandle,
@@ -1679,8 +1684,8 @@ impl PropertiesGpuiPanel {
                 .cloned()
                 .unwrap_or_default();
             let same = same_target(&this.target, &target.0);
-            this.target = target.0;
             if same {
+                this.target = target.0;
                 // Same target, new values (undo, timeline drag, playhead
                 // move): refresh in place so scrub gestures survive —
                 // unless the field shape changed (a parameter became
@@ -1688,9 +1693,12 @@ impl PropertiesGpuiPanel {
                 // would edit through a read-only row.
                 this.refresh_values_checked(cx);
             } else {
-                // A pending color commit must not land on the new target.
-                this.pending_color_commit = None;
-                this.color_commit_generation += 1;
+                // The pending color commit belongs to the target being left
+                // and its live value is already in the document: commit it
+                // here, while `self.target` still names the row it came from,
+                // instead of dropping it into an unrelated undo step.
+                this.flush_pending_color_commit(cx);
+                this.target = target.0;
                 // A refusal names a port on the target that is going away,
                 // and a rename record names a row that is going with it.
                 this.port_error = None;
@@ -1808,6 +1816,26 @@ impl PropertiesGpuiPanel {
         {
             self.needs_rebuild = true;
         }
+    }
+
+    /// Whether an edit gesture is mid-flight, i.e. a widget still owes this
+    /// panel the commit that ends it.
+    ///
+    /// A scrub is two events (`Change` … `Commit`) delivered through a
+    /// subscription the panel owns, and a color gesture is a live change plus
+    /// a debounced commit; in both cases the document already holds an
+    /// uncommitted value. Rebuilding the widgets drops the subscription that
+    /// was going to deliver the commit, so the value stays in the document
+    /// with no undo entry in front of it and Undo jumps past the gesture
+    /// entirely. The rebuild waits instead — the gesture is short, and the
+    /// stale-binding risk a rebuild guards against is already covered where it
+    /// matters by the driven-parameter check in [`Self::route_change`].
+    fn gesture_in_flight(&self, cx: &App) -> bool {
+        self.pending_color_commit.is_some()
+            || self
+                .scrubs
+                .iter()
+                .any(|(_, binding)| binding.state.read(cx).is_dragging())
     }
 
     /// The frame under the playhead from the shared `PlaybackPosition`
@@ -2689,25 +2717,48 @@ impl PropertiesGpuiPanel {
         node_ids: &[NodeId],
         cx: &mut Context<Self>,
     ) {
+        // One slot carries the pending commit, so a gesture on a *different*
+        // row would overwrite an edit that is already live in the document.
+        // Reusing the slot for the same row is the debounce doing its job —
+        // the later value supersedes the earlier one and both belong to the
+        // same undo step — so only a different row flushes first.
+        if self
+            .pending_color_commit
+            .as_ref()
+            .is_some_and(|(pending, _, ids)| pending != key || ids != node_ids)
+        {
+            self.flush_pending_color_commit(cx);
+        }
         self.route_change(key, value.clone(), false, node_ids, cx);
         self.color_commit_generation += 1;
         let generation = self.color_commit_generation;
-        self.pending_color_commit = Some((key.to_string(), value));
-        let ids = node_ids.to_vec();
+        self.pending_color_commit = Some((key.to_string(), value, node_ids.to_vec()));
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COLOR_COMMIT_QUIET).await;
             this.update(cx, |this, cx| {
                 if this.color_commit_generation != generation {
                     return;
                 }
-                let Some((key, value)) = this.pending_color_commit.take() else {
-                    return;
-                };
-                this.route_change(&key, value, true, &ids, cx);
+                this.flush_pending_color_commit(cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Commit a pending color edit before the slot that carries it is cleared
+    /// or reused.
+    ///
+    /// The live `Change` already reached the document through `apply_document`
+    /// (no undo step); dropping the commit would leave that value folded into
+    /// whatever undo step comes next. Bumping the generation cancels the timer
+    /// that was going to do this.
+    fn flush_pending_color_commit(&mut self, cx: &mut Context<Self>) {
+        let Some((key, value, ids)) = self.pending_color_commit.take() else {
+            return;
+        };
+        self.color_commit_generation += 1;
+        self.route_change(&key, value, true, &ids, cx);
     }
 
     /// Push the sections' current color values into idle picker widgets so
@@ -3585,7 +3636,10 @@ impl Focusable for PropertiesGpuiPanel {
 
 impl Render for PropertiesGpuiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.needs_rebuild {
+        // A rebuild requested while a gesture is in flight waits for the
+        // gesture to end: `needs_rebuild` stays set, and the commit that ends
+        // the gesture notifies again (see `gesture_in_flight`).
+        if self.needs_rebuild && !self.gesture_in_flight(cx) {
             self.rebuild_widgets(window, cx);
         }
         // Widget-state consumption, same as the rebuild above: propagate
@@ -4084,6 +4138,26 @@ mod tests {
         })
     }
 
+    /// Red component of the layer's custom `tint` channel at frame 0.
+    fn tint_red(layer: &Layer) -> f32 {
+        let eval = ravel_core::eval::EvalContext::new(
+            0,
+            ravel_core::types::FrameRate::new(30, 1),
+            (16, 16),
+        );
+        let ParameterValue::Channel4(channels) = &net::find_in_node(&layer.network)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|p| p.key == "tint")
+            .unwrap()
+            .value
+        else {
+            panic!("expected Channel4");
+        };
+        channels[0].evaluate(0.0, &eval)
+    }
+
     fn setup_node_target(
         cx: &mut TestAppContext,
     ) -> (
@@ -4541,6 +4615,137 @@ mod tests {
         assert!((tint(&layer(&project, comp_id, lid, cx)) - 1.0).abs() < 1e-6);
     }
 
+    /// The other half of the same discipline: a pending color commit is not
+    /// dropped when the slot carrying it goes away.
+    ///
+    /// The picker has no gesture-end event, so the commit is debounced. A
+    /// target switch inside the quiet window used to clear the slot — the
+    /// live value was already in the document, so the color survived with no
+    /// undo step of its own and folded into whatever the user did next.
+    #[gpui::test]
+    fn a_color_commit_survives_a_target_switch_inside_the_quiet_window(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_color_change(
+                    "custom.tint",
+                    PropertyValue::Color {
+                        r: 0.25,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    &[],
+                    cx,
+                );
+            })
+            .unwrap();
+        assert!((tint_red(&layer(&project, comp_id, lid, cx)) - 0.25).abs() < 1e-6);
+
+        // Well inside the quiet window, the user selects something else.
+        cx.update(|cx| {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Composition {
+                comp_id,
+            }));
+        });
+        cx.run_until_parked();
+        window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    panel.pending_color_commit.is_none(),
+                    "the switch consumed the pending commit"
+                );
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            (tint_red(&layer(&project, comp_id, lid, cx)) - 1.0).abs() < 1e-6,
+            "one undo returns the pre-gesture color"
+        );
+        // Only a committed step can be redone.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!((tint_red(&layer(&project, comp_id, lid, cx)) - 0.25).abs() < 1e-6);
+    }
+
+    /// The same slot, reused rather than cleared: a second color gesture on a
+    /// *different* row inside the quiet window commits the first one instead
+    /// of overwriting it. Reusing the slot for the same row stays a
+    /// supersede — that is the debounce merging one gesture's ticks.
+    #[gpui::test]
+    fn a_second_color_gesture_on_another_row_commits_the_first(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::AnimationChannel;
+        let color = |r: f32| {
+            ParameterValue::Channel4([
+                AnimationChannel::constant(r),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(0.0),
+                AnimationChannel::constant(1.0),
+            ])
+        };
+        let node = Node::new(NodeId::next(), "test")
+            .with_param("tint", color(1.0))
+            .with_param("rim", color(1.0));
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
+
+        let red = |key: &str, cx: &mut TestAppContext| {
+            let ParameterValue::Channel4(channels) =
+                node_parameter(&project, &path, node_id, key, cx)
+            else {
+                panic!("{key} stays a color channel");
+            };
+            let ChannelSource::Constant(value) = channels[0].source else {
+                panic!("{key} stays constant");
+            };
+            value
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_color_change(
+                    "tint",
+                    PropertyValue::Color {
+                        r: 0.25,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    &[node_id],
+                    cx,
+                );
+                // No clock advance: the first commit is still pending.
+                panel.apply_color_change(
+                    "rim",
+                    PropertyValue::Color {
+                        r: 0.5,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    &[node_id],
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(COLOR_COMMIT_QUIET * 2);
+        cx.run_until_parked();
+
+        assert!((red("tint", cx) - 0.25).abs() < 1e-6);
+        assert!((red("rim", cx) - 0.5).abs() < 1e-6);
+
+        // Two gestures, two undo steps — the first was not swallowed.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!((red("rim", cx) - 1.0).abs() < 1e-6);
+        assert!(
+            (red("tint", cx) - 0.25).abs() < 1e-6,
+            "the first edit stands"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!((red("tint", cx) - 1.0).abs() < 1e-6);
+    }
+
     /// Blend / adjustment edits route through with a structural hint (the
     /// compiled merge chain changes shape).
     #[gpui::test]
@@ -4637,6 +4842,88 @@ mod tests {
         assert_eq!(
             node_parameter(&project, &path, node_id, "amount", cx),
             ParameterValue::Float(20.0)
+        );
+    }
+
+    /// A rebuild asked for *during* a scrub must wait for the gesture to end.
+    ///
+    /// Scrubbing an expression-driven parameter collapses the channel to a
+    /// plain float on the first live `Change`, so the row's shape changes and
+    /// `refresh_values_checked` asks for new widgets. Rebuilding there would
+    /// drop the `ScrubBinding` — and with it the subscription the
+    /// gesture-ending `Commit` travels on — leaving the live value in the
+    /// document with no undo step in front of it, so Undo jumps to whatever
+    /// the user did before the scrub.
+    #[gpui::test]
+    fn a_scrub_survives_a_rebuild_requested_mid_gesture(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        let scrub = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .scrubs
+                    .iter()
+                    .find(|(key, _)| key == "amount")
+                    .map(|(_, binding)| binding.state.clone())
+                    .expect("a scrub widget for the amount row")
+            })
+            .unwrap();
+
+        // Drag: the live `Change` writes the document without recording undo.
+        scrub.update(cx, |state, cx| {
+            state.begin_drag(0.0);
+            state.drag_to(120.0, &gpui::Modifiers::default(), cx);
+        });
+        cx.run_until_parked();
+        let scrubbed = scrub.read_with(cx, |state, _| state.value());
+        assert_ne!(scrubbed, 1.0, "the drag moved the value");
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "amount", cx),
+            ParameterValue::Float(scrubbed),
+            "the live change collapsed the expression channel"
+        );
+
+        // The shape change asked for a rebuild, and the frame that ran above
+        // (the panel notified, so it drew) had to leave it pending: the
+        // rebuild is where the widgets — and the subscription carrying the
+        // commit — would be dropped.
+        window
+            .read_with(cx, |panel, cx| {
+                assert!(panel.gesture_in_flight(cx));
+                assert!(
+                    panel.needs_rebuild,
+                    "the rebuild is requested and still waiting for the gesture"
+                );
+                assert!(
+                    panel.scrubs.iter().any(|(key, binding)| key == "amount"
+                        && binding.state.entity_id() == scrub.entity_id()),
+                    "the widget carrying the pending commit is still bound"
+                );
+            })
+            .unwrap();
+
+        // Release: the `Commit` reaches the panel and records the undo step.
+        scrub.update(cx, |state, cx| {
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let restored = node_parameter(&project, &path, node_id, "amount", cx);
+        assert!(
+            expression::component_expression(&restored, 0).is_some(),
+            "one undo returns the pre-scrub expression, got {restored:?}"
+        );
+        // Only a *committed* step can be redone: undoing an uncommitted live
+        // preview also returns true but leaves nothing behind it.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "amount", cx),
+            ParameterValue::Float(scrubbed)
         );
     }
 

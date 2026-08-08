@@ -372,3 +372,125 @@ processors: HashMap<NodeId, Arc<dyn NodeProcessor>>,   // crates/ravel-core/src/
 **検証**: Subnet ノードをコピー＆ペーストして、複製元と複製先の内部ノード ID が
 交わらないテスト（`ravel-app` のパネルテストで書ける）。入れ子の Subnet
 （Subnet の中の Subnet）でも交わらないこと。
+
+---
+
+## MED-APP-26 | bug | 「プロジェクトへ露出」のトグルが片道 — チェックボックスに見えて解除できない
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:598-631`（`exposed_toggle_button`）、
+解除の実体は同ファイル `:2548`（`remove_declaration`）
+
+ボタンは `declared` で `SquareFilled` / `Square` を塗り分け、**チェックボックスとして
+描かれている**のに、`on_mouse_down` は状態を見ずに常に `expose_parameter` を呼ぶ。
+
+```rust
+let (icon, color) = if declared { (SquareFilled, active) } else { (Square, muted) };
+…
+.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+    …this.expose_parameter(node_id, &key, cx);   // declared でも同じ
+})
+```
+
+一度露出させると、その場では戻せない。`remove_declaration` は同じパネルに
+既にあり、宣言セクション側の削除ボタン（`:513`）からは呼ばれている
+— **繋がっていないだけ**。
+
+対比: ポートの露出は `node_editor.rs:1147` の `toggle_param_port` が
+`param_port_index(key).is_some()` で分岐して正しくトグルする。
+
+**修正方針**: `declared` で分岐し、真なら `remove_declaration` を呼ぶ。
+`toggle_param_port` と同じ形にする。ツールチップも状態で出し分ける。
+
+---
+
+## MED-APP-27 | bug | Tab で開くノード検索パレットがカーソル位置に来ない（キャンバス中央固定）
+
+**該当**: `crates/ravel-app/src/panels/node_editor.rs:2517-2536`（`on_search_palette`）
+
+```rust
+let (w, h) = self.canvas_size.get();
+let local = (w * 0.5, h * 0.5);      // ← 常にキャンバス中央
+```
+
+ダブルクリック経路（`:2816`）は `event.position` を渡しているので、
+**同じパレットが開き方によって違う場所に出る**。Tab は手を止めずに使う操作なので、
+毎回中央へ視線が飛ぶ。置かれるノードの位置も中央になる。
+
+**修正方針**: 最後のポインタ位置を持っておき、Tab のときそれを渡す。
+ポインタがキャンバス外なら現在どおり中央へ落とす。
+
+---
+
+## MED-APP-28 | bug | Timeline のバードラッグが複数選択を無視して 1 レイヤーしか動かさない
+
+**該当**: `crates/ravel-app/src/panels/timeline.rs:1491-1512`（`drag_moved` の
+`TimelineDrag::MoveBar`）
+
+```rust
+TimelineDrag::MoveBar { layer, origin_start, grab_x, .. } => {
+    …
+    self.edit_layer(layer, …, |l| l.start_frame = new_start, …)
+}
+```
+
+`MoveBar` は**単一の `LayerId`** を持ち、ドラッグはその 1 つだけを動かす。
+複数レイヤーを選択してバーを掴んでも、掴んだ 1 本しか動かない。
+
+削除（`delete_layer`）と複製（`duplicate_layers_from_row`）は
+`operation_targets` を通して選択全体へ広げているので、**バードラッグだけが
+選択の規約から外れている**。トリム（in / out）も同じ形。
+
+**修正方針**: `MoveBar` に対象集合を持たせ、`operation_targets` で決める。
+1 ジェスチャ = 1 undo は維持する（各レイヤーに同じ差分を当てて 1 コミット）。
+ロックされたレイヤーは `delete_layer` と同じく保護する。
+
+---
+
+## MED-APP-29 | bug / debt | `layer.ref` のレイヤー指定が数値スクラブで、参照ポートを変えても出力型が変わらない
+
+**該当**: `crates/ravel-core/src/registry/builtin.rs:529-540`（`layer_ref`）
+
+```rust
+.with_output(OutputPort { name: "output".into(), data_type: DataTypeId::FRAME_BUFFER })
+.with_param(int_parameter("layer", -1))
+.with_param(string_parameter("port", "frame"))
+.with_param_range("layer", -1.0..=16_777_215.0, -1.0..=1000.0)
+```
+
+2 つある。
+
+1. **`layer` が Int パラメータ**なので、Properties には −1〜16,777,215 の
+   数値スクラブが出る。ユーザーはレイヤー ID を知らないし、スクラブすると
+   存在しないレイヤーを指す。`port` も自由文字列
+2. **出力ポートの型が `FRAME_BUFFER` 固定**。`port` を変えても
+   出力の型が追随しないので、フレーム以外を参照した瞬間に型が嘘になる
+
+`NETIF-2` が「型の文脈依存」を入れているので、2 はその枠組みで解ける。
+
+**修正方針**: `layer` と `port` を Select にする（候補は同じコンポジションの
+レイヤーと、選んだレイヤーの出力ポート）。出力の型は `port` から引く。
+`SHELL-5` の Parent ドロップダウン（循環候補を除外する）が候補列挙の前例。
+
+---
+
+## MED-APP-30 | perf | ノードエディタのラバーバンド選択中に Properties が作り直され続ける
+
+**該当**: `crates/ravel-app/src/panels/node_editor.rs:1760-1764`, `:1923-1949`
+（バンドの選択公開）、`crates/ravel-app/src/panels/properties.rs:1802`
+（`refresh_values_checked`）
+
+ラバーバンドでノードを囲っている間、Properties が目に見えて荒ぶる。
+
+バンドはドラッグ中に選択を公開し、Properties は選択が変わるたびに
+セクションを組み直す。`MED-UI-02`（Properties が再生中フレームあたり 2 回
+全セクションを再構築）と同じ経路で、**マウス移動のたびに**それが起きる。
+
+`HIGH-28` と同じ再構築経路なので、**ジェスチャ中の再構築を抑える修正が
+入れば一緒に収まる可能性がある**。
+
+**未確認**: 「マウス移動ごとに選択が公開されている」ことをソースで特定できて
+いない（バンドの公開箇所は `LOW-APP-03` が指す行を参照）。
+着手時にまずそこを確かめること。
+
+**修正方針**: バンド中は選択の公開をドラッグ終了までまとめる。
+最低でも、前回公開した集合と同じなら公開しない。

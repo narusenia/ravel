@@ -211,6 +211,7 @@ fn the_panel_binding_table_is_the_code_side_shortcut_set() {
             (CommandId::NodeSearchPalette, "Tab", PanelKind::NodeGraph),
             (CommandId::EditDelete, "Delete", PanelKind::NodeGraph),
             (CommandId::EditDelete, "Backspace", PanelKind::NodeGraph),
+            (CommandId::NodeAutoLayout, "L", PanelKind::NodeGraph),
             (CommandId::EditDelete, "Delete", PanelKind::Timeline),
             (CommandId::EditDelete, "Backspace", PanelKind::Timeline),
             (CommandId::EditDuplicate, "Cmd+D", PanelKind::Timeline),

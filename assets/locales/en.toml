@@ -93,6 +93,7 @@ zoom = "Zoom Tool"
 search_palette = "Search Nodes…"
 collapse_to_subnet = "Collapse to Subnet"
 extract_subnet = "Extract Subnet"
+auto_layout = "Auto-Layout Nodes"
 
 [menu.panel]
 detach = "Detach Panel"

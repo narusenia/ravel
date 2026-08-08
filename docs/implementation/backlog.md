@@ -649,6 +649,22 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 **リリース前は `NGR-1`〜`NGR-3` だけ**、`NGR-4` 以降はリリース後
 （`roadmap.md` のフェーズ UX）。
 
+### 文脈依存のパラメータ候補と出力型（`contextual-parameter-options-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| CPO-1 | ⬜ | `ParamOptions` と `contextual_options`（`SiblingLayer`） | — |
+| CPO-2 | ⬜ | Properties が文脈付きで候補を引く | CPO-1 |
+| CPO-3 | ⬜ | `LayerOutputPort` 候補と `port` の Select 化 | CPO-2 |
+| CPO-4 | ⬜ | `dependent_port_updates` と `set_params` での適用 | CPO-3 |
+| CPO-5 | ⬜ | `layer` の Int → String 移行（フォーマット版 +1） | CPO-2 |
+| CPO-6 | ⬜ | Parent ドロップダウンを `ParamOption` へ寄せる | CPO-1 |
+| CPO-7 | ⬜ | ロケール / 文書 | CPO-1〜6 |
+
+`MED-APP-29`（`layer.ref` が数値スクラブ、出力型が `port` に追随しない）が
+きっかけだが、直す対象は 1 ノードではなく**文脈から候補と型が決まる機構**。
+フォーマット版は `CPO-5` 着手時に `CURRENT_FORMAT_VERSION` の次を取る。
+
 ### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |

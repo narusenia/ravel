@@ -355,11 +355,14 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 2. **出力ポートの型が `FRAME_BUFFER` 固定**。`port` を変えても
    出力の型が追随しないので、フレーム以外を参照した瞬間に型が嘘になる
 
-`NETIF-2` が「型の文脈依存」を入れているので、2 はその枠組みで解ける。
-
-**修正方針**: `layer` と `port` を Select にする（候補は同じコンポジションの
-レイヤーと、選んだレイヤーの出力ポート）。出力の型は `port` から引く。
-`SHELL-5` の Parent ドロップダウン（循環候補を除外する）が候補列挙の前例。
+**修正方針は計画書へ移した**（2026-08-09）。調べたところ、足りないのは
+`layer.ref` の書き方ではなく**文脈から候補と型が決まる機構**そのものだった:
+`Registry::param_options` はテンプレート静的、`SHELL-5` の Parent
+ドロップダウンはレイヤーフィールドの別経路、パラメータ → 出力ポート型の追随は
+どこにも無い（`set_params` が retype するのはパラメータポートだけ）。
+複数クレートに跨るので Design gate に当たる。
+→ [`contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
+の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
 
 ---
 

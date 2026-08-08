@@ -1697,7 +1697,11 @@ pub fn collapse_to_subnet(
             .iter()
             .map(|name| (*name).to_string())
             .collect();
-    let mut outbound_names: HashSet<String> = HashSet::new();
+    // Same reservation on the Out side: a crossing that leaves a node whose
+    // input is called `frame` would otherwise take the Out node's built-in
+    // name, and `is_fixed_port` would then refuse to rename or remove it.
+    let mut outbound_names: HashSet<String> =
+        [PORT_FRAME].iter().map(|n| (*n).to_string()).collect();
 
     for edge in &edges {
         let from_member = member_set.contains(&edge.source);
@@ -4177,6 +4181,34 @@ mod tests {
                 .map(|p| p.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["t_2"]
+        );
+    }
+
+    /// `LOW-APP-24`: the Out node's built-in `frame` is reserved on the
+    /// outbound side too. A pin that took the name would be reported fixed by
+    /// [`is_fixed_port`] — unrenamable, unremovable, and carrying whatever
+    /// type the crossing happened to have.
+    #[test]
+    fn a_pin_never_takes_the_built_in_out_port_name() {
+        let consumer = Node::new(NodeId::new(12), "consumer")
+            .with_input(PORT_FRAME, &[DataTypeId::SCALAR])
+            .with_output("out", DataTypeId::SCALAR)
+            .with_position(400.0, 0.0);
+        let graph = Graph::new()
+            .add_node(member_node(11))
+            .unwrap()
+            .add_node(consumer)
+            .unwrap();
+        let graph = wire(graph, 11, 0, 12, 0);
+
+        let (collapsed, subnet) = collapse_to_subnet(graph, [NodeId::new(11)]).unwrap();
+        assert_eq!(
+            node_of(&collapsed, subnet)
+                .outputs
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["frame_2"]
         );
     }
 

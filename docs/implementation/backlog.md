@@ -637,9 +637,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| NGR-1 | 🟡 | 自動整列の計算（ヘッドレス） | — |
-| NGR-2 | ⬜ | 整列コマンドと undo | NGR-1 |
-| NGR-3 | 🟡 | `SettingsLayer` の `node_editor` 節と `edge_style` の永続化 | — |
+| NGR-1 | ✅ #347 | 自動整列の計算（ヘッドレス） | — |
+| NGR-2 | ✅ #347 | 整列コマンドと undo | NGR-1 |
+| NGR-3 | ✅ #347 | `SettingsLayer` の `node_editor` 節と `edge_style` の永続化 | — |
 | NGR-4 | 🟡 | 型によるエッジ配色 | — |
 | NGR-5 | ⬜ | 上→下フローモード（描画・整列軸・`flow_direction`） | NGR-1, NGR-3 |
 | NGR-6 | 🟡 | Reroute ノード | — |

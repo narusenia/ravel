@@ -1,6 +1,6 @@
 # ノードグラフの可読性 実装計画
 
-> **Status**: Planned — 2026-08-08
+> **Status**: 単位 1〜3 実装済み（#347）、単位 4〜7 は未着手 — 2026-08-08
 
 対象: `ravel-core` の `NodeMetadata::position`、`ravel-project` の
 `SettingsLayer`、`ravel-app` のノードエディタ（`node_editor/` と

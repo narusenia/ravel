@@ -565,8 +565,8 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 |---|---|
 | `UX-1`〜`UX-3` | ワークフロー貫通の計器と測定の取り込み（`refactor-plan-0808.md`） |
 | `UX-4`〜`UX-12` | 既知分の実装（ノード検索、Timeline の絞り込み / 値スクラブ / ルーラ / ループ、素材からレイヤーへの経路、設定 2 つ） |
-| `NGR-1`〜`NGR-2` | ノードの自動整列（手動コマンド。`node-graph-readability-plan.md`） |
-| `NGR-3` | `SettingsLayer` の `node_editor` 節と `edge_style` の永続化 |
+| ~~`NGR-1`〜`NGR-2`~~ | ✅ #347 ノードの自動整列（手動コマンド。`node-graph-readability-plan.md`） |
+| ~~`NGR-3`~~ | ✅ #347 `SettingsLayer` の `node_editor` 節と `edge_style` の永続化 |
 | ~~`HIGH-30`~~ | ✅ #346 Subnet のポート改名が外側のエッジを落とす（`MED-APP-25` / `HIGH-27` と同じ PR で解決） |
 
 **D より前に置く理由**は基準 4 の変種。フェーズ D は「作れるはずなのに

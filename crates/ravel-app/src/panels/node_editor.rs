@@ -6577,6 +6577,81 @@ mod tests {
             .unwrap();
     }
 
+    /// A parameter inside a pasted subnet that is driven by another node
+    /// inside the same subnet has to follow the copy.
+    ///
+    /// `ChannelSource::NodeOutput` is a second way a graph names a node, one
+    /// the edge list does not carry, and it is remapped by the same pass that
+    /// renumbers the nodes. Left pointing at the original, the copy would be
+    /// animated by a node in a different subnet — a dependency the user cannot
+    /// see anywhere in the network they are looking at.
+    #[gpui::test]
+    fn pasting_a_subnet_repoints_its_inner_node_output_bindings(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+
+        let driver =
+            Node::new(NodeId::next(), "math.scalar").with_output("out", DataTypeId::SCALAR);
+        let driver_id = driver.id;
+        let driven = Node::new(NodeId::next(), "math.scalar").with_param(
+            "value",
+            ParameterValue::Channel(ravel_core::animation::channel::AnimationChannel::new(
+                ravel_core::animation::channel::ChannelSource::NodeOutput(
+                    driver_id,
+                    OutputPortIndex(0),
+                ),
+            )),
+        );
+        let inner = Graph::new()
+            .add_node(driver)
+            .unwrap()
+            .add_node(driven)
+            .unwrap();
+        let outer_id = NodeId::next();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let graph = panel
+                    .graph
+                    .clone()
+                    .add_node(Node::new(outer_id, "subnet").with_subnet(inner))
+                    .unwrap();
+                panel.commit_graph(graph, None, cx);
+                panel.set_selected_nodes(HashSet::from([outer_id]), cx);
+                panel.copy_selected(cx);
+                panel.paste((20.0, 20.0), cx);
+
+                let copy = panel
+                    .graph
+                    .nodes()
+                    .find(|node| node.type_key == "subnet" && node.id != outer_id)
+                    .expect("the pasted subnet");
+                let copied_inner = copy.subnet.as_deref().expect("inner graph");
+                // Found by shape, not by id: an id-keyed lookup would fail on
+                // the renumbering this test is not about and never reach the
+                // binding assertion below.
+                let bound = copied_inner
+                    .nodes()
+                    .find(|node| !node.parameters.is_empty())
+                    .expect("the driven node came across");
+                let source_kind = match &bound.parameters[0].value {
+                    ParameterValue::Channel(channel) => channel.source.clone(),
+                    other => panic!("unexpected parameter: {other:?}"),
+                };
+                let ravel_core::animation::channel::ChannelSource::NodeOutput(source, port) =
+                    source_kind
+                else {
+                    panic!("the binding collapsed instead of being remapped");
+                };
+                assert_eq!(port, OutputPortIndex(0));
+                assert_ne!(source, driver_id, "the copy does not name the original");
+                assert!(
+                    copied_inner.node(source).is_some(),
+                    "it names the driver inside the copy"
+                );
+            })
+            .unwrap();
+    }
+
     /// The `CanvasSelection` global reflects every selection mutation that
     /// the node editor performs (click, clear, delete, duplicate, network
     /// switch). External consumers will read this global for bbox/tool

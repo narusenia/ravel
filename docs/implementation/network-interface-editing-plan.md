@@ -561,15 +561,18 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
 - **Subnet ノードのコピー＆ペーストが内部グラフのノード ID を複製する**
   （REQ-LAYER-003 の受入条件で唯一埋まらなかったもの）。
   `NodeEditorPanel::paste_content` はノード自身に新しい ID を採るが
-  `node.subnet` を丸ごと clone するので、内部ノードの ID が元と同じまま残る。
+  `node.subnet` を丸ごと clone するので、内部ノードの ID が元と同じまま残った。
   `Evaluator` のプロセッサ表は `HashMap<NodeId, _>` の平坦な写像なので、
-  複製元と複製先の内部ノードが 1 エントリを奪い合う。レイヤー複製が使う
-  `Graph::duplicate_with_fresh_ids` は内部グラフまで再帰して採番し直しており、
-  そちらが正しい形。**掃き寄せの単位では直さない**（挙動の変更になる）。
+  複製元と複製先の内部ノードが 1 エントリを奪い合う。
+  **掃き寄せの単位では直さず**（挙動の変更になる）、
   `issues/medium/app-shell.md` の **`MED-APP-25`** に起票した —
   `NETIF-5` / `NETIF-6` で Subnet が初めてユーザーに作れるようになった結果
   到達可能になった穴で、それ以前はテストフィクスチャの外に Subnet が
-  存在しなかったので踏みようが無かった
+  存在しなかったので踏みようが無かった。
+  **この計画の外で修正済み**: `paste_content` はレイヤー複製と同じ再帰
+  （`Graph::duplicate_nodes_with_fresh_ids` → `allocate_duplicate_node_ids`）を
+  通るようになり、内部エッジと `ChannelSource::NodeOutput` バインドも
+  同じ写像で付け替わる
 
 ## 検証
 

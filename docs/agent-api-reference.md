@@ -767,6 +767,10 @@ Document::sync_subnet_pins()   // load-time DRIFT REPAIR, not a format upgrade
     // ports the derivation reads. Idempotent. MINTS NO IDS, so it cannot
     // repair a subnet whose `subnet` field is `None` (that needs two fresh
     // node ids, and the chain runs before `advance_id_counters`).
+    // Diffs each subnet node's pins across the call and `tracing::warn!`s the
+    // ones the repair DELETED, with the outer edges each one cost. This is the
+    // only place that warning is emitted: the same removal reached through
+    // `remove_custom_port` is what the user asked for and logs at debug.
 Document::fold_component_params()   // .ravprj v4 → v5, run AFTER the counters
     // Folds `_x` / `_y` component parameters (the scalar
     // `geometry.transform` `rotation`, and `attribute.set`'s `value` family
@@ -924,16 +928,20 @@ sync_subnet_pins(graph, subnet_id) -> Result<Graph, NetworkError>
     // back untouched, so it is idempotent and cheap. MINTS NO IDS — which is
     // why a subnet with `subnet: None` is left broken rather than repaired.
     // Errs on a missing node or a node that is not a subnet.
-    // A pin REMOVAL is `tracing::warn!`ed with the number of outer edges it
-    // deletes: it also runs on load, where a drifted stored pin list costs
-    // wiring with no user action to attribute it to.
+    // A pin REMOVAL logs at DEBUG here — after a deliberate `remove_custom_port`
+    // the lost edges are what the user asked for. The load-time caller
+    // (`Document::sync_subnet_pins`) diffs the pins across the call and WARNS
+    // about what it lost, because there nobody asked.
 rename_subnet_pin(graph, subnet_id, &PinRename) -> Graph   // the PRE-pass
     // Renames the pin (and, on the input side, its promotion parameter's KEY —
     // a pin is not an `is_param` port, so `Graph::rename_port` would not move
     // it and `promote_parameters` would re-seed the value, losing its
     // keyframes) so the sync that follows sees the two lists agreeing by name
     // and has nothing to remove. Anything that does not line up leaves the
-    // graph alone, so a stale or repeated call costs nothing.
+    // graph alone and WARNS: the sync that runs next is the destructive one, so
+    // a pre-pass that could not place the rename means outer edges are about to
+    // go. Deliberately not an error — propagating it would abort the document
+    // edit, turning "some edges are lost" into "the rename does nothing".
 sync_subnet_pins_or_log(graph, subnet_id) -> Graph   // for callers that have
     // already established the node is a subnet; logs a refusal, returns the
     // graph unchanged. Used by `sync_subnet_pins_in` and `replace_network`.

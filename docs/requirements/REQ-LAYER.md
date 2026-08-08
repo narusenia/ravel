@@ -92,13 +92,11 @@ HDA 的ネットワーク共有等）。
   - [x] In / Out でカスタム入出力ポートを定義でき、外観のピンになる
   - [x] 未接続の入力ピンがパラメータとして露出する
   - [x] サブネットに潜って編集できる（REQ-LAYER-011）
-  - [ ] コピー＆ペーストで複製できる
-        （ノードエディタの Copy / Paste / Duplicate は Subnet ノードの
-        内部グラフをノード ID ごと複製するため、ノード ID が
-        ドキュメント内でグローバル一意という REQ-LAYER-009 の不変条件を
-        破る。レイヤー複製の `Graph::duplicate_with_fresh_ids` は
-        内部グラフまで再採番しており、そちらが正しい形。
-        `issues/medium/app-shell.md` の `MED-APP-25` に起票済み）
+  - [x] コピー＆ペーストで複製できる
+        （ノードエディタの Copy / Paste / Duplicate は
+        `Graph::duplicate_nodes_with_fresh_ids` を通り、Subnet ノードの
+        内部グラフを全階層ぶん再採番する。ノード ID がドキュメント内で
+        グローバル一意という REQ-LAYER-009 の不変条件を保つ）
 - **依存**: REQ-LAYER-002, REQ-LAYER-007
 
 ## REQ-LAYER-004: ネットワーク内パラメータのアニメーション

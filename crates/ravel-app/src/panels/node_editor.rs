@@ -782,7 +782,7 @@ impl NodeEditorPanel {
             node_sizes: HashMap::new(),
             node_categories: HashMap::new(),
             node_labels: HashMap::new(),
-            edge_style: EdgeStyle::default(),
+            edge_style: crate::app_settings::resolved(cx).node_editor_edge_style,
             clipboard: None,
             drag: DragMode::None,
             pointer_hint: PointerHint::default(),
@@ -2232,6 +2232,23 @@ impl NodeEditorPanel {
         cx.set_global(super::SelectedPropertiesTarget(target));
     }
 
+    /// Adopt `style` and remember it.
+    ///
+    /// The choice is a preference rather than a property of this panel, this
+    /// window or this project, so it is written to the global settings layer
+    /// and read back by whatever node editor is built next
+    /// (`node-graph-readability-plan.md`, `NGR-3`). The field is kept in step
+    /// so the current panel repaints without waiting to be rebuilt.
+    fn set_edge_style(&mut self, style: EdgeStyle, cx: &mut Context<Self>) {
+        self.edge_style = style;
+        crate::app_settings::update(
+            crate::app_settings::SettingsScope::Global,
+            |layer| layer.node_editor.edge_style = Some(style),
+            cx,
+        );
+        cx.notify();
+    }
+
     fn refresh_node_sizes(&mut self) {
         self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
     }
@@ -3518,8 +3535,7 @@ impl Render for NodeEditorPanel {
                                 PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_bezier"))
                                     .on_click(move |_, _window, cx| {
                                         e1.update(cx, |this, cx| {
-                                            this.edge_style = EdgeStyle::Bezier;
-                                            cx.notify();
+                                            this.set_edge_style(EdgeStyle::Bezier, cx);
                                         })
                                         .ok();
                                     }),
@@ -3528,8 +3544,7 @@ impl Render for NodeEditorPanel {
                                 PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_straight"))
                                     .on_click(move |_, _window, cx| {
                                         e2.update(cx, |this, cx| {
-                                            this.edge_style = EdgeStyle::Straight;
-                                            cx.notify();
+                                            this.set_edge_style(EdgeStyle::Straight, cx);
                                         })
                                         .ok();
                                     }),
@@ -3538,8 +3553,7 @@ impl Render for NodeEditorPanel {
                                 PopupMenuItem::new(t!("panel.node_graph_menu.edge_style_step"))
                                     .on_click(move |_, _window, cx| {
                                         e3.update(cx, |this, cx| {
-                                            this.edge_style = EdgeStyle::Step;
-                                            cx.notify();
+                                            this.set_edge_style(EdgeStyle::Step, cx);
                                         })
                                         .ok();
                                     }),
@@ -6070,6 +6084,35 @@ mod tests {
                 panel.auto_layout_nodes(cx);
                 assert!(!rects_overlap(&drawn_rects(panel)));
                 assert_eq!(panel.graph.nodes().count(), extra.len() + 1);
+            })
+            .unwrap();
+    }
+
+    // ----- edge style persistence (NGR-3) ------------------------------------
+
+    /// The style used to live and die with the panel. It is a setting now, so
+    /// a panel built after the choice starts on it.
+    #[gpui::test]
+    fn the_chosen_edge_style_outlives_the_panel_that_chose_it(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert_eq!(panel.edge_style, EdgeStyle::Bezier, "the default is Bezier");
+                panel.set_edge_style(EdgeStyle::Step, cx);
+            })
+            .unwrap();
+
+        // A second panel is what "close it and open it again" amounts to.
+        let reopened = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        reopened
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.edge_style, EdgeStyle::Step);
             })
             .unwrap();
     }

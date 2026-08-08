@@ -759,6 +759,7 @@ mod tests {
     use gpui::{AppContext as _, TestAppContext};
     use ravel_project::ProjectFile;
     use ravel_project::settings::{AutoSaveLayer, PlaybackLayer};
+    use ravel_ui::node_editor::EdgeStyle;
 
     fn write_toml(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -884,6 +885,43 @@ mod tests {
             .expect("the written global layer parses");
         assert_eq!(written.locale, None);
         assert_eq!(cx.update(|cx| resolved(cx)).locale, DEFAULT_LOCALE);
+    }
+
+    /// The edge style the node editor's context menu writes has to be there on
+    /// the next launch, not just in the panel that wrote it — the whole point
+    /// of `NGR-3`. A relaunch is the global file being read again, which is
+    /// exactly what this replays.
+    #[gpui::test]
+    fn the_node_editor_edge_style_survives_a_relaunch(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config").join("settings.toml");
+
+        // Nothing written yet: the editor starts on the style it always had.
+        assert_eq!(
+            read_global_settings_at(Some(path.clone()))
+                .resolved()
+                .node_editor_edge_style,
+            EdgeStyle::Bezier
+        );
+
+        cx.update(|cx| {
+            install(read_global_settings_at(Some(path.clone())), cx);
+            update(
+                SettingsScope::Global,
+                |layer| layer.node_editor.edge_style = Some(EdgeStyle::Step),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // A fresh process reads the file back and resolves the same value.
+        assert_eq!(
+            read_global_settings_at(Some(path))
+                .resolved()
+                .node_editor_edge_style,
+            EdgeStyle::Step
+        );
     }
 
     /// The other direction: a project-layer edit writes no global file at all.

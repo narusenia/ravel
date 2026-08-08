@@ -696,11 +696,9 @@ fn update_shell<R>(cx: &mut App, f: impl FnOnce(&mut AppShell) -> R) -> Option<R
     let out = session.update(cx, |session, cx| {
         let out = f(&mut session.shell);
         cx.notify();
+        crate::workspace::install_menus(&session.shell, cx);
         out
     });
-    if let Some(menus) = read_shell(cx, crate::workspace::build_menus) {
-        cx.set_menus(menus);
-    }
     Some(out)
 }
 

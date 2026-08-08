@@ -17,10 +17,11 @@
 use std::collections::HashSet;
 
 use gpui::*;
-use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
+use gpui_component::menu::AppMenuBar;
 use gpui_component::notification::{Notification, NotificationType};
+use gpui_component::{GlobalState, WindowExt as _};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
@@ -462,7 +463,7 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
 /// Convert a headless MenuItem to a GPUI MenuItem.
 fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
     match item {
-        ravel_ui::menu::MenuItem::Action { command, .. } => {
+        ravel_ui::menu::MenuItem::Action { command, check } => {
             let command = *command;
             macro_rules! to_gpui_action {
                 ($($Action:ident),+ $(,)?) => {
@@ -473,7 +474,16 @@ fn convert_menu_item(item: &ravel_ui::menu::MenuItem) -> gpui::MenuItem {
                     }
                 };
             }
-            for_each_command!(to_gpui_action)
+            let item: gpui::MenuItem = for_each_command!(to_gpui_action);
+            // The checkbox the headless model tracks (panel toggles, the active
+            // workspace preset). `gpui::MenuItem::Action` carries it, the macOS
+            // menu draws it as an item state, and `Menu::owned` carries it into
+            // the in-window bar — so this one conversion is the only place the
+            // check has to be honoured.
+            match check {
+                Some(checked) => item.checked(*checked),
+                None => item,
+            }
         }
         ravel_ui::menu::MenuItem::Separator => gpui::MenuItem::separator(),
         ravel_ui::menu::MenuItem::Submenu(sub) => {
@@ -511,6 +521,58 @@ pub fn build_menus(shell: &AppShell) -> Vec<gpui::Menu> {
     }
 
     gpui_menus
+}
+
+/// The in-window application menu bar, off macOS. See [`install_menus`].
+struct AppMenuBarGlobal(Entity<AppMenuBar>);
+
+impl Global for AppMenuBarGlobal {}
+
+/// The in-window menu bar entity, once [`install_menus`] has created it.
+///
+/// Durable shared application state — one bar for the application's lifetime,
+/// like [`crate::window_host::WindowRegistry`] — so a Global is the right
+/// mechanism here.
+pub(crate) fn app_menu_bar(cx: &App) -> Option<Entity<AppMenuBar>> {
+    Some(cx.try_global::<AppMenuBarGlobal>()?.0.clone())
+}
+
+/// Publishes one menu snapshot to every place a menu is drawn.
+///
+/// The single entry point for menus: `App::set_menus` for the macOS menu bar,
+/// and gpui-component's [`GlobalState`] snapshot for [`AppMenuBar`], the
+/// in-window bar the title bar draws where no OS menu bar exists (`set_menus`
+/// is implemented on macOS and the test platform only, so on Windows and Linux
+/// it reaches nothing and the whole hierarchy would be unreachable).
+///
+/// Both are fed from the same [`build_menus`] — one menu table, one
+/// Command↔Action mapping, only the drawing differs. Unlike the macOS bar the
+/// in-window one holds a snapshot, so every caller that used to refresh
+/// `set_menus` has to come through here.
+pub fn install_menus(shell: &AppShell, cx: &mut App) {
+    // `gpui::Menu` owns boxed actions and is not `Clone`, so the two consumers
+    // each get their own build.
+    cx.set_menus(build_menus(shell));
+    // The synthetic macOS application menu `build_menus` prepends is dropped
+    // here: `FileQuit` already sits in the headless File menu and `HelpAbout`
+    // in Help (`ravel_ui::menu`), so keeping it would show Quit and About
+    // twice in the in-window bar.
+    let owned = build_menus(shell)
+        .into_iter()
+        .skip(1)
+        .map(gpui::Menu::owned)
+        .collect();
+    GlobalState::global_mut(cx).set_app_menus(owned);
+
+    let bar = match app_menu_bar(cx) {
+        Some(bar) => bar,
+        None => {
+            let bar = AppMenuBar::new(cx);
+            cx.set_global(AppMenuBarGlobal(bar.clone()));
+            bar
+        }
+    };
+    bar.update(cx, |bar, cx| bar.reload(cx));
 }
 
 // ---------------------------------------------------------------------------
@@ -664,13 +726,12 @@ impl RavelWorkspace {
             crate::window_host::set_detached_minimized(minimized, cx);
         });
 
-        // The menu bar is not part of any window's element tree, so a language
-        // change cannot reach it by re-rendering: the labels were baked into the
-        // `Menu`s handed to the platform. Rebuild them when the settings global
-        // moves (`app_settings`), which is also the only thing that can change
-        // the language.
+        // Both menu bars hold a snapshot with the labels already baked in, so a
+        // language change cannot reach them by re-rendering. Rebuild them when
+        // the settings global moves (`app_settings`), which is also the only
+        // thing that can change the language.
         let settings_sub = cx.observe_global::<crate::app_settings::AppSettings>(|this, cx| {
-            cx.set_menus(build_menus(&this.shell));
+            install_menus(&this.shell, cx);
             cx.notify();
         });
 
@@ -733,7 +794,7 @@ impl RavelWorkspace {
         self.dispatch_outcome(cmd, outcome.clone(), window, cx);
         // The View and Workspace menus carry live checkboxes, and any command
         // may have moved a panel or switched a preset.
-        cx.set_menus(build_menus(&self.shell));
+        install_menus(&self.shell, cx);
         // Any command may have changed the arrangement, so this is where it
         // reaches disk. Unchanged documents write nothing, so the commands that
         // are not layout changes cost one serialization and no I/O.
@@ -756,7 +817,7 @@ impl RavelWorkspace {
             tracing::warn!(%error, name, "could not apply the named layout");
             return;
         }
-        cx.set_menus(build_menus(&self.shell));
+        install_menus(&self.shell, cx);
         crate::layout_persist::save(&self.shell, cx);
         cx.notify();
     }
@@ -862,7 +923,7 @@ impl RavelWorkspace {
         // against the ids they still have.
         crate::window_host::close_all_detached(cx);
         let opened = self.shell.restore_layout(&target);
-        cx.set_menus(build_menus(&self.shell));
+        install_menus(&self.shell, cx);
         cx.notify();
         // Opening a window from inside this entity's update is not allowed, and
         // the hosts have to re-render from the new layout first anyway.

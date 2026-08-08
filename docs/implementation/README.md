@@ -49,6 +49,9 @@ several plans here wait on its later units rather than on each other.
 | `hands-on-findings-handoff.md` | Where the 2026-08-08 hands-on findings landed, and the order to pick the filed bugs up in | — | — |
 | `asset-identity-plan.md` | Stable `AssetId` separate from the display name, so a re-import cannot silently rebind an existing reference | — | REQ-PROJ-001, REQ-UI-008, REQ-UI-010 |
 | `parameter-groups-plan.md` | Parameter groups (Pages) declared by the node type; the shape `OFX-5` reads plugin Group/Page into | — | REQ-PLUGIN-001 |
+| `refactor-plan-0808.md` | Workflow-penetration UX: the instrumentation that counts panel round-trips and re-searches, plus the known Timeline / import / search fixes — **the pre-release UX bucket** | — | REQ-UI-002–004, REQ-UI-013 |
+| `node-graph-readability-plan.md` | Manual auto-layout on undo, the `node_editor` settings section that finally persists `EdgeStyle`, then top-down flow, reroute, edge insertion, and type-coloured edges | — | REQ-UI-002, REQ-UI-003 |
+| `wrangle-plan.md` | A multi-statement, multi-attribute CPU wrangle node and spare parameters on any node — **post-release; gated on `HIGH-30`** | `issues/high/HIGH-30` | REQ-CORE-010, REQ-CORE-015, REQ-PLUGIN-005 |
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract — **prerequisite for `done/exposed-parameters-plan.md`** | — | REQ-LAYER-002, REQ-LAYER-003, REQ-PROJ-006 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
 | `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1); `vector-field-plan.md` unit 5 (merged) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |

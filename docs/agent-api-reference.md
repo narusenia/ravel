@@ -1725,6 +1725,11 @@ Unknown type keys are skipped silently (plugin space).
   which matches the query case-insensitively against label and description
   and ranks label matches above description-only matches, recently used
   types first.
+- `node_editor` (node_editor.rs): `EdgeStyle { Bezier, Straight, Step }`
+  (default `Bezier`, serialized `snake_case`). It lives here rather than in
+  `ravel-app` because `ravel-project` persists it as `settings.node_editor`
+  and cannot see the GUI crate; `ravel-app`'s `node_editor::EdgeStyle` is a
+  re-export, so there is one definition.
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
   `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via
@@ -2279,6 +2284,12 @@ Unknown type keys are skipped silently (plugin space).
   is written atomically off the UI thread to `<config>/ravel/settings.toml`
   (failure emits `ProjectEvent::SettingsSaveFailed`), `Project` travels in the
   `.ravprj` and marks the project dirty (`ProjectState::mark_settings_changed`).
+  The `node_editor` section (`NGR-3`) rides the same path: the layer field is
+  `SettingsLayer::node_editor.edge_style: Option<EdgeStyle>`, the resolved one
+  is `ResolvedSettings::node_editor_edge_style` (default `Bezier`), and the
+  node editor's context menu writes it to `Global` — it is a preference, not a
+  property of a project or a window. Nothing applies it centrally: the panel
+  reads it when it is built.
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has

@@ -129,16 +129,17 @@ fn no_binding_is_registered_without_a_context() {
 
     for loaded in &cases {
         let shell = shell_with(loaded);
-        let context = workspace_context();
-        let allowed: Vec<&str> = std::iter::once(context.as_str())
-            .chain(panel_contexts())
-            .collect();
+        // A panel binding carries its panel's context, narrowed the same way
+        // the workspace one is: an open menu owns the keyboard whichever
+        // binding set the chord came from (`MED-APP-31`).
+        let mut allowed = vec![workspace_context()];
+        allowed.extend(panel_contexts().map(workspace::yield_to_open_menus));
         for (key, predicate) in bindings_of(&shell) {
             let predicate = predicate.unwrap_or_else(|| {
                 panic!("'{key}' is bound with no key context (MED-APP-16 regression)")
             });
             assert!(
-                allowed.contains(&predicate.as_str()),
+                allowed.contains(&predicate),
                 "'{key}' is bound in the unexpected context '{predicate}'"
             );
         }

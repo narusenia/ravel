@@ -440,7 +440,16 @@ fn dialog_margin_top(window: &Window) -> Pixels {
 /// does not toggle playback either. That is the intent: an open menu is modal
 /// to the keyboard.
 pub fn workspace_binding_context() -> String {
-    format!("!Input && !{POPUP_MENU_CONTEXT} && !{APP_MENU_BAR_CONTEXT}")
+    yield_to_open_menus("!Input")
+}
+
+/// `context` narrowed so it stops matching while a menu is open.
+///
+/// Applies to the panel-scoped bindings too: a popup is a child of the panel
+/// that opened it, so the panel's own key context is still on the stack while
+/// its menu is up, and `L` would lay the graph out behind an open menu.
+pub fn yield_to_open_menus(context: &str) -> String {
+    format!("{context} && !{POPUP_MENU_CONTEXT} && !{APP_MENU_BAR_CONTEXT}")
 }
 
 /// Build GPUI keybindings from the headless table and panel-local contexts.
@@ -473,12 +482,12 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
             continue;
         };
         let gpui_chord = chord_to_gpui_string(&chord);
-        let context = binding.context;
+        let context = yield_to_open_menus(binding.context);
         macro_rules! bind_panel {
             ($($Action:ident),+ $(,)?) => {
                 match binding.command {
                     $(CommandId::$Action => {
-                        out.push(KeyBinding::new(&gpui_chord, $Action, Some(context)));
+                        out.push(KeyBinding::new(&gpui_chord, $Action, Some(&context)));
                     })+
                 }
             };

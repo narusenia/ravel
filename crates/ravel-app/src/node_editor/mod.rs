@@ -3,6 +3,7 @@
 
 pub mod bezier;
 pub mod hover_popover;
+pub mod layout;
 pub mod painting;
 pub mod palette;
 pub mod port_colors;

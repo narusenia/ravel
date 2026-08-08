@@ -376,6 +376,9 @@ processors: HashMap<NodeId, Arc<dyn NodeProcessor>>,   // crates/ravel-core/src/
 > どちらの半分が走るかは**描画時のフラグではなくドキュメントを読み直して**
 > 決めるので、1 フレーム前の状態で撤回が二重宣言に化けることがない。
 > 束縛を辿って名前を取るため、改名済みの宣言も正しく外れる。
+> **束縛は一意でない**（`bound_to` の docstring がそう書いている）ので、
+> トグルはそのパラメータに束縛された宣言を**全部**外す — 先頭 1 件だけ外すと
+> チェックが埋まったままになり、クリックが無視されたように見える。
 > ツールチップは状態で出し分ける（`properties.toggle.exposed_remove`）。
 > `exposed-parameters-plan.md` の「押し戻しで取り消さない」という判断は
 > **この修正で撤回した**（理由は同計画書に記録）。
@@ -441,6 +444,9 @@ let local = (w * 0.5, h * 0.5);      // ← 常にキャンバス中央
 > `Vec<BarBaseline>` を持ち、`operation_targets` からロック済みを除いて作る。
 > **トリムも含めた**（個票が「同じ形」と書いていたもの）。制限は
 > レイヤーごとに自分の表示区間で掛かる。1 マウス移動 = 1 `apply_document`。
+> ジェスチャが**始まらない**押下（修飾クリック / ロック済み / バーを外した
+> 押下）は普通のクリックなので、その場で選択を 1 枚へ絞る — mouseup 側の
+> 絞り込みは走らないため。判断は `press_layer_bar` 1 箇所に置いた。
 
 **該当**: `crates/ravel-app/src/panels/timeline.rs:1491-1512`（`drag_moved` の
 `TimelineDrag::MoveBar`）

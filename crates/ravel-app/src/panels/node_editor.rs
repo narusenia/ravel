@@ -691,10 +691,15 @@ pub struct NodeEditorPanel {
     canvas_origin: Rc<Cell<(f32, f32)>>,
     canvas_size: Rc<Cell<(f32, f32)>>,
     last_right_click: Rc<Cell<(f32, f32)>>,
-    /// Last pointer position in canvas-local pixels, so the keyboard-opened
-    /// search palette lands where the hand already is. `None` until the
-    /// pointer has been over the canvas once; a position outside the canvas
-    /// (the pointer left, or a drag carried it away) is rejected at use.
+    /// Last pointer position **over the canvas**, in canvas-local pixels, so
+    /// the keyboard-opened search palette lands where the hand last worked.
+    ///
+    /// `on_mouse_move` only fires while the hitbox is hovered, so this is
+    /// never written with an outside position and it keeps its value after the
+    /// pointer leaves — which is what the palette wants, since the last place
+    /// the user was editing beats the canvas center. The bounds check at use
+    /// is for the case the value goes stale another way: the canvas shrinking
+    /// out from under a position that used to be inside it.
     last_pointer: Option<(f32, f32)>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
@@ -2502,8 +2507,9 @@ impl NodeEditorPanel {
         result
     }
 
-    /// Where a keyboard-opened overlay belongs: under the pointer when it is
-    /// over the canvas, the canvas center otherwise.
+    /// Where a keyboard-opened overlay belongs: the last pointer position over
+    /// the canvas, falling back to the center when there is none or it no
+    /// longer lands inside.
     fn pointer_or_canvas_center(&self) -> (f32, f32) {
         let (w, h) = self.canvas_size.get();
         self.last_pointer
@@ -2671,8 +2677,9 @@ impl NodeEditorPanel {
     ///
     /// The double-click path opens the same palette at the click, so a fixed
     /// canvas center made one palette appear in two places and put the node it
-    /// places somewhere the hand was not (`MED-APP-27`). With the pointer off
-    /// the canvas there is no better answer than the center.
+    /// places somewhere the hand was not (`MED-APP-27`). Before the pointer
+    /// has ever been over the canvas there is no better answer than the
+    /// center.
     fn on_search_palette(
         &mut self,
         _: &NodeSearchPalette,

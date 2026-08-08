@@ -2196,6 +2196,15 @@ Unknown type keys are skipped silently (plugin space).
   port colour of its domain's data type, so a node's header matches the port
   dots of the data it deals with. A pair table in that file's tests pins the
   1:1 mapping.
+- Auto layout: `node_editor/layout.rs::auto_layout(&graph, &targets, &sizes,
+  LayoutAxis) -> HashMap<NodeId, (f32, f32)>` (`NGR-1`) — a pure function that
+  returns new positions and never touches the `Graph`. Empty `targets` means
+  the whole network; ids the graph does not have are dropped, synthetic nodes
+  are never moved, and layering is the longest path over the subgraph the
+  targets induce. `sizes` are network-coordinate sizes, so a caller holding
+  the panel's zoomed `node_sizes` divides by the zoom first. Only
+  `NodeEditorPanel::auto_layout_nodes` (behind `CommandId::NodeAutoLayout`)
+  calls it, in one `commit_graph`; nothing runs it automatically.
 - Port colors and silhouettes: `node_editor/port_colors.rs` maps `DataTypeId`
   → Hsla and → `PortShape` (`Circle`, `RoundedSquare` = FRAME_BUFFER,
   `Diamond` = GEOMETRY, `Triangle` = FIELD, `Hexagon` = SCENE); add an arm for

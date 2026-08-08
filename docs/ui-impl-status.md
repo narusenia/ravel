@@ -58,6 +58,7 @@ Popover・検索パレット・種別アイコン）Done
 | ポート型フィルタリング | ✅ | 接続ドラッグ中に非互換ポートをスナップスキップ |
 | 単一入力制約 | ✅ | 既存エッジを自動置換 |
 | Fit View (F key) | ✅ | 全ノードが画面に収まるようズーム+パン |
+| 自動整列 (L key) | ✅ | `CommandId::NodeAutoLayout`（`NodeEditor` キーコンテキストの `L`。パネル固有なのでユーザー再割り当ての対象外）。選択が空ならネットワーク全体、選択があればその集合だけを DAG の深さで層に分け、層は右へ、層の中は下へ並べる。層内の順は現在の Y 座標（同値ならノード ID）で決まり、結果は元のバウンディングボックス左上に揃うので選択の一部を整列しても飛ばない。synthetic ノードは動かさない。**Document コミット 1 回**（`NodeMetadata::position` は保存データなので undo 1 回で全位置が戻る）。位置が 1 つも変わらないときは undo ステップを作らない。**自動では走らない** — collapse / extract / ノード追加のどの経路からも呼ばない（node-graph-readability 計画の決定事項） |
 | Evaluator 連携 | ✅ | ProjectState の EvalService 経由（Document-aware、バックグラウンド） |
 | ネットワークコンテキスト | ✅ | 所有パス（Comp/Layer/[Subnet...]）で 1 ネットワークを編集（REQ-LAYER-011）。`LayerSelection` を observe し、**レイヤー 1 つだけ選択中**のときそのネットワークを開く。0 個と複数個は同じ閉じた状態（中央メッセージのみ差し替え、閉じるとき `CanvasSelection` もクリア。REQ-UI-013 単位 6） |
 | サブネットへの潜り | ✅ | サブネットノードをダブルクリックで内部 Graph へ |

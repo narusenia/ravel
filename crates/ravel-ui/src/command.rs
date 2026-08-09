@@ -47,6 +47,29 @@ pub enum CommandId {
     KeyframeInterpolationBezier,
     KeyframeInterpolationLinear,
     KeyframeInterpolationStep,
+    // Timeline property reveal (After Effects' `U` / `P` / `S` / `R` / `T` /
+    // `A` / `L`, plus `UU` and `EE` as `Alt+U` / `Alt+E`). Each criterion has
+    // a second command for its `Shift` chord, which adds to the current
+    // filter where the unmodified one replaces it — a GPUI action carries no
+    // modifiers, so the two meanings are two commands.
+    TimelineRevealAnimated,
+    TimelineRevealAnimatedAdd,
+    TimelineRevealAnchorPoint,
+    TimelineRevealAnchorPointAdd,
+    TimelineRevealPosition,
+    TimelineRevealPositionAdd,
+    TimelineRevealScale,
+    TimelineRevealScaleAdd,
+    TimelineRevealRotation,
+    TimelineRevealRotationAdd,
+    TimelineRevealOpacity,
+    TimelineRevealOpacityAdd,
+    TimelineRevealAudioGain,
+    TimelineRevealAudioGainAdd,
+    TimelineRevealModified,
+    TimelineRevealModifiedAdd,
+    TimelineRevealExpression,
+    TimelineRevealExpressionAdd,
     // View (panel toggles)
     ViewToggleOutliner,
     ViewToggleTimeline,
@@ -207,6 +230,72 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         CommandId::KeyframeInterpolationStep,
         "keyframe.interpolation_step",
     ),
+    (
+        CommandId::TimelineRevealAnimated,
+        "timeline.reveal_animated",
+    ),
+    (
+        CommandId::TimelineRevealAnimatedAdd,
+        "timeline.reveal_animated_add",
+    ),
+    (
+        CommandId::TimelineRevealAnchorPoint,
+        "timeline.reveal_anchor_point",
+    ),
+    (
+        CommandId::TimelineRevealAnchorPointAdd,
+        "timeline.reveal_anchor_point_add",
+    ),
+    (
+        CommandId::TimelineRevealPosition,
+        "timeline.reveal_position",
+    ),
+    (
+        CommandId::TimelineRevealPositionAdd,
+        "timeline.reveal_position_add",
+    ),
+    (CommandId::TimelineRevealScale, "timeline.reveal_scale"),
+    (
+        CommandId::TimelineRevealScaleAdd,
+        "timeline.reveal_scale_add",
+    ),
+    (
+        CommandId::TimelineRevealRotation,
+        "timeline.reveal_rotation",
+    ),
+    (
+        CommandId::TimelineRevealRotationAdd,
+        "timeline.reveal_rotation_add",
+    ),
+    (CommandId::TimelineRevealOpacity, "timeline.reveal_opacity"),
+    (
+        CommandId::TimelineRevealOpacityAdd,
+        "timeline.reveal_opacity_add",
+    ),
+    (
+        CommandId::TimelineRevealAudioGain,
+        "timeline.reveal_audio_gain",
+    ),
+    (
+        CommandId::TimelineRevealAudioGainAdd,
+        "timeline.reveal_audio_gain_add",
+    ),
+    (
+        CommandId::TimelineRevealModified,
+        "timeline.reveal_modified",
+    ),
+    (
+        CommandId::TimelineRevealModifiedAdd,
+        "timeline.reveal_modified_add",
+    ),
+    (
+        CommandId::TimelineRevealExpression,
+        "timeline.reveal_expression",
+    ),
+    (
+        CommandId::TimelineRevealExpressionAdd,
+        "timeline.reveal_expression_add",
+    ),
     (CommandId::ViewToggleOutliner, "view.toggle_outliner"),
     (CommandId::ViewToggleTimeline, "view.toggle_timeline"),
     (CommandId::ViewToggleNodeGraph, "view.toggle_node_graph"),
@@ -298,6 +387,24 @@ impl CommandId {
             CommandId::KeyframeInterpolationBezier => "timeline.interpolation.bezier",
             CommandId::KeyframeInterpolationLinear => "timeline.interpolation.linear",
             CommandId::KeyframeInterpolationStep => "timeline.interpolation.step",
+            CommandId::TimelineRevealAnimated => "timeline.reveal.animated",
+            CommandId::TimelineRevealAnimatedAdd => "timeline.reveal.animated_add",
+            CommandId::TimelineRevealAnchorPoint => "timeline.reveal.anchor_point",
+            CommandId::TimelineRevealAnchorPointAdd => "timeline.reveal.anchor_point_add",
+            CommandId::TimelineRevealPosition => "timeline.reveal.position",
+            CommandId::TimelineRevealPositionAdd => "timeline.reveal.position_add",
+            CommandId::TimelineRevealScale => "timeline.reveal.scale",
+            CommandId::TimelineRevealScaleAdd => "timeline.reveal.scale_add",
+            CommandId::TimelineRevealRotation => "timeline.reveal.rotation",
+            CommandId::TimelineRevealRotationAdd => "timeline.reveal.rotation_add",
+            CommandId::TimelineRevealOpacity => "timeline.reveal.opacity",
+            CommandId::TimelineRevealOpacityAdd => "timeline.reveal.opacity_add",
+            CommandId::TimelineRevealAudioGain => "timeline.reveal.audio_gain",
+            CommandId::TimelineRevealAudioGainAdd => "timeline.reveal.audio_gain_add",
+            CommandId::TimelineRevealModified => "timeline.reveal.modified",
+            CommandId::TimelineRevealModifiedAdd => "timeline.reveal.modified_add",
+            CommandId::TimelineRevealExpression => "timeline.reveal.expression",
+            CommandId::TimelineRevealExpressionAdd => "timeline.reveal.expression_add",
             CommandId::ViewToggleOutliner => "menu.view.outliner",
             CommandId::ViewToggleTimeline => "menu.view.timeline",
             CommandId::ViewToggleNodeGraph => "menu.view.node_graph",

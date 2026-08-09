@@ -489,6 +489,28 @@ bezier = "Bezier"
 linear = "Linear"
 step = "Step"
 
+# Reveal shortcuts: each criterion has a "show only these rows" command and an
+# `_add` variant (its Shift chord) that adds to the current filter.
+[timeline.reveal]
+animated = "Reveal animated properties"
+animated_add = "Add animated properties"
+anchor_point = "Reveal Anchor Point"
+anchor_point_add = "Add Anchor Point"
+position = "Reveal Position"
+position_add = "Add Position"
+scale = "Reveal Scale"
+scale_add = "Add Scale"
+rotation = "Reveal Rotation"
+rotation_add = "Add Rotation"
+opacity = "Reveal Opacity"
+opacity_add = "Add Opacity"
+audio_gain = "Reveal Gain"
+audio_gain_add = "Add Gain"
+modified = "Reveal modified properties"
+modified_add = "Add modified properties"
+expression = "Reveal properties with expressions"
+expression_add = "Add properties with expressions"
+
 [timeline.transport]
 to_start = "Go to start"
 step_back = "Step back one frame"
@@ -524,6 +546,7 @@ next = "Next keyframe"
 value = "Value"
 
 [timeline.property]
+anchor_point = "Anchor Point"
 position = "Position"
 scale = "Scale"
 rotation = "Rotation"

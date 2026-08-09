@@ -484,6 +484,28 @@ bezier = "ベジェ"
 linear = "リニア"
 step = "ステップ"
 
+# 絞り込みショートカット。各条件に「その行だけを表示」と、Shift 側の
+# 現在の絞り込みに足す `_add` がある。
+[timeline.reveal]
+animated = "アニメーション済みのみ表示"
+animated_add = "アニメーション済みを追加"
+anchor_point = "アンカーポイントのみ表示"
+anchor_point_add = "アンカーポイントを追加"
+position = "位置のみ表示"
+position_add = "位置を追加"
+scale = "スケールのみ表示"
+scale_add = "スケールを追加"
+rotation = "回転のみ表示"
+rotation_add = "回転を追加"
+opacity = "不透明度のみ表示"
+opacity_add = "不透明度を追加"
+audio_gain = "ゲインのみ表示"
+audio_gain_add = "ゲインを追加"
+modified = "変更済みのみ表示"
+modified_add = "変更済みを追加"
+expression = "式を持つ行のみ表示"
+expression_add = "式を持つ行を追加"
+
 [timeline.transport]
 to_start = "先頭へ"
 step_back = "1フレーム戻る"
@@ -519,6 +541,7 @@ next = "次のキーフレーム"
 value = "値"
 
 [timeline.property]
+anchor_point = "アンカーポイント"
 position = "位置"
 scale = "スケール"
 rotation = "回転"

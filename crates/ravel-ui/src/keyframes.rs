@@ -4,7 +4,8 @@
 //! Keyframe editing model for the timeline property tree (layer-network-model
 //! plan, Phase 4; REQ-LAYER-004).
 //!
-//! The timeline lists, per layer, the shell channel groups (Position / Scale
+//! The timeline lists, per layer, the shell channel groups (Anchor Point /
+//! Position / Scale
 //! / Rotation / Opacity, plus Gain on audio layers) and every **network parameter that carries
 //! keyframes** — node parameters of the layer's owned network whose
 //! [`ParameterValue::Channel`]…[`ParameterValue::Channel4`] components hold a
@@ -126,12 +127,95 @@ pub fn comp_frame_for_key(layer: &Layer, local_frame: u64) -> i64 {
 }
 
 /// The shell groups always shown in the tree, in display order.
-pub const SHELL_GROUPS: [PropertyGroup; 4] = [
+///
+/// The order is After Effects': Anchor Point, Position, Scale, Rotation,
+/// Opacity — the order the reveal shortcuts (`A` / `P` / `S` / `R` / `T`)
+/// address them in.
+pub const SHELL_GROUPS: [PropertyGroup; 5] = [
+    PropertyGroup::AnchorPoint,
     PropertyGroup::Position,
     PropertyGroup::Scale,
     PropertyGroup::Rotation,
     PropertyGroup::Opacity,
 ];
+
+/// One After Effects-style *reveal* criterion: a property row is shown when it
+/// matches at least one active criterion (`refactor-plan-0808.md`, unit 5).
+///
+/// The criteria filter the rows [`property_rows`] produces; they never change
+/// which rows exist. A row hidden by a filter is hidden everywhere — the
+/// header tree, the painter, hit testing, rubber-band selection and the
+/// content height all read the same filtered list, because a filter that
+/// reaches only some of them makes painting and hit testing disagree below
+/// the first hidden row (`MED-APP-13`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RevealFilter {
+    /// Rows that carry keyframes (AE `U`).
+    Animated,
+    /// One shell group (AE `A` / `P` / `S` / `R` / `T` / `L`).
+    Group(PropertyGroup),
+    /// Rows whose value differs from the shell default (AE `UU`).
+    Modified,
+    /// Rows driven by an expression (AE `EE`).
+    Expression,
+}
+
+impl RevealFilter {
+    /// Whether `row` of `layer` survives this criterion.
+    pub fn matches(self, layer: &Layer, row: &PropertyRow) -> bool {
+        let channels = || row_channels(layer, &row.id).unwrap_or_default();
+        match self {
+            Self::Group(group) => row.id == PropertyRowId::Shell(group),
+            Self::Animated => channels()
+                .iter()
+                .any(|channel| matches!(channel.source, ChannelSource::Keyframes(_))),
+            // A blend counts: the Properties badge calls such a channel
+            // expression-driven, and one definition of "driven by an
+            // expression" has to serve both panels.
+            //
+            // **Scope**: this can only reveal rows that exist, and a network
+            // parameter earns a row by being keyframed
+            // ([`property_rows`]). An expression attached to a parameter that
+            // was never keyframed therefore has no row for `Alt+E` to keep.
+            // Widening row generation is not this filter's job — it would
+            // change the tree for everyone, not just while a filter is on.
+            Self::Expression => channels().iter().any(|channel| {
+                crate::properties::expression::source_has_expression(&channel.source)
+            }),
+            Self::Modified => match &row.id {
+                PropertyRowId::Shell(group) => {
+                    let defaults = shell_default_channels(*group);
+                    let channels = channels();
+                    channels.len() != defaults.len()
+                        || channels
+                            .iter()
+                            .zip(&defaults)
+                            .any(|(channel, default)| channel.source != default.source)
+                }
+                // A network parameter is only listed once it is keyframed, so
+                // it is by construction no longer the processor's default.
+                PropertyRowId::Network { .. } => true,
+            },
+        }
+    }
+}
+
+/// The channels a shell group holds on a freshly created layer
+/// ([`Layer::new`] and [`ravel_core::composition::AudioSource`]), which
+/// [`RevealFilter::Modified`] compares against.
+fn shell_default_channels(group: PropertyGroup) -> Vec<AnimationChannel> {
+    let transform = ravel_core::composition::LayerTransform::default();
+    match group {
+        PropertyGroup::AnchorPoint => transform.anchor_point.to_vec(),
+        PropertyGroup::Position => transform.position.to_vec(),
+        PropertyGroup::Scale => transform.scale.to_vec(),
+        PropertyGroup::Rotation => vec![transform.rotation],
+        PropertyGroup::Opacity => vec![AnimationChannel::constant(1.0)],
+        PropertyGroup::AudioGain => {
+            vec![ravel_core::composition::AudioSource::default().gain]
+        }
+    }
+}
 
 /// The property-tree rows of a layer: the shell groups, then every network
 /// parameter with at least one keyframed component (REQ-LAYER-004), ordered
@@ -880,22 +964,44 @@ mod tests {
     #[test]
     fn rows_list_shell_groups_then_keyframed_network_params() {
         let rows = property_rows(&test_layer());
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].id, PropertyRowId::Shell(PropertyGroup::Position));
-        assert_eq!(rows[3].id, PropertyRowId::Shell(PropertyGroup::Opacity));
+        assert_eq!(rows.len(), 6);
+        // After Effects' order: Anchor Point, Position, Scale, Rotation,
+        // Opacity, then the keyframed network parameters.
+        assert_eq!(rows[0].id, PropertyRowId::Shell(PropertyGroup::AnchorPoint));
+        assert_eq!(rows[1].id, PropertyRowId::Shell(PropertyGroup::Position));
+        assert_eq!(rows[4].id, PropertyRowId::Shell(PropertyGroup::Opacity));
         assert_eq!(
-            rows[4].id,
+            rows[5].id,
             PropertyRowId::Network {
                 node: NodeId::new(20),
                 key: "radius".into()
             }
         );
-        assert_eq!(rows[4].label.as_deref(), Some("blur · radius"));
+        assert_eq!(rows[5].label.as_deref(), Some("blur · radius"));
         // Constant-only params (Float `mix`, `amount`) are not listed.
         assert!(!rows.iter().any(|r| matches!(
             &r.id,
             PropertyRowId::Network { key, .. } if key == "mix" || key == "amount"
         )));
+    }
+
+    /// Anchor Point is a row of every layer's tree, and it is keyable through
+    /// it like any other shell group (AE's `A`).
+    #[test]
+    fn anchor_point_is_a_keyable_shell_row() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Shell(PropertyGroup::AnchorPoint);
+        let listed = property_rows(&layer);
+        assert_eq!(listed[0].id, row);
+        assert_eq!(listed[0].channel_names, vec!["X", "Y"]);
+
+        assert!(insert_keyframe(&mut layer, &row, 1, 3));
+        assert!(has_keyframe_at(&layer, &row, 1, 3));
+        assert!(set_channel_value(&mut layer, &row, 1, 3, 12.0));
+        assert!(
+            (layer.transform.anchor_point[1].evaluate(3.0, &eval_ctx()) - 12.0).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -1074,11 +1180,11 @@ mod tests {
         let network = Graph::new().add_node(color).unwrap();
         let layer = Layer::new(LayerId::new(2), "C", network).with_time(0, 0, 100);
         let rows = property_rows(&layer);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[4].channel_names, vec!["R", "G", "B", "A"]);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[5].channel_names, vec!["R", "G", "B", "A"]);
         // Per-component editing targets the keyframed component only.
         let mut layer = layer;
-        let row = rows[4].id.clone();
+        let row = rows[5].id.clone();
         assert!(insert_keyframe(&mut layer, &row, 1, 3));
         assert!(has_keyframe_at(&layer, &row, 1, 3));
         assert!(!has_keyframe_at(&layer, &row, 2, 3));

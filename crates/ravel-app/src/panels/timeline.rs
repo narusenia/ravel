@@ -1267,6 +1267,13 @@ impl TimelineGpuiPanel {
             }) else {
                 return;
             };
+            // Aligning what is already aligned changes nothing, and an undo
+            // step that undoes to an identical document is one the user has to
+            // press twice to get anywhere — the same rule the declarations
+            // list follows for a no-op rename.
+            if doc == *project.document() {
+                return;
+            }
             project.commit_document(doc, InvalidationHint::Structural, cx);
         });
         cx.notify();
@@ -9311,6 +9318,37 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(layer(&project, comp_id, a, cx).start_frame, -30);
         assert_eq!(layer(&project, comp_id, b, cx).start_frame, 10);
+    }
+
+    /// Aligning what is already aligned records nothing: an undo step that
+    /// undoes to an identical document is one the user has to press twice to
+    /// get anywhere.
+    #[gpui::test]
+    fn a_repeat_align_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        window
+            .update(cx, |panel, window, cx| {
+                super::super::set_layer_selection(vec![a], cx);
+                panel.set_playhead(70, cx);
+                panel.on_align_layer_start(&TimelineAlignLayerStart, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 70);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.on_align_layer_start(&TimelineAlignLayerStart, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            layer(&project, comp_id, a, cx).start_frame,
+            0,
+            "one undo reaches the position before the first align"
+        );
     }
 
     /// `I` / `O` span the whole selection: its earliest start and its latest

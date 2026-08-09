@@ -519,6 +519,7 @@ next = "次のキーフレーム"
 value = "値"
 
 [timeline.property]
+anchor_point = "アンカーポイント"
 position = "位置"
 scale = "スケール"
 rotation = "回転"

@@ -5115,16 +5115,15 @@ fn paint_diamond(cx_pos: Pixels, cy: Pixels, color: Hsla, window: &mut Window) {
     }
 }
 
-/// Localized label of a shell property group. `AnchorPoint` is not part of
-/// `keyframes::SHELL_GROUPS`, so it never reaches the tree.
+/// Localized label of a shell property group.
 fn shell_group_label(group: PropertyGroup) -> SharedString {
     match group {
+        PropertyGroup::AnchorPoint => SharedString::from(t!("timeline.property.anchor_point")),
         PropertyGroup::Position => SharedString::from(t!("timeline.property.position")),
         PropertyGroup::Scale => SharedString::from(t!("timeline.property.scale")),
         PropertyGroup::Rotation => SharedString::from(t!("timeline.property.rotation")),
         PropertyGroup::Opacity => SharedString::from(t!("timeline.property.opacity")),
         PropertyGroup::AudioGain => SharedString::from(t!("timeline.property.gain")),
-        PropertyGroup::AnchorPoint => SharedString::default(),
     }
 }
 
@@ -6604,8 +6603,10 @@ mod tests {
                 panel.state.toggle_layer_expanded(a);
                 panel.state.toggle_property_expanded(a, row.clone());
                 let (origin_x, origin_y) = panel.area_origin.get();
-                // Layer B occupies y 0..28; layer A's Position-X channel is
-                // centered at area-local y 86. Start at empty frame 15 and
+                // Layer B occupies y 0..28 and layer A's bar y 28..56; the
+                // Anchor Point row (AE's first property) then sits at 56..76
+                // and Position at 76..96, so A's Position-X channel is
+                // centered at area-local y 106. Start at empty frame 15 and
                 // drag left across the keys at frames 0 and 10.
                 panel.channel_row_mouse_down(
                     a,
@@ -6614,11 +6615,11 @@ mod tests {
                     60.0,
                     1,
                     origin_x + 60.0,
-                    origin_y + 86.0,
+                    origin_y + 106.0,
                     false,
                     cx,
                 );
-                panel.drag_moved(origin_x - 1.0, origin_y + 90.0, false, false, cx);
+                panel.drag_moved(origin_x - 1.0, origin_y + 110.0, false, false, cx);
                 assert_eq!(
                     panel.selected_keyframes,
                     HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10),])

@@ -4,7 +4,8 @@
 //! Keyframe editing model for the timeline property tree (layer-network-model
 //! plan, Phase 4; REQ-LAYER-004).
 //!
-//! The timeline lists, per layer, the shell channel groups (Position / Scale
+//! The timeline lists, per layer, the shell channel groups (Anchor Point /
+//! Position / Scale
 //! / Rotation / Opacity, plus Gain on audio layers) and every **network parameter that carries
 //! keyframes** — node parameters of the layer's owned network whose
 //! [`ParameterValue::Channel`]…[`ParameterValue::Channel4`] components hold a
@@ -126,7 +127,12 @@ pub fn comp_frame_for_key(layer: &Layer, local_frame: u64) -> i64 {
 }
 
 /// The shell groups always shown in the tree, in display order.
-pub const SHELL_GROUPS: [PropertyGroup; 4] = [
+///
+/// The order is After Effects': Anchor Point, Position, Scale, Rotation,
+/// Opacity — the order the reveal shortcuts (`A` / `P` / `S` / `R` / `T`)
+/// address them in.
+pub const SHELL_GROUPS: [PropertyGroup; 5] = [
+    PropertyGroup::AnchorPoint,
     PropertyGroup::Position,
     PropertyGroup::Scale,
     PropertyGroup::Rotation,
@@ -880,17 +886,20 @@ mod tests {
     #[test]
     fn rows_list_shell_groups_then_keyframed_network_params() {
         let rows = property_rows(&test_layer());
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].id, PropertyRowId::Shell(PropertyGroup::Position));
-        assert_eq!(rows[3].id, PropertyRowId::Shell(PropertyGroup::Opacity));
+        assert_eq!(rows.len(), 6);
+        // After Effects' order: Anchor Point, Position, Scale, Rotation,
+        // Opacity, then the keyframed network parameters.
+        assert_eq!(rows[0].id, PropertyRowId::Shell(PropertyGroup::AnchorPoint));
+        assert_eq!(rows[1].id, PropertyRowId::Shell(PropertyGroup::Position));
+        assert_eq!(rows[4].id, PropertyRowId::Shell(PropertyGroup::Opacity));
         assert_eq!(
-            rows[4].id,
+            rows[5].id,
             PropertyRowId::Network {
                 node: NodeId::new(20),
                 key: "radius".into()
             }
         );
-        assert_eq!(rows[4].label.as_deref(), Some("blur · radius"));
+        assert_eq!(rows[5].label.as_deref(), Some("blur · radius"));
         // Constant-only params (Float `mix`, `amount`) are not listed.
         assert!(!rows.iter().any(|r| matches!(
             &r.id,
@@ -963,6 +972,25 @@ mod tests {
             .find(|r| r.id == in_id)
             .expect("keyframed custom param listed");
         assert_eq!(row.label.as_deref(), Some("amount"));
+    }
+
+    /// Anchor Point is a row of every layer's tree, and it is keyable through
+    /// it like any other shell group (AE's `A`).
+    #[test]
+    fn anchor_point_is_a_keyable_shell_row() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Shell(PropertyGroup::AnchorPoint);
+        let listed = property_rows(&layer);
+        assert_eq!(listed[0].id, row);
+        assert_eq!(listed[0].channel_names, vec!["X", "Y"]);
+
+        assert!(insert_keyframe(&mut layer, &row, 1, 3));
+        assert!(has_keyframe_at(&layer, &row, 1, 3));
+        assert!(set_channel_value(&mut layer, &row, 1, 3, 12.0));
+        assert!(
+            (layer.transform.anchor_point[1].evaluate(3.0, &eval_ctx()) - 12.0).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -1074,11 +1102,11 @@ mod tests {
         let network = Graph::new().add_node(color).unwrap();
         let layer = Layer::new(LayerId::new(2), "C", network).with_time(0, 0, 100);
         let rows = property_rows(&layer);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[4].channel_names, vec!["R", "G", "B", "A"]);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[5].channel_names, vec!["R", "G", "B", "A"]);
         // Per-component editing targets the keyframed component only.
         let mut layer = layer;
-        let row = rows[4].id.clone();
+        let row = rows[5].id.clone();
         assert!(insert_keyframe(&mut layer, &row, 1, 3));
         assert!(has_keyframe_at(&layer, &row, 1, 3));
         assert!(!has_keyframe_at(&layer, &row, 2, 3));

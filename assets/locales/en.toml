@@ -524,6 +524,7 @@ next = "Next keyframe"
 value = "Value"
 
 [timeline.property]
+anchor_point = "Anchor Point"
 position = "Position"
 scale = "Scale"
 rotation = "Rotation"

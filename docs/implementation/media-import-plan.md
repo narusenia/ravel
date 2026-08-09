@@ -38,6 +38,12 @@
 | 7 | オフライン/デコード失敗のレイヤーは**透明フレームとして継続**。評価全体を失敗させない | 大きなコンポジションで 1 枚壊れると全部見えなくなるのを避ける |
 | 8 | アセットのメタデータ表示とパス編集は `PropertiesTarget::MediaAsset { id }` を追加して Properties に出す。MediaBin は一覧列のみ | `Composition` ターゲットの前例と同型。「ターゲットは identify するだけ、値は毎回ドキュメントから解決」規約に乗る |
 
+> **決定 4 の適用範囲は `refactor-plan-0808.md` の単位 10 が狭めた。**
+> インポートは配置しなくなり、配置は独立した操作になった。開始フレームは
+> 再生ヘッドのまま（メニュー / ダブルクリック / Outliner / Viewer へのドロップ）
+> だが、Timeline へドロップした場合だけポインタの指すフレームになる。
+> 素材長の決め方は不変。
+
 ## 目標アーキテクチャ
 
 ### アセットモデル（ravel-core）
@@ -168,6 +174,7 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
    `ExternalPaths` ドロップをワークスペースのルートで受ける）、
    background probe（`MediaProber` 注入可能）、相対化して `media_assets` へ
    1 undo で追加、「レイヤーとして追加」（素材長 + 再生ヘッド）。
+   **インポート時の自動配置は `refactor-plan-0808.md` の単位 10 で外した。**
 4. **MediaBin パネル**（ravel-ui / ravel-app）— ✅ 実装済み
    行モデル + 種別フィルタ + 検索、`MediaSelection` Global、
    `SelectedPropertiesTarget` 連携、行コンテキストメニュー、

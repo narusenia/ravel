@@ -303,3 +303,18 @@ fn node_editor_keybindings_are_context_scoped() {
         ]
     );
 }
+
+/// `command_action` produces the very action `for_each_command!` declared for
+/// the command, for every command. Menus that dispatch a command without
+/// naming its action type (the Outliner's Add Layer submenu) rely on it, so a
+/// mismatch would silently send the wrong action.
+#[test]
+fn command_action_returns_the_action_declared_for_each_command() {
+    for command in CommandId::all() {
+        assert_eq!(
+            ravel_app::workspace::command_action(command).name(),
+            action_name(command),
+            "command_action({command}) names the wrong action"
+        );
+    }
+}

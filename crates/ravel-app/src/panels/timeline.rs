@@ -51,6 +51,7 @@ use ravel_ui::panels::timeline::{
 };
 
 use crate::assets::RavelIcon;
+use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
 use crate::project_state::ProjectState;
 use crate::widgets::curve_view::{self, CurveValueRange, format_value_label, value_grid_values};
 // Exercised only by this module's grid tests, which reach it through
@@ -3757,6 +3758,34 @@ impl TimelineGpuiPanel {
         }
     }
 
+    /// Place the dragged MediaBin assets on the active composition, starting
+    /// at the frame under `pointer` (unit 10).
+    ///
+    /// Only the horizontal position is read: the drop frame is what the
+    /// pointer names, while the stack position is the top of the stack like
+    /// every other layer-creating path. A drop left of the lane area (over
+    /// the layer headers) lands on the first visible frame rather than
+    /// nowhere.
+    ///
+    /// The whole drop is one `commit_document`, so dropping a multi-selection
+    /// is one undo step.
+    fn drop_media_assets(
+        &mut self,
+        drag: &DraggedAsset,
+        pointer: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let assets = dropped_asset_ids(drag, cx);
+        if assets.is_empty() {
+            return;
+        }
+        let pointer_x: f32 = pointer.x.into();
+        let lane_x = (pointer_x - self.area_origin.get().0).max(0.0);
+        let frame = self.state.x_to_frame(lane_x as f64) as i64;
+        add_assets_as_layers(&assets, frame, cx);
+        cx.notify();
+    }
+
     fn total_layer_height(&self) -> f32 {
         let mut h = 0.0f32;
         for layer in self.state.layers() {
@@ -4759,6 +4788,7 @@ impl Render for TimelineGpuiPanel {
         let menu_selection = self.selected_keyframes.clone();
         let last_right_click = self.last_right_click.clone();
         let menu_area_origin = self.area_origin.clone();
+        let drop_highlight = theme.colors.drop_target;
 
         let root = div()
             .id("timeline-root")
@@ -4934,6 +4964,14 @@ impl Render for TimelineGpuiPanel {
                     .id("layer-scroll-area")
                     .flex_grow()
                     .overflow_y_scroll()
+                    // A MediaBin asset dropped on the stack becomes a layer
+                    // starting at the frame under the pointer (unit 10).
+                    .drag_over::<DraggedAsset>(move |style, _drag, _window, _cx| {
+                        style.bg(drop_highlight)
+                    })
+                    .on_drop(cx.listener(|this, drag: &DraggedAsset, window, cx| {
+                        this.drop_media_assets(drag, window.mouse_position(), cx);
+                    }))
                     .child(
                         div()
                             .flex()

@@ -30,7 +30,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
-use crate::media::import::ProbedAsset;
 use crate::media::thumbnail::{ThumbnailCache, ThumbnailSource, ThumbnailState};
 use crate::project_state::ProjectState;
 
@@ -383,6 +382,22 @@ impl MediaBinGpuiPanel {
                 }),
             );
 
+        // Drag onto the Timeline or the Viewer to make a layer of it. An
+        // offline asset has nothing to decode, so it does not drag at all
+        // (the same reason its menu item is disabled).
+        if can_layer {
+            content = content.on_drag(
+                DraggedAsset {
+                    asset_id: row.asset_id.clone(),
+                    name: row.name.clone(),
+                },
+                |drag, _offset, _window, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                },
+            );
+        }
+
         // Thumbnail: the decoded frame when the cache produced one, the kind
         // icon while it is pending and when none is available.
         let mut thumb = div()
@@ -489,6 +504,49 @@ impl MediaBinGpuiPanel {
     }
 }
 
+/// Payload of a MediaBin → Timeline / Viewer asset drag, and its own drag
+/// preview (the pattern `DragScrub` and `DragCurvePoint` use).
+///
+/// It names **only the pressed row**: the payload is baked when that row
+/// renders, which is before the press has updated `MediaSelection`. The drop
+/// side expands it against the live selection instead
+/// ([`dropped_asset_ids`]), so a multi-selection travels as a whole and a row
+/// outside the selection travels alone — the rule the context menu already
+/// follows.
+#[derive(Clone)]
+pub struct DraggedAsset {
+    pub asset_id: String,
+    /// Display name, for the preview that follows the pointer.
+    pub name: String,
+}
+
+impl Render for DraggedAsset {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        div()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.popover)
+            .text_xs()
+            .text_color(colors.popover_foreground)
+            .child(SharedString::from(self.name.clone()))
+    }
+}
+
+/// The assets a drop of `drag` should place: the whole media selection when
+/// the dragged row is part of it, otherwise just that row.
+pub fn dropped_asset_ids(drag: &DraggedAsset, cx: &App) -> Vec<String> {
+    let selection = super::media_selection(cx);
+    if selection.contains(&drag.asset_id) {
+        selection.assets().to_vec()
+    } else {
+        vec![drag.asset_id.clone()]
+    }
+}
+
 /// The decode path a thumbnail request takes for the asset kind.
 fn thumbnail_source(kind: &AssetKind) -> ThumbnailSource {
     match kind {
@@ -533,31 +591,48 @@ fn asset_entry(asset_id: &str, cx: &App) -> Option<(Entity<ProjectState>, MediaA
     Some((project, entry))
 }
 
-/// Add the asset to the active composition as a layer at the playhead, by
-/// feeding it back through the unit-3 import path (`ProjectState::import_media`
-/// dedupes on the resolved path, so the existing asset is reused and only the
-/// layer is created — one undo step). A no-op for offline assets and without
+/// Add the asset to the active composition as a layer at the playhead — one
+/// undo step. A no-op for offline assets (nothing would resolve) and without
 /// an active composition.
 pub fn add_asset_as_layer(asset_id: &str, cx: &mut App) {
-    let Some((project, entry)) = asset_entry(asset_id, cx) else {
-        return;
-    };
-    let Some(path) = entry.resolved.clone() else {
+    add_assets_as_layers(
+        &[asset_id.to_string()],
+        ProjectState::playhead_frame(cx),
+        cx,
+    );
+}
+
+/// [`add_asset_as_layer`] for a whole set at a chosen frame — the drop
+/// handlers of the Timeline and the Viewer. One `commit_document` covers the
+/// batch, so dropping a multi-selection is a single undo step.
+pub fn add_assets_as_layers(asset_ids: &[String], start_frame: i64, cx: &mut App) {
+    let Some(project) = cx
+        .try_global::<crate::project_state::ProjectStateHandle>()
+        .and_then(|handle| handle.0.upgrade())
+    else {
         return;
     };
     if super::active_composition(cx).is_none() {
         return;
     }
+    // Offline assets have no file to decode; the menu item is disabled for
+    // them and a drag must not smuggle one in.
+    let online: Vec<String> = asset_ids
+        .iter()
+        .filter(|id| {
+            project
+                .read(cx)
+                .document()
+                .get_media_asset(id)
+                .is_some_and(|entry| entry.resolved.is_some())
+        })
+        .cloned()
+        .collect();
+    if online.is_empty() {
+        return;
+    }
     project.update(cx, |project, cx| {
-        project.import_media(
-            vec![ProbedAsset {
-                path,
-                kind: entry.kind.clone(),
-                metadata: entry.metadata.clone(),
-            }],
-            vec![],
-            cx,
-        );
+        project.add_asset_layers(&online, start_frame, cx);
     });
 }
 

@@ -1764,10 +1764,16 @@ Unknown type keys are skipped silently (plugin space).
   `add_layer_from_template(doc, comp, template, &registry)`,
   `add_media_layer(doc, comp, template, &registry, MediaLayerSpec {
   name_base, asset_id, start_frame, out_frame, audio_stream_index })` (the
-  media template with `asset_id` bound, placed at the playhead — REQ-UI-010;
+  media template with `asset_id` bound, placed at `start_frame` — REQ-UI-010;
   `audio_stream_index: Some(i)` also gives the shell an `AudioSource` for the
   same asset id, which is how a video layer's sound is wired — audio-plan
   unit 4),
+  `add_media_layers(doc, comp, &registry, &asset_ids, start_frame)
+  -> (Document, Vec<LayerId>)` (the caller-facing one: template choice,
+  length, and name derived from each already-imported asset; the whole batch
+  is **one** document, so a multi-asset drop is one undo step. Importing
+  places nothing — `ProjectState::add_asset_layers` is the committing
+  wrapper),
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`,
   `replace_network_renaming_pin(doc, &path, graph, Option<&PinRename>)` (the
   same, told that the edit renamed one of the network's own In / Out custom
@@ -2474,11 +2480,14 @@ Unknown type keys are skipped silently (plugin space).
   channels), which is what the Properties stream picker lists.
   `ProjectState::import_media(probed, skipped, cx)` then applies the whole
   batch as ONE `commit_document` (one undo step): assets are relativized
-  against the project root, an already-registered absolute path reuses its
-  asset id, and each asset gets a media layer at the playhead
-  (`start_frame = PlaybackPosition.frame`,
-  `out_frame = ceil(duration_secs × comp_fps)`, falling back to the
-  composition length). Composition settings are never touched (decision 5).
+  against the project root and an already-registered absolute path reuses its
+  asset id. **An import registers and nothing else** (refactor-plan-0808 unit
+  10) — placing is `ProjectState::add_asset_layers(&asset_ids, start_frame,
+  cx)`, its own undo step, with `out_frame = ceil(duration_secs × comp_fps)`
+  falling back to the composition length. A run that registers no new asset
+  leaves the document untouched and commits nothing, so re-importing a file
+  already in the bin does not spend an undo step.
+  Composition settings are never touched (decision 5).
   Audio (audio-plan unit 4): a file with audio also gets an `AudioSource` on
   the shell, bound to the same asset id with
   `metadata.first_audio_stream_index()` — silent media leaves `Layer::audio`

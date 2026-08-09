@@ -152,6 +152,22 @@ macro_rules! declare_actions {
 }
 for_each_command!(declare_actions);
 
+/// The GPUI action that carries `cmd`, generated from the same table the
+/// actions are declared from.
+///
+/// A menu that wants to send a command through the focus hierarchy uses this
+/// rather than naming an action type itself: a second Command↔Action list
+/// would be exactly the drift the table exists to prevent
+/// (`.agents/rules/gpui.md`).
+pub fn command_action(cmd: CommandId) -> Box<dyn Action> {
+    macro_rules! map {
+        ($($Action:ident),+ $(,)?) => {
+            match cmd { $(CommandId::$Action => Box::new($Action),)+ }
+        };
+    }
+    for_each_command!(map)
+}
+
 /// Every command mapped to a GPUI action, in table order.
 ///
 /// Exposed so tests can detect a [`CommandId`] variant missing from (or

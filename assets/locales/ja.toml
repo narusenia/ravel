@@ -284,6 +284,7 @@ reference = "このネットワークの上位で展開済み"
 subnet = "サブネット — ダブルクリックで開く"
 
 [outliner.menu]
+add_layer = "レイヤーを追加"
 rename = "名前を変更"
 duplicate = "レイヤーを複製"
 delete = "レイヤーを削除"

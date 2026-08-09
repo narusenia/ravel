@@ -41,6 +41,11 @@
 `for_each_command!` の網羅 `match` が「テーブルに無い `CommandId`」を
 コンパイルエラーにするので、テーブルが唯一の対応表になっている。
 
+コンテキストメニューから既存のコマンドを出すときは
+`ravel_app::workspace::command_action(cmd)` で Action を取り、
+`window.dispatch_action(...)` に渡す。**Action 型を自分で名指ししない** —
+名指しが増えると対応表が 2 つ目になる。
+
 ## キーバインドの置き場所
 
 | 種類 | 置き場所 |

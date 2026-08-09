@@ -48,6 +48,7 @@ Timeline が「アクティブコンプの時間ビュー」、Outliner が「�
 | 複数選択 | Shift で範囲、Cmd でトグル。Duplicate / Delete は選択全体に 1 undo |
 | レイヤー行の縦ドラッグ | スタックの並べ替え（同一コンポジション内） |
 | 右クリック | Rename / Duplicate / Delete（レイヤー）、Settings / Duplicate / Delete（コンプ） |
+| コンプ行右クリック ▸ レイヤーを追加 | 組み込みテンプレート（Solid / Shape / Video / Audio / Null）。**アクティブコンプの行にだけ出す**（レイヤー追加はアクティブコンプが対象なので、別のコンプの行に出すと違う場所に足すことになる） |
 
 ## 選択の一元化
 

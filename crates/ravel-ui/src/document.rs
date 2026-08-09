@@ -349,6 +349,92 @@ pub fn duplicate_layers(
     next.map(|document| (document, copies))
 }
 
+/// Cut `layer` in two at composition frame `comp_frame` (After Effects'
+/// "Split Layer"), leaving the halves stacked with the later one directly
+/// above the earlier one.
+///
+/// The source keeps its id and becomes the part before the cut
+/// (`out_frame` pulled back to the cut); the part after the cut is a
+/// [`Layer::duplicate_with_fresh_ids`] copy placed at `comp_frame` with its
+/// `in_frame` at the cut. It keeps the source's name — the halves are one
+/// layer that was cut, not a copy of it.
+///
+/// **Nothing inside the layer is rewritten.** A layer maps composition time
+/// to local time as `comp - start_frame + in_frame`, and the copy shifts
+/// `start_frame` and `in_frame` by the same amount, so the mapping is
+/// identical on both sides: keyframes, the owned network, the shell channels
+/// and the audio source all stay where they were, and the two halves cover
+/// exactly the source's original composition range.
+///
+/// `None` — no cut — when the layer is missing, locked, or when `comp_frame`
+/// is not strictly inside its range (a cut at either edge would produce an
+/// empty half).
+pub fn split_layer(
+    doc: &Document,
+    comp: CompId,
+    layer: LayerId,
+    comp_frame: i64,
+) -> Option<Document> {
+    let composition = doc.get_composition(comp)?;
+    let index = composition.layers.iter().position(|l| l.id == layer)?;
+    let source = composition.layers[index].clone();
+    if source.locked {
+        return None;
+    }
+    // Deliberately not `Layer::local_frame`: that clamps at zero, which would
+    // report a cut before the layer as a cut at its first frame.
+    let local = comp_frame - source.start_frame + source.in_frame as i64;
+    if local <= source.in_frame as i64 || local >= source.out_frame as i64 {
+        return None;
+    }
+    let local = local as u64;
+    let mut tail = source.duplicate_with_fresh_ids(LayerId::next());
+    tail.start_frame = comp_frame;
+    tail.in_frame = local;
+    update_composition(doc, comp, |mut c| {
+        let mut head = c.layers[index].clone();
+        head.out_frame = local;
+        c.layers.set(index, head);
+        c.insert_layer(index + 1, tail)
+    })
+}
+
+/// [`split_layer`] over every named layer, in one document so the whole
+/// selection is one undo step. Returns the new document and the ids of the
+/// layers created after the cut, in source order. `None` when nothing split.
+pub fn split_layers(
+    doc: &Document,
+    comp: CompId,
+    layers: &[LayerId],
+    comp_frame: i64,
+) -> Option<(Document, Vec<LayerId>)> {
+    let mut next: Option<Document> = None;
+    let mut tails = Vec::new();
+    for layer in layers {
+        let base = next.as_ref().unwrap_or(doc);
+        // Re-found per iteration: an earlier split inserted a layer and moved
+        // every index above it.
+        let Some(index) = base
+            .get_composition(comp)
+            .and_then(|c| c.layers.iter().position(|item| item.id == *layer))
+        else {
+            continue;
+        };
+        let Some(updated) = split_layer(base, comp, *layer, comp_frame) else {
+            continue;
+        };
+        if let Some(tail) = updated
+            .get_composition(comp)
+            .and_then(|c| c.layers.get(index + 1))
+            .map(|layer| layer.id)
+        {
+            tails.push(tail);
+        }
+        next = Some(updated);
+    }
+    next.map(|document| (document, tails))
+}
+
 /// Move `layer` to stack index `to_index` (0 = bottom).
 pub fn reorder_layer(
     doc: &Document,
@@ -924,6 +1010,110 @@ mod tests {
             "Layer 1 copy"
         );
         assert!(duplicate_layers(&doc, comp, &[]).is_none());
+    }
+
+    /// The completion criterion for the split: the two halves cover the
+    /// source's original composition range exactly — no gap, no overlap — and
+    /// both map composition time to the same layer-local time the source did,
+    /// so the keyframes on either side stay under the frames they were on.
+    #[test]
+    fn split_layer_halves_cover_the_original_range() {
+        let (doc, comp) = doc_with_layers(1);
+        let id = LayerId::new(1);
+        let doc = update_layer(&doc, comp, id, |l| {
+            l.start_frame = 10;
+            l.in_frame = 4;
+            l.out_frame = 24;
+        })
+        .unwrap();
+        let source = doc
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(id)
+            .unwrap()
+            .clone();
+        assert_eq!((source.start_frame, source.end_frame()), (10, 30));
+
+        let split = split_layer(&doc, comp, id, 18).unwrap();
+        let composition = split.get_composition(comp).unwrap();
+        let head = composition.get_layer(id).unwrap();
+        let tail_id = composition.layers[1].id;
+        let tail = composition.get_layer(tail_id).unwrap();
+
+        assert_eq!((head.start_frame, head.end_frame()), (10, 18));
+        assert_eq!((tail.start_frame, tail.end_frame()), (18, 30));
+        assert_eq!(head.duration() + tail.duration(), source.duration());
+        // Same comp→local mapping on both sides: the cut moved `start_frame`
+        // and `in_frame` by the same amount.
+        for frame in [10u64, 17, 18, 29] {
+            let half = if frame < 18 { head } else { tail };
+            assert_eq!(half.local_frame(frame), source.local_frame(frame));
+        }
+        assert_eq!(
+            tail.name, source.name,
+            "the halves are one layer, not a copy"
+        );
+        assert_ne!(tail.id, source.id);
+    }
+
+    /// A cut outside the layer, on either edge of it, or on a locked layer
+    /// changes nothing — an empty half is not a layer.
+    #[test]
+    fn split_layer_refuses_cuts_that_produce_an_empty_half() {
+        let (doc, comp) = doc_with_layers(1);
+        let id = LayerId::new(1);
+        let doc = update_layer(&doc, comp, id, |l| {
+            l.start_frame = 10;
+            l.in_frame = 4;
+            l.out_frame = 24;
+        })
+        .unwrap();
+        for frame in [-5, 0, 9, 10, 30, 40] {
+            assert!(
+                split_layer(&doc, comp, id, frame).is_none(),
+                "frame {frame} is not strictly inside the layer"
+            );
+        }
+
+        let locked = update_layer(&doc, comp, id, |l| l.locked = true).unwrap();
+        assert!(split_layer(&locked, comp, id, 18).is_none());
+    }
+
+    /// Splitting a selection is one snapshot — one undo step — and each new
+    /// half lands directly above its source even though the earlier
+    /// insertions moved the indices above them.
+    #[test]
+    fn split_layers_splits_the_whole_selection_in_one_document() {
+        let (doc, comp) = doc_with_layers(2);
+        let (split, tails) =
+            split_layers(&doc, comp, &[LayerId::new(1), LayerId::new(2)], 100).unwrap();
+        assert_eq!(tails.len(), 2);
+
+        let order: Vec<LayerId> = split
+            .get_composition(comp)
+            .unwrap()
+            .layers
+            .iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(
+            order,
+            vec![LayerId::new(1), tails[0], LayerId::new(2), tails[1]]
+        );
+
+        let mut store = DocumentStore::new(doc);
+        store.commit(split);
+        assert!(store.undo());
+        assert_eq!(
+            store.document().get_composition(comp).unwrap().layers.len(),
+            2,
+            "one undo puts the whole selection back"
+        );
+
+        assert!(
+            split_layers(store.document(), comp, &[LayerId::new(1)], 0).is_none(),
+            "a selection nothing can be cut in is None, not an empty snapshot"
+        );
     }
 
     #[test]

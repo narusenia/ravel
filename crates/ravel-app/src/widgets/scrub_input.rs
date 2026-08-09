@@ -249,6 +249,13 @@ impl ScrubInputState {
     /// opens on [`Self::label`], which is rounded to `precision`, so parsing
     /// it back would write the rounding over the value it was rounded from
     /// (0.123456 → 0.12) for merely clicking the field.
+    ///
+    /// The guard compares strings, so **deliberately typing the value already
+    /// displayed is also ignored** — asking for exactly 0.12 when 0.123456 is
+    /// shown as `0.12` leaves the stored value alone. Telling the two apart
+    /// needs edit-event tracking, and the difference is invisible: the field
+    /// keeps showing `0.12` either way. Losing precision by clicking is the
+    /// worse of the two, so this is the side to err on.
     fn commit_edit(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;

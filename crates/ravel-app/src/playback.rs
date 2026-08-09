@@ -162,6 +162,7 @@ impl Transport {
     /// freeze lands on the frame the listener actually reached (and a
     /// later fall back to `Wall` continues from there).
     pub fn toggle_with(&mut self, clock: &ClockSource, now: Instant) -> TransportUpdate {
+        let was = self.state();
         let was_playing = self.is_playing();
         if was_playing && let ClockSource::Audio(sync) = clock {
             let frame = audio_frame(sync, self.clock.fps());
@@ -179,10 +180,16 @@ impl Transport {
             self.dropped_frames += frame - self.last_frame - 1;
         }
         self.last_frame = frame;
+        // A *fresh* play starts a segment; resuming from a pause continues
+        // the one already running, so it must not move the origin — pausing
+        // halfway and carrying on is still the same viewing pass, and
+        // "return to where playback started" means where it started, not
+        // where it was last unpaused.
+        //
         // Read after the toggle: playing from the end restarts at frame 0
         // (`PlaybackClock::play`), so the position before it is not where this
         // segment actually starts.
-        if !was_playing && self.is_playing() {
+        if was == PlaybackState::Stopped && self.is_playing() {
             self.play_origin = Some(frame);
         }
         TransportUpdate {
@@ -684,6 +691,25 @@ mod tests {
         t.toggle(t0);
         t.tick(at(t0, 100));
         assert_eq!(t.stop(at(t0, 100), true).frame, 0);
+    }
+
+    /// Pausing does not start a new segment: stopping after a pause and a
+    /// resume returns to where playback originally started, not to where it
+    /// was unpaused.
+    #[test]
+    fn a_pause_and_resume_keeps_the_original_play_start() {
+        let (mut t, t0) = transport();
+        t.seek(40, t0);
+        t.toggle(t0);
+        t.tick(at(t0, 1000));
+        assert_eq!(t.current_frame(), 70);
+
+        t.toggle(at(t0, 1000));
+        assert_eq!(t.state(), PlaybackState::Paused);
+        t.toggle(at(t0, 1100));
+        assert!(t.is_playing());
+
+        assert_eq!(t.stop(at(t0, 1100), true).frame, 40);
     }
 
     /// Nothing has played, so there is no start position to return to: the

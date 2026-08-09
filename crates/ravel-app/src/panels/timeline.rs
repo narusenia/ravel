@@ -623,6 +623,13 @@ impl TimelineGpuiPanel {
         // gesture. Committing leaves one undo step they can press; reverting
         // would silently discard a deliberate edit — and, because the live
         // document is shared, any other panel's uncommitted work with it.
+        //
+        // That the commit takes the whole live document — another panel's
+        // uncommitted work included — is the model, not a hole this opened:
+        // `PropertiesGpuiPanel::end_gestures` ends its own gestures the same
+        // way. Narrowing it would need per-gesture transactions on the
+        // project, which is a change to the undo model rather than to this
+        // panel.
         let release_sub = cx.on_release(|this: &mut Self, cx| {
             this.end_channel_scrubs(|_| true, cx);
         });

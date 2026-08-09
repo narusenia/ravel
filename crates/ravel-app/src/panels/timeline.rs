@@ -384,8 +384,13 @@ enum TimelineDrag {
     /// pressed frame is one end and the pointer is the other, so dragging
     /// either way works; releasing without leaving that frame clears the
     /// range instead, which is the gesture's own way to say "play through".
+    ///
+    /// The gesture writes the shared range live, so it carries the range it
+    /// replaced: cancelling has to put that back. Every way out of the
+    /// gesture goes through [`loop_range_after_gesture`].
     LoopRange {
         anchor: u64,
+        before: Option<LoopRange>,
         moved: bool,
     },
     /// Move the bars along the timeline (start_frame), one baseline per
@@ -485,6 +490,28 @@ fn pointer_hint_transition(
     dragging: bool,
 ) -> Option<PointerHint> {
     (!dragging && current != next).then_some(next)
+}
+
+/// The loop range to install when a ruler loop gesture ends, or `None` when
+/// the gesture leaves it alone.
+///
+/// One decision for every way out — mouse-up, a cancelled drag, and the panel
+/// going away — because the gesture writes the shared range while it runs. A
+/// cleanup that only ran on mouse-up would strand a half-dragged range (or the
+/// one-frame range an Alt-press writes immediately) in state nothing else
+/// touches.
+fn loop_range_after_gesture(drag: &TimelineDrag, cancelled: bool) -> Option<Option<LoopRange>> {
+    let TimelineDrag::LoopRange { before, moved, .. } = drag else {
+        return None;
+    };
+    match (cancelled, moved) {
+        // Cancelled: the gesture never happened.
+        (true, _) => Some(*before),
+        // Released without moving: the Alt-click that asks for no loop.
+        (false, false) => Some(None),
+        // Released after a drag: the live updates already are the answer.
+        (false, true) => None,
+    }
 }
 
 fn drag_cursor(drag: &TimelineDrag) -> Option<CursorStyle> {
@@ -655,6 +682,7 @@ impl TimelineGpuiPanel {
         // project, which is a change to the undo model rather than to this
         // panel.
         let release_sub = cx.on_release(|this: &mut Self, cx| {
+            this.end_loop_range_gesture(true, cx);
             this.end_channel_scrubs(|_| true, cx);
         });
         let focus_handle = cx.focus_handle();
@@ -2071,12 +2099,19 @@ impl TimelineGpuiPanel {
                 let frame = self.scrub_target_frame(x, shift);
                 self.scrub_playhead(frame, cx);
             }
-            TimelineDrag::LoopRange { anchor, .. } => {
+            TimelineDrag::LoopRange {
+                anchor,
+                before,
+                moved,
+            } => {
                 let frame = self.scrub_target_frame(x, shift);
                 self.apply_loop_range(Some(LoopRange::new(anchor, frame)), cx);
                 self.drag = TimelineDrag::LoopRange {
                     anchor,
-                    moved: frame != anchor,
+                    before,
+                    // Sticky: dragging back onto the anchor still leaves a
+                    // one-frame loop, it does not turn into a bare click.
+                    moved: moved || frame != anchor,
                 };
             }
             TimelineDrag::MoveBar {
@@ -2387,6 +2422,7 @@ impl TimelineGpuiPanel {
     /// undo step.
     fn cancel_drag(&mut self, cx: &mut Context<Self>) {
         let had_drag = !matches!(self.drag, TimelineDrag::None);
+        self.end_loop_range_gesture(true, cx);
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
@@ -2418,12 +2454,7 @@ impl TimelineGpuiPanel {
     }
 
     fn drag_ended(&mut self, cx: &mut Context<Self>) {
-        // An Alt-click that never became a drag asks for no loop at all: a
-        // one-frame range is not a useful thing to leave behind, and the
-        // gesture needs a way to undo itself without a second one.
-        if let TimelineDrag::LoopRange { moved: false, .. } = &self.drag {
-            self.apply_loop_range(None, cx);
-        }
+        self.end_loop_range_gesture(false, cx);
         let collapse_to = match &self.drag {
             TimelineDrag::MoveKeyframe {
                 pressed,
@@ -3626,7 +3657,10 @@ impl TimelineGpuiPanel {
     /// Ruler loop-range gesture: routes the range through the playback
     /// controller, which owns it (it clamps to the composition, re-anchors
     /// the clock, and tells the audio engine where to fold).
-    fn apply_loop_range(&mut self, range: Option<LoopRange>, cx: &mut Context<Self>) {
+    /// Takes `&mut App` rather than `&mut Context<Self>` so the release
+    /// listener, which has no panel context left, runs the same code
+    /// (`end_channel_scrubs` is here for the same reason).
+    fn apply_loop_range(&mut self, range: Option<LoopRange>, cx: &mut App) {
         let Some((fps, duration_frames)) = self.composition_params() else {
             return;
         };
@@ -3639,7 +3673,15 @@ impl TimelineGpuiPanel {
                 controller.set_loop_range_from_timeline(range, fps, duration_frames, cx);
             });
         }
-        cx.notify();
+    }
+
+    /// Settle the ruler loop gesture, whichever way it is ending. Every exit
+    /// — mouse-up, cancel, panel drop — calls this, and it is the only place
+    /// the gesture's shared writes are undone.
+    fn end_loop_range_gesture(&mut self, cancelled: bool, cx: &mut App) {
+        if let Some(range) = loop_range_after_gesture(&self.drag, cancelled) {
+            self.apply_loop_range(range, cx);
+        }
     }
 
     /// The frame currently under the playhead.
@@ -5033,12 +5075,14 @@ impl Render for TimelineGpuiPanel {
                                     // owns "which frame", and the range is
                                     // the other thing it says.
                                     if event.modifiers.alt {
+                                        let before = super::loop_range(cx);
                                         this.apply_loop_range(
                                             Some(LoopRange::new(frame, frame)),
                                             cx,
                                         );
                                         this.drag = TimelineDrag::LoopRange {
                                             anchor: frame,
+                                            before,
                                             moved: false,
                                         };
                                         return;
@@ -6172,6 +6216,42 @@ mod tests {
             }),
             Some(CursorStyle::Crosshair)
         );
+    }
+
+    /// Every way out of the ruler loop gesture settles the shared range, and
+    /// only one of them leaves it as the drag left it.
+    #[test]
+    fn every_exit_from_the_loop_gesture_settles_the_range() {
+        let previous = Some(LoopRange::new(5, 50));
+        let dragging = |moved| TimelineDrag::LoopRange {
+            anchor: 10,
+            before: previous,
+            moved,
+        };
+
+        // Cancelled — a lost button, a dropped panel — puts back what the
+        // gesture replaced, whether or not it had moved.
+        assert_eq!(
+            loop_range_after_gesture(&dragging(true), true),
+            Some(previous)
+        );
+        assert_eq!(
+            loop_range_after_gesture(&dragging(false), true),
+            Some(previous)
+        );
+
+        // Released without moving: the Alt-click that clears the range. The
+        // one-frame range the press wrote must not survive it.
+        assert_eq!(
+            loop_range_after_gesture(&dragging(false), false),
+            Some(None)
+        );
+
+        // Released after a drag: the live updates stand.
+        assert_eq!(loop_range_after_gesture(&dragging(true), false), None);
+
+        // Any other gesture is none of this function's business.
+        assert_eq!(loop_range_after_gesture(&TimelineDrag::Scrub, true), None);
     }
 
     /// The readouts seed the editors, so what they print has to parse back.

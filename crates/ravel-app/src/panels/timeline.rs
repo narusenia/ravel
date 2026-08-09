@@ -9164,6 +9164,18 @@ mod tests {
 
                 panel.state.toggle_layer_expanded(a);
                 panel.drag_moved(origin + 42.0, 0.0, true, false, cx);
+                assert_eq!(
+                    panel.playhead(),
+                    11,
+                    "an expanded layer whose property rows are collapsed still \
+                     draws no diamonds, so there is nothing to snap to"
+                );
+
+                panel.state.toggle_property_expanded(
+                    a,
+                    ravel_ui::keyframes::PropertyRowId::Shell(PropertyGroup::Position),
+                );
+                panel.drag_moved(origin + 42.0, 0.0, true, false, cx);
                 assert_eq!(panel.playhead(), 10, "Shift pulls onto the visible key");
 
                 // Far enough away and the key has no claim on the pointer.

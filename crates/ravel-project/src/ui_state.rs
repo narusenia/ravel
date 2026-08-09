@@ -264,6 +264,22 @@ mod tests {
         assert!(state.loop_ranges(&document).is_empty());
     }
 
+    /// `ui_state.json` is hand-editable, so a reversed pair must not reach
+    /// `LoopRange::wrap` — `frame - in_frame` would underflow there.
+    #[test]
+    fn a_hand_edited_loop_range_is_ordered_on_read() {
+        let state =
+            UiState::from_json(r#"{"loop_ranges": [[1, {"in_frame": 40, "out_frame": 10}]]}"#)
+                .expect("a reversed pair must load");
+        let range = state.loop_ranges[0].1;
+        assert_eq!(range, LoopRange::new(10, 40));
+        // The invariant the fold relies on: no wrap can underflow.
+        assert_eq!(range.wrap(41), 10);
+
+        let (root, document) = (CompId::new(1), document_with(&[CompId::new(1)]));
+        assert_eq!(state.loop_ranges(&document)[&root], LoopRange::new(10, 40));
+    }
+
     /// A partial or hand-edited entry must not reach the painter as a
     /// degenerate grid.
     #[test]

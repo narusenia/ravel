@@ -35,11 +35,32 @@ pub enum PlaybackState {
 /// it is persisted in `ui_state.json` and never in the document — see
 /// `docs/specifications/ui/timeline.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "LoopRangeRepr")]
 pub struct LoopRange {
     /// First frame of the loop.
     pub in_frame: u64,
     /// Last frame of the loop (inclusive).
     pub out_frame: u64,
+}
+
+/// Deserialization shadow for [`LoopRange`], so a read restores the ordering
+/// invariant the type promises.
+///
+/// `derive(Deserialize)` never runs [`LoopRange::new`], and `ui_state.json` is
+/// a file people hand-edit: a reversed pair would reach [`LoopRange::wrap`]
+/// and underflow `frame - in_frame`. Ordering the ends on the way in is the
+/// same treatment `CurveParam` gives its own invariants
+/// (`docs/dev/persistence.md`).
+#[derive(Deserialize)]
+struct LoopRangeRepr {
+    in_frame: u64,
+    out_frame: u64,
+}
+
+impl From<LoopRangeRepr> for LoopRange {
+    fn from(repr: LoopRangeRepr) -> Self {
+        Self::new(repr.in_frame, repr.out_frame)
+    }
 }
 
 impl LoopRange {

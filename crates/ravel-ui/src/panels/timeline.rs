@@ -156,6 +156,15 @@ impl BpmGrid {
 /// lines, so the host stops drawing it instead.
 const MIN_BEAT_SPACING_PX: f64 = 4.0;
 
+/// How near a keyframe a `Shift`-held playhead gesture has to come before it
+/// snaps to it, in pixels (`TimelinePanel::snap_playhead_x`).
+///
+/// A pixel radius rather than a frame count so the pull is the same gesture at
+/// every zoom. Half a keyframe diamond's width either side: close enough that
+/// aiming at the diamond catches, far enough that a deliberate frame beside it
+/// does not.
+pub const KEYFRAME_SNAP_RADIUS_PX: f64 = 8.0;
+
 /// Which transform property group is expanded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PropertyGroup {
@@ -495,6 +504,65 @@ impl TimelinePanel {
         rows.into_iter()
             .filter(|row| self.reveal.iter().any(|filter| filter.matches(layer, row)))
             .collect()
+    }
+
+    // ----- Keyframe snapping ------------------------------------------------
+
+    /// Composition frames carrying a keyframe the panel is **currently
+    /// showing**, sorted and deduplicated.
+    ///
+    /// "Showing" is the panel's own tree, not the document: a collapsed layer
+    /// contributes nothing, and an expanded one contributes only the rows that
+    /// survive the reveal filter ([`Self::visible_property_rows`], the one
+    /// filtered enumeration). Property-row expansion is deliberately not
+    /// consulted — a collapsed property row still draws its channels'
+    /// keyframes as one aggregated lane, so those keys are on screen.
+    ///
+    /// Frames before composition frame 0 are dropped: the playhead is
+    /// unsigned, so they are not positions it can snap to.
+    pub fn visible_keyframe_frames(&self) -> Vec<i64> {
+        let mut frames: Vec<i64> = self
+            .layers()
+            .filter(|layer| self.is_layer_expanded(layer.id))
+            .flat_map(|layer| {
+                self.visible_property_rows(layer)
+                    .into_iter()
+                    .filter_map(move |row| crate::keyframes::row_channels(layer, &row.id))
+                    .flatten()
+                    .filter_map(|channel| match &channel.source {
+                        ravel_core::animation::ChannelSource::Keyframes(curve) => {
+                            Some(curve.keyframes())
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(move |key| crate::keyframes::comp_frame_for_key(layer, key.frame))
+            })
+            .filter(|frame| *frame >= 0)
+            .collect();
+        frames.sort_unstable();
+        frames.dedup();
+        frames
+    }
+
+    /// The frame a playhead gesture at lane-local pixel `x` lands on while the
+    /// user holds `Shift`: the nearest visible keyframe within
+    /// [`KEYFRAME_SNAP_RADIUS_PX`], otherwise the frame under the pointer.
+    ///
+    /// The radius is compared in **pixels, not frames**, so the pull feels the
+    /// same at every zoom instead of covering half the screen when zoomed in.
+    pub fn snap_playhead_x(&self, x: f64, candidates: &[i64]) -> u64 {
+        let snapped = candidates
+            .iter()
+            .copied()
+            .map(|frame| (frame, (self.frame_to_x(frame) - x).abs()))
+            .filter(|(_, distance)| *distance <= KEYFRAME_SNAP_RADIUS_PX)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(frame, _)| frame);
+        match snapped {
+            Some(frame) => frame.max(0) as u64,
+            None => self.x_to_frame(x),
+        }
     }
 
     // ----- Coordinate helpers ----------------------------------------------
@@ -1130,5 +1198,110 @@ mod tests {
         };
         let beats = grid.beat_frames(FrameRate::new(24, 1), 0.0, 1e9);
         assert_eq!(beats.len(), MAX_BEATS_PER_QUERY);
+    }
+    // ----- Keyframe snapping -----------------------------------------------
+
+    /// A composition holding one layer whose Position X is keyed at
+    /// `position_keys` and whose Rotation is keyed at `rotation_keys`
+    /// (layer-local frames; the layer starts at composition frame 0).
+    fn snap_composition(position_keys: &[u64], rotation_keys: &[u64]) -> (TimelinePanel, LayerId) {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let curve = |frames: &[u64]| {
+            let mut curve = KeyframeCurve::new();
+            for frame in frames {
+                curve.insert(*frame, 0.0, Interpolation::Linear);
+            }
+            AnimationChannel::keyframes(curve)
+        };
+        let lid = LayerId::new(1);
+        let mut layer = Layer::new(lid, "L", Graph::new()).with_time(0, 0, 200);
+        layer.transform.position[0] = curve(position_keys);
+        layer.transform.rotation = curve(rotation_keys);
+        let comp = Composition::new(CompId::new(1), "C", (16, 16), FrameRate::new(30, 1), 200)
+            .add_layer(layer);
+        let mut panel = panel();
+        panel.set_composition(Some(comp));
+        (panel, lid)
+    }
+
+    /// The completion criterion for the snap: it sees exactly what the panel
+    /// shows. A collapsed layer offers nothing, and a reveal filter takes the
+    /// rows it hides out of the candidate set with them.
+    #[test]
+    fn snap_candidates_are_the_rows_the_panel_shows() {
+        let (mut p, lid) = snap_composition(&[10, 40], &[25]);
+        assert!(
+            p.visible_keyframe_frames().is_empty(),
+            "a collapsed layer has no keyframes on screen"
+        );
+
+        p.toggle_layer_expanded(lid);
+        assert_eq!(p.visible_keyframe_frames(), vec![10, 25, 40]);
+
+        p.apply_reveal(RevealFilter::Group(PropertyGroup::Position), false);
+        assert_eq!(
+            p.visible_keyframe_frames(),
+            vec![10, 40],
+            "a row the reveal filter hides takes its keys with it"
+        );
+    }
+
+    /// Keys pushed before composition frame 0 by a negative `start_frame` are
+    /// not positions the (unsigned) playhead can snap to.
+    #[test]
+    fn snap_candidates_drop_keys_before_the_composition_start() {
+        let (mut p, lid) = snap_composition(&[0, 60], &[]);
+        p.toggle_layer_expanded(lid);
+        let mut comp = p.composition().unwrap().clone();
+        let mut layer = comp.layers[0].clone();
+        layer.start_frame = -20;
+        comp.layers.set(0, layer);
+        p.set_composition(Some(comp));
+        assert_eq!(p.visible_keyframe_frames(), vec![40]);
+    }
+
+    /// The pull is a pixel radius, so it covers the same gesture at every
+    /// zoom rather than a widening band of frames.
+    #[test]
+    fn snap_pull_is_a_pixel_radius_at_any_zoom() {
+        let (mut p, lid) = snap_composition(&[20], &[]);
+        p.toggle_layer_expanded(lid);
+        let candidates = p.visible_keyframe_frames();
+
+        for ppf in [1.0, 4.0, 40.0] {
+            p.set_pixels_per_frame(ppf);
+            let key_x = p.frame_to_x(20);
+            assert_eq!(
+                p.snap_playhead_x(key_x + KEYFRAME_SNAP_RADIUS_PX - 0.5, &candidates),
+                20,
+                "inside the radius at {ppf} px/frame"
+            );
+            let outside = key_x + KEYFRAME_SNAP_RADIUS_PX + 0.5;
+            assert_eq!(
+                p.snap_playhead_x(outside, &candidates),
+                p.x_to_frame(outside),
+                "outside the radius the pointer wins at {ppf} px/frame"
+            );
+        }
+    }
+
+    /// With two keys inside the radius the nearer one wins, and an empty
+    /// candidate set is the plain pointer frame.
+    #[test]
+    fn snap_takes_the_nearest_candidate() {
+        let (mut p, lid) = snap_composition(&[20, 22], &[]);
+        p.toggle_layer_expanded(lid);
+        let candidates = p.visible_keyframe_frames();
+        p.set_pixels_per_frame(4.0);
+        assert_eq!(p.snap_playhead_x(p.frame_to_x(22) - 1.0, &candidates), 22);
+        assert_eq!(p.snap_playhead_x(p.frame_to_x(20) + 1.0, &candidates), 20);
+        assert_eq!(
+            p.snap_playhead_x(p.frame_to_x(21), &[]),
+            21,
+            "no candidates is the frame under the pointer"
+        );
     }
 }

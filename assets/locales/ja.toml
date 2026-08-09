@@ -464,6 +464,11 @@ follow_playhead = "再生ヘッドに追従"
 bar_view = "レイヤーバーを表示"
 graph_view = "値グラフを表示"
 
+[timeline.bpm]
+toggle = "拍グリッドを表示"
+tempo = "テンポ（BPM）"
+offset = "1 拍目のフレーム"
+
 [timeline.empty]
 no_composition = "コンポジションがありません — 作成すると編集を開始できます"
 

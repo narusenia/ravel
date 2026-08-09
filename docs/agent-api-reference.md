@@ -2319,7 +2319,8 @@ Unknown type keys are skipped silently (plugin space).
   (`ResolvedSettings::startup_creates_composition`, default `true`) is read by
   `project_state::fresh_document(cx)`, the one builder of the launch document
   and of `File ▸ New` — `ravel_ui::document::default_document` stays free of
-  the settings layers and only receives the resolved frame rate.
+  the settings layers and only receives the resolved frame rate. Both are on
+  Preferences ▸ General as switches (`SET-16`).
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has
@@ -2339,13 +2340,17 @@ Unknown type keys are skipped silently (plugin space).
   settings keep the requested name so a theme file arriving later is still worn.
 - Settings dialogs (`src/settings_dialog.rs`): `SettingsScope::{Preferences,
   Project}` is the *screen* (and therefore the layer written), not
-  `app_settings::SettingsScope`. `SettingsPageKind::{Appearance, Language,
-  Keybindings, Project}`; a page carries fields only once its settings apply, and
-  `Settings` hides a page with no item. `fields_for(kind, cx) -> Vec<PageField>`
+  `app_settings::SettingsScope`. `SettingsPageKind::{General, Appearance,
+  Language, Keybindings, Project}`; a page carries fields only once its settings
+  apply, and `Settings` hides a page with no item.
+  `fields_for(kind, cx) -> Vec<PageField>`
   is the rows a page shows (`title_key`, `description_key`, `field`) and the seam
-  the dialog builds its groups from — a test can ask a `PageField` for
+  the dialog builds its groups from — a test can ask `PageField::field.any()` for
   `is_resettable(cx)` / `reset(window, cx)`, which a finished `SettingItem` no
-  longer answers. `label_keys(kind)` is every i18n key a page's fields render.
+  longer answers. `field` is a `FieldControl::{Text, Toggle}`, because
+  `SettingField` is generic over the value type and a page mixes string rows with
+  boolean ones; `any()` is the `&dyn AnySettingField` view of either.
+  `label_keys(kind)` is every i18n key a page's fields render.
   Fields bind `SettingField::on_reset(is_dirty, reset)` —
   `is_dirty` = this layer holds a value, `reset` = remove it — and never
   `default_value()`, which would write the default as an explicit override.

@@ -20,7 +20,6 @@ use gpui::{
     AnyWindowHandle, AppContext as _, Context, IntoElement, Pixels, Render, Size, Styled as _,
     TestAppContext, Window, div, px,
 };
-use gpui_component::setting::AnySettingField as _;
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
 use ravel_app::project_state::{
     ProjectState, ProjectStateHandle, disable_background_eval_for_tests,
@@ -97,6 +96,7 @@ fn row_is_resettable(cx: &mut TestAppContext) -> bool {
             .find(|page_field| page_field.title_key == FRAME_RATE_ROW)
             .expect("the Project page has a default frame rate row")
             .field
+            .any()
             .is_resettable(cx)
     })
 }
@@ -109,7 +109,7 @@ fn reset_row(window: AnyWindowHandle, cx: &mut TestAppContext) {
                 .into_iter()
                 .find(|page_field| page_field.title_key == FRAME_RATE_ROW)
                 .expect("the Project page has a default frame rate row");
-            page_field.field.reset(window, cx);
+            page_field.field.any().reset(window, cx);
         })
         .expect("the window is open");
     cx.run_until_parked();

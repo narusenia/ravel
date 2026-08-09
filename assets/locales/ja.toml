@@ -203,10 +203,19 @@ project_title = "プロジェクト設定"
 
 # 設定ダイアログのサイドバーのページ。
 [settings.page]
+general = "一般"
 appearance = "外観"
 language = "言語"
 keybindings = "キーバインド"
 project = "プロジェクト"
+
+# 環境設定 ▸ 一般。ほかのページに属さない挙動の設定。
+[settings.general]
+group = "再生と起動"
+stop_returns_to_play_start = "停止したら再生開始位置へ戻す"
+stop_returns_to_play_start_description = "停止したとき、先頭フレームへ巻き戻す代わりに再生を始めたフレームへ戻ります。一度も再生していない場合は再生ヘッドを動かしません。"
+startup_create_composition = "起動時にコンポジションを作る"
+startup_create_composition_description = "新しいドキュメントを空のコンポジション 1 つで開きます。オフにするとコンポジションを持たない状態で始まり、書式は コンポジション ▸ 新規コンポジション… で自分で決めます。"
 
 # 環境設定 ▸ 外観。テーマ名はテーマ資産に入っている文字列なので翻訳しない。
 [settings.appearance]

@@ -206,10 +206,19 @@ project_title = "Project Settings"
 
 # Sidebar pages of the settings dialogs.
 [settings.page]
+general = "General"
 appearance = "Appearance"
 language = "Language"
 keybindings = "Keybindings"
 project = "Project"
+
+# Preferences ▸ General. Behaviour that belongs to no other page.
+[settings.general]
+group = "Playback and startup"
+stop_returns_to_play_start = "Return to the play start on stop"
+stop_returns_to_play_start_description = "Stop puts the playhead back where playback began instead of rewinding to the first frame. With nothing played yet, the playhead stays where it is."
+startup_create_composition = "Create a composition at startup"
+startup_create_composition_description = "A new document opens with one empty composition. Turn this off to start with none and choose the format yourself in Composition ▸ New Composition…"
 
 # Preferences ▸ Appearance. Theme names themselves come from the theme assets
 # and are not translated.

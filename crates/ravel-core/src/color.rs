@@ -470,6 +470,26 @@ pub fn quantize_u16(value: f32) -> u16 {
     (value.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
 }
 
+/// The inverse: one 8-bit RGBA sample straight into the working space.
+///
+/// This is the ingest rule (`CM-2`) — normalise, then remove the transfer
+/// function in the same step, so no encoded value ever reaches the graph.
+/// It lives here rather than in the decoder because it is pure, and because
+/// every ingest path has to agree on it exactly the way every exit has to
+/// agree on [`quantize_u8`].
+///
+/// **Alpha is not converted.** Coverage carries no transfer function; running
+/// it through one would change what "half covered" means.
+pub fn ingest_rgba8(rgba: [u8; 4], input: ColorSpace) -> [f32; 4] {
+    let norm = |b: u8| f32::from(b) / 255.0;
+    let rgb = convert(
+        [norm(rgba[0]), norm(rgba[1]), norm(rgba[2])],
+        input,
+        ColorSpace::WORKING,
+    );
+    [rgb[0], rgb[1], rgb[2], norm(rgba[3])]
+}
+
 // ===========================================================================
 // 3D LUT (.cube)
 // ===========================================================================
@@ -905,6 +925,49 @@ mod tests {
         assert_eq!(quantize_u16(0.5), 32768);
         assert_eq!(quantize_u16(-3.0), 0);
         assert_eq!(quantize_u16(f32::NAN), 0);
+    }
+
+    /// CM-2: an sRGB sample arrives linear, a linear sample is untouched
+    /// (no double application), and alpha is never converted.
+    #[test]
+    fn ingest_decodes_only_the_colour_channels() {
+        let srgb = ingest_rgba8([128, 128, 128, 128], ColorSpace::SRGB);
+        for channel in &srgb[..3] {
+            assert!((channel - 0.215_860_5).abs() < 1e-5, "{srgb:?}");
+        }
+        assert!(
+            (srgb[3] - 128.0 / 255.0).abs() < 1e-6,
+            "alpha was converted"
+        );
+
+        // Already linear: normalised and nothing else.
+        let linear = ingest_rgba8([128, 128, 128, 128], ColorSpace::LINEAR_REC709);
+        for channel in linear {
+            assert!((channel - 128.0 / 255.0).abs() < 1e-6, "{linear:?}");
+        }
+
+        // The endpoints are fixed points of every transfer function, so an
+        // opaque black or white pixel is unmoved whichever space it is in.
+        assert_eq!(
+            ingest_rgba8([0, 0, 0, 255], ColorSpace::SRGB),
+            [0.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            ingest_rgba8([255, 255, 255, 255], ColorSpace::SRGB),
+            [1.0, 1.0, 1.0, 1.0]
+        );
+    }
+
+    /// The ingest and the 8-bit exit are exact inverses, which is what makes
+    /// CM-4's "import a PNG, export a PNG, get the same bytes" hold.
+    #[test]
+    fn ingest_and_quantise_round_trip_every_code() {
+        for code in 0..=255u8 {
+            let ingested = ingest_rgba8([code, code, code, code], ColorSpace::SRGB);
+            let out = quantize_u8(Transfer::Srgb.encode(ingested[0]));
+            assert_eq!(out, code, "code {code} came back as {out}");
+            assert_eq!(quantize_u8(ingested[3]), code, "alpha code {code}");
+        }
     }
 
     const IDENTITY_CUBE: &str = "\

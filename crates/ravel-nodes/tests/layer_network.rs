@@ -873,7 +873,7 @@ fn fake_media_factory(fps: FrameRate) -> ravel_nodes::media::ReaderFactory {
         }
     }
 
-    Arc::new(move |_path| {
+    Arc::new(move |_path, _color_space| {
         Ok(Box::new(FakeReader(MediaInfo {
             container: None,
             container_name: "fake".into(),

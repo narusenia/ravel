@@ -1064,6 +1064,11 @@ impl TimelineGpuiPanel {
     /// Duplicate the operation targets of the row `lid` — the whole selection
     /// when the row is part of it — as one undo step, and select the copies.
     fn duplicate_layers_from_row(&mut self, lid: LayerId, cx: &mut Context<Self>) {
+        // Same reason as the flag toggle above: a structural commit landing
+        // on a layer being scrubbed would swallow the live gesture into its
+        // own undo step. Both of these are keyboard-reachable, so they can
+        // arrive while a pointer drag is still running.
+        self.end_channel_scrubs(|_| true, cx);
         let targets = self.operation_targets(lid, cx);
         if targets.len() < 2 {
             self.duplicate_layer(lid, cx);
@@ -1096,6 +1101,11 @@ impl TimelineGpuiPanel {
     /// (the panel mirror may lag one observer flush). Returns whether anything
     /// was deleted.
     fn delete_layer(&mut self, lid: LayerId, cx: &mut Context<Self>) -> bool {
+        // Same reason as the flag toggle above: a structural commit landing
+        // on a layer being scrubbed would swallow the live gesture into its
+        // own undo step. Both of these are keyboard-reachable, so they can
+        // arrive while a pointer drag is still running.
+        self.end_channel_scrubs(|_| true, cx);
         let Some(project) = self.project.clone() else {
             return false;
         };
@@ -8034,6 +8044,49 @@ mod tests {
             keyframes::channel_value_at(&l, &channel.row, 0, 0),
             Some(live),
             "undoing the lock leaves the scrubbed value in place"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(0.0),
+            "the gesture kept an undo step of its own"
+        );
+    }
+
+    /// Delete is keyboard-reachable, so it can land while a pointer drag is
+    /// still running. Like the lock, it must not swallow the live gesture into
+    /// its own undo step.
+    #[gpui::test]
+    fn deleting_a_layer_mid_gesture_finalizes_the_scrub_first(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: b,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        drag(&scrub, 5.0, cx);
+        let live = scrub.read_with(cx, |state, _| state.value());
+
+        // Delete the *other* layer, so the scrubbed one survives and its step
+        // can be inspected.
+        window
+            .update(cx, |panel, _window, cx| panel.delete_layer(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            !scrub.read_with(cx, |state, _| state.is_dragging()),
+            "the gesture is ended, not left half-applied"
+        );
+
+        // Two steps, in order: the delete, then the scrub.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let l = layer(&project, comp_id, b, cx);
+        assert_eq!(
+            keyframes::channel_value_at(&l, &channel.row, 0, 0),
+            Some(live),
+            "undoing the delete leaves the scrubbed value in place"
         );
         project.update(cx, |project, cx| assert!(project.undo(cx)));
         assert_eq!(

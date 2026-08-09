@@ -25,7 +25,7 @@ use gpui::{
     Render, SharedString, Size, Styled as _, TestAppContext, Window, div, px,
 };
 use gpui_component::Root;
-use gpui_component::setting::{AnySettingField as _, SettingFieldType};
+use gpui_component::setting::SettingFieldType;
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
 use ravel_app::settings_dialog::{
     SettingsDialog, SettingsPageKind, SettingsScope as SettingsScreen, fields_for, label_keys,
@@ -201,7 +201,7 @@ fn theme_mode_option_labels(cx: &mut TestAppContext) -> Vec<String> {
             .into_iter()
             .find(|page_field| page_field.title_key == "settings.appearance.mode")
             .expect("the Appearance page has a theme mode field");
-        match field.field.field_type() {
+        match field.field.any().field_type() {
             SettingFieldType::Dropdown { options, .. } => options
                 .iter()
                 .map(|(_value, label)| label.to_string())
@@ -260,19 +260,19 @@ fn the_language_reset_control_drops_the_override(cx: &mut TestAppContext) {
     let window: AnyWindowHandle = cx.open_window(WINDOW_SIZE, |_window, _cx| Blank).into();
 
     assert!(
-        !cx.update(|cx| language_field(cx).is_resettable(cx)),
+        !cx.update(|cx| language_field(cx).any().is_resettable(cx)),
         "an untouched language offers no reset"
     );
 
     switch_to("ja", cx);
     assert!(
-        cx.update(|cx| language_field(cx).is_resettable(cx)),
+        cx.update(|cx| language_field(cx).any().is_resettable(cx)),
         "the override the switch wrote is what is_dirty reports"
     );
 
     window
         .update(cx, |_view, window, cx| {
-            language_field(cx).reset(window, cx);
+            language_field(cx).any().reset(window, cx);
         })
         .expect("the window is open");
     cx.run_until_parked();
@@ -296,7 +296,7 @@ fn the_language_reset_control_drops_the_override(cx: &mut TestAppContext) {
 }
 
 /// The Language page's single field.
-fn language_field(cx: &gpui::App) -> gpui_component::setting::SettingField<SharedString> {
+fn language_field(cx: &gpui::App) -> ravel_app::settings_dialog::FieldControl {
     fields_for(SettingsPageKind::Language, cx)
         .into_iter()
         .next()

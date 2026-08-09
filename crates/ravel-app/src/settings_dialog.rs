@@ -19,12 +19,13 @@
 //!
 //! A page carries a field only once the setting behind it takes effect, because
 //! a setting that changes nothing must not be on screen
-//! (`docs/implementation/settings-screen-plan.md`). Appearance (`SET-3`),
-//! Language (`SET-4`), the read-only Keybindings list (`SET-5`) and the
-//! project's default frame rate (`SET-6`) are what applies today; cache, auto
-//! save, proxy and colour settings are absent until the features behind them
-//! exist (`SET-8`–`SET-11`). `Settings` drops a page with no item, so a page
-//! added ahead of its fields would simply not appear in the sidebar.
+//! (`docs/implementation/settings-screen-plan.md`). General (`SET-16`),
+//! Appearance (`SET-3`), Language (`SET-4`), the read-only Keybindings list
+//! (`SET-5`) and the project's default frame rate (`SET-6`) are what applies
+//! today; cache, auto save, proxy and colour settings are absent until the
+//! features behind them exist (`SET-8`–`SET-11`). `Settings` drops a page with
+//! no item, so a page added ahead of its fields would simply not appear in the
+//! sidebar.
 //!
 //! **Every field binds `SettingField::on_reset(is_dirty, reset)` and never
 //! `SettingField::default_value()`.** `default_value` writes the default back as
@@ -41,7 +42,9 @@
 //! language change made inside it.
 
 use gpui::*;
-use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_component::setting::{
+    AnySettingField, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
@@ -102,6 +105,7 @@ impl SettingsScope {
     pub fn pages(self) -> &'static [SettingsPageKind] {
         match self {
             Self::Preferences => &[
+                SettingsPageKind::General,
                 SettingsPageKind::Appearance,
                 SettingsPageKind::Language,
                 SettingsPageKind::Keybindings,
@@ -114,6 +118,9 @@ impl SettingsScope {
 /// A page in a settings screen's sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPageKind {
+    /// Behaviour that belongs to no other page: playback and startup
+    /// (`SET-16`).
+    General,
     /// Theme mode and theme selection (`SET-3`).
     Appearance,
     /// UI language (`SET-4`).
@@ -126,7 +133,8 @@ pub enum SettingsPageKind {
 
 impl SettingsPageKind {
     /// Every page, for the locale-coverage test.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::General,
         Self::Appearance,
         Self::Language,
         Self::Keybindings,
@@ -136,6 +144,7 @@ impl SettingsPageKind {
     /// i18n key for the page's sidebar entry and header.
     pub fn label_key(self) -> &'static str {
         match self {
+            Self::General => "settings.page.general",
             Self::Appearance => "settings.page.appearance",
             Self::Language => "settings.page.language",
             Self::Keybindings => "settings.page.keybindings",
@@ -179,9 +188,7 @@ fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
     let Some(group_key) = group_key(kind) else {
         return Vec::new();
     };
-    let items = fields_for(kind, cx).into_iter().map(|field| {
-        SettingItem::new(t!(field.title_key), field.field).description(t!(field.description_key))
-    });
+    let items = fields_for(kind, cx).into_iter().map(PageField::into_item);
     vec![SettingGroup::new().title(t!(group_key)).items(items)]
 }
 
@@ -193,6 +200,7 @@ fn groups_for(kind: SettingsPageKind, cx: &App) -> Vec<SettingGroup> {
 /// shows.
 fn group_key(kind: SettingsPageKind) -> Option<&'static str> {
     match kind {
+        SettingsPageKind::General => Some(GENERAL_GROUP),
         SettingsPageKind::Appearance => Some(APPEARANCE_GROUP),
         SettingsPageKind::Language => Some(LANGUAGE_GROUP),
         SettingsPageKind::Project => Some(PROJECT_GROUP),
@@ -217,12 +225,53 @@ pub struct PageField {
     /// i18n key for the sentence under it.
     pub description_key: &'static str,
     /// The control, bound to the settings layer this screen writes.
-    pub field: SettingField<SharedString>,
+    pub field: FieldControl,
+}
+
+/// A row's control, by the type of value it carries.
+///
+/// `SettingField` is generic over that type and `SettingItem::new` is generic
+/// over the field, so a page holding rows of both kinds needs one name for them
+/// — a boolean switch and a string dropdown are not the same type and never
+/// will be. Two variants because two are what the dialog uses; a number row
+/// (`SettingField<f64>`) adds a third when a setting needs one.
+pub enum FieldControl {
+    /// A dropdown or text field over a string-valued setting.
+    Text(SettingField<SharedString>),
+    /// A switch over a boolean setting.
+    Toggle(SettingField<bool>),
+}
+
+impl FieldControl {
+    /// The control as the interface the reset wiring is read through
+    /// (`is_resettable` / `reset`), which is the same for either value type.
+    pub fn any(&self) -> &dyn AnySettingField {
+        match self {
+            Self::Text(field) => field,
+            Self::Toggle(field) => field,
+        }
+    }
+}
+
+impl PageField {
+    /// The row as the dialog renders it. Consumes the field, which is why
+    /// [`fields_for`] hands out the parts rather than the finished item.
+    fn into_item(self) -> SettingItem {
+        let (title, description) = (t!(self.title_key), t!(self.description_key));
+        match self.field {
+            FieldControl::Text(field) => SettingItem::new(title, field).description(description),
+            FieldControl::Toggle(field) => SettingItem::new(title, field).description(description),
+        }
+    }
 }
 
 /// The rows a page shows, in order.
 pub fn fields_for(kind: SettingsPageKind, cx: &App) -> Vec<PageField> {
     match kind {
+        SettingsPageKind::General => vec![
+            stop_returns_to_play_start_field(),
+            startup_create_composition_field(),
+        ],
         SettingsPageKind::Appearance => vec![
             theme_mode_field(),
             theme_field(ThemeMode::Light, cx),
@@ -231,6 +280,96 @@ pub fn fields_for(kind: SettingsPageKind, cx: &App) -> Vec<PageField> {
         SettingsPageKind::Language => vec![language_field()],
         SettingsPageKind::Project => vec![default_frame_rate_field(cx)],
         SettingsPageKind::Keybindings => Vec::new(),
+    }
+}
+
+// ===========================================================================
+// General (`SET-16`)
+// ===========================================================================
+
+const GENERAL_GROUP: &str = "settings.general.group";
+const STOP_RETURNS_TO_PLAY_START: &str = "settings.general.stop_returns_to_play_start";
+const STOP_RETURNS_TO_PLAY_START_DESCRIPTION: &str =
+    "settings.general.stop_returns_to_play_start_description";
+const STARTUP_CREATE_COMPOSITION: &str = "settings.general.startup_create_composition";
+const STARTUP_CREATE_COMPOSITION_DESCRIPTION: &str =
+    "settings.general.startup_create_composition_description";
+
+/// Where Stop leaves the playhead.
+///
+/// A switch rather than a two-option dropdown: the setting is a boolean in the
+/// file and reads as one on screen, and a dropdown would ask the user to read
+/// two labels to find out which one is "off".
+fn stop_returns_to_play_start_field() -> PageField {
+    PageField {
+        title_key: STOP_RETURNS_TO_PLAY_START,
+        description_key: STOP_RETURNS_TO_PLAY_START_DESCRIPTION,
+        field: FieldControl::Toggle(
+            SettingField::switch(
+                |cx| app_settings::resolved(cx).stop_returns_to_play_start,
+                |value, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.playback.stop_returns_to_play_start = Some(value),
+                        cx,
+                    );
+                },
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .playback
+                        .stop_returns_to_play_start
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.playback.stop_returns_to_play_start = None,
+                        cx,
+                    );
+                },
+            ),
+        ),
+    }
+}
+
+/// Whether a document with nothing to open starts on one empty composition.
+///
+/// A preference rather than a project setting even though it decides what a
+/// document contains: it applies to the document being *built*, which has no
+/// project layer to read yet (`ProjectState::fresh_document`).
+fn startup_create_composition_field() -> PageField {
+    PageField {
+        title_key: STARTUP_CREATE_COMPOSITION,
+        description_key: STARTUP_CREATE_COMPOSITION_DESCRIPTION,
+        field: FieldControl::Toggle(
+            SettingField::switch(
+                |cx| app_settings::resolved(cx).startup_creates_composition,
+                |value, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.startup.create_composition = Some(value),
+                        cx,
+                    );
+                },
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .startup
+                        .create_composition
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.startup.create_composition = None,
+                        cx,
+                    );
+                },
+            ),
+        ),
     }
 }
 
@@ -260,38 +399,40 @@ fn theme_mode_field() -> PageField {
     PageField {
         title_key: THEME_MODE,
         description_key: THEME_MODE_DESCRIPTION,
-        field: SettingField::dropdown(
-            options,
-            |cx| SharedString::from(app_settings::resolved(cx).theme_mode.as_str()),
-            |value, cx| {
-                let Some(mode) = AppearanceMode::from_value(&value) else {
-                    // The option ids come from `AppearanceMode::ALL`, so this is
-                    // unreachable unless the two drift apart; refusing beats
-                    // writing a value the settings file cannot express.
-                    tracing::warn!(%value, "ignoring an unknown theme mode");
-                    return;
-                };
-                app_settings::update(
-                    SettingsLayerScope::Global,
-                    |layer| layer.appearance.theme_mode = Some(mode),
-                    cx,
-                );
-            },
-        )
-        .on_reset(
-            |cx| {
-                app_settings::layer(SettingsLayerScope::Global, cx)
-                    .appearance
-                    .theme_mode
-                    .is_some()
-            },
-            |_window, cx| {
-                app_settings::update(
-                    SettingsLayerScope::Global,
-                    |layer| layer.appearance.theme_mode = None,
-                    cx,
-                );
-            },
+        field: FieldControl::Text(
+            SettingField::dropdown(
+                options,
+                |cx| SharedString::from(app_settings::resolved(cx).theme_mode.as_str()),
+                |value, cx| {
+                    let Some(mode) = AppearanceMode::from_value(&value) else {
+                        // The option ids come from `AppearanceMode::ALL`, so this is
+                        // unreachable unless the two drift apart; refusing beats
+                        // writing a value the settings file cannot express.
+                        tracing::warn!(%value, "ignoring an unknown theme mode");
+                        return;
+                    };
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.appearance.theme_mode = Some(mode),
+                        cx,
+                    );
+                },
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .appearance
+                        .theme_mode
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.appearance.theme_mode = None,
+                        cx,
+                    );
+                },
+            ),
         ),
     }
 }
@@ -330,39 +471,41 @@ fn theme_field(mode: ThemeMode, cx: &App) -> PageField {
     PageField {
         title_key,
         description_key,
-        field: SettingField::scrollable_dropdown(
-            options,
-            move |cx| theme_in_force(mode, cx),
-            move |value, cx| {
-                let name = value.to_string();
-                app_settings::update(
-                    SettingsLayerScope::Global,
-                    move |layer| match mode {
-                        ThemeMode::Light => layer.appearance.light_theme = Some(name),
-                        ThemeMode::Dark => layer.appearance.dark_theme = Some(name),
-                    },
-                    cx,
-                );
-            },
-        )
-        .on_reset(
-            move |cx| {
-                let appearance = app_settings::layer(SettingsLayerScope::Global, cx).appearance;
-                match mode {
-                    ThemeMode::Light => appearance.light_theme.is_some(),
-                    ThemeMode::Dark => appearance.dark_theme.is_some(),
-                }
-            },
-            move |_window, cx| {
-                app_settings::update(
-                    SettingsLayerScope::Global,
-                    move |layer| match mode {
-                        ThemeMode::Light => layer.appearance.light_theme = None,
-                        ThemeMode::Dark => layer.appearance.dark_theme = None,
-                    },
-                    cx,
-                );
-            },
+        field: FieldControl::Text(
+            SettingField::scrollable_dropdown(
+                options,
+                move |cx| theme_in_force(mode, cx),
+                move |value, cx| {
+                    let name = value.to_string();
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        move |layer| match mode {
+                            ThemeMode::Light => layer.appearance.light_theme = Some(name),
+                            ThemeMode::Dark => layer.appearance.dark_theme = Some(name),
+                        },
+                        cx,
+                    );
+                },
+            )
+            .on_reset(
+                move |cx| {
+                    let appearance = app_settings::layer(SettingsLayerScope::Global, cx).appearance;
+                    match mode {
+                        ThemeMode::Light => appearance.light_theme.is_some(),
+                        ThemeMode::Dark => appearance.dark_theme.is_some(),
+                    }
+                },
+                move |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        move |layer| match mode {
+                            ThemeMode::Light => layer.appearance.light_theme = None,
+                            ThemeMode::Dark => layer.appearance.dark_theme = None,
+                        },
+                        cx,
+                    );
+                },
+            ),
         ),
     }
 }
@@ -405,26 +548,32 @@ fn language_field() -> PageField {
     PageField {
         title_key: UI_LANGUAGE,
         description_key: UI_LANGUAGE_DESCRIPTION,
-        field: SettingField::dropdown(
-            locale_options(),
-            |cx| SharedString::from(app_settings::resolved(cx).locale),
-            |value, cx| {
-                app_settings::update(
-                    SettingsLayerScope::Global,
-                    |layer| layer.locale = Some(value.to_string()),
-                    cx,
-                );
-            },
-        )
-        .on_reset(
-            |cx| {
-                app_settings::layer(SettingsLayerScope::Global, cx)
-                    .locale
-                    .is_some()
-            },
-            |_window, cx| {
-                app_settings::update(SettingsLayerScope::Global, |layer| layer.locale = None, cx);
-            },
+        field: FieldControl::Text(
+            SettingField::dropdown(
+                locale_options(),
+                |cx| SharedString::from(app_settings::resolved(cx).locale),
+                |value, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.locale = Some(value.to_string()),
+                        cx,
+                    );
+                },
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .locale
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.locale = None,
+                        cx,
+                    );
+                },
+            ),
         ),
     }
 }
@@ -526,33 +675,35 @@ fn default_frame_rate_field(cx: &App) -> PageField {
     PageField {
         title_key: DEFAULT_FRAME_RATE,
         description_key: DEFAULT_FRAME_RATE_DESCRIPTION,
-        field: SettingField::dropdown(options, frame_rate_option_in_force, |value, cx| {
-            if app_settings::parse_frame_rate(&value).is_none() {
-                // Unreachable while the options come from the list above;
-                // refusing beats writing a rate the settings cannot read.
-                tracing::warn!(%value, "ignoring an unusable default frame rate");
-                return;
-            }
-            app_settings::update(
-                SettingsLayerScope::Project,
-                |layer| layer.playback.frame_rate = Some(value.to_string()),
-                cx,
-            );
-        })
-        .on_reset(
-            |cx| {
-                app_settings::layer(SettingsLayerScope::Project, cx)
-                    .playback
-                    .frame_rate
-                    .is_some()
-            },
-            |_window, cx| {
+        field: FieldControl::Text(
+            SettingField::dropdown(options, frame_rate_option_in_force, |value, cx| {
+                if app_settings::parse_frame_rate(&value).is_none() {
+                    // Unreachable while the options come from the list above;
+                    // refusing beats writing a rate the settings cannot read.
+                    tracing::warn!(%value, "ignoring an unusable default frame rate");
+                    return;
+                }
                 app_settings::update(
                     SettingsLayerScope::Project,
-                    |layer| layer.playback.frame_rate = None,
+                    |layer| layer.playback.frame_rate = Some(value.to_string()),
                     cx,
                 );
-            },
+            })
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Project, cx)
+                        .playback
+                        .frame_rate
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Project,
+                        |layer| layer.playback.frame_rate = None,
+                        cx,
+                    );
+                },
+            ),
         ),
     }
 }
@@ -564,6 +715,13 @@ fn default_frame_rate_field(cx: &App) -> PageField {
 /// each render, so if they follow the active locale, so does the dialog.
 pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
     match kind {
+        SettingsPageKind::General => vec![
+            GENERAL_GROUP,
+            STOP_RETURNS_TO_PLAY_START,
+            STOP_RETURNS_TO_PLAY_START_DESCRIPTION,
+            STARTUP_CREATE_COMPOSITION,
+            STARTUP_CREATE_COMPOSITION_DESCRIPTION,
+        ],
         SettingsPageKind::Appearance => vec![
             APPEARANCE_GROUP,
             THEME_MODE,
@@ -868,6 +1026,7 @@ mod tests {
     /// `every_locale_carries_the_keybinding_list_keys`.
     #[test]
     fn only_the_pages_whose_settings_apply_carry_labels() {
+        assert!(!label_keys(SettingsPageKind::General).is_empty());
         assert!(!label_keys(SettingsPageKind::Appearance).is_empty());
         assert!(!label_keys(SettingsPageKind::Language).is_empty());
         assert!(!label_keys(SettingsPageKind::Project).is_empty());

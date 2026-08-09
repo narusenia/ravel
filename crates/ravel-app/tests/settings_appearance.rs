@@ -19,7 +19,6 @@ use gpui::{
     AnyWindowHandle, Context, IntoElement, Pixels, Render, Size, Styled as _, TestAppContext,
     Window, div, px,
 };
-use gpui_component::setting::AnySettingField as _;
 use gpui_component::{Theme, ThemeMode, ThemeRegistry};
 use ravel_app::app_settings::{self, SettingsScope, read_global_settings_at};
 use ravel_app::settings_dialog::{SettingsPageKind, fields_for};
@@ -354,7 +353,7 @@ fn dirty_fields(cx: &mut TestAppContext) -> Vec<&'static str> {
     cx.update(|cx| {
         fields_for(SettingsPageKind::Appearance, cx)
             .into_iter()
-            .filter(|page_field| page_field.field.is_resettable(cx))
+            .filter(|page_field| page_field.field.any().is_resettable(cx))
             .map(|page_field| page_field.title_key)
             .collect()
     })
@@ -368,7 +367,7 @@ fn reset_field(window: AnyWindowHandle, title_key: &str, cx: &mut TestAppContext
                 .into_iter()
                 .find(|page_field| page_field.title_key == title_key)
                 .unwrap_or_else(|| panic!("the Appearance page has no field {title_key:?}"));
-            page_field.field.reset(window, cx);
+            page_field.field.any().reset(window, cx);
         })
         .expect("the window is open");
     cx.run_until_parked();

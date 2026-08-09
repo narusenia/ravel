@@ -289,6 +289,7 @@ reference = "Shown in full further up this network"
 subnet = "Subnet — double-click to open it"
 
 [outliner.menu]
+add_layer = "Add Layer"
 rename = "Rename"
 duplicate = "Duplicate Layer"
 delete = "Delete Layer"

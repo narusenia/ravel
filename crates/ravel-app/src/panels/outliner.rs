@@ -24,6 +24,7 @@ use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
+use ravel_ui::command::CommandId;
 use ravel_ui::document::{
     NetworkPath, duplicate_layers, remove_layers, reorder_layer, update_layer,
 };
@@ -38,6 +39,16 @@ const HEADER_HEIGHT: f32 = 24.0;
 const ROW_HEIGHT: f32 = 22.0;
 const INDENT_PER_DEPTH: f32 = 12.0;
 const DISCLOSURE_SIZE: f32 = 14.0;
+
+/// Builtin layer templates offered by the composition row's Add Layer
+/// submenu, in the Layer menu's order.
+const LAYER_ADD_COMMANDS: [CommandId; 5] = [
+    CommandId::LayerAddSolid,
+    CommandId::LayerAddShape,
+    CommandId::LayerAddVideo,
+    CommandId::LayerAddAudio,
+    CommandId::LayerAddNull,
+];
 
 /// A layer row being dragged to a new position in its composition's stack.
 /// The live document carries the moves; `changed` decides whether the gesture
@@ -1005,7 +1016,34 @@ impl OutlinerGpuiPanel {
                         this.select_composition(comp, cx);
                     }),
                 )
-                .context_menu(move |menu, _window, _cx| {
+                .context_menu(move |menu, window, cx| {
+                    // Layer creation targets the *active* composition, so the
+                    // submenu only appears on the row that is active — an
+                    // "Add Layer" on some other composition's row would put
+                    // the layer somewhere else entirely.
+                    let menu = if is_active_comp {
+                        menu.submenu(
+                            t!("outliner.menu.add_layer"),
+                            window,
+                            cx,
+                            |sub, _window, _cx| {
+                                LAYER_ADD_COMMANDS.iter().fold(sub, |sub, command| {
+                                    let command = *command;
+                                    sub.item(PopupMenuItem::new(t!(command.label_key())).on_click(
+                                        move |_, window, cx| {
+                                            window.dispatch_action(
+                                                crate::workspace::command_action(command),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                })
+                            },
+                        )
+                        .separator()
+                    } else {
+                        menu
+                    };
                     menu.item(
                         PopupMenuItem::new(t!("menu.composition.settings")).on_click(
                             |_, window, cx| {

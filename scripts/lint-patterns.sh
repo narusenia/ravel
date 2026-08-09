@@ -280,9 +280,6 @@ done < <(rg -nU --no-heading \
 # `color.rs` defines the conversion and is exempt. Anything else that really
 # wants the file's own values rather than a display of the composite needs a
 # justified allow entry.
-#
-# The search covers the display side (`CM-3`). `CM-4` converts the writers and
-# widens it to `crates`.
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line content; do
     [ -z "${file:-}" ] && continue
@@ -298,7 +295,7 @@ done < <(rg -n --no-heading \
     -e '\* 255\.0' \
     -e '\* 65535\.0' \
     -e '\* max as f32' \
-    crates/ravel-app crates/ravel-ui crates/ravel-core -g '*.rs' 2>/dev/null)
+    crates -g '*.rs' 2>/dev/null)
 
 if [ "$violations" -gt 0 ]; then
     echo >&2

@@ -31,9 +31,11 @@
 //! The reasons are structured, not prose: user-visible text is the caller's
 //! job through `t!`.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use super::{ImageFormat, MediaResult, VideoCodec};
+use crate::color::{ColorSpace, convert};
 use crate::types::FrameBuffer;
 
 // ===========================================================================
@@ -164,6 +166,20 @@ impl SequenceCodec {
         }
     }
 
+    /// The colour space a frame must be in when it reaches this writer.
+    ///
+    /// PNG is an 8- or 16-bit interchange format that everything downstream
+    /// reads as display-encoded, so it gets [`ColorSpace::DISPLAY`]. EXR is
+    /// the lossless intermediate and is written in the **working space** —
+    /// 32-bit float scene-linear, which is exactly what a compositor opening
+    /// it expects (`CM-4`).
+    pub const fn color_space(self) -> ColorSpace {
+        match self {
+            Self::Png(_) => ColorSpace::DISPLAY,
+            Self::Exr => ColorSpace::WORKING,
+        }
+    }
+
     /// Pair an [`ImageFormat`] with PNG settings, or `None` when Ravel has no
     /// writer for it. The entry point for a CLI flag or a UI menu choice.
     pub const fn from_image_format(format: ImageFormat, png_depth: PngDepth) -> Option<Self> {
@@ -173,6 +189,31 @@ impl SequenceCodec {
             ImageFormat::Tiff | ImageFormat::Dpx => None,
         }
     }
+}
+
+/// Convert a rendered frame out of the working space, ready for an encoder.
+///
+/// **The stage in front of [`Encoder`], not a part of it.** The trait and
+/// every writer behind it stay unaware of colour management (`CM-4`): the
+/// render worker converts once, then hands the encoder a frame that is
+/// already in the space its format calls for.
+///
+/// Borrowed unchanged when `space` is the working space — the EXR path, and
+/// the reason writing an EXR still costs no copy.
+///
+/// Alpha is coverage and is never converted.
+pub fn to_output_space(frame: &FrameBuffer, space: ColorSpace) -> Cow<'_, FrameBuffer> {
+    if space == ColorSpace::WORKING {
+        return Cow::Borrowed(frame);
+    }
+    let pixels = frame.as_f32();
+    let mut converted = Vec::with_capacity(pixels.len());
+    for pixel in pixels.chunks_exact(4) {
+        let rgb = convert([pixel[0], pixel[1], pixel[2]], ColorSpace::WORKING, space);
+        converted.extend_from_slice(&rgb);
+        converted.push(pixel[3]);
+    }
+    Cow::Owned(FrameBuffer::from_f32(frame.width, frame.height, converted))
 }
 
 /// Where a numbered image sequence is written and how its files are named.

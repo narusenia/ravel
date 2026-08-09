@@ -24,10 +24,13 @@
 
 use ravel_core::composition::Document;
 use ravel_core::id::CompId;
+use ravel_ui::panels::timeline::BpmGrid;
 use serde::{Deserialize, Serialize};
 
 /// UI state persisted alongside a project.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: [`BpmGrid`] carries a tempo as `f64`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiState {
     /// The composition that was active when the project was saved. `None`
@@ -39,12 +42,32 @@ pub struct UiState {
     /// fallback on top.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_comp: Option<CompId>,
+
+    /// The Timeline's musical beat grid — on/off, tempo, and the frame that
+    /// carries beat 1. It steers nothing in the rendered picture, which is
+    /// why it lives here rather than on the composition and why adding it
+    /// left `format_version` alone.
+    ///
+    /// `None` (or a missing entry) is the ordinary first-run state and reads
+    /// as [`BpmGrid::default`]; use [`Self::bpm_grid`], which also sanitizes
+    /// a hand-edited tempo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bpm_grid: Option<BpmGrid>,
 }
 
 impl UiState {
     /// The UI state of a session whose active composition is `active_comp`.
     pub fn with_active_comp(active_comp: Option<CompId>) -> Self {
-        Self { active_comp }
+        Self {
+            active_comp,
+            ..Self::default()
+        }
+    }
+
+    /// The beat grid the Timeline should open with: the persisted one pulled
+    /// back into range, or the default when the entry is absent.
+    pub fn bpm_grid(&self) -> BpmGrid {
+        self.bpm_grid.unwrap_or_default().sanitized()
     }
 
     /// The composition the UI should open `document` on: the persisted one
@@ -140,6 +163,43 @@ mod tests {
         // An id that no longer resolves (composition deleted since the save).
         let stale = UiState::with_active_comp(Some(CompId::new(99)));
         assert_eq!(stale.initial_active_comp(&document), Some(root));
+    }
+
+    #[test]
+    fn the_bpm_grid_round_trips_and_is_absent_by_default() {
+        // The default state writes no entry at all, so an untouched project
+        // keeps the same `ui_state.json` it always had.
+        let json = UiState::default().to_json().unwrap();
+        assert!(!json.contains("bpm_grid"), "unexpected json: {json}");
+        assert_eq!(
+            UiState::from_json(&json).unwrap().bpm_grid(),
+            BpmGrid::default()
+        );
+
+        let state = UiState {
+            bpm_grid: Some(BpmGrid {
+                enabled: true,
+                bpm: 174.0,
+                offset_frames: 12.5,
+            }),
+            ..UiState::default()
+        };
+        let json = state.to_json().unwrap();
+        let back = UiState::from_json(&json).unwrap();
+        assert_eq!(back, state);
+        assert_eq!(back.bpm_grid().bpm, 174.0);
+    }
+
+    /// A partial or hand-edited entry must not reach the painter as a
+    /// degenerate grid.
+    #[test]
+    fn a_hand_edited_bpm_grid_is_sanitized_on_read() {
+        let state = UiState::from_json(r#"{"bpm_grid": {"enabled": true}}"#).unwrap();
+        assert_eq!(state.bpm_grid().bpm, BpmGrid::default().bpm);
+        assert!(state.bpm_grid().enabled);
+
+        let state = UiState::from_json(r#"{"bpm_grid": {"enabled": true, "bpm": 0}}"#).unwrap();
+        assert_eq!(state.bpm_grid().bpm, ravel_ui::panels::timeline::MIN_BPM);
     }
 
     /// Composition 0: nothing to fall back to, and that is a valid state.

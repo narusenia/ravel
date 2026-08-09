@@ -25,6 +25,7 @@ use ravel_dock::PaneContent;
 use ravel_i18n::t;
 use ravel_ui::layout::{PanelInstance, PanelInstanceId};
 use ravel_ui::panel::PanelKind;
+use ravel_ui::panels::timeline::BpmGrid;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -353,6 +354,31 @@ impl LayerSelection {
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }
+}
+
+/// Durable shared state: the Timeline's musical beat grid (unit 8 of
+/// `docs/implementation/refactor-plan-0808.md`).
+///
+/// A Global rather than panel-local state because the value outlives any one
+/// Timeline view: the project save path writes it to `ui_state.json` and a
+/// load installs it, and a second Timeline instance must show the same grid.
+/// It is UI state, so it stays out of the `Document` and out of undo.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BpmGridState(BpmGrid);
+
+impl Global for BpmGridState {}
+
+/// The Timeline's beat grid, defaulted before any project state published one.
+pub fn bpm_grid(cx: &App) -> BpmGrid {
+    cx.try_global::<BpmGridState>()
+        .map_or_else(BpmGrid::default, |state| state.0)
+}
+
+/// Install a beat grid: the Timeline toolbar on a user edit, and
+/// [`crate::project_state::ProjectState`] on a project load or File ▸ New.
+/// Sanitized here so no caller can install a degenerate tempo.
+pub(crate) fn set_bpm_grid(grid: BpmGrid, cx: &mut App) {
+    cx.set_global(BpmGridState(grid.sanitized()));
 }
 
 /// The active composition id, `None` when the document has no composition

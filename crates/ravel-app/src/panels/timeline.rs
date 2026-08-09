@@ -46,7 +46,7 @@ use ravel_ui::document::{
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::timeline::{
-    MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
+    BpmGrid, MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
 };
 
 use crate::assets::RavelIcon;
@@ -87,6 +87,36 @@ const TRIM_HANDLE_PX: f64 = 6.0;
 const KEYFRAME_HIT_PX: f64 = 5.0;
 const CURVE_DEGENERATE_MARGIN: f64 = curve_view::DEGENERATE_MARGIN;
 const CURVE_HIT_RADIUS: f64 = 7.0;
+/// Opacity of the wash over the frames past the composition duration. Strong
+/// enough to read as "outside", weak enough to leave layer bars legible.
+const OUT_OF_RANGE_ALPHA: f32 = 0.55;
+/// Opacity of the tint that keeps the out-of-range strip visible where there
+/// is no content for the wash to knock back.
+const OUT_OF_RANGE_TINT_ALPHA: f32 = 0.09;
+/// Opacity of a BPM beat line.
+const BEAT_LINE_ALPHA: f32 = 0.45;
+/// Width of the `BPM` toggle — three glyphs, so wider than `S` / `M` / `L`.
+const BPM_TOGGLE_WIDTH: f32 = 32.0;
+/// Width of one BPM readout / editor in the transport toolbar.
+const BPM_FIELD_WIDTH: f32 = 52.0;
+
+/// Which number of the beat grid a transport-toolbar readout edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BpmField {
+    /// Tempo in beats per minute.
+    Bpm,
+    /// Composition frame carrying beat 1.
+    Offset,
+}
+
+impl BpmField {
+    fn element_id(self) -> &'static str {
+        match self {
+            Self::Bpm => "timeline-bpm-value",
+            Self::Offset => "timeline-bpm-offset",
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct TimelineCurveData {
@@ -357,6 +387,11 @@ pub struct TimelineGpuiPanel {
     /// Transient frame editor shown after an explicit timecode click.
     timecode_input: Option<Entity<InputState>>,
     timecode_input_sub: Option<Subscription>,
+    /// Transient editor for one BPM-grid field, opened by clicking its
+    /// readout. Same contract as the timecode editor: Enter commits, Esc and
+    /// blur cancel.
+    bpm_input: Option<(BpmField, Entity<InputState>)>,
+    bpm_input_sub: Option<Subscription>,
     /// Normalized logarithmic pixels-per-frame control.
     zoom_slider: Entity<SliderState>,
     #[allow(dead_code)]
@@ -378,6 +413,11 @@ pub struct TimelineGpuiPanel {
     active_comp_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
+    /// The beat grid is written by this panel's toolbar, by a project load and
+    /// by `File ▸ New`, so a Timeline that did not do the writing still has to
+    /// repaint from it.
+    #[allow(dead_code)]
+    bpm_grid_sub: Subscription,
 }
 
 impl TimelineGpuiPanel {
@@ -427,6 +467,9 @@ impl TimelineGpuiPanel {
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| {
             cx.notify();
         });
+        let bpm_grid_sub = cx.observe_global::<super::BpmGridState>(|_this, cx| {
+            cx.notify();
+        });
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
         let zoom_slider = cx.new(|_| {
@@ -466,6 +509,8 @@ impl TimelineGpuiPanel {
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             timecode_input: None,
             timecode_input_sub: None,
+            bpm_input: None,
+            bpm_input_sub: None,
             zoom_slider,
             zoom_slider_sub,
             focus_handle,
@@ -476,6 +521,7 @@ impl TimelineGpuiPanel {
             mirror_epoch: super::MirrorEpoch::default(),
             active_comp_sub,
             selection_sub,
+            bpm_grid_sub,
         }
     }
 
@@ -2435,6 +2481,141 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
+    // ----- BPM grid ------------------------------------------------------------
+    //
+    // The toggle and the two readouts are panel-local view state, not
+    // commands: nothing outside the Timeline invokes them, they have no
+    // keybinding and no menu entry, so they stay button handlers like the
+    // graph-grid toggle rather than adding a `CommandId`.
+
+    fn toggle_bpm_grid(&mut self, cx: &mut Context<Self>) {
+        let mut grid = super::bpm_grid(cx);
+        grid.enabled = !grid.enabled;
+        super::set_bpm_grid(grid, cx);
+        self.cancel_bpm_edit(cx);
+    }
+
+    fn begin_bpm_edit(&mut self, field: BpmField, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bpm_input.is_some() {
+            return;
+        }
+        let grid = super::bpm_grid(cx);
+        // Seeded unit-free so the text the user edits is the text that parses.
+        let value = format_bpm_number(match field {
+            BpmField::Bpm => grid.bpm,
+            BpmField::Offset => grid.offset_frames,
+        });
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        let input_sub =
+            cx.subscribe(
+                &input,
+                |this: &mut Self, _input, event: &InputEvent, cx| match event {
+                    InputEvent::PressEnter { .. } => this.commit_bpm_edit(cx),
+                    InputEvent::Blur => this.cancel_bpm_edit(cx),
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.bpm_input = Some((field, input));
+        self.bpm_input_sub = Some(input_sub);
+        cx.notify();
+    }
+
+    fn commit_bpm_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((field, input)) = self.bpm_input.take() else {
+            return;
+        };
+        self.bpm_input_sub = None;
+        // Unparseable text leaves the grid alone: the readout snaps back to
+        // the value that is still in force rather than inventing one.
+        let text = input.read(cx).value();
+        // Tolerate the `f` the offset readout shows, in case it was pasted.
+        let text = text.trim().trim_end_matches(['f', 'F']).trim();
+        if let Ok(value) = text.parse::<f64>() {
+            let mut grid = super::bpm_grid(cx);
+            match field {
+                BpmField::Bpm => grid.bpm = value,
+                BpmField::Offset => grid.offset_frames = value,
+            }
+            // `set_bpm_grid` sanitizes, so a typed 0 or 10000 lands inside
+            // the accepted tempo range instead of breaking the paint.
+            super::set_bpm_grid(grid, cx);
+        }
+        cx.notify();
+    }
+
+    fn cancel_bpm_edit(&mut self, cx: &mut Context<Self>) {
+        self.bpm_input = None;
+        self.bpm_input_sub = None;
+        cx.notify();
+    }
+
+    /// The BPM toggle plus, while the grid is on, the tempo and beat-1
+    /// readouts. Each readout turns into an input when clicked.
+    fn build_bpm_controls(&self, colors: &ThemeColor, cx: &mut Context<Self>) -> Div {
+        let grid = super::bpm_grid(cx);
+        let mut row = div().flex().items_center().gap_1().child(
+            make_toggle(
+                "bpm-grid".to_string(),
+                "BPM",
+                grid.enabled,
+                SharedString::from(t!("timeline.bpm.toggle")),
+                colors,
+            )
+            .w(px(BPM_TOGGLE_WIDTH))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _win, cx| this.toggle_bpm_grid(cx)),
+            ),
+        );
+        if !grid.enabled {
+            return row;
+        }
+        for (field, text, tooltip) in [
+            (
+                BpmField::Bpm,
+                format_bpm_number(grid.bpm),
+                t!("timeline.bpm.tempo"),
+            ),
+            (
+                BpmField::Offset,
+                format_beat_offset(grid.offset_frames),
+                t!("timeline.bpm.offset"),
+            ),
+        ] {
+            let editing = self.bpm_input.as_ref().filter(|(open, _)| *open == field);
+            row = row.child(match editing {
+                Some((_, input)) => div()
+                    .w(px(BPM_FIELD_WIDTH))
+                    .h(px(22.0))
+                    .child(Input::new(input).small())
+                    .into_any_element(),
+                None => {
+                    let tooltip = SharedString::from(tooltip);
+                    div()
+                        .id(SharedString::from(field.element_id()))
+                        .w(px(BPM_FIELD_WIDTH))
+                        .h(px(22.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(2.0))
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(colors.foreground)
+                        .hover(|this| this.bg(colors.muted))
+                        .child(SharedString::from(text))
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            this.begin_bpm_edit(field, window, cx);
+                        }))
+                        .into_any_element()
+                }
+            });
+        }
+        row
+    }
+
     fn sync_zoom_slider(&self, window: &mut Window, cx: &mut Context<Self>) {
         let value = ppf_to_slider(self.state.pixels_per_frame());
         self.zoom_slider
@@ -2530,6 +2711,8 @@ impl TimelineGpuiPanel {
             div().into_any_element()
         };
 
+        let bpm_controls = self.build_bpm_controls(&colors, cx);
+
         let timecode = if let Some(input) = &self.timecode_input {
             div()
                 .w(px(92.0))
@@ -2589,6 +2772,7 @@ impl TimelineGpuiPanel {
                         "{fps} fps · {duration_frames}f"
                     ))),
             )
+            .child(bpm_controls)
             .child(graph_controls)
             .child(div().flex_1())
             .child(
@@ -2725,7 +2909,7 @@ impl TimelineGpuiPanel {
             .map(|comp| (comp.frame_rate, comp.duration_frames))
     }
 
-    fn build_ruler(&self, theme_colors: &ThemeColor) -> impl IntoElement + use<> {
+    fn build_ruler(&self, theme_colors: &ThemeColor, bpm: BpmGrid) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let ruler_width = self.ruler_width.clone();
@@ -2754,8 +2938,16 @@ impl TimelineGpuiPanel {
                 );
                 window.paint_quad(fill(border_bounds, colors.border));
 
+                // Beat lines sit under the frame ticks: the two grids are
+                // independent and are shown together, so the frame ruler must
+                // stay the one that carries the labels.
+                paint_beat_lines(&state, bpm, bounds, &colors, window);
+
                 let (minor_interval, major_interval) = tick_intervals(ppf, fr);
                 if minor_interval == 0 || major_interval == 0 {
+                    // The end still has to be visible when the tick maths
+                    // degenerates (`LOW-APP-05`).
+                    paint_out_of_range(&state, bounds, &colors, window);
                     return;
                 }
 
@@ -2828,6 +3020,11 @@ impl TimelineGpuiPanel {
                             .ok();
                     }
                 }
+
+                // Last, so the ticks and labels past the composition end are
+                // knocked back with everything else — the lane paints its
+                // band over its content for the same reason.
+                paint_out_of_range(&state, bounds, &colors, window);
             },
         )
         .h(px(RULER_HEIGHT))
@@ -2895,6 +3092,7 @@ impl TimelineGpuiPanel {
     fn build_layer_area(
         &self,
         theme_colors: &ThemeColor,
+        bpm: BpmGrid,
         area_origin: Rc<Cell<(f32, f32)>>,
         cx: &App,
     ) -> impl IntoElement + use<> {
@@ -2956,6 +3154,7 @@ impl TimelineGpuiPanel {
                 let area_width: f32 = bounds.size.width.into();
 
                 window.paint_quad(fill(bounds, colors.background));
+                paint_beat_lines(&state, bpm, bounds, &colors, window);
 
                 let mut y = bounds.origin.y;
                 for layer in state.layers().rev() {
@@ -3101,6 +3300,10 @@ impl TimelineGpuiPanel {
                         }
                     }
                 }
+
+                // The end of the composition, over the bars but under the
+                // playhead: the bars stay readable, the playhead stays found.
+                paint_out_of_range(&state, bounds, &colors, window);
 
                 // Playhead
                 let playhead_x = (state.playhead() as f64 - scroll) * ppf;
@@ -3819,11 +4022,12 @@ impl Render for TimelineGpuiPanel {
             .and_then(|handle| handle.0.upgrade())
             .is_some_and(|controller| controller.read(cx).transport().is_playing());
         let transport_toolbar = self.build_transport_toolbar(is_playing, cx);
-        let ruler = self.build_ruler(&theme.colors);
+        let bpm = super::bpm_grid(cx);
+        let ruler = self.build_ruler(&theme.colors, bpm);
         let view_mode = self.state.view_mode();
         let right_pane = match view_mode {
             TimelineViewMode::Bars => self
-                .build_layer_area(&theme.colors, self.area_origin.clone(), cx)
+                .build_layer_area(&theme.colors, bpm, self.area_origin.clone(), cx)
                 .into_any_element(),
             TimelineViewMode::Graph => self
                 .build_curve_editor_shell(&theme.colors, self.area_origin.clone(), cx)
@@ -3855,6 +4059,8 @@ impl Render for TimelineGpuiPanel {
                 cx.listener(|this, _: &gpui_component::input::Escape, _window, cx| {
                     if this.timecode_input.is_some() {
                         this.cancel_timecode_edit(cx);
+                    } else if this.bpm_input.is_some() {
+                        this.cancel_bpm_edit(cx);
                     } else {
                         cx.propagate();
                     }
@@ -4678,6 +4884,22 @@ fn fit_pixels_per_frame(ruler_width: f64, duration_frames: u64) -> f64 {
     (ruler_width.max(0.0) / duration_frames.max(1) as f64).clamp(MIN_PPF, MAX_PPF)
 }
 
+/// A beat-grid number: whole values plain, fractional ones to one decimal.
+/// Unit-free, so the same text seeds the editor and parses back.
+fn format_bpm_number(value: f64) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+/// Beat-1 readout. `f` is the same unit notation the transport already uses
+/// for the playhead and the duration (`docs/specifications/ui/timeline.md`).
+fn format_beat_offset(offset_frames: f64) -> String {
+    format!("{}f", format_bpm_number(offset_frames))
+}
+
 fn format_fps(frame_rate: FrameRate) -> String {
     let fps = frame_rate.as_f64();
     if (fps - fps.round()).abs() < 0.000_5 {
@@ -4757,6 +4979,95 @@ fn make_toggle(
         .cursor_pointer()
         .child(SharedString::from(label))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+}
+
+/// Shades the part of `bounds` that lies past the composition's last frame.
+///
+/// The zoom deliberately still reaches beyond the duration (there are reasons
+/// to look outside it), so the end is *marked* rather than made unreachable.
+fn paint_out_of_range(
+    state: &TimelinePanel,
+    bounds: Bounds<Pixels>,
+    colors: &ThemeColor,
+    window: &mut Window,
+) {
+    let Some((x, width)) = state.out_of_range_span(f64::from(f32::from(bounds.size.width))) else {
+        return;
+    };
+    let band = Bounds::new(
+        point(bounds.origin.x + px(x as f32), bounds.origin.y),
+        size(px(width as f32), bounds.size.height),
+    );
+    // Two passes: the background wash knocks back whatever content reaches
+    // past the end (the same trick the mute overlay uses), and the tint makes
+    // the strip read as "outside" even where there is no content to knock
+    // back. The tint follows `foreground`, so it darkens a light theme and
+    // lightens a dark one.
+    window.paint_quad(fill(
+        band,
+        Hsla {
+            a: OUT_OF_RANGE_ALPHA,
+            ..colors.background
+        },
+    ));
+    window.paint_quad(fill(
+        band,
+        Hsla {
+            a: OUT_OF_RANGE_TINT_ALPHA,
+            ..colors.foreground
+        },
+    ));
+    // A hairline at the duration itself, so the exact end frame is readable
+    // even where the shade sits on a dark background.
+    if x > 0.0 {
+        window.paint_quad(fill(
+            Bounds::new(
+                point(bounds.origin.x + px(x as f32), bounds.origin.y),
+                size(px(1.0), bounds.size.height),
+            ),
+            Hsla {
+                a: 0.5,
+                ..colors.foreground
+            },
+        ));
+    }
+}
+
+/// Draws the musical beat grid across `bounds`, when it is enabled and beats
+/// are far enough apart to read as lines.
+fn paint_beat_lines(
+    state: &TimelinePanel,
+    bpm: BpmGrid,
+    bounds: Bounds<Pixels>,
+    colors: &ThemeColor,
+    window: &mut Window,
+) {
+    let ppf = state.pixels_per_frame();
+    if !bpm.enabled || !bpm.is_legible_at(state.frame_rate(), ppf) {
+        return;
+    }
+    let width = f64::from(f32::from(bounds.size.width));
+    let scroll = state.scroll_offset();
+    for frame in bpm.beat_frames(state.frame_rate(), scroll, scroll + width / ppf) {
+        // Fractional beat frames are rounded to a pixel exactly here, at the
+        // paint boundary — never back into a whole frame (`BpmGrid`).
+        let x = (frame - scroll) * ppf;
+        if x < 0.0 || x > width {
+            continue;
+        }
+        window.paint_quad(fill(
+            Bounds::new(
+                point(bounds.origin.x + px(x as f32), bounds.origin.y),
+                size(px(1.0), bounds.size.height),
+            ),
+            Hsla {
+                a: BEAT_LINE_ALPHA,
+                // A chart hue, so a beat line never reads as the playhead
+                // (`primary`) or as a layer bar (`accent`).
+                ..colors.chart_2
+            },
+        ));
+    }
 }
 
 fn paint_bar_label(
@@ -4966,6 +5277,24 @@ mod tests {
                 moved: false,
             }),
             Some(CursorStyle::Crosshair)
+        );
+    }
+
+    /// The readouts seed the editors, so what they print has to parse back.
+    #[test]
+    fn bpm_readouts_round_trip_through_the_editor() {
+        assert_eq!(format_bpm_number(120.0), "120");
+        assert_eq!(format_bpm_number(128.5), "128.5");
+        assert_eq!(format_beat_offset(0.0), "0f");
+        assert_eq!(format_beat_offset(-12.5), "-12.5f");
+        for value in [120.0_f64, 128.5, -12.5] {
+            let text = format_bpm_number(value);
+            assert_eq!(text.parse::<f64>().unwrap(), value, "seed text: {text}");
+        }
+        // The `f` on the offset readout is tolerated on the way back in.
+        assert_eq!(
+            format_beat_offset(7.0).trim_end_matches('f').parse::<f64>(),
+            Ok(7.0)
         );
     }
 

@@ -14,12 +14,146 @@ use crate::panel::PanelKind;
 use ravel_core::composition::{Composition, Layer};
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::types::FrameRate;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 const DEFAULT_PPF: f64 = 4.0;
 pub const MIN_PPF: f64 = 0.1;
 pub const MAX_PPF: f64 = 50.0;
 const ZOOM_FACTOR: f64 = 1.2;
+
+/// Accepted tempo range. The lower bound also keeps the beat spacing finite:
+/// a `0` (or negative) tempo read from a hand-edited `ui_state.json` would
+/// otherwise make the beat spacing infinite or run the grid backwards.
+pub const MIN_BPM: f64 = 1.0;
+pub const MAX_BPM: f64 = 999.0;
+
+/// Upper bound on the beats one call may return, so a dense grid at a far
+/// zoom-out cannot allocate without limit. At the point the cap bites, beats
+/// are far below one pixel apart and the host has already stopped drawing
+/// them ([`BpmGrid::is_legible_at`]).
+const MAX_BEATS_PER_QUERY: usize = 4096;
+
+/// The musical beat grid the Timeline can overlay on the frame grid
+/// (they are independent and can be shown together).
+///
+/// This is **UI state, not a composition attribute**: it steers nothing in
+/// the rendered picture, so it is persisted in `ui_state.json` rather than in
+/// the document (`docs/implementation/refactor-plan-0808.md`, unit 8).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BpmGrid {
+    /// Whether the beat lines are drawn at all.
+    pub enabled: bool,
+    /// Tempo in beats per minute.
+    pub bpm: f64,
+    /// Composition frame that carries beat 1. Recorded music almost never
+    /// starts on frame 0, so the grid is useless without it.
+    pub offset_frames: f64,
+}
+
+impl Default for BpmGrid {
+    /// Off, at the tempo most sequencers open on. Not `derive`d: a derived
+    /// default would be `bpm: 0.0`, and with `#[serde(default)]` a partial
+    /// entry such as `{"enabled": true}` would then load as a degenerate grid.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bpm: 120.0,
+            offset_frames: 0.0,
+        }
+    }
+}
+
+impl BpmGrid {
+    /// The same grid with out-of-range or non-finite numbers pulled back into
+    /// the accepted range. `ui_state.json` is hand-editable and a `NumberInput`
+    /// accepts anything the user types, so every entry point sanitizes.
+    pub fn sanitized(self) -> Self {
+        let default = Self::default();
+        Self {
+            enabled: self.enabled,
+            bpm: if self.bpm.is_finite() {
+                self.bpm.clamp(MIN_BPM, MAX_BPM)
+            } else {
+                default.bpm
+            },
+            offset_frames: if self.offset_frames.is_finite() {
+                self.offset_frames
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Distance between two beats, in frames.
+    ///
+    /// **Deliberately fractional.** At 24 fps and 140 BPM a beat lands every
+    /// 10.2857… frames, so rounding to whole frames would bunch the lines
+    /// against the frame grid and drift a full beat over a few bars. Nothing
+    /// snaps to this grid — it is a visual guide — so the host paints the
+    /// lines at fractional frame positions and lets the pixel rounding happen
+    /// once, at paint time.
+    pub fn frames_per_beat(&self, frame_rate: FrameRate) -> f64 {
+        let fps = frame_rate.as_f64();
+        if !fps.is_finite() || fps <= 0.0 || !self.bpm.is_finite() || self.bpm < MIN_BPM {
+            return f64::NAN;
+        }
+        fps * 60.0 / self.bpm
+    }
+
+    /// Whether beats are far enough apart at `pixels_per_frame` to read as a
+    /// grid rather than as a smear.
+    pub fn is_legible_at(&self, frame_rate: FrameRate, pixels_per_frame: f64) -> bool {
+        let spacing = self.frames_per_beat(frame_rate) * pixels_per_frame;
+        spacing.is_finite() && spacing >= MIN_BEAT_SPACING_PX
+    }
+
+    /// Frames of the beats inside `[first_frame, last_frame]`, in order.
+    ///
+    /// Each frame is computed as `offset + index * frames_per_beat` from the
+    /// beat index rather than by accumulating the step, so a long timeline
+    /// does not collect floating-point drift. Beats before beat 1 are not
+    /// emitted: a negative beat index has no musical meaning here.
+    pub fn beat_frames(
+        &self,
+        frame_rate: FrameRate,
+        first_frame: f64,
+        last_frame: f64,
+    ) -> Vec<f64> {
+        let step = self.frames_per_beat(frame_rate);
+        // `offset_frames` is checked here too, not only in `sanitized`: this
+        // is a pure function anyone may call with a hand-built grid, and a
+        // non-finite offset would make every beat NaN right up to the cap.
+        if !step.is_finite()
+            || step <= 0.0
+            || !self.offset_frames.is_finite()
+            || !first_frame.is_finite()
+            || !last_frame.is_finite()
+        {
+            return Vec::new();
+        }
+        let first_index = ((first_frame - self.offset_frames) / step).ceil().max(0.0);
+        if !first_index.is_finite() {
+            return Vec::new();
+        }
+        let mut beats = Vec::new();
+        let mut index = first_index;
+        loop {
+            let frame = self.offset_frames + index * step;
+            if frame > last_frame || beats.len() >= MAX_BEATS_PER_QUERY {
+                break;
+            }
+            beats.push(frame);
+            index += 1.0;
+        }
+        beats
+    }
+}
+
+/// Below this beat spacing the grid is drawn as a solid block rather than as
+/// lines, so the host stops drawing it instead.
+const MIN_BEAT_SPACING_PX: f64 = 4.0;
 
 /// Which transform property group is expanded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -322,6 +456,27 @@ impl TimelinePanel {
         self.x_to_frame_f64(x).round().max(0.0) as u64
     }
 
+    /// Pixel span `(x, width)` of the region past the composition's last
+    /// frame inside a lane `viewport_width` pixels wide, or `None` when the
+    /// whole viewport is inside the composition.
+    ///
+    /// The end is *shaded*, not clamped away: the zoom deliberately still
+    /// reaches beyond the duration, so the timeline says where the
+    /// composition stops instead of refusing to show it.
+    pub fn out_of_range_span(&self, viewport_width: f64) -> Option<(f64, f64)> {
+        if viewport_width <= 0.0 || !viewport_width.is_finite() {
+            return None;
+        }
+        // No composition means no duration to be outside of.
+        let duration = self.composition.as_ref()?.duration_frames;
+        let start = self.frame_to_x(i64::try_from(duration).unwrap_or(i64::MAX));
+        if !start.is_finite() || start >= viewport_width {
+            return None;
+        }
+        let start = start.max(0.0);
+        Some((start, viewport_width - start))
+    }
+
     fn x_to_frame_f64(&self, x: f64) -> f64 {
         x / self.pixels_per_frame + self.scroll_offset
     }
@@ -583,5 +738,186 @@ mod tests {
         p.toggle_property_expanded(lid, position.clone());
         assert!(p.is_property_expanded(lid, &position));
         assert!(!p.is_property_expanded(lid, &scale));
+    }
+
+    // ----- Composition end -------------------------------------------------
+
+    fn panel_with_duration(duration_frames: u64) -> TimelinePanel {
+        let mut p = panel();
+        p.set_composition(Some(Composition::new(
+            CompId::new(1),
+            "Test",
+            (1280, 720),
+            FrameRate::new(30, 1),
+            duration_frames,
+        )));
+        p.set_pixels_per_frame(2.0);
+        p
+    }
+
+    #[test]
+    fn the_out_of_range_span_starts_at_the_last_frame() {
+        let p = panel_with_duration(100);
+        // 100 frames * 2 px = 200 px of composition inside a 400 px lane.
+        assert_eq!(p.out_of_range_span(400.0), Some((200.0, 200.0)));
+    }
+
+    #[test]
+    fn a_viewport_inside_the_composition_has_no_out_of_range_span() {
+        let p = panel_with_duration(1000);
+        assert_eq!(p.out_of_range_span(400.0), None);
+    }
+
+    #[test]
+    fn scrolling_past_the_end_shades_the_whole_viewport() {
+        let mut p = panel_with_duration(100);
+        p.set_scroll_offset(300.0);
+        assert_eq!(p.out_of_range_span(400.0), Some((0.0, 400.0)));
+    }
+
+    #[test]
+    fn no_composition_has_nothing_to_be_outside_of() {
+        let p = panel();
+        assert_eq!(p.out_of_range_span(400.0), None);
+        // A degenerate viewport is never shaded either.
+        assert_eq!(panel_with_duration(100).out_of_range_span(0.0), None);
+    }
+
+    // ----- BPM grid --------------------------------------------------------
+
+    #[test]
+    fn the_default_grid_is_off_at_a_usable_tempo() {
+        let grid = BpmGrid::default();
+        assert!(!grid.enabled);
+        assert_eq!(grid.bpm, 120.0);
+        assert_eq!(grid.offset_frames, 0.0);
+    }
+
+    #[test]
+    fn a_beat_is_one_second_of_frames_at_sixty_bpm() {
+        let grid = BpmGrid {
+            bpm: 60.0,
+            ..BpmGrid::default()
+        };
+        assert_eq!(grid.frames_per_beat(FrameRate::new(24, 1)), 24.0);
+        // 24 fps, 120 BPM: a beat every 12 frames, on whole frames.
+        let grid = BpmGrid {
+            bpm: 120.0,
+            ..BpmGrid::default()
+        };
+        assert_eq!(
+            grid.beat_frames(FrameRate::new(24, 1), 0.0, 36.0),
+            vec![0.0, 12.0, 24.0, 36.0]
+        );
+    }
+
+    /// The interesting case: neither the frame rate nor the tempo divides
+    /// A hand-built grid can carry a non-finite offset without passing
+    /// through `sanitized`; the beat query has to answer with nothing rather
+    /// than with NaN positions.
+    #[test]
+    fn a_non_finite_offset_yields_no_beats() {
+        let fr = FrameRate::new(24, 1);
+        for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let grid = BpmGrid {
+                enabled: true,
+                offset_frames: offset,
+                ..BpmGrid::default()
+            };
+            assert!(
+                grid.beat_frames(fr, 0.0, 1000.0).is_empty(),
+                "offset {offset} must produce no beats"
+            );
+        }
+    }
+
+    /// evenly, so the beats sit between frames and must stay there.
+    #[test]
+    fn beats_stay_on_fractional_frames() {
+        let grid = BpmGrid {
+            bpm: 140.0,
+            ..BpmGrid::default()
+        };
+        let fr = FrameRate::new(30000, 1001); // 29.97
+        let step = grid.frames_per_beat(fr);
+        assert!((step - 12.8443).abs() < 0.001, "unexpected step: {step}");
+        let beats = grid.beat_frames(fr, 0.0, 40.0);
+        assert_eq!(beats.len(), 4);
+        for (index, beat) in beats.iter().enumerate() {
+            // Computed from the index, so beat 100 is as exact as beat 1.
+            assert!((beat - index as f64 * step).abs() < 1e-9);
+        }
+        let far = grid.beat_frames(fr, 12_844.0, 12_857.0);
+        assert!((far[0] - 1000.0 * step).abs() < 1e-9, "drifted: {far:?}");
+    }
+
+    #[test]
+    fn the_offset_moves_beat_one_and_earlier_beats_are_dropped() {
+        let grid = BpmGrid {
+            bpm: 120.0,
+            offset_frames: 7.0,
+            ..BpmGrid::default()
+        };
+        let fr = FrameRate::new(24, 1);
+        assert_eq!(grid.beat_frames(fr, 0.0, 31.0), vec![7.0, 19.0, 31.0]);
+        // Nothing before beat 1, even when the viewport starts before it.
+        assert_eq!(grid.beat_frames(fr, -100.0, 6.0), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn a_degenerate_tempo_yields_no_beats_instead_of_looping() {
+        let fr = FrameRate::new(24, 1);
+        for bpm in [0.0, -60.0, f64::NAN, f64::INFINITY] {
+            let grid = BpmGrid {
+                bpm,
+                ..BpmGrid::default()
+            };
+            assert!(
+                grid.beat_frames(fr, 0.0, 1000.0).is_empty(),
+                "bpm {bpm} must produce no beats"
+            );
+            assert!(!grid.is_legible_at(fr, 4.0), "bpm {bpm} must not be drawn");
+        }
+    }
+
+    #[test]
+    fn sanitizing_pulls_hand_edited_values_back_into_range() {
+        let sanitized = |bpm, offset| {
+            BpmGrid {
+                enabled: true,
+                bpm,
+                offset_frames: offset,
+            }
+            .sanitized()
+        };
+        assert_eq!(sanitized(0.0, 0.0).bpm, MIN_BPM);
+        assert_eq!(sanitized(100_000.0, 0.0).bpm, MAX_BPM);
+        assert_eq!(sanitized(f64::NAN, 0.0).bpm, BpmGrid::default().bpm);
+        assert_eq!(sanitized(120.0, f64::INFINITY).offset_frames, 0.0);
+        assert!(
+            sanitized(120.0, 5.0).enabled,
+            "the toggle is never rewritten"
+        );
+    }
+
+    #[test]
+    fn a_grid_too_dense_to_read_is_not_drawn() {
+        let grid = BpmGrid {
+            bpm: 120.0,
+            ..BpmGrid::default()
+        };
+        let fr = FrameRate::new(24, 1); // 12 frames per beat
+        assert!(grid.is_legible_at(fr, 1.0), "12 px apart is readable");
+        assert!(!grid.is_legible_at(fr, 0.1), "1.2 px apart is a smear");
+    }
+
+    #[test]
+    fn the_beat_query_is_capped() {
+        let grid = BpmGrid {
+            bpm: MAX_BPM,
+            ..BpmGrid::default()
+        };
+        let beats = grid.beat_frames(FrameRate::new(24, 1), 0.0, 1e9);
+        assert_eq!(beats.len(), MAX_BEATS_PER_QUERY);
     }
 }

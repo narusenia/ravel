@@ -36,12 +36,14 @@ use ravel_core::runtime::{
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
 use ravel_project::settings::{ResolvedSettings, SettingsLayer};
+use ravel_project::ui_state::UiState;
 use ravel_ui::document::{
     CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
     duplicate_composition, neighbour_composition, next_composition_name, remove_composition,
     update_composition,
 };
 use ravel_ui::layout_doc::LayoutDocument;
+use ravel_ui::panels::timeline::BpmGrid;
 use ravel_ui::panels::viewer::ViewerResolution;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -136,10 +138,11 @@ struct CompiledRoot {
 struct SaveRequest {
     path: PathBuf,
     document: Document,
-    /// The composition the user was on when they asked for the save
-    /// (REQ-UI-013) — captured with the document so a queued save records
-    /// the session it describes.
-    active_comp: Option<CompId>,
+    /// What the user was looking at when they asked for the save
+    /// (REQ-UI-013): the active composition and the Timeline's beat grid.
+    /// Captured with the document so a queued save records the session it
+    /// describes.
+    ui_state: UiState,
     /// The workspace layout to embed, when the user opted in (DOCK-9).
     /// Captured with the document for the same reason: a queued save writes
     /// the arrangement the user asked about.
@@ -648,7 +651,14 @@ impl ProjectState {
         let document = fresh_document(cx);
         let active_comp = document.root_comp;
         self.revision += 1;
-        self.replace_document(document, None, active_comp, SettingsLayer::default(), cx);
+        self.replace_document(
+            document,
+            None,
+            active_comp,
+            BpmGrid::default(),
+            SettingsLayer::default(),
+            cx,
+        );
         cx.emit(DocumentReplaced {
             workspace_layout: None,
         });
@@ -698,7 +708,14 @@ impl ProjectState {
         let request = SaveRequest {
             path,
             document: self.store.document().clone(),
-            active_comp: crate::panels::active_composition(cx),
+            ui_state: UiState {
+                active_comp: crate::panels::active_composition(cx),
+                // An untouched grid writes no entry, so saving a project
+                // nobody used the beat grid in leaves `ui_state.json`
+                // byte-identical to what earlier builds wrote.
+                bpm_grid: Some(crate::panels::bpm_grid(cx))
+                    .filter(|grid| *grid != BpmGrid::default()),
+            },
             workspace_layout,
             settings: crate::app_settings::layer(crate::app_settings::SettingsScope::Project, cx),
             generation: self.generation,
@@ -718,7 +735,7 @@ impl ProjectState {
         let SaveRequest {
             path,
             document,
-            active_comp,
+            ui_state,
             workspace_layout,
             settings,
             generation,
@@ -739,7 +756,7 @@ impl ProjectState {
                 ravel_project::ProjectFile::from_document(project_name, created_at, document);
             file.manifest.modified_at = ravel_project::timestamp::rfc3339_now();
             file.settings = settings;
-            file.ui_state = ravel_project::ui_state::UiState::with_active_comp(active_comp);
+            file.ui_state = ui_state;
             // `None` while the opt-in is off, which leaves the archive without
             // the entry at all.
             file.workspace_layout = workspace_layout;
@@ -821,11 +838,13 @@ impl ProjectState {
                         // root when the archive predates `ui_state.json`
                         // (or names a composition it no longer has).
                         let active_comp = file.ui_state.initial_active_comp(&file.document);
+                        let bpm_grid = file.ui_state.bpm_grid();
                         let workspace_layout = file.workspace_layout;
                         this.replace_document(
                             file.document,
                             Some(path),
                             active_comp,
+                            bpm_grid,
                             file.settings,
                             cx,
                         );
@@ -900,7 +919,9 @@ impl ProjectState {
     ///
     /// `active_comp` is the composition the replacement opens on: the
     /// document root for a new project, the restored `ui_state.json` entry
-    /// for a loaded one (REQ-UI-013).
+    /// for a loaded one (REQ-UI-013). `bpm_grid` follows the same rule, so a
+    /// project's beat grid stops applying as it is replaced instead of
+    /// leaking into the next project.
     ///
     /// `settings` is the project's own settings layer, which is adopted here
     /// so a project's overrides start applying as it opens and stop applying
@@ -911,6 +932,7 @@ impl ProjectState {
         document: Document,
         path: Option<PathBuf>,
         active_comp: Option<CompId>,
+        bpm_grid: BpmGrid,
         settings: SettingsLayer,
         cx: &mut Context<Self>,
     ) {
@@ -920,6 +942,7 @@ impl ProjectState {
         // in the document that actually holds it.
         self.store = DocumentStore::new(document);
         crate::panels::set_active_composition(active_comp, cx);
+        crate::panels::set_bpm_grid(bpm_grid, cx);
         crate::app_settings::set_project_layer(settings, cx);
         self.project_path = path;
         self.generation += 1;
@@ -2276,7 +2299,14 @@ mod tests {
                 .unwrap();
             let layer = Layer::new(LayerId::next(), "Reused", network).with_time(0, 0, 300);
             document = ravel_ui::document::add_layer(&document, comp, layer).expect("add layer");
-            project.replace_document(document, None, Some(comp), SettingsLayer::default(), cx);
+            project.replace_document(
+                document,
+                None,
+                Some(comp),
+                BpmGrid::default(),
+                SettingsLayer::default(),
+                cx,
+            );
         });
 
         assert!(

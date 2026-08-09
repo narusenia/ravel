@@ -469,6 +469,11 @@ follow_playhead = "Follow playhead"
 bar_view = "Show layer bars"
 graph_view = "Show value graph"
 
+[timeline.bpm]
+toggle = "Show beat grid"
+tempo = "Tempo (BPM)"
+offset = "Frame of the first beat"
+
 [timeline.empty]
 no_composition = "No composition — create one to start editing"
 

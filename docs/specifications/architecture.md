@@ -395,7 +395,7 @@ project.ravprj (zip)
 ├── presets/
 │   └── node_presets.ron     # ノード単位プリセット
 ├── settings.toml            # プロジェクト固有設定オーバーライド
-├── ui_state.json            # UI 状態（アクティブコンプ等、任意エントリ）
+├── ui_state.json            # UI 状態（アクティブコンプ・BPM グリッド等、任意エントリ）
 └── .journal/                # 操作ジャーナル（正常終了時コンパクション）
 ```
 

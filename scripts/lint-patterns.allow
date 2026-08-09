@@ -32,6 +32,11 @@ observe-global crates/ravel-app/src/panels/node_editor.rs SelectedPropertiesTarg
 # CanvasSelection in the Node Editor.
 observe-global crates/ravel-app/src/panels/timeline.rs ActiveComposition
 observe-global crates/ravel-app/src/panels/timeline.rs LayerSelection
+# Durable shared UI state (refactor-plan-0808 unit 8): the beat grid is written
+# by the Timeline toolbar, by a project load and by File ▸ New, so a Timeline
+# instance that did not do the writing still has to repaint from it. Same
+# lifecycle and same reason as the two entries above.
+observe-global crates/ravel-app/src/panels/timeline.rs BpmGridState
 # The Node Editor opens the network of the shared layer selection (REQ-UI-013
 # unit 3). Timeline and Outliner both write that selection, so observing the
 # durable state replaces per-writer pushes into this panel.

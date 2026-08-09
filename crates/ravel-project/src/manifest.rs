@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// a way that requires a migration step — and, for v7, when a purely additive
 /// field must not be silently discarded by an older build (see the
 /// `migrate_v6_to_v7` step in [`crate::migration`]).
-pub const CURRENT_FORMAT_VERSION: u32 = 7;
+pub const CURRENT_FORMAT_VERSION: u32 = 8;
 
 /// Rational frame rate stored in the manifest (`{ "num": 30, "den": 1 }`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

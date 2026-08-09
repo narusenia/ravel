@@ -15,6 +15,7 @@
 //! enabling structural sharing for undo.
 
 pub mod asset;
+mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
 pub(crate) mod graph_walk;
@@ -22,6 +23,8 @@ mod param_fold;
 pub mod templates;
 pub mod transform;
 pub mod validate;
+
+pub use color_upgrade::{ColorMigrationNote, ColorMigrationReport, is_color_param};
 
 pub use asset::{
     AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource, MediaAssetEntry,
@@ -1043,6 +1046,29 @@ impl Document {
     /// and is logged. Mints no ids. Idempotent.
     pub fn upgrade_curve_params(self) -> Self {
         self.map_graphs(curve_upgrade::upgrade_graph)
+    }
+
+    /// Reinterpret every authored colour for the linear working space
+    /// (`.ravprj` v7 → v8), in every graph of the document — the flat graph,
+    /// each layer network, and nested subnets.
+    ///
+    /// **Not idempotent, and cannot be**: `srgb → linear` applied twice is a
+    /// different colour, and no inspection of a stored number can tell how
+    /// many times it has been applied. Idempotence is the *format version's*
+    /// job — [`ProjectFile::from_archive`](../../ravel_project/struct.ProjectFile.html)
+    /// runs this only for an archive written before v8, and a v8 archive is
+    /// never converted again.
+    ///
+    /// The returned [`ColorMigrationReport`] lists what could not be
+    /// converted; the caller is expected to surface it.
+    pub fn linearize_colors(
+        self,
+        registry: &NodeRegistry,
+    ) -> (Self, color_upgrade::ColorMigrationReport) {
+        let report = std::cell::RefCell::new(color_upgrade::ColorMigrationReport::default());
+        let document =
+            self.map_graphs(|graph| color_upgrade::upgrade_graph(graph, registry, &report));
+        (document, report.into_inner())
     }
 
     /// Apply a graph rewrite to every graph the document owns: the flat

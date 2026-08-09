@@ -93,6 +93,11 @@ impl KeyframeCurve {
         &self.keyframes
     }
 
+    /// The value the curve returns while it has no keyframes.
+    pub fn default_value(&self) -> f32 {
+        self.default_value
+    }
+
     /// Find the storage index of the keyframe exactly at `frame`, if any.
     fn index_of(&self, frame: u64) -> Option<usize> {
         self.keyframes

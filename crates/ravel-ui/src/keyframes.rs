@@ -169,12 +169,19 @@ impl RevealFilter {
             Self::Animated => channels()
                 .iter()
                 .any(|channel| matches!(channel.source, ChannelSource::Keyframes(_))),
-            // A blended source is not reported as an expression: what the row
-            // shows is the blend, and AE's `EE` means "this property is driven
-            // by an expression".
-            Self::Expression => channels()
-                .iter()
-                .any(|channel| matches!(channel.source, ChannelSource::Expression(_))),
+            // A blend counts: the Properties badge calls such a channel
+            // expression-driven, and one definition of "driven by an
+            // expression" has to serve both panels.
+            //
+            // **Scope**: this can only reveal rows that exist, and a network
+            // parameter earns a row by being keyframed
+            // ([`property_rows`]). An expression attached to a parameter that
+            // was never keyframed therefore has no row for `Alt+E` to keep.
+            // Widening row generation is not this filter's job — it would
+            // change the tree for everyone, not just while a filter is on.
+            Self::Expression => channels().iter().any(|channel| {
+                crate::properties::expression::source_has_expression(&channel.source)
+            }),
             Self::Modified => match &row.id {
                 PropertyRowId::Shell(group) => {
                     let defaults = shell_default_channels(*group);

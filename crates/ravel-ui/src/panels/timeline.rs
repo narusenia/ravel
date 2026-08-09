@@ -879,6 +879,32 @@ mod tests {
         );
     }
 
+    /// An expression reached through a blend still counts: the Properties
+    /// badge calls that channel expression-driven, so the reveal must agree.
+    #[test]
+    fn a_blended_expression_still_reveals_the_row() {
+        use ravel_core::animation::channel::{
+            AnimationChannel, ChannelSource, ParameterExpression,
+        };
+
+        let mut layer = reveal_layer();
+        layer.transform.rotation = AnimationChannel::new(ChannelSource::Blend(
+            Box::new(ChannelSource::Constant(0.0)),
+            Box::new(ChannelSource::Expression(ParameterExpression::new("2.0"))),
+            Default::default(),
+            0.5,
+        ));
+
+        let mut p = panel();
+        p.apply_reveal(RevealFilter::Expression, false);
+        assert!(
+            revealed(&p, &layer).contains(&crate::keyframes::PropertyRowId::Shell(
+                PropertyGroup::Rotation
+            )),
+            "a blended expression is still an expression"
+        );
+    }
+
     #[test]
     fn unmodified_replaces_shift_adds_and_the_same_key_clears() {
         let mut p = panel();

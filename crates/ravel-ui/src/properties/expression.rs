@@ -80,6 +80,15 @@ pub fn component_expression(
     first_expression(&channel.source)
 }
 
+/// Whether `source` is driven by an expression, directly or through a blend.
+///
+/// The one definition of "this is expression-driven" in the crate: the
+/// Properties badge and the Timeline's `Alt+E` reveal both ask it, so a blended
+/// expression cannot be shown as driven in one panel and undriven in the other.
+pub fn source_has_expression(source: &ChannelSource) -> bool {
+    first_expression(source).is_some()
+}
+
 /// The first expression in `source`, in pre-order.
 fn first_expression(source: &ChannelSource) -> Option<&ParameterExpression> {
     match source {

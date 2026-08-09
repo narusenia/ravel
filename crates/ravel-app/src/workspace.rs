@@ -272,9 +272,26 @@ pub fn register_action_handlers(cx: &mut App) {
 
 /// Convert a ravel-ui KeyChord to the gpui keystroke string format.
 ///
-/// ravel-ui: `Cmd+Shift+Z`  →  gpui: `cmd-shift-z`
+/// ravel-ui: `Cmd+Shift+Z`  →  gpui: `secondary-shift-z`
+///
+/// **The primary modifier is written `secondary-`, not `cmd-`.** `KeyChord`
+/// spells it `Cmd` on every platform ([`KeyChord`]'s `Display`), but to gpui
+/// `cmd` / `super` / `win` all mean `Modifiers::platform`, which on Windows is
+/// the Windows key — so `Cmd+S` became `Win+S` there and no shortcut in the
+/// application fired. gpui's own `secondary-` resolves to the platform
+/// modifier on macOS and to Control everywhere else, which is exactly what
+/// `KeyChord::command` means (`keybindings/mod.rs`: "rendered as `Cmd` on
+/// macOS and `Ctrl` on Windows/Linux").
+///
+/// `control` stays `ctrl-`. A chord carrying both would collapse to one
+/// modifier off macOS; nothing in the assets or in [`PANEL_BINDINGS`] does
+/// that, and `a_chord_cannot_hold_both_primary_modifiers` keeps it that way.
 fn chord_to_gpui_string(chord: &KeyChord) -> String {
-    chord.to_string().replace('+', "-").to_lowercase()
+    chord
+        .to_string()
+        .replace('+', "-")
+        .to_lowercase()
+        .replace("cmd-", "secondary-")
 }
 
 // ---------------------------------------------------------------------------
@@ -2206,6 +2223,55 @@ mod tests {
             assert!(
                 !predicate.eval(&[context("Workspace"), context(owner)]),
                 "{owner} owns its own arrows while it is focused"
+            );
+        }
+    }
+
+    /// The primary modifier must reach gpui as `secondary-`, which resolves to
+    /// Cmd on macOS and Control elsewhere. Sending `cmd-` instead means
+    /// `Modifiers::platform` on every platform — the Windows key on Windows,
+    /// where it made every `Cmd+…` shortcut in the application dead.
+    #[test]
+    fn the_primary_modifier_reaches_gpui_as_secondary() {
+        let chord: ravel_ui::keybindings::KeyChord = "Cmd+Shift+Z".parse().expect("chord parses");
+        assert_eq!(super::chord_to_gpui_string(&chord), "secondary-shift-z");
+
+        let plain: ravel_ui::keybindings::KeyChord = "Shift+A".parse().expect("chord parses");
+        assert_eq!(
+            super::chord_to_gpui_string(&plain),
+            "shift-a",
+            "a chord without the primary modifier is untouched"
+        );
+
+        let control: ravel_ui::keybindings::KeyChord = "Ctrl+A".parse().expect("chord parses");
+        assert_eq!(
+            super::chord_to_gpui_string(&control),
+            "ctrl-a",
+            "the literal Control key is not the primary modifier"
+        );
+    }
+
+    /// `secondary` and `ctrl` collapse onto the same modifier off macOS, so a
+    /// chord holding both would be two names for one keystroke. Nothing in the
+    /// binding set does that; this fails if something starts to.
+    #[test]
+    fn a_chord_cannot_hold_both_primary_modifiers() {
+        let shell = ravel_ui::shell::AppShell::default();
+        for (chord, cmd) in shell.keybindings().iter() {
+            let gpui = super::chord_to_gpui_string(chord);
+            assert!(
+                !(gpui.contains("secondary-") && gpui.contains("ctrl-")),
+                "{cmd:?} binds {chord}, which is one keystroke off macOS"
+            );
+        }
+        for binding in super::PANEL_BINDINGS {
+            let gpui = binding.chord.replace('+', "-").to_lowercase();
+            let gpui = gpui.replace("cmd-", "secondary-");
+            assert!(
+                !(gpui.contains("secondary-") && gpui.contains("ctrl-")),
+                "{:?} binds {}, which is one keystroke off macOS",
+                binding.command,
+                binding.chord
             );
         }
     }

@@ -134,6 +134,18 @@ chord 以外の到達手段が要る。ラベルキー `menu.panel.detach` は�
 あったのにメニュー行が無く、**キーバインドだけが唯一の到達経路**だった
 （この単位が塞いだ取りこぼし）。
 
+**主修飾子は gpui へ `secondary-` として渡す。** `KeyChord` の `command` は
+「macOS では Cmd、Windows / Linux では Ctrl」と定義されているが、gpui にとって
+`cmd` / `super` / `win` はどれも `Modifiers::platform`（Windows では Windows
+キー）なので、そのまま渡すと **Windows で `Cmd+…` のショートカットが 1 つも
+効かない**。gpui 自身の `secondary-` が macOS で platform、それ以外で Control に
+落ちるので、`chord_to_gpui_string` がそこへ変換する。`Ctrl+` は literal な
+Control のまま。**両方を持つ chord は macOS 以外で 1 つの打鍵に潰れる**ので、
+資産にも `PANEL_BINDINGS` にも置かない（テストで固定）。
+
+なお**環境設定の一覧はまだ `Cmd+` と表示する**（`LOW-APP-25`）。保存形と表示形を
+分ける作業が残っている。
+
 キーフレーム補間の切替はメニューと `on_action` だけで、キーバインドは持たない。
 
 **ユーザーファイルはこの表のコマンドを再割り当てできない。** 割り当てを受理すると

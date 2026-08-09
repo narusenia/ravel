@@ -281,7 +281,10 @@ fn node_editor_keybindings_are_context_scoped() {
                 .inner();
             (
                 keystroke.key.as_str(),
-                keystroke.modifiers.platform,
+                // The primary modifier reaches gpui as `secondary-`, which is
+                // the platform key on macOS and Control elsewhere — so this
+                // asks "is the primary modifier held", not "is it Cmd".
+                keystroke.modifiers.platform || keystroke.modifiers.control,
                 keystroke.modifiers.modified(),
                 binding.action().name(),
             )

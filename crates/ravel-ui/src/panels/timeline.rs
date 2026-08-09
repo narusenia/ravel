@@ -122,7 +122,15 @@ impl BpmGrid {
         last_frame: f64,
     ) -> Vec<f64> {
         let step = self.frames_per_beat(frame_rate);
-        if !step.is_finite() || step <= 0.0 || !first_frame.is_finite() || !last_frame.is_finite() {
+        // `offset_frames` is checked here too, not only in `sanitized`: this
+        // is a pure function anyone may call with a hand-built grid, and a
+        // non-finite offset would make every beat NaN right up to the cap.
+        if !step.is_finite()
+            || step <= 0.0
+            || !self.offset_frames.is_finite()
+            || !first_frame.is_finite()
+            || !last_frame.is_finite()
+        {
             return Vec::new();
         }
         let first_index = ((first_frame - self.offset_frames) / step).ceil().max(0.0);
@@ -804,6 +812,25 @@ mod tests {
     }
 
     /// The interesting case: neither the frame rate nor the tempo divides
+    /// A hand-built grid can carry a non-finite offset without passing
+    /// through `sanitized`; the beat query has to answer with nothing rather
+    /// than with NaN positions.
+    #[test]
+    fn a_non_finite_offset_yields_no_beats() {
+        let fr = FrameRate::new(24, 1);
+        for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let grid = BpmGrid {
+                enabled: true,
+                offset_frames: offset,
+                ..BpmGrid::default()
+            };
+            assert!(
+                grid.beat_frames(fr, 0.0, 1000.0).is_empty(),
+                "offset {offset} must produce no beats"
+            );
+        }
+    }
+
     /// evenly, so the beats sit between frames and must stay there.
     #[test]
     fn beats_stay_on_fractional_frames() {

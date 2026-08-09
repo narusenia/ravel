@@ -413,6 +413,11 @@ pub struct TimelineGpuiPanel {
     active_comp_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
+    /// The beat grid is written by this panel's toolbar, by a project load and
+    /// by `File ▸ New`, so a Timeline that did not do the writing still has to
+    /// repaint from it.
+    #[allow(dead_code)]
+    bpm_grid_sub: Subscription,
 }
 
 impl TimelineGpuiPanel {
@@ -460,6 +465,9 @@ impl TimelineGpuiPanel {
             this.sync_from_project(cx);
         });
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| {
+            cx.notify();
+        });
+        let bpm_grid_sub = cx.observe_global::<super::BpmGridState>(|_this, cx| {
             cx.notify();
         });
         let focus_handle = cx.focus_handle();
@@ -513,6 +521,7 @@ impl TimelineGpuiPanel {
             mirror_epoch: super::MirrorEpoch::default(),
             active_comp_sub,
             selection_sub,
+            bpm_grid_sub,
         }
     }
 

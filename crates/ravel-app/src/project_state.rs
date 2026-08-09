@@ -1042,6 +1042,11 @@ impl ProjectState {
         // frames of one sequence (or the same file picked twice) resolve to
         // one asset.
         let mut batch_ids: HashMap<PathBuf, String> = HashMap::new();
+        // Whether the run put anything new in the document. An import that
+        // only names paths already in the bin leaves it untouched, and
+        // committing that would push an undo step that reverts nothing —
+        // reachable only since placing stopped being part of an import.
+        let mut registered = false;
         for asset in probed {
             let id = match batch_ids.get(&asset.path).cloned().or_else(|| {
                 doc.media_assets.iter().find_map(|(id, entry)| {
@@ -1050,6 +1055,7 @@ impl ProjectState {
             }) {
                 Some(id) => id,
                 None => {
+                    registered = true;
                     let id = unique_asset_id(&doc, &asset.path);
                     doc = doc.with_media_asset_entry(
                         id.clone(),
@@ -1067,7 +1073,9 @@ impl ProjectState {
             summary.imported.push((id, asset.path.clone()));
         }
 
-        self.commit_document(doc, InvalidationHint::Structural, cx);
+        if registered {
+            self.commit_document(doc, InvalidationHint::Structural, cx);
+        }
         summary
     }
 

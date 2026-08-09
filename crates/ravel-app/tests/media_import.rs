@@ -354,16 +354,30 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
         );
     });
 
-    // Each import is still its own undo step.
-    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    // The second import registered nothing, so it is not a history entry:
+    // one undo takes the layers away and the next takes the asset with it.
+    // Since an import stopped placing layers, a re-import changes the
+    // document not at all, and committing it would spend an undo on nothing.
     project.update(cx, |project, cx| assert!(project.undo(cx)));
     project.read_with(cx, |project, _| {
-        assert_eq!(project.document().media_assets.len(), 1);
         assert_eq!(
             ravel_ui::document::root_composition(project.document())
                 .unwrap()
                 .layer_count(),
-            0
+            0,
+            "the first undo reverts the placement"
+        );
+        assert_eq!(
+            project.document().media_assets.len(),
+            1,
+            "the asset is still imported"
+        );
+    });
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    project.read_with(cx, |project, _| {
+        assert!(
+            project.document().media_assets.is_empty(),
+            "the next undo reverts the import itself — the re-import spent no step"
         );
     });
 }

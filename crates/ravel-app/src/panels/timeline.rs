@@ -2657,6 +2657,22 @@ impl TimelineGpuiPanel {
     /// enumeration goes through `TimelinePanel::visible_property_rows` like
     /// every other derivation (`MED-APP-13`); no y layout is derived here.
     fn sync_channel_scrubs(&mut self, cx: &mut Context<Self>) {
+        // A gesture that ended where it started emits no `Commit` (there is no
+        // net change to record), so the captured frame has no other clear
+        // site: drop it once the widget it belongs to has stopped dragging, or
+        // the next gesture on that row would inherit a frame the user has
+        // since scrubbed away from. This runs **before** the prune below,
+        // whose widgets are still dragging when it ends them — their captured
+        // frame has to survive until the `Commit` it queues is delivered.
+        if let Some((key, _)) = &self.active_scrub
+            && !self
+                .scrubs
+                .get(key)
+                .is_some_and(|scrub| scrub.state.read(cx).is_dragging())
+        {
+            self.active_scrub = None;
+        }
+
         let playhead = self.state.playhead();
         let comp_id = self.state.comp_id();
         let mut wanted: Vec<(TimelineChannelRef, f32)> = Vec::new();
@@ -4418,9 +4434,18 @@ impl TimelineGpuiPanel {
                                         div()
                                             .id(SharedString::from(format!("chv-{lid}-{j}-{ci}")))
                                             .flex_shrink_0()
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation();
-                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _ev, _win, cx| {
+                                                    cx.stop_propagation();
+                                                    // A press means nothing is
+                                                    // in flight: the frame the
+                                                    // last gesture captured is
+                                                    // stale even if no sync
+                                                    // ran in between.
+                                                    this.active_scrub = None;
+                                                }),
+                                            )
                                             .child(ScrubInput::new(&state))
                                     })),
                             );
@@ -7700,6 +7725,56 @@ mod tests {
             keyframes::channel_value_at(&l, &row, 0, 0),
             Some(0.0),
             "the frame the playhead moved to is untouched"
+        );
+    }
+
+    /// A gesture that ends where it started records nothing — and must leave
+    /// nothing behind either. The frame it captured has to go with it, or the
+    /// next gesture on the same row writes the frame the previous one held.
+    #[gpui::test]
+    fn a_gesture_that_committed_nothing_leaves_no_captured_frame(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: row.clone(),
+            component: 0,
+        };
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(10, cx))
+            .unwrap();
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+
+        // Out and back: live changes fire, no commit closes the gesture.
+        scrub.update(cx, |state, cx| {
+            state.begin_drag(0.0);
+            state.drag_to(5.0, &gpui::Modifiers::default(), cx);
+            state.drag_to(0.0, &gpui::Modifiers::default(), cx);
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(0, cx))
+            .unwrap();
+        cx.run_until_parked();
+        drag(&scrub, 10.0, cx);
+        scrub.update(cx, |state, cx| {
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+
+        let l = layer(&project, comp_id, a, cx);
+        assert_eq!(
+            keyframes::channel_value_at(&l, &row, 0, 0),
+            Some(200.0),
+            "the new gesture writes the frame the playhead is on now"
+        );
+        assert_eq!(
+            keyframes::channel_value_at(&l, &row, 0, 10),
+            Some(100.0),
+            "the frame the abandoned gesture had captured is untouched"
         );
     }
 

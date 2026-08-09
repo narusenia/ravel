@@ -33,6 +33,11 @@
 | 2 | 動画・静止画・画像シーケンスを **1 ノードに統合**（`type_key` を `media` にし `video` を alias として永続互換） | `is_time_dependent(&self)` は引数を取らないので 1 processor 型で出し分けられない。time-dependent のまま静止画を Arc キャッシュすれば実コストはゼロ |
 | 3 | サムネイル/波形キャッシュは**外部グローバルキャッシュ**（`global_config_dir()/cache/`、キー = 絶対パス + mtime + size） | 未保存プロジェクトでも効く。`.ravprj` は zip なので同封すると保存サイズと保存時間、保存のバイト決定性にサムネ生成が絡む |
 | 4 | メディアレイヤーの時間配置は **素材長 + 再生ヘッド位置**（`out_frame = ceil(duration_secs × comp_fps)`、長さ不明はコンプ全長にフォールバック） | 連続投入でヘッドに積める。`video` ノードは `media_frame_for(ctx.time, stream)` で秒基準にマップするので素材 fps ≠ コンプ fps でもズレない（REQ-LAYER-006） |
+
+> **決定 4 の適用範囲は `refactor-plan-0808.md` の単位 10 が狭めた。**
+> インポートは配置しなくなり、配置は独立した操作になった。開始フレームは
+> 再生ヘッドのまま（メニュー / ダブルクリック / Outliner）だが、Timeline へ
+> ドロップした場合だけポインタの指すフレームになる。素材長の決め方は不変。
 | 5 | 空コンプにメディアを入れてもコンプ設定は**変えない**。代わりに MediaBin に「素材からコンポジションを作成」を置く | 解像度/fps の暗黙書き換えは意外な破壊的変更 |
 | 6 | オフラインは**検出 + 手動再リンク**まで v1。一括再リンク・ディレクトリ探索は v2 | 再リンクは「asset の path を差し替える Document 編集 1 回」なので小さい |
 | 7 | オフライン/デコード失敗のレイヤーは**透明フレームとして継続**。評価全体を失敗させない | 大きなコンポジションで 1 枚壊れると全部見えなくなるのを避ける |
@@ -168,6 +173,7 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
    `ExternalPaths` ドロップをワークスペースのルートで受ける）、
    background probe（`MediaProber` 注入可能）、相対化して `media_assets` へ
    1 undo で追加、「レイヤーとして追加」（素材長 + 再生ヘッド）。
+   **インポート時の自動配置は `refactor-plan-0808.md` の単位 10 で外した。**
 4. **MediaBin パネル**（ravel-ui / ravel-app）— ✅ 実装済み
    行モデル + 種別フィルタ + 検索、`MediaSelection` Global、
    `SelectedPropertiesTarget` 連携、行コンテキストメニュー、

@@ -557,7 +557,9 @@ impl TimelinePanel {
             .copied()
             .map(|frame| (frame, (self.frame_to_x(frame) - x).abs()))
             .filter(|(_, distance)| *distance <= KEYFRAME_SNAP_RADIUS_PX)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
+            // The frame breaks a tie, so the earlier key wins: `min_by` keeps
+            // the *last* of equal elements, and the candidates are ascending.
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
             .map(|(frame, _)| frame);
         match snapped {
             Some(frame) => frame.max(0) as u64,
@@ -1298,6 +1300,11 @@ mod tests {
         p.set_pixels_per_frame(4.0);
         assert_eq!(p.snap_playhead_x(p.frame_to_x(22) - 1.0, &candidates), 22);
         assert_eq!(p.snap_playhead_x(p.frame_to_x(20) + 1.0, &candidates), 20);
+        assert_eq!(
+            p.snap_playhead_x(p.frame_to_x(21), &candidates),
+            20,
+            "an exact tie goes to the earlier frame"
+        );
         assert_eq!(
             p.snap_playhead_x(p.frame_to_x(21), &[]),
             21,

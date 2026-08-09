@@ -996,13 +996,16 @@ fn build_field_row(
             if let Some(entity) = picker {
                 row = row.child(ColorPicker::new(entity).small());
             } else {
-                row = row.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(fg)
-                        .child(SharedString::from(format!("({r:.2}, {g:.2}, {b:.2})"))),
-                );
+                // No picker widget for this field: the readout still shows
+                // the display encoding rather than the working-space value
+                // behind it (`CM-3`).
+                let display = ColorSpace::DISPLAY.from_linear([*r, *g, *b]);
+                row = row.child(div().flex_shrink_0().text_xs().text_color(fg).child(
+                    SharedString::from(format!(
+                        "({:.2}, {:.2}, {:.2})",
+                        display[0], display[1], display[2]
+                    )),
+                ));
             }
             row
         }

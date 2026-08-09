@@ -211,7 +211,13 @@ fn placeholder_value(field: &PropertyField) -> String {
         PropertyField::Int { value, .. } => format!("{value}"),
         PropertyField::Bool { value, .. } => format!("{value}"),
         PropertyField::Enum { value, .. } => value.clone(),
-        PropertyField::Color { r, g, b, a, .. } => format!("{r}, {g}, {b}, {a}"),
+        // Colour fields hold working-space linear light (`CM-2`), and this
+        // text is read by a human — so it shows the display encoding, like
+        // the Properties swatch does.
+        PropertyField::Color { r, g, b, a, .. } => {
+            let display = ravel_core::color::ColorSpace::DISPLAY.from_linear([*r, *g, *b]);
+            format!("{}, {}, {}, {a}", display[0], display[1], display[2])
+        }
         PropertyField::Vector { components, .. } => format!("{components:?}"),
         // Composition settings carry no curve; the dialog only needs a form
         // that cannot panic if one is ever added.

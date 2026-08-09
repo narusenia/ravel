@@ -1,0 +1,931 @@
+// Copyright 2026 Ravel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Colour spaces, transfer functions, primary matrices, 3D LUTs, and the one
+//! shared quantiser (`docs/implementation/color-management-plan.md`, CM-1).
+//!
+//! # Two axes, never one enum
+//!
+//! A colour space is [`Primaries`] **and** [`Transfer`], kept apart. Folding
+//! them into a single `enum ColorSpace { Srgb, Rec2020, AcesCg, … }` hides
+//! the question the rest of the pipeline has to answer — *is this value
+//! encoded or linear?* — inside a name, and the ingest path (`CM-2`) and the
+//! OCIO path (`CM-7`) both need it in the type.
+//!
+//! Ravel's working space is [`ColorSpace::LINEAR_REC709`]: Rec.709 primaries
+//! with the transfer function removed. Compositing, blending, opacity and
+//! blur happen there; the display and output transforms convert out of it.
+//!
+//! # Purity
+//!
+//! This module performs no I/O and holds no state. [`CubeLut::parse`] takes
+//! the file's text, not its path — the caller reads the file.
+//!
+//! # Out-of-domain values
+//!
+//! Every transfer function accepts the whole real line. Negative inputs use
+//! the odd extension (`-f(-v)`) and values above 1.0 continue the encoded
+//! branch, so the functions stay monotonic and finite for the out-of-range
+//! values a 32-bit float compositor routinely carries. Nothing here panics
+//! and nothing here clamps — only [`quantize_u8`] / [`quantize_u16`] clamp,
+//! because a byte has nowhere to put 1.4.
+//!
+//! # Chromatic adaptation is deferred
+//!
+//! [`Primaries::rgb_to_xyz`] carries each set's native white point (D65 for
+//! Rec.709 and Rec.2020, ACES white for AP1), and [`primaries_matrix`]
+//! composes them without a chromatic adaptation transform. Every conversion
+//! Ravel performs today is Rec.709 → Rec.709, where the matrix is the
+//! identity and the question does not arise; the Bradford adaptation a real
+//! AP1 conversion needs arrives with OCIO in `CM-7`.
+
+// ===========================================================================
+// Transfer
+// ===========================================================================
+
+/// An opto-electronic transfer function: the encoding a colour space applies
+/// on top of linear light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Transfer {
+    /// No encoding — the value *is* linear light. The working space.
+    #[default]
+    Linear,
+    /// IEC 61966-2-1 sRGB: a linear segment near black, a 2.4 power curve
+    /// above it.
+    Srgb,
+    /// ITU-R BT.709 camera OETF: a linear segment near black, a 0.45 power
+    /// curve above it.
+    Rec709,
+    /// SMPTE ST 2084 (perceptual quantiser), normalised so `1.0` is
+    /// 10 000 cd/m².
+    Pq,
+}
+
+/// sRGB: slope of the linear segment.
+const SRGB_PHI: f64 = 12.92;
+/// sRGB: the linear value where the segments meet.
+const SRGB_LINEAR_BREAK: f64 = 0.003_130_8;
+/// sRGB: the encoded value where the segments meet.
+///
+/// Deliberately `SRGB_PHI * SRGB_LINEAR_BREAK` rather than the rounded
+/// `0.04045` the standard prints. The two published constants do not name
+/// the same point (`12.92 × 0.0031308 = 0.04044994`), so using both makes
+/// [`Transfer::decode`] and [`Transfer::encode`] disagree by up to 5e-6 for
+/// inputs in the gap. Deriving one from the other makes them exact inverses
+/// and moves the whole error into a single bounded step at the seam, which
+/// `srgb_seam_jump_is_bounded` pins.
+const SRGB_ENCODED_BREAK: f64 = SRGB_PHI * SRGB_LINEAR_BREAK;
+const SRGB_ALPHA: f64 = 0.055;
+const SRGB_GAMMA: f64 = 2.4;
+
+/// Rec.709: slope of the linear segment.
+const REC709_PHI: f64 = 4.5;
+const REC709_LINEAR_BREAK: f64 = 0.018;
+/// Rec.709: the encoded value where the segments meet, derived from the
+/// linear break for the same reason as [`SRGB_ENCODED_BREAK`].
+const REC709_ENCODED_BREAK: f64 = REC709_PHI * REC709_LINEAR_BREAK;
+/// Rec.709: the power-branch scale, **derived** rather than the standard's
+/// printed `1.099`.
+///
+/// BT.709 rounds its constants far more coarsely than sRGB does: with
+/// `1.099` the power branch evaluates to `0.081284` at the `0.018` break
+/// while the linear branch gives `0.081`, a step of 2.8e-4 that costs 5.5e-5
+/// on a round trip through the seam — fifty times the criterion. `alpha` is
+/// therefore solved from the break point instead,
+/// `alpha = (1 - phi·x0) / (1 - x0^gamma)`, which makes the two branches
+/// meet exactly and the pair exact inverses. `alpha - beta` stays 1, so
+/// `encode(1.0)` is still `1.0`; the largest deviation from the printed
+/// constants anywhere in `0..=1` is under 1e-4, well inside a 16-bit code.
+/// `rec709_branches_meet_at_the_break` pins the derivation.
+const REC709_ALPHA: f64 = 1.099_296_1;
+const REC709_BETA: f64 = REC709_ALPHA - 1.0;
+const REC709_GAMMA: f64 = 0.45;
+
+/// ST 2084 constants (`m1`, `m2`, `c1`, `c2`, `c3`).
+const PQ_M1: f64 = 2610.0 / 16384.0;
+const PQ_M2: f64 = 2523.0 / 4096.0 * 128.0;
+const PQ_C1: f64 = 3424.0 / 4096.0;
+const PQ_C2: f64 = 2413.0 / 4096.0 * 32.0;
+const PQ_C3: f64 = 2392.0 / 4096.0 * 32.0;
+/// `dY/dN` of the PQ EOTF at `N = 1`.
+///
+/// ST 2084 is defined on `0..=1` and has a **pole** just past it: the
+/// denominator `c2 - c3·N^(1/m2)` reaches zero at `N ≈ 1.992`, so the naive
+/// formula returns a negative value and then an infinity for inputs a float
+/// compositor can perfectly well produce. Above 1 both directions therefore
+/// continue as a straight line at the curve's own slope — monotonic, finite,
+/// and still exactly invertible. `pq_extrapolation_slope_matches_the_curve`
+/// pins this constant against a numerical derivative.
+const PQ_SLOPE_AT_ONE: f64 = 9.554_2;
+
+/// Extend `f` — defined for non-negative inputs — to the whole real line as
+/// an odd function. Keeps monotonicity and never produces a NaN from a
+/// negative base in `powf`.
+fn odd(v: f64, f: impl Fn(f64) -> f64) -> f64 {
+    if v < 0.0 { -f(-v) } else { f(v) }
+}
+
+impl Transfer {
+    /// Encoded value → linear light.
+    pub fn decode(self, value: f32) -> f32 {
+        self.decode_f64(f64::from(value)) as f32
+    }
+
+    /// Linear light → encoded value.
+    pub fn encode(self, value: f32) -> f32 {
+        self.encode_f64(f64::from(value)) as f32
+    }
+
+    /// The `f64` kernel. Every transfer function is evaluated in double
+    /// precision and rounded once on the way out: PQ raises to the power
+    /// 78.84, which in `f32` alone loses enough digits to break the
+    /// round-trip criterion.
+    fn decode_f64(self, value: f64) -> f64 {
+        match self {
+            Self::Linear => value,
+            Self::Srgb => odd(value, |v| {
+                if v <= SRGB_ENCODED_BREAK {
+                    v / SRGB_PHI
+                } else {
+                    ((v + SRGB_ALPHA) / (1.0 + SRGB_ALPHA)).powf(SRGB_GAMMA)
+                }
+            }),
+            Self::Rec709 => odd(value, |v| {
+                if v <= REC709_ENCODED_BREAK {
+                    v / REC709_PHI
+                } else {
+                    ((v + REC709_BETA) / REC709_ALPHA).powf(1.0 / REC709_GAMMA)
+                }
+            }),
+            Self::Pq => odd(value, |v| {
+                if v > 1.0 {
+                    return 1.0 + (v - 1.0) * PQ_SLOPE_AT_ONE;
+                }
+                let e = v.powf(1.0 / PQ_M2);
+                let num = (e - PQ_C1).max(0.0);
+                let den = PQ_C2 - PQ_C3 * e;
+                (num / den).powf(1.0 / PQ_M1)
+            }),
+        }
+    }
+
+    fn encode_f64(self, value: f64) -> f64 {
+        match self {
+            Self::Linear => value,
+            Self::Srgb => odd(value, |v| {
+                if v <= SRGB_LINEAR_BREAK {
+                    SRGB_PHI * v
+                } else {
+                    (1.0 + SRGB_ALPHA) * v.powf(1.0 / SRGB_GAMMA) - SRGB_ALPHA
+                }
+            }),
+            Self::Rec709 => odd(value, |v| {
+                if v <= REC709_LINEAR_BREAK {
+                    REC709_PHI * v
+                } else {
+                    REC709_ALPHA * v.powf(REC709_GAMMA) - REC709_BETA
+                }
+            }),
+            Self::Pq => odd(value, |v| {
+                if v > 1.0 {
+                    return 1.0 + (v - 1.0) / PQ_SLOPE_AT_ONE;
+                }
+                let y = v.powf(PQ_M1);
+                ((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y)).powf(PQ_M2)
+            }),
+        }
+    }
+
+    /// Every variant, for exhaustive tests and UI enumeration.
+    pub const ALL: [Self; 4] = [Self::Linear, Self::Srgb, Self::Rec709, Self::Pq];
+}
+
+// ===========================================================================
+// Primaries
+// ===========================================================================
+
+/// A 3×3 matrix in row-major order, held in `f64` so a composed conversion
+/// does not accumulate `f32` error before it reaches a pixel.
+pub type Mat3 = [[f64; 3]; 3];
+
+/// The chromaticity set of a colour space, independent of its encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Primaries {
+    /// ITU-R BT.709 / sRGB, D65. Ravel's working primaries.
+    #[default]
+    Rec709,
+    /// ITU-R BT.2020, D65.
+    Rec2020,
+    /// ACES AP1 (what ACEScg uses), ACES white.
+    ApOne,
+}
+
+impl Primaries {
+    /// The RGB → CIE XYZ matrix for this set, at its native white point.
+    pub fn rgb_to_xyz(self) -> Mat3 {
+        match self {
+            Self::Rec709 => [
+                [0.412_390_799_3, 0.357_584_339_4, 0.180_480_788_4],
+                [0.212_639_005_9, 0.715_168_678_8, 0.072_192_315_4],
+                [0.019_330_818_7, 0.119_194_779_8, 0.950_532_152_2],
+            ],
+            Self::Rec2020 => [
+                [0.636_958_048_3, 0.144_616_903_6, 0.168_880_975_1],
+                [0.262_700_212_0, 0.677_998_071_9, 0.059_301_716_1],
+                [0.0, 0.028_072_693_0, 1.060_985_057_7],
+            ],
+            Self::ApOne => [
+                [0.662_454_181_7, 0.134_004_206_1, 0.156_187_687_4],
+                [0.272_228_716_8, 0.674_081_566_1, 0.053_689_717_1],
+                [-0.005_574_649_5, 0.004_060_733_6, 1.010_339_100_9],
+            ],
+        }
+    }
+
+    /// The CIE XYZ → RGB matrix for this set.
+    pub fn xyz_to_rgb(self) -> Mat3 {
+        invert(self.rgb_to_xyz()).expect("a primary matrix is always invertible")
+    }
+
+    /// Every variant, for exhaustive tests and UI enumeration.
+    pub const ALL: [Self; 3] = [Self::Rec709, Self::Rec2020, Self::ApOne];
+}
+
+/// The matrix converting linear RGB in `from` to linear RGB in `to`.
+///
+/// The identity when the two agree — the only case the shipped pipeline
+/// reaches, since the working space and every display Ravel targets today
+/// are Rec.709.
+pub fn primaries_matrix(from: Primaries, to: Primaries) -> Mat3 {
+    if from == to {
+        return IDENTITY;
+    }
+    multiply(to.xyz_to_rgb(), from.rgb_to_xyz())
+}
+
+/// The 3×3 identity.
+pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// `a × b`.
+pub fn multiply(a: Mat3, b: Mat3) -> Mat3 {
+    let mut out = [[0.0f64; 3]; 3];
+    for (row, out_row) in out.iter_mut().enumerate() {
+        for (col, cell) in out_row.iter_mut().enumerate() {
+            *cell = (0..3).map(|k| a[row][k] * b[k][col]).sum();
+        }
+    }
+    out
+}
+
+/// `m × v`.
+pub fn apply(m: Mat3, v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+/// The inverse of `m`, or `None` when it is singular.
+pub fn invert(m: Mat3) -> Option<Mat3> {
+    let cofactor = |r: usize, c: usize| {
+        let rows: Vec<usize> = (0..3).filter(|&i| i != r).collect();
+        let cols: Vec<usize> = (0..3).filter(|&i| i != c).collect();
+        let minor =
+            m[rows[0]][cols[0]] * m[rows[1]][cols[1]] - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
+        if (r + c).is_multiple_of(2) {
+            minor
+        } else {
+            -minor
+        }
+    };
+    let det = m[0][0] * cofactor(0, 0) + m[0][1] * cofactor(0, 1) + m[0][2] * cofactor(0, 2);
+    if det.abs() < f64::EPSILON {
+        return None;
+    }
+    let mut out = [[0.0f64; 3]; 3];
+    for (row, out_row) in out.iter_mut().enumerate() {
+        for (col, cell) in out_row.iter_mut().enumerate() {
+            // Transposed on purpose: the inverse is the *adjugate* over the
+            // determinant, and the adjugate is the transpose of the cofactor
+            // matrix.
+            *cell = cofactor(col, row) / det;
+        }
+    }
+    Some(out)
+}
+
+// ===========================================================================
+// ColorSpace
+// ===========================================================================
+
+/// A colour space: which primaries, and which encoding on top of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct ColorSpace {
+    pub primaries: Primaries,
+    pub transfer: Transfer,
+}
+
+impl ColorSpace {
+    /// sRGB — Rec.709 primaries, sRGB transfer. What an 8-bit image file
+    /// holds unless it says otherwise.
+    pub const SRGB: Self = Self::new(Primaries::Rec709, Transfer::Srgb);
+    /// Ravel's working space: Rec.709 primaries, no transfer function.
+    pub const LINEAR_REC709: Self = Self::new(Primaries::Rec709, Transfer::Linear);
+    /// Rec.709 video — Rec.709 primaries and the BT.709 camera OETF.
+    pub const REC709: Self = Self::new(Primaries::Rec709, Transfer::Rec709);
+    /// ACEScg — AP1 primaries, linear.
+    pub const ACES_CG: Self = Self::new(Primaries::ApOne, Transfer::Linear);
+    /// Rec.2020 with the PQ transfer (HDR10).
+    pub const REC2020_PQ: Self = Self::new(Primaries::Rec2020, Transfer::Pq);
+
+    /// The space compositing happens in. Every other space in the pipeline
+    /// is defined by its conversion to and from this one.
+    pub const WORKING: Self = Self::LINEAR_REC709;
+
+    pub const fn new(primaries: Primaries, transfer: Transfer) -> Self {
+        Self {
+            primaries,
+            transfer,
+        }
+    }
+
+    /// Whether values in this space are linear light (no decode needed).
+    pub fn is_linear(self) -> bool {
+        self.transfer == Transfer::Linear
+    }
+
+    /// Decode one RGB triple from this space into linear light with **this
+    /// space's own primaries**. Use [`convert`] to reach another set.
+    pub fn to_linear(self, rgb: [f32; 3]) -> [f32; 3] {
+        rgb.map(|c| self.transfer.decode(c))
+    }
+
+    /// Encode one linear RGB triple, already in this space's primaries.
+    pub fn from_linear(self, rgb: [f32; 3]) -> [f32; 3] {
+        rgb.map(|c| self.transfer.encode(c))
+    }
+}
+
+/// Convert one RGB triple from `from` to `to`: decode, rotate primaries,
+/// re-encode.
+///
+/// Alpha is never passed through here. It carries no transfer function, so
+/// the callers that hold RGBA convert the first three components and copy
+/// the fourth (`docs/specifications/color-management.md`).
+pub fn convert(rgb: [f32; 3], from: ColorSpace, to: ColorSpace) -> [f32; 3] {
+    if from == to {
+        return rgb;
+    }
+    let linear = from.to_linear(rgb);
+    let rotated = if from.primaries == to.primaries {
+        linear
+    } else {
+        let m = primaries_matrix(from.primaries, to.primaries);
+        let v = apply(
+            m,
+            [
+                f64::from(linear[0]),
+                f64::from(linear[1]),
+                f64::from(linear[2]),
+            ],
+        );
+        [v[0] as f32, v[1] as f32, v[2] as f32]
+    };
+    to.from_linear(rotated)
+}
+
+// ===========================================================================
+// Quantisation
+// ===========================================================================
+
+/// The one quantiser. Every 8-bit exit — the viewer, the PNG writer, the
+/// FFmpeg encoder — goes through it.
+///
+/// Round to nearest, not truncate: truncation cannot map `1.0` to `255`, so
+/// an 8-bit round trip through it loses the top code. Before `CM-1` the
+/// viewer rounded and the FFmpeg encoder truncated, which put display and
+/// video output one LSB apart (`HIGH-25`).
+///
+/// `NaN` survives `clamp` and saturates to `0` in the cast, which is the
+/// behaviour the previous viewer conversion had and its golden test pins.
+pub fn quantize_u8(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// [`quantize_u8`] for 16-bit exits (the deep PNG sequence writer).
+pub fn quantize_u16(value: f32) -> u16 {
+    (value.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16
+}
+
+// ===========================================================================
+// 3D LUT (.cube)
+// ===========================================================================
+
+/// Why a `.cube` file could not be read.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CubeError {
+    #[error("missing LUT_3D_SIZE")]
+    MissingSize,
+    #[error("unsupported LUT size {0} (2..=256)")]
+    BadSize(usize),
+    #[error("line {line}: expected three floats, found {found:?}")]
+    BadEntry { line: usize, found: String },
+    #[error("expected {expected} entries, found {found}")]
+    WrongEntryCount { expected: usize, found: usize },
+    #[error("LUT_1D_SIZE is not supported; this reader handles 3D LUTs only")]
+    OneDimensional,
+}
+
+/// A 3D lookup table parsed from Adobe's `.cube` format.
+///
+/// Entries are stored in the file's own order — red varies fastest, then
+/// green, then blue.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CubeLut {
+    size: usize,
+    domain_min: [f32; 3],
+    domain_max: [f32; 3],
+    entries: Vec<[f32; 3]>,
+}
+
+impl CubeLut {
+    /// Parse `.cube` text. Takes the text rather than a path: this module
+    /// performs no I/O.
+    pub fn parse(text: &str) -> Result<Self, CubeError> {
+        let mut size = None;
+        let mut domain_min = [0.0f32; 3];
+        let mut domain_max = [1.0f32; 3];
+        let mut entries = Vec::new();
+
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let head = parts.next().unwrap_or("");
+            match head {
+                "TITLE" => continue,
+                "LUT_1D_SIZE" => return Err(CubeError::OneDimensional),
+                "LUT_3D_SIZE" => {
+                    let n: usize = parts
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or(CubeError::MissingSize)?;
+                    if !(2..=256).contains(&n) {
+                        return Err(CubeError::BadSize(n));
+                    }
+                    size = Some(n);
+                }
+                "DOMAIN_MIN" | "DOMAIN_MAX" => {
+                    let triple = parse_triple(parts, index + 1, line)?;
+                    if head == "DOMAIN_MIN" {
+                        domain_min = triple;
+                    } else {
+                        domain_max = triple;
+                    }
+                }
+                _ => {
+                    let triple = parse_triple(line.split_whitespace(), index + 1, line)?;
+                    entries.push(triple);
+                }
+            }
+        }
+
+        let size = size.ok_or(CubeError::MissingSize)?;
+        let expected = size * size * size;
+        if entries.len() != expected {
+            return Err(CubeError::WrongEntryCount {
+                expected,
+                found: entries.len(),
+            });
+        }
+        Ok(Self {
+            size,
+            domain_min,
+            domain_max,
+            entries,
+        })
+    }
+
+    /// Edge length of the cube.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// The input range the table is defined over.
+    pub fn domain(&self) -> ([f32; 3], [f32; 3]) {
+        (self.domain_min, self.domain_max)
+    }
+
+    /// Sample the table with trilinear interpolation.
+    ///
+    /// Inputs outside the domain are clamped to the nearest edge of the
+    /// cube — a LUT has no values beyond its own extent, and extrapolating a
+    /// grade is how highlights turn into garbage.
+    pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let last = (self.size - 1) as f32;
+        let mut base = [0usize; 3];
+        let mut frac = [0f32; 3];
+        for axis in 0..3 {
+            let span = self.domain_max[axis] - self.domain_min[axis];
+            let normalized = if span.abs() < f32::EPSILON {
+                0.0
+            } else {
+                (rgb[axis] - self.domain_min[axis]) / span
+            };
+            let coord = (normalized.clamp(0.0, 1.0) * last).clamp(0.0, last);
+            let floor = coord.floor();
+            base[axis] = (floor as usize).min(self.size - 2.min(self.size - 1));
+            frac[axis] = coord - floor;
+            if base[axis] + 1 >= self.size {
+                base[axis] = self.size - 1;
+                frac[axis] = 0.0;
+            }
+        }
+
+        let mut out = [0f32; 3];
+        for corner in 0..8 {
+            let dr = corner & 1;
+            let dg = (corner >> 1) & 1;
+            let db = (corner >> 2) & 1;
+            let weight =
+                lerp_weight(frac[0], dr) * lerp_weight(frac[1], dg) * lerp_weight(frac[2], db);
+            if weight == 0.0 {
+                continue;
+            }
+            let entry = self.entry(base[0] + dr, base[1] + dg, base[2] + db);
+            for axis in 0..3 {
+                out[axis] += weight * entry[axis];
+            }
+        }
+        out
+    }
+
+    /// The entry at grid coordinates, red fastest.
+    fn entry(&self, r: usize, g: usize, b: usize) -> [f32; 3] {
+        self.entries[r + self.size * (g + self.size * b)]
+    }
+}
+
+fn lerp_weight(frac: f32, corner: usize) -> f32 {
+    if corner == 0 { 1.0 - frac } else { frac }
+}
+
+fn parse_triple<'a>(
+    parts: impl Iterator<Item = &'a str>,
+    line: usize,
+    raw: &str,
+) -> Result<[f32; 3], CubeError> {
+    let values: Vec<f32> = parts.filter_map(|v| v.parse::<f32>().ok()).collect();
+    if values.len() != 3 {
+        return Err(CubeError::BadEntry {
+            line,
+            found: raw.to_string(),
+        });
+    }
+    Ok([values[0], values[1], values[2]])
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A spread that reaches both sides of every seam plus the out-of-range
+    /// values a float compositor really carries.
+    fn probe_values() -> Vec<f32> {
+        let mut values = vec![
+            -4.0,
+            -1.0,
+            -0.5,
+            -0.05,
+            -1e-6,
+            0.0,
+            1e-8,
+            1e-4,
+            0.0031308,
+            0.018,
+            0.04045,
+            0.081,
+            0.1,
+            0.18,
+            0.5,
+            0.735_356_9,
+            0.9,
+            1.0,
+            1.5,
+            4.0,
+            16.0,
+        ];
+        for step in 0..=256 {
+            values.push(step as f32 / 256.0);
+        }
+        values
+    }
+
+    /// CM-1: "the transfer functions round-trip within 1e-6 for every input".
+    #[test]
+    fn transfer_round_trips_within_tolerance() {
+        for transfer in Transfer::ALL {
+            for value in probe_values() {
+                // 1e-6 absolute inside the unit interval, scaled above it:
+                // one `f32` ulp at 16.0 is already 1e-6, so an absolute
+                // bound out there would measure the storage, not the maths.
+                let tolerance = 1e-6 * value.abs().max(1.0);
+                let back = transfer.decode(transfer.encode(value));
+                assert!(
+                    (back - value).abs() <= tolerance,
+                    "{transfer:?}: {value} -> {} -> {back}",
+                    transfer.encode(value)
+                );
+                let forward = transfer.encode(transfer.decode(value));
+                assert!(
+                    (forward - value).abs() <= tolerance,
+                    "{transfer:?}: decode/encode of {value} gave {forward}"
+                );
+            }
+        }
+    }
+
+    /// CM-1: the step at the piecewise seam is bounded.
+    ///
+    /// Continuity is *not* claimed for sRGB: `0.04045` and `0.0031308` are
+    /// rounded and do not name the same point, so no conforming
+    /// implementation is continuous there. What is asserted is the size of
+    /// the step — evaluated as the difference between the two closed forms
+    /// at the break, not as a finite difference across it, which would
+    /// measure the slope rather than the jump.
+    #[test]
+    fn srgb_seam_jump_is_bounded() {
+        let linear_side = SRGB_PHI * SRGB_LINEAR_BREAK;
+        let power_side = (1.0 + SRGB_ALPHA) * SRGB_LINEAR_BREAK.powf(1.0 / SRGB_GAMMA) - SRGB_ALPHA;
+        assert!(
+            (linear_side - power_side).abs() < 1e-6,
+            "sRGB encode seam steps by {}",
+            power_side - linear_side
+        );
+        // And the decode threshold is the encode threshold, so the pair is
+        // an exact inverse on both sides of the step.
+        assert_eq!(SRGB_ENCODED_BREAK, linear_side);
+    }
+
+    /// The Rec.709 branches are made to meet exactly, because the standard's
+    /// printed `1.099` leaves a 2.8e-4 step that breaks the round-trip
+    /// criterion. This is the check that keeps [`REC709_ALPHA`] honest.
+    #[test]
+    fn rec709_branches_meet_at_the_break() {
+        let linear_side = REC709_PHI * REC709_LINEAR_BREAK;
+        let power_side = REC709_ALPHA * REC709_LINEAR_BREAK.powf(REC709_GAMMA) - REC709_BETA;
+        assert!(
+            (linear_side - power_side).abs() < 1e-6,
+            "Rec.709 encode seam steps by {}",
+            power_side - linear_side
+        );
+        // The offset preserves `encode(1.0) == 1.0`.
+        assert!((Transfer::Rec709.encode(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// [`PQ_SLOPE_AT_ONE`] is a hand-solved constant; this is what stops it
+    /// drifting away from the curve it continues.
+    #[test]
+    fn pq_extrapolation_slope_matches_the_curve() {
+        let eps = 1e-4f64;
+        let numeric = (Transfer::Pq.decode_f64(1.0) - Transfer::Pq.decode_f64(1.0 - eps)) / eps;
+        assert!(
+            (numeric - PQ_SLOPE_AT_ONE).abs() / PQ_SLOPE_AT_ONE < 1e-3,
+            "numerical slope {numeric} vs constant {PQ_SLOPE_AT_ONE}"
+        );
+        assert!((Transfer::Pq.decode(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// CM-1: no panic and no folded ordering outside `0..=1`.
+    #[test]
+    fn transfer_is_monotonic_outside_the_unit_interval() {
+        for transfer in Transfer::ALL {
+            let mut previous_encode = f32::NEG_INFINITY;
+            let mut previous_decode = f32::NEG_INFINITY;
+            let mut value = -8.0f32;
+            while value <= 8.0 {
+                let encoded = transfer.encode(value);
+                let decoded = transfer.decode(value);
+                assert!(
+                    encoded.is_finite(),
+                    "{transfer:?} encode({value}) = {encoded}"
+                );
+                assert!(
+                    decoded.is_finite(),
+                    "{transfer:?} decode({value}) = {decoded}"
+                );
+                assert!(
+                    encoded >= previous_encode,
+                    "{transfer:?} encode is not monotonic at {value}"
+                );
+                assert!(
+                    decoded >= previous_decode,
+                    "{transfer:?} decode is not monotonic at {value}"
+                );
+                previous_encode = encoded;
+                previous_decode = decoded;
+                value += 1.0 / 64.0;
+            }
+        }
+    }
+
+    /// The number the CM-3 regression test is built on: a 50 % composite of
+    /// black and white is `0.5` linear, which displays as sRGB 0.7354 — code
+    /// 188, not 128.
+    #[test]
+    fn linear_half_displays_as_188() {
+        let encoded = Transfer::Srgb.encode(0.5);
+        assert!((encoded - 0.735_356_9).abs() < 1e-6, "{encoded}");
+        assert_eq!(quantize_u8(encoded), 188);
+    }
+
+    /// CM-1: the primary matrices round-trip to the identity.
+    #[test]
+    fn primary_matrices_round_trip() {
+        for primaries in Primaries::ALL {
+            let round = multiply(primaries.xyz_to_rgb(), primaries.rgb_to_xyz());
+            for (row, expected_row) in round.iter().zip(IDENTITY.iter()) {
+                for (cell, expected) in row.iter().zip(expected_row.iter()) {
+                    assert!((cell - expected).abs() < 1e-9, "{round:?}");
+                }
+            }
+        }
+        for from in Primaries::ALL {
+            for to in Primaries::ALL {
+                let there = primaries_matrix(from, to);
+                let back = primaries_matrix(to, from);
+                let round = multiply(back, there);
+                for (row, expected_row) in round.iter().zip(IDENTITY.iter()) {
+                    for (cell, expected) in row.iter().zip(expected_row.iter()) {
+                        assert!(
+                            (cell - expected).abs() < 1e-9,
+                            "{from:?} -> {to:?}: {round:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            primaries_matrix(Primaries::Rec709, Primaries::Rec709),
+            IDENTITY
+        );
+    }
+
+    /// CM-1: every `Primaries` × `Transfer` pair constructs and round-trips.
+    #[test]
+    fn every_colour_space_combination_round_trips() {
+        for primaries in Primaries::ALL {
+            for transfer in Transfer::ALL {
+                let space = ColorSpace::new(primaries, transfer);
+                assert_eq!(space.primaries, primaries);
+                assert_eq!(space.transfer, transfer);
+                assert_eq!(space.is_linear(), transfer == Transfer::Linear);
+                for other_primaries in Primaries::ALL {
+                    for other_transfer in Transfer::ALL {
+                        let other = ColorSpace::new(other_primaries, other_transfer);
+                        let source = [0.2f32, 0.55, 0.8];
+                        let there = convert(source, space, other);
+                        let back = convert(there, other, space);
+                        for (a, b) in back.iter().zip(source.iter()) {
+                            assert!(
+                                (a - b).abs() < 1e-5,
+                                "{space:?} -> {other:?} -> back gave {back:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn convert_between_identical_spaces_is_the_identity() {
+        let source = [0.13f32, 0.0, 1.7];
+        assert_eq!(convert(source, ColorSpace::SRGB, ColorSpace::SRGB), source);
+    }
+
+    #[test]
+    fn srgb_to_working_space_decodes_the_transfer_only() {
+        let converted = convert([0.5, 0.5, 0.5], ColorSpace::SRGB, ColorSpace::WORKING);
+        for channel in converted {
+            assert!((channel - 0.214_041_14).abs() < 1e-6, "{channel}");
+        }
+    }
+
+    /// CM-1: quantisation at the boundaries and the midpoint.
+    #[test]
+    fn quantisation_boundaries() {
+        assert_eq!(quantize_u8(0.0), 0);
+        assert_eq!(quantize_u8(1.0), 255);
+        assert_eq!(quantize_u8(-1.0), 0);
+        assert_eq!(quantize_u8(2.0), 255);
+        assert_eq!(quantize_u8(0.5), 128);
+        // Rounding, not truncation: half a code up lands on the next code.
+        assert_eq!(quantize_u8(0.5 / 255.0), 1);
+        assert_eq!(quantize_u8(0.49 / 255.0), 0);
+        assert_eq!(quantize_u8(254.5 / 255.0), 255);
+        assert_eq!(quantize_u8(f32::NAN), 0);
+
+        assert_eq!(quantize_u16(0.0), 0);
+        assert_eq!(quantize_u16(1.0), 65535);
+        assert_eq!(quantize_u16(0.5), 32768);
+        assert_eq!(quantize_u16(-3.0), 0);
+        assert_eq!(quantize_u16(f32::NAN), 0);
+    }
+
+    const IDENTITY_CUBE: &str = "\
+TITLE \"identity\"
+# a comment
+LUT_3D_SIZE 2
+DOMAIN_MIN 0.0 0.0 0.0
+DOMAIN_MAX 1.0 1.0 1.0
+0.0 0.0 0.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+1.0 1.0 0.0
+0.0 0.0 1.0
+1.0 0.0 1.0
+0.0 1.0 1.0
+1.0 1.0 1.0
+";
+
+    /// CM-1: a known LUT returns known values, including between grid points.
+    #[test]
+    fn cube_lut_parses_and_interpolates() {
+        let lut = CubeLut::parse(IDENTITY_CUBE).unwrap();
+        assert_eq!(lut.size(), 2);
+        assert_eq!(lut.domain(), ([0.0; 3], [1.0; 3]));
+
+        for probe in [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.25, 0.5, 0.75],
+            [0.5, 0.5, 0.5],
+        ] {
+            let sampled = lut.sample(probe);
+            for (a, b) in sampled.iter().zip(probe.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "identity LUT moved {probe:?} to {sampled:?}"
+                );
+            }
+        }
+        // Out of domain clamps to the cube's edge instead of extrapolating.
+        assert_eq!(lut.sample([-1.0, 2.0, 0.5]), [0.0, 1.0, 0.5]);
+    }
+
+    #[test]
+    fn cube_lut_inverts_red_when_the_table_says_so() {
+        // Same grid, red inverted: the interpolation must follow the table,
+        // not the input.
+        let inverted = IDENTITY_CUBE
+            .lines()
+            .map(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() == 3 && parts[0].parse::<f32>().is_ok() {
+                    let r: f32 = parts[0].parse().unwrap();
+                    format!("{} {} {}", 1.0 - r, parts[1], parts[2])
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lut = CubeLut::parse(&inverted).unwrap();
+        let sampled = lut.sample([0.25, 0.5, 0.75]);
+        assert!((sampled[0] - 0.75).abs() < 1e-6, "{sampled:?}");
+        assert!((sampled[1] - 0.5).abs() < 1e-6, "{sampled:?}");
+        assert!((sampled[2] - 0.75).abs() < 1e-6, "{sampled:?}");
+    }
+
+    #[test]
+    fn cube_lut_rejects_malformed_files() {
+        assert_eq!(CubeLut::parse("0.0 0.0 0.0\n"), Err(CubeError::MissingSize));
+        assert_eq!(
+            CubeLut::parse("LUT_1D_SIZE 32\n"),
+            Err(CubeError::OneDimensional)
+        );
+        assert_eq!(
+            CubeLut::parse("LUT_3D_SIZE 1\n"),
+            Err(CubeError::BadSize(1))
+        );
+        assert!(matches!(
+            CubeLut::parse("LUT_3D_SIZE 2\n0.0 0.0 0.0\n"),
+            Err(CubeError::WrongEntryCount {
+                expected: 8,
+                found: 1
+            })
+        ));
+        assert!(matches!(
+            CubeLut::parse("LUT_3D_SIZE 2\nnot a colour\n"),
+            Err(CubeError::BadEntry { .. })
+        ));
+    }
+}

@@ -70,6 +70,19 @@ pub enum CommandId {
     TimelineRevealModifiedAdd,
     TimelineRevealExpression,
     TimelineRevealExpressionAdd,
+    // Timeline playhead / layer timing (After Effects' `Cmd+Shift+D`, `[`,
+    // `]`, `I` and `O`). All five read the Timeline's layer selection and the
+    // playhead, so they are Timeline-context bindings rather than global ones.
+    /// Cut every selected layer in two at the playhead, as one undo step.
+    TimelineSplitLayer,
+    /// Move every selected layer so it *starts* at the playhead.
+    TimelineAlignLayerStart,
+    /// Move every selected layer so it *ends* at the playhead.
+    TimelineAlignLayerEnd,
+    /// Put the playhead on the earliest selected layer's first frame.
+    TimelineGoToLayerIn,
+    /// Put the playhead on the last selected layer's end (exclusive) frame.
+    TimelineGoToLayerOut,
     // View (panel toggles)
     ViewToggleOutliner,
     ViewToggleTimeline,
@@ -296,6 +309,14 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         CommandId::TimelineRevealExpressionAdd,
         "timeline.reveal_expression_add",
     ),
+    (CommandId::TimelineSplitLayer, "timeline.split_layer"),
+    (
+        CommandId::TimelineAlignLayerStart,
+        "timeline.align_layer_start",
+    ),
+    (CommandId::TimelineAlignLayerEnd, "timeline.align_layer_end"),
+    (CommandId::TimelineGoToLayerIn, "timeline.go_to_layer_in"),
+    (CommandId::TimelineGoToLayerOut, "timeline.go_to_layer_out"),
     (CommandId::ViewToggleOutliner, "view.toggle_outliner"),
     (CommandId::ViewToggleTimeline, "view.toggle_timeline"),
     (CommandId::ViewToggleNodeGraph, "view.toggle_node_graph"),
@@ -405,6 +426,11 @@ impl CommandId {
             CommandId::TimelineRevealModifiedAdd => "timeline.reveal.modified_add",
             CommandId::TimelineRevealExpression => "timeline.reveal.expression",
             CommandId::TimelineRevealExpressionAdd => "timeline.reveal.expression_add",
+            CommandId::TimelineSplitLayer => "timeline.layer.split",
+            CommandId::TimelineAlignLayerStart => "timeline.layer.align_start",
+            CommandId::TimelineAlignLayerEnd => "timeline.layer.align_end",
+            CommandId::TimelineGoToLayerIn => "timeline.layer.go_to_in",
+            CommandId::TimelineGoToLayerOut => "timeline.layer.go_to_out",
             CommandId::ViewToggleOutliner => "menu.view.outliner",
             CommandId::ViewToggleTimeline => "menu.view.timeline",
             CommandId::ViewToggleNodeGraph => "menu.view.node_graph",

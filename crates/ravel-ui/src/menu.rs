@@ -187,6 +187,12 @@ impl MenuBar {
                 ),
                 MenuItem::Separator,
                 MenuItem::action(CommandId::ViewFit),
+                // Detaching had a label key and a keybinding but no menu row,
+                // so it was reachable by chord alone. A panel-scoped chord can
+                // shadow that one (`UX-7` binds the Timeline's split to the
+                // same combination), which would have left it unreachable
+                // while that panel had focus.
+                MenuItem::action(CommandId::PanelDetach),
             ],
         );
 

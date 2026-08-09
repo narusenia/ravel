@@ -89,6 +89,11 @@ macro_rules! for_each_command {
             TimelineRevealModifiedAdd,
             TimelineRevealExpression,
             TimelineRevealExpressionAdd,
+            TimelineSplitLayer,
+            TimelineAlignLayerStart,
+            TimelineAlignLayerEnd,
+            TimelineGoToLayerIn,
+            TimelineGoToLayerOut,
             ViewToggleOutliner,
             ViewToggleTimeline,
             ViewToggleNodeGraph,
@@ -484,6 +489,46 @@ pub const PANEL_BINDINGS: &[PanelBinding] = &[
         panel: PanelKind::Timeline,
         context: panels::timeline::KEY_CONTEXT,
     },
+    // After Effects' playhead-relative layer timing (`refactor-plan-0808.md`,
+    // unit 7). Every one of them reads the Timeline's layer selection and its
+    // playhead, so they are context-scoped rather than asset bindings: `[`,
+    // `]`, `I` and `O` unqualified would fire from the Viewer and the node
+    // editor as well.
+    //
+    // `Cmd+Shift+D` **shadows the global `panel.detach`** while the Timeline
+    // holds focus (a deeper key context wins). Split is what that chord means
+    // in an AE-shaped timeline, detaching still works from every other panel,
+    // and `panel.detach` is an asset binding a user can move.
+    PanelBinding {
+        command: CommandId::TimelineSplitLayer,
+        chord: "Cmd+Shift+D",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineAlignLayerStart,
+        chord: "[",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineAlignLayerEnd,
+        chord: "]",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineGoToLayerIn,
+        chord: "I",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineGoToLayerOut,
+        chord: "O",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
     // Tool shortcuts (Viewer key context, REQ-UI-011 unit 2).
     PanelBinding {
         command: CommandId::ToolSelect,
@@ -575,6 +620,19 @@ pub fn workspace_binding_context() -> String {
     yield_to_open_menus("!Input")
 }
 
+/// `context` narrowed so it stops matching while a text input or a menu owns
+/// the keyboard.
+///
+/// A panel-scoped binding needs the `!Input` half as much as a workspace one
+/// does: the Timeline alone binds `U` / `A` / `P` / `S` / `R` / `T` / `L`,
+/// `I`, `O`, `[` and `]`, and it also hosts the timecode field, the tempo
+/// fields and the inline value editors. Without it, typing a letter into one
+/// of those fires the panel's command instead. That is `MED-APP-16` again,
+/// one context deeper than where it was first fixed.
+pub fn panel_binding_context(context: &str) -> String {
+    yield_to_open_menus(&format!("{context} && !Input"))
+}
+
 /// `context` narrowed so it stops matching while a menu is open.
 ///
 /// Applies to the panel-scoped bindings too: a popup is a child of the panel
@@ -614,7 +672,7 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
             continue;
         };
         let gpui_chord = chord_to_gpui_string(&chord);
-        let context = yield_to_open_menus(binding.context);
+        let context = panel_binding_context(binding.context);
         macro_rules! bind_panel {
             ($($Action:ident),+ $(,)?) => {
                 match binding.command {

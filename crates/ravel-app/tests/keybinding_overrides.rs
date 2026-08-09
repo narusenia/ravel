@@ -63,7 +63,8 @@ fn workspace_context() -> String {
 }
 
 /// `context` with the menu owners excluded — the shape `build_keybindings`
-/// gives every binding it registers.
+/// gives a workspace binding. A panel binding also carries `!Input`
+/// ([`panel_yielding`]).
 fn yielding(context: &str) -> String {
     let mut out = context.to_string();
     for menu in MENU_CONTEXTS {
@@ -71,6 +72,14 @@ fn yielding(context: &str) -> String {
         out.push_str(menu);
     }
     out
+}
+
+/// A panel context as `build_keybindings` registers it: its own context, then
+/// the same owners a workspace chord yields to — a focused text input included,
+/// because the Timeline binds bare letters and hosts text fields
+/// (`MED-APP-16`, one context deeper).
+fn panel_yielding(context: &str) -> String {
+    yielding(&format!("{context} && !Input"))
 }
 
 /// The panel key contexts the code-side bindings use. Everything else in the
@@ -152,7 +161,7 @@ fn no_binding_is_registered_without_a_context() {
         // the workspace one is: an open menu owns the keyboard whichever
         // binding set the chord came from (`MED-APP-31`).
         let mut allowed = vec![workspace_context()];
-        allowed.extend(panel_contexts().map(yielding));
+        allowed.extend(panel_contexts().map(panel_yielding));
         for (key, predicate) in bindings_of(&shell) {
             let predicate = predicate.unwrap_or_else(|| {
                 panic!("'{key}' is bound with no key context (MED-APP-16 regression)")
@@ -310,6 +319,15 @@ fn the_panel_binding_table_is_the_code_side_shortcut_set() {
                 "Alt+Shift+E",
                 PanelKind::Timeline,
             ),
+            (
+                CommandId::TimelineSplitLayer,
+                "Cmd+Shift+D",
+                PanelKind::Timeline,
+            ),
+            (CommandId::TimelineAlignLayerStart, "[", PanelKind::Timeline,),
+            (CommandId::TimelineAlignLayerEnd, "]", PanelKind::Timeline),
+            (CommandId::TimelineGoToLayerIn, "I", PanelKind::Timeline),
+            (CommandId::TimelineGoToLayerOut, "O", PanelKind::Timeline),
             (CommandId::ToolSelect, "V", PanelKind::Viewer),
             (CommandId::ToolPen, "P", PanelKind::Viewer),
             (CommandId::ToolRect, "R", PanelKind::Viewer),

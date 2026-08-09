@@ -106,6 +106,9 @@ about = "F1"
 | `Shift+U` / `Shift+A` / `Shift+P` / `Shift+S` / `Shift+R` / `Shift+T` / `Shift+L`（絞り込みに追加） | Timeline |
 | `Alt+U` / `Alt+E`（変更済み / 式を持つ行） | Timeline |
 | `Alt+Shift+U` / `Alt+Shift+E`（同じく追加） | Timeline |
+| `Cmd+Shift+D`（プレイヘッドでレイヤーを分割） | Timeline |
+| `[` / `]`（始端 / 終端をプレイヘッドに合わせる） | Timeline |
+| `I` / `O`（選択レイヤーの始端 / 終端へプレイヘッドを移動） | Timeline |
 
 絞り込みは**修飾なしが置換、`Shift` 併用が追加**という 2 つの意味を持つが、
 GPUI の Action は修飾キーを運ばないので**コマンドを 2 本に分けている**
@@ -114,6 +117,22 @@ GPUI の Action は修飾キーを運ばないので**コマンドを 2 本に�
 割り当てた。挙動は [`timeline.md`](timeline.md) の「行の絞り込み」節。
 Viewer の `P` / `R` と Node Editor の `L` はキーコンテキストが違うので
 衝突しない。
+
+AE 相当のプレイヘッド操作（`Cmd+Shift+D` / `[` / `]` / `I` / `O`）も
+コンテキスト付きで登録する。どれも Timeline のレイヤー選択とプレイヘッドを
+読むので、アセット側に置くと Viewer やノードエディタからも発火してしまう。
+挙動は [`timeline.md`](timeline.md) の「プレイヘッド基準のレイヤー操作」節。
+
+**`Cmd+Shift+D` は Timeline に focus があるあいだ `panel.detach` を覆い隠す。**
+gpui は深いキーコンテキストのバインドを優先するため、Timeline では分割が勝つ。
+AE 型のタイムラインでこの chord が意味するのは分割であること、パネルの切り離しは
+他のパネルからそのまま効くこと、`panel.detach` はアセット由来なのでユーザーが
+別の chord に移せることを踏まえた割り当て。
+
+**そのうえで `panel.detach` を View メニューに出した。** 覆い隠すからには
+chord 以外の到達手段が要る。ラベルキー `menu.panel.detach` は前から
+あったのにメニュー行が無く、**キーバインドだけが唯一の到達経路**だった
+（この単位が塞いだ取りこぼし）。
 
 キーフレーム補間の切替はメニューと `on_action` だけで、キーバインドは持たない。
 
@@ -138,8 +157,11 @@ Viewer の `P` / `R` と Node Editor の `L` はキーコンテキストが違�
 メニューが開いている間は Space も含めどのワークスペース chord も発火しない。
 開いているメニューはキーボードに対してモーダル、という意図的な挙動。
 
-**パネル固有のバインドも同じ narrowing を受ける**（`NodeEditor && !PopupMenu
-&& !AppMenuBar` の形）。ポップアップは開いたパネルの子として dispatch tree に
+**パネル固有のバインドも同じ narrowing を受ける**（`NodeEditor && !Input &&
+!PopupMenu && !AppMenuBar` の形）。`!Input` が要るのはワークスペース側と同じ
+理由で、**Timeline は素の 1 文字を 20 個以上束縛しつつタイムコード欄・BPM 欄・
+インラインの値編集を抱えている** — 無いとそこへの文字入力がパネルのコマンドを
+撃つ（`MED-APP-16` が 1 段深いところで再発する）。ポップアップは開いたパネルの子として dispatch tree に
 載るので、パネルの文脈はメニューが開いている間もスタックに残る — narrowing が
 無いと `L`（自動整列）がメニューの裏で走る。
 

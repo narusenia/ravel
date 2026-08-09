@@ -478,6 +478,14 @@ grid = "グラフのグリッドを表示"
 select_all = "表示中のキーフレームをすべて選択"
 fit_values = "値範囲をフィット"
 
+# プレイヘッド基準のレイヤー時間操作（AE の Cmd+Shift+D / [ / ] / I / O）。
+[timeline.layer]
+split = "プレイヘッドでレイヤーを分割"
+align_start = "レイヤーの始端をプレイヘッドに合わせる"
+align_end = "レイヤーの終端をプレイヘッドに合わせる"
+go_to_in = "レイヤーの始端へ移動"
+go_to_out = "レイヤーの終端へ移動"
+
 [timeline.interpolation]
 _self = "補間"
 bezier = "ベジェ"

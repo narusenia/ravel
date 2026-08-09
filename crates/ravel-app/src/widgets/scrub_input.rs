@@ -244,6 +244,18 @@ impl ScrubInputState {
 
     /// Parses the typed text, clamps it to the hard range, and commits.
     /// Unparsable text reverts to the previous value.
+    ///
+    /// Text left exactly as the editor opened it commits nothing: the editor
+    /// opens on [`Self::label`], which is rounded to `precision`, so parsing
+    /// it back would write the rounding over the value it was rounded from
+    /// (0.123456 → 0.12) for merely clicking the field.
+    ///
+    /// The guard compares strings, so **deliberately typing the value already
+    /// displayed is also ignored** — asking for exactly 0.12 when 0.123456 is
+    /// shown as `0.12` leaves the stored value alone. Telling the two apart
+    /// needs edit-event tracking, and the difference is invisible: the field
+    /// keeps showing `0.12` either way. Losing precision by clicking is the
+    /// worse of the two, so this is the side to err on.
     fn commit_edit(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
@@ -251,6 +263,10 @@ impl ScrubInputState {
         self.editor_sub = None;
 
         let text = editor.read(cx).value().to_string();
+        if text.trim() == self.label() {
+            cx.notify();
+            return;
+        }
         if let Ok(parsed) = text.trim().parse::<f32>() {
             let next = self.quantize(self.clamp(parsed));
             if (next - self.value).abs() > f32::EPSILON {
@@ -484,6 +500,28 @@ mod tests {
         assert_eq!(state.value(), 100.0);
         state.set_value(42.4);
         assert_eq!(state.value(), 42.0);
+    }
+
+    /// Opening the editor and committing its text untouched must leave the
+    /// value alone: the label is rounded for display, and writing it back
+    /// would quietly truncate the value behind it.
+    #[gpui::test]
+    fn an_unedited_text_commit_keeps_the_full_precision_value(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(|window, cx| {
+            let state = cx.new(|_| ScrubInputState::new(0.123456));
+            state.update(cx, |state, cx| {
+                state.begin_edit(window, cx);
+                state.commit_edit(cx);
+            });
+            ScrubTestView { state }
+        });
+
+        window
+            .update(cx, |view, _window, cx| {
+                assert_eq!(view.state.read(cx).value(), 0.123456);
+            })
+            .unwrap();
     }
 
     #[gpui::test]

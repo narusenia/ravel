@@ -448,7 +448,7 @@ fn a_user_chord_dispatches_the_command_and_the_default_one_stops(cx: &mut TestAp
     );
     let window = open_workspace(&loaded, cx);
 
-    cx.simulate_keystrokes(window.into(), "cmd-alt-right");
+    cx.simulate_keystrokes(window.into(), "secondary-alt-right");
     cx.run_until_parked();
     assert_eq!(
         cx.update(|cx| trace::execution_count(cx, CommandId::FrameStepForward)),

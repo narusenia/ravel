@@ -135,7 +135,10 @@ fn workspace_handles_edit_undo_exactly_once(cx: &mut TestAppContext) {
     let window = open_workspace(cx);
 
     focus_panel(PanelKind::Viewer, cx);
-    cx.simulate_keystrokes(window.into(), "cmd-z");
+    // `secondary-`, not `cmd-`: the binding is registered that way so the
+    // primary modifier is Cmd on macOS and Control elsewhere, and a
+    // literal `cmd-` here would miss it off macOS.
+    cx.simulate_keystrokes(window.into(), "secondary-z");
 
     let (entries, undo_executions, shell_focused_panel) = cx.update(|cx| {
         let entries = cx.global::<CommandTrace>().0.clone();
@@ -259,9 +262,9 @@ undo = "Cmd+U"
         cx.bind_keys(workspace::build_keybindings(&shell_bindings));
     });
 
-    cx.simulate_keystrokes(window.into(), "cmd-u");
+    cx.simulate_keystrokes(window.into(), "secondary-u");
     // The old chord must no longer fire; the new one fires exactly once.
-    cx.simulate_keystrokes(window.into(), "cmd-z");
+    cx.simulate_keystrokes(window.into(), "secondary-z");
 
     let undo_executions = cx.update(|cx| trace::execution_count(cx, CommandId::EditUndo));
     assert_eq!(
@@ -282,7 +285,7 @@ fn layout_rebuild_does_not_duplicate_handlers(cx: &mut TestAppContext) {
     cx.update(|cx| cx.refresh_windows());
     cx.run_until_parked();
 
-    cx.simulate_keystrokes(window.into(), "cmd-c");
+    cx.simulate_keystrokes(window.into(), "secondary-c");
 
     let (copy_executions, entries) = cx.update(|cx| {
         (
@@ -303,7 +306,7 @@ fn dispatch_follows_panel_switch(cx: &mut TestAppContext) {
 
     for panel in [PanelKind::Viewer, PanelKind::Outliner] {
         focus_panel(panel, cx);
-        cx.simulate_keystrokes(window.into(), "cmd-z");
+        cx.simulate_keystrokes(window.into(), "secondary-z");
         let synced = cx.update(|cx| {
             workspace::session(cx)
                 .expect("the session is installed")

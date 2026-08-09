@@ -206,7 +206,7 @@ fn a_settings_command_is_refused_while_a_dialog_is_open(cx: &mut TestAppContext)
 fn the_preferences_chord_opens_the_dialog(cx: &mut TestAppContext) {
     let harness = open_workspace(cx);
 
-    cx.simulate_keystrokes(harness.window.into(), "cmd-,");
+    cx.simulate_keystrokes(harness.window.into(), "secondary-,");
     cx.run_until_parked();
 
     assert!(

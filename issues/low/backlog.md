@@ -239,6 +239,19 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 → 位置を固定（キャンバス左上）にするか、少なくとも下のノードと重なるときは
 出さない。再生中だけ出す案も実機報告に含まれている。
 
+**LOW-APP-25 | bug | 環境設定のキーバインド一覧が Windows / Linux でも `Cmd+` と表示する**
+`crates/ravel-ui/src/keybindings/mod.rs:190-198`（`impl Display for KeyChord`）
+`KeyChord::command` は「macOS では Cmd、Windows / Linux では Ctrl」と型の
+docstring が定義しているのに、`Display` はどのプラットフォームでも `Cmd+` と
+書く。アセットの表記でもあるので**この形自体は正しい**（`default.toml` は
+`Cmd+S` と書く）が、環境設定のキーバインド一覧はこの `Display` をそのまま
+画面に出しているため、**Windows のユーザーは押せないキーの名前を読む**。
+gpui へ渡す側は `chord_to_gpui_string` が `secondary-` へ変換して解決済み
+（`fix/windows-primary-modifier`）。残っているのは表示だけ。
+→ 保存形（`Display`）と表示形を分ける。表示側で `cfg!(target_os = "macos")` に
+応じて `Cmd+` / `Ctrl+` を出す。**`Display` を触ると資産の書式が変わる**ので、
+そちらは動かさないこと。
+
 ## 参考: 監査で問題なしと確認された箇所
 
 - 永続化のマイグレーション連鎖 v1→v4 は防御的でテスト十分

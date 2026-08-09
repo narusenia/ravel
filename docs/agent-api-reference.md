@@ -1902,7 +1902,10 @@ Unknown type keys are skipped silently (plugin space).
   `set_curve_value` for the bare curve, `preview_keyframe_move` /
   `preview_keyframe_moves` / `preview_keyframe_moves_with_value_delta` /
   `preview_keyframe_tangent` (baseline-derived drag previews),
-  `row_channels`, `has_keyframe_at`. `RevealFilter::{Animated, Group,
+  `row_channels`, `has_keyframe_at`, `channel_value_at` (the read side of
+  `set_channel_value`: `None` where that write path would refuse — an
+  expression, a blend, a node-output binding — so a caller never offers an
+  editing control over a value it cannot write). `RevealFilter::{Animated, Group,
   Modified, Expression}` with `matches(layer, row)` is the reveal predicate
   the Timeline filters rows by (`TimelinePanel::visible_property_rows`).
   `PropertyRow::channel_names` mixes two

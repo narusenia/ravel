@@ -45,7 +45,9 @@
 
 /// An opto-electronic transfer function: the encoding a colour space applies
 /// on top of linear light.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum Transfer {
     /// No encoding — the value *is* linear light. The working space.
     #[default]
@@ -209,7 +211,9 @@ impl Transfer {
 pub type Mat3 = [[f64; 3]; 3];
 
 /// The chromaticity set of a colour space, independent of its encoding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum Primaries {
     /// ITU-R BT.709 / sRGB, D65. Ravel's working primaries.
     #[default]
@@ -320,9 +324,13 @@ pub fn invert(m: Mat3) -> Option<Mat3> {
 // ===========================================================================
 
 /// A colour space: which primaries, and which encoding on top of them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct ColorSpace {
+    #[serde(default)]
     pub primaries: Primaries,
+    #[serde(default)]
     pub transfer: Transfer,
 }
 
@@ -353,6 +361,50 @@ impl ColorSpace {
     /// Whether values in this space are linear light (no decode needed).
     pub fn is_linear(self) -> bool {
         self.transfer == Transfer::Linear
+    }
+
+    /// The named spaces, for parsing a metadata string and for naming one
+    /// back. Only combinations that have a conventional name appear; an
+    /// arbitrary `Primaries` × `Transfer` pair is still constructible, it
+    /// just has nothing to be called.
+    pub const NAMED: [(&'static str, Self); 5] = [
+        ("srgb", Self::SRGB),
+        ("linear_rec709", Self::LINEAR_REC709),
+        ("rec709", Self::REC709),
+        ("acescg", Self::ACES_CG),
+        ("rec2020_pq", Self::REC2020_PQ),
+    ];
+
+    /// Parse a colour-space name as written in file metadata or a project
+    /// file. Case- and separator-insensitive, with the aliases the formats
+    /// Ravel ingests actually use (`bt709`, `scene-linear`, …).
+    ///
+    /// `None` for a name this build does not know — the caller then falls
+    /// through to the next tier of the resolution order rather than guessing.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let key: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        match key.as_str() {
+            "srgb" | "iec6196621" => Some(Self::SRGB),
+            "linear" | "linearrec709" | "scenelinear" | "lin" | "linsrgb" => {
+                Some(Self::LINEAR_REC709)
+            }
+            "rec709" | "bt709" | "itu709" => Some(Self::REC709),
+            "acescg" | "aces" | "acesap1" => Some(Self::ACES_CG),
+            "rec2020pq" | "bt2020pq" | "pq" | "hdr10" | "smpte2084" => Some(Self::REC2020_PQ),
+            _ => None,
+        }
+    }
+
+    /// The canonical name of this space, when it has one.
+    pub fn name(self) -> Option<&'static str> {
+        Self::NAMED
+            .iter()
+            .find(|(_, space)| *space == self)
+            .map(|(name, _)| *name)
     }
 
     /// Decode one RGB triple from this space into linear light with **this
@@ -803,6 +855,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn names_round_trip_and_aliases_resolve() {
+        for (name, space) in ColorSpace::NAMED {
+            assert_eq!(ColorSpace::from_name(name), Some(space));
+            assert_eq!(space.name(), Some(name));
+        }
+        assert_eq!(ColorSpace::from_name("sRGB"), Some(ColorSpace::SRGB));
+        assert_eq!(ColorSpace::from_name("BT.709"), Some(ColorSpace::REC709));
+        assert_eq!(
+            ColorSpace::from_name("scene-linear"),
+            Some(ColorSpace::LINEAR_REC709)
+        );
+        assert_eq!(ColorSpace::from_name("gremlin"), None);
     }
 
     #[test]

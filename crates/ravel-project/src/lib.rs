@@ -1879,6 +1879,7 @@ mod tests {
             .with_media_asset_entry(
                 "plate",
                 MediaAssetEntry {
+                    color_space: None,
                     path: AssetPath::Variable("${PROJECT_ROOT}/footage/plate.mov".into()),
                     kind: AssetKind::Container,
                     metadata: AssetMetadata::default(),
@@ -2001,6 +2002,7 @@ mod tests {
             .with_media_asset_entry(
                 "gone",
                 MediaAssetEntry {
+                    color_space: None,
                     path: AssetPath::Variable("${MISSING_VAR}/a.mov".into()),
                     kind: AssetKind::Container,
                     metadata: AssetMetadata::default(),

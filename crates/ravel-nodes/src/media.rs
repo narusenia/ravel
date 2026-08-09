@@ -462,6 +462,7 @@ mod tests {
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
             "clip",
             MediaAssetEntry {
+                color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
@@ -492,6 +493,7 @@ mod tests {
 
         let factory: ReaderFactory = Arc::new(|_path| Err(MediaError::Other("cannot open".into())));
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/clip.mov")),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
@@ -529,6 +531,7 @@ mod tests {
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
             "clip",
             MediaAssetEntry {
+                color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
@@ -588,6 +591,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/plate.png")),
             kind: AssetKind::Still,
             metadata: AssetMetadata::default(),
@@ -633,6 +637,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
             kind: AssetKind::Sequence {
                 prefix: "f_".into(),
@@ -692,6 +697,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
             kind: AssetKind::Sequence {
                 prefix: "f_".into(),

@@ -1060,6 +1060,7 @@ impl ProjectState {
                     doc = doc.with_media_asset_entry(
                         id.clone(),
                         MediaAssetEntry {
+                            color_space: None,
                             path: AssetPath::for_project_root(&asset.path, project_root.as_deref()),
                             kind: asset.kind.clone(),
                             metadata: asset.metadata.clone(),

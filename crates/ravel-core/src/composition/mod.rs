@@ -24,7 +24,8 @@ pub mod transform;
 pub mod validate;
 
 pub use asset::{
-    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, MediaAssetEntry, expand_variables,
+    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource, MediaAssetEntry,
+    expand_variables,
 };
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};

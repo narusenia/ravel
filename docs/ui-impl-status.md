@@ -339,7 +339,7 @@ gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` へ
 | エリアメニュー（⋮） | ✅ | Split Right / Split Down / Duplicate into Split / Close Area。前 2 つはタブ 1 枚のエリアでは無効化 |
 | スプリッタドラッグ | ✅ | 当たり幅 5px / 線 1px、比は `[0.05, 0.95]`。ドラッグ中はプレビュー、離したときに 1 回だけモデルへ書き戻す |
 | 空エリアの畳み込み | ✅ | 空になったエリアは消え親 `Split` が畳まれる。最後のエリアが消えた分離ウィンドウは閉じる。メインの最後のタブは動かせない |
-| detach / reattach | ✅ | `Cmd+Shift+D`（フォーカス中インスタンス → 新ウィンドウ）/ `Cmd+Shift+R`（フォーカス窓の全パネル → メイン、ID 保持で既定スロットへ）。**`Cmd+Shift+D` の直後の `Cmd+Shift+R` は無効**（開いた窓の中のパネルがフォーカスを取っていないため。1 度クリックすれば動く） |
+| detach / reattach | ✅ | View メニュー ▸ パネルを切り離す、または `Cmd+Shift+D`（フォーカス中インスタンス → 新ウィンドウ。**Timeline に focus があるあいだ chord はレイヤー分割に覆われる**ので、そのときはメニューから）/ `Cmd+Shift+R`（フォーカス窓の全パネル → メイン、ID 保持で既定スロットへ）。**`Cmd+Shift+D` の直後の `Cmd+Shift+R` は無効**（開いた窓の中のパネルがフォーカスを取っていないため。1 度クリックすれば動く） |
 | 分離ウィンドウのクローズ | ✅ | クローズボタン = インスタンス破棄（メインへ自動で戻らない）。必ず `AppShell::close_window` を通るのでハンドル表と食い違わない（`MED-APP-01`） |
 | 共通 TitleBar | ✅ | `RavelTitleBar` が全ウィンドウ。中央ラベル（メイン = プロジェクト名、分離 = パネル名 / 「N 個のパネル」）+ 窓種別スロット。中央寄せ補正はこの 1 箇所。**非 macOS は実機未検証** |
 | アプリメニュー | ✅ | 出所は headless の `MenuBar` 1 つ。`workspace::install_menus` が唯一の出口で、macOS の OS メニューバー（`cx.set_menus`）と、**非 macOS でメインウィンドウのタイトルバーに出る `gpui_component::menu::AppMenuBar`**（`GlobalState` のスナップショット + `reload`）へ同じ `build_menus` を配る（`App::set_menus` を実装しているのは macOS だけ）。プラットフォーム分岐は `title_bar::render_main_title_bar` の `cfg!` 1 箇所。合成アプリメニュー（About / Services / 終了）はスナップショット側で落とす（終了はファイル、About はヘルプに既にある）。分離ウィンドウには出さない。**Windows / Linux は実機未検証** |

@@ -1863,6 +1863,62 @@ mod tests {
         }
     }
 
+    /// CM-2: authored colours that live outside every node network — a
+    /// composition background and an `exposed_parameters` colour default —
+    /// are converted too. A walk over node parameters cannot see either.
+    #[test]
+    fn colours_outside_the_graphs_are_linearised_too() {
+        use ravel_core::exposed::{
+            ExposedBinding, ExposedParameter, ExposedParameters, ExposedType, ExposedValue,
+        };
+        use ravel_core::types::Color;
+
+        let mut comp = Composition::new(
+            CompId::new(700),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        );
+        comp.background_color = Color::new(0.5, 0.5, 0.5, 1.0);
+
+        let declaration = ExposedParameter::new(
+            "tint",
+            ExposedType::Color,
+            ExposedValue::Color(Color::new(0.5, 0.25, 1.0, 0.5)),
+            ExposedBinding::new(NodeId::new(800), "color"),
+        )
+        .unwrap();
+        let document = Document::default()
+            .with_composition(comp)
+            .with_exposed_parameters(ExposedParameters::from_declarations([declaration]).unwrap());
+
+        let mut project = ProjectFile::from_document("Legacy", "2026-08-06T00:00:00Z", document);
+        project.manifest.format_version = 7;
+        let loaded = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+
+        let background = loaded
+            .document
+            .get_composition(CompId::new(700))
+            .unwrap()
+            .background_color;
+        assert!((background.r - 0.214_041_1).abs() < 1e-5, "{background:?}");
+        assert_eq!(background.a, 1.0);
+
+        let ExposedValue::Color(tint) = loaded
+            .document
+            .exposed_parameters
+            .iter()
+            .next()
+            .expect("the declaration survives")
+            .default_value()
+        else {
+            panic!("expected a colour default");
+        };
+        assert!((tint.r - 0.214_041_1).abs() < 1e-5, "{tint:?}");
+        assert_eq!(tint.a, 0.5, "alpha carries no transfer function");
+    }
+
     /// CM-2: the conversion runs exactly once. It is not idempotent on its
     /// own — the format version is what makes reopening safe.
     #[test]

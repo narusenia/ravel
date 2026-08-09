@@ -1066,8 +1066,34 @@ impl Document {
         registry: &NodeRegistry,
     ) -> (Self, color_upgrade::ColorMigrationReport) {
         let report = std::cell::RefCell::new(color_upgrade::ColorMigrationReport::default());
-        let document =
+        let mut document =
             self.map_graphs(|graph| color_upgrade::upgrade_graph(graph, registry, &report));
+
+        // Two authored colours live outside every graph, so the node walk
+        // above cannot see them.
+        let comp_ids: Vec<CompId> = document.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = document.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            updated.background_color = color_upgrade::linearize_color(updated.background_color);
+            report.borrow_mut().converted += 3;
+            document
+                .compositions
+                .insert(id, std::sync::Arc::new(updated));
+        }
+        document.exposed_parameters =
+            document
+                .exposed_parameters
+                .map_defaults(|value| match value {
+                    crate::exposed::ExposedValue::Color(color) => {
+                        report.borrow_mut().converted += 3;
+                        crate::exposed::ExposedValue::Color(color_upgrade::linearize_color(color))
+                    }
+                    other => other,
+                });
+
         (document, report.into_inner())
     }
 

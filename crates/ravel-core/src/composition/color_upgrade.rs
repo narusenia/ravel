@@ -41,6 +41,13 @@
 //!
 //! Alpha is not a colour channel and is never converted.
 //!
+//! # Authored colours outside the graphs
+//!
+//! Two live outside every node network and are converted here too:
+//! a composition's `background_color`, and the default of an
+//! `exposed_parameters` declaration of type `color`. Both are authored, both
+//! are persisted, and neither is reached by a walk over node parameters.
+//!
 //! Everything skipped is returned in a [`ColorMigrationReport`] so the load
 //! can say so. Changing a project's look in silence is the one outcome worth
 //! more than completeness.
@@ -129,6 +136,16 @@ pub fn is_color_param(registry: &NodeRegistry, node: &Node, key: &str) -> Option
 /// the linear working space.
 fn linearize(value: f32) -> f32 {
     convert([value, value, value], ColorSpace::SRGB, ColorSpace::WORKING)[0]
+}
+
+/// Reinterpret an RGBA colour, leaving alpha alone.
+pub(super) fn linearize_color(color: crate::types::Color) -> crate::types::Color {
+    crate::types::Color {
+        r: linearize(color.r),
+        g: linearize(color.g),
+        b: linearize(color.b),
+        a: color.a,
+    }
 }
 
 /// Convert one channel, recording what could not be done.

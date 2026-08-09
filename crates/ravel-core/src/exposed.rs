@@ -643,6 +643,34 @@ impl ExposedParameters {
         self.entries.iter()
     }
 
+    /// Rewrite every declaration's default value in place, keeping names,
+    /// types, descriptions and bindings.
+    ///
+    /// Exists for the `.ravprj` v7 → v8 colour pass, which has to reinterpret
+    /// a `color` default that lives outside every node network. A declaration
+    /// whose rewritten default no longer satisfies its own declared type is
+    /// **kept unchanged** rather than dropped: a migration must not delete a
+    /// contract other tools consume by name.
+    pub fn map_defaults(self, mut rewrite: impl FnMut(ExposedValue) -> ExposedValue) -> Self {
+        let entries = self
+            .entries
+            .into_iter()
+            .map(|declaration| {
+                let rewritten = rewrite(declaration.default_value().clone());
+                let description = declaration.description().to_string();
+                ExposedParameter::new(
+                    declaration.name(),
+                    declaration.value_type(),
+                    rewritten,
+                    declaration.binding().clone(),
+                )
+                .map(|updated| updated.with_description(description))
+                .unwrap_or(declaration)
+            })
+            .collect();
+        Self { entries }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

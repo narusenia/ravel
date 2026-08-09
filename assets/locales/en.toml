@@ -483,6 +483,14 @@ grid = "Show graph grid"
 select_all = "Select all displayed keyframes"
 fit_values = "Fit value range"
 
+# Playhead-relative layer timing (After Effects' Cmd+Shift+D, [, ], I and O).
+[timeline.layer]
+split = "Split layer at playhead"
+align_start = "Set layer start to playhead"
+align_end = "Set layer end to playhead"
+go_to_in = "Go to layer start"
+go_to_out = "Go to layer end"
+
 [timeline.interpolation]
 _self = "Interpolation"
 bezier = "Bezier"

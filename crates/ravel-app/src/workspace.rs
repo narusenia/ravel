@@ -89,6 +89,11 @@ macro_rules! for_each_command {
             TimelineRevealModifiedAdd,
             TimelineRevealExpression,
             TimelineRevealExpressionAdd,
+            TimelineSplitLayer,
+            TimelineAlignLayerStart,
+            TimelineAlignLayerEnd,
+            TimelineGoToLayerIn,
+            TimelineGoToLayerOut,
             ViewToggleOutliner,
             ViewToggleTimeline,
             ViewToggleNodeGraph,
@@ -481,6 +486,46 @@ pub const PANEL_BINDINGS: &[PanelBinding] = &[
     PanelBinding {
         command: CommandId::TimelineRevealExpressionAdd,
         chord: "Alt+Shift+E",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    // After Effects' playhead-relative layer timing (`refactor-plan-0808.md`,
+    // unit 7). Every one of them reads the Timeline's layer selection and its
+    // playhead, so they are context-scoped rather than asset bindings: `[`,
+    // `]`, `I` and `O` unqualified would fire from the Viewer and the node
+    // editor as well.
+    //
+    // `Cmd+Shift+D` **shadows the global `panel.detach`** while the Timeline
+    // holds focus (a deeper key context wins). Split is what that chord means
+    // in an AE-shaped timeline, detaching still works from every other panel,
+    // and `panel.detach` is an asset binding a user can move.
+    PanelBinding {
+        command: CommandId::TimelineSplitLayer,
+        chord: "Cmd+Shift+D",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineAlignLayerStart,
+        chord: "[",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineAlignLayerEnd,
+        chord: "]",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineGoToLayerIn,
+        chord: "I",
+        panel: PanelKind::Timeline,
+        context: panels::timeline::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::TimelineGoToLayerOut,
+        chord: "O",
         panel: PanelKind::Timeline,
         context: panels::timeline::KEY_CONTEXT,
     },

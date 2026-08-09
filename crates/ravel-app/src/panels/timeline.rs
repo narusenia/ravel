@@ -495,8 +495,9 @@ pub struct TimelineGpuiPanel {
     /// every live identity and drops only refs whose diamonds disappeared.
     selected_keyframes: HashSet<KeyframeRef>,
     /// Inline value scrubs of the visible channel rows, keyed by the channel
-    /// each one writes ([`ChannelScrub`]).
-    scrubs: HashMap<TimelineChannelRef, ChannelScrub>,
+    /// each one writes — composition included, because `LayerId`s recur across
+    /// compositions ([`ChannelScrub`]).
+    scrubs: HashMap<(CompId, TimelineChannelRef), ChannelScrub>,
     /// Whether the graph view paints time/value grid lines and value labels.
     show_curve_grid: bool,
     /// Visible value range of the graph editor, shared with the Properties
@@ -2580,13 +2581,14 @@ impl TimelineGpuiPanel {
     /// every document change, including the ones the drag itself makes.
     fn channel_scrub(
         &mut self,
+        comp_id: CompId,
         channel: &TimelineChannelRef,
         value: f32,
         cx: &mut Context<Self>,
     ) -> Entity<ScrubInputState> {
         let style = channel_scrub_style(&channel.row);
         let display = value * style.factor;
-        if let Some(scrub) = self.scrubs.get(channel) {
+        if let Some(scrub) = self.scrubs.get(&(comp_id, channel.clone())) {
             let state = scrub.state.clone();
             state.update(cx, |state, cx| {
                 // A drag owns its value until it ends: refreshing from the
@@ -2607,13 +2609,12 @@ impl TimelineGpuiPanel {
         // The write address is captured here rather than read from the panel
         // when the event arrives: a composition switch mid-drag must not land
         // the gesture's `Commit` on a same-numbered layer of the composition
-        // being switched to (the regression `HIGH-28`'s fix uncovered).
-        let comp_id = self.state.comp_id();
+        // being switched to (the regression `HIGH-28`'s fix uncovered). The
+        // composition is part of the key for the same reason — `LayerId`s
+        // recur across compositions, so a binding of the composition being
+        // left must never be reused by the one being entered.
         let target = channel.clone();
         let sub = cx.subscribe(&state, move |this, _state, event: &ScrubEvent, cx| {
-            let Some(comp_id) = comp_id else {
-                return;
-            };
             let (value, commit) = match event {
                 ScrubEvent::Change(value) => (*value, false),
                 ScrubEvent::Commit(value) => (*value, true),
@@ -2621,7 +2622,7 @@ impl TimelineGpuiPanel {
             this.write_channel_value(comp_id, &target, value, commit, cx);
         });
         self.scrubs.insert(
-            channel.clone(),
+            (comp_id, channel.clone()),
             ChannelScrub {
                 state: state.clone(),
                 sub,
@@ -2641,6 +2642,7 @@ impl TimelineGpuiPanel {
     /// (`MED-APP-13`); no y layout is derived here.
     fn sync_channel_scrubs(&mut self, cx: &mut Context<Self>) {
         let playhead = self.state.playhead();
+        let comp_id = self.state.comp_id();
         let mut wanted: Vec<(TimelineChannelRef, f32)> = Vec::new();
         for layer in self.state.layers() {
             if !self.state.is_layer_expanded(layer.id) {
@@ -2671,10 +2673,20 @@ impl TimelineGpuiPanel {
             }
         }
 
-        let visible: HashSet<TimelineChannelRef> =
-            wanted.iter().map(|(channel, _)| channel.clone()).collect();
-        for (channel, value) in wanted {
-            self.channel_scrub(&channel, value, cx);
+        // No active composition (`comp_id` is `None`) leaves `wanted` empty,
+        // so every idle binding goes.
+        let visible: HashSet<(CompId, TimelineChannelRef)> = comp_id
+            .iter()
+            .flat_map(|comp_id| {
+                wanted
+                    .iter()
+                    .map(|(channel, _)| (*comp_id, channel.clone()))
+            })
+            .collect();
+        if let Some(comp_id) = comp_id {
+            for (channel, value) in wanted {
+                self.channel_scrub(comp_id, &channel, value, cx);
+            }
         }
         self.prune_channel_scrubs(&visible, cx);
     }
@@ -2687,12 +2699,11 @@ impl TimelineGpuiPanel {
     /// exactly the lost `Commit` of `HIGH-28`.
     fn prune_channel_scrubs(
         &mut self,
-        visible: &HashSet<TimelineChannelRef>,
+        visible: &HashSet<(CompId, TimelineChannelRef)>,
         cx: &mut Context<Self>,
     ) {
-        self.scrubs.retain(|channel, scrub| {
-            visible.contains(channel) || scrub.state.read(cx).is_dragging()
-        });
+        self.scrubs
+            .retain(|key, scrub| visible.contains(key) || scrub.state.read(cx).is_dragging());
     }
 
     /// Write one scrubbed channel value into the document at the playhead's
@@ -3960,6 +3971,8 @@ impl TimelineGpuiPanel {
         // (REQ-UI-013 multi-selection).
         let selection = super::layer_selection(cx);
 
+        let comp_id = self.state.comp_id();
+
         let mut headers = div()
             .id("layer-headers")
             .w(px(HEADER_WIDTH))
@@ -4266,7 +4279,9 @@ impl TimelineGpuiPanel {
                             let is_selected = self.state.is_channel_selected(&channel);
                             // Built by `sync_channel_scrubs` before this pass;
                             // a channel with no editable value has none.
-                            let scrub = self.scrubs.get(&channel).map(|scrub| scrub.state.clone());
+                            let scrub = comp_id
+                                .and_then(|comp_id| self.scrubs.get(&(comp_id, channel.clone())))
+                                .map(|scrub| scrub.state.clone());
                             let select = channel.clone();
                             headers = headers.child(
                                 div()
@@ -7341,9 +7356,10 @@ mod tests {
         redraw(window, cx);
         window
             .read_with(cx, |panel, _| {
+                let comp_id = panel.state.comp_id().expect("an active composition");
                 panel
                     .scrubs
-                    .get(channel)
+                    .get(&(comp_id, channel.clone()))
                     .map(|scrub| scrub.state.clone())
                     .expect("a scrub widget for the visible channel row")
             })
@@ -7486,7 +7502,10 @@ mod tests {
         redraw(&window, cx);
         window
             .read_with(cx, |panel, cx| {
-                let bound = panel.scrubs.get(&channel).expect("the binding survives");
+                let bound = panel
+                    .scrubs
+                    .get(&(comp_id, channel.clone()))
+                    .expect("the binding survives");
                 assert_eq!(
                     bound.state.entity_id(),
                     scrub.entity_id(),
@@ -7515,7 +7534,7 @@ mod tests {
         redraw(&window, cx);
         window
             .read_with(cx, |panel, _| {
-                assert!(!panel.scrubs.contains_key(&channel));
+                assert!(!panel.scrubs.contains_key(&(comp_id, channel.clone())));
             })
             .unwrap();
     }
@@ -7552,14 +7571,16 @@ mod tests {
             .read_with(cx, |panel, _| {
                 assert_eq!(
                     panel.scrubs.keys().collect::<Vec<_>>(),
-                    vec![&opacity],
+                    vec![&(comp_id, opacity.clone())],
                     "only the rows the filter shows keep a scrub"
                 );
             })
             .unwrap();
 
         let scrub = window
-            .read_with(cx, |panel, _| panel.scrubs[&opacity].state.clone())
+            .read_with(cx, |panel, _| {
+                panel.scrubs[&(comp_id, opacity.clone())].state.clone()
+            })
             .unwrap();
         assert_eq!(
             scrub.read_with(cx, |state, _| state.value()),
@@ -7582,6 +7603,74 @@ mod tests {
             channel_value(&project, comp_id, &position, cx),
             Some(0.0),
             "the filtered-out row is untouched"
+        );
+    }
+
+    /// `LayerId`s recur across compositions, and the property expansion the
+    /// tree is drawn from is keyed by layer alone — so a binding of the
+    /// composition being left must not be reused by the one being entered.
+    /// It writes to the composition it was built for, and reusing it would
+    /// edit a layer the user is no longer looking at.
+    #[gpui::test]
+    fn a_composition_switch_does_not_reuse_a_recurring_layer_s_scrub(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let old = channel_scrub_widget(&window, &channel, cx);
+
+        // A second composition whose layer reuses `a` — an unrelated layer.
+        let new_comp_id = project.update(cx, |project, cx| {
+            let new_comp_id = CompId::next();
+            let comp = ravel_core::composition::Composition::new(
+                new_comp_id,
+                "Other",
+                (1920, 1080),
+                FrameRate::new(30, 1),
+                300,
+            )
+            .add_layer(Layer::new(a, "unrelated", stub_network()).with_time(0, 0, 100));
+            let mut doc = project.document().clone();
+            doc.compositions
+                .insert(new_comp_id, std::sync::Arc::new(comp));
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.set_active_composition(Some(new_comp_id), cx);
+            new_comp_id
+        });
+        cx.run_until_parked();
+        redraw(&window, cx);
+
+        let fresh = window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    !panel.scrubs.contains_key(&(comp_id, channel.clone())),
+                    "the composition left behind keeps no binding"
+                );
+                panel.scrubs[&(new_comp_id, channel.clone())].state.clone()
+            })
+            .unwrap();
+        assert_ne!(
+            fresh.entity_id(),
+            old.entity_id(),
+            "the new composition's row gets its own widget"
+        );
+
+        drag(&fresh, 5.0, cx);
+        fresh.update(cx, |state, cx| {
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            channel_value(&project, new_comp_id, &channel, cx),
+            Some(100.0),
+            "the scrub writes to the composition on screen"
+        );
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(0.0),
+            "the same-numbered layer of the other composition is untouched"
         );
     }
 

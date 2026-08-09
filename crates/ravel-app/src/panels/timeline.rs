@@ -158,6 +158,8 @@ macro_rules! reveal_handlers {
             $(
                 fn $handler(&mut self, _: &$Action, _window: &mut Window, cx: &mut Context<Self>) {
                     self.state.apply_reveal($filter, $additive);
+                    // The filter decides which channel rows exist.
+                    self.sync_channel_scrubs(cx);
                     cx.notify();
                 }
             )+
@@ -498,6 +500,11 @@ pub struct TimelineGpuiPanel {
     /// each one writes — composition included, because `LayerId`s recur across
     /// compositions ([`ChannelScrub`]).
     scrubs: HashMap<(CompId, TimelineChannelRef), ChannelScrub>,
+    /// The channel an inline scrub gesture is in flight on, and the
+    /// layer-local frame it writes at — captured on the gesture's first event
+    /// so the whole gesture edits one frame
+    /// ([`TimelineGpuiPanel::write_channel_value`]).
+    active_scrub: Option<((CompId, TimelineChannelRef), u64)>,
     /// Whether the graph view paints time/value grid lines and value labels.
     show_curve_grid: bool,
     /// Visible value range of the graph editor, shared with the Properties
@@ -634,6 +641,7 @@ impl TimelineGpuiPanel {
             pointer_hint: PointerHint::default(),
             selected_keyframes: HashSet::new(),
             scrubs: HashMap::new(),
+            active_scrub: None,
             show_curve_grid: true,
             curve_value_range: CurveValueRange::auto(),
             ruler_width: Rc::new(Cell::new(0.0)),
@@ -706,6 +714,10 @@ impl TimelineGpuiPanel {
                 super::clear_layer_selection(cx);
             }
         }
+        // Every document change reaches here (edit, undo, redo, composition
+        // switch), so this is where the inline value scrubs follow the values
+        // they show and the rows that still exist.
+        self.sync_channel_scrubs(cx);
         cx.notify();
     }
 
@@ -948,6 +960,10 @@ impl TimelineGpuiPanel {
         let Some(comp_id) = self.state.comp_id() else {
             return;
         };
+        // A lock landing on a layer being scrubbed would swallow the live
+        // gesture into its own undo step — and the write path stops accepting
+        // the rest of the gesture once the flag is set.
+        self.finish_channel_scrubs(cx);
         let targets = self.operation_targets(lid, cx);
         project.update(cx, |project, cx| {
             let Some(clicked) = project
@@ -2631,15 +2647,15 @@ impl TimelineGpuiPanel {
         state
     }
 
-    /// Bring the inline scrub widgets in line with the tree the panel is about
-    /// to draw: one per visible, value-editable channel row, holding the value
-    /// under the playhead.
+    /// Bring the inline scrub widgets in line with the tree: one per visible,
+    /// value-editable channel row, holding the value under the playhead.
     ///
-    /// This runs before the header tree is built rather than while it is being
-    /// built, so the widgets exist as panel state and `build_layer_headers`
-    /// only reads them. Row enumeration goes through
-    /// `TimelinePanel::visible_property_rows` like every other derivation
-    /// (`MED-APP-13`); no y layout is derived here.
+    /// Called from the paths that change what the tree shows — document sync
+    /// (edits, undo, composition switch), playhead moves, expansion toggles
+    /// and reveal filters — never from `render`, which creates no entities and
+    /// no subscriptions and only reads what this leaves behind. Row
+    /// enumeration goes through `TimelinePanel::visible_property_rows` like
+    /// every other derivation (`MED-APP-13`); no y layout is derived here.
     fn sync_channel_scrubs(&mut self, cx: &mut Context<Self>) {
         let playhead = self.state.playhead();
         let comp_id = self.state.comp_id();
@@ -2693,17 +2709,63 @@ impl TimelineGpuiPanel {
 
     /// Drop the scrub widgets of channel rows the header tree no longer shows.
     ///
-    /// A binding whose drag is still in flight survives whatever the tree now
-    /// contains: an undo, an edit from another panel or a reveal filter can
-    /// take the row away mid-gesture, and dropping the binding there is
-    /// exactly the lost `Commit` of `HIGH-28`.
+    /// A binding whose drag is still in flight is **ended** rather than
+    /// dropped, and survives one more pass. Dropping it outright is the lost
+    /// `Commit` of `HIGH-28`: the subscription the gesture-ending event
+    /// travels on goes with it. Keeping it dragging is no better — the widget
+    /// has no element left to move or release on, so the pointer can never end
+    /// the gesture and the binding would sit dragging forever. Ending it here
+    /// records the step for the values already applied; the commit's own
+    /// document change syncs again and that pass drops the idle binding.
     fn prune_channel_scrubs(
         &mut self,
         visible: &HashSet<(CompId, TimelineChannelRef)>,
         cx: &mut Context<Self>,
     ) {
-        self.scrubs
-            .retain(|key, scrub| visible.contains(key) || scrub.state.read(cx).is_dragging());
+        self.scrubs.retain(|key, scrub| {
+            visible.contains(key)
+                || scrub
+                    .state
+                    .update(cx, |state, cx| state.end_drag(cx))
+                    .is_some()
+        });
+    }
+
+    /// End every in-flight value scrub, taking the undo step it owes, before
+    /// this panel commits something else over the same live document.
+    ///
+    /// A gesture's live values are in the document without an undo step of
+    /// their own; another commit on top would swallow them into its step. The
+    /// bindings are dropped so the queued gesture-end events reach nobody
+    /// (GPUI delivers them after the caller returns, by which time the other
+    /// commit has landed), and the step is taken here instead — `commit`
+    /// differs from `apply` only in recording it.
+    fn finish_channel_scrubs(&mut self, cx: &mut Context<Self>) {
+        let mut moved = false;
+        let mut ended = false;
+        for scrub in self.scrubs.values() {
+            if let Some(scrubbed) = scrub.state.update(cx, |state, cx| state.end_drag(cx)) {
+                ended = true;
+                moved |= scrubbed;
+            }
+        }
+        if !ended {
+            return;
+        }
+        self.scrubs.clear();
+        self.active_scrub = None;
+        if !moved {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            // The document already holds the gesture's values; only the undo
+            // step is new, so nothing needs re-evaluating.
+            let live = project.document().clone();
+            project.commit_document(live, InvalidationHint::None, cx);
+        });
     }
 
     /// Write one scrubbed channel value into the document at the playhead's
@@ -2716,6 +2778,16 @@ impl TimelineGpuiPanel {
     /// gets its key at that frame updated and a constant one its constant
     /// replaced: [`keyframes::set_channel_value`] decides, the same function
     /// the Properties panel writes through.
+    ///
+    /// **One gesture writes one frame.** The layer-local frame is captured on
+    /// the gesture's first event ([`Self::active_scrub`]) — the playhead moves
+    /// under a drag during playback, and a gesture that followed it would
+    /// strew keys across frames instead of editing the one the user grabbed.
+    ///
+    /// **The lock is checked when the gesture starts.** A layer locked
+    /// mid-gesture keeps the gesture already accepted: its values are in the
+    /// live document, so refusing the rest would strand them there with no
+    /// undo step of their own.
     fn write_channel_value(
         &mut self,
         comp_id: CompId,
@@ -2727,25 +2799,37 @@ impl TimelineGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
+        let key = (comp_id, channel.clone());
+        let started = self
+            .active_scrub
+            .as_ref()
+            .filter(|(active, _)| *active == key)
+            .map(|(_, frame)| *frame);
+        let playhead = self.state.playhead();
+        let Some((locked, frame_now)) = project
+            .read(cx)
+            .document()
+            .get_composition(comp_id)
+            .and_then(|comp| comp.get_layer(channel.layer))
+            .map(|layer| (layer.locked, keyframes::layer_local_frame(layer, playhead)))
+        else {
+            return;
+        };
+        if locked && started.is_none() {
+            return;
+        }
+        let local = started.unwrap_or(frame_now);
+        self.active_scrub = (!commit).then_some((key, local));
+
         let stored = display / channel_scrub_style(&channel.row).factor;
         let hint = match &channel.row {
             PropertyRowId::Network { node, .. } => InvalidationHint::Params(vec![*node]),
             PropertyRowId::Shell(_) => InvalidationHint::None,
         };
-        let comp_frame = self.state.playhead();
         let channel = channel.clone();
         project.update(cx, |project, cx| {
-            let locked = project
-                .document()
-                .get_composition(comp_id)
-                .and_then(|comp| comp.get_layer(channel.layer))
-                .is_none_or(|layer| layer.locked);
-            if locked {
-                return;
-            }
             let mut applied = false;
             let Some(doc) = update_layer(project.document(), comp_id, channel.layer, |layer| {
-                let local = keyframes::layer_local_frame(layer, comp_frame);
                 applied = keyframes::set_channel_value(
                     layer,
                     &channel.row,
@@ -3199,10 +3283,12 @@ impl TimelineGpuiPanel {
     /// follow-playhead is enabled, pages the visible range along with it.
     /// The controller records the shared `PlaybackPosition` on the same
     /// path, which the Properties panel observes — no republish needed here.
-    pub fn set_playhead(&mut self, frame: u64) {
+    pub fn set_playhead(&mut self, frame: u64, cx: &mut Context<Self>) {
         self.state.set_playhead(frame);
         self.state
             .scroll_to_follow_playhead(self.ruler_width.get() as f64);
+        // The channel rows read their value at the playhead.
+        self.sync_channel_scrubs(cx);
     }
 
     /// Ruler scrub: moves the local playhead and seeks the playback clock so
@@ -3213,6 +3299,7 @@ impl TimelineGpuiPanel {
         };
         let frame = frame.min(duration_frames.saturating_sub(1));
         self.state.set_playhead(frame);
+        self.sync_channel_scrubs(cx);
         let controller = cx
             .try_global::<crate::playback::PlaybackControllerHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -4065,6 +4152,9 @@ impl TimelineGpuiPanel {
                                     // must not start a reorder drag).
                                     cx.stop_propagation();
                                     this.state.toggle_layer_expanded(lid);
+                                    // Expansion decides which channel rows
+                                    // exist, and so which inline scrubs do.
+                                    this.sync_channel_scrubs(cx);
                                     cx.notify();
                                 }),
                             ),
@@ -4195,6 +4285,7 @@ impl TimelineGpuiPanel {
                                 MouseButton::Left,
                                 cx.listener(move |this, _ev, _win, cx| {
                                     this.state.toggle_property_expanded(lid, row_id.clone());
+                                    this.sync_channel_scrubs(cx);
                                     cx.notify();
                                 }),
                             )
@@ -4352,9 +4443,6 @@ impl Focusable for TimelineGpuiPanel {
 impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        // Widget-state consumption, not a command or a focus change: the
-        // header tree below only reads the widgets this builds.
-        self.sync_channel_scrubs(cx);
         // Composition 0 (REQ-UI-013): there is no ruler, no stack and no
         // transport range to draw, so the panel says so instead of showing
         // an empty timeline that looks broken.
@@ -4975,6 +5063,7 @@ impl Render for TimelineGpuiPanel {
                                                     Some(RowHit::PropertyGroup(lid, row)) => {
                                                         this.state
                                                             .toggle_property_expanded(lid, row);
+                                                        this.sync_channel_scrubs(cx);
                                                         cx.notify();
                                                     }
                                                     Some(RowHit::Channel(lid, row, component)) => {
@@ -7322,16 +7411,16 @@ mod tests {
 
     // ----- inline value scrub ---------------------------------------------------
 
-    /// The widget pass every redraw starts with: it creates, refreshes and
-    /// prunes the inline scrubs, so a test provokes a "redraw" by calling it
-    /// again.
-    fn redraw(window: &gpui::WindowHandle<TimelineGpuiPanel>, cx: &mut TestAppContext) {
+    /// The pass every tree change runs: it creates, refreshes and prunes the
+    /// inline scrubs. The paths that change the tree call it themselves; a
+    /// test that pokes `panel.state` directly stands in for them here.
+    fn sync(window: &gpui::WindowHandle<TimelineGpuiPanel>, cx: &mut TestAppContext) {
         window
             .update(cx, |panel, _window, cx| panel.sync_channel_scrubs(cx))
             .unwrap();
     }
 
-    /// Expands the tree down to `channel`'s row, redraws, and returns the
+    /// Expands the tree down to `channel`'s row, syncs, and returns the
     /// scrub widget bound to that channel.
     fn channel_scrub_widget(
         window: &gpui::WindowHandle<TimelineGpuiPanel>,
@@ -7353,7 +7442,7 @@ mod tests {
                 }
             })
             .unwrap();
-        redraw(window, cx);
+        sync(window, cx);
         window
             .read_with(cx, |panel, _| {
                 let comp_id = panel.state.comp_id().expect("an active composition");
@@ -7469,16 +7558,13 @@ mod tests {
         );
     }
 
-    /// The `HIGH-28` hole, on the Timeline: the panel redraws its header tree
-    /// on every document change — including the ones the drag itself makes —
-    /// and a redraw that dropped the binding would drop the subscription the
-    /// gesture-ending `Commit` travels on, leaving the live value in the
-    /// document with no undo step in front of it.
-    ///
-    /// A reveal filter applied mid-gesture takes the row out of the tree
-    /// entirely, which is the harshest version of the same redraw.
+    /// The `HIGH-28` hole, on the Timeline: every document change syncs the
+    /// widgets — including the changes the drag itself makes — and a sync that
+    /// dropped the binding would drop the subscription the gesture-ending
+    /// `Commit` travels on, leaving the live value in the document with no
+    /// undo step in front of it.
     #[gpui::test]
-    fn a_scrub_survives_the_redraw_its_own_change_causes(cx: &mut TestAppContext) {
+    fn a_scrub_survives_the_sync_its_own_change_causes(cx: &mut TestAppContext) {
         let (window, project, comp_id, a, _b) = setup(cx);
         let channel = TimelineChannelRef {
             layer: a,
@@ -7487,19 +7573,9 @@ mod tests {
         };
         let scrub = channel_scrub_widget(&window, &channel, cx);
 
+        // The live change reaches the document, whose observer syncs the panel.
         drag(&scrub, 5.0, cx);
         let live = scrub.read_with(cx, |state, _| state.value());
-
-        // The document change already redrew the panel; filtering the row out
-        // of the tree redraws it again, now without the row.
-        window
-            .update(cx, |panel, _window, _cx| {
-                panel
-                    .state
-                    .apply_reveal(RevealFilter::Group(PropertyGroup::Opacity), false);
-            })
-            .unwrap();
-        redraw(&window, cx);
         window
             .read_with(cx, |panel, cx| {
                 let bound = panel
@@ -7528,15 +7604,147 @@ mod tests {
         );
         project.update(cx, |project, cx| assert!(project.redo(cx)));
         assert_eq!(channel_value(&project, comp_id, &channel, cx), Some(live));
+    }
 
-        // The gesture is over: the row is still filtered out, so the binding
-        // goes now.
-        redraw(&window, cx);
+    /// A row taken out of the tree mid-gesture leaves the widget with no
+    /// element to move or release on, so the pointer can never end the drag.
+    /// The sync that removes the row ends it instead — the pending commit is
+    /// recorded without anyone calling `end_drag`, and the binding does not
+    /// sit dragging forever (which would also make it immune to pruning).
+    #[gpui::test]
+    fn a_row_that_leaves_the_tree_mid_gesture_still_commits(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        drag(&scrub, 5.0, cx);
+        let live = scrub.read_with(cx, |state, _| state.value());
+
+        // A reveal filter drops the row: this is the last sync the gesture
+        // will ever see.
         window
-            .read_with(cx, |panel, _| {
-                assert!(!panel.scrubs.contains_key(&(comp_id, channel.clone())));
+            .update(cx, |panel, _window, cx| {
+                panel
+                    .state
+                    .apply_reveal(RevealFilter::Group(PropertyGroup::Opacity), false);
+                panel.sync_channel_scrubs(cx);
             })
             .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            !scrub.read_with(cx, |state, _| state.is_dragging()),
+            "the stranded gesture is ended, not left dragging"
+        );
+        window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    !panel.scrubs.contains_key(&(comp_id, channel.clone())),
+                    "and its binding is gone once the commit has landed"
+                );
+            })
+            .unwrap();
+
+        assert_eq!(channel_value(&project, comp_id, &channel, cx), Some(live));
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(0.0),
+            "one undo returns the pre-scrub value"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(channel_value(&project, comp_id, &channel, cx), Some(live));
+    }
+
+    /// One gesture edits one frame. The playhead moves under a drag during
+    /// playback, and a gesture that followed it would leave a trail of keys
+    /// across the frames it passed instead of editing the one it started on.
+    #[gpui::test]
+    fn a_scrub_keeps_writing_the_frame_it_started_on(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: row.clone(),
+            component: 0,
+        };
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(10, cx))
+            .unwrap();
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+
+        drag(&scrub, 5.0, cx);
+        // The playhead moves under the gesture (playback, or a ruler scrub
+        // from a second pointer path).
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(0, cx))
+            .unwrap();
+        cx.run_until_parked();
+        scrub.update(cx, |state, cx| {
+            state.drag_to(10.0, &gpui::Modifiers::default(), cx);
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+
+        let l = layer(&project, comp_id, a, cx);
+        assert_eq!(
+            keyframes::channel_value_at(&l, &row, 0, 10),
+            Some(300.0),
+            "the whole gesture wrote the frame it started on"
+        );
+        assert_eq!(
+            keyframes::channel_value_at(&l, &row, 0, 0),
+            Some(0.0),
+            "the frame the playhead moved to is untouched"
+        );
+    }
+
+    /// Locking a layer mid-gesture must not swallow the scrub: the live values
+    /// are already in the document, so the lock's own commit would fold them
+    /// into its undo step and the rest of the gesture would be dropped in
+    /// silence. The gesture is finalized first and keeps its own step.
+    #[gpui::test]
+    fn locking_a_layer_mid_gesture_finalizes_the_scrub_first(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        drag(&scrub, 5.0, cx);
+        let live = scrub.read_with(cx, |state, _| state.value());
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_lock(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            !scrub.read_with(cx, |state, _| state.is_dragging()),
+            "the gesture is ended, not left half-applied"
+        );
+        assert!(layer(&project, comp_id, a, cx).locked);
+
+        // Two steps, in order: the lock, then the scrub.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let l = layer(&project, comp_id, a, cx);
+        assert!(!l.locked);
+        assert_eq!(
+            keyframes::channel_value_at(&l, &channel.row, 0, 0),
+            Some(live),
+            "undoing the lock leaves the scrubbed value in place"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(0.0),
+            "the gesture kept an undo step of its own"
+        );
     }
 
     /// With a reveal filter on, the scrubs belong to the rows that are shown,
@@ -7565,7 +7773,7 @@ mod tests {
                     .apply_reveal(RevealFilter::Group(PropertyGroup::Opacity), false);
             })
             .unwrap();
-        redraw(&window, cx);
+        sync(&window, cx);
 
         window
             .read_with(cx, |panel, _| {
@@ -7640,7 +7848,7 @@ mod tests {
             new_comp_id
         });
         cx.run_until_parked();
-        redraw(&window, cx);
+        sync(&window, cx);
 
         let fresh = window
             .read_with(cx, |panel, _| {

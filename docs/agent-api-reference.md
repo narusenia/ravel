@@ -2480,11 +2480,14 @@ Unknown type keys are skipped silently (plugin space).
   channels), which is what the Properties stream picker lists.
   `ProjectState::import_media(probed, skipped, cx)` then applies the whole
   batch as ONE `commit_document` (one undo step): assets are relativized
-  against the project root, an already-registered absolute path reuses its
-  asset id, and each asset gets a media layer at the playhead
-  (`start_frame = PlaybackPosition.frame`,
-  `out_frame = ceil(duration_secs × comp_fps)`, falling back to the
-  composition length). Composition settings are never touched (decision 5).
+  against the project root and an already-registered absolute path reuses its
+  asset id. **An import registers and nothing else** (refactor-plan-0808 unit
+  10) — placing is `ProjectState::add_asset_layers(&asset_ids, start_frame,
+  cx)`, its own undo step, with `out_frame = ceil(duration_secs × comp_fps)`
+  falling back to the composition length. A run that registers no new asset
+  leaves the document untouched and commits nothing, so re-importing a file
+  already in the bin does not spend an undo step.
+  Composition settings are never touched (decision 5).
   Audio (audio-plan unit 4): a file with audio also gets an `AudioSource` on
   the shell, bound to the same asset id with
   `metadata.first_audio_stream_index()` — silent media leaves `Layer::audio`

@@ -28,7 +28,9 @@ REQ-PROJ-001。設計は
 
 ## レイヤー化
 
-素材をアクティブコンプに置く経路は 1 つの実装（`add_media_layers`）に集約する。
+素材をアクティブコンプに置く経路は 1 つの実装
+（`ProjectState::add_asset_layers`、変換そのものは `add_media_layers`）に
+集約する。
 
 - 置く位置は**素材長のレイヤー**。長さが不明なときはコンプ全長
 - 音声つきの素材は殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）を

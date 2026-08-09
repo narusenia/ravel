@@ -42,7 +42,7 @@ use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
     duplicate_layer as duplicate_layer_document, duplicate_layers, remove_layers, reorder_layer,
-    update_layer, update_layers,
+    split_layers, update_layer, update_layers,
 };
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
@@ -66,12 +66,13 @@ use crate::widgets::{
 use crate::workspace::{
     EditDelete, EditDuplicate, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
     KeyframeInterpolationLinear, KeyframeInterpolationStep, PlaybackStop, PlaybackToggle,
+    TimelineAlignLayerEnd, TimelineAlignLayerStart, TimelineGoToLayerIn, TimelineGoToLayerOut,
     TimelineRevealAnchorPoint, TimelineRevealAnchorPointAdd, TimelineRevealAnimated,
     TimelineRevealAnimatedAdd, TimelineRevealAudioGain, TimelineRevealAudioGainAdd,
     TimelineRevealExpression, TimelineRevealExpressionAdd, TimelineRevealModified,
     TimelineRevealModifiedAdd, TimelineRevealOpacity, TimelineRevealOpacityAdd,
     TimelineRevealPosition, TimelineRevealPositionAdd, TimelineRevealRotation,
-    TimelineRevealRotationAdd, TimelineRevealScale, TimelineRevealScaleAdd,
+    TimelineRevealRotationAdd, TimelineRevealScale, TimelineRevealScaleAdd, TimelineSplitLayer,
 };
 use ravel_ui::command::CommandId;
 use ravel_ui::keyframes::RevealFilter;
@@ -1180,6 +1181,127 @@ impl TimelineGpuiPanel {
         self.duplicate_layers_from_row(lid, cx);
     }
 
+    // ----- playhead-relative layer timing --------------------------------------
+    //
+    // After Effects' `Cmd+Shift+D`, `[`, `]`, `I` and `O`. All five expand the
+    // clicked-row rule the rest of the panel uses (`operation_targets`): a
+    // shortcut aimed at the selection acts on the whole selection.
+
+    /// Cut every selected layer in two at the playhead as one undo step, and
+    /// select the halves after the cut. Locked layers and layers the playhead
+    /// is not strictly inside are skipped (`split_layers`).
+    fn split_selected_layers(&mut self, cx: &mut Context<Self>) {
+        // A structural commit landing on a layer being scrubbed would swallow
+        // the live gesture into its own undo step, and this arrives from the
+        // keyboard, so it can reach us mid-drag.
+        self.end_channel_scrubs(|_| true, cx);
+        let Some(lid) = self.selected_layer(cx) else {
+            return;
+        };
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
+        let targets = self.operation_targets(lid, cx);
+        let frame = self.state.playhead() as i64;
+        let tails = project.update(cx, |project, cx| {
+            let (doc, tails) = split_layers(project.document(), comp_id, &targets, frame)?;
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            Some(tails)
+        });
+        if let Some(tails) = tails
+            && !tails.is_empty()
+        {
+            self.selected_keyframes.clear();
+            super::set_layer_selection(tails, cx);
+            self.publish_selected_layer_target(cx);
+            cx.notify();
+        }
+    }
+
+    /// Slide every selected layer so its start (`to_start`) or its end sits on
+    /// the playhead, as one undo step. The duration is preserved — this is AE's
+    /// `[` / `]`, which move the layer, not its trim handles — and locked
+    /// layers are left alone, as they are for a bar drag.
+    ///
+    /// The end is the half-open `end_frame`, so `]` puts the last visible frame
+    /// just *before* the playhead. That is what makes `]` on one layer and `[`
+    /// on the next butt them together with no gap and no overlap.
+    fn align_selected_layers(&mut self, to_start: bool, cx: &mut Context<Self>) {
+        // Same reason as the split above.
+        self.end_channel_scrubs(|_| true, cx);
+        let Some(lid) = self.selected_layer(cx) else {
+            return;
+        };
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(comp_id) = self.state.comp_id() else {
+            return;
+        };
+        let selected = self.operation_targets(lid, cx);
+        let playhead = self.state.playhead() as i64;
+        project.update(cx, |project, cx| {
+            // The lock is read from the document, not from the panel mirror:
+            // the mirror lags a commit by one observer flush, so a layer
+            // locked a moment ago would still look movable here.
+            let Some(composition) = project.document().get_composition(comp_id) else {
+                return;
+            };
+            let targets: Vec<LayerId> = selected
+                .into_iter()
+                .filter(|id| {
+                    composition
+                        .get_layer(*id)
+                        .is_some_and(|layer| !layer.locked)
+                })
+                .collect();
+            let Some(doc) = update_layers(project.document(), comp_id, &targets, |layer| {
+                layer.start_frame = if to_start {
+                    playhead
+                } else {
+                    playhead - layer.duration() as i64
+                };
+            }) else {
+                return;
+            };
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.notify();
+    }
+
+    /// Jump the playhead to the selected layers' first frame (`to_start`) or
+    /// to their end. A multi-selection spans them all: the earliest start and
+    /// the latest end, so the playhead lands on an edge of the selection
+    /// rather than of whichever layer happens to be first in the stack.
+    ///
+    /// Only the playhead moves, so a live channel scrub is left running — it
+    /// captured its frame when the gesture started.
+    fn go_to_selected_layer_edge(&mut self, to_start: bool, cx: &mut Context<Self>) {
+        let Some(lid) = self.selected_layer(cx) else {
+            return;
+        };
+        let edges = self
+            .operation_targets(lid, cx)
+            .into_iter()
+            .filter_map(|id| self.state.layer(id))
+            .map(|layer| {
+                if to_start {
+                    layer.start_frame
+                } else {
+                    layer.end_frame()
+                }
+            });
+        let frame = if to_start { edges.min() } else { edges.max() };
+        // A layer starting before frame 0 has no reachable start: the playhead
+        // is unsigned, so it stops at the composition's first frame.
+        if let Some(frame) = frame {
+            self.scrub_playhead(frame.max(0) as u64, cx);
+        }
+    }
+
     /// Remove all selected keyframes as one Document undo step. Locked-layer
     /// refs stay selected; deleted and stale refs are dropped.
     fn delete_selected_keyframes(&mut self, cx: &mut Context<Self>) {
@@ -1481,6 +1603,52 @@ impl TimelineGpuiPanel {
             },
         );
         cx.notify();
+    }
+
+    fn on_split_layer(
+        &mut self,
+        _: &TimelineSplitLayer,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.split_selected_layers(cx);
+        cx.notify();
+    }
+
+    fn on_align_layer_start(
+        &mut self,
+        _: &TimelineAlignLayerStart,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.align_selected_layers(true, cx);
+    }
+
+    fn on_align_layer_end(
+        &mut self,
+        _: &TimelineAlignLayerEnd,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.align_selected_layers(false, cx);
+    }
+
+    fn on_go_to_layer_in(
+        &mut self,
+        _: &TimelineGoToLayerIn,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.go_to_selected_layer_edge(true, cx);
+    }
+
+    fn on_go_to_layer_out(
+        &mut self,
+        _: &TimelineGoToLayerOut,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.go_to_selected_layer_edge(false, cx);
     }
 
     // ----- bar drags -----------------------------------------------------------
@@ -1849,11 +2017,27 @@ impl TimelineGpuiPanel {
         selection
     }
 
+    /// The frame a playhead gesture at window x `x` lands on.
+    ///
+    /// Holding `Shift` snaps to the nearest keyframe the panel is showing
+    /// (`TimelinePanel::snap_playhead_x`); without it the pointer decides.
+    /// Candidates are recomputed per event because the reveal filter and the
+    /// expansion tree can change between gestures — they cannot change during
+    /// one, and the list is short enough that caching would only add state to
+    /// keep in sync.
+    fn scrub_target_frame(&self, x: f32, shift: bool) -> u64 {
+        let local_x = (x - self.ruler_origin_x.get()).max(0.0) as f64;
+        if !shift {
+            return self.state.x_to_frame(local_x);
+        }
+        let candidates = self.state.visible_keyframe_frames();
+        self.state.snap_playhead_x(local_x, &candidates)
+    }
+
     fn drag_moved(&mut self, x: f32, y: f32, shift: bool, alt: bool, cx: &mut Context<Self>) {
         match self.drag.clone() {
             TimelineDrag::Scrub => {
-                let local_x = (x - self.ruler_origin_x.get()).max(0.0) as f64;
-                let frame = self.state.x_to_frame(local_x);
+                let frame = self.scrub_target_frame(x, shift);
                 self.scrub_playhead(frame, cx);
             }
             TimelineDrag::MoveBar {
@@ -4583,6 +4767,11 @@ impl Render for TimelineGpuiPanel {
         Self::with_reveal_actions(root, cx)
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_duplicate))
+            .on_action(cx.listener(Self::on_split_layer))
+            .on_action(cx.listener(Self::on_align_layer_start))
+            .on_action(cx.listener(Self::on_align_layer_end))
+            .on_action(cx.listener(Self::on_go_to_layer_in))
+            .on_action(cx.listener(Self::on_go_to_layer_out))
             .on_action(cx.listener(Self::on_keyframe_bezier))
             .on_action(cx.listener(Self::on_keyframe_linear))
             .on_action(cx.listener(Self::on_keyframe_step))
@@ -4720,10 +4909,13 @@ impl Render for TimelineGpuiPanel {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                                    let click_x: f32 = event.position.x.into();
-                                    let local_x =
-                                        (click_x - this.ruler_origin_x.get()).max(0.0) as f64;
-                                    let frame = this.state.x_to_frame(local_x);
+                                    // Shift snaps on the press too, so a
+                                    // shift-click lands where a shift-drag
+                                    // released at the same pixel would.
+                                    let frame = this.scrub_target_frame(
+                                        event.position.x.into(),
+                                        event.modifiers.shift,
+                                    );
                                     this.scrub_playhead(frame, cx);
                                     this.drag = TimelineDrag::Scrub;
                                 }),
@@ -8938,6 +9130,204 @@ mod tests {
                     "Fit follows the data again"
                 );
                 assert_eq!(panel.curve_value_range.resolved((-9.0, 9.0)), (-9.0, 9.0));
+            })
+            .unwrap();
+    }
+    // ----- playhead snapping and the AE timing chords -----------------------
+
+    /// `Shift` during a ruler scrub pulls the playhead onto a keyframe the
+    /// panel is showing — and onto nothing at all once the row is off screen,
+    /// which is the unit's completion criterion.
+    #[gpui::test]
+    fn a_shift_scrub_snaps_only_to_keyframes_on_screen(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx); // local frames 0 and 10
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::Scrub;
+                // 4 px/frame past the header: frame 10 sits 40 px into the
+                // ruler, so +42 px is two pixels off the key and rounds to
+                // frame 11 unaided.
+                assert_eq!(panel.state.pixels_per_frame(), 4.0);
+                let origin = panel.ruler_origin_x.get();
+                panel.drag_moved(origin + 42.0, 0.0, false, false, cx);
+                assert_eq!(panel.playhead(), 11, "without Shift the pointer decides");
+
+                panel.state.toggle_layer_expanded(a);
+                panel.drag_moved(origin + 42.0, 0.0, true, false, cx);
+                assert_eq!(panel.playhead(), 10, "Shift pulls onto the visible key");
+
+                // Far enough away and the key has no claim on the pointer.
+                panel.drag_moved(origin + 60.0, 0.0, true, false, cx);
+                assert_eq!(panel.playhead(), 15);
+
+                // A collapsed layer draws no keyframes, so there is nothing to
+                // snap to even though the document still holds the keys.
+                panel.state.toggle_layer_expanded(a);
+                panel.drag_moved(origin + 42.0, 0.0, true, false, cx);
+                assert_eq!(panel.playhead(), 11, "a collapsed row cannot pull");
+
+                // Nor does a row the reveal filter is hiding (`UX-5`).
+                panel.state.toggle_layer_expanded(a);
+                panel
+                    .state
+                    .apply_reveal(RevealFilter::Group(PropertyGroup::Scale), false);
+                panel.drag_moved(origin + 42.0, 0.0, true, false, cx);
+                assert_eq!(panel.playhead(), 11, "a filtered-out row cannot pull");
+            })
+            .unwrap();
+    }
+
+    /// The split's completion criterion: one undo step, and the two halves
+    /// cover exactly the range the source layer covered.
+    #[gpui::test]
+    fn splitting_at_the_playhead_is_one_undo_over_the_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        // A spans 0..100 and B spans 50..150, so frame 60 is inside both.
+        window
+            .update(cx, |panel, window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.set_playhead(60, cx);
+                panel.on_split_layer(&TimelineSplitLayer, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ranges = |cx: &mut TestAppContext| -> Vec<(i64, i64)> {
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .iter()
+                    .map(|l| (l.start_frame, l.end_frame()))
+                    .collect()
+            })
+        };
+        assert_eq!(
+            ranges(cx),
+            vec![(0, 60), (60, 100), (50, 60), (60, 150)],
+            "each half sits directly above its source and the pair covers the source"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            ranges(cx),
+            vec![(0, 100), (50, 150)],
+            "one undo, both layers"
+        );
+    }
+
+    /// A playhead outside a layer has no cut to make, and a locked layer is
+    /// protected the way it is from a delete.
+    #[gpui::test]
+    fn a_split_outside_the_layer_or_on_a_locked_one_does_nothing(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let layer_count = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .len()
+            })
+        };
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.select_layer(a, cx);
+                panel.set_playhead(120, cx); // past A's end
+                panel.on_split_layer(&TimelineSplitLayer, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(layer_count(cx), 2);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.toggle_lock(a, cx);
+                panel.set_playhead(50, cx);
+                panel.on_split_layer(&TimelineSplitLayer, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(layer_count(cx), 2, "a locked layer is not cut");
+    }
+
+    /// `[` and `]` slide the selection onto the playhead without retiming it,
+    /// and `]` leaves the layer's half-open end exactly on the playhead so the
+    /// next `[` butts against it.
+    #[gpui::test]
+    fn the_align_chords_move_the_selection_without_changing_its_duration(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        window
+            .update(cx, |panel, window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.set_playhead(70, cx);
+                panel.on_align_layer_start(&TimelineAlignLayerStart, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            (
+                layer(&project, comp_id, a, cx).start_frame,
+                layer(&project, comp_id, a, cx).duration()
+            ),
+            (70, 100)
+        );
+        assert_eq!(layer(&project, comp_id, b, cx).start_frame, 70);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.on_align_layer_end(&TimelineAlignLayerEnd, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let aligned = layer(&project, comp_id, a, cx);
+        assert_eq!(
+            aligned.end_frame(),
+            70,
+            "the half-open end lands on the playhead"
+        );
+        assert_eq!(aligned.duration(), 100, "the trim is untouched");
+
+        // Locked layers are protected here too.
+        window
+            .update(cx, |panel, window, cx| {
+                // `toggle_lock` is itself a selection-wide operation, so the
+                // lock is aimed at A alone before the selection is restored.
+                super::super::set_layer_selection(vec![a], cx);
+                panel.toggle_lock(a, cx);
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.set_playhead(10, cx);
+                panel.on_align_layer_start(&TimelineAlignLayerStart, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, -30);
+        assert_eq!(layer(&project, comp_id, b, cx).start_frame, 10);
+    }
+
+    /// `I` / `O` span the whole selection: its earliest start and its latest
+    /// end, not whichever layer happens to be first in the stack.
+    #[gpui::test]
+    fn the_go_to_chords_span_the_whole_selection(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, b) = setup(cx);
+        window
+            .update(cx, |panel, window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.set_playhead(80, cx);
+
+                panel.on_go_to_layer_in(&TimelineGoToLayerIn, window, cx);
+                assert_eq!(panel.playhead(), 0, "A starts first");
+
+                panel.on_go_to_layer_out(&TimelineGoToLayerOut, window, cx);
+                assert_eq!(panel.playhead(), 150, "B ends last");
             })
             .unwrap();
     }

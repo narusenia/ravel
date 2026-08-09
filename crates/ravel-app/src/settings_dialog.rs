@@ -295,6 +295,29 @@ const STARTUP_CREATE_COMPOSITION: &str = "settings.general.startup_create_compos
 const STARTUP_CREATE_COMPOSITION_DESCRIPTION: &str =
     "settings.general.startup_create_composition_description";
 
+/// Write the Stop landing point into the preferences layer.
+///
+/// A named function rather than a closure body because `SettingField`'s setter
+/// is `pub(crate)` to gpui-component: a test cannot reach the switch's own
+/// closure, so the closure is a one-line delegation to something a test *can*
+/// call, and "which layer does this row write" stops being untestable.
+pub fn set_stop_returns_to_play_start(value: bool, cx: &mut App) {
+    app_settings::update(
+        SettingsLayerScope::Global,
+        |layer| layer.playback.stop_returns_to_play_start = Some(value),
+        cx,
+    );
+}
+
+/// [`set_stop_returns_to_play_start`] for the startup composition switch.
+pub fn set_startup_create_composition(value: bool, cx: &mut App) {
+    app_settings::update(
+        SettingsLayerScope::Global,
+        |layer| layer.startup.create_composition = Some(value),
+        cx,
+    );
+}
+
 /// Where Stop leaves the playhead.
 ///
 /// A switch rather than a two-option dropdown: the setting is a boolean in the
@@ -307,13 +330,7 @@ fn stop_returns_to_play_start_field() -> PageField {
         field: FieldControl::Toggle(
             SettingField::switch(
                 |cx| app_settings::resolved(cx).stop_returns_to_play_start,
-                |value, cx| {
-                    app_settings::update(
-                        SettingsLayerScope::Global,
-                        |layer| layer.playback.stop_returns_to_play_start = Some(value),
-                        cx,
-                    );
-                },
+                set_stop_returns_to_play_start,
             )
             .on_reset(
                 |cx| {
@@ -346,13 +363,7 @@ fn startup_create_composition_field() -> PageField {
         field: FieldControl::Toggle(
             SettingField::switch(
                 |cx| app_settings::resolved(cx).startup_creates_composition,
-                |value, cx| {
-                    app_settings::update(
-                        SettingsLayerScope::Global,
-                        |layer| layer.startup.create_composition = Some(value),
-                        cx,
-                    );
-                },
+                set_startup_create_composition,
             )
             .on_reset(
                 |cx| {

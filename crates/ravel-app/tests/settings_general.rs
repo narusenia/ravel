@@ -23,7 +23,7 @@ use ravel_app::playback::PlaybackController;
 use ravel_app::project_state::{
     ProjectState, ProjectStateHandle, disable_background_eval_for_tests,
 };
-use ravel_app::settings_dialog::{SettingsPageKind, fields_for};
+use ravel_app::settings_dialog::{self, SettingsPageKind, fields_for};
 use ravel_ui::command::CommandId;
 
 /// Any window will do; a field's reset only needs one to exist.
@@ -58,26 +58,18 @@ fn start(
     (project, dir, path)
 }
 
-/// Set one of the two switches the way its row does.
+/// Flip one of the two switches through **the row's own setter**, not a copy of
+/// it. `SettingField`'s stored closure is `pub(crate)` to gpui-component and so
+/// out of a test's reach; the row delegates to these functions for exactly that
+/// reason, which keeps "writes the global layer, writes *this* field" under
+/// test instead of duplicated in the assertion.
 fn set_stop_returns_to_play_start(value: bool, cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        app_settings::update(
-            SettingsScope::Global,
-            |layer| layer.playback.stop_returns_to_play_start = Some(value),
-            cx,
-        );
-    });
+    cx.update(|cx| settings_dialog::set_stop_returns_to_play_start(value, cx));
     cx.run_until_parked();
 }
 
 fn set_startup_creates_composition(value: bool, cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        app_settings::update(
-            SettingsScope::Global,
-            |layer| layer.startup.create_composition = Some(value),
-            cx,
-        );
-    });
+    cx.update(|cx| settings_dialog::set_startup_create_composition(value, cx));
     cx.run_until_parked();
 }
 

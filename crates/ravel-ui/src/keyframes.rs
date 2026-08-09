@@ -408,6 +408,28 @@ pub fn move_keyframe(
     })
 }
 
+/// The value [`set_channel_value`] would edit at `frame`: the constant, or
+/// the curve sampled there.
+///
+/// `None` means *there is no editable value here* — the row or component
+/// does not resolve, or the source is one `set_channel_value` refuses (an
+/// expression, a blend, a node-output binding). A caller that offers an
+/// editing control reads this first, so it never shows a number the write
+/// path would silently drop.
+pub fn channel_value_at(
+    layer: &Layer,
+    id: &PropertyRowId,
+    component: usize,
+    frame: u64,
+) -> Option<f32> {
+    let channels = row_channels(layer, id)?;
+    match &channels.get(component)?.source {
+        ChannelSource::Constant(value) => Some(*value),
+        ChannelSource::Keyframes(curve) => Some(curve.sample(frame as f64)),
+        _ => None,
+    }
+}
+
 /// Set the channel's value at `frame`: a keyframed channel gets an updated
 /// key (preserving its interpolation and tangents) or an inserted one; a
 /// constant channel has its constant replaced. Returns `false` when the row
@@ -1034,6 +1056,49 @@ mod tests {
                 .abs()
                 < f32::EPSILON
         );
+    }
+
+    /// The read side of [`set_channel_value`]: a value exists exactly where
+    /// the write path would accept one.
+    #[test]
+    fn channel_value_at_reads_only_editable_sources() {
+        let mut layer = test_layer();
+        let position = PropertyRowId::Shell(PropertyGroup::Position);
+        let radius = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+
+        // Constant channel: the constant, at any frame.
+        assert_eq!(channel_value_at(&layer, &position, 0, 42), Some(0.0));
+        // Keyframed channel: the curve sampled at the layer-local frame.
+        assert_eq!(channel_value_at(&layer, &radius, 0, 0), Some(0.0));
+        assert_eq!(channel_value_at(&layer, &radius, 0, 10), Some(1.0));
+        let half = channel_value_at(&layer, &radius, 0, 5).expect("sampled mid-curve");
+        assert!((half - 0.5).abs() < 1e-4, "linear sample at 5: {half}");
+
+        // Out-of-range component and unknown row resolve to nothing.
+        assert_eq!(channel_value_at(&layer, &position, 2, 0), None);
+        assert_eq!(
+            channel_value_at(
+                &layer,
+                &PropertyRowId::Network {
+                    node: NodeId::new(99),
+                    key: "gone".into()
+                },
+                0,
+                0
+            ),
+            None
+        );
+
+        // An expression-driven channel has no editable value: the write path
+        // refuses it, so the read path must not offer a number either.
+        layer.transform.position[0] = AnimationChannel::new(ChannelSource::Expression(
+            ravel_core::animation::ParameterExpression::new("frame * 2"),
+        ));
+        assert_eq!(channel_value_at(&layer, &position, 0, 3), None);
+        assert!(!set_channel_value(&mut layer, &position, 0, 3, 1.0));
     }
 
     #[test]

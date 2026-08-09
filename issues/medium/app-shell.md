@@ -355,48 +355,14 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 2. **出力ポートの型が `FRAME_BUFFER` 固定**。`port` を変えても
    出力の型が追随しないので、フレーム以外を参照した瞬間に型が嘘になる
 
-`NETIF-2` が「型の文脈依存」を入れているので、2 はその枠組みで解ける。
-
-**修正方針**: `layer` と `port` を Select にする（候補は同じコンポジションの
-レイヤーと、選んだレイヤーの出力ポート）。出力の型は `port` から引く。
-`SHELL-5` の Parent ドロップダウン（循環候補を除外する）が候補列挙の前例。
+**修正方針は計画書へ移した**（2026-08-09）。調べたところ、足りないのは
+`layer.ref` の書き方ではなく**文脈から候補と型が決まる機構**そのものだった:
+`Registry::param_options` はテンプレート静的、`SHELL-5` の Parent
+ドロップダウンはレイヤーフィールドの別経路、パラメータ → 出力ポート型の追随は
+どこにも無い（`set_params` が retype するのはパラメータポートだけ）。
+複数クレートに跨るので Design gate に当たる。
+→ [`contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
+の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
 
 ---
 
-## MED-APP-31 | bug | ポップアップメニューが開いている間もワークスペースのショートカットが勝つ
-
-**該当**: `crates/ravel-app/src/workspace.rs:424`（`build_keybindings` が
-アセット由来のバインドに与える文脈 `"!Input"`）、
-`crates/ravel-app/src/main.rs:64` / `:100`（登録順）、
-`assets/keybindings/default.toml`（`playback.step_forward` = `Right`、
-`step_backward` = `Left`）
-
-`gpui_component` のポップアップは自前のキー操作を持っている。
-`PopupMenu` は上下と Enter、`AppMenuBar` は左右でのトップレベル移動を
-それぞれ専用の文脈（`PopupMenu` / `AppMenuBar`）に登録する
-（`gpui_component::init` 内）。
-
-**それが Ravel 側のバインドに潰される。** アセット由来のコマンドは
-すべて `"!Input"` 文脈で登録され、これは**テキスト入力しか避けていない**。
-ポップアップの文脈は除外していないうえ、Ravel の `cx.bind_keys` は
-`gpui_component::init` より**後**に走るので、同じ和音では Ravel 側が勝つ。
-
-結果、**メニューを開いた状態で ← → を押すとトップレベルが動かずフレームが
-送られ、メニューが閉じる**。
-
-在窓のアプリメニューバー（非 macOS、`HIGH-29` で入った）で目に見えるが、
-**バー固有ではない**。パネルの `…` ドロップダウンなど、**すべての
-`PopupMenu` に同じことが起きる**。到達不能にはならず（マウスで操作できる）、
-macOS では OS のメニューバーなので影響しない。
-
-**未確認**: **Escape でポップアップが閉じない**現象も同時に観測されている
-（既存のパネル `…` ドロップダウンでも同じ）。ただし Ravel は Escape を
-アセットにもコードにも束縛しておらず、`DockRoot` の `observe_keystrokes`
-（`crates/ravel-dock/src/dock.rs:223`）はキーを消費しない観測なので、
-**上記の登録順とは別の原因**。着手時に切り分けること。
-
-**修正方針**: アセット由来のバインドの文脈述語を、テキスト入力だけでなく
-**ポップアップの文脈も避ける**形にする。文脈名は `gpui_component` 側の
-定数が正で、Ravel が文字列を二重に持たないこと。
-全ワークスペースコマンドの経路に触るので、`for_each_command!` の 1 表を
-通る変更として入れる。

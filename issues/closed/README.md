@@ -14,7 +14,7 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 22 | 1件1ファイル |
-| medium | 27 | 領域別4ファイル（`medium-*.md`） |
+| medium | 28 | 領域別4ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -53,9 +53,9 @@
 | [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
-## medium（27件）
+## medium（28件）
 
-- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30`
+- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）

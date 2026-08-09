@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
-use gpui_component::menu::AppMenuBar;
+use gpui_component::menu::{APP_MENU_BAR_CONTEXT, AppMenuBar, POPUP_MENU_CONTEXT};
 use gpui_component::notification::{Notification, NotificationType};
 use gpui_component::{GlobalState, WindowExt as _};
 use ravel_i18n::t;
@@ -419,19 +419,50 @@ fn dialog_margin_top(window: &Window) -> Pixels {
     window.viewport_size().height / DIALOG_TOP_FRACTION
 }
 
+/// The context predicate every asset-derived workspace binding carries.
+///
+/// A workspace command must yield to whatever owns the keyboard right now:
+///
+/// - a focused text input, whose own `Input`-context actions own the arrows,
+///   editing, the clipboard chords and Space while typing;
+/// - an open menu, whose `PopupMenu` / `AppMenuBar` actions own the arrows,
+///   Enter and Escape.
+///
+/// Yielding has to be spelled out here because gpui resolves a tie by
+/// **registration order** (`Keymap::bindings_for_input` sorts by context depth,
+/// then by binding index) and Ravel binds after `gpui_component::init`. Both
+/// predicates match at the menu's own node, so without the negation the
+/// workspace binding wins and `MED-APP-31`'s symptom appears: arrows step the
+/// playhead instead of walking the menu, and the menu closes under the user.
+///
+/// A negated context disables the binding while that context is anywhere in
+/// the stack, so **no** workspace chord fires while a menu is open — Space
+/// does not toggle playback either. That is the intent: an open menu is modal
+/// to the keyboard.
+pub fn workspace_binding_context() -> String {
+    yield_to_open_menus("!Input")
+}
+
+/// `context` narrowed so it stops matching while a menu is open.
+///
+/// Applies to the panel-scoped bindings too: a popup is a child of the panel
+/// that opened it, so the panel's own key context is still on the stack while
+/// its menu is up, and `L` would lay the graph out behind an open menu.
+fn yield_to_open_menus(context: &str) -> String {
+    format!("{context} && !{POPUP_MENU_CONTEXT} && !{APP_MENU_BAR_CONTEXT}")
+}
+
 /// Build GPUI keybindings from the headless table and panel-local contexts.
 pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
     let mut out = Vec::new();
+    let context = workspace_binding_context();
     for (chord, cmd) in shell.keybindings().iter() {
         let gpui_chord = chord_to_gpui_string(chord);
         macro_rules! bind {
             ($($Action:ident),+ $(,)?) => {
                 match cmd {
                     $(CommandId::$Action => {
-                        // Workspace commands must yield to focused text inputs,
-                        // whose own Input-context actions own arrows, editing,
-                        // clipboard shortcuts, and Space while typing.
-                        out.push(KeyBinding::new(&gpui_chord, $Action, Some("!Input")));
+                        out.push(KeyBinding::new(&gpui_chord, $Action, Some(&context)));
                     })+
                 }
             };
@@ -451,12 +482,12 @@ pub fn build_keybindings(shell: &AppShell) -> Vec<KeyBinding> {
             continue;
         };
         let gpui_chord = chord_to_gpui_string(&chord);
-        let context = binding.context;
+        let context = yield_to_open_menus(binding.context);
         macro_rules! bind_panel {
             ($($Action:ident),+ $(,)?) => {
                 match binding.command {
                     $(CommandId::$Action => {
-                        out.push(KeyBinding::new(&gpui_chord, $Action, Some(context)));
+                        out.push(KeyBinding::new(&gpui_chord, $Action, Some(&context)));
                     })+
                 }
             };
@@ -1963,19 +1994,30 @@ mod tests {
     // to the built-in one so `#[test]` resolves to the real one.
     use core::prelude::v1::test;
 
+    /// A workspace chord belongs to the workspace only while nothing else owns
+    /// the keyboard. Text inputs own it while typing, and an open menu owns it
+    /// while it is open (`MED-APP-31`) — gpui breaks the tie by registration
+    /// order and Ravel binds last, so the yielding has to be in the predicate.
     #[test]
-    fn playback_arrow_bindings_yield_to_text_inputs() {
+    fn playback_arrow_bindings_yield_to_text_inputs_and_open_menus() {
         let bindings = super::build_keybindings(&ravel_ui::shell::AppShell::default());
         let step_forward = bindings
             .iter()
             .find(|binding| binding.action().as_any().is::<super::FrameStepForward>())
             .expect("default step-forward binding");
+        let predicate = step_forward.predicate().expect("bindings carry a context");
 
-        assert_eq!(
-            step_forward.predicate().unwrap().to_string(),
-            "!Input",
-            "workspace playback must not consume an Input's Right arrow"
+        let context = |name: &str| gpui::KeyContext::try_from(name).expect("context parses");
+        assert!(
+            predicate.eval(&[context("Workspace")]),
+            "the workspace still owns the arrow when nothing else does"
         );
+        for owner in ["Input", "PopupMenu", "AppMenuBar"] {
+            assert!(
+                !predicate.eval(&[context("Workspace"), context(owner)]),
+                "{owner} owns its own arrows while it is focused"
+            );
+        }
     }
 
     #[test]

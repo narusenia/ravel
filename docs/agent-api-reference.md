@@ -2343,8 +2343,10 @@ Unknown type keys are skipped silently (plugin space).
   user_file() }`; a missing file is silent, an unreadable one warns and yields
   the defaults, and a single bad entry warns and is skipped. `main` puts
   `bindings()` on the `AppShell` — never straight into `cx.bind_keys` — so
-  `workspace::build_keybindings` gives user chords the same `!Input` context
-  every asset chord gets (`MED-APP-16`), then `install(loaded, cx)` publishes the
+  `workspace::build_keybindings` gives user chords the same context every asset
+  chord gets — `workspace_binding_context()`, which yields to a focused `Input`
+  (`MED-APP-16`) and to an open `PopupMenu` / `AppMenuBar` (`MED-APP-31`) —
+  then `install(loaded, cx)` publishes the
   durable global. `rows(&loaded)` / `current_row(command, cx)` produce
   `KeybindingRow { command, chord, panel_chords, origin }` with
   `KeybindingOrigin::{Default, User, Panel, Unassigned}` for the read-only

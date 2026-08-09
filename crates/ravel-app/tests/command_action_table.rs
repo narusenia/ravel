@@ -261,13 +261,17 @@ fn the_synthetic_application_menu_only_duplicates_headless_entries() {
 
 #[test]
 fn node_editor_keybindings_are_context_scoped() {
+    // The panel's own context, narrowed out of an open menu the same way every
+    // other binding is (`MED-APP-31`). Spelled out rather than read from
+    // `build_keybindings`, so a narrowing that silently goes away fails here.
+    let scope = format!("{KEY_CONTEXT} && !PopupMenu && !AppMenuBar");
     let bindings = build_keybindings(&AppShell::default());
     let scoped: Vec<_> = bindings
         .iter()
         .filter(|binding| {
             binding
                 .predicate()
-                .is_some_and(|predicate| predicate.to_string() == KEY_CONTEXT)
+                .is_some_and(|predicate| predicate.to_string() == scope)
         })
         .map(|binding| {
             let keystroke = binding

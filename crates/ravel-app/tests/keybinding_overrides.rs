@@ -6,8 +6,10 @@
 //! `MED-APP-16` was asset-derived bindings registered with **no** key context:
 //! `default.toml` binds `Left` / `Right` to frame stepping, a context-free
 //! binding matches in every context, and so a focused text field lost its
-//! arrows to the transport. Phase A fixed it by giving every asset binding
-//! `Some("!Input")`.
+//! arrows to the transport. Phase A fixed it by giving every asset binding a
+//! context that yields to whoever owns the keyboard. `MED-APP-31` widened that
+//! set from text inputs alone to open menus as well, so the predicate is built
+//! by `workspace::workspace_binding_context` rather than written out here.
 //!
 //! A user override file is a second source of bare single-key chords, which is
 //! exactly the shape that caused the bug. What keeps it safe is that user
@@ -28,8 +30,8 @@
 //!
 //! The predicate check is not vacuous, and that was measured rather than
 //! assumed. To reproduce: in `crates/ravel-app/src/workspace.rs`, change the
-//! asset loop's `Some("!Input")` back to `None` — the shape `MED-APP-16`
-//! reported — and run `cargo test -p ravel-app --test keybinding_overrides`.
+//! asset loop's context back to `None` — the shape `MED-APP-16` reported — and
+//! run `cargo test -p ravel-app --test keybinding_overrides`.
 //! `no_binding_is_registered_without_a_context` fails with
 //! `'s' is bound with no key context`, and
 //! `asset_and_user_bindings_are_both_scoped_out_of_text_input` fails with
@@ -45,11 +47,34 @@ use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 
+/// The contexts an open menu owns, spelled out rather than read from
+/// `gpui_component`.
+///
+/// Deliberate duplication: this file exists to catch the predicate narrowing
+/// **going away**, so deriving the expected value from the code under test
+/// would make every assertion here true by construction. Widening the set of
+/// keyboard owners is supposed to fail this test until someone confirms the
+/// widening was intended.
+const MENU_CONTEXTS: [&str; 2] = ["PopupMenu", "AppMenuBar"];
+
 /// The predicate every binding derived from the binding set must carry.
-const NOT_INPUT: &str = "!Input";
+fn workspace_context() -> String {
+    yielding("!Input")
+}
+
+/// `context` with the menu owners excluded — the shape `build_keybindings`
+/// gives every binding it registers.
+fn yielding(context: &str) -> String {
+    let mut out = context.to_string();
+    for menu in MENU_CONTEXTS {
+        out.push_str(" && !");
+        out.push_str(menu);
+    }
+    out
+}
 
 /// The panel key contexts the code-side bindings use. Everything else in the
-/// table has to be `!Input`.
+/// table has to carry [`workspace_context`].
 fn panel_contexts() -> [&'static str; 3] {
     [
         panels::node_editor::KEY_CONTEXT,
@@ -92,7 +117,7 @@ fn bindings_of(shell: &AppShell) -> Vec<(String, Option<String>)> {
 fn keys_scoped_out_of_input(shell: &AppShell) -> Vec<String> {
     bindings_of(shell)
         .into_iter()
-        .filter(|(_, predicate)| predicate.as_deref() == Some(NOT_INPUT))
+        .filter(|(_, predicate)| predicate.as_deref() == Some(workspace_context().as_str()))
         .map(|(key, _)| key)
         .collect()
 }
@@ -123,13 +148,17 @@ fn no_binding_is_registered_without_a_context() {
 
     for loaded in &cases {
         let shell = shell_with(loaded);
-        let allowed: Vec<&str> = std::iter::once(NOT_INPUT).chain(panel_contexts()).collect();
+        // A panel binding carries its panel's context, narrowed the same way
+        // the workspace one is: an open menu owns the keyboard whichever
+        // binding set the chord came from (`MED-APP-31`).
+        let mut allowed = vec![workspace_context()];
+        allowed.extend(panel_contexts().map(yielding));
         for (key, predicate) in bindings_of(&shell) {
             let predicate = predicate.unwrap_or_else(|| {
                 panic!("'{key}' is bound with no key context (MED-APP-16 regression)")
             });
             assert!(
-                allowed.contains(&predicate.as_str()),
+                allowed.contains(&predicate),
                 "'{key}' is bound in the unexpected context '{predicate}'"
             );
         }

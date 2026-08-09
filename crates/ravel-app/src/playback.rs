@@ -488,6 +488,28 @@ impl PlaybackController {
         }
     }
 
+    /// Re-read everything the active composition decides — frame rate,
+    /// duration and loop range — and tell the audio engine when the range
+    /// moved. The tick loop calls this once per frame, which is what makes a
+    /// running transport notice a composition switch, a shortened duration or
+    /// a freshly loaded project.
+    ///
+    /// The range is *per composition*, so without this a switch mid-playback
+    /// keeps folding at the previous composition's out point, and the mixer
+    /// keeps folding there too — picture and sound turning round in a place
+    /// neither composition names. Nothing is sent while nothing changed, so
+    /// the steady-state cost is two lookups per frame.
+    pub fn resync_from_active_composition(&mut self, cx: &mut Context<Self>) {
+        let before = self.transport.loop_range();
+        self.sync_from_active_composition(Instant::now(), cx);
+        if self.transport.loop_range() == before {
+            return;
+        }
+        let secs = self.secs_at_frame(self.transport.current_frame());
+        self.forward_transport(self.transport.is_playing(), Some(secs), cx);
+        self.commit_loop_range(cx);
+    }
+
     /// Adopt the active composition's loop range before acting on it: the
     /// shared state is where a project load, the Timeline ruler, and the
     /// commands all leave it.
@@ -618,6 +640,10 @@ impl PlaybackController {
                     if this.epoch != epoch || !this.transport.is_playing() {
                         return true;
                     }
+                    // The active composition can change under a running
+                    // transport; the loop range is one of the things that
+                    // changes with it.
+                    this.resync_from_active_composition(cx);
                     // Audio tracks + running engine ⇒ the device clock is
                     // the master; anything else stays on the wall clock.
                     // The switch is decided in exactly one place:

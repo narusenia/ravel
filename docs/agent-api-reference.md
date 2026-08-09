@@ -2550,7 +2550,9 @@ Unknown type keys are skipped silently (plugin space).
   `PlaybackLoop{In,Out,Clear}`). The loop range itself lives in the
   `panels::LoopRangeState` global, keyed by composition; the controller
   adopts it before every command and writes back what the transport changed
-  on its own (a seek out of the range drops it). While
+  on its own (a seek out of the range drops it);
+  `resync_from_active_composition(cx)` does the same from the tick loop, so a
+  composition switch mid-playback moves the fold with it. While
   playing, a spawned task ticks once per frame interval, moves the Timeline
   playhead, records the shared `PlaybackPosition` global, and asks
   `ProjectState` to re-evaluate the root composition output at the new

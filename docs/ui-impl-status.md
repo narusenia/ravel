@@ -274,7 +274,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 項目 | 状態 | 備考 |
 |------|------|------|
 | New / Open / Save / Save As | ✅ | File メニュー配線済み。Save As/Open は GPUI ネイティブダイアログ。未保存時の Save は Save As にフォールスルー。dirty な New/Open は保存確認後に続行 |
-| メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録し、再生ヘッド位置に素材長のレイヤーを作成。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用。音声つきの素材は同じ 1 undo の中で殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）も設定し、映像を持たない音声ファイルは frameless な `audio` テンプレートでレイヤー化（`audio-plan.md` 単位 4） |
+| メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録するだけで、レイヤーは作らない（配置は別操作）。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用 |
 | UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ、Timeline の BPM グリッド）。任意エントリで、欠落時はそれぞれ `root_comp` フォールバックと `BpmGrid` の既定。既定のままの BPM グリッドはエントリ自体を書かない。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
 | ワークスペースレイアウトの埋込 | ✅ | 任意エントリ `workspace_layout.toml`。**オプトイン（既定 OFF）**で、OFF のときは書かれない（format_version 据え置き）。詳細は下の[ワークスペース節](#ワークスペースドッキングウィンドウ) |
 | Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、公開パラメータ宣言 `exposed_parameters` を含む、format v7）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳み、v5 以前はカーブパラメータを変換する。v6 以前は宣言ゼロとして読む。宣言の追加・改名・並べ替え・削除は Properties の公開パラメータセクションから行える（EXPO-5） |
@@ -362,7 +362,7 @@ gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` へ
 
 | パネル | 状態 | 備考 |
 |--------|------|------|
-| MediaBin | ✅ | プロジェクトのメディアアセット一覧（media-import 計画 単位 4）。種別フィルタ（全て / 映像 / 静止画 / 音声）と名前検索、サムネイル（単位 5 の `ThumbnailCache`、生成前・失敗時は種別アイコン）、オフライン表示。選択は `MediaSelection` Global で Properties が `PropertiesTarget::MediaAsset` に追従（表示はプレースホルダ、作り込みは単位 6）。行の操作: ダブルクリック / 右クリックで「レイヤーとして追加」（単位 3 のインポート経路を再利用）「素材からコンポジションを作成」（素材の解像度・fps・長さ）「プロジェクトから削除」（使用中なら参照コンプ・レイヤー名つきで確認）。Relink… は単位 6 |
+| MediaBin | ✅ | プロジェクトのメディアアセット一覧（media-import 計画 単位 4）。種別フィルタ（全て / 映像 / 静止画 / 音声）と名前検索、サムネイル（単位 5 の `ThumbnailCache`、生成前・失敗時は種別アイコン）、オフライン表示。選択は `MediaSelection` Global で Properties が `PropertiesTarget::MediaAsset` に追従（表示はプレースホルダ、作り込みは単位 6）。行の操作: ダブルクリック / 右クリックで「レイヤーとして追加」（再生ヘッド位置）「素材からコンポジションを作成」（素材の解像度・fps・長さ）「プロジェクトから削除」（使用中なら参照コンプ・レイヤー名つきで確認）。Relink… は単位 6 |
 | Outliner | ✅ | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete。ドラッグ中は `ResizeUpDown`）。複数選択（単位 6、Shift 範囲 / Cmd トグル、Duplicate・Delete は選択全体に 1 undo）。検索・フィルタ欄と親子付け替え D&D は非対象 |
 | Render Queue | ✅ | 書き出しジョブ一覧（`render-export-plan.md` 単位 5）。行は投入時点で出て「待機中」から始まり、ワーカーのイベントで 進捗バー・n / m フレーム・状態語が動く。中止ボタンは待機中・実行中の行だけに出し、フレーム境界で止めて書きかけの出力を消す。失敗行は `RenderError` の診断を下に出す。「完了分を消す」は終わった行だけを畳む。**キューはパネルではなくセッションが持つ**ので、パネルを閉じてもレンダリングは続き、開き直すと走っているジョブが見える |
 | Dopesheet | 🔲 | PlaceholderPanel |

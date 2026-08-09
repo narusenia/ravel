@@ -1764,10 +1764,16 @@ Unknown type keys are skipped silently (plugin space).
   `add_layer_from_template(doc, comp, template, &registry)`,
   `add_media_layer(doc, comp, template, &registry, MediaLayerSpec {
   name_base, asset_id, start_frame, out_frame, audio_stream_index })` (the
-  media template with `asset_id` bound, placed at the playhead — REQ-UI-010;
+  media template with `asset_id` bound, placed at `start_frame` — REQ-UI-010;
   `audio_stream_index: Some(i)` also gives the shell an `AudioSource` for the
   same asset id, which is how a video layer's sound is wired — audio-plan
   unit 4),
+  `add_media_layers(doc, comp, &registry, &asset_ids, start_frame)
+  -> (Document, Vec<LayerId>)` (the caller-facing one: template choice,
+  length, and name derived from each already-imported asset; the whole batch
+  is **one** document, so a multi-asset drop is one undo step. Importing
+  places nothing — `ProjectState::add_asset_layers` is the committing
+  wrapper),
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`,
   `replace_network_renaming_pin(doc, &path, graph, Option<&PinRename>)` (the
   same, told that the edit renamed one of the network's own In / Out custom

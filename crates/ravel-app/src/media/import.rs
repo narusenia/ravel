@@ -10,6 +10,10 @@
 //! [`crate::project_state::ProjectState::import_media`] as **one**
 //! `commit_document`, so a multi-file import is exactly one undo step.
 //!
+//! An import registers assets and nothing else: the file lands in the
+//! MediaBin, not on a composition. Placing it is a separate action
+//! ([`crate::project_state::ProjectState::add_asset_layers`]).
+//!
 //! The probe backends are injectable through [`MediaProber`] (the same idea
 //! as the `media` node's `ReaderFactory`), which keeps the tests free of
 //! real FFmpeg and real media files.
@@ -97,11 +101,11 @@ pub struct ImportFailure {
 }
 
 /// What one import run did: the asset ids now in the document (new or
-/// reused), the layers created for them, and the files that were skipped.
+/// reused) and the files that were skipped. Nothing is placed on a
+/// composition — see [`crate::project_state::ProjectState::import_media`].
 #[derive(Clone, Debug, Default)]
 pub struct ImportSummary {
     pub imported: Vec<(String, PathBuf)>,
-    pub layers: Vec<ravel_core::id::LayerId>,
     pub skipped: Vec<ImportFailure>,
 }
 

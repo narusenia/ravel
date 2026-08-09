@@ -24,7 +24,7 @@ use crate::panels::ViewerImage;
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
-use ravel_core::composition::{AssetKind, AssetPath, Composition, Document, MediaAssetEntry};
+use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::{EvalContext, Quality};
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
@@ -1000,10 +1000,14 @@ impl ProjectState {
     // ----- media import (REQ-UI-010) -------------------------------------------
 
     /// Apply one batch of probed media files to the document (File ▸ Import
-    /// / OS file drop): register each as a media asset — reusing the
-    /// existing entry when the same absolute path is already present — and
-    /// stack a media layer for it at the playhead (decision 4). The whole
-    /// batch is a single `commit_document`, i.e. one undo step.
+    /// / OS file drop): register each as a media asset, reusing the existing
+    /// entry when the same absolute path is already present. The whole batch
+    /// is a single `commit_document`, i.e. one undo step.
+    ///
+    /// **Import only imports** (refactor unit 10): nothing is placed on a
+    /// composition. Putting an asset on the timeline is its own action —
+    /// the MediaBin's Add as Layer, a double click, or a drag onto the
+    /// Timeline or Viewer, all of which land in [`Self::add_asset_layers`].
     ///
     /// Probing happened before this call (background executor, see
     /// [`crate::media::import`]); this method is the synchronous document
@@ -1027,25 +1031,17 @@ impl ProjectState {
             return summary;
         }
 
-        let playhead = cx
-            .try_global::<crate::panels::PlaybackPosition>()
-            .map(|position| position.frame)
-            .unwrap_or(0);
         let project_root = self
             .project_path
             .as_deref()
             .and_then(|path| path.parent())
             .map(Path::to_path_buf);
-        let active = self
-            .active_composition(cx)
-            .map(|comp| (comp.id, comp.frame_rate, comp.duration_frames));
 
         let mut doc = self.store.document().clone();
         // Dedupe within the batch as well as against the document: two
         // frames of one sequence (or the same file picked twice) resolve to
         // one asset.
         let mut batch_ids: HashMap<PathBuf, String> = HashMap::new();
-        let mut layer_specs = Vec::new();
         for asset in probed {
             let id = match batch_ids.get(&asset.path).cloned().or_else(|| {
                 doc.media_assets.iter().find_map(|(id, entry)| {
@@ -1068,70 +1064,49 @@ impl ProjectState {
                 }
             };
             batch_ids.insert(asset.path.clone(), id.clone());
-            summary.imported.push((id.clone(), asset.path.clone()));
-            layer_specs.push((id, asset));
-        }
-
-        // "Add as layer": the media template with `asset_id` bound, placed
-        // at the playhead with the asset's own length; an unknown duration
-        // spans the whole composition. A file with audio also gets the
-        // shell's `AudioSource` bound to the same asset id (audio-plan
-        // unit 4), and an audio-only file uses the frameless `audio`
-        // template instead of a `media` node that has no picture to decode.
-        if let Some((comp, comp_fps, comp_duration)) = active {
-            for (id, asset) in layer_specs {
-                let audio_stream_index = asset.metadata.first_audio_stream_index();
-                let template_key = if audio_stream_index.is_some() && is_audio_only(&asset) {
-                    "audio"
-                } else {
-                    "media"
-                };
-                let Some(template) =
-                    ravel_core::composition::templates::builtin_layer_template(template_key)
-                else {
-                    tracing::warn!(template_key, "media import: layer template missing");
-                    continue;
-                };
-                let out_frame = asset
-                    .metadata
-                    .duration_secs
-                    .map(|secs| (secs * comp_fps.as_f64()).ceil().max(1.0) as u64)
-                    .unwrap_or(comp_duration);
-                let name_base = asset
-                    .path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .filter(|stem| !stem.is_empty())
-                    .unwrap_or_else(|| "Media".to_string());
-                match ravel_ui::document::add_media_layer(
-                    &doc,
-                    comp,
-                    template,
-                    &self.registry,
-                    ravel_ui::document::MediaLayerSpec {
-                        name_base: &name_base,
-                        asset_id: &id,
-                        start_frame: playhead as i64,
-                        out_frame,
-                        audio_stream_index,
-                    },
-                ) {
-                    Ok(Some((next, layer_id))) => {
-                        doc = next;
-                        summary.layers.push(layer_id);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::error!(%err, "media import: layer creation failed");
-                    }
-                }
-            }
-        } else {
-            tracing::warn!("media import: no active composition; imported without layers");
+            summary.imported.push((id, asset.path.clone()));
         }
 
         self.commit_document(doc, InvalidationHint::Structural, cx);
         summary
+    }
+
+    /// Stack a layer for each already-imported asset on the active
+    /// composition, starting at `start_frame`, and return the new layer ids.
+    ///
+    /// The whole batch is one `commit_document`, so dropping five clips onto
+    /// the Timeline at once is **one** undo step. A no-op without an active
+    /// composition or when nothing resolves.
+    pub fn add_asset_layers(
+        &mut self,
+        asset_ids: &[String],
+        start_frame: i64,
+        cx: &mut Context<Self>,
+    ) -> Vec<LayerId> {
+        let Some(comp) = self.active_composition(cx).map(|comp| comp.id) else {
+            tracing::warn!("add as layer: no active composition");
+            return Vec::new();
+        };
+        let (doc, layers) = ravel_ui::document::add_media_layers(
+            self.store.document(),
+            comp,
+            &self.registry,
+            asset_ids,
+            start_frame,
+        );
+        if layers.is_empty() {
+            return layers;
+        }
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        layers
+    }
+
+    /// The frame a "put this asset on the timeline" action places at when it
+    /// has no position of its own (the menu item, the double click).
+    pub fn playhead_frame(cx: &App) -> i64 {
+        cx.try_global::<crate::panels::PlaybackPosition>()
+            .map(|position| position.frame as i64)
+            .unwrap_or(0)
     }
 
     // ----- composition management (REQ-UI-013) --------------------------------
@@ -1535,18 +1510,6 @@ impl ProjectState {
 
 impl EventEmitter<ProjectEvent> for ProjectState {}
 impl EventEmitter<DocumentReplaced> for ProjectState {}
-
-/// Whether a probed asset is a container with sound but no picture.
-///
-/// Such a file becomes a frameless `audio` layer instead of a `media` node:
-/// the node would have no video stream to decode and would contribute a
-/// transparent frame plus a warning to every evaluation, while the shell's
-/// `AudioSource` is the part that actually plays (audio-plan decision 1,
-/// unit 4). Only a container can be audio-only — a still or a sequence is
-/// picture by definition.
-fn is_audio_only(asset: &crate::media::import::ProbedAsset) -> bool {
-    asset.kind == AssetKind::Container && asset.metadata.width.is_none()
-}
 
 /// A readable, collision-free asset id derived from the file name.
 fn unique_asset_id(doc: &Document, path: &Path) -> String {

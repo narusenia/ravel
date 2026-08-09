@@ -597,6 +597,105 @@ fn bind_media_asset_id(mut network: Graph, asset_id: &str) -> Graph {
     network
 }
 
+/// Stack a layer for each of `asset_ids` (in order) on `comp`, at
+/// `start_frame`, and return the resulting document with the new layer ids.
+///
+/// This is the one "make a layer out of an asset already in the project"
+/// transform — the MediaBin's Add as Layer, the double click, and the drag
+/// onto the Timeline or Viewer all go through it, which is why the whole
+/// batch produces a **single** document: the caller commits once, so a
+/// multi-asset drop is one undo step. Importing no longer places anything
+/// (refactor unit 10): registering an asset and putting it on the timeline
+/// are separate user actions.
+///
+/// Each layer takes the asset's own length in composition frames, falling
+/// back to the composition length when the duration is unknown, and is named
+/// after the asset's file stem. An asset that is missing, has no readable
+/// composition, or whose template is unavailable is skipped rather than
+/// aborting the batch.
+pub fn add_media_layers(
+    doc: &Document,
+    comp: CompId,
+    registry: &NodeRegistry,
+    asset_ids: &[String],
+    start_frame: i64,
+) -> (Document, Vec<LayerId>) {
+    let mut next = doc.clone();
+    let mut created = Vec::new();
+    let Some((frame_rate, duration_frames)) = doc
+        .get_composition(comp)
+        .map(|comp| (comp.frame_rate, comp.duration_frames))
+    else {
+        return (next, created);
+    };
+    for asset_id in asset_ids {
+        let Some(entry) = next.get_media_asset(asset_id) else {
+            continue;
+        };
+        let audio_stream_index = entry.metadata.first_audio_stream_index();
+        // An audio-only file uses the frameless `audio` template instead of a
+        // `media` node with no picture to decode — but only when the stream
+        // list names a stream to play: a bare legacy count cannot, and a
+        // frameless layer with no audio source would be nothing at all.
+        let template_key = if audio_stream_index.is_some() && is_audio_only(entry) {
+            "audio"
+        } else {
+            "media"
+        };
+        let Some(template) =
+            ravel_core::composition::templates::builtin_layer_template(template_key)
+        else {
+            continue;
+        };
+        let out_frame = entry
+            .metadata
+            .duration_secs
+            .map(|secs| (secs * frame_rate.as_f64()).ceil().max(1.0) as u64)
+            .unwrap_or(duration_frames);
+        let name_base = media_layer_name_base(asset_id, entry);
+        // A template that fails to instantiate or a composition that vanished
+        // skips this asset; the rest of the batch still lands.
+        if let Ok(Some((doc, layer_id))) = add_media_layer(
+            &next,
+            comp,
+            template,
+            registry,
+            MediaLayerSpec {
+                name_base: &name_base,
+                asset_id,
+                start_frame,
+                out_frame,
+                audio_stream_index,
+            },
+        ) {
+            next = doc;
+            created.push(layer_id);
+        }
+    }
+    (next, created)
+}
+
+/// A container with sound and no picture. `AssetKind` alone cannot say it:
+/// a muxed clip and a bare `.wav` are both containers.
+fn is_audio_only(entry: &ravel_core::composition::MediaAssetEntry) -> bool {
+    entry.kind == ravel_core::composition::AssetKind::Container && entry.metadata.width.is_none()
+}
+
+/// Base name of a media layer: the asset's file stem, or the asset id when
+/// the persisted path yields none (a bare `${VAR}` token, a trailing
+/// separator).
+fn media_layer_name_base(
+    asset_id: &str,
+    entry: &ravel_core::composition::MediaAssetEntry,
+) -> String {
+    let path = entry.path.to_string();
+    std::path::Path::new(&path)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty() && !stem.starts_with("${"))
+        .unwrap_or_else(|| asset_id.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Composition management (REQ-UI-013)
 // ---------------------------------------------------------------------------

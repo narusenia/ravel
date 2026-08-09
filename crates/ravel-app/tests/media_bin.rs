@@ -7,8 +7,8 @@
 //!
 //! - document assets become panel rows;
 //! - selecting an asset publishes a `PropertiesTarget::MediaAsset`;
-//! - "add as layer" and "new composition from asset" go through the unit-3
-//!   import path;
+//! - "add as layer" places the asset (an import alone places nothing) and
+//!   "new composition from asset" makes the comp and places into it;
 //! - deleting an in-use asset asks first (the confirmation carries the
 //!   reference count), an unused one deletes immediately, and a confirmed
 //!   delete prunes the selection and the Properties target.
@@ -184,24 +184,25 @@ fn selecting_an_asset_publishes_the_properties_target(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn add_as_layer_reuses_the_import_path(cx: &mut TestAppContext) {
+fn importing_does_not_place_a_layer_but_add_as_layer_does(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
     import_clip(&harness, cx);
+
+    harness.project.read_with(cx, |project, cx| {
+        let comp = project.active_composition(cx).expect("active composition");
+        assert_eq!(comp.layer_count(), 0, "an import only imports");
+    });
 
     cx.update(|cx| add_asset_as_layer("clip", cx));
     cx.run_until_parked();
 
     harness.project.read_with(cx, |project, cx| {
         let comp = project.active_composition(cx).expect("active composition");
-        assert_eq!(
-            comp.layer_count(),
-            2,
-            "the import created one layer, the row action a second"
-        );
+        assert_eq!(comp.layer_count(), 1, "the row action places the asset");
         assert_eq!(
             project.document().media_assets.len(),
             1,
-            "the asset is deduped on its resolved path, not re-registered"
+            "placing an asset does not register a second one"
         );
     });
 }
@@ -255,6 +256,8 @@ fn deleting_an_unused_asset_skips_the_confirmation(cx: &mut TestAppContext) {
 fn deleting_an_in_use_asset_confirms_with_the_reference_count(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
     import_clip(&harness, cx);
+    cx.update(|cx| add_asset_as_layer("clip", cx));
+    cx.run_until_parked();
 
     // The confirmation names the referencing composition and layer and
     // carries the count.

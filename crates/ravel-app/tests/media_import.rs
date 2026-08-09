@@ -6,20 +6,21 @@
 //! Pins the unit-3 completion conditions without real FFmpeg or real media
 //! files (probe backends are injected):
 //!
-//! - an import registers assets and layers and is exactly one undo step
+//! - an import registers assets and **nothing else** — placing them is a
+//!   separate action (refactor unit 10) — and is exactly one undo step
 //!   (proved through redo, since `DocumentStore::undo` also reports `true`
 //!   for reverting an uncommitted preview);
 //! - a multi-file batch is one undo step, with probe failures skipped;
-//! - the layer is placed at the playhead with `ceil(duration × comp_fps)`
-//!   frames, falling back to the composition length when the duration is
-//!   unknown;
-//! - re-importing the same absolute path reuses the existing asset id.
+//! - re-importing the same absolute path reuses the existing asset id;
+//! - `add_asset_layers` places at the requested frame with
+//!   `ceil(duration × comp_fps)` frames, falling back to the composition
+//!   length when the duration is unknown, and a whole batch is one undo
+//!   step.
 
 use std::path::PathBuf;
 
 use gpui::{AppContext as _, TestAppContext};
 use ravel_app::media::import::{ImportFailure, MediaProber, ProbedAsset};
-use ravel_app::panels;
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
 use ravel_core::graph::ParameterValue;
@@ -35,12 +36,16 @@ fn project(cx: &mut TestAppContext) -> gpui::Entity<ProjectState> {
     })
 }
 
-fn set_playhead(cx: &mut TestAppContext, frame: u64) {
-    cx.update(|cx| {
-        cx.set_global(panels::PlaybackPosition {
-            frame,
-            fps: FrameRate::new(30, 1),
-        });
+/// Place already-imported assets, the way every "add as layer" path does.
+fn add_layers(
+    project: &gpui::Entity<ProjectState>,
+    ids: &[&str],
+    start_frame: i64,
+    cx: &mut TestAppContext,
+) {
+    let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+    project.update(cx, |project, cx| {
+        project.add_asset_layers(&ids, start_frame, cx);
     });
 }
 
@@ -70,15 +75,13 @@ fn probed_clip(path: &str, duration: Option<f64>) -> ProbedAsset {
 }
 
 #[gpui::test]
-fn import_registers_asset_and_layer_as_one_undo_step(cx: &mut TestAppContext) {
+fn import_registers_the_asset_without_placing_it(cx: &mut TestAppContext) {
     let project = project(cx);
-    set_playhead(cx, 42);
 
     let summary = project.update(cx, |project, cx| {
         project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
     });
     assert_eq!(summary.imported.len(), 1);
-    assert_eq!(summary.layers.len(), 1);
     assert!(summary.skipped.is_empty());
 
     project.read_with(cx, |project, _| {
@@ -91,15 +94,50 @@ fn import_registers_asset_and_layer_as_one_undo_step(cx: &mut TestAppContext) {
         assert_eq!(entry.resolved, Some(PathBuf::from("/media/clip.mov")));
         assert_eq!(entry.metadata.audio_stream_count, 1);
 
-        let comp = ravel_ui::document::root_composition(doc).unwrap();
+        assert_eq!(
+            ravel_ui::document::root_composition(doc)
+                .unwrap()
+                .layer_count(),
+            0,
+            "importing a file does not put it on the timeline"
+        );
+    });
+
+    // One undo removes the asset; redo proves the step was a real history
+    // entry, not a preview revert.
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    project.read_with(cx, |project, _| {
+        assert!(project.document().media_assets.is_empty());
+    });
+    project.update(cx, |project, cx| assert!(project.redo(cx)));
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.document().media_assets.len(), 1);
+    });
+}
+
+/// Placing an imported asset binds the media node to it and puts the layer at
+/// the requested frame with the asset's own length — one undo step of its own,
+/// separate from the import.
+#[gpui::test]
+fn adding_an_asset_as_a_layer_places_and_binds_it(cx: &mut TestAppContext) {
+    let project = project(cx);
+    project.update(cx, |project, cx| {
+        project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
+    });
+
+    add_layers(&project, &["clip"], 42, cx);
+
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         assert_eq!(comp.layer_count(), 1);
         let layer = &comp.layers[0];
-        assert_eq!(layer.start_frame, 42, "the layer starts at the playhead");
+        assert_eq!(layer.start_frame, 42, "the layer starts where it was put");
         assert_eq!(layer.in_frame, 0);
         assert_eq!(
             layer.out_frame, 60,
             "out_frame = ceil(2.0 s × 30 fps comp rate)"
         );
+        assert_eq!(layer.name, "clip 1", "named after the asset's file stem");
         let media_node = layer
             .network
             .nodes()
@@ -115,27 +153,62 @@ fn import_registers_asset_and_layer_as_one_undo_step(cx: &mut TestAppContext) {
         );
     });
 
-    // One undo removes asset and layer together; redo proves the step was a
-    // real history entry, not a preview revert.
+    // Undo takes the layer back and leaves the import standing.
     project.update(cx, |project, cx| assert!(project.undo(cx)));
     project.read_with(cx, |project, _| {
-        assert!(project.document().media_assets.is_empty());
         assert_eq!(
             ravel_ui::document::root_composition(project.document())
                 .unwrap()
                 .layer_count(),
             0
         );
+        assert_eq!(project.document().media_assets.len(), 1, "still imported");
     });
     project.update(cx, |project, cx| assert!(project.redo(cx)));
     project.read_with(cx, |project, _| {
-        assert_eq!(project.document().media_assets.len(), 1);
         assert_eq!(
             ravel_ui::document::root_composition(project.document())
                 .unwrap()
                 .layer_count(),
             1
         );
+    });
+}
+
+/// Dropping several assets at once is **one** undo step: the batch is a
+/// single document commit (refactor unit 10 completion condition).
+#[gpui::test]
+fn placing_several_assets_at_once_is_one_undo_step(cx: &mut TestAppContext) {
+    let project = project(cx);
+    project.update(cx, |project, cx| {
+        project.import_media(
+            vec![
+                probed_clip("/media/a.mov", Some(1.0)),
+                probed_clip("/media/b.mov", Some(2.0)),
+                probed_clip("/media/c.mov", Some(3.0)),
+            ],
+            vec![],
+            cx,
+        )
+    });
+
+    add_layers(&project, &["a", "b", "c"], 12, cx);
+    project.read_with(cx, |project, _| {
+        let comp = ravel_ui::document::root_composition(project.document()).unwrap();
+        assert_eq!(comp.layer_count(), 3);
+        assert!(comp.layers.iter().all(|layer| layer.start_frame == 12));
+    });
+
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    project.read_with(cx, |project, _| {
+        assert_eq!(
+            ravel_ui::document::root_composition(project.document())
+                .unwrap()
+                .layer_count(),
+            0,
+            "one undo reverts the whole drop"
+        );
+        assert_eq!(project.document().media_assets.len(), 3, "still imported");
     });
 }
 
@@ -156,12 +229,6 @@ fn a_three_file_batch_is_one_undo_step(cx: &mut TestAppContext) {
     });
     project.read_with(cx, |project, _| {
         assert_eq!(project.document().media_assets.len(), 3);
-        assert_eq!(
-            ravel_ui::document::root_composition(project.document())
-                .unwrap()
-                .layer_count(),
-            3
-        );
     });
 
     project.update(cx, |project, cx| assert!(project.undo(cx)));
@@ -169,12 +236,6 @@ fn a_three_file_batch_is_one_undo_step(cx: &mut TestAppContext) {
         assert!(
             project.document().media_assets.is_empty(),
             "one undo reverts the whole batch"
-        );
-        assert_eq!(
-            ravel_ui::document::root_composition(project.document())
-                .unwrap()
-                .layer_count(),
-            0
         );
     });
     project.update(cx, |project, cx| assert!(project.redo(cx)));
@@ -255,6 +316,7 @@ fn unknown_duration_falls_back_to_the_composition_length(cx: &mut TestAppContext
     project.update(cx, |project, cx| {
         project.import_media(vec![probed_clip("/media/stillish.mov", None)], vec![], cx)
     });
+    add_layers(&project, &["stillish"], 0, cx);
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         let layer = &comp.layers[0];
@@ -279,10 +341,13 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
     project.read_with(cx, |project, _| {
         let doc = project.document();
         assert_eq!(doc.media_assets.len(), 1, "no duplicate asset id");
-        // …but the user asked twice, so both layers exist, pointing at the
-        // shared asset.
+    });
+
+    // …but placing it twice does make two layers pointing at the shared asset.
+    add_layers(&project, &["clip", "clip"], 0, cx);
+    project.read_with(cx, |project, _| {
         assert_eq!(
-            ravel_ui::document::root_composition(doc)
+            ravel_ui::document::root_composition(project.document())
                 .unwrap()
                 .layer_count(),
             2
@@ -291,13 +356,14 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
 
     // Each import is still its own undo step.
     project.update(cx, |project, cx| assert!(project.undo(cx)));
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
     project.read_with(cx, |project, _| {
         assert_eq!(project.document().media_assets.len(), 1);
         assert_eq!(
             ravel_ui::document::root_composition(project.document())
                 .unwrap()
                 .layer_count(),
-            1
+            0
         );
     });
 }
@@ -312,11 +378,11 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_clip_with_audio_binds_the_shell_audio_source(cx: &mut TestAppContext) {
     let project = project(cx);
-    set_playhead(cx, 10);
 
     project.update(cx, |project, cx| {
         project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
     });
+    add_layers(&project, &["clip"], 10, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
@@ -331,7 +397,7 @@ fn a_clip_with_audio_binds_the_shell_audio_source(cx: &mut TestAppContext) {
         assert!(layer.has_frame_output(), "a video clip still has a picture");
     });
 
-    // Asset, layer, and audio source revert and return together.
+    // Layer and audio source revert and return together.
     project.update(cx, |project, cx| assert!(project.undo(cx)));
     project.read_with(cx, |project, _| {
         assert_eq!(
@@ -365,6 +431,7 @@ fn silent_media_gets_no_audio_source(cx: &mut TestAppContext) {
     project.update(cx, |project, cx| {
         project.import_media(vec![silent, still], vec![], cx)
     });
+    add_layers(&project, &["silent", "plate"], 0, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
@@ -388,6 +455,7 @@ fn an_audio_only_file_becomes_a_frameless_audio_layer(cx: &mut TestAppContext) {
     project.update(cx, |project, cx| {
         project.import_media(vec![music], vec![], cx)
     });
+    add_layers(&project, &["music"], 0, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
@@ -421,16 +489,17 @@ fn a_count_without_the_stream_list_binds_nothing(cx: &mut TestAppContext) {
     project.update(cx, |project, cx| {
         project.import_media(vec![legacy], vec![], cx)
     });
+    add_layers(&project, &["legacy"], 0, cx);
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         assert!(comp.layers[0].audio.is_none());
     });
 }
 
-/// Importing with no active composition still registers the assets; only
-/// layer creation is skipped (the batch remains one undo step).
+/// Without an active composition an import still registers the assets, and
+/// placing them is simply a no-op.
 #[gpui::test]
-fn import_without_an_active_composition_skips_layers(cx: &mut TestAppContext) {
+fn placing_without_an_active_composition_is_a_no_op(cx: &mut TestAppContext) {
     let project = project(cx);
     project.update(cx, |project, cx| project.set_active_composition(None, cx));
 
@@ -445,10 +514,16 @@ fn import_without_an_active_composition_skips_layers(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(summary.imported.len(), 1);
-    assert!(summary.layers.is_empty());
     assert_eq!(summary.skipped.len(), 1);
 
+    add_layers(&project, &["clip"], 0, cx);
     project.read_with(cx, |project, _| {
         assert_eq!(project.document().media_assets.len(), 1);
+        assert_eq!(
+            ravel_ui::document::root_composition(project.document())
+                .unwrap()
+                .layer_count(),
+            0
+        );
     });
 }

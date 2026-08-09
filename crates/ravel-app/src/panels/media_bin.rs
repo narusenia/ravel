@@ -30,7 +30,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
-use crate::media::import::ProbedAsset;
 use crate::media::thumbnail::{ThumbnailCache, ThumbnailSource, ThumbnailState};
 use crate::project_state::ProjectState;
 
@@ -533,31 +532,48 @@ fn asset_entry(asset_id: &str, cx: &App) -> Option<(Entity<ProjectState>, MediaA
     Some((project, entry))
 }
 
-/// Add the asset to the active composition as a layer at the playhead, by
-/// feeding it back through the unit-3 import path (`ProjectState::import_media`
-/// dedupes on the resolved path, so the existing asset is reused and only the
-/// layer is created — one undo step). A no-op for offline assets and without
+/// Add the asset to the active composition as a layer at the playhead — one
+/// undo step. A no-op for offline assets (nothing would resolve) and without
 /// an active composition.
 pub fn add_asset_as_layer(asset_id: &str, cx: &mut App) {
-    let Some((project, entry)) = asset_entry(asset_id, cx) else {
-        return;
-    };
-    let Some(path) = entry.resolved.clone() else {
+    add_assets_as_layers(
+        &[asset_id.to_string()],
+        ProjectState::playhead_frame(cx),
+        cx,
+    );
+}
+
+/// [`add_asset_as_layer`] for a whole set at a chosen frame — the drop
+/// handlers of the Timeline and the Viewer. One `commit_document` covers the
+/// batch, so dropping a multi-selection is a single undo step.
+pub fn add_assets_as_layers(asset_ids: &[String], start_frame: i64, cx: &mut App) {
+    let Some(project) = cx
+        .try_global::<crate::project_state::ProjectStateHandle>()
+        .and_then(|handle| handle.0.upgrade())
+    else {
         return;
     };
     if super::active_composition(cx).is_none() {
         return;
     }
+    // Offline assets have no file to decode; the menu item is disabled for
+    // them and a drag must not smuggle one in.
+    let online: Vec<String> = asset_ids
+        .iter()
+        .filter(|id| {
+            project
+                .read(cx)
+                .document()
+                .get_media_asset(id)
+                .is_some_and(|entry| entry.resolved.is_some())
+        })
+        .cloned()
+        .collect();
+    if online.is_empty() {
+        return;
+    }
     project.update(cx, |project, cx| {
-        project.import_media(
-            vec![ProbedAsset {
-                path,
-                kind: entry.kind.clone(),
-                metadata: entry.metadata.clone(),
-            }],
-            vec![],
-            cx,
-        );
+        project.add_asset_layers(&online, start_frame, cx);
     });
 }
 

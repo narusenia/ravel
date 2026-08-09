@@ -557,6 +557,10 @@ pub struct TimelineGpuiPanel {
     /// repaint from it.
     #[allow(dead_code)]
     bpm_grid_sub: Subscription,
+    /// Settles an in-flight inline scrub when this panel is dropped
+    /// ([`TimelineGpuiPanel::end_channel_scrubs`]).
+    #[allow(dead_code)]
+    release_sub: Subscription,
 }
 
 impl TimelineGpuiPanel {
@@ -608,6 +612,19 @@ impl TimelineGpuiPanel {
         });
         let bpm_grid_sub = cx.observe_global::<super::BpmGridState>(|_this, cx| {
             cx.notify();
+        });
+        // A scrub in flight when this panel goes away (its pane closed, the
+        // workspace replaced) has already written live values through
+        // `apply_document`, and the widget that owed the commit dies with the
+        // panel — `HIGH-28` again, with the panel itself as the carrier.
+        //
+        // Those values are **committed**, not reverted: the user dragged a
+        // value and watched it change, and a pane closing is not a cancel
+        // gesture. Committing leaves one undo step they can press; reverting
+        // would silently discard a deliberate edit — and, because the live
+        // document is shared, any other panel's uncommitted work with it.
+        let release_sub = cx.on_release(|this: &mut Self, cx| {
+            this.end_channel_scrubs(|_| true, cx);
         });
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
@@ -663,6 +680,7 @@ impl TimelineGpuiPanel {
             active_comp_sub,
             selection_sub,
             bpm_grid_sub,
+            release_sub,
         }
     }
 
@@ -963,7 +981,7 @@ impl TimelineGpuiPanel {
         // A lock landing on a layer being scrubbed would swallow the live
         // gesture into its own undo step — and the write path stops accepting
         // the rest of the gesture once the flag is set.
-        self.finish_channel_scrubs(cx);
+        self.end_channel_scrubs(|_| true, cx);
         let targets = self.operation_targets(lid, cx);
         project.update(cx, |project, cx| {
             let Some(clicked) = project
@@ -2723,52 +2741,59 @@ impl TimelineGpuiPanel {
         self.prune_channel_scrubs(&visible, cx);
     }
 
-    /// Drop the scrub widgets of channel rows the header tree no longer shows.
+    /// End the in-flight value scrubs the caller selects, and settle
+    /// everything the gesture leaves behind.
     ///
-    /// A binding whose drag is still in flight is **ended** rather than
-    /// dropped, and survives one more pass. Dropping it outright is the lost
-    /// `Commit` of `HIGH-28`: the subscription the gesture-ending event
-    /// travels on goes with it. Keeping it dragging is no better — the widget
-    /// has no element left to move or release on, so the pointer can never end
-    /// the gesture and the binding would sit dragging forever. Ending it here
-    /// records the step for the values already applied; the commit's own
-    /// document change syncs again and that pass drops the idle binding.
-    fn prune_channel_scrubs(
+    /// **This is where a scrub gesture's lifetime ends**, other than the
+    /// pointer release that reaches the widget's own element. Three shapes
+    /// arrive here — the row left the tree, this panel is about to commit
+    /// something else, this panel is going away — and none of them may lean on
+    /// the widget's `Commit` reaching the panel:
+    ///
+    /// - a gesture whose value never changed emits **nothing at all**
+    ///   (`ScrubInputState::end_drag`), so cleanup that rides on the event
+    ///   would never run for it;
+    /// - the binding carrying the subscription is dropped right here, and
+    ///   GPUI delivers an emitted event only after this returns, so an event
+    ///   emitted now reaches nobody by construction. That is deliberate: a
+    ///   `Commit` arriving *after* the caller's own commit would land in the
+    ///   wrong undo step.
+    ///
+    /// So the commit-or-nothing decision is made here instead. A gesture that
+    /// moved the value commits the live document — `commit` differs from
+    /// `apply` only in recording the step, so the snapshot is the one the
+    /// routed `Commit` would have produced. A gesture that did not move it has
+    /// nothing to record: its own `Change` events already put the value back
+    /// where the last commit left it.
+    ///
+    /// Takes `&mut App` rather than `&mut Context<Self>` so the release
+    /// listener, which has no panel context left, runs the same code.
+    fn end_channel_scrubs(
         &mut self,
-        visible: &HashSet<(CompId, TimelineChannelRef)>,
-        cx: &mut Context<Self>,
+        mut ends: impl FnMut(&(CompId, TimelineChannelRef)) -> bool,
+        cx: &mut App,
     ) {
-        self.scrubs.retain(|key, scrub| {
-            visible.contains(key)
-                || scrub
-                    .state
-                    .update(cx, |state, cx| state.end_drag(cx))
-                    .is_some()
-        });
-    }
-
-    /// End every in-flight value scrub, taking the undo step it owes, before
-    /// this panel commits something else over the same live document.
-    ///
-    /// A gesture's live values are in the document without an undo step of
-    /// their own; another commit on top would swallow them into its step. The
-    /// bindings are dropped so the queued gesture-end events reach nobody
-    /// (GPUI delivers them after the caller returns, by which time the other
-    /// commit has landed), and the step is taken here instead — `commit`
-    /// differs from `apply` only in recording it.
-    fn finish_channel_scrubs(&mut self, cx: &mut Context<Self>) {
-        let mut moved = false;
         let mut ended = false;
-        for scrub in self.scrubs.values() {
-            if let Some(scrubbed) = scrub.state.update(cx, |state, cx| state.end_drag(cx)) {
-                ended = true;
-                moved |= scrubbed;
+        let mut moved = false;
+        self.scrubs.retain(|key, scrub| {
+            if !ends(key) {
+                return true;
             }
-        }
+            match scrub.state.update(cx, |state, cx| state.end_drag(cx)) {
+                // A drag was in flight: it ends, and its binding goes with it.
+                Some(scrubbed) => {
+                    ended = true;
+                    moved |= scrubbed;
+                    false
+                }
+                // Idle: not this function's business, the caller prunes.
+                None => true,
+            }
+        });
         if !ended {
             return;
         }
-        self.scrubs.clear();
+        // The captured frame belongs to the gesture, and the gesture is over.
         self.active_scrub = None;
         if !moved {
             return;
@@ -2782,6 +2807,22 @@ impl TimelineGpuiPanel {
             let live = project.document().clone();
             project.commit_document(live, InvalidationHint::None, cx);
         });
+    }
+
+    /// Drop the scrub widgets of channel rows the header tree no longer shows.
+    ///
+    /// A row that left the tree takes its gesture with it: the widget has no
+    /// element left to move or release on, so the pointer could never end the
+    /// drag and the binding would sit dragging forever — invisible to this
+    /// prune and to everything else. Ending it first is what keeps the pending
+    /// commit from dying with its carrier (`HIGH-28`).
+    fn prune_channel_scrubs(
+        &mut self,
+        visible: &HashSet<(CompId, TimelineChannelRef)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_channel_scrubs(|key| !visible.contains(key), cx);
+        self.scrubs.retain(|key, _| visible.contains(key));
     }
 
     /// Write one scrubbed channel value into the document at the playhead's
@@ -7726,6 +7767,186 @@ mod tests {
             Some(0.0),
             "the frame the playhead moved to is untouched"
         );
+    }
+
+    /// `render` must build no widgets. Creating entities and subscriptions
+    /// there is the mutation `.agents/rules/gpui.md` forbids, and a
+    /// subscription per frame is the shape the rule exists to stop; the sync
+    /// runs on the paths that change the tree instead.
+    #[gpui::test]
+    fn a_render_pass_builds_no_scrub_widgets(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        // Open the rows, then throw away what the tree-change sync built: from
+        // here on only drawing happens.
+        let _ = channel_scrub_widget(&window, &channel, cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.scrubs.clear();
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    panel.scrubs.is_empty(),
+                    "drawing the panel created {} scrub widget(s)",
+                    panel.scrubs.len()
+                );
+            })
+            .unwrap();
+    }
+
+    /// A gesture that changed nothing emits no `Commit`, so nothing that rides
+    /// on that event can be trusted to clean up after it: the binding and the
+    /// captured frame have to go on the same path that ends the gesture.
+    #[gpui::test]
+    fn a_stranded_gesture_that_changed_nothing_leaves_nothing_behind(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+
+        // Out and back: live changes fire, the release will emit nothing.
+        scrub.update(cx, |state, cx| {
+            state.begin_drag(0.0);
+            state.drag_to(5.0, &gpui::Modifiers::default(), cx);
+            state.drag_to(0.0, &gpui::Modifiers::default(), cx);
+        });
+        cx.run_until_parked();
+
+        // The row leaves the tree with the gesture still in flight.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel
+                    .state
+                    .apply_reveal(RevealFilter::Group(PropertyGroup::Opacity), false);
+                panel.sync_channel_scrubs(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(!scrub.read_with(cx, |state, _| state.is_dragging()));
+        window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    panel.scrubs.is_empty(),
+                    "the binding goes with the gesture, commit or no commit"
+                );
+                assert!(
+                    panel.active_scrub.is_none(),
+                    "and so does the frame it captured"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(0.0),
+            "the value is where the gesture left it"
+        );
+    }
+
+    /// The lock path with the same shape: nothing to record, but the bindings
+    /// and the captured frame still have to go, and the lock must still be one
+    /// undo step of its own.
+    #[gpui::test]
+    fn locking_during_a_gesture_that_changed_nothing_records_only_the_lock(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        scrub.update(cx, |state, cx| {
+            state.begin_drag(0.0);
+            state.drag_to(5.0, &gpui::Modifiers::default(), cx);
+            state.drag_to(0.0, &gpui::Modifiers::default(), cx);
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_lock(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(!scrub.read_with(cx, |state, _| state.is_dragging()));
+        let ended = scrub.entity_id();
+        window
+            .read_with(cx, |panel, _| {
+                // The row is still on screen, so the sync that follows the
+                // lock builds it a fresh widget — but the one that carried the
+                // gesture is gone, and so is the frame it captured.
+                assert!(
+                    panel
+                        .scrubs
+                        .values()
+                        .all(|scrub| scrub.state.entity_id() != ended)
+                );
+                assert!(panel.active_scrub.is_none());
+            })
+            .unwrap();
+        assert!(layer(&project, comp_id, a, cx).locked);
+
+        // One step, the lock's own: the gesture had nothing to add.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        let l = layer(&project, comp_id, a, cx);
+        assert!(!l.locked);
+        assert_eq!(
+            keyframes::channel_value_at(&l, &channel.row, 0, 0),
+            Some(0.0)
+        );
+    }
+
+    /// The panel is the thing that carries the pending commit, and panes do
+    /// close. A gesture in flight when the panel is dropped has already
+    /// written live values through `apply_document`; those are committed on
+    /// the way out, so the edit keeps an undo step instead of being folded
+    /// into whatever commits next (`HIGH-28`, with the panel as the carrier).
+    #[gpui::test]
+    fn dropping_the_panel_mid_gesture_commits_the_live_change(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: PropertyRowId::Shell(PropertyGroup::Position),
+            component: 0,
+        };
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        drag(&scrub, 5.0, cx);
+        let live = scrub.read_with(cx, |state, _| state.value());
+        drop(scrub);
+
+        // The pane goes away with the pointer still down.
+        window
+            .update(cx, |_panel, window, _cx| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(live),
+            "the live value stays"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            channel_value(&project, comp_id, &channel, cx),
+            Some(0.0),
+            "one undo covers the abandoned gesture"
+        );
+        // Only a committed step can be redone.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(channel_value(&project, comp_id, &channel, cx), Some(live));
     }
 
     /// A gesture that ends where it started records nothing — and must leave

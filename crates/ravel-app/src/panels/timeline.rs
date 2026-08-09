@@ -65,8 +65,15 @@ use crate::widgets::{
 use crate::workspace::{
     EditDelete, EditDuplicate, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
     KeyframeInterpolationLinear, KeyframeInterpolationStep, PlaybackStop, PlaybackToggle,
+    TimelineRevealAnchorPoint, TimelineRevealAnchorPointAdd, TimelineRevealAnimated,
+    TimelineRevealAnimatedAdd, TimelineRevealAudioGain, TimelineRevealAudioGainAdd,
+    TimelineRevealExpression, TimelineRevealExpressionAdd, TimelineRevealModified,
+    TimelineRevealModifiedAdd, TimelineRevealOpacity, TimelineRevealOpacityAdd,
+    TimelineRevealPosition, TimelineRevealPositionAdd, TimelineRevealRotation,
+    TimelineRevealRotationAdd, TimelineRevealScale, TimelineRevealScaleAdd,
 };
 use ravel_ui::command::CommandId;
+use ravel_ui::keyframes::RevealFilter;
 
 /// GPUI key context used by shortcuts local to the timeline.
 pub const KEY_CONTEXT: &str = "Timeline";
@@ -99,6 +106,74 @@ const BEAT_LINE_ALPHA: f32 = 0.45;
 const BPM_TOGGLE_WIDTH: f32 = 32.0;
 /// Width of one BPM readout / editor in the transport toolbar.
 const BPM_FIELD_WIDTH: f32 = 52.0;
+
+/// Every After Effects-style reveal chord: the handler name, the action the
+/// chord dispatches, the criterion it applies, and whether the chord adds to
+/// the current filter (`Shift`) instead of replacing it.
+///
+/// **One table, two readers** — the handler definitions and the `on_action`
+/// wiring — for the same reason `for_each_command!` is one table: a criterion
+/// listed here is bound and handled, or it is neither.
+macro_rules! for_each_reveal {
+    ($m:ident) => {
+        $m! {
+            on_reveal_animated, TimelineRevealAnimated, RevealFilter::Animated, false;
+            on_reveal_animated_add, TimelineRevealAnimatedAdd, RevealFilter::Animated, true;
+            on_reveal_anchor_point, TimelineRevealAnchorPoint,
+                RevealFilter::Group(PropertyGroup::AnchorPoint), false;
+            on_reveal_anchor_point_add, TimelineRevealAnchorPointAdd,
+                RevealFilter::Group(PropertyGroup::AnchorPoint), true;
+            on_reveal_position, TimelineRevealPosition,
+                RevealFilter::Group(PropertyGroup::Position), false;
+            on_reveal_position_add, TimelineRevealPositionAdd,
+                RevealFilter::Group(PropertyGroup::Position), true;
+            on_reveal_scale, TimelineRevealScale,
+                RevealFilter::Group(PropertyGroup::Scale), false;
+            on_reveal_scale_add, TimelineRevealScaleAdd,
+                RevealFilter::Group(PropertyGroup::Scale), true;
+            on_reveal_rotation, TimelineRevealRotation,
+                RevealFilter::Group(PropertyGroup::Rotation), false;
+            on_reveal_rotation_add, TimelineRevealRotationAdd,
+                RevealFilter::Group(PropertyGroup::Rotation), true;
+            on_reveal_opacity, TimelineRevealOpacity,
+                RevealFilter::Group(PropertyGroup::Opacity), false;
+            on_reveal_opacity_add, TimelineRevealOpacityAdd,
+                RevealFilter::Group(PropertyGroup::Opacity), true;
+            on_reveal_audio_gain, TimelineRevealAudioGain,
+                RevealFilter::Group(PropertyGroup::AudioGain), false;
+            on_reveal_audio_gain_add, TimelineRevealAudioGainAdd,
+                RevealFilter::Group(PropertyGroup::AudioGain), true;
+            on_reveal_modified, TimelineRevealModified, RevealFilter::Modified, false;
+            on_reveal_modified_add, TimelineRevealModifiedAdd, RevealFilter::Modified, true;
+            on_reveal_expression, TimelineRevealExpression, RevealFilter::Expression, false;
+            on_reveal_expression_add, TimelineRevealExpressionAdd, RevealFilter::Expression, true;
+        }
+    };
+}
+
+macro_rules! reveal_handlers {
+    ($($handler:ident, $Action:ident, $filter:expr, $additive:expr;)+) => {
+        impl TimelineGpuiPanel {
+            $(
+                fn $handler(&mut self, _: &$Action, _window: &mut Window, cx: &mut Context<Self>) {
+                    self.state.apply_reveal($filter, $additive);
+                    cx.notify();
+                }
+            )+
+
+            /// Attach one action handler per reveal chord to the panel root.
+            fn with_reveal_actions<E: InteractiveElement>(
+                element: E,
+                cx: &mut Context<Self>,
+            ) -> E {
+                let mut element = element;
+                $(element = element.on_action(cx.listener(Self::$handler));)+
+                element
+            }
+        }
+    };
+}
+for_each_reveal!(reveal_handlers);
 
 /// Which number of the beat grid a transport-toolbar readout edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2141,7 +2216,7 @@ impl TimelineGpuiPanel {
             if !self.state.is_layer_expanded(layer.id) {
                 continue;
             }
-            for row in keyframes::property_rows(layer) {
+            for row in self.state.visible_property_rows(layer) {
                 y += PROPERTY_ROW_HEIGHT;
                 if !self.state.is_property_expanded(layer.id, &row.id) {
                     continue;
@@ -3047,7 +3122,7 @@ impl TimelineGpuiPanel {
             }
             y += LAYER_ROW_HEIGHT;
             if state.is_layer_expanded(layer.id) {
-                for row in keyframes::property_rows(layer) {
+                for row in state.visible_property_rows(layer) {
                     if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
                         return Some(RowHit::PropertyGroup(layer.id, row.id));
                     }
@@ -3078,7 +3153,7 @@ impl TimelineGpuiPanel {
         for layer in self.state.layers() {
             h += LAYER_ROW_HEIGHT;
             if self.state.is_layer_expanded(layer.id) {
-                for row in keyframes::property_rows(layer) {
+                for row in self.state.visible_property_rows(layer) {
                     h += PROPERTY_ROW_HEIGHT;
                     if self.state.is_property_expanded(layer.id, &row.id) {
                         h += row.channel_names.len() as f32 * PROPERTY_ROW_HEIGHT;
@@ -3226,7 +3301,7 @@ impl TimelineGpuiPanel {
 
                     // Property rows (always present when layer is expanded)
                     if state.is_layer_expanded(layer.id) {
-                        for row in keyframes::property_rows(layer) {
+                        for row in state.visible_property_rows(layer) {
                             let prop_border = Bounds::new(
                                 point(bounds.origin.x, y + px(PROPERTY_ROW_HEIGHT) - px(1.0)),
                                 size(bounds.size.width, px(1.0)),
@@ -3665,7 +3740,7 @@ impl TimelineGpuiPanel {
             .map(|(id, ..)| {
                 self.state
                     .layer(*id)
-                    .map(keyframes::property_rows)
+                    .map(|layer| self.state.visible_property_rows(layer))
                     .unwrap_or_default()
             })
             .collect();
@@ -4040,7 +4115,7 @@ impl Render for TimelineGpuiPanel {
         let last_right_click = self.last_right_click.clone();
         let menu_area_origin = self.area_origin.clone();
 
-        div()
+        let root = div()
             .id("timeline-root")
             .size_full()
             .flex()
@@ -4049,7 +4124,9 @@ impl Render for TimelineGpuiPanel {
             .border_t_1()
             .border_color(theme.colors.border)
             .track_focus(&self.focus_handle)
-            .key_context(KEY_CONTEXT)
+            .key_context(KEY_CONTEXT);
+        // The reveal chords, from the same table that defines their handlers.
+        Self::with_reveal_actions(root, cx)
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_duplicate))
             .on_action(cx.listener(Self::on_keyframe_bezier))
@@ -6625,6 +6702,79 @@ mod tests {
                     HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10),])
                 );
                 panel.drag_ended(cx);
+            })
+            .unwrap();
+    }
+
+    /// A reveal filter reaches **every** derivation of the row layout at once:
+    /// the content height, hit testing and the rubber band all walk
+    /// `TimelinePanel::visible_property_rows`. They each re-derive the y
+    /// layout by hand (`MED-APP-13`), so a filter that reached only some of
+    /// them would silently shift hit testing against the picture below the
+    /// first hidden row. The painter reads the same list at the same place in
+    /// its own walk, which is what keeps it in step.
+    #[gpui::test]
+    fn a_reveal_filter_reaches_every_row_layout_derivation(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.state.toggle_layer_expanded(a);
+                panel.state.toggle_property_expanded(a, row.clone());
+                // Unfiltered, Anchor Point leads the tree and pushes the
+                // Position channels down: the band over y 76..96 covers the
+                // Position *group* row, which carries no diamonds.
+                let band = ((0.0, 76.0), (200.0, 96.0));
+                assert!(panel.keyframes_in_rect(band.0, band.1).is_empty());
+
+                panel
+                    .state
+                    .apply_reveal(RevealFilter::Group(PropertyGroup::Position), false);
+
+                // Height: two layer bars, the Position row, its two channels.
+                assert_eq!(
+                    panel.total_layer_height(),
+                    2.0 * LAYER_ROW_HEIGHT + 3.0 * PROPERTY_ROW_HEIGHT
+                );
+                // Hit testing follows the same layout…
+                let at = |y| TimelineGpuiPanel::row_at_content_y_in(&panel.state, y);
+                assert_eq!(
+                    at(2.0 * LAYER_ROW_HEIGHT + 1.0),
+                    Some(RowHit::PropertyGroup(a, row.clone())),
+                    "the filtered layer's first property row is Position"
+                );
+                assert_eq!(
+                    at(2.0 * LAYER_ROW_HEIGHT + PROPERTY_ROW_HEIGHT + 1.0),
+                    Some(RowHit::Channel(a, row.clone(), 0))
+                );
+                assert_eq!(
+                    at(2.0 * LAYER_ROW_HEIGHT + 3.0 * PROPERTY_ROW_HEIGHT + 1.0),
+                    None,
+                    "nothing is left below the filtered tree"
+                );
+                // …and so does the rubber band: the same band now sits over
+                // the Position X channel and catches both of its keys.
+                assert_eq!(
+                    panel.keyframes_in_rect(band.0, band.1),
+                    HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10)])
+                );
+
+                // A filter with no matching row empties the layer instead of
+                // erroring: only the two layer bars are left.
+                panel
+                    .state
+                    .apply_reveal(RevealFilter::Group(PropertyGroup::AudioGain), false);
+                assert_eq!(panel.total_layer_height(), 2.0 * LAYER_ROW_HEIGHT);
+                assert_eq!(
+                    TimelineGpuiPanel::row_at_content_y_in(
+                        &panel.state,
+                        2.0 * LAYER_ROW_HEIGHT + 1.0
+                    ),
+                    None
+                );
+                cx.notify();
             })
             .unwrap();
     }

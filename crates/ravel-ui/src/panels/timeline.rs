@@ -10,6 +10,7 @@
 //! it lives in the host's `LayerSelection` global so the Timeline and the
 //! Outliner share one selection instead of mirroring each other.
 
+use crate::keyframes::RevealFilter;
 use crate::panel::PanelKind;
 use ravel_core::composition::{Composition, Layer};
 use ravel_core::id::{CompId, LayerId};
@@ -207,6 +208,12 @@ pub struct TimelinePanel {
     view_mode: TimelineViewMode,
     /// Property channels whose curves the graph view should display.
     selected_channels: Vec<TimelineChannelRef>,
+    /// Active reveal criteria; empty means every row is shown.
+    ///
+    /// Panel state rather than a shared global: it is one panel's view of the
+    /// tree, and it deliberately outlives a layer selection change, so it
+    /// cannot hang off the selection either.
+    reveal: HashSet<crate::keyframes::RevealFilter>,
 }
 
 impl TimelinePanel {
@@ -227,6 +234,7 @@ impl TimelinePanel {
             follow_playhead: true,
             view_mode: TimelineViewMode::default(),
             selected_channels: Vec::new(),
+            reveal: HashSet::new(),
         }
     }
 
@@ -444,6 +452,49 @@ impl TimelinePanel {
         if !self.expanded_properties.remove(&key) {
             self.expanded_properties.insert(key);
         }
+    }
+
+    // ----- Reveal filters ---------------------------------------------------
+
+    /// The active reveal criteria; empty means nothing is filtered out.
+    pub fn reveal_filters(&self) -> &HashSet<RevealFilter> {
+        &self.reveal
+    }
+
+    /// Apply one reveal criterion.
+    ///
+    /// Unmodified (`additive == false`) **replaces** the current filter, and
+    /// applying the criterion the panel is already showing alone clears it —
+    /// pressing the same key twice returns to the full tree. `Shift`
+    /// (`additive == true`) toggles the criterion's membership instead, so a
+    /// second `Shift+<key>` takes that group back out.
+    pub fn apply_reveal(&mut self, filter: RevealFilter, additive: bool) {
+        if additive {
+            if !self.reveal.remove(&filter) {
+                self.reveal.insert(filter);
+            }
+        } else if self.reveal.len() == 1 && self.reveal.contains(&filter) {
+            self.reveal.clear();
+        } else {
+            self.reveal.clear();
+            self.reveal.insert(filter);
+        }
+    }
+
+    /// The property rows of `layer` that survive the active reveal filters.
+    ///
+    /// **The one filtered enumeration.** Painting, hit testing, rubber-band
+    /// selection, the content height and the header tree all go through it;
+    /// deriving the row list anywhere else makes them disagree below the first
+    /// hidden row (`MED-APP-13`).
+    pub fn visible_property_rows(&self, layer: &Layer) -> Vec<crate::keyframes::PropertyRow> {
+        let rows = crate::keyframes::property_rows(layer);
+        if self.reveal.is_empty() {
+            return rows;
+        }
+        rows.into_iter()
+            .filter(|row| self.reveal.iter().any(|filter| filter.matches(layer, row)))
+            .collect()
     }
 
     // ----- Coordinate helpers ----------------------------------------------
@@ -738,6 +789,140 @@ mod tests {
         p.toggle_property_expanded(lid, position.clone());
         assert!(p.is_property_expanded(lid, &position));
         assert!(!p.is_property_expanded(lid, &scale));
+    }
+
+    // ----- Reveal filters --------------------------------------------------
+
+    /// A layer with a keyframed Position X, an expression on Opacity and a
+    /// moved (but constant) Scale — one row per reveal criterion.
+    fn reveal_layer() -> Layer {
+        use ravel_core::animation::channel::{
+            AnimationChannel, ChannelSource, ParameterExpression,
+        };
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        let mut layer = Layer::new(LayerId::new(1), "L", Graph::new()).with_time(0, 0, 100);
+        layer.transform.position[0] = AnimationChannel::keyframes(curve);
+        layer.transform.scale[0] = AnimationChannel::constant(2.0);
+        layer.opacity =
+            AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new("1.0")));
+        layer
+    }
+
+    fn revealed(panel: &TimelinePanel, layer: &Layer) -> Vec<crate::keyframes::PropertyRowId> {
+        panel
+            .visible_property_rows(layer)
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    #[test]
+    fn no_filter_shows_every_row() {
+        let p = panel();
+        let layer = reveal_layer();
+        assert_eq!(
+            p.visible_property_rows(&layer).len(),
+            crate::keyframes::property_rows(&layer).len()
+        );
+    }
+
+    #[test]
+    fn a_group_filter_keeps_only_that_group() {
+        let mut p = panel();
+        let layer = reveal_layer();
+        p.apply_reveal(RevealFilter::Group(PropertyGroup::Position), false);
+        assert_eq!(
+            revealed(&p, &layer),
+            vec![crate::keyframes::PropertyRowId::Shell(
+                PropertyGroup::Position
+            )]
+        );
+
+        // A layer without the group reveals nothing rather than erroring.
+        let bare = Layer::new(LayerId::new(2), "B", Graph::new());
+        p.apply_reveal(RevealFilter::Group(PropertyGroup::AudioGain), false);
+        assert!(revealed(&p, &bare).is_empty());
+    }
+
+    #[test]
+    fn animated_modified_and_expression_select_their_own_rows() {
+        let layer = reveal_layer();
+        let rows = |filter| {
+            let mut p = panel();
+            p.apply_reveal(filter, false);
+            revealed(&p, &layer)
+        };
+        let shell = crate::keyframes::PropertyRowId::Shell;
+
+        assert_eq!(
+            rows(RevealFilter::Animated),
+            vec![shell(PropertyGroup::Position)]
+        );
+        assert_eq!(
+            rows(RevealFilter::Expression),
+            vec![shell(PropertyGroup::Opacity)]
+        );
+        // Everything the user touched: the keyframed Position, the scaled
+        // Scale, and the Opacity expression. Anchor Point and Rotation are
+        // untouched, so they drop out.
+        assert_eq!(
+            rows(RevealFilter::Modified),
+            vec![
+                shell(PropertyGroup::Position),
+                shell(PropertyGroup::Scale),
+                shell(PropertyGroup::Opacity),
+            ]
+        );
+    }
+
+    #[test]
+    fn unmodified_replaces_shift_adds_and_the_same_key_clears() {
+        let mut p = panel();
+        let position = RevealFilter::Group(PropertyGroup::Position);
+        let scale = RevealFilter::Group(PropertyGroup::Scale);
+
+        p.apply_reveal(position, false);
+        assert_eq!(p.reveal_filters().len(), 1);
+
+        // Shift adds to the current filter…
+        p.apply_reveal(scale, true);
+        assert_eq!(
+            p.reveal_filters(),
+            &HashSet::from([position, scale]),
+            "Shift adds instead of replacing"
+        );
+        // …and takes the same group back out.
+        p.apply_reveal(scale, true);
+        assert_eq!(p.reveal_filters(), &HashSet::from([position]));
+
+        // Unmodified replaces.
+        p.apply_reveal(scale, false);
+        assert_eq!(p.reveal_filters(), &HashSet::from([scale]));
+        // The same key again shows everything.
+        p.apply_reveal(scale, false);
+        assert!(p.reveal_filters().is_empty());
+    }
+
+    /// Reselecting a layer — which reaches the panel as a composition sync —
+    /// must not drop the filter.
+    #[test]
+    fn the_filter_survives_a_composition_sync() {
+        let comp = Composition::new(
+            CompId::new(1),
+            "Test",
+            (1280, 720),
+            FrameRate::new(24, 1),
+            240,
+        )
+        .add_layer(reveal_layer());
+        let mut p = TimelinePanel::with_composition(comp.clone());
+        p.apply_reveal(RevealFilter::Animated, false);
+        p.set_composition(Some(comp));
+        assert_eq!(p.reveal_filters(), &HashSet::from([RevealFilter::Animated]));
     }
 
     // ----- Composition end -------------------------------------------------

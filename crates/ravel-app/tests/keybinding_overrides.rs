@@ -244,6 +244,72 @@ fn the_panel_binding_table_is_the_code_side_shortcut_set() {
             (CommandId::EditDelete, "Delete", PanelKind::Timeline),
             (CommandId::EditDelete, "Backspace", PanelKind::Timeline),
             (CommandId::EditDuplicate, "Cmd+D", PanelKind::Timeline),
+            (CommandId::TimelineRevealAnimated, "U", PanelKind::Timeline),
+            (
+                CommandId::TimelineRevealAnimatedAdd,
+                "Shift+U",
+                PanelKind::Timeline,
+            ),
+            (
+                CommandId::TimelineRevealAnchorPoint,
+                "A",
+                PanelKind::Timeline
+            ),
+            (
+                CommandId::TimelineRevealAnchorPointAdd,
+                "Shift+A",
+                PanelKind::Timeline,
+            ),
+            (CommandId::TimelineRevealPosition, "P", PanelKind::Timeline),
+            (
+                CommandId::TimelineRevealPositionAdd,
+                "Shift+P",
+                PanelKind::Timeline,
+            ),
+            (CommandId::TimelineRevealScale, "S", PanelKind::Timeline),
+            (
+                CommandId::TimelineRevealScaleAdd,
+                "Shift+S",
+                PanelKind::Timeline,
+            ),
+            (CommandId::TimelineRevealRotation, "R", PanelKind::Timeline),
+            (
+                CommandId::TimelineRevealRotationAdd,
+                "Shift+R",
+                PanelKind::Timeline,
+            ),
+            (CommandId::TimelineRevealOpacity, "T", PanelKind::Timeline),
+            (
+                CommandId::TimelineRevealOpacityAdd,
+                "Shift+T",
+                PanelKind::Timeline,
+            ),
+            (CommandId::TimelineRevealAudioGain, "L", PanelKind::Timeline),
+            (
+                CommandId::TimelineRevealAudioGainAdd,
+                "Shift+L",
+                PanelKind::Timeline,
+            ),
+            (
+                CommandId::TimelineRevealModified,
+                "Alt+U",
+                PanelKind::Timeline,
+            ),
+            (
+                CommandId::TimelineRevealModifiedAdd,
+                "Alt+Shift+U",
+                PanelKind::Timeline,
+            ),
+            (
+                CommandId::TimelineRevealExpression,
+                "Alt+E",
+                PanelKind::Timeline,
+            ),
+            (
+                CommandId::TimelineRevealExpressionAdd,
+                "Alt+Shift+E",
+                PanelKind::Timeline,
+            ),
             (CommandId::ToolSelect, "V", PanelKind::Viewer),
             (CommandId::ToolPen, "P", PanelKind::Viewer),
             (CommandId::ToolRect, "R", PanelKind::Viewer),

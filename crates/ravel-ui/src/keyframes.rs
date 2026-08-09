@@ -139,6 +139,77 @@ pub const SHELL_GROUPS: [PropertyGroup; 5] = [
     PropertyGroup::Opacity,
 ];
 
+/// One After Effects-style *reveal* criterion: a property row is shown when it
+/// matches at least one active criterion (`refactor-plan-0808.md`, unit 5).
+///
+/// The criteria filter the rows [`property_rows`] produces; they never change
+/// which rows exist. A row hidden by a filter is hidden everywhere — the
+/// header tree, the painter, hit testing, rubber-band selection and the
+/// content height all read the same filtered list, because a filter that
+/// reaches only some of them makes painting and hit testing disagree below
+/// the first hidden row (`MED-APP-13`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RevealFilter {
+    /// Rows that carry keyframes (AE `U`).
+    Animated,
+    /// One shell group (AE `A` / `P` / `S` / `R` / `T` / `L`).
+    Group(PropertyGroup),
+    /// Rows whose value differs from the shell default (AE `UU`).
+    Modified,
+    /// Rows driven by an expression (AE `EE`).
+    Expression,
+}
+
+impl RevealFilter {
+    /// Whether `row` of `layer` survives this criterion.
+    pub fn matches(self, layer: &Layer, row: &PropertyRow) -> bool {
+        let channels = || row_channels(layer, &row.id).unwrap_or_default();
+        match self {
+            Self::Group(group) => row.id == PropertyRowId::Shell(group),
+            Self::Animated => channels()
+                .iter()
+                .any(|channel| matches!(channel.source, ChannelSource::Keyframes(_))),
+            // A blended source is not reported as an expression: what the row
+            // shows is the blend, and AE's `EE` means "this property is driven
+            // by an expression".
+            Self::Expression => channels()
+                .iter()
+                .any(|channel| matches!(channel.source, ChannelSource::Expression(_))),
+            Self::Modified => match &row.id {
+                PropertyRowId::Shell(group) => {
+                    let defaults = shell_default_channels(*group);
+                    let channels = channels();
+                    channels.len() != defaults.len()
+                        || channels
+                            .iter()
+                            .zip(&defaults)
+                            .any(|(channel, default)| channel.source != default.source)
+                }
+                // A network parameter is only listed once it is keyframed, so
+                // it is by construction no longer the processor's default.
+                PropertyRowId::Network { .. } => true,
+            },
+        }
+    }
+}
+
+/// The channels a shell group holds on a freshly created layer
+/// ([`Layer::new`] and [`ravel_core::composition::AudioSource`]), which
+/// [`RevealFilter::Modified`] compares against.
+fn shell_default_channels(group: PropertyGroup) -> Vec<AnimationChannel> {
+    let transform = ravel_core::composition::LayerTransform::default();
+    match group {
+        PropertyGroup::AnchorPoint => transform.anchor_point.to_vec(),
+        PropertyGroup::Position => transform.position.to_vec(),
+        PropertyGroup::Scale => transform.scale.to_vec(),
+        PropertyGroup::Rotation => vec![transform.rotation],
+        PropertyGroup::Opacity => vec![AnimationChannel::constant(1.0)],
+        PropertyGroup::AudioGain => {
+            vec![ravel_core::composition::AudioSource::default().gain]
+        }
+    }
+}
+
 /// The property-tree rows of a layer: the shell groups, then every network
 /// parameter with at least one keyframed component (REQ-LAYER-004), ordered
 /// deterministically by node id then parameter position — subnets included,
@@ -907,6 +978,25 @@ mod tests {
         )));
     }
 
+    /// Anchor Point is a row of every layer's tree, and it is keyable through
+    /// it like any other shell group (AE's `A`).
+    #[test]
+    fn anchor_point_is_a_keyable_shell_row() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Shell(PropertyGroup::AnchorPoint);
+        let listed = property_rows(&layer);
+        assert_eq!(listed[0].id, row);
+        assert_eq!(listed[0].channel_names, vec!["X", "Y"]);
+
+        assert!(insert_keyframe(&mut layer, &row, 1, 3));
+        assert!(has_keyframe_at(&layer, &row, 1, 3));
+        assert!(set_channel_value(&mut layer, &row, 1, 3, 12.0));
+        assert!(
+            (layer.transform.anchor_point[1].evaluate(3.0, &eval_ctx()) - 12.0).abs()
+                < f32::EPSILON
+        );
+    }
+
     #[test]
     fn audio_gain_is_a_shell_keyframe_row_only_on_audio_layers() {
         let mut layer = test_layer();
@@ -972,25 +1062,6 @@ mod tests {
             .find(|r| r.id == in_id)
             .expect("keyframed custom param listed");
         assert_eq!(row.label.as_deref(), Some("amount"));
-    }
-
-    /// Anchor Point is a row of every layer's tree, and it is keyable through
-    /// it like any other shell group (AE's `A`).
-    #[test]
-    fn anchor_point_is_a_keyable_shell_row() {
-        let mut layer = test_layer();
-        let row = PropertyRowId::Shell(PropertyGroup::AnchorPoint);
-        let listed = property_rows(&layer);
-        assert_eq!(listed[0].id, row);
-        assert_eq!(listed[0].channel_names, vec!["X", "Y"]);
-
-        assert!(insert_keyframe(&mut layer, &row, 1, 3));
-        assert!(has_keyframe_at(&layer, &row, 1, 3));
-        assert!(set_channel_value(&mut layer, &row, 1, 3, 12.0));
-        assert!(
-            (layer.transform.anchor_point[1].evaluate(3.0, &eval_ctx()) - 12.0).abs()
-                < f32::EPSILON
-        );
     }
 
     #[test]

@@ -174,6 +174,8 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | プロパティ展開行 | ✅ | 殻の Position/Scale/Rotation/Opacity + キーフレームを持つネットワーク内パラメータ（In カスタム・サブネット露出含む、REQ-LAYER-004） |
 | キーフレームダイヤ | ✅ | Keyframes チャンネルをレイヤーローカル→Comp 時間へ変換して描画（`comp_frame_for_key`、in_frame 考慮）。選択中は描き分け |
 | 再生ヘッド | ✅ | 赤色 2px 縦線 |
+| コンポ終端の帯 | ✅ | Duration の外をルーラーとレーンで落とす（背景ウォッシュ + tint + 終端 1px 線）。ズームは終端で止めない。グラフモードには敷かない |
+| BPM グリッド | ✅ | フレームグリッドと独立で同時表示。拍 = `offset + n × (fps × 60 / BPM)` をフレームに丸めずに描く。間隔 4px 未満なら描かない。テンポは 1〜999 に丸め込み。状態は `ui_state.json`（`BpmGrid`）で、保存したプロジェクトに残る |
 | タイムコード表示 | ✅ | ヘッダー左上コーナーに M:SS:FF（再生ヘッド位置、固定幅表示） |
 | 選択ハイライト | ✅ | レイヤーヘッダー背景色変更 |
 
@@ -266,7 +268,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 |------|------|------|
 | New / Open / Save / Save As | ✅ | File メニュー配線済み。Save As/Open は GPUI ネイティブダイアログ。未保存時の Save は Save As にフォールスルー。dirty な New/Open は保存確認後に続行 |
 | メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録し、再生ヘッド位置に素材長のレイヤーを作成。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用。音声つきの素材は同じ 1 undo の中で殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）も設定し、映像を持たない音声ファイルは frameless な `audio` テンプレートでレイヤー化（`audio-plan.md` 単位 4） |
-| UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ）。任意エントリで、欠落時は `root_comp` フォールバック。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
+| UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ、Timeline の BPM グリッド）。任意エントリで、欠落時はそれぞれ `root_comp` フォールバックと `BpmGrid` の既定。既定のままの BPM グリッドはエントリ自体を書かない。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
 | ワークスペースレイアウトの埋込 | ✅ | 任意エントリ `workspace_layout.toml`。**オプトイン（既定 OFF）**で、OFF のときは書かれない（format_version 据え置き）。詳細は下の[ワークスペース節](#ワークスペースドッキングウィンドウ) |
 | Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、公開パラメータ宣言 `exposed_parameters` を含む、format v7）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳み、v5 以前はカーブパラメータを変換する。v6 以前は宣言ゼロとして読む。宣言の追加・改名・並べ替え・削除は Properties の公開パラメータセクションから行える（EXPO-5） |
 | 設定の適用（3 層マージ、`user` 層は未実装） | 🟡 | 起動時に `default → global → project` を解決して `AppSettings` Global に載せ、**`locale`、`[appearance]`（テーマモード / ライト・ダークのテーマ）、`playback.frame_rate` を適用**。言語と外観は環境設定ダイアログから、既定フレームレートはプロジェクト設定ダイアログから**変更でき、その場で反映される**（言語切替は開いている全ウィンドウを再描画し、メニューバーも組み直す。テーマ名が無効なときは同梱テーマへフォールバック）。未知のロケールは警告して `en` にフォールバック。既定フレームレートは新規コンポジションの初期値と `File ▸ New` の root コンプに効く（**アクティブなコンポジションがあればその書式が勝つ**ので、開いている状態では観測できない。fps 表記 / 有理数の両方を読み、解釈できない値は警告して 30 fps へフォールバック）。書き込み API は層ごとに独立（global = `<config>/ravel/settings.toml` へ即時アトミック、project = 次のプロジェクト保存で `.ravprj` に入り dirty になる）。失敗は通知。「既定に戻す」はその層の値を消す（既定値を書き戻さない）。**キャッシュ予算（`SET-8`）・自動保存（`SET-9`）・プロキシ（`SET-10`）・カラー管理（`SET-11`）への配線は未**で、前提機能が入るまで設定画面にも出さない。`user` 層は置き場も呼び出し元も無い |

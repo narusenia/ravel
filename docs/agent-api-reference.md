@@ -2394,7 +2394,9 @@ Unknown type keys are skipped silently (plugin space).
   the present form is `Some(AudioSource(...))`.
   `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of
   the undo history and the document diff — currently `active_comp`
-  (REQ-UI-013). The entry is optional in both directions (missing entry →
+  (REQ-UI-013) and `bpm_grid` (the Timeline's beat grid, read back through
+  `UiState::bpm_grid()`, which sanitizes a hand-edited tempo). The entry is
+  optional in both directions (missing entry →
   defaults, unknown fields ignored, unreadable content → defaults + a
   warning, never a failed load), which is why it does NOT bump
   `format_version`; add future UI state as `#[serde(default)]` fields.

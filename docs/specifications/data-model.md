@@ -641,9 +641,15 @@ GraphDoc(
 
 ```json
 {
-  "active_comp": 2
+  "active_comp": 2,
+  "bpm_grid": { "enabled": true, "bpm": 174.0, "offset_frames": 12.0 }
 }
 ```
+
+`bpm_grid` は Timeline の拍グリッド（on/off、テンポ、1 拍目のフレーム）。
+既定のままなら**エントリ自体が書かれない**。読み出しは
+`UiState::bpm_grid()` を通し、手で書き換えられたテンポは 1〜999 BPM に
+丸め込む。
 
 ユーザーが「何を見ていたか」はドキュメントの一部ではない — アクティブコンプを
 `Document` に入れると undo スナップショット（undo の単位）に載ってしまい、

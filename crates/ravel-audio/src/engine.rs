@@ -39,6 +39,15 @@ pub enum AudioCommand {
     Pause,
     /// Seek to an absolute time position (seconds).
     Seek(f64),
+    /// Repeat a half-open span `[start, end)` of the timeline (seconds), or
+    /// `None` to play straight through.
+    ///
+    /// The prep thread folds its own mix position back to `start` when it
+    /// reaches `end`, so the wrap costs neither a seek nor a transport epoch:
+    /// the queued blocks stay valid and the loop is seamless. Everything the
+    /// listener hears at a monotonic device position therefore matches what
+    /// the video transport folds that position to.
+    SetLoopRange(Option<(f64, f64)>),
     /// Add or replace a track whose samples are already at the engine's
     /// output rate.
     SetTrack(Track),
@@ -106,6 +115,29 @@ struct PrepState {
     transport: Arc<TransportSync>,
     output_rate: u32,
     read_position: usize,
+    /// Loop span in output frames, half-open `[start, end)`. `None` plays
+    /// straight through.
+    loop_frames: Option<(usize, usize)>,
+}
+
+impl PrepState {
+    /// How many frames to mix next, after folding the mix position back to
+    /// the loop's in point if it has reached the out point.
+    ///
+    /// A block is shortened so it never straddles the loop end — the
+    /// callback already consumes chunks of any length — which is what lets
+    /// the wrap happen inside the queue instead of through a seek.
+    fn next_block_frames(&mut self, chunk_frames: usize) -> usize {
+        let Some((start, end)) = self.loop_frames else {
+            return chunk_frames;
+        };
+        if self.read_position >= end {
+            self.read_position = start;
+        }
+        chunk_frames
+            .min(end.saturating_sub(self.read_position))
+            .max(1)
+    }
 }
 
 impl AudioEngine {
@@ -160,6 +192,7 @@ impl AudioEngine {
                         transport,
                         output_rate,
                         read_position: 0,
+                        loop_frames: None,
                     },
                 );
             })
@@ -281,9 +314,10 @@ fn prep_thread_main(
         }
 
         // Mix the next chunk.
+        let block_frames = state.next_block_frames(chunk_frames);
         let chunk = AudioChunk {
             epoch: state.transport.epoch(),
-            samples: state.mixer.mix(state.read_position, chunk_frames).into(),
+            samples: state.mixer.mix(state.read_position, block_frames).into(),
         };
 
         // A full queue must not delay Pause or Seek. Only advance the mix
@@ -302,7 +336,7 @@ fn prep_thread_main(
                     tracing::warn!("audio chunk channel disconnected");
                     return;
                 }
-                state.read_position += chunk_frames;
+                state.read_position += block_frames;
             }
         }
     }
@@ -328,6 +362,18 @@ fn handle_command(cmd: &AudioCommand, state: &mut PrepState) -> bool {
             let frame_pos = sample_pos; // output_rate is in frames/sec
             state.read_position = frame_pos;
             tracing::debug!(time = time_secs, frame = frame_pos, "seek");
+        }
+        AudioCommand::SetLoopRange(range) => {
+            // Deliberately not a transport update: bumping the epoch would
+            // throw away the queued blocks, and a loop that discards its own
+            // buffer on every change is exactly the gap this avoids.
+            state.loop_frames = range.map(|(start, end)| {
+                let rate = state.output_rate as f64;
+                let start = (start.max(0.0) * rate) as usize;
+                let end = (end.max(0.0) * rate) as usize;
+                (start, end.max(start + 1))
+            });
+            tracing::debug!(?state.loop_frames, "loop range set");
         }
         AudioCommand::SetTrack(track) => {
             state.mixer.set_track(track.clone());
@@ -404,6 +450,7 @@ mod tests {
             transport: TransportSync::new(),
             output_rate: 48_000,
             read_position: 0,
+            loop_frames: None,
         }
     }
 
@@ -478,6 +525,58 @@ mod tests {
             assert!(handle_command(&command, &mut state));
             assert_eq!(state.transport.epoch(), expected_epoch);
         }
+    }
+
+    /// The wrap happens inside the prep loop: blocks are shortened at the out
+    /// point and the mix position folds back to the in point, all without a
+    /// transport epoch — which is what keeps the queued audio valid across a
+    /// lap instead of dropping it as a seek would.
+    #[test]
+    fn a_loop_range_folds_the_mix_position_without_a_transport_epoch() {
+        let mut state = test_prep_state();
+        assert!(handle_command(
+            &AudioCommand::SetLoopRange(Some((1.0, 1.05))),
+            &mut state
+        ));
+        assert_eq!(state.loop_frames, Some((48_000, 50_400)));
+        assert_eq!(state.transport.epoch(), 0, "the queue must stay valid");
+
+        // Straight through until the block would straddle the out point.
+        state.read_position = 48_000;
+        assert_eq!(state.next_block_frames(1_024), 1_024);
+        state.read_position += 1_024;
+        assert_eq!(state.next_block_frames(1_024), 1_024);
+        state.read_position += 1_024;
+        // 352 frames left of the loop: the block is shortened, not skipped.
+        assert_eq!(state.next_block_frames(1_024), 352);
+        state.read_position += 352;
+
+        // Reaching the out point folds back to the in point exactly.
+        assert_eq!(state.next_block_frames(1_024), 1_024);
+        assert_eq!(state.read_position, 48_000);
+        assert_eq!(state.transport.epoch(), 0);
+
+        // Dropping the range plays straight through again.
+        assert!(handle_command(
+            &AudioCommand::SetLoopRange(None),
+            &mut state
+        ));
+        state.read_position = 1_000_000;
+        assert_eq!(state.next_block_frames(1_024), 1_024);
+    }
+
+    /// A degenerate range (one video frame, or hand-built ends that collapse)
+    /// must still produce a block; a zero-length mix would spin the prep loop.
+    #[test]
+    fn a_collapsed_loop_range_still_mixes_a_frame() {
+        let mut state = test_prep_state();
+        assert!(handle_command(
+            &AudioCommand::SetLoopRange(Some((2.0, 2.0))),
+            &mut state
+        ));
+        assert_eq!(state.loop_frames, Some((96_000, 96_001)));
+        state.read_position = 96_000;
+        assert_eq!(state.next_block_frames(1_024), 1);
     }
 
     #[test]

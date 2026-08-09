@@ -7,6 +7,18 @@
 | 領域 | ravel-media / decode・encode, ravel-app / Viewer, ravel-core / 合成 |
 | 該当 | `crates/ravel-media/src/decoder.rs:921-924`, `crates/ravel-media/src/encoder.rs:160-163`, `crates/ravel-app/src/panels/mod.rs`（`reference_bgra`）, `crates/ravel-media/src/encode/sequence.rs` |
 
+> **解決済み**: フェーズ CM の `CM-1`〜`CM-4` が入った。作業空間はリニア
+> Rec.709 原色になり、取り込み（`ravel_core::color::ingest_rgba8`）で伝達関数を
+> 外し、Viewer（`ViewerImage::from_frame_buffer`）と書き出し
+> （`Encoder` の手前の `to_output_space`）で掛け直す。量子化は
+> `ravel_core::color::quantize_u8` に一本化して**最近接に統一**したので、
+> 動画書き出しの切り捨てによる 1 LSB のずれも消えた。素材ごとの入力色空間は
+> `MediaAssetEntry`（明示指定 → メタデータ → 拡張子の順）に持つ。作者が指定
+> した色は `.ravprj` v8 で一度だけ読み替える。規範は
+> `docs/specifications/color-management.md`。
+> **OCIO / GPU LUT（REQ-RENDER-003 の残り）は `CM-6`〜`CM-8` として別に残る**
+> が、この個票が挙げた検証項目はすべて満たされている。
+
 ## 現状
 
 **色空間変換のコードがリポジトリに 1 行も無い。** `sRGB` / ガンマ / 伝達関数を
@@ -66,7 +78,8 @@ grep しても、`composition/asset.rs:765` のメタデータ文字列 `"sRGB"`
 ## 修正方針
 
 `docs/implementation/color-management-plan.md` が引き受けた。ロードマップの
-**フェーズ CM**（`C4` の直後）。
+**フェーズ CM**（`C4` の直後）。以下は着手前の記述で、`CM-1`〜`CM-4` は
+実装済み。
 
 - `CM-1` 色空間の型と変換関数
 - `CM-2` 素材ごとの入力色空間とデコードの線形化 + `.ravprj` v8 移行

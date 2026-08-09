@@ -1,10 +1,15 @@
 # カラーマネジメント実装計画（REQ-RENDER-003 / REQ-CORE-009）
 
-> **Status**: Planned — 2026-08-06
+> **Status**: `CM-1`〜`CM-5` 実装済み（骨格はリニア化まで完了）/
+> `CM-6`〜`CM-8`（`ocio-rs` の導入以降）は未着手 — 2026-08-06 起案
+
+規範は [`../specifications/color-management.md`](../specifications/color-management.md)。
+以下の「問題」節は着手前の状況の記録として残してある。
 
 対象要件: REQ-RENDER-003（OCIO + GPU LUT カラーマネジメント）、
 REQ-CORE-009（32bit float 内部処理のリニア前提）。
-引き受ける issue: `HIGH-25`（合成が display-referred 空間で行われている）。
+引き受ける issue: `HIGH-25`（合成が display-referred 空間で行われている。
+`CM-1`〜`CM-4` で解決済み、`issues/closed/` へ移した）。
 
 ## 問題
 

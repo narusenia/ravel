@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 22 | 1件1ファイル |
+| high | 23 | 1件1ファイル |
 | medium | 28 | 領域別4ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
@@ -48,6 +48,7 @@
 | [HIGH-22](HIGH-22-port-hit-test-ignores-z-order.md) | ポートヒットテストが z 順を無視 | フェーズ A |
 | [HIGH-23](HIGH-23-resampled-audio-not-cached.md) | リサンプル結果が未キャッシュ | フェーズ A4 |
 | [HIGH-24](HIGH-24-timeline-end-pause-not-forwarded-to-audio.md) | 終端の自動 Pause が音声へ転送されない | フェーズ A4 |
+| [HIGH-25](HIGH-25-compositing-in-display-referred-space.md) | 合成が display-referred 空間で行われている | フェーズ CM |
 | [HIGH-28](HIGH-28-scrub-commit-lost-when-properties-rebuilds.md) | スクラブの `Commit` が再構築で失われ undo が飛ぶ | 実機フィードバック |
 | [HIGH-27](HIGH-27-timeline-keyframes-invisible-inside-subnets.md) | Subnet の中のキーフレームが Timeline から消える | 実機フィードバック |
 | [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |

@@ -247,6 +247,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 項目 | 状態 | 備考 |
 |------|------|------|
 | FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし）。f32→BGRA 変換は評価ワーカーで済んでいて、UI スレッドは出来上がった `RenderImage` を持つだけ |
+| 表示変換（リニア → sRGB） | ✅ | 評価バッファはリニア光なので `ViewerImage::from_frame_buffer` が `ravel_core::color::to_display_rgba8` を通す（`CM-3`）。**変換点はこの 1 箇所**で、`scripts/lint-patterns.sh` の `raw-pixel-quantisation` が自前の量子化を禁じる。`quality` / `ViewerResolution` と直交。表示色空間は **sRGB 固定**（選択 UI は `CM-8`、`.ocio` は `CM-7` で未着手）|
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |

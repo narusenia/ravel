@@ -479,6 +479,20 @@ pub fn quantize_u8(value: f32) -> u8 {
 /// is how the four exits drifted apart before `CM-1`.
 ///
 /// Alpha is coverage, not light: quantised, never encoded.
+///
+/// # Cost
+///
+/// One `powf` per colour channel, evaluated in `f64`. Measured on an M-series
+/// laptop: quantising a 1920×1080 frame alone is 0.7 ms, quantising it
+/// *through this* is 35 ms. The viewer pays it on the evaluation worker (not
+/// the UI thread) at the interactive resolution, and a render pays it per
+/// exported frame.
+///
+/// Deliberate: precision first, and the designed fix is not a faster scalar
+/// loop. `CM-7` bakes the transform into a GPU 3D LUT and applies it in the
+/// wgpu path, which removes the cost rather than shaving it. An `f32` `powf`
+/// was measured at 25 ms — a 28 % saving for a second copy of every constant,
+/// which is not a trade worth making before the LUT lands.
 pub fn to_display_rgba8(rgba: [f32; 4]) -> [u8; 4] {
     let encoded = ColorSpace::DISPLAY.from_linear([rgba[0], rgba[1], rgba[2]]);
     [

@@ -30,7 +30,7 @@ pub use eval_service::{
     ProcessorSync,
 };
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};
-pub use playback::{PlaybackClock, PlaybackState};
+pub use playback::{LoopRange, PlaybackClock, PlaybackState};
 pub use render::{
     CONFLICT_SAMPLE, JobProgress, JobState, OverwritePolicy, RenderError, RenderEvent, RenderJob,
     RenderJobId, RenderOutput, RenderQueue, occupied,

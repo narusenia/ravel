@@ -103,6 +103,12 @@ pub enum CommandId {
     PlaybackStop,
     FrameStepForward,
     FrameStepBackward,
+    /// Put the loop range's in point at the playhead.
+    PlaybackLoopIn,
+    /// Put the loop range's out point at the playhead.
+    PlaybackLoopOut,
+    /// Play straight through again.
+    PlaybackLoopClear,
     // Composition management (REQ-UI-013)
     CompositionNew,
     CompositionSettings,
@@ -338,6 +344,9 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::PlaybackStop, "playback.stop"),
     (CommandId::FrameStepForward, "playback.step_forward"),
     (CommandId::FrameStepBackward, "playback.step_backward"),
+    (CommandId::PlaybackLoopIn, "playback.loop_in"),
+    (CommandId::PlaybackLoopOut, "playback.loop_out"),
+    (CommandId::PlaybackLoopClear, "playback.loop_clear"),
     (CommandId::CompositionNew, "composition.new"),
     (CommandId::CompositionSettings, "composition.settings"),
     (CommandId::CompositionDuplicate, "composition.duplicate"),
@@ -449,6 +458,9 @@ impl CommandId {
             CommandId::PlaybackStop => "menu.playback.stop",
             CommandId::FrameStepForward => "menu.playback.step_forward",
             CommandId::FrameStepBackward => "menu.playback.step_backward",
+            CommandId::PlaybackLoopIn => "menu.playback.loop_in",
+            CommandId::PlaybackLoopOut => "menu.playback.loop_out",
+            CommandId::PlaybackLoopClear => "menu.playback.loop_clear",
             CommandId::CompositionNew => "menu.composition.new",
             CommandId::CompositionSettings => "menu.composition.settings",
             CommandId::CompositionDuplicate => "menu.composition.duplicate",

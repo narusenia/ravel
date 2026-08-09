@@ -38,6 +38,7 @@ use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::{FrameRate, Vec2};
 use ravel_i18n::t;
 use ravel_ui::document::{
@@ -105,6 +106,11 @@ const OUT_OF_RANGE_ALPHA: f32 = 0.55;
 const OUT_OF_RANGE_TINT_ALPHA: f32 = 0.09;
 /// Opacity of a BPM beat line.
 const BEAT_LINE_ALPHA: f32 = 0.45;
+/// Opacity of the loop-range band in the ruler. Light enough that the ticks
+/// and labels under it stay readable — it marks a span, it does not mask one.
+const LOOP_RANGE_ALPHA: f32 = 0.22;
+/// Height of the loop-range band's edge markers, as a fraction of the ruler.
+const LOOP_RANGE_EDGE_RATIO: f32 = 1.0;
 /// Width of the `BPM` toggle — three glyphs, so wider than `S` / `M` / `L`.
 const BPM_TOGGLE_WIDTH: f32 = 32.0;
 /// Width of one BPM readout / editor in the transport toolbar.
@@ -374,6 +380,19 @@ enum TimelineDrag {
     /// mousedown" contract as `widgets/scrub_input.rs`). No document edits,
     /// so ending or cancelling commits nothing.
     Scrub,
+    /// Drag out the loop range on the ruler (`Alt` held on the press). The
+    /// pressed frame is one end and the pointer is the other, so dragging
+    /// either way works; releasing without leaving that frame clears the
+    /// range instead, which is the gesture's own way to say "play through".
+    ///
+    /// The gesture writes the shared range live, so it carries the range it
+    /// replaced: cancelling has to put that back. Every way out of the
+    /// gesture goes through [`loop_range_after_gesture`].
+    LoopRange {
+        anchor: u64,
+        before: Option<LoopRange>,
+        moved: bool,
+    },
     /// Move the bars along the timeline (start_frame), one baseline per
     /// selected layer.
     MoveBar {
@@ -473,12 +492,35 @@ fn pointer_hint_transition(
     (!dragging && current != next).then_some(next)
 }
 
+/// The loop range to install when a ruler loop gesture ends, or `None` when
+/// the gesture leaves it alone.
+///
+/// One decision for every way out — mouse-up, a cancelled drag, and the panel
+/// going away — because the gesture writes the shared range while it runs. A
+/// cleanup that only ran on mouse-up would strand a half-dragged range (or the
+/// one-frame range an Alt-press writes immediately) in state nothing else
+/// touches.
+fn loop_range_after_gesture(drag: &TimelineDrag, cancelled: bool) -> Option<Option<LoopRange>> {
+    let TimelineDrag::LoopRange { before, moved, .. } = drag else {
+        return None;
+    };
+    match (cancelled, moved) {
+        // Cancelled: the gesture never happened.
+        (true, _) => Some(*before),
+        // Released without moving: the Alt-click that asks for no loop.
+        (false, false) => Some(None),
+        // Released after a drag: the live updates already are the answer.
+        (false, true) => None,
+    }
+}
+
 fn drag_cursor(drag: &TimelineDrag) -> Option<CursorStyle> {
     match drag {
         TimelineDrag::None => None,
-        TimelineDrag::Scrub | TimelineDrag::TrimIn { .. } | TimelineDrag::TrimOut { .. } => {
-            Some(CursorStyle::ResizeLeftRight)
-        }
+        TimelineDrag::Scrub
+        | TimelineDrag::LoopRange { .. }
+        | TimelineDrag::TrimIn { .. }
+        | TimelineDrag::TrimOut { .. } => Some(CursorStyle::ResizeLeftRight),
         TimelineDrag::MoveBar { .. }
         | TimelineDrag::MoveKeyframe { .. }
         | TimelineDrag::GraphKeyframes { .. } => Some(CursorStyle::ClosedHand),
@@ -559,6 +601,10 @@ pub struct TimelineGpuiPanel {
     /// repaint from it.
     #[allow(dead_code)]
     bpm_grid_sub: Subscription,
+    /// Same for the loop range: the transport drops it when a seek leaves it,
+    /// so the band has to repaint from writes this panel did not make.
+    #[allow(dead_code)]
+    loop_range_sub: Subscription,
     /// Settles an in-flight inline scrub when this panel is dropped
     /// ([`TimelineGpuiPanel::end_channel_scrubs`]).
     #[allow(dead_code)]
@@ -615,6 +661,9 @@ impl TimelineGpuiPanel {
         let bpm_grid_sub = cx.observe_global::<super::BpmGridState>(|_this, cx| {
             cx.notify();
         });
+        let loop_range_sub = cx.observe_global::<super::LoopRangeState>(|_this, cx| {
+            cx.notify();
+        });
         // A scrub in flight when this panel goes away (its pane closed, the
         // workspace replaced) has already written live values through
         // `apply_document`, and the widget that owed the commit dies with the
@@ -633,6 +682,7 @@ impl TimelineGpuiPanel {
         // project, which is a change to the undo model rather than to this
         // panel.
         let release_sub = cx.on_release(|this: &mut Self, cx| {
+            this.end_loop_range_gesture(true, cx);
             this.end_channel_scrubs(|_| true, cx);
         });
         let focus_handle = cx.focus_handle();
@@ -689,6 +739,7 @@ impl TimelineGpuiPanel {
             active_comp_sub,
             selection_sub,
             bpm_grid_sub,
+            loop_range_sub,
             release_sub,
         }
     }
@@ -2048,6 +2099,21 @@ impl TimelineGpuiPanel {
                 let frame = self.scrub_target_frame(x, shift);
                 self.scrub_playhead(frame, cx);
             }
+            TimelineDrag::LoopRange {
+                anchor,
+                before,
+                moved,
+            } => {
+                let frame = self.scrub_target_frame(x, shift);
+                self.apply_loop_range(Some(LoopRange::new(anchor, frame)), cx);
+                self.drag = TimelineDrag::LoopRange {
+                    anchor,
+                    before,
+                    // Sticky: dragging back onto the anchor still leaves a
+                    // one-frame loop, it does not turn into a bare click.
+                    moved: moved || frame != anchor,
+                };
+            }
             TimelineDrag::MoveBar {
                 baselines,
                 pressed,
@@ -2356,6 +2422,7 @@ impl TimelineGpuiPanel {
     /// undo step.
     fn cancel_drag(&mut self, cx: &mut Context<Self>) {
         let had_drag = !matches!(self.drag, TimelineDrag::None);
+        self.end_loop_range_gesture(true, cx);
         let changed = match &self.drag {
             TimelineDrag::MoveBar { changed, .. }
             | TimelineDrag::TrimIn { changed, .. }
@@ -2364,8 +2431,11 @@ impl TimelineGpuiPanel {
             | TimelineDrag::MoveKeyframe { changed, .. }
             | TimelineDrag::GraphKeyframes { changed, .. }
             | TimelineDrag::GraphTangent { changed, .. } => *changed,
+            // The loop range is UI state, not a document edit: nothing to
+            // commit and nothing to roll back.
             TimelineDrag::None
             | TimelineDrag::Scrub
+            | TimelineDrag::LoopRange { .. }
             | TimelineDrag::RubberBand { .. }
             | TimelineDrag::GraphRubberBand { .. } => false,
         };
@@ -2384,6 +2454,7 @@ impl TimelineGpuiPanel {
     }
 
     fn drag_ended(&mut self, cx: &mut Context<Self>) {
+        self.end_loop_range_gesture(false, cx);
         let collapse_to = match &self.drag {
             TimelineDrag::MoveKeyframe {
                 pressed,
@@ -2425,8 +2496,11 @@ impl TimelineGpuiPanel {
             | TimelineDrag::MoveKeyframe { changed, .. }
             | TimelineDrag::GraphKeyframes { changed, .. }
             | TimelineDrag::GraphTangent { changed, .. } => *changed,
+            // The loop range is UI state, not a document edit: nothing to
+            // commit and nothing to roll back.
             TimelineDrag::None
             | TimelineDrag::Scrub
+            | TimelineDrag::LoopRange { .. }
             | TimelineDrag::RubberBand { .. }
             | TimelineDrag::GraphRubberBand { .. } => false,
         };
@@ -3580,6 +3654,36 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
+    /// Ruler loop-range gesture: routes the range through the playback
+    /// controller, which owns it (it clamps to the composition, re-anchors
+    /// the clock, and tells the audio engine where to fold).
+    /// Takes `&mut App` rather than `&mut Context<Self>` so the release
+    /// listener, which has no panel context left, runs the same code
+    /// (`end_channel_scrubs` is here for the same reason).
+    fn apply_loop_range(&mut self, range: Option<LoopRange>, cx: &mut App) {
+        let Some((fps, duration_frames)) = self.composition_params() else {
+            return;
+        };
+        let controller = cx
+            .try_global::<crate::playback::PlaybackControllerHandle>()
+            .and_then(|handle| handle.0.upgrade());
+        if let Some(controller) = controller {
+            // On the entity update stack, same contract as `scrub_playhead`.
+            controller.update(cx, |controller, cx| {
+                controller.set_loop_range_from_timeline(range, fps, duration_frames, cx);
+            });
+        }
+    }
+
+    /// Settle the ruler loop gesture, whichever way it is ending. Every exit
+    /// — mouse-up, cancel, panel drop — calls this, and it is the only place
+    /// the gesture's shared writes are undone.
+    fn end_loop_range_gesture(&mut self, cancelled: bool, cx: &mut App) {
+        if let Some(range) = loop_range_after_gesture(&self.drag, cancelled) {
+            self.apply_loop_range(range, cx);
+        }
+    }
+
     /// The frame currently under the playhead.
     pub fn playhead(&self) -> u64 {
         self.state.playhead()
@@ -3594,7 +3698,12 @@ impl TimelineGpuiPanel {
             .map(|comp| (comp.frame_rate, comp.duration_frames))
     }
 
-    fn build_ruler(&self, theme_colors: &ThemeColor, bpm: BpmGrid) -> impl IntoElement + use<> {
+    fn build_ruler(
+        &self,
+        theme_colors: &ThemeColor,
+        bpm: BpmGrid,
+        loop_range: Option<LoopRange>,
+    ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let ruler_width = self.ruler_width.clone();
@@ -3632,6 +3741,9 @@ impl TimelineGpuiPanel {
                 if minor_interval == 0 || major_interval == 0 {
                     // The end still has to be visible when the tick maths
                     // degenerates (`LOW-APP-05`).
+                    if let Some(range) = loop_range {
+                        paint_loop_range(&state, range, bounds, &colors, window);
+                    }
                     paint_out_of_range(&state, bounds, &colors, window);
                     return;
                 }
@@ -3706,6 +3818,11 @@ impl TimelineGpuiPanel {
                     }
                 }
 
+                // Over the ticks and labels: the band says which span plays,
+                // and a band the ruler draws through reads as a gradient.
+                if let Some(range) = loop_range {
+                    paint_loop_range(&state, range, bounds, &colors, window);
+                }
                 // Last, so the ticks and labels past the composition end are
                 // knocked back with everything else — the lane paints its
                 // band over its content for the same reason.
@@ -4772,7 +4889,7 @@ impl Render for TimelineGpuiPanel {
             .is_some_and(|controller| controller.read(cx).transport().is_playing());
         let transport_toolbar = self.build_transport_toolbar(is_playing, cx);
         let bpm = super::bpm_grid(cx);
-        let ruler = self.build_ruler(&theme.colors, bpm);
+        let ruler = self.build_ruler(&theme.colors, bpm, super::loop_range(cx));
         let view_mode = self.state.view_mode();
         let right_pane = match view_mode {
             TimelineViewMode::Bars => self
@@ -4953,6 +5070,23 @@ impl Render for TimelineGpuiPanel {
                                         event.position.x.into(),
                                         event.modifiers.shift,
                                     );
+                                    // Alt draws the loop range instead of
+                                    // moving the playhead: the ruler already
+                                    // owns "which frame", and the range is
+                                    // the other thing it says.
+                                    if event.modifiers.alt {
+                                        let before = super::loop_range(cx);
+                                        this.apply_loop_range(
+                                            Some(LoopRange::new(frame, frame)),
+                                            cx,
+                                        );
+                                        this.drag = TimelineDrag::LoopRange {
+                                            anchor: frame,
+                                            before,
+                                            moved: false,
+                                        };
+                                        return;
+                                    }
                                     this.scrub_playhead(frame, cx);
                                     this.drag = TimelineDrag::Scrub;
                                 }),
@@ -5802,6 +5936,42 @@ fn paint_out_of_range(
     }
 }
 
+/// Draws the loop range as a band across the ruler, with a solid edge at each
+/// end so the exact in and out frames are readable.
+///
+/// Ruler only, like the composition-end hairline's own reason for being
+/// there: the range is a transport setting, and putting it behind the layer
+/// bars as well would compete with the content the lanes exist to show.
+fn paint_loop_range(
+    state: &TimelinePanel,
+    range: LoopRange,
+    bounds: Bounds<Pixels>,
+    colors: &ThemeColor,
+    window: &mut Window,
+) {
+    let Some((x, width)) = state.loop_range_span(range, f64::from(f32::from(bounds.size.width)))
+    else {
+        return;
+    };
+    let origin = |offset: f64| point(bounds.origin.x + px(offset as f32), bounds.origin.y);
+    let height = bounds.size.height * LOOP_RANGE_EDGE_RATIO;
+    window.paint_quad(fill(
+        Bounds::new(origin(x), size(px(width as f32), height)),
+        Hsla {
+            a: LOOP_RANGE_ALPHA,
+            // A chart hue for the same reason the beat lines use one: never
+            // mistakable for the playhead (`primary`) or a layer bar.
+            ..colors.chart_1
+        },
+    ));
+    for edge in [x, x + width - 1.0] {
+        window.paint_quad(fill(
+            Bounds::new(origin(edge.max(0.0)), size(px(2.0), height)),
+            colors.chart_1,
+        ));
+    }
+}
+
 /// Draws the musical beat grid across `bounds`, when it is enabled and beats
 /// are far enough apart to read as lines.
 fn paint_beat_lines(
@@ -6046,6 +6216,42 @@ mod tests {
             }),
             Some(CursorStyle::Crosshair)
         );
+    }
+
+    /// Every way out of the ruler loop gesture settles the shared range, and
+    /// only one of them leaves it as the drag left it.
+    #[test]
+    fn every_exit_from_the_loop_gesture_settles_the_range() {
+        let previous = Some(LoopRange::new(5, 50));
+        let dragging = |moved| TimelineDrag::LoopRange {
+            anchor: 10,
+            before: previous,
+            moved,
+        };
+
+        // Cancelled — a lost button, a dropped panel — puts back what the
+        // gesture replaced, whether or not it had moved.
+        assert_eq!(
+            loop_range_after_gesture(&dragging(true), true),
+            Some(previous)
+        );
+        assert_eq!(
+            loop_range_after_gesture(&dragging(false), true),
+            Some(previous)
+        );
+
+        // Released without moving: the Alt-click that clears the range. The
+        // one-frame range the press wrote must not survive it.
+        assert_eq!(
+            loop_range_after_gesture(&dragging(false), false),
+            Some(None)
+        );
+
+        // Released after a drag: the live updates stand.
+        assert_eq!(loop_range_after_gesture(&dragging(true), false), None);
+
+        // Any other gesture is none of this function's business.
+        assert_eq!(loop_range_after_gesture(&TimelineDrag::Scrub, true), None);
     }
 
     /// The readouts seed the editors, so what they print has to parse back.

@@ -24,8 +24,10 @@
 
 use ravel_core::composition::Document;
 use ravel_core::id::CompId;
+use ravel_core::runtime::playback::LoopRange;
 use ravel_ui::panels::timeline::BpmGrid;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// UI state persisted alongside a project.
 ///
@@ -53,6 +55,19 @@ pub struct UiState {
     /// a hand-edited tempo.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bpm_grid: Option<BpmGrid>,
+
+    /// The loop range of every composition that has one, in id order.
+    ///
+    /// A list rather than a map because a JSON object cannot key on an
+    /// integer, and per composition because that is the granularity of the
+    /// feature — the range belongs to the composition you set it in.
+    ///
+    /// It lives here rather than on the `Composition` for the same reason as
+    /// the beat grid: it is where you are working, not what the frame looks
+    /// like. Handing a project to someone else therefore does not hand them
+    /// your loop range (2026-08-09).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_ranges: Vec<(CompId, LoopRange)>,
 }
 
 impl UiState {
@@ -68,6 +83,21 @@ impl UiState {
     /// back into range, or the default when the entry is absent.
     pub fn bpm_grid(&self) -> BpmGrid {
         self.bpm_grid.unwrap_or_default().sanitized()
+    }
+
+    /// The loop ranges that still apply to `document`: compositions it no
+    /// longer has are dropped, and a range that outlived a shortened
+    /// composition is pulled back inside it (or dropped when nothing of it is
+    /// left). A hand-edited or stale entry can therefore never install a
+    /// range that points past the end of a composition.
+    pub fn loop_ranges(&self, document: &Document) -> BTreeMap<CompId, LoopRange> {
+        self.loop_ranges
+            .iter()
+            .filter_map(|(id, range)| {
+                let comp = document.get_composition(*id)?;
+                Some((*id, range.clamped_to(comp.duration_frames)?))
+            })
+            .collect()
     }
 
     /// The composition the UI should open `document` on: the persisted one
@@ -188,6 +218,66 @@ mod tests {
         let back = UiState::from_json(&json).unwrap();
         assert_eq!(back, state);
         assert_eq!(back.bpm_grid().bpm, 174.0);
+    }
+
+    #[test]
+    fn loop_ranges_round_trip_and_are_absent_by_default() {
+        // A project nobody looped in writes no entry at all, so its
+        // `ui_state.json` stays byte-identical to what earlier builds wrote.
+        let json = UiState::default().to_json().unwrap();
+        assert!(!json.contains("loop_ranges"), "unexpected json: {json}");
+
+        let state = UiState {
+            loop_ranges: vec![(CompId::new(2), LoopRange::new(10, 40))],
+            ..UiState::default()
+        };
+        let json = state.to_json().unwrap();
+        assert_eq!(UiState::from_json(&json).unwrap(), state);
+    }
+
+    /// Ranges are per composition, and a load must not install one that
+    /// points outside the composition it belongs to.
+    #[test]
+    fn loop_ranges_drop_stale_compositions_and_clamp_to_the_duration() {
+        let (first, second) = (CompId::new(1), CompId::new(2));
+        let document = document_with(&[first, second]); // 300 frames each
+        let state = UiState {
+            loop_ranges: vec![
+                (first, LoopRange::new(10, 40)),
+                (second, LoopRange::new(280, 900)),
+                // A composition this document no longer has.
+                (CompId::new(99), LoopRange::new(0, 10)),
+            ],
+            ..UiState::default()
+        };
+
+        let ranges = state.loop_ranges(&document);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[&first], LoopRange::new(10, 40));
+        assert_eq!(ranges[&second], LoopRange::new(280, 299));
+
+        // Nothing of the range is left inside the composition.
+        let state = UiState {
+            loop_ranges: vec![(first, LoopRange::new(400, 500))],
+            ..UiState::default()
+        };
+        assert!(state.loop_ranges(&document).is_empty());
+    }
+
+    /// `ui_state.json` is hand-editable, so a reversed pair must not reach
+    /// `LoopRange::wrap` — `frame - in_frame` would underflow there.
+    #[test]
+    fn a_hand_edited_loop_range_is_ordered_on_read() {
+        let state =
+            UiState::from_json(r#"{"loop_ranges": [[1, {"in_frame": 40, "out_frame": 10}]]}"#)
+                .expect("a reversed pair must load");
+        let range = state.loop_ranges[0].1;
+        assert_eq!(range, LoopRange::new(10, 40));
+        // The invariant the fold relies on: no wrap can underflow.
+        assert_eq!(range.wrap(41), 10);
+
+        let (root, document) = (CompId::new(1), document_with(&[CompId::new(1)]));
+        assert_eq!(state.loop_ranges(&document)[&root], LoopRange::new(10, 40));
     }
 
     /// A partial or hand-edited entry must not reach the painter as a

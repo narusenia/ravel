@@ -22,6 +22,7 @@ use ravel_core::composition::{Composition, Layer};
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::FrameRate;
 use ravel_ui::command::CommandId;
 
@@ -210,6 +211,61 @@ fn playback_is_inert_without_an_active_composition(cx: &mut TestAppContext) {
         let transport = controller.read(cx).transport();
         assert_eq!(transport.current_frame(), 0);
         assert!(!transport.is_playing(), "there is nothing to play");
+    });
+}
+
+/// The loop range is per composition, so a running transport has to notice a
+/// switch: the tick loop's `resync_from_active_composition` is what makes it
+/// stop folding at the previous composition's out point.
+#[gpui::test]
+fn the_loop_range_follows_the_active_composition(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let other = add_composition(&project, cx, LayerId::next());
+    let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
+
+    // A loop over frames 10..=10 in the root composition.
+    cx.update(|cx| {
+        controller.update(cx, |controller, cx| {
+            for _ in 0..10 {
+                controller.handle_command(CommandId::FrameStepForward, cx);
+            }
+            controller.handle_command(CommandId::PlaybackLoopIn, cx);
+            controller.handle_command(CommandId::PlaybackLoopOut, cx);
+        });
+        assert_eq!(
+            controller.read(cx).transport().loop_range(),
+            Some(LoopRange::new(10, 10))
+        );
+    });
+
+    // Switching compositions mid-playback: the other composition has no range,
+    // so playback must stop folding rather than repeat frames of a comp it is
+    // no longer showing.
+    project.update(cx, |project, cx| {
+        project.set_active_composition(Some(other), cx)
+    });
+    cx.update(|cx| {
+        controller.update(cx, |controller, cx| {
+            controller.resync_from_active_composition(cx);
+        });
+        let transport = controller.read(cx).transport();
+        assert_eq!(transport.loop_range(), None);
+        assert_eq!(transport.fps(), FrameRate::new(24, 1));
+    });
+
+    // And switching back restores the range that belongs to that composition.
+    let root = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
+    project.update(cx, |project, cx| {
+        project.set_active_composition(Some(root), cx)
+    });
+    cx.update(|cx| {
+        controller.update(cx, |controller, cx| {
+            controller.resync_from_active_composition(cx);
+        });
+        assert_eq!(
+            controller.read(cx).transport().loop_range(),
+            Some(LoopRange::new(10, 10))
+        );
     });
 }
 

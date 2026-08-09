@@ -557,6 +557,8 @@ mod tests {
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
     use ravel_core::network as net;
+    use ravel_core::runtime::playback::LoopRange;
+    use std::collections::BTreeMap;
 
     use crate::manifest::CURRENT_FORMAT_VERSION;
     use crate::settings::{ColorLayer, ProxyMode};
@@ -766,6 +768,22 @@ mod tests {
         assert_ne!(other, root, "the restored composition is not just the root");
         // The switch is UI state only: the document root is untouched.
         assert_eq!(back.document.root_comp, Some(root));
+    }
+
+    /// The loop ranges ride the same optional entry, so a project saved with
+    /// one comes back with it and the format version stays put.
+    #[test]
+    fn the_archive_round_trips_a_per_composition_loop_range() {
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("demo project has a root");
+        project.ui_state.loop_ranges = vec![(root, LoopRange::new(10, 40))];
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            back.ui_state.loop_ranges(&back.document),
+            BTreeMap::from([(root, LoopRange::new(10, 40))])
+        );
     }
 
     /// A current-format archive may omit `ui_state.json`; it must still load,

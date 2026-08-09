@@ -20,6 +20,7 @@ use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::network::NetworkError;
+use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::FrameBuffer;
 use ravel_dock::PaneContent;
 use ravel_i18n::t;
@@ -28,7 +29,7 @@ use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::timeline::BpmGrid;
 use smallvec::SmallVec;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// The reason a refused custom-port edit gives the user.
@@ -379,6 +380,56 @@ pub fn bpm_grid(cx: &App) -> BpmGrid {
 /// Sanitized here so no caller can install a degenerate tempo.
 pub(crate) fn set_bpm_grid(grid: BpmGrid, cx: &mut App) {
     cx.set_global(BpmGridState(grid.sanitized()));
+}
+
+/// Durable shared state: the loop range of every composition that has one
+/// (unit 9 of `docs/implementation/refactor-plan-0808.md`).
+///
+/// Keyed by composition because that is the granularity of the feature — a
+/// loop range belongs to the composition you set it in, the way After
+/// Effects' work area does — and a Global for the same reasons as
+/// [`BpmGridState`]: the project save path writes it to `ui_state.json`, a
+/// load installs it, and the transport reads it without going through a
+/// Timeline view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoopRangeState(BTreeMap<CompId, LoopRange>);
+
+impl Global for LoopRangeState {}
+
+/// Every stored loop range, for the project save path.
+pub fn loop_ranges(cx: &App) -> BTreeMap<CompId, LoopRange> {
+    cx.try_global::<LoopRangeState>()
+        .map_or_else(BTreeMap::new, |state| state.0.clone())
+}
+
+/// The active composition's loop range, `None` when it has none.
+pub fn loop_range(cx: &App) -> Option<LoopRange> {
+    let comp = active_composition(cx)?;
+    cx.try_global::<LoopRangeState>()?.0.get(&comp).copied()
+}
+
+/// Install the active composition's loop range (`None` clears it). A no-op
+/// without an active composition: there is nothing for the range to belong
+/// to. Returns whether anything changed, so callers can skip the notify.
+pub(crate) fn set_loop_range(range: Option<LoopRange>, cx: &mut App) -> bool {
+    let Some(comp) = active_composition(cx) else {
+        return false;
+    };
+    let mut ranges = loop_ranges(cx);
+    let changed = match range {
+        Some(range) => ranges.insert(comp, range) != Some(range),
+        None => ranges.remove(&comp).is_some(),
+    };
+    if changed {
+        cx.set_global(LoopRangeState(ranges));
+    }
+    changed
+}
+
+/// Install every loop range at once: [`crate::project_state::ProjectState`]
+/// on a project load or File ▸ New.
+pub(crate) fn set_loop_ranges(ranges: BTreeMap<CompId, LoopRange>, cx: &mut App) {
+    cx.set_global(LoopRangeState(ranges));
 }
 
 /// The active composition id, `None` when the document has no composition

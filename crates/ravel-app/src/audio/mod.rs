@@ -114,6 +114,9 @@ pub struct AudioService {
     /// document cannot populate the cache (asset ids may be reused across
     /// documents for different files).
     generation: u64,
+    /// Loop span last forwarded by the transport, replayed when the engine
+    /// starts (it does so lazily, on the first audio track).
+    loop_secs: Option<(f64, f64)>,
 }
 
 impl AudioService {
@@ -137,6 +140,7 @@ impl AudioService {
             sent: HashMap::new(),
             desired_count: 0,
             generation: 0,
+            loop_secs: None,
         }
     }
 
@@ -170,14 +174,25 @@ impl AudioService {
         self.cache.insert(key, Arc::new(audio));
     }
 
-    /// Mirror the transport into the engine: seek first (so a resume
-    /// continues from the right position), then play/pause. Sent whenever
-    /// the transport changes, even with zero audio tracks, so the clock is
-    /// already aligned when a track appears mid-playback.
-    pub fn forward_transport(&self, playing: bool, seek_secs: Option<f64>) {
+    /// Mirror the transport into the engine: loop range and seek first (so a
+    /// resume continues from the right position), then play/pause. Sent
+    /// whenever the transport changes, even with zero audio tracks, so the
+    /// clock is already aligned when a track appears mid-playback.
+    ///
+    /// The range is remembered rather than only forwarded, because the engine
+    /// starts lazily on the first audio track: a loop set before that would
+    /// otherwise never reach the mixer.
+    pub fn forward_transport(
+        &mut self,
+        playing: bool,
+        seek_secs: Option<f64>,
+        loop_secs: Option<(f64, f64)>,
+    ) {
+        self.loop_secs = loop_secs;
         let Some(sink) = &self.sink else {
             return;
         };
+        let _ = sink.send(AudioCommand::SetLoopRange(loop_secs));
         if let Some(secs) = seek_secs {
             let _ = sink.send(AudioCommand::Seek(secs));
         }
@@ -374,6 +389,7 @@ impl AudioService {
                     .unwrap_or_default();
                 let fps = position.fps;
                 let secs = position.frame as f64 * fps.den.max(1) as f64 / fps.num.max(1) as f64;
+                let _ = engine.send(AudioCommand::SetLoopRange(self.loop_secs));
                 let _ = engine.seek(secs);
                 let playing = cx
                     .try_global::<crate::playback::PlaybackControllerHandle>()
@@ -482,9 +498,16 @@ pub fn playback_clock(cx: &App) -> Option<Arc<SyncClock>> {
 }
 
 /// Forward a transport change to the audio engine (no-op without one).
-pub fn forward_transport(playing: bool, seek_secs: Option<f64>, cx: &App) {
+pub fn forward_transport(
+    playing: bool,
+    seek_secs: Option<f64>,
+    loop_secs: Option<(f64, f64)>,
+    cx: &mut App,
+) {
     if let Some(service) = service(cx) {
-        service.read(cx).forward_transport(playing, seek_secs);
+        service.update(cx, |service, _cx| {
+            service.forward_transport(playing, seek_secs, loop_secs);
+        });
     }
 }
 

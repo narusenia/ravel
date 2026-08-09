@@ -73,6 +73,9 @@ toggle = "Space"
 stop = "K"
 step_forward = "Right"
 step_backward = "Left"
+loop_in = "B"
+loop_out = "N"
+loop_clear = "Alt+B"
 
 [workspace]
 edit = "Cmd+F1"

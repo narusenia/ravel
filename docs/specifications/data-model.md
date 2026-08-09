@@ -642,7 +642,8 @@ GraphDoc(
 ```json
 {
   "active_comp": 2,
-  "bpm_grid": { "enabled": true, "bpm": 174.0, "offset_frames": 12.0 }
+  "bpm_grid": { "enabled": true, "bpm": 174.0, "offset_frames": 12.0 },
+  "loop_ranges": [[2, { "in_frame": 30, "out_frame": 89 }]]
 }
 ```
 
@@ -650,6 +651,15 @@ GraphDoc(
 既定のままなら**エントリ自体が書かれない**。読み出しは
 `UiState::bpm_grid()` を通し、手で書き換えられたテンポは 1〜999 BPM に
 丸め込む。
+
+`loop_ranges` は**コンポジションごとの**ループ再生範囲（閉区間）。JSON の
+オブジェクトは整数をキーにできないので、`[CompId, LoopRange]` の配列で持つ。
+1 件も無ければ**エントリ自体が書かれない**。読み出しは
+`UiState::loop_ranges(&document)` を通し、ドキュメントに無いコンプジションの
+分は捨て、Duration の外へ出た範囲は引き戻す（残らなければその 1 件を捨てる）。
+手で `in_frame` と `out_frame` を逆に書いた場合は**読み込み時に並べ替える**
+（`LoopRange` の Deserialize が `LoopRange::new` を通る）。逆順のまま折り返しに
+渡すと減算がアンダーフローするため、BPM の 1〜999 丸め込みと同じ扱いにしてある。
 
 ユーザーが「何を見ていたか」はドキュメントの一部ではない — アクティブコンプを
 `Document` に入れると undo スナップショット（undo の単位）に載ってしまい、

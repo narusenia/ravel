@@ -16,6 +16,7 @@
 //! position instead.
 
 use crate::types::FrameRate;
+use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 /// Playback transport state.
@@ -24,6 +25,88 @@ pub enum PlaybackState {
     Stopped,
     Playing,
     Paused,
+}
+
+/// An inclusive frame range playback repeats over (the "loop range", AE's
+/// work area). Both ends are frames the loop plays, so an in/out pair set on
+/// the same frame is a one-frame loop rather than an empty one.
+///
+/// This is a working convenience rather than an attribute of the picture, so
+/// it is persisted in `ui_state.json` and never in the document — see
+/// `docs/specifications/ui/timeline.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "LoopRangeRepr")]
+pub struct LoopRange {
+    /// First frame of the loop.
+    pub in_frame: u64,
+    /// Last frame of the loop (inclusive).
+    pub out_frame: u64,
+}
+
+/// Deserialization shadow for [`LoopRange`], so a read restores the ordering
+/// invariant the type promises.
+///
+/// `derive(Deserialize)` never runs [`LoopRange::new`], and `ui_state.json` is
+/// a file people hand-edit: a reversed pair would reach [`LoopRange::wrap`]
+/// and underflow `frame - in_frame`. Ordering the ends on the way in is the
+/// same treatment `CurveParam` gives its own invariants
+/// (`docs/dev/persistence.md`).
+#[derive(Deserialize)]
+struct LoopRangeRepr {
+    in_frame: u64,
+    out_frame: u64,
+}
+
+impl From<LoopRangeRepr> for LoopRange {
+    fn from(repr: LoopRangeRepr) -> Self {
+        Self::new(repr.in_frame, repr.out_frame)
+    }
+}
+
+impl LoopRange {
+    /// A range over the two frames in either order, so a caller may set the
+    /// out point before the in point.
+    pub fn new(a: u64, b: u64) -> Self {
+        Self {
+            in_frame: a.min(b),
+            out_frame: a.max(b),
+        }
+    }
+
+    /// Number of frames the loop plays (always at least 1 — a loop range is
+    /// never empty, which is why this is not a `len`/`is_empty` pair).
+    pub fn frame_count(&self) -> u64 {
+        self.out_frame.saturating_sub(self.in_frame) + 1
+    }
+
+    /// Whether `frame` is inside the loop.
+    pub fn contains(&self, frame: u64) -> bool {
+        frame >= self.in_frame && frame <= self.out_frame
+    }
+
+    /// Fold a position that ran past the out point back into the range.
+    /// Positions before the in point are left alone: playback entering the
+    /// loop from earlier in the timeline plays in, it does not jump.
+    pub fn wrap(&self, frame: u64) -> u64 {
+        if frame <= self.out_frame {
+            return frame;
+        }
+        self.in_frame + (frame - self.in_frame) % self.frame_count()
+    }
+
+    /// The range as it applies to a timeline of `duration_frames`: the out
+    /// point is pulled inside, and a range that starts past the end is gone
+    /// entirely. Used when the composition is shortened under a live loop.
+    pub fn clamped_to(&self, duration_frames: u64) -> Option<Self> {
+        let last = duration_frames.checked_sub(1)?;
+        if self.in_frame > last {
+            return None;
+        }
+        Some(Self {
+            in_frame: self.in_frame,
+            out_frame: self.out_frame.min(last),
+        })
+    }
 }
 
 /// A frame-accurate transport clock over `[0, duration_frames)`.
@@ -37,6 +120,9 @@ pub struct PlaybackClock {
     base_frame: u64,
     /// Time origin of the current play segment; `Some` only while playing.
     base_instant: Option<Instant>,
+    /// While set, playback folds back to the in point instead of running to
+    /// the end of the timeline.
+    loop_range: Option<LoopRange>,
 }
 
 impl PlaybackClock {
@@ -48,11 +134,34 @@ impl PlaybackClock {
             state: PlaybackState::Stopped,
             base_frame: 0,
             base_instant: None,
+            loop_range: None,
         }
     }
 
     pub fn state(&self) -> PlaybackState {
         self.state
+    }
+
+    pub fn loop_range(&self) -> Option<LoopRange> {
+        self.loop_range
+    }
+
+    /// Set (or drop) the loop range, re-anchoring the clock at the frame
+    /// currently under the playhead.
+    ///
+    /// The re-anchor is the point: while a loop runs, the raw position
+    /// derived from the play origin keeps growing past the out point and
+    /// only [`Self::current_frame`]'s fold hides that. Changing the range
+    /// without re-anchoring would let the raw position surface — after a few
+    /// laps, dropping the loop would jump the playhead to the end of the
+    /// timeline instead of leaving it where it was.
+    pub fn set_loop_range(&mut self, range: Option<LoopRange>, now: Instant) {
+        if self.loop_range == range {
+            return;
+        }
+        let frame = self.current_frame(now);
+        self.loop_range = range;
+        self.seek(frame, now);
     }
 
     pub fn fps(&self) -> FrameRate {
@@ -74,9 +183,10 @@ impl PlaybackClock {
     /// While playing this derives the frame from the elapsed time since the
     /// play origin in exact integer arithmetic (`nanos × num / (den × 1e9)`),
     /// so exact frame boundaries never truncate early. The playhead shows
-    /// frame `N` for the whole interval `[N, N+1)`; once the computed frame
-    /// leaves the timeline the clock pauses holding the last frame (no
-    /// looping yet). While paused/stopped it returns the held position.
+    /// frame `N` for the whole interval `[N, N+1)`. With a loop range set the
+    /// position folds back to the in point on every lap; without one, the
+    /// clock pauses holding the last frame once the computed frame leaves the
+    /// timeline. While paused/stopped it returns the held position.
     pub fn current_frame(&mut self, now: Instant) -> u64 {
         if let Some(base) = self.base_instant {
             let elapsed = now.saturating_duration_since(base);
@@ -85,6 +195,12 @@ impl PlaybackClock {
             let frame = self
                 .base_frame
                 .saturating_add(u64::try_from(advanced).unwrap_or(u64::MAX));
+            // Folding before the end check is what makes a loop repeat
+            // rather than stop: a range never reaches past the timeline, so
+            // the pause below stays out of the way while one is set.
+            if let Some(range) = self.loop_range {
+                return range.wrap(frame);
+            }
             if frame >= self.duration_frames {
                 // Past the end of the timeline: hold the last frame and
                 // pause. The last frame still plays for its full interval.
@@ -100,14 +216,16 @@ impl PlaybackClock {
     }
 
     /// Begin (or resume) playback at time `now` from the current position.
-    /// Playing from the end restarts at frame 0. An empty timeline has no
-    /// playable frame, so `play` is a no-op on it.
+    /// Playing from the end restarts at frame 0 — or at the loop's in point
+    /// while a loop range is set, because that is where "the beginning" is
+    /// for a loop. An empty timeline has no playable frame, so `play` is a
+    /// no-op on it.
     pub fn play(&mut self, now: Instant) {
         if self.state == PlaybackState::Playing || self.duration_frames == 0 {
             return;
         }
         if self.base_frame >= self.last_frame() {
-            self.base_frame = 0;
+            self.base_frame = self.loop_range.map_or(0, |range| range.in_frame);
         }
         self.base_instant = Some(now);
         self.state = PlaybackState::Playing;
@@ -269,6 +387,83 @@ mod tests {
         clock.stop();
         assert_eq!(clock.step(-1, at(t0, 3000)), 0);
         assert_eq!(clock.state(), PlaybackState::Paused);
+    }
+
+    #[test]
+    fn loop_range_orders_its_ends_and_folds_only_past_the_out_point() {
+        let range = LoopRange::new(40, 10);
+        assert_eq!((range.in_frame, range.out_frame), (10, 40));
+        assert_eq!(range.frame_count(), 31);
+        assert!(range.contains(10) && range.contains(40));
+        assert!(!range.contains(9) && !range.contains(41));
+
+        // Before the in point: untouched, playback plays into the loop.
+        assert_eq!(range.wrap(0), 0);
+        assert_eq!(range.wrap(40), 40);
+        assert_eq!(range.wrap(41), 10);
+        // Many laps fold with the same modular arithmetic, so a long play
+        // never drifts.
+        assert_eq!(range.wrap(41 + 31 * 100), 10);
+        assert_eq!(range.wrap(55), 24);
+
+        // A one-frame loop is a valid loop, not an empty one.
+        let single = LoopRange::new(7, 7);
+        assert_eq!(single.frame_count(), 1);
+        assert_eq!(single.wrap(9), 7);
+    }
+
+    #[test]
+    fn loop_range_clamps_to_a_shortened_timeline() {
+        let range = LoopRange::new(10, 40);
+        assert_eq!(range.clamped_to(300), Some(range));
+        assert_eq!(range.clamped_to(20), Some(LoopRange::new(10, 19)));
+        // The whole range fell off the end.
+        assert_eq!(range.clamped_to(10), None);
+        assert_eq!(range.clamped_to(0), None);
+    }
+
+    #[test]
+    fn a_loop_range_repeats_instead_of_pausing_at_the_end() {
+        let (mut clock, t0) = clock();
+        clock.set_loop_range(Some(LoopRange::new(30, 59)), t0); // 1 s at 30 fps
+        clock.seek(30, t0);
+        clock.play(t0);
+        assert_eq!(clock.current_frame(at(t0, 500)), 45);
+        // One lap later, back at the in point rather than paused.
+        assert_eq!(clock.current_frame(at(t0, 1000)), 30);
+        assert_eq!(clock.current_frame(at(t0, 1500)), 45);
+        assert_eq!(clock.state(), PlaybackState::Playing);
+        // Still running long past the end of the timeline.
+        assert_eq!(clock.current_frame(at(t0, 60_000)), 30);
+        assert_eq!(clock.state(), PlaybackState::Playing);
+    }
+
+    /// The raw position behind a running loop is far past the out point;
+    /// dropping the range must leave the playhead where the user sees it and
+    /// not surface that raw position.
+    #[test]
+    fn dropping_the_loop_mid_play_keeps_the_displayed_frame() {
+        let (mut clock, t0) = clock();
+        clock.set_loop_range(Some(LoopRange::new(30, 59)), t0);
+        clock.seek(30, t0);
+        clock.play(t0);
+        // 10 s of playing = ten laps; the raw position is past frame 300.
+        assert_eq!(clock.current_frame(at(t0, 10_500)), 45);
+
+        clock.set_loop_range(None, at(t0, 10_500));
+        assert_eq!(clock.current_frame(at(t0, 10_500)), 45);
+        assert_eq!(clock.state(), PlaybackState::Playing);
+        // And it carries on from there rather than snapping to the end.
+        assert_eq!(clock.current_frame(at(t0, 11_500)), 75);
+    }
+
+    #[test]
+    fn playing_from_the_timeline_end_restarts_at_the_loop_in_point() {
+        let (mut clock, t0) = clock();
+        clock.set_loop_range(Some(LoopRange::new(100, 299)), t0);
+        clock.seek(299, t0);
+        clock.play(t0);
+        assert_eq!(clock.current_frame(t0), 100);
     }
 
     #[test]

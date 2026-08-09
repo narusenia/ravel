@@ -1416,6 +1416,9 @@ PlaybackClock::new(fps: FrameRate, duration_frames: u64)   // stopped at 0
     .seek(frame, now) / .step(±delta, now) -> u64          // step pauses
     .current_frame(now) -> u64   // closed-form from play origin: jitter
                                  // drops frames but never drifts the clock
+    .set_loop_range(Option<LoopRange>, now)  // re-anchors at the shown frame
+LoopRange::new(a, b)             // inclusive, ends ordered
+    .contains(frame) / .frame_count() / .wrap(frame) / .clamped_to(duration)
 PlaybackState::{Stopped, Playing, Paused}
 ```
 
@@ -1423,7 +1426,9 @@ The time source is an argument; `ravel-app`'s `Transport` wraps it with
 `ClockSource::Wall(Instant)` / `ClockSource::Audio(&SyncClock)` (audio-plan
 unit 3): the audio device clock is the master while the active composition
 has audio tracks and an engine runs, otherwise playback falls back to the
-wall clock. Reaching the end pauses on the last frame. See
+wall clock. Reaching the end pauses on the last frame — unless a `LoopRange`
+is set, in which case `current_frame` folds the position back to the in point
+instead (refactor-plan-0808 unit 9). See
 `docs/implementation/done/playback-foundation-plan.md` and
 `docs/implementation/audio-plan.md`.
 
@@ -2427,8 +2432,11 @@ Unknown type keys are skipped silently (plugin space).
   the present form is `Some(AudioSource(...))`.
   `ui_state::UiState` (`ui_state.json`) holds UI state that must stay out of
   the undo history and the document diff — currently `active_comp`
-  (REQ-UI-013) and `bpm_grid` (the Timeline's beat grid, read back through
-  `UiState::bpm_grid()`, which sanitizes a hand-edited tempo). The entry is
+  (REQ-UI-013), `bpm_grid` (the Timeline's beat grid, read back through
+  `UiState::bpm_grid()`, which sanitizes a hand-edited tempo) and
+  `loop_ranges: Vec<(CompId, LoopRange)>` (read back through
+  `UiState::loop_ranges(&document)`, which drops compositions the document no
+  longer has and clamps the rest to their duration). The entry is
   optional in both directions (missing entry →
   defaults, unknown fields ignored, unreadable content → defaults + a
   warning, never a failed load), which is why it does NOT bump
@@ -2543,7 +2551,13 @@ Unknown type keys are skipped silently (plugin space).
   ppf zoom slider with fit.
 - Playback: `PlaybackController` (`src/playback.rs`) wraps the headless
   `Transport` (PlaybackClock + drop counting) and handles the delegated
-  transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`). While
+  transport commands (`PlaybackToggle`/`PlaybackStop`/`FrameStep*`/
+  `PlaybackLoop{In,Out,Clear}`). The loop range itself lives in the
+  `panels::LoopRangeState` global, keyed by composition; the controller
+  adopts it before every command and writes back what the transport changed
+  on its own (a seek out of the range drops it);
+  `resync_from_active_composition(cx)` does the same from the tick loop, so a
+  composition switch mid-playback moves the fold with it. While
   playing, a spawned task ticks once per frame interval, moves the Timeline
   playhead, records the shared `PlaybackPosition` global, and asks
   `ProjectState` to re-evaluate the root composition output at the new
@@ -2623,7 +2637,10 @@ Unknown type keys are skipped silently (plugin space).
   tests) or `ClockSource::Audio(&SyncClock)`. The single switch decision is
   `audio::playback_clock(cx)`: audio clock iff the active composition has
   audio tracks AND an engine runs; zero tracks or no device ⇒ wall. The
-  controller forwards play/pause/seek to the engine on every transport
+  controller forwards play/pause/seek — and the loop span as
+  `AudioCommand::SetLoopRange(Option<(start_secs, end_secs)>)`, which the prep
+  thread folds its own mix position on without a transport epoch, so a lap
+  costs no gap — to the engine on every transport
   command so the `SyncClock` stays aligned for the switch.
   Prepared chunks carry a transport epoch: pause/seek and mixer-state changes
   invalidate old queued audio. An atomic transport gate couples epoch changes

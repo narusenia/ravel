@@ -501,6 +501,13 @@ TimelineDrag::MoveBar { layer, origin_start, grab_x, .. } => {
 > バインドを丸ごと無効にするので、メニューが開いている間は Space も含め
 > どのワークスペース chord も発火しない。開いているメニューはキーボードに
 > 対してモーダル、という判断。
+>
+> **実機未確認**: 述語のテストが見ているのは `eval()` の意味論で、実行中の
+> アプリで `PopupMenu` が実際に dispatch stack に載っているかは見ていない。
+> フォーク側の再 focus にも自動テストが無い（ヘッドレスで `PopupMenu` を
+> 開くと gpui のテストウィンドウが panic する）。再現手順は
+> 「パネルの `…` を開く → 外側クリックで閉じる → もう一度開く → Escape」で、
+> 修正前は閉じない。**もし実機で直っていなければ再起票すること。**
 
 **該当**: `crates/ravel-app/src/workspace.rs:424`（`build_keybindings` が
 アセット由来のバインドに与える文脈 `"!Input"`）、

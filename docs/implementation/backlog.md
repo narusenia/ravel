@@ -77,9 +77,6 @@
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
-| UX-5 | Timeline のプロパティ行の絞り込み（AE の reveal 一式） | `refactor-plan-0808.md` |
-| UX-6 | Timeline 上での値スクラブ | `refactor-plan-0808.md` |
-| UX-7 | プレイヘッド操作（キースナップ / ショートカット） | `refactor-plan-0808.md` |
 | UX-9 | ループ範囲とループ再生 | `refactor-plan-0808.md` |
 | UX-10 | 素材からレイヤーへの経路 | `refactor-plan-0808.md` |
 | NGR-1 | 自動整列の計算（ヘッドレス） | `node-graph-readability-plan.md` |
@@ -620,9 +617,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | UX-2 | ⬜ | シナリオ 2 本の台本と集計表 | UX-1 |
 | UX-3 | ❓ | 測定結果の取り込みと単位化 | UX-2（測定の実施） |
 | UX-4 | ✅ #351 | ノード検索を `type_key` でも引く | — |
-| UX-5 | 🟡 | Timeline のプロパティ行の絞り込み（AE の reveal 一式: U / P / S / R / T / A / L + Alt+U / Alt+E、Shift で追加） | — |
-| UX-6 | 🟡 | Timeline 上での値スクラブ | — |
-| UX-7 | 🟡 | プレイヘッド操作（キーへのスナップ、AE 相当のショートカット） | — |
+| UX-5 | ✅ #355 | Timeline のプロパティ行の絞り込み（AE の reveal 一式: U / P / S / R / T / A / L + Alt+U / Alt+E、Shift で追加） | — |
+| UX-6 | ✅ #356 | Timeline 上での値スクラブ | — |
+| UX-7 | ✅ #357 | プレイヘッド操作（キーへのスナップ、AE 相当のショートカット） | — |
 | UX-8 | ✅ #353 | 時間ルーラ（コンポ終端の可視化と BPM グリッド） | — |
 | UX-9 | 🟡 | ループ範囲とループ再生 | — |
 | UX-10 | 🟡 | 素材からレイヤーへの経路（自動配置の廃止 / ドラッグ / Outliner） | — |

@@ -66,7 +66,8 @@
 バインドを壊すことはない。**追加した経路は必ず `AppShell` 経由**にすること —
 `build_keybindings` が全バインドに文脈述語を付けており（アセット由来は
 `workspace_binding_context()` = `!Input && !PopupMenu && !AppMenuBar`、
-パネル固有は自分の文脈を `yield_to_open_menus` で同じく narrowing したもの）、
+パネル固有は自分の文脈を `panel_binding_context` で narrowing したもの
+= `<パネル文脈> && !Input && !PopupMenu && !AppMenuBar`）、
 そこを迂回して `KeyBinding` を作ると `MED-APP-16`（テキスト入力から矢印を奪う）と
 `MED-APP-31`（開いたメニューからキーを奪う）が戻る。
 

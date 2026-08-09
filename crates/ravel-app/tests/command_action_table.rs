@@ -264,7 +264,7 @@ fn node_editor_keybindings_are_context_scoped() {
     // The panel's own context, narrowed out of an open menu the same way every
     // other binding is (`MED-APP-31`). Spelled out rather than read from
     // `build_keybindings`, so a narrowing that silently goes away fails here.
-    let scope = format!("{KEY_CONTEXT} && !PopupMenu && !AppMenuBar");
+    let scope = format!("{KEY_CONTEXT} && !Input && !PopupMenu && !AppMenuBar");
     let bindings = build_keybindings(&AppShell::default());
     let scoped: Vec<_> = bindings
         .iter()

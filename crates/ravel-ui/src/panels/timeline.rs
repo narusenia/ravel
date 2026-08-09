@@ -511,15 +511,21 @@ impl TimelinePanel {
     /// Composition frames carrying a keyframe the panel is **currently
     /// showing**, sorted and deduplicated.
     ///
-    /// "Showing" is the panel's own tree, not the document: a collapsed layer
-    /// contributes nothing, and an expanded one contributes only the rows that
-    /// survive the reveal filter ([`Self::visible_property_rows`], the one
-    /// filtered enumeration). Property-row expansion is deliberately not
-    /// consulted — a collapsed property row still draws its channels'
-    /// keyframes as one aggregated lane, so those keys are on screen.
+    /// "Showing" is the panel's own tree, not the document. Three gates, all
+    /// of which the painter applies before it draws a diamond:
     ///
-    /// Frames before composition frame 0 are dropped: the playhead is
-    /// unsigned, so they are not positions it can snap to.
+    /// - a collapsed layer contributes nothing;
+    /// - an expanded one contributes only the rows that survive the reveal
+    ///   filter ([`Self::visible_property_rows`], the one filtered
+    ///   enumeration);
+    /// - **a collapsed property row contributes nothing either** — the
+    ///   keyframe diamonds live on the channel sub-rows, which are painted
+    ///   only inside the `is_property_expanded` branch, so a collapsed
+    ///   property draws no keys to snap to.
+    ///
+    /// Frames outside `[0, duration)` are dropped: the playhead cannot be
+    /// scrubbed there, so a key past the end would pull the pointer to the
+    /// clamped final frame instead of leaving it where the user aimed.
     pub fn visible_keyframe_frames(&self) -> Vec<i64> {
         let mut frames: Vec<i64> = self
             .layers()
@@ -527,6 +533,7 @@ impl TimelinePanel {
             .flat_map(|layer| {
                 self.visible_property_rows(layer)
                     .into_iter()
+                    .filter(|row| self.is_property_expanded(layer.id, &row.id))
                     .filter_map(move |row| crate::keyframes::row_channels(layer, &row.id))
                     .flatten()
                     .filter_map(|channel| match &channel.source {
@@ -538,7 +545,7 @@ impl TimelinePanel {
                     .flatten()
                     .map(move |key| crate::keyframes::comp_frame_for_key(layer, key.frame))
             })
-            .filter(|frame| *frame >= 0)
+            .filter(|frame| (0..self.duration_frames() as i64).contains(frame))
             .collect();
         frames.sort_unstable();
         frames.dedup();
@@ -853,7 +860,7 @@ mod tests {
         use crate::keyframes::PropertyRowId;
         let mut p = panel();
         let lid = LayerId::new(1);
-        let position = PropertyRowId::Shell(PropertyGroup::Position);
+        let position = crate::keyframes::PropertyRowId::Shell(PropertyGroup::Position);
         let scale = PropertyRowId::Shell(PropertyGroup::Scale);
         assert!(!p.is_property_expanded(lid, &position));
         p.toggle_property_expanded(lid, position.clone());
@@ -1229,6 +1236,21 @@ mod tests {
         (panel, lid)
     }
 
+    /// Open the two keyed property rows of [`snap_composition`]'s layer.
+    /// Keyframe diamonds live on the channel sub-rows, so a property row has
+    /// to be expanded before its keys are on screen at all.
+    fn expand_snap_rows(panel: &mut TimelinePanel, lid: LayerId) {
+        panel.toggle_layer_expanded(lid);
+        panel.toggle_property_expanded(
+            lid,
+            crate::keyframes::PropertyRowId::Shell(PropertyGroup::Position),
+        );
+        panel.toggle_property_expanded(
+            lid,
+            crate::keyframes::PropertyRowId::Shell(PropertyGroup::Rotation),
+        );
+    }
+
     /// The completion criterion for the snap: it sees exactly what the panel
     /// shows. A collapsed layer offers nothing, and a reveal filter takes the
     /// rows it hides out of the candidate set with them.
@@ -1241,6 +1263,19 @@ mod tests {
         );
 
         p.toggle_layer_expanded(lid);
+        assert!(
+            p.visible_keyframe_frames().is_empty(),
+            "an expanded layer whose property rows are collapsed draws no keys"
+        );
+
+        p.toggle_property_expanded(
+            lid,
+            crate::keyframes::PropertyRowId::Shell(PropertyGroup::Position),
+        );
+        p.toggle_property_expanded(
+            lid,
+            crate::keyframes::PropertyRowId::Shell(PropertyGroup::Rotation),
+        );
         assert_eq!(p.visible_keyframe_frames(), vec![10, 25, 40]);
 
         p.apply_reveal(RevealFilter::Group(PropertyGroup::Position), false);
@@ -1256,7 +1291,7 @@ mod tests {
     #[test]
     fn snap_candidates_drop_keys_before_the_composition_start() {
         let (mut p, lid) = snap_composition(&[0, 60], &[]);
-        p.toggle_layer_expanded(lid);
+        expand_snap_rows(&mut p, lid);
         let mut comp = p.composition().unwrap().clone();
         let mut layer = comp.layers[0].clone();
         layer.start_frame = -20;
@@ -1270,7 +1305,7 @@ mod tests {
     #[test]
     fn snap_pull_is_a_pixel_radius_at_any_zoom() {
         let (mut p, lid) = snap_composition(&[20], &[]);
-        p.toggle_layer_expanded(lid);
+        expand_snap_rows(&mut p, lid);
         let candidates = p.visible_keyframe_frames();
 
         for ppf in [1.0, 4.0, 40.0] {
@@ -1295,7 +1330,7 @@ mod tests {
     #[test]
     fn snap_takes_the_nearest_candidate() {
         let (mut p, lid) = snap_composition(&[20, 22], &[]);
-        p.toggle_layer_expanded(lid);
+        expand_snap_rows(&mut p, lid);
         let candidates = p.visible_keyframe_frames();
         p.set_pixels_per_frame(4.0);
         assert_eq!(p.snap_playhead_x(p.frame_to_x(22) - 1.0, &candidates), 22);

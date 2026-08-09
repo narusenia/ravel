@@ -6779,6 +6779,38 @@ mod tests {
             .unwrap();
     }
 
+    /// The chord's action reaches the panel: the binding table and the handler
+    /// table are separate lists, so nothing but a dispatch proves they meet.
+    #[gpui::test]
+    fn a_reveal_action_reaches_the_panel(cx: &mut TestAppContext) {
+        let (window, ..) = setup(cx);
+        window
+            .update(cx, |panel, window, cx| {
+                panel.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+        cx.update(|cx| cx.refresh_windows());
+        cx.run_until_parked();
+
+        cx.dispatch_action(window.into(), crate::workspace::TimelineRevealPosition);
+        window
+            .read_with(cx, |panel, _| {
+                assert_eq!(
+                    panel.state.reveal_filters(),
+                    &HashSet::from([RevealFilter::Group(PropertyGroup::Position)])
+                );
+            })
+            .unwrap();
+
+        // The same action again clears it, the way pressing the key twice does.
+        cx.dispatch_action(window.into(), crate::workspace::TimelineRevealPosition);
+        window
+            .read_with(cx, |panel, _| {
+                assert!(panel.state.reveal_filters().is_empty());
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn shift_empty_channel_click_keeps_selection(cx: &mut TestAppContext) {
         let (window, project, comp_id, a, _b) = setup(cx);

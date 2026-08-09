@@ -1828,7 +1828,11 @@ Unknown type keys are skipped silently (plugin space).
   mirrors the active composition as `Option<Composition>` (`composition()`,
   `comp_id()`, `layer(id)`, `layers()`, `frame_rate()`, `duration_frames()`);
   the layer selection is NOT here — it lives in the host's `LayerSelection`
-  global (REQ-UI-013).
+  global (REQ-UI-013). The AE-style reveal filters are panel state too:
+  `apply_reveal(RevealFilter, additive)` (unmodified replaces and re-applying
+  the sole active criterion clears it; `Shift` toggles membership),
+  `reveal_filters()`, and `visible_property_rows(layer)` — **the** filtered
+  row enumeration every layout derivation in the host walks (`MED-APP-13`).
 - Composition management (REQ-UI-013) lives in `document.rs`:
   `CompositionSettings { name, resolution, frame_rate, duration_frames,
   background_color }` is the settings value (`from_composition`, `fallback`,
@@ -1872,7 +1876,9 @@ Unknown type keys are skipped silently (plugin space).
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
-  the shell groups plus every keyframed parameter of the layer's network
+  the shell groups (`SHELL_GROUPS`, in After Effects' order: Anchor Point,
+  Position, Scale, Rotation, Opacity, plus Gain on audio layers)
+  plus every keyframed parameter of the layer's network
   **and of every subnet nested inside it, at any depth** — enumeration is
   recursive because evaluation is, and a flat list beside a recursive
   evaluator is what hid a collapsed node's keyframes while its animation kept
@@ -1896,7 +1902,10 @@ Unknown type keys are skipped silently (plugin space).
   `set_curve_value` for the bare curve, `preview_keyframe_move` /
   `preview_keyframe_moves` / `preview_keyframe_moves_with_value_delta` /
   `preview_keyframe_tangent` (baseline-derived drag previews),
-  `row_channels`, `has_keyframe_at`. `PropertyRow::channel_names` mixes two
+  `row_channels`, `has_keyframe_at`. `RevealFilter::{Animated, Group,
+  Modified, Expression}` with `matches(layer, row)` is the reveal predicate
+  the Timeline filters rows by (`TimelinePanel::visible_property_rows`).
+  `PropertyRow::channel_names` mixes two
   kinds: untranslated notation (`X` / `Y`, `R` / `G` / `B` / `A`) and locale
   keys for components named by a word (`shell_channel_names` returns
   `timeline.property.*`, a single-channel network parameter returns

@@ -102,6 +102,18 @@ about = "F1"
 | `L`（自動整列） | Node Editor |
 | `Tab`（ノード検索パレット） | Node Editor |
 | `Delete` / `Backspace`（削除） | Node Editor、Timeline |
+| `U` / `A` / `P` / `S` / `R` / `T` / `L`（プロパティ行の絞り込み） | Timeline |
+| `Shift+U` / `Shift+A` / `Shift+P` / `Shift+S` / `Shift+R` / `Shift+T` / `Shift+L`（絞り込みに追加） | Timeline |
+| `Alt+U` / `Alt+E`（変更済み / 式を持つ行） | Timeline |
+| `Alt+Shift+U` / `Alt+Shift+E`（同じく追加） | Timeline |
+
+絞り込みは**修飾なしが置換、`Shift` 併用が追加**という 2 つの意味を持つが、
+GPUI の Action は修飾キーを運ばないので**コマンドを 2 本に分けている**
+（`timeline.reveal_position` と `timeline.reveal_position_add`）。AE の
+二度押し（`UU` / `EE`）は `KeyChord` に表現が無いため `Alt+U` / `Alt+E` に
+割り当てた。挙動は [`timeline.md`](timeline.md) の「行の絞り込み」節。
+Viewer の `P` / `R` と Node Editor の `L` はキーコンテキストが違うので
+衝突しない。
 
 キーフレーム補間の切替はメニューと `on_action` だけで、キーバインドは持たない。
 

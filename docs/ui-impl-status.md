@@ -171,7 +171,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | ルーラー | ✅ | 高さ 24px、MM:SS:FF 形式、ズームに応じたティック間隔適応 |
 | レイヤーヘッダー | ✅ | 幅 200px、展開矢印、名前、S/M/L トグルボタン |
 | レイヤーバー | ✅ | 角丸 4px、start_frame/duration 反映、名前テキスト |
-| プロパティ展開行 | ✅ | 殻の Position/Scale/Rotation/Opacity + キーフレームを持つネットワーク内パラメータ（In カスタム・サブネット露出含む、REQ-LAYER-004） |
+| プロパティ展開行 | ✅ | 殻の AnchorPoint/Position/Scale/Rotation/Opacity（AE の並び。音声を持つレイヤーは Gain も）+ キーフレームを持つネットワーク内パラメータ（In カスタム・サブネット露出含む、REQ-LAYER-004） |
 | キーフレームダイヤ | ✅ | Keyframes チャンネルをレイヤーローカル→Comp 時間へ変換して描画（`comp_frame_for_key`、in_frame 考慮）。選択中は描き分け |
 | 再生ヘッド | ✅ | 赤色 2px 縦線 |
 | コンポ終端の帯 | ✅ | Duration の外をルーラーとレーンで落とす（背景ウォッシュ + tint + 終端 1px 線）。ズームは終端で止めない。グラフモードには敷かない |
@@ -191,6 +191,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | レイヤー選択 (ヘッダー/バークリック) | ✅ | `LayerSelection` Global へ書き込み → Properties / ノードエディタが observe。Shift で範囲選択、Cmd（platform 修飾）でトグル（REQ-UI-013 単位 6、修飾クリックはバー移動・並べ替えを開始しない）。選択中の全レイヤーをハイライト。削除・複写・S/M/L・バーの移動 / トリムは選択全体に効く（各 1 undo、ロック済みは削除と移動から保護。S/M/L は行本体の選択を奪わない） |
 | ネットワークを開く | ✅ | レイヤーを 1 つ選択するとノードエディタが `LayerSelection` を observe して開く。ダブルクリック（ヘッダー/バー）は加えてビューを fit する。0 個・複数個選択時は閉じた状態 |
 | レイヤー展開 (▶/▼) | ✅ | プロパティグループ・チャンネル行の開閉 |
+| プロパティ行の絞り込み | ✅ | AE の reveal 一式（`U` / `A` / `P` / `S` / `R` / `T` / `L`、`Alt+U` = 変更済み、`Alt+E` = 式を持つ行）。**修飾なしは置換、`Shift` 併用は追加**、同じキーの二度目で全表示に戻る。行の生成は変えずフィルタを 1 枚かぶせるだけで、描画・ヒットテスト・ラバーバンド・高さ計算のすべてが `TimelinePanel::visible_property_rows` を通る。絞り込みはパネル状態なのでレイヤーを選び直しても保たれ、`ui_state.json` には載らない（起動時は常に全表示）。展開状態は変えない |
 | Solo/Mute/Lock トグル | ✅ | Document 更新（solo/mute は Structural 再評価） |
 | レイヤー作成 | ✅ | Layer メニュー（Solid/Shape/Video/Null、テンプレートから生成） |
 | レイヤー削除 | ✅ | Delete/Backspace（locked は保護）、Document undo で復元 |

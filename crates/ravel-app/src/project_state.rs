@@ -649,13 +649,11 @@ impl ProjectState {
         app_settings::set_project_layer(SettingsLayer::default(), cx);
         // A user-driven replacement: invalidates in-flight loads.
         let document = fresh_document(cx);
-        let active_comp = document.root_comp;
         self.revision += 1;
         self.replace_document(
             document,
             None,
-            active_comp,
-            BpmGrid::default(),
+            &UiState::default(),
             SettingsLayer::default(),
             cx,
         );
@@ -715,6 +713,9 @@ impl ProjectState {
                 // byte-identical to what earlier builds wrote.
                 bpm_grid: Some(crate::panels::bpm_grid(cx))
                     .filter(|grid| *grid != BpmGrid::default()),
+                // Same rule for the loop ranges: no entry at all until one
+                // composition actually has one.
+                loop_ranges: crate::panels::loop_ranges(cx).into_iter().collect(),
             },
             workspace_layout,
             settings: crate::app_settings::layer(crate::app_settings::SettingsScope::Project, cx),
@@ -834,17 +835,11 @@ impl ProjectState {
                 let _ = this.update(cx, |this, cx| {
                     if this.load_request == request && this.revision == revision {
                         let file = loaded.project;
-                        // The saved session's composition, or the document
-                        // root when the archive predates `ui_state.json`
-                        // (or names a composition it no longer has).
-                        let active_comp = file.ui_state.initial_active_comp(&file.document);
-                        let bpm_grid = file.ui_state.bpm_grid();
                         let workspace_layout = file.workspace_layout;
                         this.replace_document(
                             file.document,
                             Some(path),
-                            active_comp,
-                            bpm_grid,
+                            &file.ui_state,
                             file.settings,
                             cx,
                         );
@@ -931,11 +926,15 @@ impl ProjectState {
         &mut self,
         document: Document,
         path: Option<PathBuf>,
-        active_comp: Option<CompId>,
-        bpm_grid: BpmGrid,
+        ui_state: &UiState,
         settings: SettingsLayer,
         cx: &mut Context<Self>,
     ) {
+        // Everything the UI opens the project on comes out of one entry, so
+        // adding a field here is one call site rather than one parameter.
+        let active_comp = ui_state.initial_active_comp(&document);
+        let bpm_grid = ui_state.bpm_grid();
+        let loop_ranges = ui_state.loop_ranges(&document);
         // The layer selection of the previous document never carries over —
         // even a reloaded project reuses composition ids for different
         // content. Published after the swap so observers resolve the new id
@@ -943,6 +942,7 @@ impl ProjectState {
         self.store = DocumentStore::new(document);
         crate::panels::set_active_composition(active_comp, cx);
         crate::panels::set_bpm_grid(bpm_grid, cx);
+        crate::panels::set_loop_ranges(loop_ranges, cx);
         crate::app_settings::set_project_layer(settings, cx);
         self.project_path = path;
         self.generation += 1;
@@ -2273,8 +2273,7 @@ mod tests {
             project.replace_document(
                 document,
                 None,
-                Some(comp),
-                BpmGrid::default(),
+                &UiState::with_active_comp(Some(comp)),
                 SettingsLayer::default(),
                 cx,
             );

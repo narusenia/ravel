@@ -238,6 +238,10 @@ impl MenuBar {
                 MenuItem::Separator,
                 MenuItem::action(CommandId::FrameStepBackward),
                 MenuItem::action(CommandId::FrameStepForward),
+                MenuItem::Separator,
+                MenuItem::action(CommandId::PlaybackLoopIn),
+                MenuItem::action(CommandId::PlaybackLoopOut),
+                MenuItem::action(CommandId::PlaybackLoopClear),
             ],
         );
 

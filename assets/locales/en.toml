@@ -72,6 +72,9 @@ toggle = "Play / Pause"
 stop = "Stop"
 step_forward = "Step Forward"
 step_backward = "Step Backward"
+loop_in = "Set Loop In"
+loop_out = "Set Loop Out"
+loop_clear = "Clear Loop Range"
 
 [menu.workspace]
 _self = "Workspace"

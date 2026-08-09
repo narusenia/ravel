@@ -70,6 +70,9 @@ toggle = "再生 / 一時停止"
 stop = "停止"
 step_forward = "1フレーム進む"
 step_backward = "1フレーム戻る"
+loop_in = "ループ開始点を設定"
+loop_out = "ループ終了点を設定"
+loop_clear = "ループ範囲を解除"
 
 [menu.workspace]
 _self = "ワークスペース"

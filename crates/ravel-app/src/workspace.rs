@@ -112,6 +112,9 @@ macro_rules! for_each_command {
             PlaybackStop,
             FrameStepForward,
             FrameStepBackward,
+            PlaybackLoopIn,
+            PlaybackLoopOut,
+            PlaybackLoopClear,
             CompositionNew,
             CompositionSettings,
             CompositionDuplicate,
@@ -1251,7 +1254,10 @@ impl RavelWorkspace {
                 CommandId::PlaybackToggle
                 | CommandId::PlaybackStop
                 | CommandId::FrameStepForward
-                | CommandId::FrameStepBackward => {
+                | CommandId::FrameStepBackward
+                | CommandId::PlaybackLoopIn
+                | CommandId::PlaybackLoopOut
+                | CommandId::PlaybackLoopClear => {
                     self.playback.update(cx, |playback, cx| {
                         playback.handle_command(cmd, cx);
                     });

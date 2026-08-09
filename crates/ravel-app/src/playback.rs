@@ -29,7 +29,7 @@
 use gpui::{App, Context, Entity};
 use ravel_audio::SyncClock;
 use ravel_core::runtime::InvalidationHint;
-use ravel_core::runtime::playback::{PlaybackClock, PlaybackState};
+use ravel_core::runtime::playback::{LoopRange, PlaybackClock, PlaybackState};
 use ravel_core::types::FrameRate;
 use ravel_ui::command::CommandId;
 use std::time::{Duration, Instant};
@@ -120,6 +120,56 @@ impl Transport {
         self.clock.fps()
     }
 
+    /// Length of the timeline the clock currently runs over.
+    pub fn duration_frames(&self) -> u64 {
+        self.clock.duration_frames()
+    }
+
+    /// The range playback currently repeats over, if any.
+    pub fn loop_range(&self) -> Option<LoopRange> {
+        self.clock.loop_range()
+    }
+
+    /// Set (or drop) the loop range, pulled inside the timeline first. A
+    /// range that starts past the end of the composition is dropped rather
+    /// than clamped to a degenerate one.
+    pub fn set_loop_range(&mut self, range: Option<LoopRange>, now: Instant) -> TransportUpdate {
+        let range = range.and_then(|range| range.clamped_to(self.clock.duration_frames()));
+        if self.clock.loop_range() != range {
+            self.clock.set_loop_range(range, now);
+            self.last_frame = self.clock.current_frame(now);
+        }
+        TransportUpdate {
+            frame: self.last_frame,
+            playing: self.is_playing(),
+        }
+    }
+
+    /// Take the loop off when `frame` lands outside it. Moving the playhead
+    /// out of the range wins over the loop: the alternative is to yank the
+    /// playhead back, which hides the fact that the click did nothing.
+    fn drop_loop_outside(&mut self, frame: u64, now: Instant) {
+        if self
+            .clock
+            .loop_range()
+            .is_some_and(|range| !range.contains(frame))
+        {
+            self.clock.set_loop_range(None, now);
+        }
+    }
+
+    /// The frame under the audio device's sample position, folded into the
+    /// loop range. The device clock keeps counting straight through a lap —
+    /// the fold is what turns it back into a position on the timeline, and it
+    /// has to match the one the audio prep thread applies to its own mix
+    /// position.
+    fn looped_audio_frame(&self, sync: &SyncClock) -> u64 {
+        let frame = audio_frame(sync, self.clock.fps());
+        self.clock
+            .loop_range()
+            .map_or(frame, |range| range.wrap(frame))
+    }
+
     /// Wall-clock interval of one frame (floored at 1 ms so a degenerate
     /// frame rate cannot busy-spin the tick loop).
     pub fn frame_interval(&self) -> Duration {
@@ -138,8 +188,16 @@ impl Transport {
             return false;
         }
         let state = self.clock.state();
+        // A composition shortened under a live loop pulls the out point back
+        // inside it; a range that no longer starts inside the timeline is
+        // gone, not clamped to a stray frame.
+        let loop_range = self
+            .clock
+            .loop_range()
+            .and_then(|range| range.clamped_to(duration_frames));
         let frame = self.last_frame.min(duration_frames.saturating_sub(1));
         self.clock = PlaybackClock::new(fps, duration_frames);
+        self.clock.set_loop_range(loop_range, now);
         self.clock.seek(frame, now);
         match state {
             PlaybackState::Playing => self.clock.play(now),
@@ -165,7 +223,7 @@ impl Transport {
         let was = self.state();
         let was_playing = self.is_playing();
         if was_playing && let ClockSource::Audio(sync) = clock {
-            let frame = audio_frame(sync, self.clock.fps());
+            let frame = self.looped_audio_frame(sync);
             self.clock.seek(frame, now);
         }
         self.clock.toggle(now);
@@ -207,12 +265,15 @@ impl Transport {
     /// playhead where it is: the setting exists so that stopping does not throw
     /// away a position, and with nothing to return to, rewinding to 0 would be
     /// exactly the discard the user turned off.
+    ///
+    /// While a loop range is set, "the beginning" is the loop's in point:
+    /// rewinding out of the range would take the loop off on the next play.
     pub fn stop(&mut self, now: Instant, return_to_play_start: bool) -> TransportUpdate {
         let held = self.last_frame;
         let target = if return_to_play_start {
             self.play_origin.unwrap_or(held)
         } else {
-            0
+            self.clock.loop_range().map_or(0, |range| range.in_frame)
         };
         self.clock.stop();
         // Stopping parks the clock at frame 0; the seek moves it back and
@@ -226,7 +287,11 @@ impl Transport {
     }
 
     pub fn step(&mut self, delta: i64, now: Instant) -> TransportUpdate {
-        self.last_frame = self.clock.step(delta, now);
+        let frame = self.clock.step(delta, now);
+        // Stepping off the end of the loop is a move out of the range like
+        // any other, so it takes the loop off rather than folding.
+        self.drop_loop_outside(frame, now);
+        self.last_frame = frame;
         TransportUpdate {
             frame: self.last_frame,
             playing: false,
@@ -234,8 +299,13 @@ impl Transport {
     }
 
     /// Move the playhead to `frame` (clamped to the timeline). A playing
-    /// clock keeps playing from the new position.
+    /// clock keeps playing from the new position, and a seek that leaves the
+    /// loop range takes the loop off.
     pub fn seek(&mut self, frame: u64, now: Instant) -> TransportUpdate {
+        self.drop_loop_outside(
+            frame.min(self.clock.duration_frames().saturating_sub(1)),
+            now,
+        );
         self.clock.seek(frame, now);
         self.last_frame = self.clock.current_frame(now);
         TransportUpdate {
@@ -254,7 +324,8 @@ impl Transport {
     /// [`Self::tick`] under an explicit clock source. On `ClockSource::Audio`
     /// the frame comes from the device's sample position; reaching the end
     /// of the timeline pauses at the last frame, mirroring the wall clock's
-    /// own end behavior.
+    /// own end behavior. A loop range folds both sources instead, so neither
+    /// ever reaches that end.
     pub fn tick_with(&mut self, clock: &ClockSource) -> Option<TransportUpdate> {
         let was_playing = self.is_playing();
         if !was_playing {
@@ -280,7 +351,7 @@ impl Transport {
                 if self.clock.state() != PlaybackState::Playing {
                     return self.clock.current_frame(Instant::now());
                 }
-                let frame = audio_frame(sync, self.clock.fps());
+                let frame = self.looped_audio_frame(sync);
                 if frame >= self.clock.duration_frames() {
                     // Past the end of the timeline: hold the last frame and
                     // pause, like `PlaybackClock::current_frame` does.
@@ -351,21 +422,37 @@ impl PlaybackController {
             }
             CommandId::FrameStepForward => self.transport.step(1, now),
             CommandId::FrameStepBackward => self.transport.step(-1, now),
+            CommandId::PlaybackLoopIn | CommandId::PlaybackLoopOut => {
+                let at = self.transport.current_frame();
+                let last = self.transport.duration_frames().saturating_sub(1);
+                let range = match (cmd, self.transport.loop_range()) {
+                    // Moving one end keeps the other where the user put it.
+                    (CommandId::PlaybackLoopIn, Some(range)) => LoopRange::new(at, range.out_frame),
+                    (_, Some(range)) => LoopRange::new(range.in_frame, at),
+                    // The first end set spans from there to the edge of the
+                    // composition, so one keystroke already loops something.
+                    (CommandId::PlaybackLoopIn, None) => LoopRange::new(at, last),
+                    (_, None) => LoopRange::new(0, at),
+                };
+                self.transport.set_loop_range(Some(range), now)
+            }
+            CommandId::PlaybackLoopClear => self.transport.set_loop_range(None, now),
             _ => return false,
         };
         // Mirror the transport into the audio engine (no-op without one).
         // Play from the timeline end restarts at frame 0, so a play command
         // re-seeks the engine clock to the published frame; pauses and
         // steps freeze it in place. Stop seeks to the frame it landed on,
-        // which is 0 unless `stop_returns_to_play_start` moved it.
+        // which is 0 unless `stop_returns_to_play_start` moved it. A loop
+        // change re-seeks too: the device clock counts straight through the
+        // laps already run, so the position it reports only means the frame
+        // the user sees again once it is re-anchored there.
         let seek_secs = match cmd {
-            CommandId::PlaybackToggle if update.playing => Some(self.secs_at_frame(update.frame)),
-            CommandId::PlaybackStop
-            | CommandId::FrameStepForward
-            | CommandId::FrameStepBackward => Some(self.secs_at_frame(update.frame)),
-            _ => None,
+            CommandId::PlaybackToggle if !update.playing => None,
+            _ => Some(self.secs_at_frame(update.frame)),
         };
-        crate::audio::forward_transport(update.playing, seek_secs, cx);
+        self.forward_transport(update.playing, seek_secs, cx);
+        self.commit_loop_range(cx);
         self.publish(update, cx);
         if update.playing {
             self.spawn_tick_loop(cx);
@@ -377,6 +464,36 @@ impl PlaybackController {
     fn secs_at_frame(&self, frame: u64) -> f64 {
         let fps = self.transport.fps();
         frame as f64 * fps.den.max(1) as f64 / fps.num.max(1) as f64
+    }
+
+    /// Mirror the transport — including its loop range — into the audio
+    /// engine. The range goes out as the half-open span the mixer needs, so
+    /// the out frame is played in full before the wrap.
+    fn forward_transport(&self, playing: bool, seek_secs: Option<f64>, cx: &mut App) {
+        let loop_secs = self.transport.loop_range().map(|range| {
+            (
+                self.secs_at_frame(range.in_frame),
+                self.secs_at_frame(range.out_frame + 1),
+            )
+        });
+        crate::audio::forward_transport(playing, seek_secs, loop_secs, cx);
+    }
+
+    /// Publish a loop range the transport changed on its own — a seek out of
+    /// the range drops it, and a shortened composition can clamp or drop it —
+    /// back to the shared state the Timeline and the project save path read.
+    fn commit_loop_range(&self, cx: &mut Context<Self>) {
+        if panels::set_loop_range(self.transport.loop_range(), cx) {
+            cx.notify();
+        }
+    }
+
+    /// Adopt the active composition's loop range before acting on it: the
+    /// shared state is where a project load, the Timeline ruler, and the
+    /// commands all leave it.
+    fn adopt_loop_range(&mut self, now: Instant, cx: &App) {
+        let range = panels::loop_range(cx);
+        self.transport.set_loop_range(range, now);
     }
 
     /// Seeks the clock to a playhead position the Timeline panel already
@@ -393,14 +510,34 @@ impl PlaybackController {
     ) {
         let now = Instant::now();
         let params_changed = self.transport.sync_params(fps, duration_frames, now);
+        self.adopt_loop_range(now, cx);
         let update = self.transport.seek(frame, now);
-        crate::audio::forward_transport(update.playing, Some(self.secs_at_frame(update.frame)), cx);
+        self.forward_transport(update.playing, Some(self.secs_at_frame(update.frame)), cx);
+        self.commit_loop_range(cx);
         self.publish_position(update, cx);
         // A frame-rate change invalidates the running tick loop's interval;
         // restarting bumps the epoch so the old loop exits on its next wake.
         if params_changed && update.playing {
             self.spawn_tick_loop(cx);
         }
+    }
+
+    /// Sets the loop range from a Timeline ruler gesture. Same contract as
+    /// [`Self::seek_from_timeline`]: the panel is on the entity update stack,
+    /// so it passes its composition parameters instead of being read back.
+    pub fn set_loop_range_from_timeline(
+        &mut self,
+        range: Option<LoopRange>,
+        fps: FrameRate,
+        duration_frames: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let now = Instant::now();
+        self.transport.sync_params(fps, duration_frames, now);
+        let update = self.transport.set_loop_range(range, now);
+        self.forward_transport(update.playing, Some(self.secs_at_frame(update.frame)), cx);
+        self.commit_loop_range(cx);
+        self.publish_position(update, cx);
     }
 
     /// Adopt the active composition's frame rate and duration, so the clock
@@ -419,6 +556,7 @@ impl PlaybackController {
             .and_then(|project| project.read(cx).playback_params(cx));
         let (fps, duration) = params.unwrap_or((self.transport.fps(), 0));
         self.transport.sync_params(fps, duration, now);
+        self.adopt_loop_range(now, cx);
     }
 
     fn timeline(cx: &App) -> Option<Entity<panels::timeline::TimelineGpuiPanel>> {
@@ -497,7 +635,7 @@ impl PlaybackController {
                                 dropped = this.transport.dropped_frames(),
                                 "playback finished"
                             );
-                            crate::audio::forward_transport(false, None, cx);
+                            this.forward_transport(false, None, cx);
                         }
                     }
                     !this.transport.is_playing()
@@ -778,6 +916,137 @@ mod tests {
         let update = t.toggle(at(t0, 167));
         assert_eq!(update.frame, 5);
         assert_eq!(t.dropped_frames(), 3);
+    }
+
+    /// The completion criterion, on the wall clock: playback turns round at
+    /// the out point instead of running to the end of the composition.
+    #[test]
+    fn playback_folds_at_the_out_point() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(30, 59)), t0); // 1 s at 30 fps
+        t.seek(30, t0);
+        t.toggle(t0);
+        assert_eq!(t.tick(at(t0, 500)).unwrap().frame, 45);
+        let wrapped = t.tick(at(t0, 1_000)).expect("the lap must be published");
+        assert_eq!(wrapped.frame, 30);
+        assert!(wrapped.playing);
+        // Long past the end of the timeline, still playing the same span.
+        assert_eq!(t.tick(at(t0, 61_500)).unwrap().frame, 45);
+        assert!(t.is_playing());
+    }
+
+    /// The other completion criterion: a seek out of the range takes the loop
+    /// off rather than pulling the playhead back into it.
+    #[test]
+    fn a_seek_outside_the_range_drops_the_loop() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(30, 59)), t0);
+
+        // Inside: the loop survives.
+        assert_eq!(t.seek(45, t0).frame, 45);
+        assert_eq!(t.loop_range(), Some(LoopRange::new(30, 59)));
+        // The ends are inside.
+        t.seek(30, t0);
+        t.seek(59, t0);
+        assert!(t.loop_range().is_some());
+
+        // Outside: gone, and the playhead is where the user put it.
+        assert_eq!(t.seek(120, t0).frame, 120);
+        assert_eq!(t.loop_range(), None);
+    }
+
+    /// Stepping is a move like any other, so it takes the loop off when it
+    /// leaves the range — including while paused.
+    #[test]
+    fn a_step_off_the_end_of_the_range_drops_the_loop() {
+        let (mut t, t0) = transport();
+        t.seek(59, t0);
+        t.set_loop_range(Some(LoopRange::new(30, 59)), t0);
+        assert_eq!(t.step(1, t0).frame, 60);
+        assert_eq!(t.loop_range(), None);
+    }
+
+    /// Dropping the loop after several laps must leave the playhead on the
+    /// frame the user is looking at, not on the raw position behind it.
+    #[test]
+    fn clearing_the_loop_mid_play_keeps_the_playhead() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(30, 59)), t0);
+        t.seek(30, t0);
+        t.toggle(t0);
+        assert_eq!(t.tick(at(t0, 10_500)).unwrap().frame, 45); // ten laps in
+
+        let update = t.set_loop_range(None, at(t0, 10_500));
+        assert_eq!(update.frame, 45);
+        assert!(update.playing);
+        assert_eq!(t.tick(at(t0, 11_500)).unwrap().frame, 75);
+    }
+
+    /// On the audio clock the device position keeps counting through the
+    /// laps; the transport has to fold it the same way the mixer folds its
+    /// own read position, or the picture drifts away from the sound.
+    #[test]
+    fn the_audio_clock_position_is_folded_into_the_range() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(30, 59)), t0);
+        t.seek(30, t0);
+        let sync = SyncClock::new(48_000, FPS);
+        t.toggle_with(&ClockSource::Audio(&sync), t0);
+
+        // Frame 45 of the third lap: 2 s + 0.5 s of device time.
+        sync.seek_to_sample(48_000 * 5 / 2);
+        let update = t
+            .tick_with(&ClockSource::Audio(&sync))
+            .expect("the folded frame differs from the last one");
+        assert_eq!(update.frame, 45);
+        assert!(update.playing);
+
+        // Past the end of the whole composition, and still inside the loop.
+        sync.seek_to_sample(48_000 * 60);
+        assert_eq!(t.tick_with(&ClockSource::Audio(&sync)).unwrap().frame, 30);
+        assert!(t.is_playing());
+
+        // Pausing lands on the folded frame, not on the raw position.
+        sync.seek_to_sample(48_000 * 121 / 2);
+        let paused = t.toggle_with(&ClockSource::Audio(&sync), at(t0, 500));
+        assert_eq!(paused.frame, 45);
+        assert!(!paused.playing);
+    }
+
+    /// A composition shortened under a live loop pulls the range in with it,
+    /// and drops it once nothing of it is left inside.
+    #[test]
+    fn shortening_the_composition_clamps_then_drops_the_range() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(30, 200)), t0);
+        t.sync_params(FPS, 100, t0);
+        assert_eq!(t.loop_range(), Some(LoopRange::new(30, 99)));
+
+        t.sync_params(FPS, 20, t0);
+        assert_eq!(t.loop_range(), None);
+    }
+
+    /// A range set beyond the end of the composition is not a range.
+    #[test]
+    fn a_range_outside_the_composition_is_refused() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(400, 500)), t0);
+        assert_eq!(t.loop_range(), None);
+        t.set_loop_range(Some(LoopRange::new(290, 500)), t0);
+        assert_eq!(t.loop_range(), Some(LoopRange::new(290, 299)));
+    }
+
+    /// Stop rewinds to the beginning, and with a loop set the beginning is
+    /// the in point — rewinding past it would take the loop off next play.
+    #[test]
+    fn stop_rewinds_to_the_loop_in_point() {
+        let (mut t, t0) = transport();
+        t.set_loop_range(Some(LoopRange::new(30, 59)), t0);
+        t.seek(30, t0);
+        t.toggle(t0);
+        t.tick(at(t0, 500));
+        assert_eq!(t.stop(at(t0, 500), false).frame, 30);
+        assert_eq!(t.loop_range(), Some(LoopRange::new(30, 59)));
     }
 
     #[test]

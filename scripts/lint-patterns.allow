@@ -139,3 +139,11 @@ observe-global crates/ravel-app/src/app_settings.rs ThemeRegistry
 framebuffer-direct-index crates/ravel-media/src/decoder.rs data-index
 framebuffer-direct-index crates/ravel-media/tests/audio_sample_format.rs data-index
 framebuffer-direct-index crates/ravel-media/tests/integration_ffmpeg.rs data-index
+
+# The media-bin thumbnail previews the *file*, not the composite. It decodes
+# through `FfmpegDecoder::open` / `read_image_frame`, which do not remove the
+# transfer function (`CM-2` gives the working-space form its own entry
+# points), so the frame it encodes is already display-referred and a display
+# transform here would brighten every thumbnail. Not an exit of the linear
+# pipeline.
+raw-pixel-quantisation crates/ravel-app/src/media/thumbnail.rs quantise

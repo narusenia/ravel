@@ -16,6 +16,7 @@ pub mod render_queue;
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
+use ravel_core::color::to_display_rgba8;
 use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
 use ravel_core::id::{CompId, LayerId, NodeId};
@@ -683,6 +684,20 @@ impl ViewerImage {
     /// layout the built-in decoders produce). Returns `None` for degenerate
     /// dimensions.
     ///
+    /// # The display transform lives here and nowhere else
+    ///
+    /// The buffer holds working-space (linear) light; a screen wants
+    /// display-encoded bytes. `GPUCOMP-9` had already collapsed the viewer's
+    /// f32 → BGRA conversion to this one function, so `CM-3` inserts the
+    /// transform here rather than at each drawing site
+    /// (`docs/specifications/color-management.md`). It is
+    /// [`to_display_rgba8`] — the same call the PNG writer and the video
+    /// encoder make, which is why the three agree bit for bit.
+    ///
+    /// It is also orthogonal to `quality` and [`ViewerResolution`]: those
+    /// decide *which pixels* are evaluated, this decides what a pixel value
+    /// means, and a value means the same thing at every resolution.
+    ///
     /// The destination bytes are written by index into one exactly sized
     /// allocation. The previous shape — four `Vec::push` calls per pixel, up
     /// to 4M per frame at the interactive resolution cap — was the other half
@@ -707,12 +722,12 @@ impl ViewerImage {
 
         let mut bytes = vec![0u8; expected];
         for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
-            let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            let display = to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
             // BGRA order.
-            out[0] = to_u8(pixel[2]);
-            out[1] = to_u8(pixel[1]);
-            out[2] = to_u8(pixel[0]);
-            out[3] = to_u8(pixel[3]);
+            out[0] = display[2];
+            out[1] = display[1];
+            out[2] = display[0];
+            out[3] = display[3];
         }
 
         let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
@@ -1131,6 +1146,7 @@ mod mirror_epoch_tests {
 #[cfg(test)]
 mod viewer_image_tests {
     use super::ViewerImage;
+    use ravel_core::color::{Transfer, quantize_u8};
     use ravel_core::types::{FrameBuffer, PixelFormat};
     use std::sync::Arc;
 
@@ -1142,20 +1158,26 @@ mod viewer_image_tests {
         FrameBuffer::from_f32(width, height, data)
     }
 
-    /// The conversion this replaced, byte for byte (`viewer.rs`'s former
-    /// `frame_buffer_to_render_image`). Kept as the reference the current
-    /// implementation is pinned against: moving the work to the worker thread
-    /// must not move a single pixel value.
+    /// The conversion the panel is pinned against, spelled out independently
+    /// of the implementation.
+    ///
+    /// Until `CM-3` this was `GPUCOMP-9`'s "the pixels must not change"
+    /// reference — the raw `clamp(0,1) * 255 + 0.5` the viewer used before
+    /// the work moved to the worker thread. The buffer is linear light now,
+    /// so that reference would assert the *absence* of the display
+    /// transform. It encodes first, and the golden values below moved with
+    /// it (0.5 linear displays as 188, not 128).
     fn reference_bgra(fb: &FrameBuffer) -> Vec<u8> {
         let pixels = fb.as_f32();
         let mut bytes = Vec::with_capacity(pixels.len());
         for pixel in pixels.chunks_exact(4) {
-            let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            let encode = |v: f32| quantize_u8(Transfer::Srgb.encode(v));
+            let alpha = quantize_u8;
             // BGRA order.
-            bytes.push(to_u8(pixel[2]));
-            bytes.push(to_u8(pixel[1]));
-            bytes.push(to_u8(pixel[0]));
-            bytes.push(to_u8(pixel[3]));
+            bytes.push(encode(pixel[2]));
+            bytes.push(encode(pixel[1]));
+            bytes.push(encode(pixel[0]));
+            bytes.push(alpha(pixel[3]));
         }
         bytes
     }
@@ -1165,8 +1187,10 @@ mod viewer_image_tests {
         let frame = fb(2, 2, [1.0, 0.5, 0.0, 1.0]);
         let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
         let bytes = converted.image().as_bytes(0).unwrap();
-        // BGRA: blue=0, green=128, red=255, alpha=255.
-        assert_eq!(&bytes[..4], &[0, 128, 255, 255]);
+        // BGRA: blue=0, green=188, red=255, alpha=255. Green was 128 before
+        // `CM-3`; the buffer now holds linear light and 0.5 linear is sRGB
+        // 188.
+        assert_eq!(&bytes[..4], &[0, 188, 255, 255]);
         assert_eq!(converted.image().size(0).width.0, 2);
         assert_eq!(converted.image().size(0).height.0, 2);
         assert_eq!((converted.width(), converted.height()), (2, 2));
@@ -1176,19 +1200,20 @@ mod viewer_image_tests {
     fn clamps_out_of_range_values() {
         let frame = fb(1, 1, [2.0, -1.0, 0.25, 1.5]);
         let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
+        // BGRA: blue = sRGB(0.25) = 137 (was 64), green = 0 from a negative
+        // value, red and alpha saturate.
         assert_eq!(
             &converted.image().as_bytes(0).unwrap()[..4],
-            &[64, 0, 255, 255]
+            &[137, 0, 255, 255]
         );
     }
 
-    /// GPUCOMP-9's "the pixels must not change" criterion: the moved and
-    /// rewritten conversion is compared against the original loop over inputs
-    /// that exercise rounding, clamping and the non-finite cases (`NaN` and
-    /// the infinities reach `as u8` through `clamp`, whose behaviour the
-    /// rewrite must preserve exactly).
+    /// The conversion is compared against the independent reference above
+    /// over inputs that exercise rounding, clamping and the non-finite cases
+    /// (`NaN` and the infinities reach `as u8` through `clamp`, whose
+    /// behaviour must be preserved exactly).
     #[test]
-    fn produces_the_same_bytes_as_the_previous_conversion() {
+    fn produces_the_same_bytes_as_the_reference_conversion() {
         let mut pixels = Vec::new();
         for step in 0..64u32 {
             // Rounding boundaries: n/255 lands exactly between two integers
@@ -1210,8 +1235,49 @@ mod viewer_image_tests {
         assert_eq!(
             converted.image().as_bytes(0).unwrap(),
             reference_bgra(&frame).as_slice(),
-            "the worker-side conversion must be byte-identical to the previous UI-thread one"
+            "the worker-side conversion must be byte-identical to the reference"
         );
+    }
+
+    /// CM-3, the criterion the whole phase exists for: compositing black
+    /// and white at 50 % is `0.5` **in linear light**, and 0.5 linear
+    /// displays as 188 — not the 128 a display-referred pipeline produced.
+    ///
+    /// The composite is spelled out rather than evaluated through a graph:
+    /// the arithmetic is the ordinary source-over lerp the merge node
+    /// already did, and what `CM-3` changed is the meaning of its result.
+    #[test]
+    fn a_half_composite_of_black_and_white_displays_as_188() {
+        let black = [0.0f32, 0.0, 0.0, 1.0];
+        let white = [1.0f32, 1.0, 1.0, 1.0];
+        let composite: [f32; 4] = std::array::from_fn(|i| black[i] * 0.5 + white[i] * 0.5);
+        assert_eq!(composite, [0.5, 0.5, 0.5, 1.0]);
+
+        let converted = ViewerImage::from_frame_buffer(&fb(1, 1, composite)).unwrap();
+        // BGRA.
+        assert_eq!(
+            &converted.image().as_bytes(0).unwrap()[..4],
+            &[188, 188, 188, 255],
+            "a physically correct 50 % composite must not display as mid-grey"
+        );
+    }
+
+    /// CM-3: the display transform is orthogonal to `quality` and
+    /// [`ViewerResolution`](crate::panels::viewer::ViewerResolution). Those
+    /// choose *which* pixels are evaluated; this decides what a pixel value
+    /// means, and that cannot depend on how many of them there are.
+    #[test]
+    fn the_display_transform_does_not_depend_on_the_buffer_size() {
+        let pixel = [0.5f32, 0.18, 0.9, 0.75];
+        let full = ViewerImage::from_frame_buffer(&fb(64, 36, pixel)).unwrap();
+        let half = ViewerImage::from_frame_buffer(&fb(32, 18, pixel)).unwrap();
+        let single = ViewerImage::from_frame_buffer(&fb(1, 1, pixel)).unwrap();
+
+        let first = |image: &ViewerImage| image.image().as_bytes(0).unwrap()[..4].to_vec();
+        assert_eq!(first(&full), first(&half));
+        assert_eq!(first(&full), first(&single));
+        assert_eq!((full.width(), full.height()), (64, 36));
+        assert_eq!((half.width(), half.height()), (32, 18));
     }
 
     #[test]

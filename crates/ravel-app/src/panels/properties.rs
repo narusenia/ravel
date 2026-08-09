@@ -51,6 +51,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
+use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetMetadata, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::exposed::{
@@ -1541,9 +1542,28 @@ fn exposed_error_message(err: &ExposedParameterError) -> SharedString {
 /// the commit is debounced (matching the scrub-gesture undo granularity).
 const COLOR_COMMIT_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// Panel color fields are plain 0-1 RGBA; the picker widget speaks `Hsla`.
+/// Working-space colour → the picker's display-referred `Hsla`.
+///
+/// Parameter colours are linear light from `.ravprj` v8 on (`CM-2`); a colour
+/// picker — its swatch, its sliders and its hex field — is a display, so it
+/// gets the display encoding, exactly like the viewer. Without this a
+/// migrated project would show every colour far darker than it renders.
+/// [`rgba_from_hsla`] is the inverse and the two must stay a pair.
 fn hsla_from_rgba(r: f32, g: f32, b: f32, a: f32) -> Hsla {
-    Hsla::from(Rgba { r, g, b, a })
+    let display = ColorSpace::DISPLAY.from_linear([r, g, b]);
+    Hsla::from(Rgba {
+        r: display[0],
+        g: display[1],
+        b: display[2],
+        a,
+    })
+}
+
+/// The picker's display-referred value → a working-space colour.
+fn rgba_from_hsla(hsla: Hsla) -> [f32; 4] {
+    let rgba = Rgba::from(hsla);
+    let linear = ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b]);
+    [linear[0], linear[1], linear[2], rgba.a]
 }
 
 /// What kind of target the current widgets were built for. Same-identity
@@ -2901,12 +2921,15 @@ impl PropertiesGpuiPanel {
                 let Some((_, binding)) = self.colors.iter().find(|(k, _)| k == key) else {
                     continue;
                 };
+                // Compared in the working space, which is the space the
+                // field is in — converting the picker back is the only way
+                // the two are comparable at all.
                 let differs = binding.state.read(cx).value().is_none_or(|current| {
-                    let current = Rgba::from(current);
-                    (current.r - r).abs() > 1e-3
-                        || (current.g - g).abs() > 1e-3
-                        || (current.b - b).abs() > 1e-3
-                        || (current.a - a).abs() > 1e-3
+                    let current = rgba_from_hsla(current);
+                    (current[0] - r).abs() > 1e-3
+                        || (current[1] - g).abs() > 1e-3
+                        || (current[2] - b).abs() > 1e-3
+                        || (current[3] - a).abs() > 1e-3
                 });
                 if differs {
                     updates.push((binding.state.clone(), hsla_from_rgba(*r, *g, *b, *a)));
@@ -3333,17 +3356,16 @@ impl PropertiesGpuiPanel {
                             let ColorPickerEvent::Change(Some(hsla)) = event else {
                                 return;
                             };
-                            // Note: the picker speaks display-referred Hsla;
-                            // parameter colors are stored as plain 0-1 RGBA
-                            // with no transfer function (the pipeline is not
-                            // color-managed yet, REQ-COLOR is a later
-                            // milestone).
-                            let rgba = Rgba::from(*hsla);
+                            // The picker speaks display-referred `Hsla`;
+                            // parameter colours are working-space linear
+                            // light (`CM-2`), so the edit is decoded on the
+                            // way in.
+                            let rgba = rgba_from_hsla(*hsla);
                             let value = PropertyValue::Color {
-                                r: rgba.r,
-                                g: rgba.g,
-                                b: rgba.b,
-                                a: rgba.a,
+                                r: rgba[0],
+                                g: rgba[1],
+                                b: rgba[2],
+                                a: rgba[3],
                             };
                             this.apply_color_change(&field_key, value, &ids, cx);
                         },

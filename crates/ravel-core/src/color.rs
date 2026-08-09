@@ -351,6 +351,11 @@ impl ColorSpace {
     /// is defined by its conversion to and from this one.
     pub const WORKING: Self = Self::LINEAR_REC709;
 
+    /// The space every 8-bit exit targets: the viewer, the PNG writer, and
+    /// the video encoder. Fixed at sRGB until `CM-8` lets the user choose a
+    /// display.
+    pub const DISPLAY: Self = Self::SRGB;
+
     pub const fn new(primaries: Primaries, transfer: Transfer) -> Self {
         Self {
             primaries,
@@ -463,6 +468,36 @@ pub fn convert(rgb: [f32; 3], from: ColorSpace, to: ColorSpace) -> [f32; 3] {
 /// behaviour the previous viewer conversion had and its golden test pins.
 pub fn quantize_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// Working space → the display space, quantised to 8 bit. **The** exit.
+///
+/// The viewer, the PNG writer and the video encoder all call this and
+/// nothing else, which is what makes them agree bit for bit
+/// (`docs/specifications/color-management.md`). Two things have to happen
+/// together and in this order — encode, then quantise — and separating them
+/// is how the four exits drifted apart before `CM-1`.
+///
+/// Alpha is coverage, not light: quantised, never encoded.
+pub fn to_display_rgba8(rgba: [f32; 4]) -> [u8; 4] {
+    let encoded = ColorSpace::DISPLAY.from_linear([rgba[0], rgba[1], rgba[2]]);
+    [
+        quantize_u8(encoded[0]),
+        quantize_u8(encoded[1]),
+        quantize_u8(encoded[2]),
+        quantize_u8(rgba[3]),
+    ]
+}
+
+/// [`to_display_rgba8`] at 16 bits, for the deep PNG sequence.
+pub fn to_display_rgba16(rgba: [f32; 4]) -> [u16; 4] {
+    let encoded = ColorSpace::DISPLAY.from_linear([rgba[0], rgba[1], rgba[2]]);
+    [
+        quantize_u16(encoded[0]),
+        quantize_u16(encoded[1]),
+        quantize_u16(encoded[2]),
+        quantize_u16(rgba[3]),
+    ]
 }
 
 /// [`quantize_u8`] for 16-bit exits (the deep PNG sequence writer).
@@ -961,13 +996,27 @@ mod tests {
     /// The ingest and the 8-bit exit are exact inverses, which is what makes
     /// CM-4's "import a PNG, export a PNG, get the same bytes" hold.
     #[test]
-    fn ingest_and_quantise_round_trip_every_code() {
+    fn ingest_and_display_round_trip_every_code() {
         for code in 0..=255u8 {
             let ingested = ingest_rgba8([code, code, code, code], ColorSpace::SRGB);
-            let out = quantize_u8(Transfer::Srgb.encode(ingested[0]));
-            assert_eq!(out, code, "code {code} came back as {out}");
-            assert_eq!(quantize_u8(ingested[3]), code, "alpha code {code}");
+            assert_eq!(
+                to_display_rgba8(ingested),
+                [code; 4],
+                "code {code} did not survive ingest -> display"
+            );
         }
+    }
+
+    /// CM-3's regression number, at the exit: a 50 % composite of black and
+    /// white is `0.5` in linear light and displays as 188, not 128.
+    #[test]
+    fn a_half_composite_displays_as_188() {
+        assert_eq!(to_display_rgba8([0.5, 0.5, 0.5, 1.0]), [188, 188, 188, 255]);
+        assert_eq!(to_display_rgba8([0.0, 1.0, 0.5, 0.5]), [0, 255, 188, 128]);
+        // Alpha is quantised, never encoded — otherwise 0.5 coverage would
+        // display as 188 too.
+        assert_eq!(to_display_rgba8([0.0; 4])[3], 0);
+        assert_eq!(to_display_rgba16([0.5, 0.5, 0.5, 0.5])[3], 32768);
     }
 
     const IDENTITY_CUBE: &str = "\

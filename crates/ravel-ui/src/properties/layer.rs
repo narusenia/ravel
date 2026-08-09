@@ -203,14 +203,11 @@ fn field_display(field: &PropertyField) -> String {
         | PropertyField::Enum { value, .. }
         | PropertyField::ReadOnly { value, .. } => value.clone(),
         PropertyField::Color { r, g, b, a, .. } => {
-            let channel = |v: &f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-            format!(
-                "#{:02X}{:02X}{:02X}{:02X}",
-                channel(r),
-                channel(g),
-                channel(b),
-                channel(a)
-            )
+            // Colour fields hold working-space linear light (`CM-2`); a hex
+            // triplet is what a human reads off a screen, so it is the
+            // display encoding — the same one the picker beside it shows.
+            let [r, g, b, a] = ravel_core::color::to_display_rgba8([*r, *g, *b, *a]);
+            format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
         }
         PropertyField::Vector { components, .. } => components
             .iter()

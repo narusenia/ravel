@@ -1668,10 +1668,12 @@ mod tests {
         let ViewerOutput::Image(image) = &update.output else {
             panic!("expected a converted frame");
         };
-        // The conversion really ran (BGRA of 1.0, 0.5, 0.0, 1.0), ...
+        // The conversion really ran: BGRA of the working-space pixel
+        // (1.0, 0.5, 0.0, 1.0) displayed through sRGB. Green was 128 before
+        // `CM-3` inserted the display transform; 0.5 linear is 188.
         assert_eq!(
             &image.image().as_bytes(0).expect("frame 0")[..4],
-            &[0, 128, 255, 255]
+            &[0, 188, 255, 255]
         );
         // ... and it ran on the worker, not on this (UI-role) thread.
         let converted_on = image.converted_on();

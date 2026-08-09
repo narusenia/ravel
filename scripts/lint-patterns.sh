@@ -266,6 +266,40 @@ done < <(rg -nU --no-heading \
     -e 'pub enum [^}]*\bwgpu' \
     crates/ravel-gpu/src -g '*.rs' -g '!interop.rs' 2>/dev/null | rg '\bwgpu')
 
+# ---------------------------------------------------------------------------
+# raw-pixel-quantisation: no hand-rolled float → integer pixel conversion.
+#
+# The pipeline composites in linear light (`CM-2`), so turning a pixel into a
+# byte is two steps that have to happen together: encode into the display
+# space, then quantise. Every exit — the viewer, the PNG and video writers —
+# goes through `ravel_core::color::to_display_rgba8` (or its 16-bit twin) so
+# that they agree bit for bit, which is the property `CM-4`'s round-trip
+# criteria rest on. A stray `* 255.0` is how the four exits drifted apart
+# before `CM-1`, and it is silent: the picture merely looks wrong.
+#
+# `color.rs` defines the conversion and is exempt. Anything else that really
+# wants the file's own values rather than a display of the composite needs a
+# justified allow entry.
+#
+# The search covers the display side (`CM-3`). `CM-4` converts the writers and
+# widens it to `crates`.
+# ---------------------------------------------------------------------------
+while IFS=: read -r file line content; do
+    [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
+    case "$file" in
+        crates/ravel-core/src/color.rs) continue ;;
+    esac
+    if ! allowed raw-pixel-quantisation "$file" "quantise"; then
+        report raw-pixel-quantisation "$file" "$line" \
+            "hand-rolled pixel quantisation (${content#"${content%%[![:space:]]*}"}) — use ravel_core::color::to_display_rgba8 so every exit agrees (CM-1)"
+    fi
+done < <(rg -n --no-heading \
+    -e '\* 255\.0' \
+    -e '\* 65535\.0' \
+    -e '\* max as f32' \
+    crates/ravel-app crates/ravel-ui crates/ravel-core -g '*.rs' 2>/dev/null)
+
 if [ "$violations" -gt 0 ]; then
     echo >&2
     echo "lint-patterns: $violations violation(s). Fix them or add a justified entry to $ALLOW_FILE." >&2

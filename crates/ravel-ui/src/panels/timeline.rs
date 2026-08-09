@@ -14,6 +14,7 @@ use crate::keyframes::RevealFilter;
 use crate::panel::PanelKind;
 use ravel_core::composition::{Composition, Layer};
 use ravel_core::id::{CompId, LayerId};
+use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::FrameRate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -605,6 +606,25 @@ impl TimelinePanel {
         Some((start, viewport_width - start))
     }
 
+    /// Pixel span `(x, width)` of `range` inside a ruler `viewport_width`
+    /// pixels wide, clipped to the viewport, or `None` when the range is
+    /// scrolled entirely out of sight.
+    ///
+    /// The out frame is included, so the band covers the frame the loop
+    /// actually plays last rather than stopping at its leading edge.
+    pub fn loop_range_span(&self, range: LoopRange, viewport_width: f64) -> Option<(f64, f64)> {
+        if viewport_width <= 0.0 || !viewport_width.is_finite() {
+            return None;
+        }
+        let start = self.frame_to_x(i64::try_from(range.in_frame).unwrap_or(i64::MAX));
+        let end = self.frame_to_x(i64::try_from(range.out_frame + 1).unwrap_or(i64::MAX));
+        if !start.is_finite() || !end.is_finite() || end <= 0.0 || start >= viewport_width {
+            return None;
+        }
+        let start = start.max(0.0);
+        Some((start, end.min(viewport_width) - start))
+    }
+
     fn x_to_frame_f64(&self, x: f64) -> f64 {
         x / self.pixels_per_frame + self.scroll_offset
     }
@@ -1069,6 +1089,31 @@ mod tests {
         assert_eq!(p.out_of_range_span(400.0), None);
         // A degenerate viewport is never shaded either.
         assert_eq!(panel_with_duration(100).out_of_range_span(0.0), None);
+    }
+
+    #[test]
+    fn the_loop_range_span_covers_the_out_frame_and_clips_to_the_viewport() {
+        let mut p = panel_with_duration(1000);
+        // 2 px per frame: frames 10..=39 occupy [20, 80).
+        assert_eq!(
+            p.loop_range_span(LoopRange::new(10, 39), 400.0),
+            Some((20.0, 60.0))
+        );
+        // A one-frame loop is still one frame wide.
+        assert_eq!(
+            p.loop_range_span(LoopRange::new(10, 10), 400.0),
+            Some((20.0, 2.0))
+        );
+        // Clipped at both edges rather than drawn outside the ruler.
+        assert_eq!(
+            p.loop_range_span(LoopRange::new(0, 999), 400.0),
+            Some((0.0, 400.0))
+        );
+
+        p.set_scroll_offset(300.0);
+        assert_eq!(p.loop_range_span(LoopRange::new(10, 39), 400.0), None);
+        p.set_scroll_offset(0.0);
+        assert_eq!(p.loop_range_span(LoopRange::new(10, 39), 0.0), None);
     }
 
     // ----- BPM grid --------------------------------------------------------

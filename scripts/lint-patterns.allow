@@ -37,6 +37,12 @@ observe-global crates/ravel-app/src/panels/timeline.rs LayerSelection
 # instance that did not do the writing still has to repaint from it. Same
 # lifecycle and same reason as the two entries above.
 observe-global crates/ravel-app/src/panels/timeline.rs BpmGridState
+# Durable shared UI state (refactor-plan-0808 unit 9): the loop range is
+# written by the Timeline ruler, by the playback commands, by a seek that
+# leaves the range, and by a project load. The band must repaint from writes
+# this Timeline instance did not make, so it observes the state for the same
+# reason as the entry above.
+observe-global crates/ravel-app/src/panels/timeline.rs LoopRangeState
 # The Node Editor opens the network of the shared layer selection (REQ-UI-013
 # unit 3). Timeline and Outliner both write that selection, so observing the
 # durable state replaces per-writer pushes into this panel.

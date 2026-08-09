@@ -2292,6 +2292,16 @@ Unknown type keys are skipped silently (plugin space).
   node editor's context menu writes it to `Global` — it is a preference, not a
   property of a project or a window. Nothing applies it centrally: the panel
   reads it when it is built.
+  Two more switches ride the same path and are likewise read where they act,
+  not applied centrally: `playback.stop_returns_to_play_start`
+  (`ResolvedSettings::stop_returns_to_play_start`, default `false`) is read by
+  `PlaybackController::handle_command` and passed to
+  `Transport::stop(now, return_to_play_start)`, and
+  `startup.create_composition`
+  (`ResolvedSettings::startup_creates_composition`, default `true`) is read by
+  `project_state::fresh_document(cx)`, the one builder of the launch document
+  and of `File ▸ New` — `ravel_ui::document::default_document` stays free of
+  the settings layers and only receives the resolved frame rate.
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has

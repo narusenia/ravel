@@ -80,6 +80,12 @@ pub struct Transport {
     clock: PlaybackClock,
     last_frame: u64,
     dropped_frames: u64,
+    /// Frame the current (or most recent) play segment started from, which is
+    /// where [`Transport::stop`] returns to while
+    /// `playback.stop_returns_to_play_start` is on. `None` until playback has
+    /// run once — nothing else records a "start position", so the transport
+    /// keeps it itself.
+    play_origin: Option<u64>,
 }
 
 impl Transport {
@@ -88,6 +94,7 @@ impl Transport {
             clock: PlaybackClock::new(fps, duration_frames),
             last_frame: 0,
             dropped_frames: 0,
+            play_origin: None,
         }
     }
 
@@ -155,6 +162,7 @@ impl Transport {
     /// freeze lands on the frame the listener actually reached (and a
     /// later fall back to `Wall` continues from there).
     pub fn toggle_with(&mut self, clock: &ClockSource, now: Instant) -> TransportUpdate {
+        let was = self.state();
         let was_playing = self.is_playing();
         if was_playing && let ClockSource::Audio(sync) = clock {
             let frame = audio_frame(sync, self.clock.fps());
@@ -172,17 +180,47 @@ impl Transport {
             self.dropped_frames += frame - self.last_frame - 1;
         }
         self.last_frame = frame;
+        // A *fresh* play starts a segment; resuming from a pause continues
+        // the one already running, so it must not move the origin — pausing
+        // halfway and carrying on is still the same viewing pass, and
+        // "return to where playback started" means where it started, not
+        // where it was last unpaused.
+        //
+        // Read after the toggle: playing from the end restarts at frame 0
+        // (`PlaybackClock::play`), so the position before it is not where this
+        // segment actually starts.
+        if was == PlaybackState::Stopped && self.is_playing() {
+            self.play_origin = Some(frame);
+        }
         TransportUpdate {
             frame: self.last_frame,
             playing: self.is_playing(),
         }
     }
 
-    pub fn stop(&mut self) -> TransportUpdate {
+    /// Stop playback. `return_to_play_start` is the resolved
+    /// `playback.stop_returns_to_play_start` setting: off (the default) rewinds
+    /// to frame 0 as Ravel has always done, on returns to the frame the last
+    /// play segment started from.
+    ///
+    /// Stopping with the setting on but no play segment on record leaves the
+    /// playhead where it is: the setting exists so that stopping does not throw
+    /// away a position, and with nothing to return to, rewinding to 0 would be
+    /// exactly the discard the user turned off.
+    pub fn stop(&mut self, now: Instant, return_to_play_start: bool) -> TransportUpdate {
+        let held = self.last_frame;
+        let target = if return_to_play_start {
+            self.play_origin.unwrap_or(held)
+        } else {
+            0
+        };
         self.clock.stop();
-        self.last_frame = 0;
+        // Stopping parks the clock at frame 0; the seek moves it back and
+        // leaves the state Stopped (it re-anchors playing clocks only).
+        self.clock.seek(target, now);
+        self.last_frame = self.clock.current_frame(now);
         TransportUpdate {
-            frame: 0,
+            frame: self.last_frame,
             playing: false,
         }
     }
@@ -307,7 +345,9 @@ impl PlaybackController {
                 if dropped > 0 {
                     tracing::debug!(dropped, "playback stopped with dropped frames");
                 }
-                self.transport.stop()
+                let return_to_play_start =
+                    crate::app_settings::resolved(cx).stop_returns_to_play_start;
+                self.transport.stop(now, return_to_play_start)
             }
             CommandId::FrameStepForward => self.transport.step(1, now),
             CommandId::FrameStepBackward => self.transport.step(-1, now),
@@ -316,13 +356,13 @@ impl PlaybackController {
         // Mirror the transport into the audio engine (no-op without one).
         // Play from the timeline end restarts at frame 0, so a play command
         // re-seeks the engine clock to the published frame; pauses and
-        // steps freeze it in place.
+        // steps freeze it in place. Stop seeks to the frame it landed on,
+        // which is 0 unless `stop_returns_to_play_start` moved it.
         let seek_secs = match cmd {
             CommandId::PlaybackToggle if update.playing => Some(self.secs_at_frame(update.frame)),
-            CommandId::PlaybackStop => Some(0.0),
-            CommandId::FrameStepForward | CommandId::FrameStepBackward => {
-                Some(self.secs_at_frame(update.frame))
-            }
+            CommandId::PlaybackStop
+            | CommandId::FrameStepForward
+            | CommandId::FrameStepBackward => Some(self.secs_at_frame(update.frame)),
             _ => None,
         };
         crate::audio::forward_transport(update.playing, seek_secs, cx);
@@ -599,12 +639,15 @@ mod tests {
         );
     }
 
+    /// The default (`stop_returns_to_play_start` off) is what Ravel has always
+    /// done, including when playback started somewhere other than frame 0.
     #[test]
     fn stop_rewinds_to_frame_zero() {
         let (mut t, t0) = transport();
+        t.seek(40, t0);
         t.toggle(t0);
         t.tick(at(t0, 1000));
-        let update = t.stop();
+        let update = t.stop(at(t0, 1000), false);
         assert_eq!(
             update,
             TransportUpdate {
@@ -613,6 +656,79 @@ mod tests {
             }
         );
         assert_eq!(t.state(), PlaybackState::Stopped);
+    }
+
+    /// With the setting on, Stop returns to the frame the play segment started
+    /// from — and a later play resumes from there rather than from 0.
+    #[test]
+    fn stop_returns_to_the_frame_playback_started_from() {
+        let (mut t, t0) = transport();
+        t.seek(40, t0);
+        t.toggle(t0);
+        t.tick(at(t0, 1000));
+        assert_eq!(t.current_frame(), 70);
+
+        let update = t.stop(at(t0, 1000), true);
+        assert_eq!(
+            update,
+            TransportUpdate {
+                frame: 40,
+                playing: false
+            }
+        );
+        assert_eq!(t.state(), PlaybackState::Stopped);
+
+        t.toggle(at(t0, 1100));
+        assert_eq!(t.current_frame(), 40);
+    }
+
+    /// Playing from the end restarts at frame 0, so that — not the frame the
+    /// playhead sat on — is the segment's start.
+    #[test]
+    fn stop_returns_to_zero_when_playback_restarted_from_the_end() {
+        let (mut t, t0) = transport();
+        t.seek(299, t0);
+        t.toggle(t0);
+        t.tick(at(t0, 100));
+        assert_eq!(t.stop(at(t0, 100), true).frame, 0);
+    }
+
+    /// Pausing does not start a new segment: stopping after a pause and a
+    /// resume returns to where playback originally started, not to where it
+    /// was unpaused.
+    #[test]
+    fn a_pause_and_resume_keeps_the_original_play_start() {
+        let (mut t, t0) = transport();
+        t.seek(40, t0);
+        t.toggle(t0);
+        t.tick(at(t0, 1000));
+        assert_eq!(t.current_frame(), 70);
+
+        t.toggle(at(t0, 1000));
+        assert_eq!(t.state(), PlaybackState::Paused);
+        t.toggle(at(t0, 1100));
+        assert!(t.is_playing());
+
+        assert_eq!(t.stop(at(t0, 1100), true).frame, 40);
+    }
+
+    /// Nothing has played, so there is no start position to return to: the
+    /// playhead stays put rather than losing the position the user scrubbed to.
+    #[test]
+    fn stop_without_a_play_segment_leaves_the_playhead_alone() {
+        let (mut t, t0) = transport();
+        t.seek(120, t0);
+        let update = t.stop(t0, true);
+        assert_eq!(
+            update,
+            TransportUpdate {
+                frame: 120,
+                playing: false
+            }
+        );
+        assert_eq!(t.state(), PlaybackState::Stopped);
+        // The same stop with the setting off is the historical rewind.
+        assert_eq!(t.stop(t0, false).frame, 0);
     }
 
     #[test]

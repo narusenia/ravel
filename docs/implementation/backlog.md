@@ -46,6 +46,7 @@
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
 | SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
+| SET-16 | 停止位置と起動時コンポの設定の露出 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -213,6 +214,7 @@ CACHE-3 / 4 も済み（#230 / #227）。評価キャッシュは `CacheBudget` 
 | SET-13 | ❓ | 設定の import / export | 項目が揃ってから |
 | SET-14 | ❓ | UI スケーリング | 調査（パネルが `Theme.font_size` を尊重しているか） |
 | SET-15 | ❓ | 色覚多様性テーマ / アニメーション削減 | テーマ資産の追加とアニメーション箇所の棚卸し |
+| SET-16 | 🟡 | 停止位置と起動時コンポの設定を設定画面へ出す | UX-11（挙動と既定値。マージ済みならゲートは開いている） |
 
 **「出す項目 = 実際に効く項目」が規約**なので、SET-8 以降は前提機能の
 マージ後に着手する（`settings-screen-plan.md`）。

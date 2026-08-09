@@ -163,6 +163,10 @@ pub struct PlaybackLayer {
     pub proxy_mode: Option<ProxyMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_resolution: Option<f32>,
+    /// Whether Stop returns the playhead to the frame playback started from
+    /// instead of rewinding to frame 0. Off is what Ravel has always done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_returns_to_play_start: Option<bool>,
 }
 
 impl PlaybackLayer {
@@ -171,6 +175,30 @@ impl PlaybackLayer {
             frame_rate: over.frame_rate.clone().or_else(|| self.frame_rate.clone()),
             proxy_mode: over.proxy_mode.or(self.proxy_mode),
             proxy_resolution: over.proxy_resolution.or(self.proxy_resolution),
+            stop_returns_to_play_start: over
+                .stop_returns_to_play_start
+                .or(self.stop_returns_to_play_start),
+        }
+    }
+}
+
+/// Startup settings (all fields optional for layering).
+///
+/// What a document with nothing in it starts as — both the launch document and
+/// the one `File ▸ New` builds, because they are the same "nothing to inherit
+/// from" case.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupLayer {
+    /// Whether a fresh document is given one empty composition. On is what
+    /// Ravel has always done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_composition: Option<bool>,
+}
+
+impl StartupLayer {
+    fn merge(&self, over: &StartupLayer) -> StartupLayer {
+        StartupLayer {
+            create_composition: over.create_composition.or(self.create_composition),
         }
     }
 }
@@ -272,6 +300,8 @@ pub struct SettingsLayer {
     #[serde(default)]
     pub playback: PlaybackLayer,
     #[serde(default)]
+    pub startup: StartupLayer,
+    #[serde(default)]
     pub auto_save: AutoSaveLayer,
     #[serde(default)]
     pub cache: CacheLayer,
@@ -287,6 +317,7 @@ impl SettingsLayer {
             appearance: self.appearance.merge(&over.appearance),
             color: self.color.merge(&over.color),
             playback: self.playback.merge(&over.playback),
+            startup: self.startup.merge(&over.startup),
             auto_save: self.auto_save.merge(&over.auto_save),
             cache: self.cache.merge(&over.cache),
             node_editor: self.node_editor.merge(&over.node_editor),
@@ -337,6 +368,10 @@ pub struct ResolvedSettings {
     pub frame_rate: String,
     pub proxy_mode: ProxyMode,
     pub proxy_resolution: f32,
+    /// Whether Stop returns to the frame playback started from.
+    pub stop_returns_to_play_start: bool,
+    /// Whether a fresh document is given one empty composition.
+    pub startup_creates_composition: bool,
     pub auto_save_enabled: bool,
     pub auto_save_interval_seconds: u32,
     pub cache_root: Option<String>,
@@ -364,6 +399,10 @@ impl Default for ResolvedSettings {
             frame_rate: "30".to_string(),
             proxy_mode: ProxyMode::Auto,
             proxy_resolution: 0.5,
+            // Both of these default to what Ravel already did: Stop rewinds to
+            // frame 0, and a fresh document opens on one empty composition.
+            stop_returns_to_play_start: false,
+            startup_creates_composition: true,
             auto_save_enabled: true,
             auto_save_interval_seconds: 120,
             // The budget owns the canonical numbers; restating them here
@@ -412,6 +451,14 @@ impl ResolvedSettings {
                 .playback
                 .proxy_resolution
                 .unwrap_or(d.proxy_resolution),
+            stop_returns_to_play_start: merged
+                .playback
+                .stop_returns_to_play_start
+                .unwrap_or(d.stop_returns_to_play_start),
+            startup_creates_composition: merged
+                .startup
+                .create_composition
+                .unwrap_or(d.startup_creates_composition),
             auto_save_enabled: merged.auto_save.enabled.unwrap_or(d.auto_save_enabled),
             auto_save_interval_seconds: merged
                 .auto_save
@@ -734,6 +781,67 @@ disk_enabled = false
             ResolvedSettings::resolve(&older).node_editor_edge_style,
             EdgeStyle::Bezier
         );
+    }
+
+    /// Both switches added for the transport/startup unit default to the
+    /// behaviour Ravel already had, so a user without a settings file sees no
+    /// change: Stop rewinds to frame 0 and a fresh document has one
+    /// composition.
+    #[test]
+    fn the_stop_and_startup_defaults_keep_the_current_behaviour() {
+        let resolved = ResolvedSettings::from_layers(&[]);
+        assert!(!resolved.stop_returns_to_play_start);
+        assert!(resolved.startup_creates_composition);
+    }
+
+    /// Both switches ride the same merge direction as every other field, and a
+    /// settings file written before they existed still reads — which is why no
+    /// format version moves.
+    #[test]
+    fn the_stop_and_startup_switches_merge_and_are_optional() {
+        let global = SettingsLayer {
+            playback: PlaybackLayer {
+                stop_returns_to_play_start: Some(true),
+                ..Default::default()
+            },
+            startup: StartupLayer {
+                create_composition: Some(false),
+            },
+            ..Default::default()
+        };
+
+        // Inheritance: the project layer says nothing, so global stands.
+        let inherited = ResolvedSettings::from_layers(&[global.clone(), SettingsLayer::default()]);
+        assert!(inherited.stop_returns_to_play_start);
+        assert!(!inherited.startup_creates_composition);
+
+        // Override: the later layer wins, field by field.
+        let project = SettingsLayer {
+            startup: StartupLayer {
+                create_composition: Some(true),
+            },
+            ..Default::default()
+        };
+        let overridden = ResolvedSettings::from_layers(&[global, project]);
+        assert!(overridden.startup_creates_composition);
+        // The playback switch the project left unset still comes from global.
+        assert!(overridden.stop_returns_to_play_start);
+
+        // Round trip, and an older file reads as "neither overridden".
+        let text = "[playback]\nstop_returns_to_play_start = true\n\
+                    \n[startup]\ncreate_composition = false\n";
+        let layer = SettingsLayer::from_toml(text).expect("the sections parse");
+        assert_eq!(layer.playback.stop_returns_to_play_start, Some(true));
+        assert_eq!(layer.startup.create_composition, Some(false));
+        assert_eq!(
+            SettingsLayer::from_toml(&layer.to_toml().unwrap()).unwrap(),
+            layer
+        );
+
+        let older = SettingsLayer::from_toml("[playback]\nframe_rate = \"24\"\n")
+            .expect("an older file parses");
+        assert_eq!(older.playback.stop_returns_to_play_start, None);
+        assert_eq!(older.startup, StartupLayer::default());
     }
 
     #[test]

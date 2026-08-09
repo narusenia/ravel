@@ -169,6 +169,32 @@ pub enum SaveOutcome {
     Failed,
 }
 
+/// The document a session with nothing to open starts from: the launch
+/// document and the one `File ▸ New` builds.
+///
+/// Two settings decide it, and both are resolved here because `ravel-ui` stays
+/// free of the settings layers:
+///
+/// - `startup.create_composition` (default on) — off means the document opens
+///   with **no** composition at all, so the user picks the format in
+///   `Composition ▸ New…` instead of inheriting one nobody asked for. The
+///   active composition is then `None`, which is a state the session already
+///   has to handle: it is what a project whose `ui_state.json` names nothing
+///   resolves to (`UiState::initial_active_comp`), and every panel renders its
+///   empty form.
+/// - `playback.frame_rate` (`SET-6`) — the root composition of a fresh
+///   document has nothing to inherit a format from, so it takes the resolved
+///   default rate. The settings global is installed before the first window
+///   exists (`crate::main`), so this reads the user's value; a tool that
+///   builds a `ProjectState` without the bootstrap gets the built-in one.
+fn fresh_document(cx: &App) -> Document {
+    if app_settings::resolved(cx).startup_creates_composition {
+        default_document(app_settings::default_frame_rate(cx))
+    } else {
+        Document::default()
+    }
+}
+
 /// GPUI entity owning the document, its undo history, and the background
 /// evaluation service.
 pub struct ProjectState {
@@ -429,13 +455,7 @@ impl ProjectState {
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
 
-        // The startup document has nothing to inherit a format from, so its root
-        // composition takes the default frame rate the settings resolve to
-        // (`SET-6`). The settings global is installed before the first window
-        // exists (`crate::main`), so this reads the user's value rather than the
-        // built-in one; a tool that builds a `ProjectState` without the
-        // bootstrap gets the built-in one.
-        let store = DocumentStore::new(default_document(app_settings::default_frame_rate(cx)));
+        let store = DocumentStore::new(fresh_document(cx));
         // The startup document opens on its root composition; from here on
         // the active composition is UI state, never written back to the
         // document (REQ-UI-013).
@@ -625,7 +645,7 @@ impl ProjectState {
         // finds the layer already empty and does nothing.
         app_settings::set_project_layer(SettingsLayer::default(), cx);
         // A user-driven replacement: invalidates in-flight loads.
-        let document = default_document(app_settings::default_frame_rate(cx));
+        let document = fresh_document(cx);
         let active_comp = document.root_comp;
         self.revision += 1;
         self.replace_document(document, None, active_comp, SettingsLayer::default(), cx);
@@ -1537,6 +1557,28 @@ mod tests {
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
+
+    /// The default is what Ravel has always launched with — one composition,
+    /// which is also the root — and turning the setting off launches with none
+    /// rather than with an empty one.
+    #[gpui::test]
+    fn a_fresh_document_follows_the_startup_composition_setting(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            app_settings::install(app_settings::GlobalSettingsFile::default(), cx);
+            let default = fresh_document(cx);
+            assert_eq!(default.compositions.len(), 1);
+            assert!(default.root_comp.is_some());
+
+            app_settings::update(
+                app_settings::SettingsScope::Global,
+                |layer| layer.startup.create_composition = Some(false),
+                cx,
+            );
+            let empty = fresh_document(cx);
+            assert!(empty.compositions.is_empty());
+            assert_eq!(empty.root_comp, None);
+        });
+    }
 
     #[derive(Default)]
     struct ProjectEventRecorder(Vec<ProjectEvent>);

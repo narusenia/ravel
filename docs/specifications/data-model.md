@@ -676,6 +676,13 @@ display_space = "sRGB"
 frame_rate = "30"
 proxy_mode = "auto"
 proxy_resolution = 0.5
+stop_returns_to_play_start = false
+
+[startup]
+create_composition = true
+
+[node_editor]
+edge_style = "bezier"
 
 [auto_save]
 enabled = true
@@ -696,6 +703,20 @@ disk_enabled = false
 存在しないテーマ名は適用時に同梱テーマへフォールバックし、設定値は要求された
 名前を保持する（テーマディレクトリは非同期に読まれるので、後から現れた
 テーマを忘れないため）。
+
+`playback.stop_returns_to_play_start`（既定 `false`）は停止の着地点。`false`
+なら従来どおりフレーム 0 へ巻き戻し、`true` なら**その再生を開始したフレーム**
+へ戻る。一度も再生していない状態で停止したときは再生ヘッドを動かさない
+（戻る先が無く、0 へ巻き戻すのはこの設定が止めたかった破棄そのものだから）。
+
+`[startup]` の `create_composition`（既定 `true`）は、**中身の無いドキュメント
+がコンポジションを 1 つ持って始まるか**。起動時のドキュメントと `File ▸ New`
+の両方に効く（どちらも「継承元が無い」同じ状態）。`false` ならコンポジション
+0 個で始まり、アクティブコンポジションは `None` になる — `ui_state.json` が
+何も指していないプロジェクトと同じ状態で、各パネルは空表示になる。
+
+`[node_editor]` の `edge_style`（既定 `bezier`）はノードエディタのエッジ描画。
+プロジェクトではなくユーザーの好みなので、パネルは `global` 層へ書き戻す。
 
 `[cache]` は `CacheBudget`（`ravel_core::cache_budget`）の上限で、
 `default → global → project → user` の 4 段マージに他の節と同じ形で乗る。

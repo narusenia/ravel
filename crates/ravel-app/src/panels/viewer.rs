@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use super::{CanvasSelection, ToolState, ViewerFrame, track_panel_focus};
 use crate::assets::RavelIcon;
+use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
 use crate::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
@@ -1851,11 +1852,21 @@ impl Render for ViewerPanel {
 
         // The interaction surface is the canvas area only, so toolbar
         // clicks and wheel events never zoom or pan the composition.
+        let drop_highlight = cx.theme().colors.drop_target;
         let content = div()
             .id("viewer-canvas-area")
             .flex_1()
             .min_h_0()
             .cursor(pointer_cursor)
+            // A MediaBin asset dropped on the picture becomes a layer at the
+            // playhead: the Viewer shows one instant, so that instant is the
+            // only frame a drop here can mean (unit 10).
+            .drag_over::<DraggedAsset>(move |style, _drag, _window, _cx| style.bg(drop_highlight))
+            .on_drop(cx.listener(|_this, drag: &DraggedAsset, _window, cx| {
+                let assets = dropped_asset_ids(drag, cx);
+                add_assets_as_layers(&assets, ProjectState::playhead_frame(cx), cx);
+                cx.notify();
+            }))
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {

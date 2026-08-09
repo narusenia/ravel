@@ -382,6 +382,22 @@ impl MediaBinGpuiPanel {
                 }),
             );
 
+        // Drag onto the Timeline or the Viewer to make a layer of it. An
+        // offline asset has nothing to decode, so it does not drag at all
+        // (the same reason its menu item is disabled).
+        if can_layer {
+            content = content.on_drag(
+                DraggedAsset {
+                    asset_id: row.asset_id.clone(),
+                    name: row.name.clone(),
+                },
+                |drag, _offset, _window, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                },
+            );
+        }
+
         // Thumbnail: the decoded frame when the cache produced one, the kind
         // icon while it is pending and when none is available.
         let mut thumb = div()
@@ -485,6 +501,49 @@ impl MediaBinGpuiPanel {
                 ))
             })
             .into_any_element()
+    }
+}
+
+/// Payload of a MediaBin → Timeline / Viewer asset drag, and its own drag
+/// preview (the pattern `DragScrub` and `DragCurvePoint` use).
+///
+/// It names **only the pressed row**: the payload is baked when that row
+/// renders, which is before the press has updated `MediaSelection`. The drop
+/// side expands it against the live selection instead
+/// ([`dropped_asset_ids`]), so a multi-selection travels as a whole and a row
+/// outside the selection travels alone — the rule the context menu already
+/// follows.
+#[derive(Clone)]
+pub struct DraggedAsset {
+    pub asset_id: String,
+    /// Display name, for the preview that follows the pointer.
+    pub name: String,
+}
+
+impl Render for DraggedAsset {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors;
+        div()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.popover)
+            .text_xs()
+            .text_color(colors.popover_foreground)
+            .child(SharedString::from(self.name.clone()))
+    }
+}
+
+/// The assets a drop of `drag` should place: the whole media selection when
+/// the dragged row is part of it, otherwise just that row.
+pub fn dropped_asset_ids(drag: &DraggedAsset, cx: &App) -> Vec<String> {
+    let selection = super::media_selection(cx);
+    if selection.contains(&drag.asset_id) {
+        selection.assets().to_vec()
+    } else {
+        vec![drag.asset_id.clone()]
     }
 }
 

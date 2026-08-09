@@ -9,6 +9,8 @@
 //! - selecting an asset publishes a `PropertiesTarget::MediaAsset`;
 //! - "add as layer" places the asset (an import alone places nothing) and
 //!   "new composition from asset" makes the comp and places into it;
+//! - a drag's payload expands against the live selection at drop time, and
+//!   the whole drop is one undo step;
 //! - deleting an in-use asset asks first (the confirmation carries the
 //!   reference count), an unused one deletes immediately, and a confirmed
 //!   delete prunes the selection and the Properties target.
@@ -20,8 +22,8 @@ use gpui::{
 use gpui_component::{Root, WindowExt as _};
 use ravel_app::media::import::ProbedAsset;
 use ravel_app::panels::media_bin::{
-    MediaBinGpuiPanel, add_asset_as_layer, delete_confirmation, new_composition_from_asset,
-    request_delete_asset,
+    DraggedAsset, MediaBinGpuiPanel, add_asset_as_layer, add_assets_as_layers, delete_confirmation,
+    dropped_asset_ids, new_composition_from_asset, request_delete_asset,
 };
 use ravel_app::panels::{self, PropertiesTarget};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
@@ -204,6 +206,52 @@ fn importing_does_not_place_a_layer_but_add_as_layer_does(cx: &mut TestAppContex
             1,
             "placing an asset does not register a second one"
         );
+    });
+}
+
+/// A drag carries the pressed row, and the drop expands it against the live
+/// selection: a row inside the selection drags the whole selection, a row
+/// outside it drags alone (the context menu's rule).
+#[gpui::test]
+fn a_drop_places_the_selection_when_the_dragged_row_is_part_of_it(cx: &mut TestAppContext) {
+    let harness = open_panel(cx);
+    harness.project.update(cx, |project, cx| {
+        project.import_media(
+            vec![probed_clip("/media/a.mov"), probed_clip("/media/b.mov")],
+            vec![],
+            cx,
+        );
+    });
+
+    let drag = DraggedAsset {
+        asset_id: "a".to_string(),
+        name: "a.mov".to_string(),
+    };
+    cx.update(|cx| {
+        panels::set_media_selection(vec!["a".to_string(), "b".to_string()], cx);
+        assert_eq!(dropped_asset_ids(&drag, cx), vec!["a", "b"]);
+        // A row the selection does not hold travels alone.
+        panels::set_media_selection(vec!["b".to_string()], cx);
+        assert_eq!(dropped_asset_ids(&drag, cx), vec!["a"]);
+    });
+
+    // Dropping both is one undo step, at the frame the drop names.
+    cx.update(|cx| {
+        panels::set_media_selection(vec!["a".to_string(), "b".to_string()], cx);
+        add_assets_as_layers(&dropped_asset_ids(&drag, cx), 24, cx);
+    });
+    cx.run_until_parked();
+    harness.project.read_with(cx, |project, cx| {
+        let comp = project.active_composition(cx).expect("active composition");
+        assert_eq!(comp.layer_count(), 2);
+        assert!(comp.layers.iter().all(|layer| layer.start_frame == 24));
+    });
+    harness.project.update(cx, |project, cx| {
+        assert!(project.undo(cx));
+    });
+    harness.project.read_with(cx, |project, cx| {
+        let comp = project.active_composition(cx).expect("active composition");
+        assert_eq!(comp.layer_count(), 0, "one undo reverts the whole drop");
     });
 }
 

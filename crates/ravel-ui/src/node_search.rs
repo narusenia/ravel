@@ -7,9 +7,10 @@
 //! resolved through the locale catalogs there); this module is the pure part
 //! — given the resolved strings, which candidates match a query and in what
 //! order they appear. Matching is a case-insensitive substring test over the
-//! label and the description, so a Japanese query matches Japanese text
-//! unchanged. Recently used type keys rank first, and a label match outranks
-//! a description-only match.
+//! label, the `type_key` and the description, so a Japanese query matches
+//! Japanese text unchanged and a type name such as `shape.rect` finds its node
+//! whatever the label's language is. Recently used type keys rank first, and
+//! the three match tiers rank label over `type_key` over description.
 
 use ravel_core::registry::NodeCategory;
 
@@ -30,8 +31,8 @@ pub struct SearchCandidate {
 ///
 /// Ranking, strongest signal first:
 ///
-/// 1. a label match outranks a description-only match (an empty query matches
-///    every label, so all candidates pass);
+/// 1. where the query matched: label, then `type_key`, then description (an
+///    empty query matches every label, so all candidates pass);
 /// 2. recently used types (`recents`, most-recent-first) outrank unused ones,
 ///    keeping their recency order;
 /// 3. ties break by label, then by `type_key` for a stable order.
@@ -45,12 +46,14 @@ pub fn filter_candidates(
     let match_tier = |candidate: &SearchCandidate| {
         if candidate.label.to_lowercase().contains(&query) {
             Some(0u8)
+        } else if candidate.type_key.to_lowercase().contains(&query) {
+            Some(1u8)
         } else if candidate
             .description
             .as_ref()
             .is_some_and(|d| d.to_lowercase().contains(&query))
         {
-            Some(1u8)
+            Some(2u8)
         } else {
             None
         }
@@ -155,6 +158,41 @@ mod tests {
                 &filter_candidates(&candidates, "blur", None, &[])
             ),
             vec!["b", "a"]
+        );
+    }
+
+    #[test]
+    fn a_type_key_query_matches_whatever_language_the_label_is_in() {
+        // The label never contains "shape.rect", so only the type_key tier can
+        // find it — in a Japanese UI as much as in an English one.
+        for label in ["矩形", "Rectangle"] {
+            let candidates = vec![
+                candidate("shape.rect", label, None, NodeCategory::Geometry),
+                candidate("blur", "Blur", None, NodeCategory::Image),
+            ];
+            assert_eq!(
+                keys(
+                    &candidates,
+                    &filter_candidates(&candidates, "shape.rect", None, &[])
+                ),
+                vec!["shape.rect"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_match_outranks_a_type_key_match_which_outranks_a_description() {
+        let candidates = vec![
+            candidate("a.rect", "Alpha", None, NodeCategory::Geometry),
+            candidate("b", "Beta", Some("draws a rect"), NodeCategory::Geometry),
+            candidate("c", "Rect", None, NodeCategory::Geometry),
+        ];
+        assert_eq!(
+            keys(
+                &candidates,
+                &filter_candidates(&candidates, "rect", None, &[])
+            ),
+            vec!["c", "a.rect", "b"]
         );
     }
 

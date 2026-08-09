@@ -77,14 +77,11 @@
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
-| UX-4 | ノード検索を `type_key` でも引く | `refactor-plan-0808.md` |
 | UX-5 | Timeline のプロパティ行の絞り込み（AE の reveal 一式） | `refactor-plan-0808.md` |
 | UX-6 | Timeline 上での値スクラブ | `refactor-plan-0808.md` |
 | UX-7 | プレイヘッド操作（キースナップ / ショートカット） | `refactor-plan-0808.md` |
-| UX-8 | 時間ルーラ（コンポ終端と BPM グリッド） | `refactor-plan-0808.md` |
 | UX-9 | ループ範囲とループ再生 | `refactor-plan-0808.md` |
 | UX-10 | 素材からレイヤーへの経路 | `refactor-plan-0808.md` |
-| UX-11 | 再生停止位置と起動時コンポの設定 | `refactor-plan-0808.md` |
 | NGR-1 | 自動整列の計算（ヘッドレス） | `node-graph-readability-plan.md` |
 | NGR-3 | `node_editor` 設定節と `edge_style` の永続化 | `node-graph-readability-plan.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
@@ -214,7 +211,7 @@ CACHE-3 / 4 も済み（#230 / #227）。評価キャッシュは `CacheBudget` 
 | SET-13 | ❓ | 設定の import / export | 項目が揃ってから |
 | SET-14 | ❓ | UI スケーリング | 調査（パネルが `Theme.font_size` を尊重しているか） |
 | SET-15 | ❓ | 色覚多様性テーマ / アニメーション削減 | テーマ資産の追加とアニメーション箇所の棚卸し |
-| SET-16 | 🟡 | 停止位置と起動時コンポの設定を設定画面へ出す | UX-11（挙動と既定値。マージ済みならゲートは開いている） |
+| SET-16 | 🟡 | 停止位置と起動時コンポの設定を設定画面へ出す | UX-11 ✅ #352（ゲートは開いている） |
 
 **「出す項目 = 実際に効く項目」が規約**なので、SET-8 以降は前提機能の
 マージ後に着手する（`settings-screen-plan.md`）。
@@ -622,14 +619,14 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | UX-1 | 🟡 | 情報の所在表と往復候補の列挙 | — |
 | UX-2 | ⬜ | シナリオ 2 本の台本と集計表 | UX-1 |
 | UX-3 | ❓ | 測定結果の取り込みと単位化 | UX-2（測定の実施） |
-| UX-4 | 🟡 | ノード検索を `type_key` でも引く | — |
+| UX-4 | ✅ #351 | ノード検索を `type_key` でも引く | — |
 | UX-5 | 🟡 | Timeline のプロパティ行の絞り込み（AE の reveal 一式: U / P / S / R / T / A / L + Alt+U / Alt+E、Shift で追加） | — |
 | UX-6 | 🟡 | Timeline 上での値スクラブ | — |
 | UX-7 | 🟡 | プレイヘッド操作（キーへのスナップ、AE 相当のショートカット） | — |
-| UX-8 | 🟡 | 時間ルーラ（コンポ終端の可視化と BPM グリッド） | — |
+| UX-8 | ✅ #353 | 時間ルーラ（コンポ終端の可視化と BPM グリッド） | — |
 | UX-9 | 🟡 | ループ範囲とループ再生 | — |
 | UX-10 | 🟡 | 素材からレイヤーへの経路（自動配置の廃止 / ドラッグ / Outliner） | — |
-| UX-11 | 🟡 | 再生停止位置と起動時コンポの設定 2 つ | — |
+| UX-11 | ✅ #352 | 再生停止位置と起動時コンポの設定 2 つ | — |
 | UX-12 | ⬜ | ロケール / 文書 | UX-4〜11 |
 
 **`UX-4` 以降は `UX-1`〜`UX-3` に依存しない。** 測定は優先順位付けと

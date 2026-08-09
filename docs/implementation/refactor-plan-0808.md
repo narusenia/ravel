@@ -1,6 +1,6 @@
 # ワークフロー貫通の UX 洗い出しと改善 実装計画
 
-> **Status**: Planned — 2026-08-08
+> **Status**: `UX-4` / `UX-8` / `UX-11` 実装済み（#351 / #353 / #352）、残りは未着手 — 2026-08-09
 
 対象: `ravel-ui` の Timeline / Properties モデルとノード検索、`ravel-app` の
 Timeline・Outliner・MediaBin・Viewer・ノードエディタの各パネル、

@@ -1563,11 +1563,12 @@ are `u32`, so past ~4 GiB it refuses rather than wrapping; a rate or channel
 count whose byte rate or block align does not fit its header field is refused
 by `create` for the same reason (`EXPORT-4`).
 
-**No transfer function is applied on the way out**, matching ingest, the
-viewer, and the FFmpeg encoder — so the written values are display-referred,
-not scene-linear, and an EXR from Ravel looks bright in a tool that assumes
-linear. Deliberate until OCIO (REQ-RENDER-003) exists; see the
-`encode::sequence` module docs.
+**The transfer function is applied in front of the encoder, not inside it**
+(`CM-4`): `to_output_space` converts the frame once, so a PNG or a video
+carries display-encoded values while **an EXR is written in the working space
+— linear, the precision argument EXR rests on made true**. See
+`docs/specifications/color-management.md` for the norm and the
+`encode::sequence` module docs for the writer side.
 
 ## ravel-nodes — built-in processors
 

@@ -62,7 +62,7 @@ use crate::cache_budget::{
     CacheKind, Evicted, Reservation, ReservationId, SharedCacheBudget, Tier,
 };
 use crate::composition::Document;
-use crate::eval::{CacheMiss, Precision, TimeKey};
+use crate::eval::{CacheMiss, EvalContext, Precision, TimeKey};
 use crate::id::CompId;
 use crate::types::{FrameBuffer, NodeData};
 use std::collections::HashMap;
@@ -196,34 +196,38 @@ impl FrameCache {
         Some(entry.value.clone())
     }
 
-    /// Frame ranges of `comp` currently cached at `resolution` and at or
-    /// above `precision`, as half-open `[start, end)` spans of integer
-    /// frames (`CACHE-6`).
+    /// Frame ranges of `comp` a request built from `wanted` would hit, as
+    /// half-open `[start, end)` spans of integer frames (`CACHE-6`).
+    ///
+    /// **The filter is [`CacheIdentity::mismatch`] itself**, not a subset of
+    /// its axes. `quality`, `fps` and `comp_resolution` decide a hit exactly
+    /// as `resolution` and `precision` do, so leaving any of them out would
+    /// paint frames green that a scrub then recomputes — the same reason the
+    /// slot key omits the node id.
+    ///
+    /// The time axis is supplied per entry: `wanted`'s own frame position is
+    /// irrelevant, the question is which *other* positions are cached.
     ///
     /// Sub-frame entries (motion-blur shutter samples) are not frames a
     /// playhead can land on, so they are excluded rather than rounded — a
     /// band drawn from rounded samples would claim frames that would miss.
-    pub fn cached_ranges(
-        &self,
-        comp: CompId,
-        precision: Precision,
-        resolution: (u32, u32),
-    ) -> Vec<Range<u64>> {
+    pub fn cached_ranges(&self, comp: CompId, wanted: &EvalContext) -> Vec<Range<u64>> {
         let scale = TimeKey::SUBFRAME_SCALE as i64;
-        let mut frames: Vec<u64> = self
-            .entries
-            .iter()
-            .filter(|(slot, entry)| {
-                slot.comp == comp
-                    && entry.identity.resolution == resolution
-                    && entry.identity.precision >= precision
-            })
-            .filter_map(|(slot, _)| {
-                let ticks = slot.time.ticks();
-                (!slot.time.is_timeless() && ticks >= 0 && ticks % scale == 0)
-                    .then_some((ticks / scale) as u64)
-            })
-            .collect();
+        let mut wanted = CacheIdentity::of_frame(wanted);
+        let mut frames: Vec<u64> = Vec::new();
+        for (slot, entry) in &self.entries {
+            if slot.comp != comp || slot.time.is_timeless() {
+                continue;
+            }
+            let ticks = slot.time.ticks();
+            if ticks < 0 || ticks % scale != 0 {
+                continue;
+            }
+            wanted.time = slot.time;
+            if entry.identity.mismatch(&wanted).is_none() {
+                frames.push((ticks / scale) as u64);
+            }
+        }
         frames.sort_unstable();
         frames.dedup();
 
@@ -476,15 +480,10 @@ impl SharedFrameCache {
         self.lock().clear();
     }
 
-    /// Frame ranges of `comp` cached at `resolution` and at or above
-    /// `precision` — the timeline's cache band (`CACHE-6`).
-    pub fn cached_ranges(
-        &self,
-        comp: CompId,
-        precision: Precision,
-        resolution: (u32, u32),
-    ) -> Vec<Range<u64>> {
-        self.lock().cached_ranges(comp, precision, resolution)
+    /// Frame ranges of `comp` a request built from `wanted` would hit — the
+    /// timeline's cache band (`CACHE-6`).
+    pub fn cached_ranges(&self, comp: CompId, wanted: &EvalContext) -> Vec<Range<u64>> {
+        self.lock().cached_ranges(comp, wanted)
     }
 
     /// Hit / miss tallies and the bytes held.
@@ -686,12 +685,12 @@ mod tests {
         cache.sync_document(Some(&old), &new);
 
         assert_eq!(
-            cache.cached_ranges(comp_a(), Precision::F32, (4, 4)),
+            cache.cached_ranges(comp_a(), &ctx(0)),
             Vec::<Range<u64>>::new(),
             "the edited composition kept frames"
         );
         assert_eq!(
-            cache.cached_ranges(comp_b(), Precision::F32, (4, 4)),
+            cache.cached_ranges(comp_b(), &ctx(0)),
             vec![0..3],
             "an untouched composition lost its frames"
         );
@@ -845,7 +844,7 @@ mod tests {
             );
         }
         assert_eq!(
-            cache.cached_ranges(comp_a(), Precision::F32, (4, 4)),
+            cache.cached_ranges(comp_a(), &ctx(0)),
             vec![0..3, 5..7, 9..10]
         );
     }
@@ -861,20 +860,69 @@ mod tests {
         cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(1)), frame_value());
 
         // An export-grade query sees only the F32 entry.
-        assert_eq!(
-            cache.cached_ranges(comp_a(), Precision::F32, (4, 4)),
-            vec![1..2]
-        );
+        assert_eq!(cache.cached_ranges(comp_a(), &ctx(0)), vec![1..2]);
         // A preview-grade query sees both.
         assert_eq!(
-            cache.cached_ranges(comp_a(), Precision::F16, (4, 4)),
+            cache.cached_ranges(comp_a(), &ctx(0).with_min_precision(Precision::F16)),
             vec![0..2]
         );
         // Another resolution has nothing.
         assert_eq!(
-            cache.cached_ranges(comp_a(), Precision::F16, (8, 8)),
+            cache.cached_ranges(
+                comp_a(),
+                &EvalContext::new(0, FPS, (8, 8)).with_min_precision(Precision::F16)
+            ),
             Vec::<Range<u64>>::new()
         );
+    }
+
+    /// The band must agree with the hit test on **every** axis, not just the
+    /// two the first version filtered on. A cache holding entries produced
+    /// under other qualities, frame rates and coordinate bases must report
+    /// exactly the frames a request would actually be served.
+    #[test]
+    fn every_reported_frame_is_a_frame_the_cache_would_serve() {
+        let cache = SharedFrameCache::new(None);
+        let wanted = ctx(0);
+
+        // Frame 0: matches on every axis.
+        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), frame_value());
+        // Frame 1: a different quality stage — a different picture, never a
+        // substitute (`Quality` has no order).
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(1).with_quality(crate::eval::Quality::Preview)),
+            frame_value(),
+        );
+        // Frame 2: another frame rate.
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&EvalContext::new(2, FrameRate { num: 24, den: 1 }, (4, 4))),
+            frame_value(),
+        );
+        // Frame 3: another composition-space coordinate basis.
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(3).with_comp_resolution((8, 8))),
+            frame_value(),
+        );
+        // Frame 4: matches again, so the band is not simply empty.
+        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(4)), frame_value());
+
+        let reported = cache.cached_ranges(comp_a(), &wanted);
+        assert_eq!(reported, vec![0..1, 4..5]);
+
+        // The band's claim, checked against the hit test frame by frame.
+        for frame in 0..5u64 {
+            let claimed = reported.iter().any(|range| range.contains(&frame));
+            let served = cache
+                .get(comp_a(), &CacheIdentity::of_frame(&ctx(frame)))
+                .is_some();
+            assert_eq!(
+                claimed, served,
+                "frame {frame}: band says {claimed}, the cache says {served}"
+            );
+        }
     }
 
     /// A shutter sample sits between frames; the band must not claim the
@@ -886,7 +934,7 @@ mod tests {
         sub.time += 0.25 / FPS.as_f64();
         cache.insert(comp_a(), CacheIdentity::of_frame(&sub), frame_value());
         assert_eq!(
-            cache.cached_ranges(comp_a(), Precision::F32, (4, 4)),
+            cache.cached_ranges(comp_a(), &ctx(0)),
             Vec::<Range<u64>>::new()
         );
     }

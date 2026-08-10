@@ -1347,9 +1347,7 @@ impl ProjectState {
         let Some(comp) = crate::panels::active_composition_in(&document, cx) else {
             return Ok(None);
         };
-        let fps = comp.frame_rate;
-        let resolution = self.viewer_resolution.apply(comp.resolution);
-        let comp_resolution = comp.resolution;
+        let ctx = self.viewer_eval_context(comp, frame);
         let Some(compiled) = self.compiled_root(cx)? else {
             return Ok(None);
         };
@@ -1361,17 +1359,29 @@ impl ProjectState {
             // it rather than reordering the viewer's.
             nodes: vec![compiled.output],
             path: Vec::new(),
-            // The interactive path is the one place that opts down the
-            // quality axis: the viewer wants a responsive picture, not the
-            // sample count an export pays for. The preview factor above is
-            // an independent axis — it scales the buffer, this counts
-            // samples — so the two combine freely.
-            ctx: EvalContext::new(frame, fps, resolution)
-                .with_comp_resolution(comp_resolution)
-                .with_quality(Quality::Preview),
+            ctx,
             document: Some(document),
             hint: InvalidationHint::None,
         }))
+    }
+
+    /// The evaluation context the viewer asks for, at `frame`.
+    ///
+    /// One place, because the frame cache keys on every axis of it: the band
+    /// (`CACHE-6`) has to ask with the *same* context the request carries, or
+    /// it reports entries a scrub would miss. The interactive path is also
+    /// the one place that opts down the quality axis — the viewer wants a
+    /// responsive picture, not the sample count an export pays for. The
+    /// preview resolution factor is an independent axis (it scales the
+    /// buffer, quality counts samples), so the two combine freely.
+    fn viewer_eval_context(&self, comp: &Composition, frame: u64) -> EvalContext {
+        EvalContext::new(
+            frame,
+            comp.frame_rate,
+            self.viewer_resolution.apply(comp.resolution),
+        )
+        .with_comp_resolution(comp.resolution)
+        .with_quality(Quality::Preview)
     }
 
     /// `Ok(None)`: nothing to draw (no active composition, or no active
@@ -1544,14 +1554,12 @@ impl ProjectState {
         let Some(comp) = self.active_composition(cx) else {
             return;
         };
-        let (id, resolution) = (comp.id, comp.resolution);
-        let ranges = eval.frame_cache().cached_ranges(
-            id,
-            // The viewer's floor, so the band and the viewer agree on which
-            // entries count (`EvalContext::new`'s default today).
-            ravel_core::eval::Precision::F32,
-            self.viewer_resolution.apply(resolution),
-        );
+        let id = comp.id;
+        // The very context the next request will carry, so the band and the
+        // hit test agree on every axis.
+        let ranges = eval
+            .frame_cache()
+            .cached_ranges(id, &self.viewer_eval_context(comp, 0));
         crate::panels::set_cache_band(id, ranges, cx);
     }
 

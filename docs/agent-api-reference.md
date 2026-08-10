@@ -1332,8 +1332,9 @@ roll a newer project back to an older revision).
 InvalidationHint::{None, Params(Vec<NodeId>), Structural}
 trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
     fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
-    fn finalize(&mut self, Arc<dyn NodeData>, &EvalContext) -> Arc<dyn NodeData>;
-}
+    fn finalize(&mut self, &Arc<dyn NodeData>, &EvalContext)
+        -> Option<Arc<dyn NodeData>>;   // None = failed: the raw value is
+}                                       // delivered but never cached
 EvalRequest { graph, nodes: Vec<NodeId>, comp: Option<CompId>,
     path: Vec<PathSegment>, ctx, document: Option<Arc<Document>>, hint }
     // document → Evaluator::set_document before sync (scoped invalidation);
@@ -1376,8 +1377,10 @@ processor's construction compiles a shader and creates a pipeline.
 
 ```rust
 SharedFrameCache::new(Option<SharedCacheBudget>)   // EvalService builds one
-    .cached_ranges(CompId, Precision, (u32, u32)) -> Vec<Range<u64>>
-        // half-open integer-frame spans; the timeline's cache band (CACHE-6)
+    .cached_ranges(CompId, &EvalContext) -> Vec<Range<u64>>
+        // half-open integer-frame spans; the timeline's cache band (CACHE-6).
+        // Filters with CacheIdentity::mismatch itself — every axis, not a
+        // subset — so a reported frame is always one a request would hit
     .stats() -> FrameCacheStats { hits, misses_by_reason, entries,
         bytes_by_tier }                            // .hit_rate() / .bytes(Tier)
     .invalidate_comp(CompId) / .clear()

@@ -293,7 +293,7 @@ pub enum Tier { Vram, Ram, Disk }
 - `cache_stats()` で `CacheMiss` 別件数・ヒット数・層別使用バイトを読める
   ようにし、`GPUCOMP-7`（リードバック回数の回帰テスト）と同じ発想で
   「スクラブ後戻りで `process` が走らない」をテストで固める。
-- `cached_ranges(comp, precision, resolution) -> Vec<Range<u64>>` を提供し、
+- `cached_ranges(comp, &EvalContext) -> Vec<Range<u64>>` を提供し、
   Timeline に AE 風のキャッシュ帯を描く（RAM = 緑、ディスク = 青相当）。
   厳密一致で照合しているので、帯の意味が一意に決まる。
 
@@ -496,12 +496,17 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 
 ### 単位 6 (`CACHE-6`): Timeline のキャッシュ帯と統計
 
-- `cached_ranges(comp, precision, resolution)` を追加。
+- `cached_ranges(comp, &EvalContext)` を追加。
 - Timeline にキャッシュ帯を描く（RAM = 緑、将来のディスク = 青）。
 - 予算・ヒット率のログ出力を整える。
 
 **実装時の決定**（コードが正）:
 
+- `cached_ranges` の絞り込みは **`CacheIdentity::mismatch` そのもの**で、
+  軸の部分集合ではない。品質・fps・コンプ解像度も解像度や精度と同じように
+  ヒットを決めるので、1 つでも落とすと「帯は緑なのにスクラブで再計算される」
+  フレームが出る（スロットにノード id を入れないのと同じ理由）。引数が
+  `EvalContext` なのはそのため — ビューアが次に投げる文脈をそのまま渡す。
 - `cached_ranges` は**整数フレームだけ**を返す。サブフレーム位置
   （シャッターサンプル）は再生ヘッドが乗れないので、丸めて帯にすると
   「当たらないフレームを当たると言う」ことになる。

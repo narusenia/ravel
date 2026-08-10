@@ -1499,7 +1499,7 @@ mod tests {
             .unwrap();
         let document = frame_document();
         let frames = service.frame_cache().clone();
-        let ranges = || frames.cached_ranges(comp_id(), crate::eval::Precision::F32, (2, 2));
+        let ranges = || frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2)));
 
         for frame in 0..3u64 {
             service.request(frame_request(

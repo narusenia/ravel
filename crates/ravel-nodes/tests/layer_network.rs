@@ -903,6 +903,9 @@ fn fake_media_factory(fps: FrameRate) -> ravel_nodes::media::ReaderFactory {
                 frame_count: None,
                 duration_secs: None,
                 pixel_format: "rgba".into(),
+                color_primaries: None,
+                color_transfer: None,
+                color_matrix: None,
             })],
             duration_secs: None,
         })) as Box<dyn MediaReader>)

@@ -140,6 +140,53 @@ mod ffmpeg_tests {
         assert_eq!(video.codec, Some(VideoCodec::Vp9));
     }
 
+    /// A container's declared colour metadata reaches the probe, mapped onto
+    /// Ravel's vocabulary; an untagged file declares nothing and the fields
+    /// stay `None` rather than guessing (`MED-MED-07`).
+    #[test]
+    fn probe_reads_container_colour_metadata() {
+        use ravel_core::color::{Primaries, Transfer};
+
+        let dir = tempfile::tempdir().unwrap();
+        // Tagging happens at remux: the muxer is what writes the colr atom
+        // the probe reads back.
+        let base = generate_test_video(dir.path(), "base.mp4");
+        let path = dir.path().join("tagged.mov");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                base.to_str().unwrap(),
+                "-c",
+                "copy",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-movflags",
+                "write_colr",
+                path.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg failed to tag the video");
+
+        let info = FfmpegDecoder::probe(&path).expect("probe failed");
+        let video = info.first_video().expect("no video stream");
+        assert_eq!(video.color_primaries, Some(Primaries::Rec709));
+        assert_eq!(video.color_transfer, Some(Transfer::Rec709));
+        assert_eq!(video.color_matrix.as_deref(), Some("bt709"));
+
+        let info = FfmpegDecoder::probe(&base).expect("probe failed");
+        let video = info.first_video().expect("no video stream");
+        assert_eq!(video.color_primaries, None);
+        assert_eq!(video.color_transfer, None);
+    }
+
     // ---- Video decode -----------------------------------------------------
 
     #[test]

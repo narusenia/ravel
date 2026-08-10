@@ -260,6 +260,18 @@ pub struct VideoStreamInfo {
     pub frame_count: Option<u64>,
     pub duration_secs: Option<f64>,
     pub pixel_format: String,
+    /// Colour primaries the container declares, mapped onto Ravel's
+    /// vocabulary. `None` when the file says nothing Ravel can name — the
+    /// input-colour-space resolution then falls through to the next tier
+    /// rather than guessing (`docs/specifications/color-management.md`).
+    pub color_primaries: Option<crate::color::Primaries>,
+    /// The declared transfer characteristic, same rule as
+    /// [`Self::color_primaries`].
+    pub color_transfer: Option<crate::color::Transfer>,
+    /// The declared YUV↔RGB matrix, as the backend names it. Kept for
+    /// diagnostics only: a matrix does not name a transfer function, so the
+    /// resolution order never reads it.
+    pub color_matrix: Option<String>,
 }
 
 /// Metadata for an audio stream.
@@ -650,6 +662,9 @@ mod tests {
                     frame_count: Some(300),
                     duration_secs: Some(10.0),
                     pixel_format: "yuv420p".into(),
+                    color_primaries: None,
+                    color_transfer: None,
+                    color_matrix: None,
                 }),
             ],
         };

@@ -17,7 +17,9 @@
 
 use std::path::Path;
 
-use ravel_core::color::{ColorSpace, ingest_rgba8, ingest_rgba16, ingest_rgbaf32};
+use ravel_core::color::{
+    ColorSpace, Primaries, Transfer, ingest_rgba8, ingest_rgba16, ingest_rgbaf32,
+};
 
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::ffi;
@@ -25,6 +27,7 @@ use ffmpeg_the_third::ffi::AV_TIME_BASE;
 use ffmpeg_the_third::format::context::Input;
 use ffmpeg_the_third::media::Type as MediaType;
 use ffmpeg_the_third::software::scaling as sws;
+use ffmpeg_the_third::util::color;
 use ffmpeg_the_third::util::format::pixel::Pixel as PixelFormat;
 use ffmpeg_the_third::util::format::sample::Sample as SampleFormat;
 use ffmpeg_the_third::util::frame;
@@ -830,6 +833,11 @@ fn build_media_info(ctx: &Input) -> MediaInfo {
                         frame_count,
                         duration_secs,
                         pixel_format: String::new(),
+                        color_primaries: probe_primaries(codec_params.color_primaries()),
+                        color_transfer: probe_transfer(
+                            codec_params.color_transfer_characteristic(),
+                        ),
+                        color_matrix: codec_params.color_space().name().map(str::to_owned),
                     }))
                 }
                 MediaType::Audio => {
@@ -897,6 +905,33 @@ fn extract_video_dimensions(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, 
     unsafe {
         let ptr = params.as_ptr();
         ((*ptr).width as u32, (*ptr).height as u32)
+    }
+}
+
+/// Map FFmpeg's declared colour primaries onto Ravel's vocabulary. Anything
+/// Ravel cannot name stays `None` — the input-colour-space resolution then
+/// falls through to the extension default instead of guessing
+/// (`docs/specifications/color-management.md`).
+fn probe_primaries(primaries: color::Primaries) -> Option<Primaries> {
+    match primaries {
+        color::Primaries::BT709 => Some(Primaries::Rec709),
+        color::Primaries::BT2020 => Some(Primaries::Rec2020),
+        _ => None,
+    }
+}
+
+/// Map FFmpeg's declared transfer characteristic onto Ravel's vocabulary,
+/// with the same `None`-means-unknown rule as [`probe_primaries`].
+fn probe_transfer(trc: color::TransferCharacteristic) -> Option<Transfer> {
+    match trc {
+        color::TransferCharacteristic::Linear => Some(Transfer::Linear),
+        color::TransferCharacteristic::IEC61966_2_1 => Some(Transfer::Srgb),
+        // BT.2020 encodes with the BT.709 OETF; FFmpeg spells it per depth.
+        color::TransferCharacteristic::BT709
+        | color::TransferCharacteristic::BT2020_10
+        | color::TransferCharacteristic::BT2020_12 => Some(Transfer::Rec709),
+        color::TransferCharacteristic::SMPTE2084 => Some(Transfer::Pq),
+        _ => None,
     }
 }
 

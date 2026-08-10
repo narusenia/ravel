@@ -400,6 +400,9 @@ fn picture_and_sound_share_the_layer_local_time_axis() {
         frame_count: None,
         duration_secs: None,
         pixel_format: "rgba".into(),
+        color_primaries: None,
+        color_transfer: None,
+        color_matrix: None,
     };
 
     // A clip placed at comp frame 30, trimmed to source frames 10..100.

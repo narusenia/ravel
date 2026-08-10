@@ -268,6 +268,9 @@ fn probe_failures_are_skipped_and_successes_import(cx: &mut TestAppContext) {
                         frame_count: None,
                         duration_secs: Some(1.0),
                         pixel_format: "rgba".into(),
+                        color_primaries: None,
+                        color_transfer: None,
+                        color_matrix: None,
                     })],
                     duration_secs: Some(1.0),
                 })

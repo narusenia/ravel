@@ -151,6 +151,33 @@ TIFF / DPX は float も log も入りうるが**リニア扱いにしない**: 
 **UI からは届かない。** `.cube` を選ぶ設定 UI は `CM-8` の担当で、今は
 API とテストだけがこの経路を通る。
 
+### 変換できなかったときは黙らない
+
+シェーダがコンパイルできない、デバイスを失った — 表示変換が走らなかった
+フレームは、リニアのまま `finalize` から出てくる。**CPU で救済しない**
+（変換点を二重化しないため）。代わりに**ホストがエラーとして出す**:
+`ViewerUpdate::from_eval` はリニアのフレームを
+`viewer.display_transform_failed` のエラーオーバーレイに変える。リニア光を
+そのまま描くのは誤り、黙って黒画面にするのは不親切、という判断。
+フレームでない出力（`Scalar` 等）は従来どおり空白。
+
+### 完了条件の検証には GPU アダプタが要る
+
+`CM-7` の完了条件はほぼ全部が GPU テスト
+（`crates/ravel-nodes/tests/display_transform.rs`）で、アダプタが無い環境では
+既存の GPU テストと同じ作法で skip する。**アダプタの無い CI では、この単位は
+実質検証されない。**
+
+アダプタ無しでも走るのは次の 2 つだけ:
+
+- `display_transform.wgsl` の naga による検証と MSL / HLSL / SPIR-V への変換
+  （`gpu_util::shader_translation` が全ビルトインシェーダを走査する）
+- LUT のアトラス化（`display.rs` の純関数の単体テスト）
+
+**伝達関数の一致・LUT の補間・`quality` 直交は実機でしか確かめられない。**
+この単位に触る変更は、アダプタのある機体で
+`cargo test -p ravel-nodes --test display_transform` を通すこと。
+
 ### 残っている上限: リードバックそのもの
 
 表示変換が GPU に載っても、フレームは依然として一度 CPU へ降りて UI

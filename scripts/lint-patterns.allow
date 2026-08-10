@@ -139,4 +139,3 @@ observe-global crates/ravel-app/src/app_settings.rs ThemeRegistry
 framebuffer-direct-index crates/ravel-media/src/decoder.rs data-index
 framebuffer-direct-index crates/ravel-media/tests/audio_sample_format.rs data-index
 framebuffer-direct-index crates/ravel-media/tests/integration_ffmpeg.rs data-index
-

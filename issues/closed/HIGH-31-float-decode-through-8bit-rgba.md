@@ -5,7 +5,7 @@
 | 深刻度 | high |
 | 種別 | bug |
 | 領域 | ravel-media / デコード |
-| 該当 | `crates/ravel-media/src/decoder.rs:937`, `crates/ravel-media/src/image_seq.rs:82` |
+| 該当 | `crates/ravel-media/src/decoder.rs`（`convert_video_frame_to_rgba`）, `crates/ravel-media/src/image_seq.rs:82` |
 
 > **解決済み**: デコードが素材の画素形式から取り込み経路を選ぶようになった。
 > float の RGB 形式（`GBRPF32` / `GBRAPF32` / `RGBAF32`）はスケーラを通さず

@@ -1,6 +1,6 @@
 # [HIGH-32] 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる
 
-**解決済み**: この PR（2026-08-11）。u8/u16 の厳密 transfer LUT、float 経路の rayon 行分割、
+**解決済み**: #378（2026-08-11）。u8/u16 の厳密 transfer LUT、float 経路の rayon 行分割、
 decoder 経路の一致テストと 1080p 交互測定を実施した。HIGH-17 のスケーラキャッシュと
 出力バッファプールは対象外のまま。
 

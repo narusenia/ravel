@@ -343,8 +343,7 @@ Transfer  : Linear | Srgb | Rec709 | Pq
 > | 最新版 | 0.2.1（2026-07-15。約 4 週間更新なし） |
 > | DL 総数 | 1332（初版 2026-05-13 から 3 か月、月あたり約 440） |
 > | GitHub | star 3 / fork 2 / open issue 0、単独メンテナ |
-> | 直近のコミット | **全部 `ocio-sys` のビルド検出修正**（install prefix の
-> 優先順位、minizip の互換名、pkg-config メタデータ、Imath の ABI 検出） |
+> | 直近のコミット | **全部 `ocio-sys` のビルド検出修正**（install prefix の優先順位、minizip の互換名、pkg-config メタデータ、Imath の ABI 検出） |
 >
 > 直近のコミットが示すとおり、**システム導入の検出がまだ安定していない**。
 >

@@ -21,7 +21,7 @@
 >
 > **この個票の範囲外として別に起票したもの**（どれもこの個票の検証項目には
 > 含まれない別の欠陥で、未解決のまま残る）:
-> [HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md)（float / EXR の
+> [HIGH-31](HIGH-31-float-decode-through-8bit-rgba.md)（float / EXR の
 > デコードが 8bit RGBA を経由し、1 超がクリップされる）、
 > `MED-MED-07`（素材の色メタデータが読まれず、入力色空間の解決が常に
 > 拡張子既定へ落ちる）、`MED-APP-32`（EXR サムネイルが暗い）。

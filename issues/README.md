@@ -108,11 +108,6 @@
     アセット単位共有キャッシュ、予算は `CacheKind::MediaFrame`）。
 12. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
-13. **[HIGH-31](high/HIGH-31-float-decode-through-8bit-rgba.md)**
-    同じスケーラが**出力を 8bit RGBA に固定**しているので、float / 10bit の
-    素材は f32 バッファに届く前に 256 段へ落ちる。`MED-MED-01` を昇格した
-    もので（フェーズ CM が仕様に「リニア EXR を取り込む」と書いた結果、
-    深刻さが上がった）、`HIGH-17` と同じ関数を触る。
 
 ### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）
 

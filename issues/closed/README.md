@@ -53,6 +53,7 @@
 | [HIGH-28](HIGH-28-scrub-commit-lost-when-properties-rebuilds.md) | スクラブの `Commit` が再構築で失われ undo が飛ぶ | 実機フィードバック |
 | [HIGH-27](HIGH-27-timeline-keyframes-invisible-inside-subnets.md) | Subnet の中のキーフレームが Timeline から消える | 実機フィードバック |
 | [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |
+| [HIGH-31](HIGH-31-float-decode-through-8bit-rgba.md) | float / 高ビット深度のデコードが 8bit RGBA を経由 | 画素形式別の取り込み経路（float 直読み / RGBA64） |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
 ## medium（28件）

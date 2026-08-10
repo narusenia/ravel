@@ -415,7 +415,7 @@ sRGB 素材ではそれが恒等になるので現状の見え方が保たれる
 解決順（明示指定 > メタデータ > 拡張子既定）が 2 箇所に分かれる。
 
 **関連**:
-- [HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md) — 同じ EXR が
+- [HIGH-31](../closed/HIGH-31-float-decode-through-8bit-rgba.md) — 同じ EXR が
   8bit を経由して取り込まれるので、暗さに加えて 1 超がクリップされている。
   暗さだけ直しても白飛びは残る
 - `MED-MED-07`（[media-audio.md](media-audio.md)）— 入力色空間の解決に

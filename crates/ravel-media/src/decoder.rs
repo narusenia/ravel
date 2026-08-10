@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use ravel_core::color::{ColorSpace, ingest_rgba8};
+use ravel_core::color::{ColorSpace, ingest_rgba8, ingest_rgba16, ingest_rgbaf32};
 
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::ffi;
@@ -914,9 +914,20 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
 /// `input_color_space` into the working space on the way.
 ///
 /// This is the ingest end of the linear pipeline (`CM-2`): the transfer
-/// function is removed **immediately** after the bytes are normalised, so
+/// function is removed **immediately** after the samples are normalised, so
 /// nothing downstream ever sees an encoded value. Alpha carries no transfer
 /// function and is copied through.
+///
+/// The road the samples take depends on how much precision the decoded
+/// format carries — never on the file extension:
+///
+/// - **Float RGB formats** (EXR and other scene-referred sources) are read
+///   plane by plane, without the scaler: no quantisation and **no clamp**,
+///   so values above 1.0 reach the working space.
+/// - **Formats deeper than 8 bits** (ProRes 422 10-bit, DNxHR, 16-bit
+///   stills) scale to RGBA64 and ingest at 16 bits.
+/// - **Everything else** keeps the 8-bit RGBA path it has always had; its
+///   output is unchanged bit for bit.
 fn convert_video_frame_to_rgba(
     frame: &frame::Video,
     input_color_space: ColorSpace,
@@ -930,24 +941,74 @@ fn convert_video_frame_to_rgba(
         ));
     }
 
+    if let Some(layout) = FloatRgbLayout::of(frame.format()) {
+        return read_float_rgb_frame(frame, layout, input_color_space);
+    }
+
+    if source_depth(frame.format()) > 8 {
+        match scale_frame(frame, DEEP_OUTPUT) {
+            Ok(scaled) => return Ok(framebuffer_from_rgba64(&scaled, input_color_space)),
+            Err(error) => warn!(
+                format = ?frame.format(),
+                %error,
+                "16-bit scaling unavailable; decoding through 8-bit RGBA"
+            ),
+        }
+    }
+
+    let scaled = scale_frame(frame, PixelFormat::RGBA)?;
+    Ok(framebuffer_from_rgba8(&scaled, input_color_space))
+}
+
+/// The scaler output format for sources deeper than 8 bits, in host byte
+/// order so the u16 lanes read back without a swap.
+#[cfg(target_endian = "little")]
+const DEEP_OUTPUT: PixelFormat = PixelFormat::RGBA64LE;
+#[cfg(target_endian = "big")]
+const DEEP_OUTPUT: PixelFormat = PixelFormat::RGBA64BE;
+
+/// Bits per sample of a pixel format — the deepest component. Formats
+/// FFmpeg cannot describe are treated as 8-bit, which is the path they took
+/// before the deep paths existed.
+fn source_depth(format: PixelFormat) -> u32 {
+    // SAFETY: the returned descriptor is a static table entry owned by
+    // libavutil; it outlives this read and is never mutated.
+    let desc = unsafe { ffi::av_pix_fmt_desc_get(format.into()) };
+    if desc.is_null() {
+        return 8;
+    }
+    let desc = unsafe { &*desc };
+    (0..desc.nb_components as usize)
+        .map(|index| desc.comp[index].depth as u32)
+        .max()
+        .unwrap_or(8)
+}
+
+/// Run a frame through the sws scaler into `output`, same size.
+fn scale_frame(frame: &frame::Video, output: PixelFormat) -> MediaResult<frame::Video> {
     let mut scaler = sws::Context::get(
         frame.format(),
-        width,
-        height,
-        PixelFormat::RGBA,
-        width,
-        height,
+        frame.width(),
+        frame.height(),
+        output,
+        frame.width(),
+        frame.height(),
         sws::Flags::BILINEAR,
     )
     .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
 
-    let mut rgba_frame = frame::Video::empty();
+    let mut scaled = frame::Video::empty();
     scaler
-        .run(frame, &mut rgba_frame)
+        .run(frame, &mut scaled)
         .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
+    Ok(scaled)
+}
 
-    let stride = rgba_frame.stride(0);
-    let data = rgba_frame.data(0);
+/// Ingest an 8-bit RGBA frame into the working space.
+fn framebuffer_from_rgba8(frame: &frame::Video, input_color_space: ColorSpace) -> FrameBuffer {
+    let (width, height) = (frame.width(), frame.height());
+    let stride = frame.stride(0);
+    let data = frame.data(0);
     let pixel_count = (width * height) as usize;
     let mut f32_data = Vec::with_capacity(pixel_count * 4);
 
@@ -964,6 +1025,138 @@ fn convert_video_frame_to_rgba(
                 ],
                 input_color_space,
             ));
+        }
+    }
+
+    FrameBuffer::from_f32(width, height, f32_data)
+}
+
+/// Ingest a 16-bit RGBA frame (native-endian, see [`DEEP_OUTPUT`]) into the
+/// working space.
+fn framebuffer_from_rgba64(frame: &frame::Video, input_color_space: ColorSpace) -> FrameBuffer {
+    let (width, height) = (frame.width(), frame.height());
+    let stride = frame.stride(0);
+    let data = frame.data(0);
+    let pixel_count = (width * height) as usize;
+    let mut f32_data = Vec::with_capacity(pixel_count * 4);
+
+    let lane = |offset: usize| u16::from_ne_bytes([data[offset], data[offset + 1]]);
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        for x in 0..width as usize {
+            let offset = row_start + x * 8;
+            f32_data.extend_from_slice(&ingest_rgba16(
+                [
+                    lane(offset),
+                    lane(offset + 2),
+                    lane(offset + 4),
+                    lane(offset + 6),
+                ],
+                input_color_space,
+            ));
+        }
+    }
+
+    FrameBuffer::from_f32(width, height, f32_data)
+}
+
+/// How a float RGB frame lays its samples out. These formats are read
+/// directly rather than scaled: the scaler's float support varies by FFmpeg
+/// version, and an integer intermediate would clamp the highlights these
+/// formats exist to carry.
+#[derive(Clone, Copy, Debug)]
+enum FloatRgbLayout {
+    /// `GBRPF32`: one f32 plane per channel, in G, B, R order; opaque.
+    Planar { big_endian: bool },
+    /// `GBRAPF32`: planar, with an alpha plane after the colour planes.
+    PlanarAlpha { big_endian: bool },
+    /// `RGBAF32`: interleaved.
+    Packed { big_endian: bool },
+}
+
+impl FloatRgbLayout {
+    fn of(format: PixelFormat) -> Option<Self> {
+        Some(match format {
+            PixelFormat::GBRPF32LE => Self::Planar { big_endian: false },
+            PixelFormat::GBRPF32BE => Self::Planar { big_endian: true },
+            PixelFormat::GBRAPF32LE => Self::PlanarAlpha { big_endian: false },
+            PixelFormat::GBRAPF32BE => Self::PlanarAlpha { big_endian: true },
+            PixelFormat::RGBAF32LE => Self::Packed { big_endian: false },
+            PixelFormat::RGBAF32BE => Self::Packed { big_endian: true },
+            _ => return None,
+        })
+    }
+
+    fn sample(self, data: &[u8], offset: usize) -> f32 {
+        let bytes = [
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ];
+        match self {
+            Self::Planar { big_endian }
+            | Self::PlanarAlpha { big_endian }
+            | Self::Packed { big_endian }
+                if big_endian =>
+            {
+                f32::from_be_bytes(bytes)
+            }
+            _ => f32::from_le_bytes(bytes),
+        }
+    }
+}
+
+/// Read a float RGB frame straight into the working space. No scaling, no
+/// quantisation, no clamp — 1.0 is not a ceiling here.
+fn read_float_rgb_frame(
+    frame: &frame::Video,
+    layout: FloatRgbLayout,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
+    let (width, height) = (frame.width(), frame.height());
+    let pixel_count = (width * height) as usize;
+    let mut f32_data = Vec::with_capacity(pixel_count * 4);
+
+    match layout {
+        FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
+            // GBRP order: plane 0 is green, 1 is blue, 2 is red.
+            let planes = [frame.data(2), frame.data(0), frame.data(1)];
+            let strides = [frame.stride(2), frame.stride(0), frame.stride(1)];
+            let alpha = match layout {
+                FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
+                _ => None,
+            };
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let rgb = [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
+                    let a = alpha.map_or(1.0, |(data, stride)| {
+                        layout.sample(data, y * stride + x * 4)
+                    });
+                    f32_data.extend_from_slice(&ingest_rgbaf32(
+                        [rgb[0], rgb[1], rgb[2], a],
+                        input_color_space,
+                    ));
+                }
+            }
+        }
+        FloatRgbLayout::Packed { .. } => {
+            let data = frame.data(0);
+            let stride = frame.stride(0);
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let offset = y * stride + x * 16;
+                    f32_data.extend_from_slice(&ingest_rgbaf32(
+                        [
+                            layout.sample(data, offset),
+                            layout.sample(data, offset + 4),
+                            layout.sample(data, offset + 8),
+                            layout.sample(data, offset + 12),
+                        ],
+                        input_color_space,
+                    ));
+                }
+            }
         }
     }
 

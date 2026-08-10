@@ -3,7 +3,7 @@
 ---
 
 `MED-MED-01`（全ての映像デコードが 8bit RGBA を経由する）は
-[HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md) へ昇格した
+[HIGH-31](../closed/HIGH-31-float-decode-through-8bit-rgba.md) へ昇格した
 （2026-08-10）。フェーズ CM で仕様が「リニア EXR を取り込む」と規定したため、
 同じ欠陥の深刻さが上がった。**解決ではなく移動**なので `closed/` には無い。
 ID は再利用しない。
@@ -95,7 +95,7 @@ rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
 - **不明は `None` のまま**。推測で埋めると 3 段目の既定より悪くなる。
   仕様どおり「2 と 3 のどちらを採ったか」を素材ごとに 1 度ログへ出す
 
-**関連**: [HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md) とは独立。
+**関連**: [HIGH-31](../closed/HIGH-31-float-decode-through-8bit-rgba.md) とは独立。
 あちらは取り込みのビット幅、こちらは入力色空間の判定。
 設定 UI（明示指定を与える手段）は `CM-8`。
 

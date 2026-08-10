@@ -7,6 +7,16 @@
 | 領域 | ravel-media / デコード |
 | 該当 | `crates/ravel-media/src/decoder.rs:937`, `crates/ravel-media/src/image_seq.rs:82` |
 
+> **解決済み**: デコードが素材の画素形式から取り込み経路を選ぶようになった。
+> float の RGB 形式（`GBRPF32` / `GBRAPF32` / `RGBAF32`）はスケーラを通さず
+> 面を直接読み、1 超の値をクリップしない。8bit 超の整数形式は RGBA64 へ
+> スケールして `ingest_rgba16` で取り込む（`ingest_rgba16` /
+> `ingest_rgbaf32` は `ravel_core::color` の新規関数で、既存関数の挙動は
+> 不変）。8bit 素材の経路は従来どおりで、出力はビット単位で同一
+> （`eight_bit_source_decodes_bit_identically`）。連番経路
+> （`read_image_frame_in`）も同じデコーダを通るので一緒に直った
+> （`float_source_keeps_values_above_one`）。
+
 ## 現状
 
 `convert_video_frame_to_rgba` は素材の画素形式に関わらず、sws スケーラの

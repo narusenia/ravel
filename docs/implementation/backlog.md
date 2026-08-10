@@ -90,7 +90,7 @@
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
 | EXPO-3 | 宣言の機械可読な列挙（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
-| CM-7 | 表示変換を GPU で行う（自前 + `.cube`。`CM-6` を待たない） | `color-management-plan.md` |
+| ZC-1 | 往復の内訳を測り直す（ゼロコピー表示の判断ゲート） | `zero-copy-viewer-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -136,7 +136,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-8 | ✅ | リードバック実装の改善（HIGH-04） | GPUBK-6（#282）が回収 |
 | GPUCOMP-9 | ✅ | f32→BGRA 変換を評価ワーカーへ（HIGH-08。HIGH-09 は一部） | #284 |
 | GPUCOMP-10 | ❌ | 非同期リードバック（GPUBK-6 の測定で不要と判断） | — |
-| GPUCOMP-11 | ❓ | ゼロコピー表示（**判断は済み、実装の引受先が未定**） | GPUCOMP-9 ✅ |
+| GPUCOMP-11 | → | ゼロコピー表示（**引受先は `zero-copy-viewer-plan.md` の `ZC-*`**） | GPUCOMP-9 ✅ |
 
 GPUCOMP-1（#197）で測定の土台が入り、readback が **N 回 / 完成評価**であることを
 実測で確認した。10 レイヤー再生形では `comp.transform` が `evaluate` の 78% で、
@@ -170,6 +170,24 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 `CM-3` の表示変換が rayon と境界表で 10.1× 速くなった（#363）ので、
 **往復のうち CPU 変換が占めていた分は既に消えている。** ゼロコピー化の
 判断はこの数字で測り直すこと。
+
+### ゼロコピー Viewer 表示（HIGH-09 の残り）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| ZC-1 | 🟡 | 往復の内訳を `CM-7` 後の姿で測り直す（**判断ゲート**） | — |
+| ZC-2 | ⬜ | gpui-ce に Metal デバイス / キューの取得口を足す | ZC-1 |
+| ZC-3 | ⬜ | 出力テクスチャを GPUI のカスタム要素で描く | ZC-2 |
+| ZC-4 | ⬜ | 同期と寿命（フレーム跨ぎの取り違えを防ぐ） | ZC-3 |
+| ZC-5 | ⬜ | Linux / Windows の経路（デバイス公開アクセサ） | ZC-3 |
+| ZC-6 | ⬜ | 文書更新と `HIGH-09` のクローズ | ZC-4, ZC-5 |
+
+`CM-7`（#367）が表示変換を GPU へ移し、CPU の per-pixel 処理が経路から消えた。
+**1080p で画面に届くまでは 2.14 ms**（`perf-baseline.md`）で、残っているのは
+リードバック・再アップロード・包み。**内訳はまだ測っていない** — 手元の
+リードバックの数字は `CM-7` 前のもので、転送量が変わった後の値ではない。
+`ZC-1` が総和と内訳を同じ実行で測り直し、**得が 5% を下回るなら計画を凍結する**。`MED-GPU-07` は前提ではない（解決済み）。障害は GPUI 側で、
+macOS の gpui が wgpu ではなく Metal ネイティブであること。
 
 ### キャッシュ（REQ-CORE-006）
 
@@ -724,7 +742,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | CM-3 | ✅ #363 | Viewer の表示変換（HIGH-25） | CM-1 |
 | CM-4 | ✅ #363 | 書き出しの出力変換（HIGH-25） | CM-1, EXPORT-1 |
 | CM-5 | ✅ #363 | 文書更新（骨格） | CM-2, CM-3, CM-4 |
-| CM-7 | 🟡 | 表示変換を GPU で行う（自前 + ユーザー提供の `.cube`） | CM-5 ✅ |
+| CM-7 | ✅ #367 | 表示変換を GPU で行う（自前 + ユーザー提供の `.cube`） | CM-5 ✅ |
 | CM-6 | ❓ | `ocio-rs` の導入とビルド戦略（**見送り。需要ゲート**） | CM-5 ✅ |
 | CM-9 | ⬜ | `.ocio` の読み込みと GPU シェーダ抽出 | CM-6, CM-7 |
 | CM-8 | ⬜ | カラー設定 UI（SET-11 を回収）と文書 | CM-9 |

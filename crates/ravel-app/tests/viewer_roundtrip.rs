@@ -21,9 +21,18 @@
 //!
 //! Zero-copy display removes 2, 3, and 4. Stage 4 lives inside gpui-ce and
 //! cannot be timed without a window — no UI-thread harness exists in this
-//! repository — so the harness reports 2 and 3 separately as the **lower
-//! bound** of what zero-copy saves, and stage 1's number (the `CM-7`
-//! measurement already covers it) falls out of the stage 1+2 total.
+//! repository — so the harness reports 2 and 3 separately as an **estimate**
+//! of what zero-copy saves, and stage 1's number (the `CM-7` measurement
+//! already covers it) falls out of the stage 1+2 total.
+//!
+//! **Why an estimate and not a lower bound.** Stage 2 is timed on a texture of
+//! the transform's output key, not on the one `run` reads back, and it runs
+//! after `run` has already blocked on its own readback — so it carries none of
+//! the dispatch wait `run`'s readback carries. It is a proxy, not a slice of
+//! the measured path. The cross-check that makes the proxy trustworthy is
+//! printed beside it: stage 1+2 minus stage 2 has to land within one dispatch
+//! of zero. Read the numbers as an estimate whose error is a fraction of a
+//! dispatch, not as a bound.
 //!
 //! **Why it lives in `ravel-app`.** Stage 3's entity is
 //! [`ViewerImage::from_display_frame`], and the `RenderImage` it builds is a
@@ -89,6 +98,20 @@ fn measure_viewer_roundtrip_breakdown() {
                 TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC,
             ));
 
+            // The first round of a cell pays the pipeline's first compilation
+            // and this size's staging buffer allocation; both are what the
+            // caches exist to amortize, so they are warm-up rather than part
+            // of the per-frame number (the same treatment
+            // `crates/ravel-nodes/examples/perf_baseline.rs` gives them).
+            {
+                let frame = display
+                    .run(&gpu, &mut shaders, &pool, &resident)
+                    .expect("display transform");
+                let bytes = ravel_gpu::read_texture_shared(&gpu, &readback_tex).expect("readback");
+                let image = ViewerImage::from_display_frame(&frame).expect("a display frame wraps");
+                std::hint::black_box((&bytes, &image));
+            }
+
             let rounds = 20;
             let (mut total_ns, mut readback_ns, mut wrap_ns) = (0u128, 0u128, 0u128);
             let stats_before = gpu.transfer_stats();
@@ -119,14 +142,17 @@ fn measure_viewer_roundtrip_breakdown() {
 
             let ms = |ns: u128| ns as f64 / rounds as f64 / 1e6;
             let (readback, wrap) = (ms(readback_ns), ms(wrap_ns));
+            // The estimate is summed before rounding, so it need not equal the
+            // sum of the two printed values.
             eprintln!(
                 "{comp:?} {factor:?} ({width}x{height}): \
                  transform+readback {:.3} ms | readback {:.3} ms | wrap {:.3} ms | \
-                 lower bound (readback+wrap) {:.3} ms",
+                 estimate (readback+wrap) {:.3} ms | dispatch (total-readback) {:.3} ms",
                 ms(total_ns),
                 readback,
                 wrap,
                 readback + wrap,
+                ms(total_ns) - readback,
             );
             // The viewer path itself is exactly one readback per frame (the
             // one inside `run`); the other `rounds` readbacks are the

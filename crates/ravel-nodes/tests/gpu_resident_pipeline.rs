@@ -19,6 +19,7 @@ use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager};
+use ravel_media::frame_cache::MediaFrameCache;
 use ravel_nodes::{register_all_processors, shared_texture_pool};
 use std::sync::Arc;
 
@@ -138,7 +139,14 @@ fn gpu_chain_evaluates_with_zero_intermediate_readbacks() {
     let graph = effect_graph();
 
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, &graph, &gpu, &mut shaders, &pool);
+    register_all_processors(
+        &mut evaluator,
+        &graph,
+        &gpu,
+        &mut shaders,
+        &pool,
+        &MediaFrameCache::standalone(),
+    );
     evaluator.register(nid(SRC), Arc::new(FbSource(gradient_fb(32, 32))));
 
     let before = gpu.transfer_stats();
@@ -327,10 +335,25 @@ fn evaluate_shell_chain(
     let mut shaders = ShaderManager::new(gpu.clone());
     let pool = shared_texture_pool(gpu);
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, graph, gpu, &mut shaders, &pool);
+    let media_frames = MediaFrameCache::standalone();
+    register_all_processors(
+        &mut evaluator,
+        graph,
+        gpu,
+        &mut shaders,
+        &pool,
+        &media_frames,
+    );
     for composition in document.compositions.values() {
         for layer in &composition.layers {
-            register_all_processors(&mut evaluator, &layer.network, gpu, &mut shaders, &pool);
+            register_all_processors(
+                &mut evaluator,
+                &layer.network,
+                gpu,
+                &mut shaders,
+                &pool,
+                &media_frames,
+            );
         }
     }
     if cpu_shell {
@@ -414,7 +437,14 @@ fn dropping_cached_results_returns_textures_to_the_pool() {
     let graph = effect_graph();
 
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, &graph, &gpu, &mut shaders, &pool);
+    register_all_processors(
+        &mut evaluator,
+        &graph,
+        &gpu,
+        &mut shaders,
+        &pool,
+        &MediaFrameCache::standalone(),
+    );
     evaluator.register(nid(SRC), Arc::new(FbSource(gradient_fb(32, 32))));
     let out = evaluator.evaluate(&graph, nid(MERGE), &ctx()).unwrap();
 

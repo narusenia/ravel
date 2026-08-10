@@ -111,7 +111,14 @@ mod ffmpeg_tests {
         let mut evaluator = Evaluator::new();
         evaluator.set_document(Arc::new(document.clone()));
         let node = network.node(media_node()).expect("the media node");
-        evaluator.register(media_node(), Arc::new(MediaProcessor::from_node(node)));
+        // Test hygiene: a cache of its own, so what this test measures does
+        // not depend on what an earlier decode left behind. The swap itself
+        // is safe either way — the key names the resolved path.
+        let frames = ravel_media::frame_cache::MediaFrameCache::standalone();
+        evaluator.register(
+            media_node(),
+            Arc::new(MediaProcessor::from_node(node, &frames)),
+        );
 
         let value = evaluator
             .evaluate(network, media_node(), &EvalContext::new(0, FPS, (32, 32)))

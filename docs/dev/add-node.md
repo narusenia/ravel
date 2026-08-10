@@ -130,7 +130,8 @@ impl NodeProcessor for NoiseFieldProcessor {
 CPU 実装を先に置き、GPU はその**同一結果の高速経路**として足す。
 
 - コンストラクタで `GpuContext` / `&mut ShaderManager` / `Arc<Mutex<TexturePool>>`
-  を受け取る（`processor_for_node` がすでに持っている）
+  を受け取る（`processor_for_node` がすでに持っている。デコード済みフレームを
+  読むノードなら `&MediaFrameCache` も同様）
 - WGSL は `crates/ravel-nodes/src/shaders/*.wgsl`
 - 中間テクスチャと常駐出力は `TexturePool` から取る。`GpuFrameBuffer` は
   drop でテクスチャを返す

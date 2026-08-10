@@ -29,6 +29,7 @@
 //! rasterizing a `Geometry` for the viewer) and receives results through
 //! the `on_update` callback, which is invoked on the worker thread.
 
+use crate::cache_budget::Evicted;
 use crate::composition::Document;
 use crate::eval::{
     CacheIdentity, EvalContext, EvalError, Evaluator, PathSegment, ProcessorRegistry,
@@ -229,6 +230,67 @@ pub trait EvalWorkerHooks: Send + 'static {
         let _ = ctx;
         Some(value.clone())
     }
+
+    /// Settle a budget eviction list against caches this implementation owns
+    /// — today the shared decode cache (`CACHE-8`), which lives beside the
+    /// processors rather than inside the evaluator.
+    ///
+    /// Drop the values `evicted` names that you own, then return **every id
+    /// that still needs an owner**: the ones you did not recognise, plus any
+    /// your own caches were handed earlier and could not place. An empty
+    /// argument therefore means "hand over what you are holding".
+    ///
+    /// The default owns nothing and hands the list straight back, which is
+    /// what a hooks implementation without caches of its own must do — a
+    /// list quietly dropped here leaves the budget counting fewer bytes than
+    /// the process holds ([`crate::cache_budget`]).
+    fn reconcile_evictions(&mut self, evicted: Vec<Evicted>) -> Vec<Evicted> {
+        evicted
+    }
+}
+
+/// Hand every id in the caches' eviction buffers to the cache that owns it.
+///
+/// One pass settles the list because each [`Evicted`] belongs to exactly one
+/// of the caches sharing the budget — the node results, the output-stage
+/// frames, and whatever the hooks own — and each of them sees the whole
+/// list. What survives them all is an id nobody present owns, which is the
+/// only kind that may be discarded ([`crate::cache_budget`]).
+///
+/// `frames` is optional because a render worker has no output-stage frame
+/// cache: a render walks each frame once, so caching the finished picture
+/// would only cost memory. **The routing itself is not optional**, which is
+/// why both workers call this rather than each writing the sequence out —
+/// two copies of budget-critical bookkeeping have to be kept identical by
+/// hand, and nothing would enforce it.
+pub(crate) fn settle_evictions<H: EvalWorkerHooks>(
+    evaluator: &mut Evaluator,
+    frames: Option<&SharedFrameCache>,
+    hooks: &mut H,
+) {
+    let mut pending = evaluator.take_foreign_evictions();
+    if let Some(frames) = frames {
+        pending.extend(frames.take_foreign_evictions());
+    }
+    // Hooks first: the call both drops what it owns and surrenders what it
+    // is holding, so the later legs see the decode cache's leftovers too.
+    pending = hooks.reconcile_evictions(pending);
+    if let Some(frames) = frames
+        && !pending.is_empty()
+    {
+        frames.drop_evicted(&pending);
+        pending = frames.take_foreign_evictions();
+    }
+    if !pending.is_empty() {
+        evaluator.drop_evicted(&pending);
+        pending = evaluator.take_foreign_evictions();
+    }
+    if !pending.is_empty() {
+        tracing::debug!(
+            count = pending.len(),
+            "eviction ids no cache in this worker owns"
+        );
+    }
 }
 
 struct Request {
@@ -410,23 +472,17 @@ impl EvalService {
                                     value
                                 }
                             });
-                        // The budget's tiers are shared, so a node-result
-                        // reservation can push a cached frame out. Whoever is
-                        // handed an id it does not own routes it to the cache
-                        // that does — an eviction nobody acts on leaves the
-                        // budget counting fewer bytes than the process holds.
-                        let foreign = evaluator.take_foreign_evictions();
-                        if !foreign.is_empty() {
-                            frames.drop_evicted(&foreign);
-                        }
                         if let (Some(comp), Ok(value)) = (frame_comp.filter(|_| finalized), &result)
                         {
                             frames.insert(comp, frame_identity, value.clone());
-                            let foreign = frames.take_foreign_evictions();
-                            if !foreign.is_empty() {
-                                evaluator.drop_evicted(&foreign);
-                            }
                         }
+                        // The budget's tiers are shared, so any of the three
+                        // caches can push another's entry out. Settling after
+                        // both the evaluation and the frame insert routes
+                        // every id to its owner — an eviction nobody acts on
+                        // leaves the budget counting fewer bytes than the
+                        // process holds.
+                        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
                         // Drained per target: `evaluate_at` clears the
                         // evaluator's timing buffer on entry, so reading it
                         // only after the loop would report the last target
@@ -569,6 +625,106 @@ mod tests {
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FPS, (16, 16))
+    }
+
+    /// A hooks implementation that owns one budgeted thing, the way
+    /// `GpuEvalHooks` owns the shared decode cache (`CACHE-8`).
+    #[derive(Default)]
+    struct CachingHooks {
+        held: Vec<crate::cache_budget::Reservation>,
+        foreign: Vec<Evicted>,
+    }
+
+    impl CachingHooks {
+        fn reserve(&mut self, budget: &crate::cache_budget::SharedCacheBudget, bytes: u64) {
+            let (reservation, evicted) =
+                budget.reserve(crate::cache_budget::CacheKind::MediaFrame, bytes);
+            self.held.push(reservation);
+            self.drop_owned(&evicted);
+        }
+
+        fn drop_owned(&mut self, evicted: &[Evicted]) {
+            for entry in evicted {
+                match self.held.iter().position(|held| held.id() == entry.id) {
+                    Some(index) => {
+                        self.held.swap_remove(index);
+                    }
+                    None => self.foreign.push(*entry),
+                }
+            }
+        }
+    }
+
+    impl EvalWorkerHooks for CachingHooks {
+        fn sync(
+            &mut self,
+            _evaluator: &mut ProcessorSync<'_>,
+            _graph: &Graph,
+            _document: Option<&Document>,
+            _hint: &InvalidationHint,
+        ) {
+        }
+
+        fn reconcile_evictions(&mut self, evicted: Vec<Evicted>) -> Vec<Evicted> {
+            self.drop_owned(&evicted);
+            std::mem::take(&mut self.foreign)
+        }
+    }
+
+    /// `CACHE-8`: a worker has three caches on one pot, and the third lives
+    /// behind the hooks. The settling pass has to reach it in both
+    /// directions — an id it owns must arrive, and an id it does not own must
+    /// leave — or the decode cache is back to leaking whatever the frame
+    /// cache and the evaluator push out.
+    #[test]
+    fn settling_reaches_the_cache_the_hooks_own() {
+        use crate::cache_budget::{CacheBudgetConfig, CacheKind, SharedCacheBudget, Tier};
+
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 0,
+            ram_bytes: 100,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let mut evaluator = Evaluator::with_budget(budget.clone());
+        let frames = SharedFrameCache::new(Some(budget.clone()));
+        let mut hooks = CachingHooks::default();
+
+        // The hooks' cache fills the pot, then the frame cache pushes it out.
+        let frame = crate::types::FrameBuffer::new_zeroed(2, 2);
+        hooks.reserve(&budget, 80);
+        frames.insert(
+            CompId::new(1),
+            CacheIdentity::of_frame(&ctx()),
+            Arc::new(frame),
+        );
+        assert_eq!(hooks.held.len(), 1, "nothing has settled yet");
+
+        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
+        assert!(
+            hooks.held.is_empty(),
+            "the frame cache's eviction never reached the hooks' cache"
+        );
+
+        // And the other way: the hooks' cache is told to give up an id that
+        // belongs to the frame cache, and must hand it on rather than drop it.
+        hooks.reserve(&budget, 90);
+        assert!(
+            !hooks.foreign.is_empty(),
+            "the hooks dropped an id they do not own on the floor"
+        );
+        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
+        assert_eq!(
+            frames.stats().entries,
+            0,
+            "the frame the hooks' reservation evicted is still resident"
+        );
+        assert_eq!(
+            budget.stats().used(Tier::Ram),
+            90,
+            "the pot holds the hooks' reservation and nothing else"
+        );
+        let _ = CacheKind::MediaFrame;
     }
 
     fn value_node(id: u64, value: f32) -> Node {

@@ -741,7 +741,14 @@ fn build_evaluator(
     source_fb: Option<&FrameBuffer>,
 ) -> Evaluator {
     let mut evaluator = Evaluator::new();
-    ravel_nodes::register_all_processors(&mut evaluator, graph, gpu, shaders, pool);
+    ravel_nodes::register_all_processors(
+        &mut evaluator,
+        graph,
+        gpu,
+        shaders,
+        pool,
+        &ravel_media::frame_cache::MediaFrameCache::standalone(),
+    );
     if let Some(fb) = source_fb {
         evaluator.register(nid(SRC), Arc::new(FbSource(fb.clone())));
     }
@@ -766,7 +773,14 @@ fn build_shell_evaluator(
     source_fb: &FrameBuffer,
 ) -> Evaluator {
     let mut evaluator = Evaluator::new();
-    ravel_nodes::register_all_processors(&mut evaluator, graph, gpu, shaders, pool);
+    ravel_nodes::register_all_processors(
+        &mut evaluator,
+        graph,
+        gpu,
+        shaders,
+        pool,
+        &ravel_media::frame_cache::MediaFrameCache::standalone(),
+    );
     for comp in document.compositions.values() {
         for layer in &comp.layers {
             ravel_nodes::register_all_processors(
@@ -775,6 +789,7 @@ fn build_shell_evaluator(
                 gpu,
                 shaders,
                 pool,
+                &ravel_media::frame_cache::MediaFrameCache::standalone(),
             );
             for node in layer.network.nodes() {
                 if node.type_key == "bench.source" {
@@ -899,6 +914,7 @@ impl EvalWorkerHooks for BenchHooks {
                             &self.gpu,
                             &mut self.shaders,
                             &self.pool,
+                            &ravel_media::frame_cache::MediaFrameCache::standalone(),
                         )
                     {
                         evaluator.register(*id, proc);
@@ -913,6 +929,7 @@ impl EvalWorkerHooks for BenchHooks {
                     &self.gpu,
                     &mut self.shaders,
                     &self.pool,
+                    &ravel_media::frame_cache::MediaFrameCache::standalone(),
                 );
                 evaluator.register(nid(SRC), Arc::new(FbSource(self.source_fb.clone())));
                 if let Some(document) = document {
@@ -924,6 +941,7 @@ impl EvalWorkerHooks for BenchHooks {
                                 &self.gpu,
                                 &mut self.shaders,
                                 &self.pool,
+                                &ravel_media::frame_cache::MediaFrameCache::standalone(),
                             );
                             for node in layer.network.nodes() {
                                 if node.type_key == "bench.source" {

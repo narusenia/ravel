@@ -234,8 +234,14 @@ impl Reporter for Notes {
 /// Render `plan` through `ravel-cli`'s own executor, on the stub hooks.
 fn render_with_cli(plan: &RenderPlan) -> (u64, Notes) {
     let mut notes = Notes::default();
-    let frames = ravel_cli::execute::execute(StubHooks, plan, &CancelFlag::new(), &mut notes)
-        .expect("the CLI renders the same export");
+    let frames = ravel_cli::execute::execute(
+        StubHooks,
+        ravel_core::cache_budget::SharedCacheBudget::new(Default::default()),
+        plan,
+        &CancelFlag::new(),
+        &mut notes,
+    )
+    .expect("the CLI renders the same export");
     (frames, notes)
 }
 

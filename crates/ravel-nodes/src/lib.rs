@@ -38,6 +38,7 @@ use ravel_core::eval::{EvalContext, ProcessorRegistry};
 use ravel_core::graph::{Graph, Node};
 use ravel_core::registry::builtin;
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
+use ravel_media::frame_cache::MediaFrameCache;
 use std::sync::{Arc, Mutex};
 
 /// Per-axis scale from composition-space coordinates to output-canvas pixels.
@@ -69,15 +70,16 @@ pub fn register_all_processors<R: ProcessorRegistry + ?Sized>(
     ctx: &GpuContext,
     shaders: &mut ShaderManager,
     pool: &Arc<Mutex<TexturePool>>,
+    media_frames: &MediaFrameCache,
 ) {
     let span = tracing::debug_span!("register_processors", nodes = graph.nodes().count());
     let _guard = span.enter();
     for node in graph.nodes() {
-        if let Some(proc) = processor_for_node(node, ctx, shaders, pool) {
+        if let Some(proc) = processor_for_node(node, ctx, shaders, pool, media_frames) {
             evaluator.register(node.id, proc);
         }
         if let Some(inner) = node.subnet.as_deref() {
-            register_all_processors(evaluator, inner, ctx, shaders, pool);
+            register_all_processors(evaluator, inner, ctx, shaders, pool, media_frames);
         }
     }
 }
@@ -120,6 +122,7 @@ pub fn processor_for_node(
     ctx: &GpuContext,
     shaders: &mut ShaderManager,
     pool: &Arc<Mutex<TexturePool>>,
+    media_frames: &MediaFrameCache,
 ) -> Option<Arc<dyn ravel_core::eval::NodeProcessor>> {
     let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node.type_key.as_str() {
         "attribute.set" => Some(Arc::new(attribute::AttributeSetProcessor::from_node(node))),
@@ -235,7 +238,10 @@ pub fn processor_for_node(
         // Media: `video` is the pre-rename alias persisted documents may
         // still carry in memory; loading normalizes it to `media`
         // (Document::normalize_node_type_aliases).
-        "media" | "video" => Some(Arc::new(media::MediaProcessor::from_node(node))),
+        "media" | "video" => Some(Arc::new(media::MediaProcessor::from_node(
+            node,
+            media_frames,
+        ))),
         // Cross-layer reference (REQ-LAYER-005)
         "layer.ref" => Some(Arc::new(layer_ref::LayerRefProcessor::from_node(node))),
         // Nested network (REQ-LAYER-003)
@@ -278,6 +284,7 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
 
         let blur = |id: u64, radius: f32| {
             Node::new(NodeId::new(id), "blur")
@@ -287,13 +294,15 @@ mod tests {
         };
 
         let first = blur(1, 4.0);
-        let _ = processor_for_node(&first, &gpu, &mut shaders, &pool).expect("blur processor");
+        let _ =
+            processor_for_node(&first, &gpu, &mut shaders, &pool, &frames).expect("blur processor");
         let after_first = shaders.created_pipeline_count();
         assert_eq!(after_first, 1, "the first blur node builds the pipeline");
 
         for id in 2..=8 {
             let node = blur(id, id as f32);
-            let _ = processor_for_node(&node, &gpu, &mut shaders, &pool).expect("blur processor");
+            let _ = processor_for_node(&node, &gpu, &mut shaders, &pool, &frames)
+                .expect("blur processor");
         }
         assert_eq!(
             shaders.created_pipeline_count(),
@@ -311,6 +320,7 @@ mod tests {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let mut shaders = ShaderManager::new(gpu.clone());
         let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
 
         let frame_node = |id: u64, type_key: &str| {
             Node::new(NodeId::new(id), type_key)
@@ -335,7 +345,7 @@ mod tests {
         .enumerate()
         {
             let node = frame_node(id as u64 + 1, type_key);
-            let proc = processor_for_node(&node, &gpu, &mut shaders, &pool)
+            let proc = processor_for_node(&node, &gpu, &mut shaders, &pool, &frames)
                 .unwrap_or_else(|| panic!("no processor for {type_key}"));
             assert!(
                 !proc.rebuild_on_node_change(),
@@ -347,7 +357,8 @@ mod tests {
         let constant = Node::new(NodeId::new(99), "constant")
             .with_output("value", DataTypeId::SCALAR)
             .with_param("value", ParameterValue::Float(1.0));
-        let proc = processor_for_node(&constant, &gpu, &mut shaders, &pool).expect("processor");
+        let proc =
+            processor_for_node(&constant, &gpu, &mut shaders, &pool, &frames).expect("processor");
         assert!(
             proc.rebuild_on_node_change(),
             "a node-state processor must keep the conservative default"
@@ -366,7 +377,8 @@ mod tests {
 
         let mut ev = Evaluator::new();
         let pool = shared_texture_pool(&gpu);
-        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
 
         let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
         let s = out.downcast_ref::<Scalar>().unwrap();
@@ -391,7 +403,8 @@ mod tests {
 
         let mut ev = Evaluator::new();
         let pool = shared_texture_pool(&gpu);
-        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
 
         // Processor is registered → is_dirty == true.
         assert!(ev.is_dirty(NodeId::new(1)));
@@ -401,11 +414,12 @@ mod tests {
     fn processor_factory_selects_gpu_for_user_rasterize_only() {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
         let mut shaders = ShaderManager::new(gpu.clone());
         let node = Node::new(NodeId::new(1), "rasterize");
         let mut scope = Evaluator::new();
         let geo: Arc<dyn ravel_core::types::NodeData> = Arc::new(Geometry::new());
-        let processor = processor_for_node(&node, &gpu, &mut shaders, &pool).unwrap();
+        let processor = processor_for_node(&node, &gpu, &mut shaders, &pool, &frames).unwrap();
         let out = processor
             .process(
                 &node,
@@ -419,7 +433,7 @@ mod tests {
 
         let mut synthetic = node.clone();
         synthetic.metadata.synthetic = true;
-        let processor = processor_for_node(&synthetic, &gpu, &mut shaders, &pool).unwrap();
+        let processor = processor_for_node(&synthetic, &gpu, &mut shaders, &pool, &frames).unwrap();
         let out = processor
             .process(
                 &synthetic,
@@ -443,7 +457,8 @@ mod tests {
 
         let mut ev = Evaluator::new();
         let pool = shared_texture_pool(&gpu);
-        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
 
         // No processor registered → is_dirty returns false (not in dirty set).
         assert!(!ev.is_dirty(NodeId::new(1)));
@@ -513,7 +528,8 @@ mod tests {
 
         let mut ev = Evaluator::new();
         let pool = shared_texture_pool(&gpu);
-        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
 
         // color_correct nodes have no upstream inputs, so we need to provide them
         // manually. For a true E2E test with FrameBuffer sources we'd need a

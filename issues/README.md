@@ -9,8 +9,8 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 8 | 23 | [high/](high/) — 1件1ファイル |
-| medium | 36 | 28 | [medium/](medium/) — 領域別5ファイル |
+| high | 7 | 24 | [high/](high/) — 1件1ファイル |
+| medium | 37 | 28 | [medium/](medium/) — 領域別5ファイル |
 | low | 31 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -102,9 +102,10 @@
 
 ### 第4段: メディア・スクラブ
 
-11. **[HIGH-16](high/HIGH-16-no-decoded-frame-cache.md)**
+11. **[HIGH-16](closed/HIGH-16-no-decoded-frame-cache.md)** — 解決済み（2026-08-10）
     デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
-    → `docs/implementation/cache-plan.md` の CACHE-8 が引き受ける。
+    → `docs/implementation/cache-plan.md` の CACHE-8 が回収した（`ravel-media` の
+    アセット単位共有キャッシュ、予算は `CacheKind::MediaFrame`）。
 12. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
 13. **[HIGH-31](high/HIGH-31-float-decode-through-8bit-rgba.md)**

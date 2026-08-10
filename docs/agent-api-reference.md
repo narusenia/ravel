@@ -1335,7 +1335,15 @@ trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
     fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
     fn finalize(&mut self, &Arc<dyn NodeData>, &EvalContext)
         -> Option<Arc<dyn NodeData>>;   // None = failed: the raw value is
-}                                       // delivered but never cached
+                                        // delivered but never cached
+    fn reconcile_evictions(&mut self, Vec<Evicted>) -> Vec<Evicted>;
+        // routes shared-budget evictions; default is the identity. A hooks
+        // impl that owns a cache under the same CacheBudget MUST drop the
+        // ids it owns and return the rest (plus anything it was holding for
+        // someone else) — an id nobody drops leaves the budget counting
+        // fewer bytes than the process holds (`cache_budget`). GpuEvalHooks
+        // overrides it for the shared decode cache (CACHE-8)
+}
 EvalRequest { graph, nodes: Vec<NodeId>, comp: Option<CompId>,
     path: Vec<PathSegment>, ctx, document: Option<Arc<Document>>, hint }
     // document → Evaluator::set_document AFTER EvalWorkerHooks::sync
@@ -1370,7 +1378,8 @@ published generation is shown (requiring `generation == latest_generation()`
 starved the viewer whenever one evaluation outlived one playback tick);
 `cancel_pending()` returns a fence generation that blocks in-flight results.
 `ravel_nodes::GpuEvalHooks` (`crates/ravel-nodes/src/eval_hooks.rs`) owns
-`GpuContext` + `ShaderManager`, maps hints to `register_all_processors` /
+`GpuContext` + `ShaderManager` + the worker's `MediaFrameCache`, maps hints to
+`register_all_processors` /
 `processor_for_node` (searching the document's layer networks too), and
 rasterizes `Geometry` outputs for the Viewer. `.with_display_transform()`
 adds the viewer's display transform (`CM-7`): `finalize` then finishes the
@@ -1623,9 +1632,9 @@ carries display-encoded values while **an EXR is written in the working space
 
 ## ravel-nodes — built-in processors
 
-`register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
+`register_all_processors(&mut Evaluator, &Graph, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>, &MediaFrameCache)`
 maps `Node::type_key` → processor and recurses into subnet inner graphs;
-`processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>)`
+`processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>, &MediaFrameCache)`
 builds one node's processor (processors never capture parameter values —
 edits only require dirty marking, not a rebuild; the GPU ones say so via
 `NodeProcessor::rebuild_on_node_change() == false`);
@@ -1635,6 +1644,14 @@ with a fixed 512 MiB idle budget (tests, examples).
 application's form: the pool then holds no limit of its own and its idle
 allowance is the VRAM the budget has left after the resident textures,
 re-read on release (an approximation that follows, not a hard instant cap).
+The last argument is the shared decode cache
+(`ravel_media::frame_cache::MediaFrameCache`, `CACHE-8`): one per evaluation
+worker, keyed by `(resolved path, input ColorSpace, stream index, frame)` so
+two layers on one clip decode it once and a relinked asset cannot hit the old
+path's frame. `MediaFrameCache::new(SharedCacheBudget)` is the application
+form (`CacheKind::MediaFrame`, LRU by the budget alone);
+`MediaFrameCache::standalone()` is the fixed-budget one for tests and
+examples, mirroring `shared_texture_pool`.
 
 A GPU processor gets its pipeline from
 `ShaderManager::compute_pipeline(name, source, entry_point, layout, workgroup_size)
@@ -1775,7 +1792,7 @@ Current keys:
 | `math.scalar` | CPU | `op` enum (add/subtract/multiply/divide/min/max/mod/pow + unary abs/negate/floor/ceil/round/sqrt/sin/cos); `a`/`b` are Float params (drive via exposed param ports; `a` ships already exposed as a port, removable like any other); div/mod-by-zero and sqrt(<0) → 0; mod is `rem_euclid`; radians |
 | `math.remap` | CPU | linear fit `value`: `[in_min,in_max]` → `[out_min,out_max]`, optional `clamp`; degenerate in-range → `out_min` |
 | `vector.construct.vec2` / `.vec3` / `.vec4` | CPU | Scalar components → `Vec2` / `Vec3` / `Vec4` output. `x`/`y`/`z`/`w` are Float params (drive via exposed param ports, like `math.scalar`); unset components are 0. Arity is a separate `type_key`, not a `type` param, because port types live on the node instance (`VECTOR_CONSTRUCT_VEC2` and friends in `registry::builtin`) |
-| `media` | CPU | decodes media via the document asset table (`asset_id`), branching on `AssetKind`: containers via `MediaReader` (layer-local seconds → media frame `floor(t·fps)`, clamped), stills via an injectable `ImageReaderFactory` with the decoded frame `Arc`-cached, sequences by rebuilding the frame file name (`start + floor(t·seq_fps)` clamped to `start..=end`; seq_fps = `metadata.frame_rate` else comp fps); offline / decode failure → transparent frame at ctx resolution (warned once per asset); FFmpeg backend behind the `ffmpeg` feature; `video` is a load-time alias normalized by `Document::normalize_node_type_aliases` |
+| `media` | CPU | decodes media via the document asset table (`asset_id`), branching on `AssetKind`: containers via `MediaReader` (layer-local seconds → media frame `floor(t·fps)`, clamped), stills via an injectable `ImageReaderFactory`, sequences by rebuilding the frame file name (`start + floor(t·seq_fps)` clamped to `start..=end`; seq_fps = `metadata.frame_rate` else comp fps); offline / decode failure → transparent frame at ctx resolution (warned once per asset); every decoded frame lands in the shared `MediaFrameCache` the processor was built with, the processor itself keeping only the open reader; FFmpeg backend behind the `ffmpeg` feature; `video` is a load-time alias normalized by `Document::normalize_node_type_aliases` |
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
@@ -2776,10 +2793,15 @@ ravel-cli interactive <project.ravprj>     // asks, then renders (needs a TTY
 locale_dir() -> PathBuf / init_locale()
 load_project(&Path) -> Result<ProjectFile, CliError>   // never writes
 plan_from_args(&RenderArgs) -> Result<RenderPlan, CliError>
-render_with_hooks<H: EvalWorkerHooks, F: FnOnce() -> Result<H, CliError>>(
+render_with_hooks<H: EvalWorkerHooks,
+                  F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>>(
     &RenderArgs, F, &CancelFlag, &mut dyn Reporter)
     -> Result<Summary, CliError>   // hooks are a factory: plan, then refuse
-                                   // an existing output, only then build them
+                                   // an existing output, only then build them.
+                                   // The budget is built here and given to
+                                   // both the hooks and the render worker, so
+                                   // `ravel-cli render` has one ceiling, not
+                                   // three (CACHE-3)
 render(&RenderArgs, &CancelFlag, &mut dyn Reporter)    // GpuEvalHooks
 run(Cli) -> u8                                          // the exit code
 

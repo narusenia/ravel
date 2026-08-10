@@ -33,8 +33,9 @@ use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{
     EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
 };
-use ravel_core::types::{FrameBuffer, FrameRate};
+use ravel_core::types::FrameRate;
 use ravel_gpu::GpuContext;
+use ravel_nodes::DisplayFrame;
 use ravel_project::settings::{ResolvedSettings, SettingsLayer};
 use ravel_project::ui_state::UiState;
 use ravel_ui::document::{
@@ -368,8 +369,12 @@ impl ViewerUpdate {
     /// a request this crate builds, so it blanks rather than erroring.
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
         let output = match update.results.into_iter().next() {
-            Some((_, Ok(data))) => match data.downcast_ref::<FrameBuffer>() {
-                Some(fb) => match ViewerImage::from_frame_buffer(fb) {
+            // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
+            // what arrives is display bytes rather than a linear buffer. A
+            // linear `FrameBuffer` here means the display transform was
+            // unavailable, and it is not drawable as it stands.
+            Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
+                Some(frame) => match ViewerImage::from_display_frame(frame) {
                     Some(image) => ViewerOutput::Image(image),
                     // A degenerate frame carries nothing to draw; the panel
                     // used to receive it as a `Frame` whose image was `None`
@@ -433,7 +438,12 @@ impl ProjectState {
                     // once settings reach the runtime (`SET-8`).
                     let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
                     let eval = spawn_viewer_eval_service(
-                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone()),
+                        // The viewer is the one worker whose frames go to a
+                        // screen, so it is the one that finishes them on the
+                        // GPU (`CM-7`). The export worker deliberately does
+                        // not: its own encode step needs the linear frame.
+                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
+                            .with_display_transform(),
                         budget.clone(),
                         update_tx,
                     );
@@ -1627,6 +1637,7 @@ mod tests {
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
+    use ravel_core::types::FrameBuffer;
 
     /// The default is what Ravel has always launched with — one composition,
     /// which is also the root — and turning the setting off launches with none
@@ -1667,6 +1678,17 @@ mod tests {
         recorder
     }
 
+    /// A frame as the worker now delivers it: display bytes, not linear
+    /// light (`CM-7`). The colour is irrelevant to these tests — what matters
+    /// is that a viewer result is a `DisplayFrame`.
+    fn blank_display_frame(width: u32, height: u32) -> Arc<dyn ravel_core::types::NodeData> {
+        Arc::new(ravel_nodes::DisplayFrame::new(
+            width,
+            height,
+            Arc::from(vec![0u8; (width as usize) * (height as usize) * 4]),
+        ))
+    }
+
     /// Emits a fixed frame, so an evaluation produces something the viewer
     /// path has to convert.
     struct FrameSource;
@@ -1688,10 +1710,33 @@ mod tests {
         }
     }
 
-    /// Hooks that need no GPU: every node emits a frame.
+    /// Hooks that need no GPU: every node emits a frame, and `finalize`
+    /// stands in for what `GpuEvalHooks` does on the GPU — hand the viewer
+    /// display bytes rather than linear light.
     struct FrameHooks;
 
     impl EvalWorkerHooks for FrameHooks {
+        fn finalize(
+            &mut self,
+            value: Arc<dyn ravel_core::types::NodeData>,
+            _ctx: &EvalContext,
+        ) -> Arc<dyn ravel_core::types::NodeData> {
+            let Some(fb) = value.downcast_ref::<FrameBuffer>() else {
+                return value;
+            };
+            let mut bgra = Vec::with_capacity(fb.as_f32().len());
+            for pixel in fb.as_f32().chunks_exact(4) {
+                let display =
+                    ravel_core::color::to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                bgra.extend_from_slice(&[display[2], display[1], display[0], display[3]]);
+            }
+            Arc::new(ravel_nodes::DisplayFrame::new(
+                fb.width,
+                fb.height,
+                Arc::from(bgra),
+            ))
+        }
+
         fn sync(
             &mut self,
             evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
@@ -2052,10 +2097,7 @@ mod tests {
                     ViewerUpdate::from_eval(EvalUpdate {
                         generation,
                         frame: generation,
-                        results: vec![(
-                            NodeId::new(1),
-                            Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
-                        )],
+                        results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                         timings: Vec::new(),
                     }),
                     cx,
@@ -2202,7 +2244,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                results: vec![(node, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                results: vec![(node, Ok(blank_display_frame(4, 4)))],
                 timings: vec![(node, std::time::Duration::from_micros(micros))],
             })
         };
@@ -2277,7 +2319,7 @@ mod tests {
                     ViewerUpdate::from_eval(EvalUpdate {
                         generation: project.published_generation + 1,
                         frame: 0,
-                        results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                        results: vec![(first, Ok(blank_display_frame(4, 4)))],
                         timings,
                     }),
                     cx,
@@ -2376,7 +2418,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                    results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                 }),
                 cx,
@@ -2427,7 +2469,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                    results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                 }),
                 cx,
@@ -2932,7 +2974,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                results: vec![(NodeId::new(1), Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                 timings: Vec::new(),
             })
         };
@@ -3035,10 +3077,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                results: vec![(
-                    NodeId::new(1),
-                    Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
-                )],
+                results: vec![(NodeId::new(1), Ok(blank_display_frame(size, size)))],
                 timings: Vec::new(),
             })
         };

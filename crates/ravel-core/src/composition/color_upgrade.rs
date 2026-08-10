@@ -107,13 +107,20 @@ pub fn is_color_param(registry: &NodeRegistry, node: &Node, key: &str) -> Option
     // `attribute.set` writes eight different attribute types through one
     // `value` parameter; its `type` says which. A `vec4` attribute is not a
     // colour even though it is stored as a `Channel4`.
+    //
+    // A `type` this build does not know is **undecidable, not "not a
+    // colour"**: a future or hand-edited type could well be one, and
+    // answering `false` would leave it unconverted *and* unreported — the
+    // one outcome the plan rules out. Same treatment as an unknown node type.
     if node.type_key == "attribute.set" && key == "value" {
         let declared = node
             .parameters
             .iter()
             .find(|p| p.key == "type")
             .and_then(|p| p.value.as_str())?;
-        return Some(declared == "color");
+        return crate::registry::builtin::ATTRIBUTE_SET_TYPES
+            .contains(&declared)
+            .then_some(declared == "color");
     }
 
     if let Some(port) = template
@@ -516,6 +523,34 @@ mod tests {
             }
         }
         assert_eq!(report.converted, 0);
+    }
+
+    /// An `attribute.set` whose `type` this build does not know is
+    /// undecidable, not "not a colour": unconverted **and** reported.
+    #[test]
+    fn an_unknown_attribute_type_is_reported_not_assumed_to_be_a_vector() {
+        let node = set(
+            set(
+                registry()
+                    .create_node("attribute.set", NodeId::new(1))
+                    .expect("template"),
+                "type",
+                ParameterValue::String("bogus".into()),
+            ),
+            "value",
+            channel4([
+                ChannelSource::Constant(0.5),
+                ChannelSource::Constant(0.5),
+                ChannelSource::Constant(0.5),
+                ChannelSource::Constant(0.5),
+            ]),
+        );
+        let (graph, report) = run(Graph::new().add_node(node).unwrap());
+
+        assert_eq!(constants(&param_of(&graph, 1, "value")), vec![Some(0.5); 4]);
+        assert_eq!(report.converted, 0);
+        assert_eq!(report.undecidable.len(), 1);
+        assert_eq!(report.undecidable[0].param, "value");
     }
 
     /// CM-2: a node type this build does not know is reported, never

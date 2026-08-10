@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 6 | 25 | [high/](high/) — 1件1ファイル |
+| high | 7 | 25 | [high/](high/) — 1件1ファイル |
 | medium | 36 | 30 | [medium/](medium/) — 領域別5ファイル |
 | low | 31 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -108,12 +108,16 @@
     アセット単位共有キャッシュ、予算は `CacheKind::MediaFrame`）。
 12. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
+13. **[HIGH-32](high/HIGH-32-linear-ingest-powf-per-pixel.md)**
+    線形 ingest が画素ごとに f64 の transfer function を評価し、直列で舐める。
+    1080p のデコードが 1 フレーム数十 ms（`CM-2` の ingest を入れた副作用）。
+    `HIGH-17` と同じ関数なので同時に直すのが自然。
 
 ### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）
 
 **解決済み**（フェーズ A、`HIGH-21` / `HIGH-22`）。
 
-13. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
+14. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
     **解消（2026-08-02 再調査 → 2026-08-03 修正）。** 当初挙げた 3 原因のうち
     2 つ（`NodeEvalTimings` の無条件 notify、`add_node_menu_model` の毎 render
     再構築）は再調査の時点で既に直っており、3 つ目（`shape_line` がノード毎・

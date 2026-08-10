@@ -1311,7 +1311,7 @@ impl ProjectState {
                 // Nothing will be evaluated, so nothing will republish the
                 // band: it has to be cleared on the way out or an emptied
                 // composition keeps the band of the one before it forever.
-                crate::panels::clear_cache_band(cx);
+                self.clear_cache_band(cx);
                 return;
             }
             Err(err) => {
@@ -1326,7 +1326,7 @@ impl ProjectState {
                 cx.set_global(frame);
                 // Same reason as the blank path above: no evaluation follows
                 // a composition that does not compile.
-                crate::panels::clear_cache_band(cx);
+                self.clear_cache_band(cx);
                 return;
             }
         };
@@ -1763,6 +1763,53 @@ mod tests {
             Some("ravel-eval-service"),
             "the conversion must run on the evaluation worker"
         );
+    }
+
+    /// The paths where **no evaluation follows** — an emptied composition, one
+    /// that stopped compiling — have to clear the band on their way out *and*
+    /// forget the frame-cache version it was published at.
+    ///
+    /// Forgetting the version is the half that is easy to miss: without it,
+    /// returning to a fully cached composition is all cache hits, the version
+    /// never moves, and `publish_cache_band`'s recompute guard skips forever —
+    /// the band would be gone for the rest of the session (`CACHE-6`).
+    #[gpui::test]
+    fn a_path_with_no_evaluation_clears_the_band_and_its_version(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let comp_id = project.read_with(cx, |project, _| {
+            project.document().root_comp.expect("root comp")
+        });
+        cx.update(|cx| {
+            crate::panels::set_active_composition(Some(comp_id), cx);
+            crate::panels::set_cache_band(comp_id, vec![0..10, 20..30], cx);
+        });
+        project.update(cx, |project, _cx| {
+            project.published_band_version = Some(7);
+        });
+
+        // No active composition: `build_viewer_request` returns `Ok(None)`,
+        // the viewer is blanked, and nothing is ever evaluated.
+        cx.update(|cx| crate::panels::set_active_composition(None, cx));
+        project.update(cx, |project, cx| {
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
+
+        // Read the band back through the composition it belonged to.
+        cx.update(|cx| {
+            crate::panels::set_active_composition(Some(comp_id), cx);
+            assert!(
+                crate::panels::cache_band(cx).is_empty(),
+                "the blank path kept the band of the composition before it"
+            );
+        });
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project.published_band_version, None,
+                "the band was cleared but its version was latched: it can \
+                 never be republished from a cache that stops changing"
+            );
+        });
     }
 
     #[gpui::test]

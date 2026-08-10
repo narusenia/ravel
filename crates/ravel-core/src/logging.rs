@@ -119,18 +119,42 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Counts the events that survive the filter.
-    struct CountEvents(Arc<AtomicUsize>);
+    /// Counts the events that survive the filter, restricted to the targets a
+    /// test emits itself.
+    ///
+    /// The count has to be narrowed because one of these tests installs a
+    /// **global** subscriber, and the harness runs the crate's tests as
+    /// threads of one process: an unrelated test emitting anything the filter
+    /// admits would otherwise land in the same counter and make the assertion
+    /// fail for a reason that has nothing to do with the directive under test.
+    /// Narrowing here rather than tightening the `EnvFilter` keeps the filter
+    /// the thing being tested.
+    struct CountEvents(Arc<AtomicUsize>, &'static [&'static str]);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
         fn on_event(
             &self,
-            _event: &tracing::Event<'_>,
+            event: &tracing::Event<'_>,
             _ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            self.0.fetch_add(1, Ordering::Relaxed);
+            if self.1.contains(&event.metadata().target()) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
+
+    /// Targets for the tests that emit through `tracing` directly.
+    const DIRECT_TARGETS: &[&str] = &["gpui::window::a11y", "ravel_core::logging"];
+
+    /// Target for the test that emits through the `log` facade.
+    ///
+    /// `tracing-log` dispatches every bridged record under one static
+    /// metadata whose target is `"log"`; the record's own target survives as a
+    /// field and is what the `EnvFilter` is consulted with, which is why the
+    /// a11y suppression still works. So the bridged test cannot recognise its
+    /// events by the emitted target the way the direct ones can — it counts
+    /// the bridge instead, and it is the only test that installs `LogTracer`.
+    const BRIDGED_TARGETS: &[&str] = &["log"];
 
     /// Emits one a11y warning and one ordinary warning under `directives`,
     /// returning how many reached a layer.
@@ -138,7 +162,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry()
             .with(pin_quiet_targets(EnvFilter::new(directives)))
-            .with(CountEvents(count.clone()));
+            .with(CountEvents(count.clone(), DIRECT_TARGETS));
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(
                 target: "gpui::window::a11y",
@@ -196,7 +220,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry()
             .with(pin_quiet_targets(EnvFilter::new("info")))
-            .with(CountEvents(count.clone()));
+            .with(CountEvents(count.clone(), BRIDGED_TARGETS));
         tracing::subscriber::set_global_default(subscriber)
             .expect("no other test installs a global subscriber");
         tracing_log::LogTracer::init().expect("the log bridge installs once");

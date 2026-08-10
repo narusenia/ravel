@@ -51,28 +51,27 @@
 //! go — a private eviction policy here would be exactly the second authority
 //! `cache-plan.md` exists to prevent.
 //!
-//! # Known hole: eviction lists name entries this cache does not own
+//! # Eviction lists name entries this cache does not own
 //!
-//! `CacheKind::MediaFrame` and the evaluator's `CacheKind::NodeResult` share
-//! the host-memory pot, and the budget orders eviction by tier, not by kind.
-//! So a decode can be told to drop an evaluator entry and an evaluation can
-//! be told to drop a decoded frame. Neither side can reach the other's value,
-//! so both currently skip the ids they do not own — **and that is a leak, not
-//! a safe default.** `reserve` removes an entry from the accounting *before*
-//! returning it, so a skipped id is never offered again: its `Arc` stays
-//! resident while the budget believes those bytes are free. Alternating
-//! `MediaFrame` and `NodeResult` inserts therefore grows real memory without
-//! moving `CacheBudget::used`, which is the failure
-//! `ravel_core::cache_budget`'s module documentation names as the unsafe
-//! direction.
+//! `CacheKind::MediaFrame`, the evaluator's `CacheKind::NodeResult` and the
+//! output-stage `CacheKind::Frame` share the host-memory pot, and the budget
+//! orders eviction by tier, not by kind. So a decode can be told to drop an
+//! evaluator entry, and an evaluation can be told to drop a decoded frame.
 //!
-//! Routing an eviction back to its owner is `CACHE-5`'s
-//! `Evaluator::take_foreign_evictions` / `drop_evicted`. **This cache must be
-//! put on that path once `CACHE-5` lands** — deliberately not reimplemented
-//! here, because a second hand-off mechanism between the same two caches is
-//! the thing that would make either of them wrong.
+//! **Skipping an id is not a safe default.** `reserve` removes an entry from
+//! the accounting *before* returning it, so an id nobody acts on is never
+//! offered again: its `Arc` stays resident while the budget believes those
+//! bytes are free — the failure `ravel_core::cache_budget`'s module
+//! documentation calls the unsafe direction.
+//!
+//! This cache therefore **parks** what it does not own
+//! ([`MediaFrameCache::take_foreign_evictions`]) instead of skipping it, the
+//! same shape `CACHE-5` gave the evaluator and the frame cache. The
+//! evaluation worker settles the three buffers against each other once per
+//! evaluation (`EvalWorkerHooks::reconcile_evictions`), so every id reaches
+//! its owner and only ids no cache present owns are discarded.
 
-use ravel_core::cache_budget::{CacheKind, Reservation, ReservationId, SharedCacheBudget};
+use ravel_core::cache_budget::{CacheKind, Evicted, Reservation, ReservationId, SharedCacheBudget};
 use ravel_core::color::ColorSpace;
 use ravel_core::types::{FrameBuffer, NodeData as _};
 use std::collections::HashMap;
@@ -125,6 +124,9 @@ struct Inner {
     entries: HashMap<FrameKey, Entry>,
     /// The reverse index an eviction list is resolved through.
     by_reservation: HashMap<ReservationId, FrameKey>,
+    /// Ids from an eviction list that belong to another cache, held until
+    /// the worker drains them (see the module documentation).
+    foreign_evictions: Vec<Evicted>,
 }
 
 /// Decoded frames, shared by every consumer that was handed the same handle.
@@ -151,6 +153,7 @@ impl MediaFrameCache {
             budget,
             entries: HashMap::new(),
             by_reservation: HashMap::new(),
+            foreign_evictions: Vec::new(),
         })))
     }
 
@@ -199,19 +202,35 @@ impl MediaFrameCache {
         inner.by_reservation.insert(reservation.id(), key.clone());
         inner.entries.insert(key, Entry { frame, reservation });
 
-        for entry in evicted {
-            let Some(victim) = inner.by_reservation.remove(&entry.id) else {
-                // Another consumer's entry, which this cache cannot drop.
-                // Skipping leaks it — see "Known hole" in the module
-                // documentation; the fix is `CACHE-5`'s eviction hand-off.
-                tracing::debug!(
-                    id = entry.id.raw(),
-                    "decode cache skipped a foreign eviction"
-                );
-                continue;
-            };
-            inner.entries.remove(&victim);
-        }
+        inner.drop_evicted(&evicted);
+    }
+
+    /// Drop the frames `evicted` names, parking the ids this cache does not
+    /// own for [`Self::take_foreign_evictions`].
+    ///
+    /// The counterpart the evaluation worker calls when another cache's
+    /// reservation named a decoded frame.
+    pub fn drop_evicted(&self, evicted: &[Evicted]) {
+        self.lock().drop_evicted(evicted);
+    }
+
+    /// Eviction ids this cache was told about but does not own.
+    ///
+    /// **The caller must hand these to the cache that does** — the budget has
+    /// already released their bytes, so an entry nobody drops makes the limit
+    /// stop being a limit.
+    pub fn take_foreign_evictions(&self) -> Vec<Evicted> {
+        std::mem::take(&mut self.lock().foreign_evictions)
+    }
+
+    /// Bytes of decoded frames this cache is really holding — what the
+    /// budget's accounting for [`CacheKind::MediaFrame`] must agree with.
+    pub fn resident_bytes(&self) -> u64 {
+        self.lock()
+            .entries
+            .values()
+            .map(|entry| entry.frame.byte_size())
+            .sum()
     }
 
     /// How many frames are resident. Diagnostics and tests.
@@ -244,6 +263,16 @@ impl Inner {
     fn remove(&mut self, key: &FrameKey) {
         if let Some(entry) = self.entries.remove(key) {
             self.by_reservation.remove(&entry.reservation.id());
+        }
+    }
+
+    fn drop_evicted(&mut self, evicted: &[Evicted]) {
+        for entry in evicted {
+            let Some(victim) = self.by_reservation.remove(&entry.id) else {
+                self.foreign_evictions.push(*entry);
+                continue;
+            };
+            self.entries.remove(&victim);
         }
     }
 }
@@ -357,11 +386,133 @@ mod tests {
         assert_eq!(shared.stats().used(Tier::Ram), frame(0.5).byte_size());
     }
 
-    // A cross-consumer eviction test belongs here, but it has to assert that
-    // real memory stays inside the budget — not that the skip is harmless,
-    // which is what the leak looks like from inside this file. It is written
-    // with the fix, on `CACHE-5`'s eviction hand-off; see "Known hole" in the
-    // module documentation.
+    /// Another consumer of the same host-memory pot, holding values the way
+    /// the evaluator's node cache does: a reservation per value, dropped when
+    /// the budget names it, foreign ids parked for their owner.
+    ///
+    /// A stand-in and not the real `Evaluator` because what is under test is
+    /// the *protocol* — park, hand over, drop — and the evaluator's half of
+    /// it is pinned by `ravel_core`'s own tests. What no other test can see
+    /// is whether both halves together keep real memory inside the limit.
+    #[derive(Default)]
+    struct Neighbour {
+        held: Vec<(Reservation, Arc<FrameBuffer>, u64)>,
+        foreign: Vec<Evicted>,
+    }
+
+    impl Neighbour {
+        fn insert(&mut self, budget: &SharedCacheBudget, value: Arc<FrameBuffer>, bytes: u64) {
+            let (reservation, evicted) = budget.reserve(CacheKind::NodeResult(Tier::Ram), bytes);
+            self.held.push((reservation, value, bytes));
+            self.drop_evicted(&evicted);
+        }
+
+        fn drop_evicted(&mut self, evicted: &[Evicted]) {
+            for entry in evicted {
+                match self
+                    .held
+                    .iter()
+                    .position(|(reservation, _, _)| reservation.id() == entry.id)
+                {
+                    Some(index) => {
+                        self.held.swap_remove(index);
+                    }
+                    None => self.foreign.push(*entry),
+                }
+            }
+        }
+
+        fn take_foreign(&mut self) -> Vec<Evicted> {
+            std::mem::take(&mut self.foreign)
+        }
+
+        fn resident_bytes(&self) -> u64 {
+            self.held.iter().map(|(_, _, bytes)| bytes).sum()
+        }
+    }
+
+    /// The invariant the whole hand-off exists for: two consumers of one pot
+    /// keep **real** memory inside the limit.
+    ///
+    /// `reserve` releases an entry's bytes before naming it, so an id its
+    /// owner never sees is memory the budget can no longer account for. When
+    /// this cache skipped foreign ids, the neighbour's values stayed resident
+    /// for good and the total climbed without `used()` ever moving — which is
+    /// why the assertion is on the bytes the two consumers still hold, not on
+    /// the budget's own counters.
+    ///
+    /// The two insert at **different rates**, which is what makes the least
+    /// recently used entry belong to the other consumer. Alternating one for
+    /// one never crosses: each insert evicts the entry the same consumer made
+    /// two rounds ago, and the leak stays invisible. The counters at the end
+    /// keep the test honest about having exercised both directions.
+    #[test]
+    fn two_consumers_of_one_pot_keep_real_memory_inside_the_limit() {
+        let one = frame(0.5).byte_size();
+        let limit = one * 6;
+        let shared = budget(limit);
+        let cache = MediaFrameCache::new(shared.clone());
+        let mut neighbour = Neighbour::default();
+        let mut routed = Routed::default();
+
+        for round in 0..32u64 {
+            // Two decodes per node result, so neither consumer's own entries
+            // are reliably the oldest.
+            cache.insert(key("/clip.mov", round * 2), frame(0.1));
+            settle(&cache, &mut neighbour, &mut routed);
+            cache.insert(key("/clip.mov", round * 2 + 1), frame(0.2));
+            settle(&cache, &mut neighbour, &mut routed);
+            neighbour.insert(&shared, frame(0.3), one * 2);
+            settle(&cache, &mut neighbour, &mut routed);
+
+            let resident = cache.resident_bytes() + neighbour.resident_bytes();
+            assert!(
+                resident <= limit,
+                "round {round}: the two caches hold {resident} bytes of a {limit} byte pot"
+            );
+            assert_eq!(
+                resident,
+                shared.stats().used(Tier::Ram),
+                "round {round}: the budget's count drifted from what is really held"
+            );
+        }
+
+        assert!(
+            routed.to_neighbour > 0,
+            "no decode insert ever evicted a neighbour entry"
+        );
+        assert!(
+            routed.to_cache > 0,
+            "no neighbour insert ever evicted a decoded frame"
+        );
+    }
+
+    /// How many ids each direction of the hand-off actually carried.
+    #[derive(Default)]
+    struct Routed {
+        to_neighbour: usize,
+        to_cache: usize,
+    }
+
+    /// What the evaluation worker does after every evaluation: hand each
+    /// parked id to the cache that owns it.
+    fn settle(cache: &MediaFrameCache, neighbour: &mut Neighbour, routed: &mut Routed) {
+        let from_cache = cache.take_foreign_evictions();
+        let from_neighbour = neighbour.take_foreign();
+        routed.to_neighbour += from_cache.len();
+        routed.to_cache += from_neighbour.len();
+
+        if !from_cache.is_empty() {
+            neighbour.drop_evicted(&from_cache);
+        }
+        if !from_neighbour.is_empty() {
+            cache.drop_evicted(&from_neighbour);
+        }
+        assert!(
+            neighbour.take_foreign().is_empty() && cache.take_foreign_evictions().is_empty(),
+            "an eviction id belonged to neither consumer"
+        );
+    }
 
     /// Dropping the cache must give every byte back — the entries release
     /// through their reservations, not through an explicit teardown.

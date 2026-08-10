@@ -212,6 +212,7 @@ project_title = "Project Settings"
 general = "General"
 appearance = "Appearance"
 language = "Language"
+cache = "Cache"
 keybindings = "Keybindings"
 project = "Project"
 
@@ -242,6 +243,19 @@ dark_theme_description = "Worn while the interface is dark."
 group = "Language"
 ui = "Interface language"
 ui_description = "Applies immediately. Each language is named in itself."
+
+# Preferences ▸ Cache. The disk tier is not here: nothing writes it yet, so a
+# row for it would configure nothing (CACHE-11).
+[settings.cache]
+group = "Memory and location"
+vram_limit = "Video memory limit (MiB)"
+vram_limit_description = "Total video memory cached frames and pooled textures may occupy together. Applies immediately; entries over the new limit are dropped as the next ones are cached."
+ram_limit = "Memory limit (MiB)"
+ram_limit_description = "Total system memory the caches may occupy. Applies immediately; entries over the new limit are dropped as the next ones are cached."
+sim_reserve = "Simulation reserve"
+sim_reserve_description = "Share of each limit held back for simulation state, between 0 and 1, so a long scrub cannot evict it."
+root = "Cache location"
+root_description = "Absolute path cached files are written under. Leave it empty for the default location beside the settings file. A change applies the next time Ravel starts; files already written are left where they are."
 
 # Project Settings ▸ Project. Frame rate values are numerals and are not
 # translated.

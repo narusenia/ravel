@@ -21,11 +21,12 @@
 //! a setting that changes nothing must not be on screen
 //! (`docs/implementation/settings-screen-plan.md`). General (`SET-16`),
 //! Appearance (`SET-3`), Language (`SET-4`), the read-only Keybindings list
-//! (`SET-5`) and the project's default frame rate (`SET-6`) are what applies
-//! today; cache, auto save, proxy and colour settings are absent until the
-//! features behind them exist (`SET-8`–`SET-11`). `Settings` drops a page with
-//! no item, so a page added ahead of its fields would simply not appear in the
-//! sidebar.
+//! (`SET-5`), the cache limits and location (`SET-8`) and the project's default
+//! frame rate (`SET-6`) are what applies today; auto save, proxy and colour
+//! settings are absent until the features behind them exist (`SET-9`–`SET-11`),
+//! and so is the disk tier's own row — the tier is `CACHE-11` and nothing
+//! charges it yet. `Settings` drops a page with no item, so a page added ahead
+//! of its fields would simply not appear in the sidebar.
 //!
 //! **Every field binds `SettingField::on_reset(is_dirty, reset)` and never
 //! `SettingField::default_value()`.** `default_value` writes the default back as
@@ -43,7 +44,8 @@
 
 use gpui::*;
 use gpui_component::setting::{
-    AnySettingField, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+    AnySettingField, NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
+    Settings,
 };
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use ravel_i18n::t;
@@ -108,6 +110,7 @@ impl SettingsScope {
                 SettingsPageKind::General,
                 SettingsPageKind::Appearance,
                 SettingsPageKind::Language,
+                SettingsPageKind::Cache,
                 SettingsPageKind::Keybindings,
             ],
             Self::Project => &[SettingsPageKind::Project],
@@ -125,6 +128,8 @@ pub enum SettingsPageKind {
     Appearance,
     /// UI language (`SET-4`).
     Language,
+    /// Cache limits and location (`SET-8`).
+    Cache,
     /// Keybinding list (`SET-5`).
     Keybindings,
     /// Project-level settings (`SET-6`).
@@ -133,10 +138,11 @@ pub enum SettingsPageKind {
 
 impl SettingsPageKind {
     /// Every page, for the locale-coverage test.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::General,
         Self::Appearance,
         Self::Language,
+        Self::Cache,
         Self::Keybindings,
         Self::Project,
     ];
@@ -147,6 +153,7 @@ impl SettingsPageKind {
             Self::General => "settings.page.general",
             Self::Appearance => "settings.page.appearance",
             Self::Language => "settings.page.language",
+            Self::Cache => "settings.page.cache",
             Self::Keybindings => "settings.page.keybindings",
             Self::Project => "settings.page.project",
         }
@@ -203,6 +210,7 @@ fn group_key(kind: SettingsPageKind) -> Option<&'static str> {
         SettingsPageKind::General => Some(GENERAL_GROUP),
         SettingsPageKind::Appearance => Some(APPEARANCE_GROUP),
         SettingsPageKind::Language => Some(LANGUAGE_GROUP),
+        SettingsPageKind::Cache => Some(CACHE_GROUP),
         SettingsPageKind::Project => Some(PROJECT_GROUP),
         // The keybinding list is not a field list.
         SettingsPageKind::Keybindings => None,
@@ -233,13 +241,20 @@ pub struct PageField {
 /// `SettingField` is generic over that type and `SettingItem::new` is generic
 /// over the field, so a page holding rows of both kinds needs one name for them
 /// — a boolean switch and a string dropdown are not the same type and never
-/// will be. Two variants because two are what the dialog uses; a number row
-/// (`SettingField<f64>`) adds a third when a setting needs one.
+/// will be.
 pub enum FieldControl {
     /// A dropdown or text field over a string-valued setting.
     Text(SettingField<SharedString>),
     /// A switch over a boolean setting.
     Toggle(SettingField<bool>),
+    /// A stepping number input over a numeric setting (the cache limits and
+    /// the sim reserve, `SET-8`). A number row rather than a text one because
+    /// the control itself refuses what is not a number and holds the range,
+    /// so a value the settings cannot use never reaches the layer from here —
+    /// the same argument the frame rate picker makes for a closed list. The
+    /// **setter** repeats the range check regardless, because the settings
+    /// file is hand-editable and the control is not the only writer.
+    Number(SettingField<f64>),
 }
 
 impl FieldControl {
@@ -249,6 +264,7 @@ impl FieldControl {
         match self {
             Self::Text(field) => field,
             Self::Toggle(field) => field,
+            Self::Number(field) => field,
         }
     }
 }
@@ -261,6 +277,7 @@ impl PageField {
         match self.field {
             FieldControl::Text(field) => SettingItem::new(title, field).description(description),
             FieldControl::Toggle(field) => SettingItem::new(title, field).description(description),
+            FieldControl::Number(field) => SettingItem::new(title, field).description(description),
         }
     }
 }
@@ -278,6 +295,12 @@ pub fn fields_for(kind: SettingsPageKind, cx: &App) -> Vec<PageField> {
             theme_field(ThemeMode::Dark, cx),
         ],
         SettingsPageKind::Language => vec![language_field()],
+        SettingsPageKind::Cache => vec![
+            cache_vram_limit_field(),
+            cache_ram_limit_field(),
+            cache_sim_reserve_field(),
+            cache_root_field(),
+        ],
         SettingsPageKind::Project => vec![default_frame_rate_field(cx)],
         SettingsPageKind::Keybindings => Vec::new(),
     }
@@ -613,6 +636,263 @@ fn locale_options() -> Vec<(SharedString, SharedString)> {
 }
 
 // ===========================================================================
+// Cache (`SET-8`)
+// ===========================================================================
+
+const CACHE_GROUP: &str = "settings.cache.group";
+const CACHE_VRAM_LIMIT: &str = "settings.cache.vram_limit";
+const CACHE_VRAM_LIMIT_DESCRIPTION: &str = "settings.cache.vram_limit_description";
+const CACHE_RAM_LIMIT: &str = "settings.cache.ram_limit";
+const CACHE_RAM_LIMIT_DESCRIPTION: &str = "settings.cache.ram_limit_description";
+const CACHE_SIM_RESERVE: &str = "settings.cache.sim_reserve";
+const CACHE_SIM_RESERVE_DESCRIPTION: &str = "settings.cache.sim_reserve_description";
+const CACHE_ROOT: &str = "settings.cache.root";
+const CACHE_ROOT_DESCRIPTION: &str = "settings.cache.root_description";
+
+/// The smallest tier limit the page offers, in MiB.
+///
+/// Not zero: a zero ceiling evicts every entry as it is produced, which is a
+/// way to make the application appear to hang rather than a cache size anyone
+/// wants. One frame of 1080p RGBA f32 is about 32 MiB, so anything below that
+/// is already degenerate; 1 MiB is the floor that keeps the row honest without
+/// pretending to know the user's working set.
+pub const MIN_CACHE_LIMIT_MB: f64 = 1.0;
+
+/// The largest tier limit the page offers, in MiB (1 TiB).
+///
+/// A bound rather than a technical limit, for the reason
+/// [`app_settings::parse_frame_rate`] bounds the frame rate: an unbounded field
+/// turns a stray keystroke into a number the accounting can only be surprised
+/// by.
+pub const MAX_CACHE_LIMIT_MB: f64 = 1024.0 * 1024.0;
+
+/// The step the limit rows move in, in MiB.
+const CACHE_LIMIT_STEP_MB: f64 = 64.0;
+
+/// The MiB figure `value` names, or `None` for one no tier limit may hold.
+///
+/// Refused rather than clamped, and never silently zero: this reads a number a
+/// person typed, and a limit that quietly became something else is a cache the
+/// user cannot reason about. A fraction of a MiB is truncated — the setting's
+/// unit is whole MiB, and rejecting `512.5` would be pedantry rather than
+/// safety.
+fn cache_limit_mb(value: f64) -> Option<u64> {
+    (value.is_finite() && (MIN_CACHE_LIMIT_MB..=MAX_CACHE_LIMIT_MB).contains(&value))
+        .then(|| value.trunc() as u64)
+}
+
+/// Write the VRAM ceiling into the preferences layer.
+///
+/// Named for the reason [`set_stop_returns_to_play_start`] is: the field's own
+/// closure is out of a test's reach, and "which layer does this row write, and
+/// what does it refuse" is the part worth pinning.
+pub fn set_cache_vram_limit_mb(value: f64, cx: &mut App) {
+    let Some(limit) = cache_limit_mb(value) else {
+        tracing::warn!(value, "ignoring an out-of-range VRAM cache limit");
+        return;
+    };
+    app_settings::update(
+        SettingsLayerScope::Global,
+        |layer| layer.cache.vram_limit_mb = Some(limit),
+        cx,
+    );
+}
+
+/// [`set_cache_vram_limit_mb`] for the host-memory ceiling.
+pub fn set_cache_ram_limit_mb(value: f64, cx: &mut App) {
+    let Some(limit) = cache_limit_mb(value) else {
+        tracing::warn!(value, "ignoring an out-of-range RAM cache limit");
+        return;
+    };
+    app_settings::update(
+        SettingsLayerScope::Global,
+        |layer| layer.cache.ram_limit_mb = Some(limit),
+        cx,
+    );
+}
+
+/// Write the simulation reserve share into the preferences layer.
+///
+/// A share outside `0.0..=1.0` is refused rather than clamped: `CacheBudget`
+/// clamps defensively, so a clamp here would write a value the file keeps and
+/// the budget then reinterprets — two answers to "what did I set".
+pub fn set_cache_sim_reserve_ratio(value: f64, cx: &mut App) {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        tracing::warn!(value, "ignoring an out-of-range simulation cache reserve");
+        return;
+    }
+    let ratio = value as f32;
+    app_settings::update(
+        SettingsLayerScope::Global,
+        |layer| layer.cache.sim_reserve_ratio = Some(ratio),
+        cx,
+    );
+}
+
+/// Write the cache location into the preferences layer.
+///
+/// Two refusals and one erasure. An empty field means "no location of my own"
+/// and drops the override, which is what the reset control does — writing
+/// `Some("")` instead would give [`app_settings::cache_root`] a path that
+/// resolves against the working directory. A **relative** path is refused for
+/// the same reason: the working directory of a desktop application is not
+/// something the user chose, so `cache` would land wherever Ravel happened to
+/// be launched from.
+pub fn set_cache_root(value: SharedString, cx: &mut App) {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() && !std::path::Path::new(trimmed).is_absolute() {
+        tracing::warn!(root = trimmed, "ignoring a relative cache location");
+        return;
+    }
+    let root = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    app_settings::update(
+        SettingsLayerScope::Global,
+        |layer| layer.cache.root = root,
+        cx,
+    );
+}
+
+/// A tier limit row, in MiB.
+fn cache_limit_field(
+    title_key: &'static str,
+    description_key: &'static str,
+    value: fn(&App) -> f64,
+    set_value: fn(f64, &mut App),
+    is_dirty: fn(&App) -> bool,
+    reset: fn(&mut Window, &mut App),
+) -> PageField {
+    PageField {
+        title_key,
+        description_key,
+        field: FieldControl::Number(
+            SettingField::number_input(
+                NumberFieldOptions {
+                    min: MIN_CACHE_LIMIT_MB,
+                    max: MAX_CACHE_LIMIT_MB,
+                    step: CACHE_LIMIT_STEP_MB,
+                },
+                value,
+                set_value,
+            )
+            .on_reset(is_dirty, reset),
+        ),
+    }
+}
+
+/// Total VRAM the caches may occupy, in MiB.
+fn cache_vram_limit_field() -> PageField {
+    cache_limit_field(
+        CACHE_VRAM_LIMIT,
+        CACHE_VRAM_LIMIT_DESCRIPTION,
+        |cx| app_settings::resolved(cx).cache_vram_limit_mb as f64,
+        set_cache_vram_limit_mb,
+        |cx| {
+            app_settings::layer(SettingsLayerScope::Global, cx)
+                .cache
+                .vram_limit_mb
+                .is_some()
+        },
+        |_window, cx| {
+            app_settings::update(
+                SettingsLayerScope::Global,
+                |layer| layer.cache.vram_limit_mb = None,
+                cx,
+            );
+        },
+    )
+}
+
+/// Total host memory the caches may occupy, in MiB.
+fn cache_ram_limit_field() -> PageField {
+    cache_limit_field(
+        CACHE_RAM_LIMIT,
+        CACHE_RAM_LIMIT_DESCRIPTION,
+        |cx| app_settings::resolved(cx).cache_ram_limit_mb as f64,
+        set_cache_ram_limit_mb,
+        |cx| {
+            app_settings::layer(SettingsLayerScope::Global, cx)
+                .cache
+                .ram_limit_mb
+                .is_some()
+        },
+        |_window, cx| {
+            app_settings::update(
+                SettingsLayerScope::Global,
+                |layer| layer.cache.ram_limit_mb = None,
+                cx,
+            );
+        },
+    )
+}
+
+/// The share of every tier held back for simulation state.
+fn cache_sim_reserve_field() -> PageField {
+    PageField {
+        title_key: CACHE_SIM_RESERVE,
+        description_key: CACHE_SIM_RESERVE_DESCRIPTION,
+        field: FieldControl::Number(
+            SettingField::number_input(
+                NumberFieldOptions {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.05,
+                },
+                |cx| f64::from(app_settings::resolved(cx).cache_sim_reserve_ratio),
+                set_cache_sim_reserve_ratio,
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .cache
+                        .sim_reserve_ratio
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.cache.sim_reserve_ratio = None,
+                        cx,
+                    );
+                },
+            ),
+        ),
+    }
+}
+
+/// Where cached files are written.
+///
+/// A free-text path rather than a picker: the directory a user wants may not
+/// exist yet (the point of the setting is usually "put it on the other drive"),
+/// and the caches create their own subdirectories anyway.
+fn cache_root_field() -> PageField {
+    PageField {
+        title_key: CACHE_ROOT,
+        description_key: CACHE_ROOT_DESCRIPTION,
+        field: FieldControl::Text(
+            SettingField::input(
+                |cx| SharedString::from(app_settings::resolved(cx).cache_root.unwrap_or_default()),
+                set_cache_root,
+            )
+            .on_reset(
+                |cx| {
+                    app_settings::layer(SettingsLayerScope::Global, cx)
+                        .cache
+                        .root
+                        .is_some()
+                },
+                |_window, cx| {
+                    app_settings::update(
+                        SettingsLayerScope::Global,
+                        |layer| layer.cache.root = None,
+                        cx,
+                    );
+                },
+            ),
+        ),
+    }
+}
+
+// ===========================================================================
 // Project (`SET-6`)
 // ===========================================================================
 
@@ -748,6 +1028,17 @@ pub fn label_keys(kind: SettingsPageKind) -> Vec<&'static str> {
         SettingsPageKind::Language => {
             vec![LANGUAGE_GROUP, UI_LANGUAGE, UI_LANGUAGE_DESCRIPTION]
         }
+        SettingsPageKind::Cache => vec![
+            CACHE_GROUP,
+            CACHE_VRAM_LIMIT,
+            CACHE_VRAM_LIMIT_DESCRIPTION,
+            CACHE_RAM_LIMIT,
+            CACHE_RAM_LIMIT_DESCRIPTION,
+            CACHE_SIM_RESERVE,
+            CACHE_SIM_RESERVE_DESCRIPTION,
+            CACHE_ROOT,
+            CACHE_ROOT_DESCRIPTION,
+        ],
         SettingsPageKind::Project => vec![
             PROJECT_GROUP,
             DEFAULT_FRAME_RATE,
@@ -1040,6 +1331,7 @@ mod tests {
         assert!(!label_keys(SettingsPageKind::General).is_empty());
         assert!(!label_keys(SettingsPageKind::Appearance).is_empty());
         assert!(!label_keys(SettingsPageKind::Language).is_empty());
+        assert!(!label_keys(SettingsPageKind::Cache).is_empty());
         assert!(!label_keys(SettingsPageKind::Project).is_empty());
         assert!(label_keys(SettingsPageKind::Keybindings).is_empty());
     }

@@ -391,3 +391,113 @@ fn hooks_without_the_display_transform_still_yield_a_linear_frame() {
     assert!(out.downcast_ref::<DisplayFrame>().is_none());
     assert!((linear.as_f32()[0] - 0.5).abs() < 1e-6);
 }
+
+/// Measurement harness for the `CM-7` numbers. It measures rather than
+/// asserts, so it stays out of the normal test run:
+///
+/// ```text
+/// cargo test -p ravel-nodes --release --test display_transform \
+///     measure_display_transform_cost -- --ignored --nocapture
+/// ```
+///
+/// **What it compares.** `before` is the path `CM-7` replaced, reconstructed
+/// verbatim: read the frame back (16 bytes a pixel) and run
+/// `to_display_rgba8` over it on rayon. `after` is
+/// `DisplayTransform::run` — one dispatch, then a 4-byte-a-pixel readback.
+/// The two alternate within one round so machine load falls on both.
+///
+/// **Both residencies are measured**, because they are different bargains.
+/// A GPU-resident frame is the viewer's normal case and the new path should
+/// win outright. A CPU-resident one has to be uploaded first (16 bytes a
+/// pixel *up*), which the old path did not pay.
+#[test]
+#[ignore = "measurement harness; run with --ignored --nocapture"]
+fn measure_display_transform_cost() {
+    use ravel_gpu::{GpuFrameBuffer, ShaderManager};
+    use ravel_nodes::DisplayTransform;
+    use rayon::prelude::*;
+    use std::time::Instant;
+
+    /// The pre-`CM-7` conversion, byte for byte.
+    fn cpu_bgra(fb: &FrameBuffer) -> Vec<u8> {
+        let pixels = fb.as_f32();
+        let mut bytes = vec![0u8; pixels.len()];
+        bytes
+            .par_chunks_exact_mut(4)
+            .zip(pixels.par_chunks_exact(4))
+            .for_each(|(out, pixel)| {
+                let display = to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                out[0] = display[2];
+                out[1] = display[1];
+                out[2] = display[0];
+                out[3] = display[3];
+            });
+        bytes
+    }
+
+    let Ok(gpu) = GpuContext::new_blocking() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let mut shaders = ShaderManager::new(gpu.clone());
+    let pool = ravel_nodes::shared_texture_pool(&gpu);
+    let mut display = DisplayTransform::new(&mut shaders).expect("shader");
+
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .or_else(|| {
+            std::process::Command::new("uptime")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .unwrap_or_default();
+    eprintln!("load at start: {load}");
+
+    for (width, height) in [(1920u32, 1080u32)] {
+        let count = (width as usize) * (height as usize) * 4;
+        let pixels: Vec<f32> = (0..count).map(|i| (i % 511) as f32 / 510.0).collect();
+        let cpu_frame = FrameBuffer::from_f32(width, height, pixels);
+        let resident =
+            GpuFrameBuffer::from_frame_buffer(gpu.clone(), &pool, &cpu_frame).expect("upload");
+
+        let rounds = 20;
+        let (mut before_gpu, mut after_gpu) = (0u128, 0u128);
+        let (mut before_cpu, mut after_cpu) = (0u128, 0u128);
+        for _ in 0..rounds {
+            // GPU-resident input.
+            let start = Instant::now();
+            let read = resident.to_frame_buffer().expect("readback");
+            let old = cpu_bgra(&read);
+            before_gpu += start.elapsed().as_nanos();
+
+            let start = Instant::now();
+            let new = display.run(&gpu, &pool, &resident).expect("display");
+            after_gpu += start.elapsed().as_nanos();
+            assert_eq!(old.len(), new.bgra().len());
+
+            // CPU-resident input.
+            let start = Instant::now();
+            let old = cpu_bgra(&cpu_frame);
+            before_cpu += start.elapsed().as_nanos();
+
+            let start = Instant::now();
+            let new = display.run(&gpu, &pool, &cpu_frame).expect("display");
+            after_cpu += start.elapsed().as_nanos();
+            assert_eq!(old.len(), new.bgra().len());
+        }
+        let ms = |ns: u128| ns as f64 / rounds as f64 / 1e6;
+        eprintln!(
+            "{width}x{height} GPU-resident: readback+cpu {:.3} ms -> gpu transform {:.3} ms ({:.2}x)",
+            ms(before_gpu),
+            ms(after_gpu),
+            before_gpu as f64 / after_gpu as f64,
+        );
+        eprintln!(
+            "{width}x{height} CPU-resident: cpu {:.3} ms -> upload+gpu transform {:.3} ms ({:.2}x)",
+            ms(before_cpu),
+            ms(after_cpu),
+            before_cpu as f64 / after_cpu as f64,
+        );
+    }
+}

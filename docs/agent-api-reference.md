@@ -1361,9 +1361,19 @@ EvalService::spawn(hooks, on_update)   // dedicated thread "ravel-eval-service"
 EvalService::spawn_with_budget(hooks, SharedCacheBudget, on_update)
     // the application's form: the worker builds its Evaluator on its own
     // thread, so the budget has to be handed in at spawn
+EvalService::spawn_with_config(hooks, EvalServiceConfig, on_update)
+EvalServiceConfig { budget: Option<SharedCacheBudget>,
+                    read_ahead: Option<ReadAhead> }
+ReadAhead { idle: Duration, frames: u64 }   // CACHE-9; ::DEFAULT_IDLE 250ms,
+    // ::DEFAULT_FRAMES 24. Off in spawn/spawn_with_budget: a render, a
+    // benchmark and a test counting process() calls evaluate only what they
+    // asked for. On in ravel-app's viewer service and nowhere else
 ProcessorSync<'a>            // what `sync` gets: register / processor /
     ::new(&mut Evaluator)    // invalidate_node, and nothing else
     .request(EvalRequest) -> u64              // generation; latest-wins queue
+    .request_speculative(EvalRequest)         // CACHE-9; &self, no generation,
+        // no on_update, own queue that any interactive request discards.
+        // The idle trigger posts through this same path
     .cancel_pending() / .latest_generation()
     .frame_cache() -> &SharedFrameCache       // shared with the worker
 EvalOutput = Result<Arc<dyn NodeData>, EvalError>  // one target's outcome
@@ -1408,6 +1418,16 @@ SharedFrameCache::new(Option<SharedCacheBudget>)   // EvalService builds one
     .version() -> u64            // moves only when the cached set changes;
                                  // read it before recomputing a band
 ```
+
+Invalidation (`CACHE-7`) picks the compositions from the document diff and the
+*frames* from the hint: an `InvalidationHint::Params` whose every node resolves
+to an owning layer — and only when every coalesced request carried one — drops
+that layer's `[start_frame, start_frame + duration)` (padded one frame each way
+for shutter samples, plus the spans of any layer parented to it) instead of the
+whole composition. Anything else keeps the whole-composition drop. A
+composition placed in another through a `precomp` node also invalidates the
+containing layer's span in the parent, which the diff cannot see on its own
+because the parent's own `Arc` never moved.
 
 The Timeline's band reads it through two hops that keep GPUI out of the
 cache: `ProjectState::publish_cache_band` writes `panels::CacheBandState`

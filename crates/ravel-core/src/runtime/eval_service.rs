@@ -595,6 +595,12 @@ impl EvalService {
                 // structural resync clears the evaluator's copy, and the
                 // frame cache must still be able to tell an edit from a
                 // composition switch.
+                // "An interactive request is waiting", as a predicate a
+                // read-ahead evaluation can ask between nodes.
+                let interrupt: crate::eval::CancelCheck = {
+                    let rx = rx.clone();
+                    Arc::new(move || !rx.is_empty())
+                };
                 let mut cached_document: Option<Arc<Document>> = None;
                 let mut first = true;
                 // What read-ahead would extend, and whether it already has
@@ -728,6 +734,14 @@ impl EvalService {
                     let cached_comp = request
                         .comp
                         .filter(|_| request.path.is_empty() && request.document.is_some());
+                    // Read-ahead runs at the speculative budget rank and
+                    // gives way the moment an interactive request lands: the
+                    // queue-level discard only covers frames that have not
+                    // started, and one heavy frame is exactly the case that
+                    // would otherwise delay a scrub. The predicate reads the
+                    // channel, never a clock. Installed after the structural
+                    // reset above, which would otherwise clear it.
+                    evaluator.set_read_ahead(speculative.then(|| interrupt.clone()));
                     let frame_identity = CacheIdentity::of_frame(&request.ctx);
                     let started = std::time::Instant::now();
                     let mut results = Vec::with_capacity(request.nodes.len());
@@ -786,8 +800,12 @@ impl EvalService {
                         timings.append(&mut evaluator.take_timings());
                         // One failing target must not cost the others their
                         // result: the viewer keeps drawing while an
-                        // inspection target is broken, and vice versa.
-                        if let Err(err) = &result {
+                        // inspection target is broken, and vice versa. A
+                        // cancelled read-ahead is not a failure and is not
+                        // logged as one.
+                        if let Err(err) = &result
+                            && !matches!(err, EvalError::Cancelled(_))
+                        {
                             tracing::debug!(
                                 generation = generation,
                                 node = node.raw(),
@@ -1662,6 +1680,41 @@ mod tests {
         finalized: Arc<AtomicUsize>,
         /// How many leading `finalize` calls report failure (`0`: none).
         fails_until: usize,
+        /// Reports the frame of every evaluation that completed.
+        ///
+        /// Read-ahead produces no `EvalUpdate` to wait on, so without this a
+        /// test would have to poll the shared cache — the fragility class
+        /// that has already cost this repository two CI runs. A completed
+        /// frame announces itself instead.
+        done: Option<Sender<u64>>,
+    }
+
+    impl FrameHooks {
+        fn new(processed: Arc<AtomicUsize>) -> Self {
+            Self {
+                processed,
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+                done: None,
+            }
+        }
+
+        fn counting_finalize(mut self, finalized: Arc<AtomicUsize>) -> Self {
+            self.finalized = finalized;
+            self
+        }
+
+        fn failing_until(mut self, fails_until: usize) -> Self {
+            self.fails_until = fails_until;
+            self
+        }
+
+        /// Announce every completed frame on `done`.
+        fn reporting(mut self) -> (Self, Receiver<u64>) {
+            let (tx, rx) = unbounded();
+            self.done = Some(tx);
+            (self, rx)
+        }
     }
 
     impl EvalWorkerHooks for FrameHooks {
@@ -1682,12 +1735,15 @@ mod tests {
         fn finalize(
             &mut self,
             value: &Arc<dyn NodeData>,
-            _ctx: &EvalContext,
+            ctx: &EvalContext,
         ) -> Option<Arc<dyn NodeData>> {
             self.finalized.fetch_add(1, Ordering::SeqCst);
             // `fails_until` finalize failures first, then success — the shape
             // of a transient readback loss.
             let ok = self.finalized.load(Ordering::SeqCst) > self.fails_until;
+            if ok && let Some(done) = &self.done {
+                let _ = done.send(ctx.frame);
+            }
             ok.then(|| value.clone())
         }
     }
@@ -1748,11 +1804,7 @@ mod tests {
         let finalized = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: finalized.clone(),
-                fails_until: 0,
-            },
+            FrameHooks::new(processed.clone()).counting_finalize(finalized.clone()),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1819,12 +1871,9 @@ mod tests {
         let finalized = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: finalized.clone(),
-                // The first call fails, every later one succeeds.
-                fails_until: 1,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0)))
+                .counting_finalize(finalized.clone())
+                .failing_until(1),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1880,16 +1929,9 @@ mod tests {
     fn a_document_edit_drops_the_frames_even_without_a_hint() {
         let processed = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
-        let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
-            move |update| {
-                let _ = update_tx.send(update);
-            },
-        );
+        let mut service = EvalService::spawn(FrameHooks::new(processed.clone()), move |update| {
+            let _ = update_tx.send(update);
+        });
 
         let node = NodeId::new(1);
         let graph = Graph::new()
@@ -1930,11 +1972,7 @@ mod tests {
     fn a_cache_hit_leaves_the_frame_cache_version_alone() {
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1979,16 +2017,9 @@ mod tests {
     fn a_request_without_a_composition_is_not_frame_cached() {
         let processed = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
-        let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
-            move |update| {
-                let _ = update_tx.send(update);
-            },
-        );
+        let mut service = EvalService::spawn(FrameHooks::new(processed.clone()), move |update| {
+            let _ = update_tx.send(update);
+        });
 
         let node = NodeId::new(1);
         let graph = Graph::new()
@@ -2020,11 +2051,7 @@ mod tests {
     fn the_cached_range_grows_with_playback_and_vanishes_on_an_edit() {
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -2072,20 +2099,6 @@ mod tests {
 
     // ---- read-ahead (`CACHE-9`) --------------------------------------------
 
-    /// Spin until `condition` holds, failing rather than hanging.
-    ///
-    /// Read-ahead produces no update to receive on, so its effect has to be
-    /// observed on the shared cache. This waits for a *state*, never for a
-    /// duration: nothing here asserts that something happened within some
-    /// number of milliseconds, only that it eventually did.
-    fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !condition() {
-            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-            std::thread::yield_now();
-        }
-    }
-
     /// A service whose read-ahead starts the moment both queues are empty.
     ///
     /// `idle: ZERO` is what keeps these tests deterministic — the trigger is
@@ -2094,13 +2107,12 @@ mod tests {
     fn spawn_reading_ahead<H: EvalWorkerHooks>(
         hooks: H,
         frames: u64,
-        budget: Option<SharedCacheBudget>,
     ) -> (EvalService, Receiver<EvalUpdate>) {
         let (tx, rx) = unbounded();
         let service = EvalService::spawn_with_config(
             hooks,
             EvalServiceConfig {
-                budget,
+                budget: None,
                 read_ahead: Some(ReadAhead {
                     idle: Duration::ZERO,
                     frames,
@@ -2119,21 +2131,23 @@ mod tests {
             .unwrap()
     }
 
+    /// The frames `done` reports, in the order they completed.
+    fn completed(done: &Receiver<u64>, count: usize) -> Vec<u64> {
+        (0..count)
+            .map(|index| {
+                done.recv_timeout(Duration::from_secs(5))
+                    .unwrap_or_else(|_| panic!("only {index} of {count} frames completed"))
+            })
+            .collect()
+    }
+
     /// The band grows past the playhead while nobody is asking for anything,
     /// and — the half a ranges-only assertion would miss — the frames it
     /// claims are frames a real request is actually served.
     #[test]
     fn read_ahead_extends_the_band_with_frames_a_request_would_hit() {
-        let processed = Arc::new(AtomicUsize::new(0));
-        let (mut service, update_rx) = spawn_reading_ahead(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
-            3,
-            None,
-        );
+        let (hooks, done) = FrameHooks::new(Arc::new(AtomicUsize::new(0))).reporting();
+        let (mut service, update_rx) = spawn_reading_ahead(hooks, 3);
 
         let node = NodeId::new(1);
         let frames = service.frame_cache().clone();
@@ -2149,16 +2163,20 @@ mod tests {
         ));
         update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
-        wait_until("read-ahead filled the frames after the playhead", || {
-            let ranges = frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2)));
-            ranges.len() == 1 && ranges[0] == (0..4)
-        });
+        // The interactive frame plus the three read-ahead filled, announced
+        // by the hooks rather than discovered by polling the cache.
+        let mut filled = completed(&done, 4);
+        filled.sort_unstable();
+        assert_eq!(filled, vec![0, 1, 2, 3]);
+        assert_eq!(
+            frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2))),
+            vec![0..4]
+        );
+
         // The band is only honest if the identity read-ahead produced matches
         // the one the playhead will ask with. Requesting frame 3 the ordinary
         // way must be a hit, not a recompute. `take_timings` lists only nodes
-        // that actually ran, so an empty list *is* "nothing was processed" —
-        // and unlike a `process()` count it is not moved by the read-ahead
-        // this very request starts from its own position.
+        // that actually ran, so an empty list *is* "nothing was processed".
         service.request(frame_request(
             frame_graph(node),
             node,
@@ -2173,22 +2191,14 @@ mod tests {
             update.timings
         );
         assert_eq!(service.frame_cache().stats().hits, 1);
-        let _ = processed;
     }
 
     /// Read-ahead fills the cache and nothing else: no update reaches the
     /// consumer, so the viewer keeps showing the frame the user is on.
     #[test]
     fn read_ahead_never_emits_an_update_or_moves_the_generation() {
-        let (mut service, update_rx) = spawn_reading_ahead(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
-            3,
-            None,
-        );
+        let (hooks, done) = FrameHooks::new(Arc::new(AtomicUsize::new(0))).reporting();
+        let (mut service, update_rx) = spawn_reading_ahead(hooks, 3);
 
         let node = NodeId::new(1);
         let frames = service.frame_cache().clone();
@@ -2202,9 +2212,8 @@ mod tests {
         let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(update.generation, generation);
 
-        wait_until("read-ahead cached the frames after the playhead", || {
-            frames.stats().entries == 4
-        });
+        assert_eq!(completed(&done, 4).len(), 4);
+        assert_eq!(frames.stats().entries, 4);
         assert!(
             update_rx.try_recv().is_err(),
             "a speculative frame was delivered to the consumer"
@@ -2226,15 +2235,8 @@ mod tests {
     #[test]
     fn an_interactive_request_discards_the_queued_speculation() {
         let (gate_tx, gate_rx) = unbounded();
-        let processed = Arc::new(AtomicUsize::new(0));
-        let (mut service, update_rx) = spawn_reading_ahead(
-            GatedFrames {
-                processed: processed.clone(),
-                gate: gate_rx,
-            },
-            8,
-            None,
-        );
+        let (start_tx, started) = unbounded();
+        let (mut service, update_rx) = spawn_reading_ahead(GatedFrames::new(gate_rx, start_tx), 8);
 
         let node = NodeId::new(1);
         let document = frame_document();
@@ -2250,10 +2252,15 @@ mod tests {
         update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 
         // The worker now has eight speculative frames queued and is blocked
-        // inside the first one.
-        wait_until("read-ahead started a speculative frame", || {
-            processed.load(Ordering::SeqCst) == 2
-        });
+        // inside the first one — announced, not guessed.
+        assert_eq!(
+            started.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (0, node)
+        );
+        assert_eq!(
+            started.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (1, node)
+        );
         // The user scrubs. The request is queued *before* the gate is
         // released, so the worker cannot miss it.
         service.request(frame_request(
@@ -2279,14 +2286,110 @@ mod tests {
             vec![0..2, 50..51],
             "the queued speculation kept running after the playhead moved"
         );
-        let _ = processed;
     }
 
-    /// Emits a frame after waiting on a gate, so a test can hold the worker
-    /// inside an evaluation.
+    /// A speculative frame **already being evaluated** gives way too, not
+    /// just the ones still queued (`CACHE-9`). Dropping the queue alone would
+    /// still let one expensive frame delay a scrub by its whole cost.
+    ///
+    /// The chain is two nodes so the yield point — immediately before a
+    /// `process()` — falls *between* them: the upstream is held in the gate
+    /// while the interactive request is posted, and the downstream must never
+    /// run. The token accounting is what makes it deterministic: five
+    /// `process()` calls are paid for, and a speculation that did not yield
+    /// would spend one of frame 50's on the abandoned frame and never
+    /// deliver its update.
+    #[test]
+    fn an_in_flight_speculative_frame_gives_way_to_an_interactive_request() {
+        let (gate_tx, gate_rx) = unbounded();
+        let (start_tx, started) = unbounded();
+        let (mut service, update_rx) = spawn_reading_ahead(GatedFrames::new(gate_rx, start_tx), 8);
+
+        let upstream = NodeId::new(1);
+        let downstream = NodeId::new(2);
+        let graph = || {
+            Graph::new()
+                .add_node(Node::new(upstream, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+                .unwrap()
+                .add_node(
+                    Node::new(downstream, "frame")
+                        .with_output("out", DataTypeId::FRAME_BUFFER)
+                        .with_input("in", &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    upstream,
+                    OutputPortIndex(0),
+                    downstream,
+                    InputPortIndex(0),
+                )
+                .unwrap()
+        };
+        let document = frame_document();
+
+        service.request(frame_request(
+            graph(),
+            downstream,
+            0,
+            document.clone(),
+            InvalidationHint::None,
+        ));
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(completed_pair(&started), (0, upstream));
+        assert_eq!(completed_pair(&started), (0, downstream));
+
+        // Read-ahead has started frame 1 and is inside the upstream node.
+        assert_eq!(completed_pair(&started), (1, upstream));
+        service.request(frame_request(
+            graph(),
+            downstream,
+            50,
+            document,
+            InvalidationHint::None,
+        ));
+        // One token finishes the upstream; the downstream of frame 1 must
+        // then find the interactive request waiting and yield, leaving both
+        // remaining tokens to frame 50.
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.frame, 50);
+
+        // The abandoned frame reached exactly one `process()` — the yield
+        // sits before the second — and produced no cache entry.
+        assert_eq!(completed_pair(&started), (50, upstream));
+        assert_eq!(completed_pair(&started), (50, downstream));
+        assert_eq!(
+            service
+                .frame_cache()
+                .cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2))),
+            vec![0..1, 50..51],
+            "the abandoned speculative frame was cached anyway"
+        );
+    }
+
+    fn completed_pair(started: &Receiver<(u64, NodeId)>) -> (u64, NodeId) {
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a process() call was expected")
+    }
+
+    /// Emits a frame after waiting on a gate, announcing each `process()` it
+    /// enters, so a test can hold the worker inside an evaluation and know
+    /// exactly where it is.
     struct GatedFrames {
-        processed: Arc<AtomicUsize>,
         gate: Receiver<()>,
+        started: Sender<(u64, NodeId)>,
+    }
+
+    impl GatedFrames {
+        fn new(gate: Receiver<()>, started: Sender<(u64, NodeId)>) -> Self {
+            Self { gate, started }
+        }
     }
 
     impl NodeProcessor for GatedFrames {
@@ -2296,16 +2399,16 @@ mod tests {
 
         fn process(
             &self,
-            _node: &Node,
-            _ctx: &EvalContext,
+            node: &Node,
+            ctx: &EvalContext,
             _inputs: &[Option<Arc<dyn NodeData>>],
             _params: &crate::eval::ResolvedParams,
             _scope: &mut dyn crate::eval::EvalScope,
         ) -> anyhow::Result<Arc<dyn NodeData>> {
-            self.processed.fetch_add(1, Ordering::SeqCst);
-            // A closed gate (the test finished) releases rather than
-            // panics: the worker may still be parked in a speculative frame
-            // when the service is dropped.
+            let _ = self.started.send((ctx.frame, node.id));
+            // A closed gate (the test finished) releases rather than panics:
+            // the worker may still be parked in a speculative frame when the
+            // service is dropped.
             let _ = self.gate.recv_timeout(Duration::from_secs(5));
             Ok(Arc::new(crate::types::FrameBuffer::from_f32(
                 2,
@@ -2327,10 +2430,7 @@ mod tests {
                 for node in graph.nodes() {
                     evaluator.register(
                         node.id,
-                        Arc::new(GatedFrames {
-                            processed: self.processed.clone(),
-                            gate: self.gate.clone(),
-                        }),
+                        Arc::new(GatedFrames::new(self.gate.clone(), self.started.clone())),
                     );
                 }
             }
@@ -2481,10 +2581,15 @@ mod tests {
                     frame_cached: bool| {
             let mut request = frame_request(graph.clone(), node, frame, document, hint);
             if !frame_cached {
-                // No composition named: the reference never consults the
-                // frame cache, so every one of its answers is freshly
-                // evaluated.
+                // The reference must recompute, and dropping the *frame*
+                // cache alone would not make it: the evaluator's own node
+                // cache still answers, so a stale node result would be
+                // compared against a stale frame and agree. `comp = None`
+                // keeps the frame cache out, and `Structural` resets the
+                // evaluator before every pull, so each reference answer is
+                // computed from an empty cache.
                 request.comp = None;
+                request.hint = InvalidationHint::Structural;
             }
             service.request(request);
             pixel(&rx.recv_timeout(Duration::from_secs(5)).unwrap())
@@ -2566,11 +2671,7 @@ mod tests {
         });
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn_with_budget(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
             budget.clone(),
             move |update| {
                 let _ = update_tx.send(update);

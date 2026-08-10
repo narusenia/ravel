@@ -691,8 +691,9 @@ impl ViewerImage {
     /// f32 → BGRA conversion to this one function, so `CM-3` inserts the
     /// transform here rather than at each drawing site
     /// (`docs/specifications/color-management.md`). It is
-    /// [`to_display_rgba8`] — the same call the PNG writer and the video
-    /// encoder make, which is why the three agree bit for bit.
+    /// [`to_display_rgba8`], which produces the same bytes the render exits
+    /// produce from their own encode-then-quantise pair — see that function
+    /// for what now guarantees the agreement.
     ///
     /// It is also orthogonal to `quality` and [`ViewerResolution`]: those
     /// decide *which pixels* are evaluated, this decides what a pixel value
@@ -1308,6 +1309,30 @@ mod viewer_image_tests {
         assert!(ViewerImage::from_frame_buffer(&mismatched).is_none());
     }
 
+    /// [`ViewerImage::from_frame_buffer`]'s arithmetic run serially — the
+    /// shape the function had before the conversion moved onto rayon.
+    ///
+    /// Everything else is identical, down to the `RenderImage` wrap, so the
+    /// harness below times the parallelism and nothing else.
+    fn serial_conversion(fb: &FrameBuffer) -> Option<Arc<gpui::RenderImage>> {
+        let pixels = fb.as_f32();
+        let mut bytes = vec![0u8; pixels.len()];
+        for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+            let display =
+                ravel_core::color::to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
+            // BGRA order.
+            out[0] = display[2];
+            out[1] = display[1];
+            out[2] = display[0];
+            out[3] = display[3];
+        }
+        let buffer =
+            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
+        Some(Arc::new(gpui::RenderImage::new(
+            smallvec::SmallVec::from_elem(image::Frame::new(buffer), 1),
+        )))
+    }
+
     /// Measurement harness for the HIGH-08 numbers recorded in
     /// `docs/implementation/perf-baseline.md`. It measures rather than
     /// asserts, so it stays out of the normal test run.
@@ -1329,6 +1354,7 @@ mod viewer_image_tests {
 
             let mut clone_ns = 0u128;
             let mut before_ns = 0u128;
+            let mut serial_ns = 0u128;
             let mut after_ns = 0u128;
             for _ in 0..runs {
                 let start = Instant::now();
@@ -1347,19 +1373,26 @@ mod viewer_image_tests {
                 before_ns += start.elapsed().as_nanos();
 
                 let start = Instant::now();
+                let serial = serial_conversion(&frame);
+                serial_ns += start.elapsed().as_nanos();
+
+                let start = Instant::now();
                 let new = ViewerImage::from_frame_buffer(&frame);
                 after_ns += start.elapsed().as_nanos();
 
-                assert!(old.is_some() && new.is_some());
+                assert!(old.is_some() && serial.is_some() && new.is_some());
             }
             let ms = |ns: u128| ns as f64 / runs as f64 / 1e6;
             println!(
                 "{width}x{height}: frame clone {:.3} ms, previous conversion {:.3} ms \
-                 (UI-thread total {:.3} ms), current conversion {:.3} ms",
+                 (UI-thread total {:.3} ms), same arithmetic serial {:.3} ms, \
+                 current conversion {:.3} ms (rayon {:.1}x)",
                 ms(clone_ns),
                 ms(before_ns),
                 ms(clone_ns + before_ns),
+                ms(serial_ns),
                 ms(after_ns),
+                serial_ns as f64 / after_ns as f64,
             );
         }
     }

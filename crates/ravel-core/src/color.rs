@@ -18,8 +18,11 @@
 //!
 //! # Purity
 //!
-//! This module performs no I/O and holds no state. [`CubeLut::parse`] takes
-//! the file's text, not its path — the caller reads the file.
+//! This module performs no I/O. [`CubeLut::parse`] takes the file's text, not
+//! its path — the caller reads the file. The one piece of state is
+//! [`to_display_rgba8`]'s lazily built boundary table, which is a memo of a
+//! pure function of compile-time constants: it changes no answer, only how
+//! long the answer takes.
 //!
 //! # Out-of-domain values
 //!
@@ -472,35 +475,96 @@ pub fn quantize_u8(value: f32) -> u8 {
 
 /// Working space → the display space, quantised to 8 bit. **The** exit.
 ///
-/// The viewer, the PNG writer and the video encoder all call this and
-/// nothing else, which is what makes them agree bit for bit
-/// (`docs/specifications/color-management.md`). Two things have to happen
-/// together and in this order — encode, then quantise — and separating them
-/// is how the four exits drifted apart before `CM-1`.
+/// Encoding and quantisation belong together and in this order — separating
+/// them is how the four exits drifted apart before `CM-1`
+/// (`docs/specifications/color-management.md`).
+///
+/// The viewer takes that pair from here. The render exits reach the same
+/// place by a different road: [`to_output_space`] encodes the frame while it
+/// is still `f32` and the sequence writers then call [`quantize_u8`], because
+/// a 16-bit or EXR exit needs the encoded float. **The two roads still agree
+/// bit for bit** — [`DISPLAY_CODE_THRESHOLDS`] is bisected against exactly
+/// `quantize_u8(transfer.encode(v))`, which is what that second road
+/// computes, and `the_display_table_reproduces_the_transfer_function` is what
+/// keeps it true. The agreement used to come from sharing the code; it now
+/// comes from the table's construction, so that test is load-bearing.
 ///
 /// Alpha is coverage, not light: quantised, never encoded.
 ///
-/// # Cost
+/// [`to_output_space`]: crate::media::encode::to_output_space
 ///
-/// One `powf` per colour channel, evaluated in `f64`. Measured on an M-series
-/// laptop: quantising a 1920×1080 frame alone is 0.7 ms, quantising it
-/// *through this* is 35 ms. The viewer pays it on the evaluation worker (not
-/// the UI thread) at the interactive resolution, and a render pays it per
-/// exported frame.
+/// # No `powf` per pixel
 ///
-/// Deliberate: precision first, and the designed fix is not a faster scalar
-/// loop. `CM-7` bakes the transform into a GPU 3D LUT and applies it in the
-/// wgpu path, which removes the cost rather than shaving it. An `f32` `powf`
-/// was measured at 25 ms — a 28 % saving for a second copy of every constant,
-/// which is not a trade worth making before the LUT lands.
+/// The colour channels come from [`DISPLAY_CODE_THRESHOLDS`], not from
+/// evaluating the transfer function. The result is the same value the
+/// `encode`-then-`quantize` pair produces — bit for bit, by construction of
+/// the table — for a fraction of the cost. Numbers and conditions are in
+/// `docs/implementation/perf-baseline.md`.
+///
+/// This shaves the CPU cost; it does not make the transform free. `CM-7`
+/// bakes it into a GPU 3D LUT applied in the wgpu path, which removes the
+/// per-pixel work from the CPU altogether — the table changes nothing about
+/// that argument, because it changes nothing about the transform's
+/// definition.
 pub fn to_display_rgba8(rgba: [f32; 4]) -> [u8; 4] {
-    let encoded = ColorSpace::DISPLAY.from_linear([rgba[0], rgba[1], rgba[2]]);
+    let bounds: &[f32; 255] = &DISPLAY_CODE_THRESHOLDS;
     [
-        quantize_u8(encoded[0]),
-        quantize_u8(encoded[1]),
-        quantize_u8(encoded[2]),
+        display_code_u8(bounds, rgba[0]),
+        display_code_u8(bounds, rgba[1]),
+        display_code_u8(bounds, rgba[2]),
         quantize_u8(rgba[3]),
     ]
+}
+
+/// The smallest linear value that displays as code `k`, for `k = 1..=255`.
+///
+/// The colour channels of [`to_display_rgba8`] are a **monotonic** map from a
+/// float onto 256 codes, so the transfer function only ever decides *how many
+/// of 255 boundaries a value has passed*. Tabulating the boundaries replaces
+/// the `powf` with one binary search over 255 floats.
+///
+/// The entries are deliberately **not** `decode((k - 0.5) / 255)`. That is the
+/// ideal inverse, and the function being replaced is not ideal: it rounds the
+/// encoded value to `f32`, and `quantize_u8` then rounds again in `f32`. Each
+/// entry is instead the smallest `f32` that the original expression maps to
+/// `k`, found by bisecting the **bit patterns** of `0.0..=1.0` — which are
+/// ordered as integers for non-negative floats. Both steps of the original are
+/// monotonic, so the table reproduces it exactly rather than approximately;
+/// `the_display_table_reproduces_the_transfer_function` is the check.
+///
+/// Only the 8-bit exit can do this. [`to_display_rgba16`] has 65 535
+/// boundaries, where the table stops being the cheap answer.
+///
+/// The table assumes the display and working spaces share primaries, so that
+/// [`ColorSpace::from_linear`] is the transfer function alone with no matrix
+/// in front of it. That holds for every display Ravel targets today and
+/// `the_display_space_shares_the_working_primaries` fails the day it stops.
+static DISPLAY_CODE_THRESHOLDS: std::sync::LazyLock<[f32; 255]> = std::sync::LazyLock::new(|| {
+    let exact = |value: f32| quantize_u8(ColorSpace::DISPLAY.transfer.encode(value));
+    std::array::from_fn(|index| {
+        let code = (index + 1) as u8;
+        let (mut low, mut high) = (0u32, 1.0f32.to_bits());
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if exact(f32::from_bits(mid)) < code {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        f32::from_bits(low)
+    })
+});
+
+/// One linear colour channel → its display code.
+///
+/// `partition_point` counts the boundaries at or below `linear`, which *is*
+/// the code. The out-of-domain cases fall out of the comparison rather than
+/// needing a branch: a negative value and a `NaN` pass none of them and land
+/// on `0`, anything at or above the last boundary lands on `255` — the same
+/// answers [`quantize_u8`]'s clamp gives.
+fn display_code_u8(bounds: &[f32; 255], linear: f32) -> u8 {
+    bounds.partition_point(|&bound| bound <= linear) as u8
 }
 
 /// [`to_display_rgba8`] at 16 bits, for the deep PNG sequence.
@@ -1040,6 +1104,202 @@ mod tests {
         // display as 188 too.
         assert_eq!(to_display_rgba8([0.0; 4])[3], 0);
         assert_eq!(to_display_rgba16([0.5, 0.5, 0.5, 0.5])[3], 32768);
+    }
+
+    /// What [`to_display_rgba8`] did before the boundary table: evaluate the
+    /// transfer function, then quantise. Spelled out from the public
+    /// primitives so the table is checked against the definition rather than
+    /// against a copy of itself.
+    fn encode_then_quantize(rgba: [f32; 4]) -> [u8; 4] {
+        let encoded = ColorSpace::DISPLAY.from_linear([rgba[0], rgba[1], rgba[2]]);
+        [
+            quantize_u8(encoded[0]),
+            quantize_u8(encoded[1]),
+            quantize_u8(encoded[2]),
+            quantize_u8(rgba[3]),
+        ]
+    }
+
+    /// The boundary table is built from the transfer function alone, with no
+    /// primary matrix in front of it. That is only the display transform
+    /// while the two spaces share primaries.
+    #[test]
+    fn the_display_space_shares_the_working_primaries() {
+        assert_eq!(
+            ColorSpace::DISPLAY.primaries,
+            ColorSpace::WORKING.primaries,
+            "to_display_rgba8's table skips the primary matrix; a display \
+             space with other primaries needs the matrix back"
+        );
+    }
+
+    /// The differential test the boundary table stands on: the table must
+    /// agree with `encode`-then-`quantise` **exactly**, not within a code.
+    ///
+    /// The interesting inputs are the boundaries themselves — that is where a
+    /// table built from the ideal inverse rather than from the real function
+    /// would drift by one code — so every boundary is probed together with its
+    /// two `f32` neighbours. The rest is breadth: the 256 codes an sRGB round
+    /// trip produces, the out-of-domain values a float compositor carries
+    /// (negatives, above one, subnormals, infinities, `NaN`), and 200 000
+    /// pseudo-random floats from a fixed seed.
+    #[test]
+    fn the_display_table_reproduces_the_transfer_function() {
+        let check = |value: f32, what: &str| {
+            let rgba = [value, value, value, 0.5];
+            let table = to_display_rgba8(rgba);
+            let reference = encode_then_quantize(rgba);
+            assert_eq!(
+                table,
+                reference,
+                "{what}: {value} (bits {:#010x}) gave {table:?}, expected {reference:?}",
+                value.to_bits()
+            );
+        };
+
+        for bound in DISPLAY_CODE_THRESHOLDS.iter().copied() {
+            check(bound, "boundary");
+            check(f32::from_bits(bound.to_bits() - 1), "just below a boundary");
+            check(f32::from_bits(bound.to_bits() + 1), "just above a boundary");
+        }
+
+        for code in 0..=255u8 {
+            check(ingest_rgba8([code; 4], ColorSpace::SRGB)[0], "sRGB code");
+            check(f32::from(code) / 255.0, "linear ramp");
+        }
+
+        for value in [
+            0.0,
+            -0.0,
+            -1e-30,
+            -0.5,
+            -4.0,
+            1.0,
+            1.0 + f32::EPSILON,
+            1.5,
+            1e30,
+            f32::MIN_POSITIVE,
+            f32::MIN_POSITIVE / 4.0, // subnormal
+            -f32::MIN_POSITIVE / 4.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            -f32::NAN,
+        ] {
+            check(value, "out of domain");
+        }
+
+        // A fixed-seed LCG rather than a dependency: reproducible, and a
+        // failure names the value it failed on.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..200_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let unit = ((state >> 11) as f32) / ((1u64 << 53) as f32);
+            check(unit, "random in 0..1");
+            // The same draw spread over the range a compositor really holds.
+            check(unit * 8.0 - 4.0, "random in -4..4");
+        }
+    }
+
+    /// Measurement harness for the display-transform numbers in
+    /// `docs/implementation/perf-baseline.md`. It measures rather than
+    /// asserts, so it stays out of the normal run:
+    ///
+    /// ```text
+    /// cargo test -p ravel-core --release measure_display_transform_cost \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// The three paths are timed **alternately, one round each**, because the
+    /// machine this is run on is never quiet: interleaving makes a load spike
+    /// hit all three rather than whichever one happens to be under the clock
+    /// while it lasts. Read the ratios; the absolute values belong to whatever
+    /// else was running.
+    #[test]
+    #[ignore = "measurement harness; run with --release --ignored --nocapture"]
+    fn measure_display_transform_cost() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ROUNDS: usize = 6;
+        let count = 1920usize * 1080 * 4;
+        let pixels: Vec<f32> = (0..count).map(|i| (i % 511) as f32 / 510.0).collect();
+
+        let quantise_only = |out: &mut Vec<u8>| {
+            out.clear();
+            for pixel in pixels.chunks_exact(4) {
+                out.extend_from_slice(&[
+                    quantize_u8(pixel[0]),
+                    quantize_u8(pixel[1]),
+                    quantize_u8(pixel[2]),
+                    quantize_u8(pixel[3]),
+                ]);
+            }
+        };
+        let transform_powf = |out: &mut Vec<u8>| {
+            out.clear();
+            for pixel in pixels.chunks_exact(4) {
+                out.extend_from_slice(&encode_then_quantize([
+                    pixel[0], pixel[1], pixel[2], pixel[3],
+                ]));
+            }
+        };
+        let transform_table = |out: &mut Vec<u8>| {
+            out.clear();
+            for pixel in pixels.chunks_exact(4) {
+                out.extend_from_slice(&to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]));
+            }
+        };
+
+        let mut buffer = Vec::with_capacity(count);
+        let mut rounds = [[0f64; 3]; ROUNDS];
+        let mut powf_bytes = Vec::new();
+        let mut table_bytes = Vec::new();
+        for round in rounds.iter_mut() {
+            let start = Instant::now();
+            quantise_only(&mut buffer);
+            round[0] = start.elapsed().as_secs_f64() * 1e3;
+            black_box(&buffer);
+
+            let start = Instant::now();
+            transform_powf(&mut buffer);
+            round[1] = start.elapsed().as_secs_f64() * 1e3;
+            powf_bytes = std::mem::take(&mut buffer);
+            buffer = Vec::with_capacity(count);
+
+            let start = Instant::now();
+            transform_table(&mut buffer);
+            round[2] = start.elapsed().as_secs_f64() * 1e3;
+            table_bytes = std::mem::take(&mut buffer);
+            buffer = Vec::with_capacity(count);
+        }
+
+        // The claim the timings are worth anything at all: the two transforms
+        // produce the same bytes.
+        assert_eq!(
+            powf_bytes, table_bytes,
+            "the boundary table changed the output"
+        );
+
+        let median = |column: usize| {
+            let mut values: Vec<f64> = rounds.iter().map(|round| round[column]).collect();
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        };
+        for (index, round) in rounds.iter().enumerate() {
+            println!(
+                "round {index}: quantise {:.2} ms | powf {:.2} ms | table {:.2} ms",
+                round[0], round[1], round[2]
+            );
+        }
+        let (quantise, powf, table) = (median(0), median(1), median(2));
+        println!(
+            "median (ms, 1920x1080): quantise {quantise:.2} | powf {powf:.2} | table {table:.2}"
+        );
+        println!("table vs powf: {:.1}x", powf / table);
+        println!("table vs quantise-only: {:.2}x the floor", table / quantise);
     }
 
     const IDENTITY_CUBE: &str = "\

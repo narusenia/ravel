@@ -157,6 +157,13 @@ pub struct FrameCache {
     used: [u64; 3],
     hits: u64,
     misses: [u64; CacheMiss::COUNT],
+    /// Bumped by every insert and every drop.
+    ///
+    /// Lets a consumer skip work when nothing can have changed: recomputing
+    /// [`Self::cached_ranges`] walks every entry and sorts, and the UI thread
+    /// asks after *each* evaluation — including the hits, which by definition
+    /// added nothing (`CACHE-6`).
+    version: u64,
 }
 
 impl FrameCache {
@@ -241,6 +248,11 @@ impl FrameCache {
         ranges
     }
 
+    /// A counter that changes exactly when the set of cached frames does.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Hit / miss tallies and the bytes held.
     pub fn stats(&self) -> FrameCacheStats {
         FrameCacheStats {
@@ -290,6 +302,7 @@ impl FrameCache {
             self.by_reservation.insert(reservation.id(), slot);
         }
         self.used[tier_index(tier)] += bytes;
+        self.version += 1;
         self.entries.insert(
             slot,
             FrameEntry {
@@ -385,6 +398,7 @@ impl FrameCache {
         let Some(entry) = self.entries.remove(slot) else {
             return;
         };
+        self.version += 1;
         if let Some(reservation) = &entry.reservation {
             self.by_reservation.remove(&reservation.id());
         }
@@ -489,6 +503,15 @@ impl SharedFrameCache {
     /// Hit / miss tallies and the bytes held.
     pub fn stats(&self) -> FrameCacheStats {
         self.lock().stats()
+    }
+
+    /// A counter that changes exactly when the set of cached frames does.
+    ///
+    /// The UI thread reads it before recomputing the band: an evaluation
+    /// served from the cache added nothing, and walking every entry to
+    /// discover that is work the repaint budget should not pay (`CACHE-6`).
+    pub fn version(&self) -> u64 {
+        self.lock().version()
     }
 }
 

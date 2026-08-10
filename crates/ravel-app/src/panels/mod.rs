@@ -474,16 +474,22 @@ pub fn cache_band(cx: &App) -> Vec<Range<u64>> {
 /// (a hit, a failed target) must not write the global, so no present or
 /// future observer of it wakes for a band that looks the same.
 pub(crate) fn set_cache_band(comp: CompId, ranges: Vec<Range<u64>>, cx: &mut App) -> bool {
-    let mut bands = cx
+    // Compared *before* the map is cloned: the common case during playback is
+    // "same band as last time", and paying a clone of every composition's
+    // ranges to discover that is UI-thread work for nothing.
+    let stored = cx
         .try_global::<CacheBandState>()
-        .map_or_else(BTreeMap::new, |state| state.0.clone());
-    let changed = match bands.get(&comp) {
+        .and_then(|state| state.0.get(&comp));
+    let changed = match stored {
         Some(current) => *current != ranges,
         None => !ranges.is_empty(),
     };
     if !changed {
         return false;
     }
+    let mut bands = cx
+        .try_global::<CacheBandState>()
+        .map_or_else(BTreeMap::new, |state| state.0.clone());
     if ranges.is_empty() {
         bands.remove(&comp);
     } else {

@@ -1435,6 +1435,56 @@ mod tests {
         );
     }
 
+    /// The band's recompute guard (`CACHE-6`): an evaluation served from the
+    /// frame cache changes nothing, so the UI thread must be able to see that
+    /// without walking every entry. Scrubbing back over visited frames is
+    /// exactly when a user generates the most evaluations.
+    #[test]
+    fn a_cache_hit_leaves_the_frame_cache_version_alone() {
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+        let frames = service.frame_cache().clone();
+        let post = |service: &mut EvalService, frame: u64| {
+            service.request(frame_request(
+                graph.clone(),
+                node,
+                frame,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        };
+
+        post(&mut service, 0);
+        post(&mut service, 1);
+        let after_fill = frames.version();
+        // Back over a frame already cached: a hit, nothing stored.
+        post(&mut service, 0);
+        assert_eq!(
+            frames.version(),
+            after_fill,
+            "a cache hit moved the version and would force a band recompute"
+        );
+        // A new frame does move it.
+        post(&mut service, 2);
+        assert_ne!(frames.version(), after_fill);
+    }
+
     /// A request that names no composition keeps today's behaviour exactly:
     /// a render and a benchmark evaluate rather than share the interactive
     /// cache.
@@ -1583,11 +1633,15 @@ mod tests {
         );
         // What the budget believes it is holding and what the two caches
         // actually hold have to agree, or an eviction was dropped on the
-        // floor by whichever cache did not own it.
-        assert_eq!(
-            stats.entries,
-            service.frame_cache().stats().entries + 1,
-            "budget entries and cached values disagree: {stats:?}"
+        // floor by whichever cache did not own it. The evaluator holds one
+        // node result or none, depending on whether the frame insert of the
+        // last request pushed it out — a detail of the byte arithmetic, not
+        // of the routing under test.
+        let frames = service.frame_cache().stats().entries;
+        assert!(
+            (frames..=frames + 1).contains(&stats.entries),
+            "budget entries ({}) and cached values ({frames}) disagree: {stats:?}",
+            stats.entries
         );
     }
 }

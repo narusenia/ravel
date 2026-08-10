@@ -1384,6 +1384,8 @@ SharedFrameCache::new(Option<SharedCacheBudget>)   // EvalService builds one
     .stats() -> FrameCacheStats { hits, misses_by_reason, entries,
         bytes_by_tier }                            // .hit_rate() / .bytes(Tier)
     .invalidate_comp(CompId) / .clear()
+    .version() -> u64            // moves only when the cached set changes;
+                                 // read it before recomputing a band
 ```
 
 The Timeline's band reads it through two hops that keep GPUI out of the

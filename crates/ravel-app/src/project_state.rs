@@ -281,6 +281,9 @@ pub struct ProjectState {
     /// compile error) advance this to the post-`cancel_pending` generation
     /// so an in-flight older result cannot overwrite them.
     published_generation: u64,
+    /// `SharedFrameCache::version()` the Timeline's cache band was last
+    /// computed at, so an evaluation that changed nothing skips the walk.
+    published_band_version: Option<u64>,
     /// Bumped only by changes that can add or remove nodes: a `Structural`
     /// document change, a document replacement, and a composition switch.
     ///
@@ -482,6 +485,7 @@ impl ProjectState {
             load_request: 0,
             mirror_epoch: 0,
             published_generation: 0,
+            published_band_version: None,
             structure_epoch: 0,
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
@@ -1230,7 +1234,7 @@ impl ProjectState {
         // published before the edit would claim frames the frame cache is
         // about to drop. It comes back frame by frame as evaluations
         // complete.
-        crate::panels::clear_cache_band(cx);
+        self.clear_cache_band(cx);
         // Only a topology change can add or remove nodes; a parameter edit
         // (a scrub drag, one call per mouse move) leaves the node set alone.
         if matches!(hint, InvalidationHint::Structural) {
@@ -1551,6 +1555,14 @@ impl ProjectState {
         let Some(eval) = self.eval.as_ref() else {
             return;
         };
+        // `cached_ranges` walks every cached frame and sorts. An evaluation
+        // served from the cache added none, so the version guard turns the
+        // scan into one atomic read for exactly the requests a user makes
+        // fastest — scrubbing back over frames already visited.
+        let version = eval.frame_cache().version();
+        if self.published_band_version == Some(version) {
+            return;
+        }
         let Some(comp) = self.active_composition(cx) else {
             return;
         };
@@ -1560,7 +1572,16 @@ impl ProjectState {
         let ranges = eval
             .frame_cache()
             .cached_ranges(id, &self.viewer_eval_context(comp, 0));
+        self.published_band_version = Some(version);
         crate::panels::set_cache_band(id, ranges, cx);
+    }
+
+    /// Drop the Timeline's cache band and the version it was computed at, so
+    /// the next evaluation republishes it even if the frame cache did not
+    /// change in between (an edit to another composition, say).
+    fn clear_cache_band(&mut self, cx: &mut App) {
+        self.published_band_version = None;
+        crate::panels::clear_cache_band(cx);
     }
 
     /// Frame rate and duration of the active composition, for the playback

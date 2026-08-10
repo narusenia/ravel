@@ -600,8 +600,11 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 - 退避は `CacheBudget` に一任し、**このキャッシュは独自の LRU を持たない**。
   ヒットで `touch` するので順序は least-recently-*used*。
 - Ram 層は `CacheKind::NodeResult` と共有なので、`reserve` の退避リストには
-  **他の消費者の id が混ざる**。自分の id だけを落とし、残りは debug ログを
-  出して飛ばす（評価器側も同じことをしている）。
+  **他の消費者の id が混ざる**。**現状はそれを読み飛ばしており、これは漏れ
+  である** — `reserve` は返す前に勘定から外すので、飛ばした id は二度と退避
+  対象にならず、実体は生き続ける。`CACHE-5` の
+  `Evaluator::take_foreign_evictions` / `drop_evicted` に乗せて解消する。
+  ここで 2 つ目の受け渡し方式を作らない。
 
 **完了条件**
 

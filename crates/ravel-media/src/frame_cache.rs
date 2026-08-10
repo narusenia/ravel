@@ -51,18 +51,26 @@
 //! go — a private eviction policy here would be exactly the second authority
 //! `cache-plan.md` exists to prevent.
 //!
-//! # Eviction lists name entries this cache does not own
+//! # Known hole: eviction lists name entries this cache does not own
 //!
 //! `CacheKind::MediaFrame` and the evaluator's `CacheKind::NodeResult` share
 //! the host-memory pot, and the budget orders eviction by tier, not by kind.
 //! So a decode can be told to drop an evaluator entry and an evaluation can
-//! be told to drop a decoded frame. Each consumer acts on the ids it owns and
-//! skips the rest, which is correct **only because the other side does the
-//! same**: the budget has already stopped counting those bytes, so an
-//! eviction nobody acts on is memory the limit can no longer see. Both
-//! consumers do act today (`ravel_core::eval`'s cache skips foreign ids the
-//! same way), and the bytes an eviction names stay resident only until their
-//! owner's next insert reaches them.
+//! be told to drop a decoded frame. Neither side can reach the other's value,
+//! so both currently skip the ids they do not own — **and that is a leak, not
+//! a safe default.** `reserve` removes an entry from the accounting *before*
+//! returning it, so a skipped id is never offered again: its `Arc` stays
+//! resident while the budget believes those bytes are free. Alternating
+//! `MediaFrame` and `NodeResult` inserts therefore grows real memory without
+//! moving `CacheBudget::used`, which is the failure
+//! `ravel_core::cache_budget`'s module documentation names as the unsafe
+//! direction.
+//!
+//! Routing an eviction back to its owner is `CACHE-5`'s
+//! `Evaluator::take_foreign_evictions` / `drop_evicted`. **This cache must be
+//! put on that path once `CACHE-5` lands** — deliberately not reimplemented
+//! here, because a second hand-off mechanism between the same two caches is
+//! the thing that would make either of them wrong.
 
 use ravel_core::cache_budget::{CacheKind, Reservation, ReservationId, SharedCacheBudget};
 use ravel_core::color::ColorSpace;
@@ -193,7 +201,9 @@ impl MediaFrameCache {
 
         for entry in evicted {
             let Some(victim) = inner.by_reservation.remove(&entry.id) else {
-                // Another consumer's entry — see the module documentation.
+                // Another consumer's entry, which this cache cannot drop.
+                // Skipping leaks it — see "Known hole" in the module
+                // documentation; the fix is `CACHE-5`'s eviction hand-off.
                 tracing::debug!(
                     id = entry.id.raw(),
                     "decode cache skipped a foreign eviction"
@@ -347,26 +357,11 @@ mod tests {
         assert_eq!(shared.stats().used(Tier::Ram), frame(0.5).byte_size());
     }
 
-    /// The budget orders eviction by tier, so an id belonging to another
-    /// consumer of host memory reaches this cache. Skipping it must not
-    /// panic or disturb the entries this cache does own.
-    #[test]
-    fn an_eviction_naming_another_consumers_entry_is_skipped() {
-        let one = frame(0.5).byte_size();
-        let shared = budget(one * 2);
-        let cache = MediaFrameCache::new(shared.clone());
-
-        // Somebody else fills host memory first — the evaluator's node cache
-        // is the consumer that does this in production.
-        let foreign = shared.reserve(CacheKind::NodeResult(Tier::Ram), one * 2).0;
-        cache.insert(key("/clip.mov", 0), frame(0.0));
-
-        // The insert was told to drop the foreign entry; the cache keeps its
-        // own and leaves the other consumer's `Reservation` alone.
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains(&key("/clip.mov", 0)));
-        drop(foreign);
-    }
+    // A cross-consumer eviction test belongs here, but it has to assert that
+    // real memory stays inside the budget — not that the skip is harmless,
+    // which is what the leak looks like from inside this file. It is written
+    // with the fix, on `CACHE-5`'s eviction hand-off; see "Known hole" in the
+    // module documentation.
 
     /// Dropping the cache must give every byte back — the entries release
     /// through their reservations, not through an explicit teardown.

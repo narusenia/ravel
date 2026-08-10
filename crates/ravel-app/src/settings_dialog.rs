@@ -649,37 +649,8 @@ const CACHE_SIM_RESERVE_DESCRIPTION: &str = "settings.cache.sim_reserve_descript
 const CACHE_ROOT: &str = "settings.cache.root";
 const CACHE_ROOT_DESCRIPTION: &str = "settings.cache.root_description";
 
-/// The smallest tier limit the page offers, in MiB.
-///
-/// Not zero: a zero ceiling evicts every entry as it is produced, which is a
-/// way to make the application appear to hang rather than a cache size anyone
-/// wants. One frame of 1080p RGBA f32 is about 32 MiB, so anything below that
-/// is already degenerate; 1 MiB is the floor that keeps the row honest without
-/// pretending to know the user's working set.
-pub const MIN_CACHE_LIMIT_MB: f64 = 1.0;
-
-/// The largest tier limit the page offers, in MiB (1 TiB).
-///
-/// A bound rather than a technical limit, for the reason
-/// [`app_settings::parse_frame_rate`] bounds the frame rate: an unbounded field
-/// turns a stray keystroke into a number the accounting can only be surprised
-/// by.
-pub const MAX_CACHE_LIMIT_MB: f64 = 1024.0 * 1024.0;
-
 /// The step the limit rows move in, in MiB.
 const CACHE_LIMIT_STEP_MB: f64 = 64.0;
-
-/// The MiB figure `value` names, or `None` for one no tier limit may hold.
-///
-/// Refused rather than clamped, and never silently zero: this reads a number a
-/// person typed, and a limit that quietly became something else is a cache the
-/// user cannot reason about. A fraction of a MiB is truncated — the setting's
-/// unit is whole MiB, and rejecting `512.5` would be pedantry rather than
-/// safety.
-fn cache_limit_mb(value: f64) -> Option<u64> {
-    (value.is_finite() && (MIN_CACHE_LIMIT_MB..=MAX_CACHE_LIMIT_MB).contains(&value))
-        .then(|| value.trunc() as u64)
-}
 
 /// Write the VRAM ceiling into the preferences layer.
 ///
@@ -687,7 +658,7 @@ fn cache_limit_mb(value: f64) -> Option<u64> {
 /// closure is out of a test's reach, and "which layer does this row write, and
 /// what does it refuse" is the part worth pinning.
 pub fn set_cache_vram_limit_mb(value: f64, cx: &mut App) {
-    let Some(limit) = cache_limit_mb(value) else {
+    let Some(limit) = app_settings::cache_limit_mb(value) else {
         tracing::warn!(value, "ignoring an out-of-range VRAM cache limit");
         return;
     };
@@ -700,7 +671,7 @@ pub fn set_cache_vram_limit_mb(value: f64, cx: &mut App) {
 
 /// [`set_cache_vram_limit_mb`] for the host-memory ceiling.
 pub fn set_cache_ram_limit_mb(value: f64, cx: &mut App) {
-    let Some(limit) = cache_limit_mb(value) else {
+    let Some(limit) = app_settings::cache_limit_mb(value) else {
         tracing::warn!(value, "ignoring an out-of-range RAM cache limit");
         return;
     };
@@ -717,11 +688,10 @@ pub fn set_cache_ram_limit_mb(value: f64, cx: &mut App) {
 /// clamps defensively, so a clamp here would write a value the file keeps and
 /// the budget then reinterprets — two answers to "what did I set".
 pub fn set_cache_sim_reserve_ratio(value: f64, cx: &mut App) {
-    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+    let Some(ratio) = app_settings::cache_sim_reserve_ratio(value) else {
         tracing::warn!(value, "ignoring an out-of-range simulation cache reserve");
         return;
-    }
-    let ratio = value as f32;
+    };
     app_settings::update(
         SettingsLayerScope::Global,
         |layer| layer.cache.sim_reserve_ratio = Some(ratio),
@@ -740,11 +710,12 @@ pub fn set_cache_sim_reserve_ratio(value: f64, cx: &mut App) {
 /// be launched from.
 pub fn set_cache_root(value: SharedString, cx: &mut App) {
     let trimmed = value.trim();
-    if !trimmed.is_empty() && !std::path::Path::new(trimmed).is_absolute() {
+    let usable = app_settings::cache_root_setting(trimmed);
+    if usable.is_none() && !trimmed.is_empty() {
         tracing::warn!(root = trimmed, "ignoring a relative cache location");
         return;
     }
-    let root = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    let root = usable.map(str::to_string);
     app_settings::update(
         SettingsLayerScope::Global,
         |layer| layer.cache.root = root,
@@ -767,8 +738,8 @@ fn cache_limit_field(
         field: FieldControl::Number(
             SettingField::number_input(
                 NumberFieldOptions {
-                    min: MIN_CACHE_LIMIT_MB,
-                    max: MAX_CACHE_LIMIT_MB,
+                    min: app_settings::MIN_CACHE_LIMIT_MB,
+                    max: app_settings::MAX_CACHE_LIMIT_MB,
                     step: CACHE_LIMIT_STEP_MB,
                 },
                 value,

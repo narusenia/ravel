@@ -590,6 +590,58 @@ fn apply_resolved_cache_budget(cx: &mut App) {
     });
 }
 
+/// The smallest cache tier limit a setting may hold, in MiB.
+///
+/// Not zero: a zero ceiling evicts every entry as it is produced, which is a
+/// way to make the application appear to hang rather than a cache size anyone
+/// wants. One 1080p RGBA f32 frame is about 32 MiB, so anything below that is
+/// already degenerate; 1 MiB is the floor that keeps the setting honest without
+/// pretending to know the user's working set.
+pub const MIN_CACHE_LIMIT_MB: f64 = 1.0;
+
+/// The largest cache tier limit a setting may hold, in MiB (1 TiB).
+///
+/// A bound rather than a technical limit, for the reason [`parse_frame_rate`]
+/// bounds the frame rate: an unbounded field turns a stray keystroke into a
+/// number the accounting can only be surprised by.
+pub const MAX_CACHE_LIMIT_MB: f64 = 1024.0 * 1024.0;
+
+/// The MiB figure `value` names, or `None` for one no tier limit may hold.
+///
+/// **The one range check for a cache limit**, used both where the value is
+/// typed (`crate::settings_dialog`) and where it is applied
+/// ([`usable_cache_budget`]) — the dialog is not the only writer, and two
+/// copies of a range are two ranges.
+///
+/// A fraction of a MiB is truncated: the setting's unit is whole MiB, and
+/// refusing `512.5` would be pedantry rather than safety.
+pub fn cache_limit_mb(value: f64) -> Option<u64> {
+    (value.is_finite() && (MIN_CACHE_LIMIT_MB..=MAX_CACHE_LIMIT_MB).contains(&value))
+        .then(|| value.trunc() as u64)
+}
+
+/// The simulation reserve share `value` names, or `None` for one no tier may
+/// hold. [`cache_limit_mb`]'s argument, for the share.
+///
+/// `CacheBudget` clamps this defensively, so an out-of-range share is not
+/// dangerous — but a `NaN` passes `clamp` untouched and silently turns the
+/// reserve into zero, which is the protection quietly disappearing rather than
+/// a setting being refused.
+pub fn cache_sim_reserve_ratio(value: f64) -> Option<f32> {
+    (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value as f32)
+}
+
+/// The absolute path `text` names, or `None` when it names none — an empty
+/// field ("no location of my own") and a relative path are both that.
+///
+/// Relative is refused rather than resolved because the working directory of a
+/// desktop application is not something the user chose: the cache would land
+/// wherever Ravel happened to be launched from, and move when that changed.
+pub fn cache_root_setting(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty() && Path::new(trimmed).is_absolute()).then_some(trimmed)
+}
+
 /// Put the resolved limits on `budget`.
 ///
 /// Split out of [`apply_resolved_cache_budget`] so a test can drive it against
@@ -598,26 +650,89 @@ fn apply_resolved_cache_budget(cx: &mut App) {
 /// reservations, so an entry that no longer fits is collected by the next
 /// reservation in its tier rather than dropped from under a reader.
 pub fn apply_cache_budget(budget: &SharedCacheBudget, cx: &App) {
-    budget.reconfigure(resolved(cx).cache_budget());
+    budget.reconfigure(usable_cache_budget(&resolved(cx)));
 }
 
-/// Where a disk cache puts its files: the `cache.root` setting when it names
-/// one, and otherwise the platform config directory the caches have always
-/// used.
+/// The budget `settings` imply, with anything the file could hold but the
+/// accounting cannot use replaced by the built-in default and warned about.
+///
+/// The dialog's rows refuse these values already, and this is not a second
+/// opinion about them: `settings.toml` and a project's settings layer are
+/// hand-editable and reach the budget without passing a row at all. A
+/// `vram_limit_mb = 0` written there would otherwise arrive as a ceiling that
+/// evicts everything the moment it is produced. Both checks call the same
+/// functions ([`cache_limit_mb`], [`cache_sim_reserve_ratio`]), so the range
+/// is stated once.
+///
+/// The **disk** limit is left alone: nothing charges `Tier::Disk` yet
+/// (`CACHE-11`), and the default `disk_enabled = false` resolves it to a zero
+/// allowance regardless.
+fn usable_cache_budget(settings: &ResolvedSettings) -> ravel_core::cache_budget::CacheBudgetConfig {
+    let defaults = ResolvedSettings::default();
+    let mut settings = settings.clone();
+    settings.cache_vram_limit_mb = usable_limit_mb(
+        settings.cache_vram_limit_mb,
+        defaults.cache_vram_limit_mb,
+        "vram",
+    );
+    settings.cache_ram_limit_mb = usable_limit_mb(
+        settings.cache_ram_limit_mb,
+        defaults.cache_ram_limit_mb,
+        "ram",
+    );
+    settings.cache_sim_reserve_ratio =
+        cache_sim_reserve_ratio(f64::from(settings.cache_sim_reserve_ratio)).unwrap_or_else(|| {
+            tracing::warn!(
+                sim_reserve_ratio = settings.cache_sim_reserve_ratio,
+                "unusable simulation cache reserve in the settings; using the default"
+            );
+            defaults.cache_sim_reserve_ratio
+        });
+    // The MiB→bytes conversion stays in `ResolvedSettings::cache_budget`, so
+    // the corrected values go back through it rather than around it.
+    settings.cache_budget()
+}
+
+/// One tier limit, or the default with a warning.
+fn usable_limit_mb(value: u64, default: u64, tier: &'static str) -> u64 {
+    cache_limit_mb(value as f64).unwrap_or_else(|| {
+        tracing::warn!(
+            limit_mb = value,
+            tier,
+            "cache limit out of range in the settings; using the default"
+        );
+        default
+    })
+}
+
+/// Where a disk cache puts its files: the `cache.root` setting when it names a
+/// usable one, and otherwise the platform config directory the caches have
+/// always used.
 ///
 /// `None` — no setting and no config directory — is what
 /// [`crate::media::cache::DiskCache`] takes as "no disk persistence", which is
 /// the answer a headless environment without `HOME` already got.
+///
+/// A relative path in the file falls back here for the reason
+/// [`cache_root_setting`] refuses one in the dialog, and warns: the row is not
+/// the only writer.
 ///
 /// Read where a cache is **constructed**, so a change takes effect the next
 /// time that cache is built, in practice the next launch (the row's description
 /// says so). Moving files that are already written is not something a settings
 /// row should do behind the user's back.
 pub fn cache_root(cx: &App) -> Option<PathBuf> {
-    match resolved(cx).cache_root {
-        Some(root) if !root.trim().is_empty() => Some(PathBuf::from(root.trim())),
-        _ => paths::global_config_dir(),
+    let setting = resolved(cx).cache_root.unwrap_or_default();
+    if let Some(root) = cache_root_setting(&setting) {
+        return Some(PathBuf::from(root));
     }
+    if !setting.trim().is_empty() {
+        tracing::warn!(
+            root = %setting,
+            "the cache location in the settings is not an absolute path; using the default"
+        );
+    }
+    paths::global_config_dir()
 }
 
 /// Activate the resolved locale and record the one that actually took effect.

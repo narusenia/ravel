@@ -202,11 +202,25 @@ impl SequenceCodec {
 /// the reason writing an EXR still costs no copy.
 ///
 /// Alpha is coverage and is never converted.
+///
+/// A frame that is not four-channel is handed back untouched. `as_f32` widens
+/// a `MonoF32` buffer just as willingly as an RGBA one, and `chunks_exact(4)`
+/// would then read four consecutive *pixels* as one and drop the remainder —
+/// a silently truncated image rather than a failure. Asking
+/// [`FrameBuffer::as_rgba_f32`] instead makes the shape a precondition, and
+/// passing the frame through unconverted keeps the encoder's own error the
+/// one the caller sees.
 pub fn to_output_space(frame: &FrameBuffer, space: ColorSpace) -> Cow<'_, FrameBuffer> {
     if space == ColorSpace::WORKING {
         return Cow::Borrowed(frame);
     }
-    let pixels = frame.as_f32();
+    let Ok(pixels) = frame.as_rgba_f32() else {
+        tracing::warn!(
+            format = ?frame.format,
+            "output colour conversion skipped: frame is not RGBA"
+        );
+        return Cow::Borrowed(frame);
+    };
     let mut converted = Vec::with_capacity(pixels.len());
     for pixel in pixels.chunks_exact(4) {
         let rgb = convert([pixel[0], pixel[1], pixel[2]], ColorSpace::WORKING, space);
@@ -709,7 +723,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::PixelFormat;
     use std::collections::HashSet;
+
+    /// A frame the conversion cannot interpret is returned untouched rather
+    /// than reinterpreted four pixels at a time. `as_f32` widens a `MonoF32`
+    /// buffer as readily as an RGBA one, so reading it in fours would drop
+    /// three quarters of the samples and hand the encoder a buffer whose
+    /// length no longer matches its own dimensions.
+    #[test]
+    fn a_non_rgba_frame_is_passed_through_instead_of_truncated() {
+        let mono = FrameBuffer::with_format(4, 2, PixelFormat::MonoF32);
+        let out = to_output_space(&mono, ColorSpace::DISPLAY);
+
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "a mono frame must not be rebuilt from four-sample groups"
+        );
+        assert_eq!(out.width, mono.width);
+        assert_eq!(out.height, mono.height);
+        assert_eq!(out.as_f32().len(), mono.as_f32().len());
+    }
 
     /// A hand-built environment. Every question the enumeration can ask is
     /// answered from these three fields, which is the point: the "no FFmpeg"

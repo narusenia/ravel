@@ -835,13 +835,32 @@ fn cache_sim_reserve_field() -> PageField {
 /// A free-text path rather than a picker: the directory a user wants may not
 /// exist yet (the point of the setting is usually "put it on the other drive"),
 /// and the caches create their own subdirectories anyway.
+/// The cache location the row names: the setting when it is one the caches can
+/// actually use, and otherwise empty.
+///
+/// A persisted **relative** path survives into [`app_settings::resolved`] but is
+/// refused by [`app_settings::cache_root`], which falls back to the platform
+/// config directory. Showing the refused text would name a location nothing
+/// writes to — the same divergence the frame rate row avoids
+/// (`an_unreadable_frame_rate_setting_shows_the_rate_in_force`). Empty is what
+/// "no location of my own" already looks like in this row, and it is what the
+/// caches are in fact doing.
+fn cache_root_in_force(cx: &App) -> String {
+    app_settings::resolved(cx)
+        .cache_root
+        .as_deref()
+        .and_then(app_settings::cache_root_setting)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn cache_root_field() -> PageField {
     PageField {
         title_key: CACHE_ROOT,
         description_key: CACHE_ROOT_DESCRIPTION,
         field: FieldControl::Text(
             SettingField::input(
-                |cx| SharedString::from(app_settings::resolved(cx).cache_root.unwrap_or_default()),
+                |cx| SharedString::from(cache_root_in_force(cx)),
                 set_cache_root,
             )
             .on_reset(
@@ -1397,6 +1416,62 @@ mod tests {
     /// Tested here rather than through the dialog because `SettingField`'s value
     /// getter is `pub(crate)` in `gpui_component` (`LOW-APP-20`), so the closure
     /// cannot be invoked from outside this crate.
+    /// The cache location row names the directory the caches use, not a
+    /// persisted path they refuse.
+    ///
+    /// Same reason as the frame rate row below, and tested here for the same
+    /// reason: `SettingField`'s value getter is `pub(crate)` in
+    /// `gpui_component`, so the closure cannot be invoked from outside.
+    #[gpui::test]
+    fn a_refused_cache_location_is_not_shown_as_the_one_in_force(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[cache]\nroot = \"relative/cache\"\n").unwrap();
+        cx.update(|cx| {
+            crate::app_settings::install(
+                crate::app_settings::read_global_settings_at(Some(path)),
+                cx,
+            );
+        });
+
+        cx.update(|cx| {
+            assert_eq!(
+                app_settings::resolved(cx).cache_root.as_deref(),
+                Some("relative/cache"),
+                "the refused path is still what the settings say",
+            );
+            assert_eq!(
+                cache_root_in_force(cx),
+                "",
+                "but the row does not name it, because no cache writes there",
+            );
+        });
+    }
+
+    /// An absolute location is shown as written.
+    #[gpui::test]
+    fn a_usable_cache_location_is_shown_as_written(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("caches");
+        let path = dir.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[cache]\nroot = {}\n",
+                toml::Value::from(root.to_str().unwrap())
+            ),
+        )
+        .unwrap();
+        cx.update(|cx| {
+            crate::app_settings::install(
+                crate::app_settings::read_global_settings_at(Some(path)),
+                cx,
+            );
+        });
+
+        cx.update(|cx| assert_eq!(cache_root_in_force(cx), root.to_str().unwrap()));
+    }
+
     #[gpui::test]
     fn an_unreadable_frame_rate_setting_shows_the_rate_in_force(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();

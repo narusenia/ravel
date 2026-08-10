@@ -84,8 +84,12 @@ TIFF / DPX は float も log も入りうるが**リニア扱いにしない**: 
 変換は `ravel-media` のデコード経路、画素の正規化の**直後**
 （`ravel_core::color` の `ingest_rgba8` / `ingest_rgba16` /
 `ingest_rgbaf32` — 素材のビット深度に合うもの）。`ravel-media` の入口は既定で
-無変換（`ColorSpace::WORKING`）なので、ファイルそのものの値が欲しい経路
-（メディアビンのサムネイル）は何も変わらない。
+無変換（`ColorSpace::WORKING`）なので、ファイルそのものの値が欲しい経路は
+その既定のまま読める。メディアビンのサムネイルは**解決済みの入力色空間を
+渡して**作業空間で読み、他の 8bit 出口と同じ表示変換
+（`to_display_rgba8`）を掛けてから PNG へ量子化する — sRGB 素材では
+その往復が恒等なので見え方は変わらず、リニア素材（EXR / HDR）の
+サムネイルは display 空間で生成される。
 
 ### 取り込みのビット深度
 

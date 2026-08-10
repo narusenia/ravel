@@ -14,7 +14,7 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 24 | 1件1ファイル |
-| medium | 29 | 領域別4ファイル（`medium-*.md`） |
+| medium | 30 | 領域別4ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -56,9 +56,9 @@
 | [HIGH-31](HIGH-31-float-decode-through-8bit-rgba.md) | float / 高ビット深度のデコードが 8bit RGBA を経由 | 画素形式別の取り込み経路（float 直読み / RGBA64） |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
-## medium（29件）
+## medium（30件）
 
-- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31`
+- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）

@@ -8,6 +8,7 @@
 //! or relink changes a source at the same path.
 
 use gpui::Context;
+use ravel_core::color::{ColorSpace, to_display_rgba8};
 use ravel_core::types::FrameBuffer;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
@@ -41,9 +42,9 @@ impl ThumbnailSource {
         }
     }
 
-    fn derivative_key(self) -> String {
+    fn derivative_key(self, input_color_space: ColorSpace) -> String {
         format!(
-            "thumbnail-png-long-edge={THUMBNAIL_LONG_EDGE}-source={}-v{THUMBNAIL_CACHE_VERSION}",
+            "thumbnail-png-long-edge={THUMBNAIL_LONG_EDGE}-source={}-space={input_color_space:?}-v{THUMBNAIL_CACHE_VERSION}",
             self.cache_tag()
         )
     }
@@ -72,13 +73,19 @@ pub enum ThumbnailError {
 }
 
 /// Injectable decode function used by tests and alternate media backends.
-pub type ThumbnailGenerator =
-    Arc<dyn Fn(&Path, ThumbnailSource) -> Result<FrameBuffer, ThumbnailError> + Send + Sync>;
+///
+/// The frame comes back **in the working space**: the generator decodes
+/// `input_color_space` (the asset's resolved input colour space) on the way
+/// in, and [`encode_thumbnail`] applies the display transform on the way out.
+pub type ThumbnailGenerator = Arc<
+    dyn Fn(&Path, ThumbnailSource, ColorSpace) -> Result<FrameBuffer, ThumbnailError> + Send + Sync,
+>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ThumbnailRequest {
     path: PathBuf,
     source: ThumbnailSource,
+    input_color_space: ColorSpace,
 }
 
 enum WorkerOutcome {
@@ -94,7 +101,10 @@ struct ThumbnailResolver {
 
 impl ThumbnailResolver {
     fn resolve(&self, request: &ThumbnailRequest) -> WorkerOutcome {
-        let Some(key) = DiskCache::key(&request.path, &request.source.derivative_key()) else {
+        let Some(key) = DiskCache::key(
+            &request.path,
+            &request.source.derivative_key(request.input_color_space),
+        ) else {
             return WorkerOutcome::Unavailable { failed_key: None };
         };
         if self.disk.is_failed(&key) {
@@ -104,7 +114,7 @@ impl ThumbnailResolver {
             return WorkerOutcome::Ready(key, Arc::from(bytes));
         }
 
-        let bytes = match (self.generator)(&request.path, request.source)
+        let bytes = match (self.generator)(&request.path, request.source, request.input_color_space)
             .and_then(|frame| encode_thumbnail(&frame))
         {
             Ok(bytes) => bytes,
@@ -196,18 +206,27 @@ impl ThumbnailCache {
 
     /// Return a cached thumbnail or kick off background work for a miss.
     ///
+    /// `input_color_space` is the asset's **resolved** input colour space
+    /// ([`MediaAssetEntry::input_color_space`]); the frame is decoded through
+    /// it and the display transform is applied before quantisation, so a
+    /// linear source (EXR / HDR) no longer thumbnails dark.
+    ///
     /// No filesystem or decode work occurs synchronously. Repeated calls while
     /// a request is pending share the same task, and failed requests remain
     /// unavailable until explicitly invalidated.
+    ///
+    /// [`MediaAssetEntry::input_color_space`]: ravel_core::composition::MediaAssetEntry::input_color_space
     pub fn get_or_request(
         &mut self,
         path: &Path,
         source: ThumbnailSource,
+        input_color_space: ColorSpace,
         cx: &mut Context<Self>,
     ) -> ThumbnailState {
         let request = ThumbnailRequest {
             path: path.to_path_buf(),
             source,
+            input_color_space,
         };
         if let Some(state) = self.cached_state(&request) {
             return state;
@@ -391,10 +410,17 @@ fn encode_thumbnail(frame: &FrameBuffer) -> Result<Vec<u8>, ThumbnailError> {
         return Err(ThumbnailError::InvalidFrame);
     }
 
+    // The frame arrives in the working space, so the thumbnail — an 8-bit
+    // exit — goes through the one display transform like every other exit.
+    // For an sRGB source the ingest/display pair is the identity
+    // (`ingest_and_display_round_trip_every_code` pins it), so integer-source
+    // thumbnails keep exactly the bytes they had; a linear source (EXR / HDR)
+    // is display-encoded instead of quantised raw, which is what made those
+    // thumbnails dark (MED-APP-32).
     let pixels = frame
         .as_f32()
-        .iter()
-        .map(|component| (component.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .chunks_exact(4)
+        .flat_map(|px| to_display_rgba8([px[0], px[1], px[2], px[3]]))
         .collect::<Vec<_>>();
     let image = image::RgbaImage::from_raw(frame.width, frame.height, pixels)
         .ok_or(ThumbnailError::InvalidFrame)?;
@@ -422,13 +448,15 @@ fn encode_thumbnail(frame: &FrameBuffer) -> Result<Vec<u8>, ThumbnailError> {
 fn default_thumbnail_frame(
     path: &Path,
     source: ThumbnailSource,
+    input_color_space: ColorSpace,
 ) -> Result<FrameBuffer, ThumbnailError> {
     use ravel_core::media::MediaReader as _;
 
     match source {
         ThumbnailSource::Container => {
             let mut reader = ravel_media::decoder::FfmpegDecoder::open(path)
-                .map_err(|error| ThumbnailError::DecodeUnavailable(error.to_string()))?;
+                .map_err(|error| ThumbnailError::DecodeUnavailable(error.to_string()))?
+                .with_input_color_space(input_color_space);
             let stream = reader
                 .info()
                 .first_video()
@@ -452,7 +480,7 @@ fn default_thumbnail_frame(
                 .map_err(|error| ThumbnailError::DecodeUnavailable(error.to_string()))
         }
         ThumbnailSource::Still | ThumbnailSource::Sequence => {
-            ravel_media::image_seq::read_image_frame(path)
+            ravel_media::image_seq::read_image_frame_in(path, input_color_space)
                 .map_err(|error| ThumbnailError::DecodeUnavailable(error.to_string()))
         }
     }
@@ -462,6 +490,7 @@ fn default_thumbnail_frame(
 fn default_thumbnail_frame(
     _path: &Path,
     _source: ThumbnailSource,
+    _input_color_space: ColorSpace,
 ) -> Result<FrameBuffer, ThumbnailError> {
     Err(ThumbnailError::DecodeUnavailable(
         "the `ffmpeg` feature of ravel-app is disabled".into(),
@@ -482,7 +511,7 @@ mod tests {
     }
 
     fn successful_generator(calls: Arc<AtomicUsize>) -> ThumbnailGenerator {
-        Arc::new(move |_path, _source| {
+        Arc::new(move |_path, _source, _space| {
             calls.fetch_add(1, Ordering::SeqCst);
             let mut data = Vec::with_capacity(512 * 128 * 4);
             for _ in 0..(512 * 128) {
@@ -504,6 +533,7 @@ mod tests {
         ThumbnailRequest {
             path: path.to_path_buf(),
             source: ThumbnailSource::Container,
+            input_color_space: ColorSpace::SRGB,
         }
     }
 
@@ -534,7 +564,9 @@ mod tests {
         source: ThumbnailSource,
         cx: &mut TestAppContext,
     ) -> ThumbnailState {
-        cache.update(cx, |cache, cx| cache.get_or_request(path, source, cx))
+        cache.update(cx, |cache, cx| {
+            cache.get_or_request(path, source, ColorSpace::SRGB, cx)
+        })
     }
 
     fn expect_ready(state: ThumbnailState) -> Arc<[u8]> {
@@ -547,17 +579,75 @@ mod tests {
     #[test]
     fn derivative_key_includes_the_decode_source() {
         assert_eq!(
-            ThumbnailSource::Container.derivative_key(),
-            "thumbnail-png-long-edge=256-source=container-v1"
+            ThumbnailSource::Container.derivative_key(ColorSpace::SRGB),
+            "thumbnail-png-long-edge=256-source=container-space=ColorSpace { primaries: Rec709, transfer: Srgb }-v1"
         );
         assert_ne!(
-            ThumbnailSource::Container.derivative_key(),
-            ThumbnailSource::Still.derivative_key()
+            ThumbnailSource::Container.derivative_key(ColorSpace::SRGB),
+            ThumbnailSource::Still.derivative_key(ColorSpace::SRGB)
         );
         assert_ne!(
-            ThumbnailSource::Still.derivative_key(),
-            ThumbnailSource::Sequence.derivative_key()
+            ThumbnailSource::Still.derivative_key(ColorSpace::SRGB),
+            ThumbnailSource::Sequence.derivative_key(ColorSpace::SRGB)
         );
+    }
+
+    /// The resolved input colour space is part of the cache identity: the
+    /// same file relinked or reinterpreted as another space must not be
+    /// served the other space's thumbnail.
+    #[test]
+    fn derivative_key_includes_the_colour_space() {
+        assert_ne!(
+            ThumbnailSource::Still.derivative_key(ColorSpace::SRGB),
+            ThumbnailSource::Still.derivative_key(ColorSpace::LINEAR_REC709)
+        );
+    }
+
+    /// A linear source is display-encoded before quantisation: linear 0.5
+    /// displays as 188, not 128 (MED-APP-32).
+    #[test]
+    fn linear_frames_are_display_encoded() {
+        let frame = solid_frame(64, 64, [0.5, 0.5, 0.5, 1.0]);
+        let png = encode_thumbnail(&frame).expect("encode thumbnail");
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode thumbnail png")
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [188, 188, 188, 255]);
+        // Values above 1.0 saturate at the top code, not at 1.0's code.
+        let frame = solid_frame(64, 64, [4.0, 4.0, 4.0, 1.0]);
+        let png = encode_thumbnail(&frame).expect("encode thumbnail");
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode thumbnail png")
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 255, 255, 255]);
+    }
+
+    /// An sRGB source keeps the file's exact bytes: the working-space ingest
+    /// of an sRGB code and the display transform are exact inverses, so
+    /// nothing about an integer source's thumbnail changes.
+    #[test]
+    fn srgb_frames_keep_their_bytes() {
+        let mut codes = Vec::new();
+        let mut data = Vec::new();
+        for i in 0..(64 * 64) {
+            let rgba = [
+                (i % 256) as u8,
+                ((i * 3) % 256) as u8,
+                ((i * 7) % 256) as u8,
+                ((i * 13) % 256) as u8,
+            ];
+            codes.push(rgba);
+            data.extend_from_slice(&ravel_core::color::ingest_rgba8(rgba, ColorSpace::SRGB));
+        }
+        let frame = FrameBuffer::from_f32(64, 64, data);
+        let png = encode_thumbnail(&frame).expect("encode thumbnail");
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode thumbnail png")
+            .to_rgba8();
+        for (i, rgba) in codes.iter().enumerate() {
+            let px = decoded.get_pixel((i % 64) as u32, (i / 64) as u32).0;
+            assert_eq!(&px, rgba, "pixel {i}");
+        }
     }
 
     #[gpui::test]
@@ -566,7 +656,7 @@ mod tests {
         let path = source_file(&temp, "ambiguous.dat");
         let calls = Arc::new(AtomicUsize::new(0));
         let generator_calls = calls.clone();
-        let generator: ThumbnailGenerator = Arc::new(move |_path, source| {
+        let generator: ThumbnailGenerator = Arc::new(move |_path, source, _space| {
             generator_calls.fetch_add(1, Ordering::SeqCst);
             match source {
                 ThumbnailSource::Container => {
@@ -618,8 +708,8 @@ mod tests {
 
         let (first, duplicate) = cache.update(cx, |cache, cx| {
             (
-                cache.get_or_request(&path, ThumbnailSource::Container, cx),
-                cache.get_or_request(&path, ThumbnailSource::Container, cx),
+                cache.get_or_request(&path, ThumbnailSource::Container, ColorSpace::SRGB, cx),
+                cache.get_or_request(&path, ThumbnailSource::Container, ColorSpace::SRGB, cx),
             )
         });
         assert_eq!(first, ThumbnailState::Pending);
@@ -706,7 +796,7 @@ mod tests {
         let path = source_file(&temp, "unsupported.mov");
         let calls = Arc::new(AtomicUsize::new(0));
         let generator_calls = calls.clone();
-        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source, _space| {
             generator_calls.fetch_add(1, Ordering::SeqCst);
             Err(ThumbnailError::DecodeUnavailable("unsupported".into()))
         });
@@ -735,7 +825,7 @@ mod tests {
         let path = source_file(&temp, "panic.mov");
         let calls = Arc::new(AtomicUsize::new(0));
         let generator_calls = calls.clone();
-        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source, _space| {
             generator_calls.fetch_add(1, Ordering::SeqCst);
             panic!("injected thumbnail panic");
         });
@@ -759,7 +849,7 @@ mod tests {
         let path = source_file(&temp, "retry.mov");
         let calls = Arc::new(AtomicUsize::new(0));
         let generator_calls = calls.clone();
-        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source, _space| {
             if generator_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Err(ThumbnailError::DecodeUnavailable("first attempt".into()))
             } else {
@@ -797,7 +887,7 @@ mod tests {
         let path = source_file(&temp, "changing.mov");
         let calls = Arc::new(AtomicUsize::new(0));
         let generator_calls = calls.clone();
-        let generator: ThumbnailGenerator = Arc::new(move |_path, _source| {
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source, _space| {
             let call = generator_calls.fetch_add(1, Ordering::SeqCst);
             let red = if call == 0 { 0.25 } else { 0.75 };
             Ok(solid_frame(1, 1, [red, 0.0, 0.0, 1.0]))
@@ -827,7 +917,9 @@ mod tests {
         let image = image::load_from_memory(&bytes)
             .expect("decode thumbnail")
             .into_rgba8();
-        assert_eq!(image.get_pixel(0, 0).0, [191, 0, 0, 255]);
+        // The frame is working-space (linear), so the thumbnail is display
+        // encoded: sRGB(0.75) quantises to 225, not the raw 191.
+        assert_eq!(image.get_pixel(0, 0).0, [225, 0, 0, 255]);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 

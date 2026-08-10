@@ -176,7 +176,12 @@ impl MediaBinGpuiPanel {
         self.thumbnails.update(cx, |cache, cx| {
             for (_id, entry) in &entries {
                 if let Some(path) = &entry.resolved {
-                    cache.get_or_request(path, thumbnail_source(&entry.kind), cx);
+                    cache.get_or_request(
+                        path,
+                        thumbnail_source(&entry.kind),
+                        entry.input_color_space().0,
+                        cx,
+                    );
                 }
             }
         });
@@ -211,7 +216,12 @@ impl MediaBinGpuiPanel {
                 .iter()
                 .filter_map(|(id, entry)| {
                     let path = entry.resolved.as_ref()?;
-                    match cache.get_or_request(path, thumbnail_source(&entry.kind), cx) {
+                    match cache.get_or_request(
+                        path,
+                        thumbnail_source(&entry.kind),
+                        entry.input_color_space().0,
+                        cx,
+                    ) {
                         ThumbnailState::Ready(bytes) => Some((id.clone(), bytes)),
                         ThumbnailState::Pending | ThumbnailState::Unavailable => None,
                     }

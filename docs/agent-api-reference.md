@@ -2785,10 +2785,15 @@ ravel-cli interactive <project.ravprj>     // asks, then renders (needs a TTY
 locale_dir() -> PathBuf / init_locale()
 load_project(&Path) -> Result<ProjectFile, CliError>   // never writes
 plan_from_args(&RenderArgs) -> Result<RenderPlan, CliError>
-render_with_hooks<H: EvalWorkerHooks, F: FnOnce() -> Result<H, CliError>>(
+render_with_hooks<H: EvalWorkerHooks,
+                  F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>>(
     &RenderArgs, F, &CancelFlag, &mut dyn Reporter)
     -> Result<Summary, CliError>   // hooks are a factory: plan, then refuse
-                                   // an existing output, only then build them
+                                   // an existing output, only then build them.
+                                   // The budget is built here and given to
+                                   // both the hooks and the render worker, so
+                                   // `ravel-cli render` has one ceiling, not
+                                   // three (CACHE-3)
 render(&RenderArgs, &CancelFlag, &mut dyn Reporter)    // GpuEvalHooks
 run(Cli) -> u8                                          // the exit code
 

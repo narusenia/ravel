@@ -1515,3 +1515,40 @@ cargo test -p ravel-app --release --test viewer_roundtrip \
 効かない**ので、上積みされることはあっても差し引かれることはない。
 よって計画を凍結する条件（得が 0.835 ms を下回る）は満たされず、
 **`ZC-2` 以降へ進む**。
+## 線形 ingest の transfer LUT / float 行分割（`HIGH-32`）
+
+計測日: 2026-08-11。環境: Apple M 系 / arm64 / macOS 26.3 (25D125) /
+`--release`。1080p (1920×1080) の合成フレームを decoder の ingest ループへ
+渡し、旧経路（画素ごとの `convert`）と新経路（u8/u16 は厳密 LUT、float は
+rayon の行分割）を 1 ラウンド内で交互に測った。`ColorSpace::REC2020_PQ` は
+PQ transfer に加えて Rec.2020 → Rec.709 の既存 primaries 行列も含むため、
+整数 PQ の差にはその行列コストが残る。
+
+測定前の `uptime`:
+
+```text
+5:37  up 55 days, 18:46, 2 users, load averages: 4.96 4.83 4.30
+```
+
+測定条件は 3 ラウンド、各ラウンドで各色空間について旧/新を交互に 1 回ずつ、
+各経路・色空間あたり実行回数 3 回。LUT は計時前に warm up した。表は harness の
+3 回合計を 3 で割った 1 フレームあたり平均（ms）。
+
+| 入力色空間 | RGBA8 旧 → 新 | RGBA64 旧 → 新 | float RGBA 旧 → 新 |
+|---|---:|---:|---:|
+| sRGB | 45.188 → **6.092** | 44.173 → **7.904** | 42.865 → **9.335** |
+| Rec709 | 43.197 → **6.001** | 42.220 → **7.996** | 41.154 → **9.052** |
+| PQ (`REC2020_PQ`) | 786.345 → **696.619** | 797.042 → **700.253** | 799.694 → **139.105** |
+| Linear (`WORKING`) | 7.820 → **6.796** | 9.528 → **6.988** | 9.255 → **3.037** |
+
+再現コマンド（この順で実行）:
+
+```bash
+uptime
+cargo test -p ravel-media --features ffmpeg --release measure_ingest_transfer_cost -- --ignored --nocapture
+```
+
+ハーネスは `crates/ravel-media/src/decoder.rs` の
+`measure_ingest_transfer_cost`。旧経路をローカルに再現し、同じ入力フレームを
+新経路と交互に処理するため、スケーラ生成・HIGH-17 の出力バッファプールは
+この測定に含めていない。

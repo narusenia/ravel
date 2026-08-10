@@ -132,7 +132,22 @@ fn find_node(graph: &Graph, document: Option<&Document>, id: NodeId) -> Option<A
     })
 }
 
+/// The decode cache lives here rather than in the evaluator, so this is
+/// where it joins the worker's eviction settling (`CACHE-8`).
+///
+/// `drop_evicted` parks what the cache does not own and
+/// `take_foreign_evictions` returns exactly that plus anything parked
+/// earlier — which is the contract this method states, with no bookkeeping
+/// of its own.
 impl EvalWorkerHooks for GpuEvalHooks {
+    fn reconcile_evictions(
+        &mut self,
+        evicted: Vec<ravel_core::cache_budget::Evicted>,
+    ) -> Vec<ravel_core::cache_budget::Evicted> {
+        self.media_frames.drop_evicted(&evicted);
+        self.media_frames.take_foreign_evictions()
+    }
+
     fn sync(
         &mut self,
         evaluator: &mut ProcessorSync<'_>,

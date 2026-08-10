@@ -989,6 +989,23 @@ fn render_frames<H: EvalWorkerHooks>(
         // `FrameBuffer` downcast below as `NotAFrame` — a render must not
         // silently write whatever the fallback happens to be.
         let value = hooks.finalize(&value, &ctx).unwrap_or(value);
+        // A render worker has two caches under one budget — the node results
+        // and whatever the hooks own (the shared decode cache, `CACHE-8`) —
+        // and either can be told to give up the other's entry. An eviction
+        // nobody acts on leaves the budget counting fewer bytes than the
+        // process holds, so the ids are routed rather than skipped. There is
+        // no output-stage frame cache here: a render walks each frame once.
+        let unowned = hooks.reconcile_evictions(evaluator.take_foreign_evictions());
+        if !unowned.is_empty() {
+            evaluator.drop_evicted(&unowned);
+            let unowned = evaluator.take_foreign_evictions();
+            if !unowned.is_empty() {
+                tracing::debug!(
+                    count = unowned.len(),
+                    "eviction ids no cache in this render owns"
+                );
+            }
+        }
         let picture = value
             .downcast_ref::<FrameBuffer>()
             .ok_or(RenderError::NotAFrame { frame })?;

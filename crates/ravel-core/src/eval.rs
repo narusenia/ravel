@@ -1695,18 +1695,18 @@ impl Evaluator {
         self.store.insert(key, identity, value);
     }
 
-    /// Drop the cached values `evicted` names, ignoring ids this evaluator
-    /// does not own.
+    /// Drop the cached values `evicted` names, **parking** the ids this
+    /// evaluator does not own for [`Self::take_foreign_evictions`].
     ///
-    /// The counterpart of [`Self::take_foreign_evictions`]: the budget's
-    /// pots are shared, so the output-stage frame cache's reservations can
-    /// push node results out. Whoever receives an eviction list routes the
-    /// ids it does not own here (`cache-plan.md`, `CACHE-5`).
+    /// The budget's pots are shared, so the output-stage frame cache and the
+    /// shared decode cache can push node results out and be pushed out in
+    /// turn. Whoever receives an eviction list routes the ids it does not own
+    /// here (`cache-plan.md`, `CACHE-5`) — and because a worker has a third
+    /// cache the evaluator cannot reach (`CACHE-8`, in the hooks), what this
+    /// call cannot place is kept rather than discarded. Deciding an id
+    /// belongs to nobody is the settling pass's job, not this one's.
     pub fn drop_evicted(&mut self, evicted: &[crate::cache_budget::Evicted]) {
         self.store.drop_evicted(evicted);
-        // Anything still foreign after both caches have looked at it belongs
-        // to nobody present; the next drain reports it as such.
-        let _ = self.store.take_foreign_evictions();
     }
 
     /// Eviction entries the result cache was told about but does not own.

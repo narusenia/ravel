@@ -89,7 +89,7 @@ impl PixelFormat {
 // ===========================================================================
 
 /// Rational frame rate (numerator / denominator).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrameRate {
     pub num: u32,
     pub den: u32,
@@ -341,6 +341,36 @@ impl FrameBuffer {
             }
         }
     }
+
+    /// The same picture stored as [`PixelFormat::RgbaF16`], halving its
+    /// footprint.
+    ///
+    /// The reduction the output-stage frame cache applies when the request
+    /// that produced the frame declared a floor of [`Precision::F16`] or
+    /// below (`cache-plan.md`, `CACHE-5`): the entry then *is* what it
+    /// promised and an `F32` request misses it rather than being served a
+    /// reduced picture.
+    ///
+    /// Buffers that are not `RgbaF32` are returned unchanged — `RgbaF16` and
+    /// `Rgba8` are already at or below the target, and `MonoF32` has no
+    /// four-channel half form.
+    ///
+    /// [`Precision::F16`]: crate::eval::Precision::F16
+    pub fn to_rgba_f16(&self) -> Self {
+        if self.format != PixelFormat::RgbaF32 {
+            return self.clone();
+        }
+        let mut bytes = Vec::with_capacity(self.data.len() / 2);
+        for value in self.as_f32().iter() {
+            bytes.extend_from_slice(&f32_to_f16(*value).to_le_bytes());
+        }
+        Self {
+            width: self.width,
+            height: self.height,
+            format: PixelFormat::RgbaF16,
+            data: bytes.into(),
+        }
+    }
 }
 
 /// Convert an IEEE 754 binary16 half-float bit pattern to `f32`.
@@ -372,8 +402,7 @@ fn f16_to_f32(bits: u16) -> f32 {
 
 /// Convert an `f32` to the nearest IEEE 754 binary16 half-float bit pattern
 /// (round to nearest, ties away from zero; subnormals flush to zero).
-#[cfg(test)]
-fn f32_to_f16(value: f32) -> u16 {
+pub(crate) fn f32_to_f16(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;

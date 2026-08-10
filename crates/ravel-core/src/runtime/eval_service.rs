@@ -30,9 +30,12 @@
 //! the `on_update` callback, which is invoked on the worker thread.
 
 use crate::composition::Document;
-use crate::eval::{EvalContext, EvalError, Evaluator, PathSegment, ProcessorRegistry};
+use crate::eval::{
+    CacheIdentity, EvalContext, EvalError, Evaluator, PathSegment, ProcessorRegistry,
+};
 use crate::graph::Graph;
-use crate::id::NodeId;
+use crate::id::{CompId, NodeId};
+use crate::runtime::frame_cache::SharedFrameCache;
 use crate::types::NodeData;
 use crossbeam_channel::{Sender, unbounded};
 use std::sync::Arc;
@@ -114,6 +117,20 @@ pub struct EvalRequest {
     /// [`Evaluator`] so later targets reuse what earlier ones computed.
     /// A failing target does not stop the rest.
     pub nodes: Vec<NodeId>,
+    /// Which composition this request evaluates, for the output-stage frame
+    /// cache (`CACHE-5`).
+    ///
+    /// `Some` opts the request's **first** target — the composition output by
+    /// the convention every caller already follows — into the frame cache,
+    /// keyed by `(comp, TimeKey)`. The remaining targets are inspection
+    /// points inside the graph and go through the evaluator as before.
+    ///
+    /// `None` opts out entirely, and so does a request with a non-empty
+    /// [`path`](Self::path) or no [`document`](Self::document): a render, a
+    /// benchmark and a network preview each want their own evaluation rather
+    /// than the interactive cache, and the invalidation this layer relies on
+    /// is a document diff it has nothing to compare without a document.
+    pub comp: Option<CompId>,
     /// Ownership path the evaluation runs under; empty for the root scope.
     /// A node previewed inside a layer network passes
     /// `[PathSegment::Layer(comp, layer), ...]` so cache keys and
@@ -192,12 +209,25 @@ pub trait EvalWorkerHooks: Send + 'static {
         hint: &InvalidationHint,
     );
 
-    /// Post-process a successful evaluation output (e.g. rasterize
-    /// `Geometry` into a `FrameBuffer` for the viewer). Defaults to a
-    /// pass-through.
-    fn finalize(&mut self, value: Arc<dyn NodeData>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+    /// Post-process a successful evaluation output (e.g. read a GPU frame
+    /// back, or rasterize `Geometry` into a `FrameBuffer` for the viewer).
+    /// Defaults to a pass-through.
+    ///
+    /// **`None` means the post-processing failed.** The worker then delivers
+    /// `value` unchanged — the same picture a hook that swallowed its own
+    /// error would have produced — but **does not cache it**. That
+    /// distinction is the whole reason this returns an `Option`: the frame
+    /// cache stores the finalized form and a hit never re-runs this method,
+    /// so caching a fallback would freeze one transient failure (a readback
+    /// that lost the device, a rasterize that ran out of memory) into a
+    /// viewer that stays blank until the composition is edited.
+    fn finalize(
+        &mut self,
+        value: &Arc<dyn NodeData>,
+        ctx: &EvalContext,
+    ) -> Option<Arc<dyn NodeData>> {
         let _ = ctx;
-        value
+        Some(value.clone())
     }
 }
 
@@ -211,6 +241,7 @@ pub struct EvalService {
     tx: Option<Sender<Request>>,
     generation: u64,
     worker: Option<JoinHandle<()>>,
+    frames: SharedFrameCache,
 }
 
 impl EvalService {
@@ -258,13 +289,26 @@ impl EvalService {
         F: Fn(EvalUpdate) + Send + 'static,
     {
         let (tx, rx) = unbounded::<Request>();
+        let frames = SharedFrameCache::new(budget.clone());
+        let worker_frames = frames.clone();
         let worker = std::thread::Builder::new()
             .name("ravel-eval-service".into())
             .spawn(move || {
+                let frames = worker_frames;
+                // Kept beside the evaluator so the per-request log line can
+                // say what the caches are spending *against* — a byte figure
+                // with no ceiling next to it says nothing about pressure.
+                let worker_budget = budget.clone();
                 let mut evaluator = match budget {
                     Some(budget) => Evaluator::with_budget(budget),
                     None => Evaluator::new(),
                 };
+                // The document the frame cache last invalidated against. Kept
+                // here rather than read back from the evaluator because a
+                // structural resync clears the evaluator's copy, and the
+                // frame cache must still be able to tell an edit from a
+                // composition switch.
+                let mut cached_document: Option<Arc<Document>> = None;
                 let mut first = true;
                 while let Ok(first_req) = rx.recv() {
                     // Latest-wins: drain everything queued behind the first
@@ -314,14 +358,75 @@ impl EvalService {
                     // any document installed beforehand.
                     if let Some(document) = &req.inner.document {
                         evaluator.set_document(document.clone());
+                        // The frame cache reads the same diff: many document
+                        // commits carry `InvalidationHint::None` and rely on
+                        // it, so a hint-driven frame cache would serve those
+                        // edits a stale picture.
+                        frames.sync_document(cached_document.as_deref(), document);
+                        cached_document = Some(document.clone());
                     }
+                    // Only the first target is the composition output, and
+                    // only a root-scope request with a document has the
+                    // invalidation signal this layer needs.
+                    let cached_comp = req
+                        .inner
+                        .comp
+                        .filter(|_| req.inner.path.is_empty() && req.inner.document.is_some());
+                    let frame_identity = CacheIdentity::of_frame(&req.inner.ctx);
                     let started = std::time::Instant::now();
                     let mut results = Vec::with_capacity(req.inner.nodes.len());
                     let mut timings = Vec::new();
-                    for &node in &req.inner.nodes {
+                    for (index, &node) in req.inner.nodes.iter().enumerate() {
+                        let frame_comp = cached_comp.filter(|_| index == 0);
+                        if let Some(comp) = frame_comp
+                            && let Some(value) = frames.get(comp, &frame_identity)
+                        {
+                            // A hit skips `evaluate_at` *and* `finalize`, so
+                            // nothing is processed and no GPU frame is read
+                            // back for this target.
+                            results.push((node, Ok(value)));
+                            continue;
+                        }
+                        // `finalize` reporting failure keeps its picture but
+                        // loses its place in the cache: see the trait method.
+                        //
+                        // A hook that *panics* instead is not handled, on
+                        // purpose. The unwind ends this thread, the request
+                        // channel's receiver goes with it, and every later
+                        // `request` is silently dropped — the application has
+                        // no evaluation left at all, so the budget
+                        // over-counting a frame nobody can reach is not the
+                        // failure anyone is looking at. Catching it would put
+                        // an `UnwindSafe` bound on every hooks implementation
+                        // to protect accounting in a process that has already
+                        // lost its evaluator.
+                        let mut finalized = true;
                         let result = evaluator
                             .evaluate_at(&req.inner.path, &req.inner.graph, node, &req.inner.ctx)
-                            .map(|value| hooks.finalize(value, &req.inner.ctx));
+                            .map(|value| match hooks.finalize(&value, &req.inner.ctx) {
+                                Some(value) => value,
+                                None => {
+                                    finalized = false;
+                                    value
+                                }
+                            });
+                        // The budget's tiers are shared, so a node-result
+                        // reservation can push a cached frame out. Whoever is
+                        // handed an id it does not own routes it to the cache
+                        // that does — an eviction nobody acts on leaves the
+                        // budget counting fewer bytes than the process holds.
+                        let foreign = evaluator.take_foreign_evictions();
+                        if !foreign.is_empty() {
+                            frames.drop_evicted(&foreign);
+                        }
+                        if let (Some(comp), Ok(value)) = (frame_comp.filter(|_| finalized), &result)
+                        {
+                            frames.insert(comp, frame_identity, value.clone());
+                            let foreign = frames.take_foreign_evictions();
+                            if !foreign.is_empty() {
+                                evaluator.drop_evicted(&foreign);
+                            }
+                        }
                         // Drained per target: `evaluate_at` clears the
                         // evaluator's timing buffer on entry, so reading it
                         // only after the loop would report the last target
@@ -349,6 +454,14 @@ impl EvalService {
                     // never reach the viewer were dropped by the consumer
                     // (stale generation); a result stream that stops entirely
                     // means no requests are being posted.
+                    //
+                    // The frame-cache figures ride along because the question
+                    // they answer — "is the cache still working?" — is only
+                    // readable as a ratio over a session, not from any one
+                    // request (`CACHE-6`).
+                    let frame_stats = frames.stats();
+                    let node_stats = evaluator.cache_stats();
+                    let budget_stats = worker_budget.as_ref().map(|budget| budget.stats());
                     tracing::debug!(
                         generation = req.generation,
                         frame = req.inner.ctx.frame,
@@ -356,6 +469,19 @@ impl EvalService {
                         ok = results.iter().filter(|(_, r)| r.is_ok()).count(),
                         timings = timings.len(),
                         ?elapsed,
+                        frames_cached = frame_stats.entries,
+                        frame_hit_rate = frame_stats.hit_rate(),
+                        frame_bytes_vram = frame_stats.bytes(crate::cache_budget::Tier::Vram),
+                        frame_bytes_ram = frame_stats.bytes(crate::cache_budget::Tier::Ram),
+                        node_hit_rate = node_stats.hit_rate(),
+                        budget_ram_used =
+                            budget_stats.map(|stats| stats.used(crate::cache_budget::Tier::Ram)),
+                        budget_ram_limit =
+                            budget_stats.map(|stats| stats.limit(crate::cache_budget::Tier::Ram)),
+                        budget_vram_used =
+                            budget_stats.map(|stats| stats.used(crate::cache_budget::Tier::Vram)),
+                        budget_vram_limit =
+                            budget_stats.map(|stats| stats.limit(crate::cache_budget::Tier::Vram)),
                         "eval result sent"
                     );
                     on_update(EvalUpdate {
@@ -371,7 +497,18 @@ impl EvalService {
             tx: Some(tx),
             generation: 0,
             worker: Some(worker),
+            frames,
         }
+    }
+
+    /// The output-stage frame cache this service fills (`CACHE-5`).
+    ///
+    /// Shared with the worker, so the UI thread may read
+    /// [`cached_ranges`](SharedFrameCache::cached_ranges) for the timeline's
+    /// cache band and [`stats`](SharedFrameCache::stats) for diagnostics
+    /// while an evaluation is running.
+    pub fn frame_cache(&self) -> &SharedFrameCache {
+        &self.frames
     }
 
     /// Post an evaluation request and return its generation number.
@@ -555,6 +692,7 @@ mod tests {
         EvalRequest {
             graph,
             nodes,
+            comp: None,
             path: Vec::new(),
             ctx: ctx(),
             document: None,
@@ -949,6 +1087,7 @@ mod tests {
             .add_node(Node::new(node, "probe").with_output("out", DataTypeId::SCALAR))
             .unwrap();
         service.request(EvalRequest {
+            comp: None,
             graph,
             nodes: vec![node],
             path: Vec::new(),
@@ -989,6 +1128,7 @@ mod tests {
             .add_node(Node::new(node, "probe").with_output("out", DataTypeId::SCALAR))
             .unwrap();
         service.request(EvalRequest {
+            comp: None,
             graph,
             nodes: vec![node],
             path: Vec::new(),
@@ -1003,6 +1143,516 @@ mod tests {
             budget.stats().entries > 0,
             "the evaluated value was cached outside the budget: the \
              structural resync dropped it"
+        );
+    }
+
+    // ---- the output-stage frame cache (`CACHE-5`) --------------------------
+
+    /// Emits a frame and counts how often it was asked to.
+    struct FrameSource(Arc<AtomicUsize>);
+
+    impl NodeProcessor for FrameSource {
+        /// A composition output moves with the playhead; without this the
+        /// evaluator's own entry is `TIMELESS` and answers every frame, and
+        /// the frame cache would never be reached.
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            _scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(crate::types::FrameBuffer::from_f32(
+                2,
+                2,
+                vec![0.25; 2 * 2 * 4],
+            )))
+        }
+    }
+
+    /// Registers [`FrameSource`] for every node and counts `finalize` calls.
+    ///
+    /// `finalize` is where `GpuEvalHooks` reads a GPU frame back for the
+    /// viewer — the only GPU→CPU transfer in the chain — so counting it is
+    /// the readback counter `GPUCOMP-7` established, available headlessly.
+    struct FrameHooks {
+        processed: Arc<AtomicUsize>,
+        finalized: Arc<AtomicUsize>,
+        /// How many leading `finalize` calls report failure (`0`: none).
+        fails_until: usize,
+    }
+
+    impl EvalWorkerHooks for FrameHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ProcessorSync<'_>,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(FrameSource(self.processed.clone())));
+                }
+            }
+        }
+
+        fn finalize(
+            &mut self,
+            value: &Arc<dyn NodeData>,
+            _ctx: &EvalContext,
+        ) -> Option<Arc<dyn NodeData>> {
+            self.finalized.fetch_add(1, Ordering::SeqCst);
+            // `fails_until` finalize failures first, then success — the shape
+            // of a transient readback loss.
+            let ok = self.finalized.load(Ordering::SeqCst) > self.fails_until;
+            ok.then(|| value.clone())
+        }
+    }
+
+    fn comp_id() -> crate::id::CompId {
+        crate::id::CompId::new(1)
+    }
+
+    fn frame_document() -> Arc<Document> {
+        let mut document = Document::default();
+        document.compositions.insert(
+            comp_id(),
+            Arc::new(crate::composition::Composition::new(
+                comp_id(),
+                "c",
+                (2, 2),
+                FPS,
+                100,
+            )),
+        );
+        Arc::new(document)
+    }
+
+    /// A composition whose `Arc` differs from `frame_document`'s — what a
+    /// document edit looks like to the frame cache.
+    fn edited_document() -> Arc<Document> {
+        let mut document = Document::default();
+        let mut comp = crate::composition::Composition::new(comp_id(), "c", (2, 2), FPS, 100);
+        comp.name = "edited".into();
+        document.compositions.insert(comp_id(), Arc::new(comp));
+        Arc::new(document)
+    }
+
+    fn frame_request(
+        graph: Graph,
+        node: NodeId,
+        frame: u64,
+        document: Arc<Document>,
+        hint: InvalidationHint,
+    ) -> EvalRequest {
+        EvalRequest {
+            graph,
+            nodes: vec![node],
+            comp: Some(comp_id()),
+            path: Vec::new(),
+            ctx: EvalContext::new(frame, FPS, (2, 2)),
+            document: Some(document),
+            hint,
+        }
+    }
+
+    /// The core of `cache-plan.md`: scrubbing forward and back must not
+    /// recompute anything. `take_timings` reports only nodes that actually
+    /// ran, so an empty list *is* "no `process()` call".
+    #[test]
+    fn scrubbing_back_over_a_visited_frame_processes_nothing() {
+        let processed = Arc::new(AtomicUsize::new(0));
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: processed.clone(),
+                finalized: finalized.clone(),
+                fails_until: 0,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+
+        for frame in [0u64, 1] {
+            service.request(frame_request(
+                graph.clone(),
+                node,
+                frame,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert_eq!(processed.load(Ordering::SeqCst), 2, "two distinct frames");
+        let readbacks = finalized.load(Ordering::SeqCst);
+
+        // Back to a frame already visited.
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            document,
+            InvalidationHint::None,
+        ));
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        assert!(
+            update.timings.is_empty(),
+            "the revisited frame was recomputed: {:?}",
+            update.timings
+        );
+        assert_eq!(
+            processed.load(Ordering::SeqCst),
+            2,
+            "process() ran for a frame that was already cached"
+        );
+        // A hit skips `finalize` too, which is where a GPU-resident frame
+        // would be read back to host memory.
+        assert_eq!(
+            finalized.load(Ordering::SeqCst),
+            readbacks,
+            "a cache hit paid for a GPU→CPU transfer"
+        );
+        assert!(update.results[0].1.is_ok(), "the hit produced no value");
+        assert_eq!(service.frame_cache().stats().hits, 1);
+    }
+
+    /// A `finalize` failure must not become a permanent one.
+    ///
+    /// The cache stores the *finalized* form and a hit never re-runs
+    /// `finalize`, so caching the fallback a failed readback returns would
+    /// freeze one transient loss into a viewer that never recovers. The
+    /// failure is delivered, not stored, and the next request retries.
+    #[test]
+    fn a_failed_finalize_is_not_cached_and_is_retried() {
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: finalized.clone(),
+                // The first call fails, every later one succeeds.
+                fails_until: 1,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+
+        service.request(frame_request(
+            graph.clone(),
+            node,
+            0,
+            document.clone(),
+            InvalidationHint::None,
+        ));
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            update.results[0].1.is_ok(),
+            "the fallback picture was not delivered"
+        );
+        assert_eq!(
+            service.frame_cache().stats().entries,
+            0,
+            "the failed finalize was cached"
+        );
+
+        // Same frame again: the retry reaches `finalize`, succeeds, and only
+        // now is the frame worth keeping.
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            document,
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            finalized.load(Ordering::SeqCst),
+            2,
+            "the retry never reached finalize"
+        );
+        assert_eq!(service.frame_cache().stats().entries, 1);
+    }
+
+    /// The frame cache follows the document, not the invalidation hint: many
+    /// document commits carry `InvalidationHint::None` and rely on the
+    /// evaluator's own diff, so a hint-driven frame cache would serve those
+    /// edits a stale picture.
+    #[test]
+    fn a_document_edit_drops_the_frames_even_without_a_hint() {
+        let processed = Arc::new(AtomicUsize::new(0));
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: processed.clone(),
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+
+        service.request(frame_request(
+            graph.clone(),
+            node,
+            0,
+            frame_document(),
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(service.frame_cache().stats().entries, 1);
+
+        // Same frame, edited composition, weakest possible hint.
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            edited_document(),
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            service.frame_cache().stats().hits,
+            0,
+            "the edit was served the pre-edit frame"
+        );
+    }
+
+    /// The band's recompute guard (`CACHE-6`): an evaluation served from the
+    /// frame cache changes nothing, so the UI thread must be able to see that
+    /// without walking every entry. Scrubbing back over visited frames is
+    /// exactly when a user generates the most evaluations.
+    #[test]
+    fn a_cache_hit_leaves_the_frame_cache_version_alone() {
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+        let frames = service.frame_cache().clone();
+        let post = |service: &mut EvalService, frame: u64| {
+            service.request(frame_request(
+                graph.clone(),
+                node,
+                frame,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        };
+
+        post(&mut service, 0);
+        post(&mut service, 1);
+        let after_fill = frames.version();
+        // Back over a frame already cached: a hit, nothing stored.
+        post(&mut service, 0);
+        assert_eq!(
+            frames.version(),
+            after_fill,
+            "a cache hit moved the version and would force a band recompute"
+        );
+        // A new frame does move it.
+        post(&mut service, 2);
+        assert_ne!(frames.version(), after_fill);
+    }
+
+    /// A request that names no composition keeps today's behaviour exactly:
+    /// a render and a benchmark evaluate rather than share the interactive
+    /// cache.
+    #[test]
+    fn a_request_without_a_composition_is_not_frame_cached() {
+        let processed = Arc::new(AtomicUsize::new(0));
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: processed.clone(),
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        for _ in 0..2 {
+            let mut request = frame_request(
+                graph.clone(),
+                node,
+                0,
+                frame_document(),
+                InvalidationHint::None,
+            );
+            request.comp = None;
+            service.request(request);
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        // The evaluator's own single-entry cache still answers the repeat,
+        // so what this pins is the *frame* cache staying out of it.
+        assert!(processed.load(Ordering::SeqCst) >= 1);
+        assert_eq!(service.frame_cache().stats().entries, 0);
+        assert_eq!(service.frame_cache().stats().requests(), 0);
+    }
+
+    /// The band the Timeline draws (`CACHE-6`) is `cached_ranges` over the
+    /// frames playback has already produced: it grows as the playhead
+    /// advances and is gone the moment the composition is edited.
+    #[test]
+    fn the_cached_range_grows_with_playback_and_vanishes_on_an_edit() {
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+        let frames = service.frame_cache().clone();
+        let ranges = || frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2)));
+
+        for frame in 0..3u64 {
+            service.request(frame_request(
+                graph.clone(),
+                node,
+                frame,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                ranges(),
+                vec![0..frame + 1],
+                "the band did not follow the playhead"
+            );
+        }
+
+        // An edit to the composition, with the weakest hint there is.
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            edited_document(),
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            ranges(),
+            vec![0..1],
+            "the edit left the pre-edit frames in the band"
+        );
+    }
+
+    /// Cross-cache eviction routing: the frame cache and the node-result
+    /// cache share the budget's pots, so an eviction list one of them is
+    /// handed can name the other's entries. An id nobody drops leaves the
+    /// budget counting fewer bytes than the process holds.
+    #[test]
+    fn a_frame_insert_evicts_node_results_through_the_worker() {
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 0,
+            // Room for a couple of 2x2 RGBA f32 frames and their node-result
+            // copies, so the third request has to push something out.
+            ram_bytes: 512,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn_with_budget(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+            },
+            budget.clone(),
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+        for frame in 0..6u64 {
+            service.request(frame_request(
+                graph.clone(),
+                node,
+                frame,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+
+        let stats = budget.stats();
+        assert!(
+            stats.used(crate::cache_budget::Tier::Ram) <= 512,
+            "the RAM tier stayed over its limit: {stats:?}"
+        );
+        // What the budget believes it is holding and what the two caches
+        // actually hold have to agree, or an eviction was dropped on the
+        // floor by whichever cache did not own it. The evaluator holds one
+        // node result or none, depending on whether the frame insert of the
+        // last request pushed it out — a detail of the byte arithmetic, not
+        // of the routing under test.
+        let frames = service.frame_cache().stats().entries;
+        assert!(
+            (frames..=frames + 1).contains(&stats.entries),
+            "budget entries ({}) and cached values ({frames}) disagree: {stats:?}",
+            stats.entries
         );
     }
 }

@@ -720,28 +720,28 @@ impl ProcessorRegistry for Evaluator {
 /// drift between the pass-through path, the processing path and the layers
 /// that will key on it later (`cache-plan.md`). Every axis but
 /// [`Precision`] is matched by equality; precision is matched by order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CacheIdentity {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CacheIdentity {
     /// Quantised frame position, or [`TimeKey::TIMELESS`] when the value does
     /// not depend on time.
-    time: TimeKey,
+    pub(crate) time: TimeKey,
     /// Target output resolution.
-    resolution: (u32, u32),
+    pub(crate) resolution: (u32, u32),
     /// Composition-space coordinate basis.
-    comp_resolution: (u32, u32),
+    pub(crate) comp_resolution: (u32, u32),
     /// Frame rate of the timeline the value was produced for.
-    fps: FrameRate,
+    pub(crate) fps: FrameRate,
     /// Storage precision the value is guaranteed to hold.
-    precision: Precision,
+    pub(crate) precision: Precision,
     /// Quality stage the value was produced under. Equality, never order:
     /// a preview-grade picture is a different image, not a coarser copy of
     /// the final one, so neither stage substitutes for the other.
-    quality: Quality,
+    pub(crate) quality: Quality,
     /// The node's bypass flag when this value was produced. Toggling bypass
     /// is a metadata edit that keeps ports and wiring, so the flag is part
     /// of cache validity: a pull after a toggle must not serve the stale
     /// processed (or pass-through) result.
-    bypassed: bool,
+    pub(crate) bypassed: bool,
     /// Digest of the node's parameter expressions and what they read
     /// ([`node_expression_digest`]); `0` when the node has none.
     ///
@@ -765,7 +765,7 @@ struct CacheIdentity {
     /// which the rest of the system is wrong for ordinary reasons, and the
     /// digest covers everything a structural comparison would (see
     /// [`hash_channel_expressions`]).
-    expressions: u64,
+    pub(crate) expressions: u64,
 }
 
 impl CacheIdentity {
@@ -775,7 +775,12 @@ impl CacheIdentity {
     /// time-dependent processor or animated parameters) is specific to the
     /// quantised position, everything else is [`TimeKey::TIMELESS`] and keeps
     /// being served across frames.
-    fn of(ctx: &EvalContext, time_dependent: bool, bypassed: bool, expressions: u64) -> Self {
+    pub(crate) fn of(
+        ctx: &EvalContext,
+        time_dependent: bool,
+        bypassed: bool,
+        expressions: u64,
+    ) -> Self {
         Self {
             time: if time_dependent {
                 TimeKey::from_frame_position(ctx.sample_frame())
@@ -792,9 +797,22 @@ impl CacheIdentity {
         }
     }
 
+    /// The identity of one output-stage frame produced for `ctx`
+    /// (`CACHE-5`).
+    ///
+    /// A composition output is time-varying by construction, is never
+    /// bypassed (bypass is a *node* flag and the frame cache keys on the
+    /// composition, not on the node that happened to compile to its output),
+    /// and carries no expression digest: an expression edit reaches this
+    /// layer as a document change, which drops the whole composition's
+    /// frames.
+    pub(crate) fn of_frame(ctx: &EvalContext) -> Self {
+        Self::of(ctx, true, false, 0)
+    }
+
     /// Why a value stored under `self` cannot answer a request for `wanted`,
     /// or `None` when it can.
-    fn mismatch(&self, wanted: &Self) -> Option<CacheMiss> {
+    pub(crate) fn mismatch(&self, wanted: &Self) -> Option<CacheMiss> {
         if self.bypassed != wanted.bypassed {
             Some(CacheMiss::BypassToggled)
         } else if self.expressions != wanted.expressions {
@@ -960,7 +978,7 @@ impl CacheMiss {
 /// the handful of methods below (MED-CORE-07).
 mod cache_store {
     use super::{CacheEntry, CacheIdentity, NodeKey, PathSegment};
-    use crate::cache_budget::{CacheKind, ReservationId, SharedCacheBudget, Tier};
+    use crate::cache_budget::{CacheKind, Evicted, ReservationId, SharedCacheBudget, Tier};
     use crate::id::NodeId;
     use crate::types::NodeData;
     use std::collections::{HashMap, HashSet};
@@ -998,6 +1016,9 @@ mod cache_store {
         /// Reservation → the key that owns it, so an eviction list can be
         /// turned back into cache keys.
         by_reservation: HashMap<ReservationId, NodeKey>,
+        /// Eviction entries this store was handed that belong to another
+        /// cache. Drained by the worker (see [`Self::drop_evicted`]).
+        foreign_evictions: Vec<Evicted>,
         budget: Option<SharedCacheBudget>,
         /// Bytes cached per [`Tier`], in [`Tier::ALL`] order.
         used: [u64; 3],
@@ -1136,18 +1157,34 @@ mod cache_store {
                 },
             );
 
+            self.drop_evicted(&evicted);
+        }
+
+        /// Drop the values `evicted` names that this store owns, and park the
+        /// rest for their owner.
+        ///
+        /// The budget's pots are shared: a node-result reservation can push a
+        /// frame-cache entry out and vice versa. An id nobody drops leaves
+        /// the budget counting fewer bytes than the process holds — the exact
+        /// failure `cache_budget`'s module documentation calls the unsafe
+        /// direction — so foreign ids are buffered rather than skipped, and
+        /// the evaluation worker hands them to the cache that owns them
+        /// ([`super::Evaluator::take_foreign_evictions`]).
+        pub(super) fn drop_evicted(&mut self, evicted: &[Evicted]) {
             for entry in evicted {
                 let Some(victim) = self.by_reservation.remove(&entry.id) else {
-                    // Not one of ours. Skipping is only correct because the
-                    // owning consumer drops it — an eviction the owner
-                    // ignores leaves the budget counting fewer bytes than the
-                    // process holds. Nothing else reserves today; `CACHE-5`
-                    // and `CACHE-8` each act on the ids they own.
+                    self.foreign_evictions.push(*entry);
                     continue;
                 };
                 self.drop_value(&victim);
                 self.prune_index(&victim);
             }
+        }
+
+        /// Take the eviction entries this store was told about but does not
+        /// own, so the worker can route them to the cache that does.
+        pub(super) fn take_foreign_evictions(&mut self) -> Vec<Evicted> {
+            std::mem::take(&mut self.foreign_evictions)
         }
 
         /// Mark `key` dirty. Returns whether it was not already.
@@ -1656,6 +1693,30 @@ impl Evaluator {
     #[cfg(test)]
     fn seed_cache(&mut self, key: NodeKey, identity: CacheIdentity, value: Arc<dyn NodeData>) {
         self.store.insert(key, identity, value);
+    }
+
+    /// Drop the cached values `evicted` names, ignoring ids this evaluator
+    /// does not own.
+    ///
+    /// The counterpart of [`Self::take_foreign_evictions`]: the budget's
+    /// pots are shared, so the output-stage frame cache's reservations can
+    /// push node results out. Whoever receives an eviction list routes the
+    /// ids it does not own here (`cache-plan.md`, `CACHE-5`).
+    pub fn drop_evicted(&mut self, evicted: &[crate::cache_budget::Evicted]) {
+        self.store.drop_evicted(evicted);
+        // Anything still foreign after both caches have looked at it belongs
+        // to nobody present; the next drain reports it as such.
+        let _ = self.store.take_foreign_evictions();
+    }
+
+    /// Eviction entries the result cache was told about but does not own.
+    ///
+    /// **The caller must hand these to the cache that does.** The budget has
+    /// already released their bytes, so an entry nobody drops makes the
+    /// budget under-count real memory and the limit stops being a limit
+    /// (`cache_budget`'s module documentation).
+    pub fn take_foreign_evictions(&mut self) -> Vec<crate::cache_budget::Evicted> {
+        self.store.take_foreign_evictions()
     }
 
     /// Zero the hit / miss tallies, keeping the cached values.

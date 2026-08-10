@@ -157,18 +157,26 @@ impl EvalWorkerHooks for GpuEvalHooks {
     /// chain until Phase 4 moves display to the GPU), and `Geometry`
     /// outputs are rasterized with the same ad-hoc parameters the
     /// NodeEditor previously used on the UI thread.
-    fn finalize(&mut self, value: Arc<dyn NodeData>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+    ///
+    /// A failure returns `None` rather than the untouched input: the caller
+    /// still shows that value, but must not cache it, or one lost readback
+    /// would be served back on every later hit and blank the viewer for good.
+    fn finalize(
+        &mut self,
+        value: &Arc<dyn NodeData>,
+        ctx: &EvalContext,
+    ) -> Option<Arc<dyn NodeData>> {
         if let Some(frame) = value.downcast_ref::<GpuFrameBuffer>() {
             return match frame.to_frame_buffer() {
-                Ok(fb) => Arc::new(fb),
+                Ok(fb) => Some(Arc::new(fb)),
                 Err(err) => {
                     tracing::warn!(%err, "viewer readback failed");
-                    value
+                    None
                 }
             };
         }
         if value.downcast_ref::<Geometry>().is_none() {
-            return value;
+            return Some(value.clone());
         }
         let rast_node = ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
             .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
@@ -186,10 +194,10 @@ impl EvalWorkerHooks for GpuEvalHooks {
             &ravel_core::eval::ResolvedParams::default(),
             &mut scope,
         ) {
-            Ok(fb) => fb,
+            Ok(fb) => Some(fb),
             Err(err) => {
-                tracing::warn!(%err, "viewer rasterize failed; passing geometry through");
-                value
+                tracing::warn!(%err, "viewer rasterize failed");
+                None
             }
         }
     }
@@ -217,7 +225,8 @@ mod tests {
             ravel_core::types::Vec2(10.0, 0.0),
             ravel_core::types::Vec2(10.0, 10.0),
         ]);
-        let out = hooks.finalize(Arc::new(geo), &ctx());
+        let value: Arc<dyn NodeData> = Arc::new(geo);
+        let out = hooks.finalize(&value, &ctx()).expect("rasterize succeeded");
         assert!(out.downcast_ref::<FrameBuffer>().is_some());
     }
 
@@ -230,7 +239,8 @@ mod tests {
         let cpu = FrameBuffer::from_f32(4, 4, vec![0.5f32; 4 * 4 * 4]);
         let frame = GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu).expect("upload");
 
-        let out = hooks.finalize(Arc::new(frame), &ctx());
+        let value: Arc<dyn NodeData> = Arc::new(frame);
+        let out = hooks.finalize(&value, &ctx()).expect("readback succeeded");
         let fb = out
             .downcast_ref::<FrameBuffer>()
             .expect("viewer boundary yields a CPU frame");

@@ -369,11 +369,15 @@ API から観測できる（ここまでが目標構成。現状は下記「実�
 > バイト上限と LRU 退避、テクスチャプールの従属、`Evaluator::cache_stats()`
 > による件数・理由別ミス・層別バイトの観測は実装済み（`CACHE-3`）。
 > シェーダ / パイプラインキャッシュ、メディアのデコーダ・静止画キャッシュ、
-> サムネイルのディスクキャッシュは予算の外にある。**三層のフレーム
-> キャッシュ（出力段）・ディスク層・共有デコードキャッシュ・
-> キャッシュ済み範囲の API は未実装**で、担当は
-> `docs/implementation/cache-plan.md` の `CACHE-5` / `CACHE-6` /
-> `CACHE-8` / `CACHE-11`。
+> サムネイルのディスクキャッシュは予算の外にある。
+> 出力段のフレームキャッシュ（`ravel_core::runtime::frame_cache`）とその
+> キャッシュ済み範囲の API（`cached_ranges`、Timeline のキャッシュ帯）は
+> 実装済み（`CACHE-5` / `CACHE-6`）。**ただし今エントリが載るのは RAM 層だけ**
+> — ビューア向けの `finalize` が GPU フレームを読み戻すので、保持されるのは
+> ホストメモリ側の値になる。層は保存する値の `is_gpu_resident()` で決まるので、
+> 表示が GPU テクスチャから行われるようになれば VRAM 層がそのまま動き出す。
+> **ディスク層・共有デコードキャッシュは未実装**で、担当は
+> `docs/implementation/cache-plan.md` の `CACHE-8` / `CACHE-11`。
 > 予算の上限は**起動時に `CacheBudgetConfig` の既定値から作られる**。
 > `settings.toml` の `[cache]` はパースとマージまでで実行時には届かず
 > （設定レイヤー全体が未接続。`issues/medium/app-shell.md` の `MED-APP-10`）、

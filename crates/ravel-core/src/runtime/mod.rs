@@ -18,6 +18,7 @@ pub mod channels;
 pub mod decode_pool;
 pub mod eval_pool;
 pub mod eval_service;
+pub mod frame_cache;
 pub mod io_runtime;
 pub mod playback;
 pub mod render;
@@ -29,6 +30,7 @@ pub use eval_service::{
     EvalOutput, EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
     ProcessorSync,
 };
+pub use frame_cache::{FrameCache, FrameCacheStats, SharedFrameCache};
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};
 pub use playback::{LoopRange, PlaybackClock, PlaybackState};
 pub use render::{

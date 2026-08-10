@@ -281,6 +281,9 @@ pub struct ProjectState {
     /// compile error) advance this to the post-`cancel_pending` generation
     /// so an in-flight older result cannot overwrite them.
     published_generation: u64,
+    /// `SharedFrameCache::version()` the Timeline's cache band was last
+    /// computed at, so an evaluation that changed nothing skips the walk.
+    published_band_version: Option<u64>,
     /// Bumped only by changes that can add or remove nodes: a `Structural`
     /// document change, a document replacement, and a composition switch.
     ///
@@ -482,6 +485,7 @@ impl ProjectState {
             load_request: 0,
             mirror_epoch: 0,
             published_generation: 0,
+            published_band_version: None,
             structure_epoch: 0,
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
@@ -1225,6 +1229,12 @@ impl ProjectState {
     fn document_changed(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
         self.compiled = None;
         self.mirror_epoch += 1;
+        // The band goes now, not when the next evaluation lands: the panel
+        // repaints from the notify at the bottom of this function, and a band
+        // published before the edit would claim frames the frame cache is
+        // about to drop. It comes back frame by frame as evaluations
+        // complete.
+        self.clear_cache_band(cx);
         // Only a topology change can add or remove nodes; a parameter edit
         // (a scrub drag, one call per mouse move) leaves the node set alone.
         if matches!(hint, InvalidationHint::Structural) {
@@ -1298,6 +1308,10 @@ impl ProjectState {
                 }
                 let frame = self.viewer_blank(cx);
                 cx.set_global(frame);
+                // Nothing will be evaluated, so nothing will republish the
+                // band: it has to be cleared on the way out or an emptied
+                // composition keeps the band of the one before it forever.
+                self.clear_cache_band(cx);
                 return;
             }
             Err(err) => {
@@ -1310,6 +1324,9 @@ impl ProjectState {
                 }
                 let frame = self.viewer_error(err.to_string().into(), cx);
                 cx.set_global(frame);
+                // Same reason as the blank path above: no evaluation follows
+                // a composition that does not compile.
+                self.clear_cache_band(cx);
                 return;
             }
         };
@@ -1334,30 +1351,41 @@ impl ProjectState {
         let Some(comp) = crate::panels::active_composition_in(&document, cx) else {
             return Ok(None);
         };
-        let fps = comp.frame_rate;
-        let resolution = self.viewer_resolution.apply(comp.resolution);
-        let comp_resolution = comp.resolution;
+        let ctx = self.viewer_eval_context(comp, frame);
         let Some(compiled) = self.compiled_root(cx)? else {
             return Ok(None);
         };
         Ok(Some(EvalRequest {
+            comp: Some(comp.id),
             graph: compiled.graph.clone(),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
             // reads that position, and inspection targets are appended after
             // it rather than reordering the viewer's.
             nodes: vec![compiled.output],
             path: Vec::new(),
-            // The interactive path is the one place that opts down the
-            // quality axis: the viewer wants a responsive picture, not the
-            // sample count an export pays for. The preview factor above is
-            // an independent axis — it scales the buffer, this counts
-            // samples — so the two combine freely.
-            ctx: EvalContext::new(frame, fps, resolution)
-                .with_comp_resolution(comp_resolution)
-                .with_quality(Quality::Preview),
+            ctx,
             document: Some(document),
             hint: InvalidationHint::None,
         }))
+    }
+
+    /// The evaluation context the viewer asks for, at `frame`.
+    ///
+    /// One place, because the frame cache keys on every axis of it: the band
+    /// (`CACHE-6`) has to ask with the *same* context the request carries, or
+    /// it reports entries a scrub would miss. The interactive path is also
+    /// the one place that opts down the quality axis — the viewer wants a
+    /// responsive picture, not the sample count an export pays for. The
+    /// preview resolution factor is an independent axis (it scales the
+    /// buffer, quality counts samples), so the two combine freely.
+    fn viewer_eval_context(&self, comp: &Composition, frame: u64) -> EvalContext {
+        EvalContext::new(
+            frame,
+            comp.frame_rate,
+            self.viewer_resolution.apply(comp.resolution),
+        )
+        .with_comp_resolution(comp.resolution)
+        .with_quality(Quality::Preview)
     }
 
     /// `Ok(None)`: nothing to draw (no active composition, or no active
@@ -1507,6 +1535,53 @@ impl ProjectState {
         );
         self.published_generation = update.generation;
         cx.set_global(frame);
+        self.publish_cache_band(cx);
+    }
+
+    /// Republish the active composition's cached frame ranges for the
+    /// Timeline's cache band (`CACHE-6`).
+    ///
+    /// Called when an evaluation completes, which is the only moment the
+    /// frame cache can have grown, and asked at the resolution and precision
+    /// the viewer is *currently* requesting — a band drawn from another
+    /// factor's entries would claim frames a scrub would miss.
+    ///
+    /// [`crate::panels::set_cache_band`] compares before it writes, so an
+    /// evaluation that added nothing (a cache hit, a failed target) does not
+    /// touch the global at all. Nothing observes it either: the Timeline
+    /// reads it while repainting for the playhead or the document, which is
+    /// what keeps the band off the repaint budget (`HIGH-21`).
+    fn publish_cache_band(&mut self, cx: &mut Context<Self>) {
+        let Some(eval) = self.eval.as_ref() else {
+            return;
+        };
+        // `cached_ranges` walks every cached frame and sorts. An evaluation
+        // served from the cache added none, so the version guard turns the
+        // scan into one atomic read for exactly the requests a user makes
+        // fastest — scrubbing back over frames already visited.
+        let version = eval.frame_cache().version();
+        if self.published_band_version == Some(version) {
+            return;
+        }
+        let Some(comp) = self.active_composition(cx) else {
+            return;
+        };
+        let id = comp.id;
+        // The very context the next request will carry, so the band and the
+        // hit test agree on every axis.
+        let ranges = eval
+            .frame_cache()
+            .cached_ranges(id, &self.viewer_eval_context(comp, 0));
+        self.published_band_version = Some(version);
+        crate::panels::set_cache_band(id, ranges, cx);
+    }
+
+    /// Drop the Timeline's cache band and the version it was computed at, so
+    /// the next evaluation republishes it even if the frame cache did not
+    /// change in between (an edit to another composition, say).
+    fn clear_cache_band(&mut self, cx: &mut App) {
+        self.published_band_version = None;
+        crate::panels::clear_cache_band(cx);
     }
 
     /// Frame rate and duration of the active composition, for the playback
@@ -1645,6 +1720,7 @@ mod tests {
             .add_node(Node::new(node, "test.frame").with_output("out", DataTypeId::FRAME_BUFFER))
             .expect("graph");
         service.request(EvalRequest {
+            comp: None,
             graph,
             nodes: vec![node],
             path: Vec::new(),
@@ -1687,6 +1763,53 @@ mod tests {
             Some("ravel-eval-service"),
             "the conversion must run on the evaluation worker"
         );
+    }
+
+    /// The paths where **no evaluation follows** — an emptied composition, one
+    /// that stopped compiling — have to clear the band on their way out *and*
+    /// forget the frame-cache version it was published at.
+    ///
+    /// Forgetting the version is the half that is easy to miss: without it,
+    /// returning to a fully cached composition is all cache hits, the version
+    /// never moves, and `publish_cache_band`'s recompute guard skips forever —
+    /// the band would be gone for the rest of the session (`CACHE-6`).
+    #[gpui::test]
+    fn a_path_with_no_evaluation_clears_the_band_and_its_version(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let comp_id = project.read_with(cx, |project, _| {
+            project.document().root_comp.expect("root comp")
+        });
+        cx.update(|cx| {
+            crate::panels::set_active_composition(Some(comp_id), cx);
+            crate::panels::set_cache_band(comp_id, vec![0..10, 20..30], cx);
+        });
+        project.update(cx, |project, _cx| {
+            project.published_band_version = Some(7);
+        });
+
+        // No active composition: `build_viewer_request` returns `Ok(None)`,
+        // the viewer is blanked, and nothing is ever evaluated.
+        cx.update(|cx| crate::panels::set_active_composition(None, cx));
+        project.update(cx, |project, cx| {
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
+
+        // Read the band back through the composition it belonged to.
+        cx.update(|cx| {
+            crate::panels::set_active_composition(Some(comp_id), cx);
+            assert!(
+                crate::panels::cache_band(cx).is_empty(),
+                "the blank path kept the band of the composition before it"
+            );
+        });
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project.published_band_version, None,
+                "the band was cleared but its version was latched: it can \
+                 never be republished from a cache that stops changing"
+            );
+        });
     }
 
     #[gpui::test]

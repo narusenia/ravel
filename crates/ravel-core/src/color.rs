@@ -704,6 +704,16 @@ impl CubeLut {
         (self.domain_min, self.domain_max)
     }
 
+    /// The grid entries in the file's order — red fastest, then green, then
+    /// blue, so entry `r + size * (g + size * b)` is the point `(r, g, b)`.
+    ///
+    /// Exposed for `CM-7`, which uploads the table to the GPU as a texture and
+    /// interpolates it in the display shader. [`Self::sample`] stays the
+    /// definition the shader is checked against.
+    pub fn entries(&self) -> &[[f32; 3]] {
+        &self.entries
+    }
+
     /// Sample the table with trilinear interpolation.
     ///
     /// Inputs outside the domain are clamped to the nearest edge of the

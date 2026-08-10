@@ -167,10 +167,19 @@ pub fn input_texture_layout_entry(binding: u32) -> BindingDesc {
 }
 
 /// Layout slot for the write-only storage texture a compute pass renders into.
+///
+/// `Rgba32Float`, the format every filtering pass writes. The one pass that
+/// writes something else is the display transform, which states its own format
+/// ([`output_storage_layout_entry_of`]).
 pub fn output_storage_layout_entry(binding: u32) -> BindingDesc {
+    output_storage_layout_entry_of(binding, TextureFormat::Rgba32Float)
+}
+
+/// Layout slot for a write-only storage texture of a stated format.
+pub fn output_storage_layout_entry_of(binding: u32, format: TextureFormat) -> BindingDesc {
     BindingDesc::new(
         binding,
-        BindingKind::OutputStorageTexture,
+        BindingKind::OutputStorageTexture(format),
         ShaderVisibility::COMPUTE,
     )
 }
@@ -212,7 +221,7 @@ mod shader_translation {
     /// How many built-in WGSL files exist. Pinned so that adding one is a
     /// visible change here rather than a silent gap: the walk above picks a new
     /// file up automatically, and this line makes the author confirm it.
-    const SHADER_COUNT: usize = 11;
+    const SHADER_COUNT: usize = 12;
 
     /// Every `.wgsl` under [`SHADER_DIRS`], sorted so failures name a stable
     /// order.

@@ -324,6 +324,7 @@ in_use = "このアセットはプロジェクトのレイヤーで使用中で�
 [viewer]
 no_output = "出力なし — コンポジションにレイヤーを追加"
 eval_error = "評価エラー"
+display_transform_failed = "表示変換が実行されなかったため、このフレームを表示できない。詳細はログを参照"
 fit = "フィット"
 actual_size = "等倍 (100%)"
 grid = "グリッド"

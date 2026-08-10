@@ -46,7 +46,7 @@ fn invert_shader_runs_on_gpu() {
         BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
         BindingDesc::new(
             1,
-            BindingKind::OutputStorageTexture,
+            BindingKind::OutputStorageTexture(TextureFormat::Rgba32Float),
             ShaderVisibility::COMPUTE,
         ),
     ];

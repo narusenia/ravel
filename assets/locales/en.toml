@@ -329,6 +329,7 @@ in_use = "This asset is used by project layers"
 [viewer]
 no_output = "No output — add a layer to the composition"
 eval_error = "Evaluation error"
+display_transform_failed = "The display transform did not run — the viewer cannot show this frame. See the log."
 fit = "Fit"
 actual_size = "Actual size (100%)"
 grid = "Grid"

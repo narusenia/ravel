@@ -12,6 +12,8 @@ pub mod blur;
 pub mod color_correct;
 pub mod comp;
 pub mod constant;
+pub mod display;
+pub use display::{DisplayFrame, DisplayTransform};
 pub mod eval_hooks;
 pub use eval_hooks::GpuEvalHooks;
 pub mod field;

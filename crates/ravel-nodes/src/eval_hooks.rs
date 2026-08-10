@@ -26,12 +26,19 @@ use ravel_core::id::NodeId;
 use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
 use ravel_core::types::NodeData;
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+
+use crate::display::DisplayTransform;
 use std::sync::{Arc, Mutex};
 
 pub struct GpuEvalHooks {
     gpu: GpuContext,
     shaders: ShaderManager,
     pool: Arc<Mutex<TexturePool>>,
+    /// The viewer's display transform (`CM-7`), present only when the host
+    /// asked for one. A render must not have it: the export path encodes with
+    /// `to_output_space` while the frame is still float, and it has no
+    /// business inheriting the viewer's display LUT.
+    display: Option<DisplayTransform>,
 }
 
 impl GpuEvalHooks {
@@ -40,7 +47,12 @@ impl GpuEvalHooks {
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
         let pool = crate::shared_texture_pool(&gpu);
-        Self { gpu, shaders, pool }
+        Self {
+            gpu,
+            shaders,
+            pool,
+            display: None,
+        }
     }
 
     /// Hooks whose texture pool answers to `budget`.
@@ -51,7 +63,37 @@ impl GpuEvalHooks {
     pub fn with_budget(gpu: GpuContext, budget: SharedCacheBudget) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
         let pool = crate::shared_texture_pool_with_budget(&gpu, budget);
-        Self { gpu, shaders, pool }
+        Self {
+            gpu,
+            shaders,
+            pool,
+            display: None,
+        }
+    }
+
+    /// Finish frames for a screen rather than for a file: [`Self::finalize`]
+    /// then yields a [`DisplayFrame`](crate::DisplayFrame) instead of a linear
+    /// [`FrameBuffer`](ravel_core::types::FrameBuffer).
+    ///
+    /// The interactive viewer opts in; the export worker and `ravel-cli` do
+    /// not (`CM-7`).
+    ///
+    /// Compiles nothing: the shader is validated and its pipeline created on
+    /// the first frame, which happens on the evaluation worker. A host calls
+    /// this from wherever it builds its hooks — `ProjectState::new` runs on
+    /// the UI thread, and shader validation plus pipeline creation is not
+    /// work that belongs there.
+    pub fn with_display_transform(mut self) -> Self {
+        self.display = Some(DisplayTransform::new());
+        self
+    }
+
+    /// Install (or clear) the user's display LUT. `None` restores the built-in
+    /// transfer function. No-op on hooks with no display transform.
+    pub fn set_display_lut(&mut self, lut: Option<ravel_core::color::CubeLut>) {
+        if let Some(display) = &mut self.display {
+            display.set_lut(lut);
+        }
     }
 }
 
@@ -152,20 +194,46 @@ impl EvalWorkerHooks for GpuEvalHooks {
         }
     }
 
-    /// Adapts evaluation outputs for the Viewer boundary: GPU-resident
-    /// frames are read back exactly once here (the only readback in the
-    /// chain until Phase 4 moves display to the GPU), and `Geometry`
-    /// outputs are rasterized with the same ad-hoc parameters the
-    /// NodeEditor previously used on the UI thread.
+    /// Adapts evaluation outputs for the Viewer boundary: `Geometry` outputs
+    /// are rasterized with the same ad-hoc parameters the NodeEditor
+    /// previously used on the UI thread, and the resulting frame leaves the
+    /// GPU exactly once — as display bytes when a display transform is
+    /// installed (`CM-7`), otherwise as the linear frame the render exits
+    /// encode themselves.
     ///
     /// A failure returns `None` rather than the untouched input: the caller
     /// still shows that value, but must not cache it, or one lost readback
     /// would be served back on every later hit and blank the viewer for good.
+    /// The host reads an un-finalized frame as "the display transform did not
+    /// run" and surfaces it as an error rather than drawing linear light.
     fn finalize(
         &mut self,
         value: &Arc<dyn NodeData>,
         ctx: &EvalContext,
     ) -> Option<Arc<dyn NodeData>> {
+        let value = self.rasterize_geometry(value, ctx)?;
+        // Frames only: a `Scalar` target has nothing to display and passes
+        // straight through.
+        if self.display.is_some() && crate::gpu_util::frame_size(value.as_ref()).is_some() {
+            // Split borrows: the transform compiles its pipeline through the
+            // shader manager the hooks own, and both live on this worker.
+            let Self {
+                gpu,
+                shaders,
+                pool,
+                display,
+            } = self;
+            let display = display.as_mut().expect("checked above");
+            return match display.run(gpu, shaders, pool, value.as_ref()) {
+                Ok(frame) => Some(Arc::new(frame)),
+                // No CPU rescue: a second implementation of the transform is
+                // exactly what `CM-7` removed. The host shows the error.
+                Err(err) => {
+                    tracing::warn!(%err, "viewer display transform failed");
+                    None
+                }
+            };
+        }
         if let Some(frame) = value.downcast_ref::<GpuFrameBuffer>() {
             return match frame.to_frame_buffer() {
                 Ok(fb) => Some(Arc::new(fb)),
@@ -175,6 +243,19 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 }
             };
         }
+        Some(value)
+    }
+}
+
+impl GpuEvalHooks {
+    /// Rasterize a `Geometry` output so the viewer has something to draw.
+    /// Any other value passes through untouched; a failed rasterization is
+    /// `None`, which keeps it out of the frame cache.
+    fn rasterize_geometry(
+        &self,
+        value: &Arc<dyn NodeData>,
+        ctx: &EvalContext,
+    ) -> Option<Arc<dyn NodeData>> {
         if value.downcast_ref::<Geometry>().is_none() {
             return Some(value.clone());
         }

@@ -714,6 +714,11 @@ Vulkan は `timeout_ns = 0`）、かつ**タイムアウトしても wgpu はフ
 
 ### 表示変換を評価ワーカーへ移した後（GPUCOMP-9 / HIGH-08）
 
+> **`CM-7` 以降、このハーネスは無い。** 表示変換は GPU（リードバック前の
+> 1 パス）へ移り、`ViewerImage::from_frame_buffer` と
+> `measure_display_conversion_cost` / `reference_bgra` は削除された。
+> 以下は**当時の記録**であって、再現できるコマンドではない。
+
 引き受けた issue:
 [HIGH-08](../../issues/closed/HIGH-08-ui-thread-f32-to-bgra-conversion.md)。
 計測日: 2026-08-05。環境: Apple M5 / macOS 26.3 / release ビルド。
@@ -1340,6 +1345,11 @@ BGRA u8 の毎ピクセル CPU ループ。20 回の中央値）:
 
 ### Viewer の変換関数全体（`from_frame_buffer`、40 回平均）
 
+> **`CM-7` 以降、このハーネスは無い。** 表示変換は GPU（リードバック前の
+> 1 パス）へ移り、`ViewerImage::from_frame_buffer` と
+> `measure_display_conversion_cost` / `reference_bgra` は削除された。
+> 以下は**当時の記録**であって、再現できるコマンドではない。
+
 | 経路 | 1920×1080 | 1024×576 |
 |---|---|---|
 | 旧（直列 + `powf`） | 38.2–39.3 ms | 10.8–11.3 ms |
@@ -1382,3 +1392,37 @@ BGRA u8 の毎ピクセル CPU ループ。20 回の中央値）:
   等しく乗る。**見るべきは比で、絶対値ではない**
 - rayon の取り分は特に負荷に依存する。loadavg 10 での 4.3× は下限側の値で、
   空いた機体ではこれより伸びる
+
+## 表示変換を GPU へ移したあと（`CM-7`）
+
+計測日: 2026-08-10。環境: Apple M 系 / macOS / `--release`。ハーネス:
+`crates/ravel-nodes/tests/display_transform.rs` の
+`measure_display_transform_cost`（`#[ignore]`、
+`cargo test -p ravel-nodes --release --test display_transform
+measure_display_transform_cost -- --ignored --nocapture`）。
+1920×1080、1 ラウンドで旧経路と新経路を**交互に**測って 20 ラウンドの平均、
+3 回実行。**loadavg 10.8〜14.2**（この機体は静穏にならない）。
+
+旧経路は `CM-7` が置き換えたものを逐語で再現してある: リードバック
+（1 画素 16 バイト）＋ `to_display_rgba8` の rayon ループ。新経路は
+`DisplayTransform::run` — 1 ディスパッチ＋ 1 画素 4 バイトのリードバック。
+
+**上の「表示変換のコスト（フェーズ CM 完了時）」の 3.71〜3.90 ms と直接
+比べないこと。** あちらは `from_frame_buffer` の中だけを測っていて
+リードバックを含まない。`CM-7` はリードバック量そのものを変えるので、
+ここでの比較対象は**フレームが画面に届くまで**（読み戻し＋変換）にしてある。
+
+| 入力の在処 | 旧 | 新 | 比 |
+|---|---|---|---|
+| **GPU 常駐**（Viewer の通常経路） | 5.98 / 6.09 / 7.18 ms | 2.01 / 2.04 / 1.89 ms | **2.97× / 2.99× / 3.79×** |
+| CPU 常駐 | 3.40 / 3.70 / 4.32 ms | 6.16 / 6.17 / 5.90 ms | 0.55× / 0.60× / 0.73× |
+
+**CPU 常駐のフレームは遅くなった。** 旧経路はアップロードを払わなかったが、
+新経路は 1 画素 16 バイトを上げてから 4 バイトを下ろす。**この事実ごと
+残す**: 合成チェーン（`comp.merge` / `comp.transform` / `comp.opacity`）と
+`rasterize` は GPU 実装を持つので Viewer の出力は通常 GPU 常駐だが、
+出力ノードが CPU 専用の処理系だと 1080p でおよそ 1.7 倍の時間が掛かる。
+変換点を 2 つに戻せば避けられるが、それは `CM-7` が消したものそのもの。
+
+**リードバックの往復は残っている。** 削れたのは画素ごとの CPU 計算と
+転送量であって、GPU → CPU → GPUI の往復ではない（`HIGH-09` の残り）。

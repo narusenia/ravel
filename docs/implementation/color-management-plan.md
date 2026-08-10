@@ -1,7 +1,10 @@
 # カラーマネジメント実装計画（REQ-RENDER-003 / REQ-CORE-009）
 
-> **Status**: `CM-1`〜`CM-5` 実装済み（骨格はリニア化まで完了）/
-> `CM-6`〜`CM-8`（`ocio-rs` の導入以降）は未着手 — 2026-08-06 起案
+> **Status**: `CM-1`〜`CM-5` 実装済み（骨格はリニア化まで完了）、
+> `CM-7` 実装済み（表示変換を GPU へ、`.cube` 対応）/
+> `CM-6` は見送り（`ocio-rs` を採らない判断、2026-08-10）/
+> `CM-9`（`.ocio` 読み込み）と `CM-8`（カラー設定 UI）は未着手
+> — 2026-08-06 起案
 
 規範は [`../specifications/color-management.md`](../specifications/color-management.md)。
 以下の「問題」節は着手前の状況の記録として残してある。
@@ -389,7 +392,9 @@ Transfer  : Linear | Srgb | Rec709 | Pq
 依存は **`CM-5`**（`CM-6` ではない）。OCIO 抜きで着手できる。
 
 - **表示変換を wgpu の経路で行い、CPU の per-pixel 処理を無くす。**
-  今の変換は `ViewerImage::from_frame_buffer` の CPU 側にある
+  ~~今の変換は `ViewerImage::from_frame_buffer` の CPU 側にある~~ →
+  実装済み。`ravel_nodes::DisplayTransform` が `finalize` の中、
+  リードバックの手前で 1 パス掛ける
 - **3D LUT である必要は今は無い。** 現在の変換は伝達関数だけで原色行列は
   恒等なので、**シェーダで直接計算すれば足りる**（GPU の `pow` は安く、
   LUT の補間誤差も入らない）。3D LUT が要るのは任意の変換が来る `CM-9` から

@@ -704,11 +704,29 @@ impl CubeLut {
         (self.domain_min, self.domain_max)
     }
 
+    /// The grid entries in the file's order — red fastest, then green, then
+    /// blue, so entry `r + size * (g + size * b)` is the point `(r, g, b)`.
+    ///
+    /// Exposed for `CM-7`, which uploads the table to the GPU as a texture and
+    /// interpolates it in the display shader. [`Self::sample`] stays the
+    /// definition the shader is checked against.
+    pub fn entries(&self) -> &[[f32; 3]] {
+        &self.entries
+    }
+
     /// Sample the table with trilinear interpolation.
     ///
     /// Inputs outside the domain are clamped to the nearest edge of the
     /// cube — a LUT has no values beyond its own extent, and extrapolating a
     /// grade is how highlights turn into garbage.
+    ///
+    /// The cell index is clamped to `size - 2` so that `base + 1` is always a
+    /// real grid point, and the fraction is then measured **from the clamped
+    /// base** rather than from the unclamped floor. Measuring it from the floor
+    /// is what made the top of the domain collapse: at `coord == size - 1` the
+    /// base clamped down one cell while the fraction stayed `0`, so a size-3
+    /// identity LUT mapped `1.0` to `0.5`. Only size-2 tables were covered, and
+    /// there the two happen to agree.
     pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
         let last = (self.size - 1) as f32;
         let mut base = [0usize; 3];
@@ -721,13 +739,9 @@ impl CubeLut {
                 (rgb[axis] - self.domain_min[axis]) / span
             };
             let coord = (normalized.clamp(0.0, 1.0) * last).clamp(0.0, last);
-            let floor = coord.floor();
-            base[axis] = (floor as usize).min(self.size - 2.min(self.size - 1));
-            frac[axis] = coord - floor;
-            if base[axis] + 1 >= self.size {
-                base[axis] = self.size - 1;
-                frac[axis] = 0.0;
-            }
+            // `parse` refuses a size below 2, so `size - 2` cannot wrap.
+            base[axis] = (coord as usize).min(self.size - 2);
+            frac[axis] = coord - base[axis] as f32;
         }
 
         let mut out = [0f32; 3];
@@ -1365,6 +1379,41 @@ DOMAIN_MAX 1.0 1.0 1.0
         assert!((sampled[0] - 0.75).abs() < 1e-6, "{sampled:?}");
         assert!((sampled[1] - 0.5).abs() < 1e-6, "{sampled:?}");
         assert!((sampled[2] - 0.75).abs() < 1e-6, "{sampled:?}");
+    }
+
+    /// A size-3 identity table has to be an identity at **both** ends. The top
+    /// of the domain used to collapse onto the second-to-last grid point
+    /// (`1.0` came back as `0.5`) because the interpolation fraction was
+    /// measured from the unclamped floor; only size-2 tables were covered, and
+    /// there the clamp is a no-op.
+    #[test]
+    fn cube_lut_reaches_the_last_grid_point() {
+        let mut text = String::from("LUT_3D_SIZE 3\n");
+        for b in 0..3 {
+            for g in 0..3 {
+                for r in 0..3 {
+                    let f = |v: usize| v as f32 / 2.0;
+                    text.push_str(&format!("{} {} {}\n", f(r), f(g), f(b)));
+                }
+            }
+        }
+        let lut = CubeLut::parse(&text).unwrap();
+        for probe in [
+            [0.0f32, 0.0, 0.0],
+            [0.25, 0.5, 0.75],
+            [0.5, 0.5, 0.5],
+            [1.0, 1.0, 1.0],
+            [2.0, 1.0, 0.0],
+        ] {
+            let expect = probe.map(|v: f32| v.clamp(0.0, 1.0));
+            let sampled = lut.sample(probe);
+            for (a, b) in sampled.iter().zip(expect.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "identity LUT moved {probe:?} to {sampled:?}"
+                );
+            }
+        }
     }
 
     #[test]

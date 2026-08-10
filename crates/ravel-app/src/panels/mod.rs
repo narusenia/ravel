@@ -16,15 +16,14 @@ pub mod render_queue;
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
-use ravel_core::color::to_display_rgba8;
 use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::network::NetworkError;
 use ravel_core::runtime::playback::LoopRange;
-use ravel_core::types::FrameBuffer;
 use ravel_dock::PaneContent;
 use ravel_i18n::t;
+use ravel_nodes::DisplayFrame;
 use ravel_ui::layout::{PanelInstance, PanelInstanceId};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::timeline::BpmGrid;
@@ -750,7 +749,7 @@ impl ConversionThread {
 /// came from (which may be smaller than the composition).
 ///
 /// Produced on the evaluation worker thread — `ProjectState` wires
-/// [`Self::from_frame_buffer`] into `EvalService`'s result callback, which
+/// [`Self::from_display_frame`] into `EvalService`'s result callback, which
 /// runs there — so publishing a frame costs the UI thread an `Arc` move.
 #[derive(Clone)]
 pub struct ViewerImage {
@@ -762,80 +761,49 @@ pub struct ViewerImage {
 }
 
 impl ViewerImage {
-    /// Convert a straight-alpha RGBA f32 [`FrameBuffer`] into the
-    /// straight-alpha BGRA u8 image GPUI's `img` element consumes (the same
-    /// layout the built-in decoders produce). Returns `None` for degenerate
-    /// dimensions.
+    /// Wrap the display bytes the evaluation worker produced into the image
+    /// GPUI's `img` element consumes. Returns `None` for degenerate
+    /// dimensions or a byte count that disagrees with them.
     ///
-    /// # The display transform lives here and nowhere else
+    /// # The display transform happened before this
     ///
-    /// The buffer holds working-space (linear) light; a screen wants
-    /// display-encoded bytes. `GPUCOMP-9` had already collapsed the viewer's
-    /// f32 → BGRA conversion to this one function, so `CM-3` inserts the
-    /// transform here rather than at each drawing site
-    /// (`docs/specifications/color-management.md`). It is
-    /// [`to_display_rgba8`], which produces the same bytes the render exits
-    /// produce from their own encode-then-quantise pair — see that function
-    /// for what now guarantees the agreement.
+    /// The evaluation buffer holds working-space (linear) light and a screen
+    /// wants display-encoded bytes. `CM-3` put that conversion here, on the
+    /// evaluation worker; `CM-7` moved it onto the GPU, into the dispatch that
+    /// runs before the frame is read back (`ravel_nodes::DisplayTransform`).
+    /// What arrives is already the finished BGRA image — the same bytes the
+    /// render exits reach by their own encode-then-quantise road, to within
+    /// the tolerance `docs/specifications/color-management.md` records — so
+    /// this function allocates and wraps and performs no per-pixel colour
+    /// arithmetic at all.
     ///
     /// It is also orthogonal to `quality` and [`ViewerResolution`]: those
-    /// decide *which pixels* are evaluated, this decides what a pixel value
-    /// means, and a value means the same thing at every resolution.
+    /// decide *which pixels* are evaluated, the transform decides what a pixel
+    /// value means, and a value means the same thing at every resolution.
     ///
-    /// The destination bytes are written by index into one exactly sized
-    /// allocation. The previous shape — four `Vec::push` calls per pixel, up
-    /// to 4M per frame at the interactive resolution cap — was the other half
-    /// of HIGH-08. The allocation itself cannot be reused across frames: it is
-    /// moved into the [`RenderImage`], which GPUI holds (and the panel keeps
-    /// alive) until the explicit `drop_image`.
-    ///
-    /// The conversion runs on rayon: every pixel is independent and the
-    /// indexed `zip` keeps the pairing, so the bytes are the same as the
-    /// serial loop's — this buys wall time, not a different picture.
-    pub fn from_frame_buffer(fb: &FrameBuffer) -> Option<Self> {
-        let span = tracing::debug_span!(
-            "frame_to_render_image",
-            width = fb.width,
-            height = fb.height
-        );
+    /// The bytes are copied once, out of the shared readback buffer into the
+    /// `Vec` [`RenderImage`] requires. The allocation cannot be reused across
+    /// frames: it is moved into the image, which GPUI holds (and the panel
+    /// keeps alive) until the explicit `drop_image`.
+    pub fn from_display_frame(frame: &DisplayFrame) -> Option<Self> {
+        let (width, height) = (frame.width(), frame.height());
+        let span = tracing::debug_span!("frame_to_render_image", width, height);
         let _guard = span.enter();
-        if fb.width == 0 || fb.height == 0 {
+        if width == 0 || height == 0 {
             return None;
         }
-        let expected = fb.width as usize * fb.height as usize * 4;
-        let pixels = fb.as_f32();
-        if pixels.len() != expected {
+        if frame.bgra().len() != width as usize * height as usize * 4 {
             return None;
         }
 
-        let mut bytes = vec![0u8; expected];
-        {
-            use rayon::prelude::*;
-            // Per pixel and independent, so the loop parallelises without
-            // changing a single arithmetic operation: `par_chunks_exact*` are
-            // indexed iterators, the zip keeps pixel *i* paired with output
-            // *i*, and the output bytes are identical to the serial form.
-            bytes
-                .par_chunks_exact_mut(4)
-                .zip(pixels.par_chunks_exact(4))
-                .for_each(|(out, pixel)| {
-                    let display = to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
-                    // BGRA order.
-                    out[0] = display[2];
-                    out[1] = display[1];
-                    out[2] = display[0];
-                    out[3] = display[3];
-                });
-        }
-
-        let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
+        let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, frame.bgra().to_vec())?;
         Some(Self {
             image: Arc::new(RenderImage::new(SmallVec::from_elem(
                 ImageFrame::new(buffer),
                 1,
             ))),
-            width: fb.width,
-            height: fb.height,
+            width,
+            height,
             #[cfg(test)]
             converted_on: ConversionThread::current(),
         })
@@ -1244,239 +1212,47 @@ mod mirror_epoch_tests {
 #[cfg(test)]
 mod viewer_image_tests {
     use super::ViewerImage;
-    use ravel_core::color::{Transfer, quantize_u8};
-    use ravel_core::types::{FrameBuffer, PixelFormat};
+    use ravel_nodes::DisplayFrame;
     use std::sync::Arc;
 
-    fn fb(width: u32, height: u32, pixel: [f32; 4]) -> FrameBuffer {
-        let mut data = Vec::with_capacity((width * height * 4) as usize);
-        for _ in 0..width * height {
-            data.extend_from_slice(&pixel);
-        }
-        FrameBuffer::from_f32(width, height, data)
-    }
-
-    /// The conversion the panel is pinned against, spelled out independently
-    /// of the implementation.
+    /// A display frame of `width` x `height` filled with one BGRA pixel.
     ///
-    /// Until `CM-3` this was `GPUCOMP-9`'s "the pixels must not change"
-    /// reference — the bare clamp-and-scale the viewer used before the work
-    /// moved to the worker thread. The buffer is linear light now,
-    /// so that reference would assert the *absence* of the display
-    /// transform. It encodes first, and the golden values below moved with
-    /// it (0.5 linear displays as 188, not 128).
-    fn reference_bgra(fb: &FrameBuffer) -> Vec<u8> {
-        let pixels = fb.as_f32();
-        let mut bytes = Vec::with_capacity(pixels.len());
-        for pixel in pixels.chunks_exact(4) {
-            let encode = |v: f32| quantize_u8(Transfer::Srgb.encode(v));
-            let alpha = quantize_u8;
-            // BGRA order.
-            bytes.push(encode(pixel[2]));
-            bytes.push(encode(pixel[1]));
-            bytes.push(encode(pixel[0]));
-            bytes.push(alpha(pixel[3]));
-        }
-        bytes
+    /// The bytes are already display-encoded: `CM-7` performs that transform
+    /// on the GPU before the readback, and all this panel does with the result
+    /// is wrap it. The transform itself — and its agreement with
+    /// `to_display_rgba8` — is pinned by
+    /// `ravel-nodes/tests/display_transform.rs`, which needs an adapter.
+    fn display_frame(width: u32, height: u32, bgra: [u8; 4]) -> DisplayFrame {
+        let bytes: Vec<u8> = bgra
+            .iter()
+            .copied()
+            .cycle()
+            .take((width as usize) * (height as usize) * 4)
+            .collect();
+        DisplayFrame::new(width, height, Arc::from(bytes))
     }
 
     #[test]
-    fn converts_rgba_f32_to_bgra_u8() {
-        let frame = fb(2, 2, [1.0, 0.5, 0.0, 1.0]);
-        let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
+    fn wraps_the_display_bytes_without_touching_them() {
+        // BGRA of the working-space pixel (1.0, 0.5, 0.0, 1.0): blue 0,
+        // green 188, red 255. 0.5 linear is sRGB 188, not the 128 a
+        // display-referred pipeline produced before `CM-3`.
+        let frame = display_frame(2, 2, [0, 188, 255, 255]);
+        let converted = ViewerImage::from_display_frame(&frame).unwrap();
         let bytes = converted.image().as_bytes(0).unwrap();
-        // BGRA: blue=0, green=188, red=255, alpha=255. Green was 128 before
-        // `CM-3`; the buffer now holds linear light and 0.5 linear is sRGB
-        // 188.
         assert_eq!(&bytes[..4], &[0, 188, 255, 255]);
+        assert_eq!(bytes.len(), 2 * 2 * 4);
         assert_eq!(converted.image().size(0).width.0, 2);
         assert_eq!(converted.image().size(0).height.0, 2);
         assert_eq!((converted.width(), converted.height()), (2, 2));
     }
 
     #[test]
-    fn clamps_out_of_range_values() {
-        let frame = fb(1, 1, [2.0, -1.0, 0.25, 1.5]);
-        let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
-        // BGRA: blue = sRGB(0.25) = 137 (was 64), green = 0 from a negative
-        // value, red and alpha saturate.
-        assert_eq!(
-            &converted.image().as_bytes(0).unwrap()[..4],
-            &[137, 0, 255, 255]
-        );
-    }
-
-    /// The conversion is compared against the independent reference above
-    /// over inputs that exercise rounding, clamping and the non-finite cases
-    /// (`NaN` and the infinities reach `as u8` through `clamp`, whose
-    /// behaviour must be preserved exactly).
-    #[test]
-    fn produces_the_same_bytes_as_the_reference_conversion() {
-        let mut pixels = Vec::new();
-        for step in 0..64u32 {
-            // Rounding boundaries: n/255 lands exactly between two integers
-            // often enough that a changed rounding rule shows up here.
-            let v = step as f32 / 63.0;
-            pixels.extend_from_slice(&[v, 1.0 - v, v * 0.5 + 0.25, 1.0 - v * 0.5]);
-        }
-        for pixel in [
-            [0.0, 1.0, 0.5, 0.25],
-            [-1.0, 2.0, f32::NAN, f32::INFINITY],
-            [f32::NEG_INFINITY, f32::MIN, f32::MAX, f32::EPSILON],
-            [0.5 / 255.0, 1.5 / 255.0, 254.5 / 255.0, 1.0 - 1.0 / 512.0],
-        ] {
-            pixels.extend_from_slice(&pixel);
-        }
-        let frame = FrameBuffer::from_f32(pixels.len() as u32 / 4, 1, pixels);
-
-        let converted = ViewerImage::from_frame_buffer(&frame).unwrap();
-        assert_eq!(
-            converted.image().as_bytes(0).unwrap(),
-            reference_bgra(&frame).as_slice(),
-            "the worker-side conversion must be byte-identical to the reference"
-        );
-    }
-
-    /// CM-3, the criterion the whole phase exists for: compositing black
-    /// and white at 50 % is `0.5` **in linear light**, and 0.5 linear
-    /// displays as 188 — not the 128 a display-referred pipeline produced.
-    ///
-    /// The composite is spelled out rather than evaluated through a graph:
-    /// the arithmetic is the ordinary source-over lerp the merge node
-    /// already did, and what `CM-3` changed is the meaning of its result.
-    #[test]
-    fn a_half_composite_of_black_and_white_displays_as_188() {
-        let black = [0.0f32, 0.0, 0.0, 1.0];
-        let white = [1.0f32, 1.0, 1.0, 1.0];
-        let composite: [f32; 4] = std::array::from_fn(|i| black[i] * 0.5 + white[i] * 0.5);
-        assert_eq!(composite, [0.5, 0.5, 0.5, 1.0]);
-
-        let converted = ViewerImage::from_frame_buffer(&fb(1, 1, composite)).unwrap();
-        // BGRA.
-        assert_eq!(
-            &converted.image().as_bytes(0).unwrap()[..4],
-            &[188, 188, 188, 255],
-            "a physically correct 50 % composite must not display as mid-grey"
-        );
-    }
-
-    /// CM-3: the display transform is orthogonal to `quality` and
-    /// [`ViewerResolution`](crate::panels::viewer::ViewerResolution). Those
-    /// choose *which* pixels are evaluated; this decides what a pixel value
-    /// means, and that cannot depend on how many of them there are.
-    #[test]
-    fn the_display_transform_does_not_depend_on_the_buffer_size() {
-        let pixel = [0.5f32, 0.18, 0.9, 0.75];
-        let full = ViewerImage::from_frame_buffer(&fb(64, 36, pixel)).unwrap();
-        let half = ViewerImage::from_frame_buffer(&fb(32, 18, pixel)).unwrap();
-        let single = ViewerImage::from_frame_buffer(&fb(1, 1, pixel)).unwrap();
-
-        let first = |image: &ViewerImage| image.image().as_bytes(0).unwrap()[..4].to_vec();
-        assert_eq!(first(&full), first(&half));
-        assert_eq!(first(&full), first(&single));
-        assert_eq!((full.width(), full.height()), (64, 36));
-        assert_eq!((half.width(), half.height()), (32, 18));
-    }
-
-    #[test]
     fn rejects_degenerate_frames() {
-        assert!(ViewerImage::from_frame_buffer(&fb(0, 4, [0.0; 4])).is_none());
-        // `from_f32` debug-asserts a matching pixel count, so build the
-        // malformed buffer (8 f32 worth of bytes for a 4x4 frame) directly.
-        let mismatched = FrameBuffer {
-            width: 4,
-            height: 4,
-            format: PixelFormat::RgbaF32,
-            data: Arc::from(vec![0u8; 8 * 4]),
-        };
-        assert!(ViewerImage::from_frame_buffer(&mismatched).is_none());
-    }
-
-    /// [`ViewerImage::from_frame_buffer`]'s arithmetic run serially — the
-    /// shape the function had before the conversion moved onto rayon.
-    ///
-    /// Everything else is identical, down to the `RenderImage` wrap, so the
-    /// harness below times the parallelism and nothing else.
-    fn serial_conversion(fb: &FrameBuffer) -> Option<Arc<gpui::RenderImage>> {
-        let pixels = fb.as_f32();
-        let mut bytes = vec![0u8; pixels.len()];
-        for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
-            let display =
-                ravel_core::color::to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
-            // BGRA order.
-            out[0] = display[2];
-            out[1] = display[1];
-            out[2] = display[0];
-            out[3] = display[3];
-        }
-        let buffer =
-            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;
-        Some(Arc::new(gpui::RenderImage::new(
-            smallvec::SmallVec::from_elem(image::Frame::new(buffer), 1),
-        )))
-    }
-
-    /// Measurement harness for the HIGH-08 numbers recorded in
-    /// `docs/implementation/perf-baseline.md`. It measures rather than
-    /// asserts, so it stays out of the normal test run.
-    ///
-    /// `before` is what the UI thread used to do per published frame: the
-    /// publisher's `Arc::new(fb.clone())` plus the per-pixel push loop and the
-    /// `RenderImage` wrap in the `ViewerFrame` observer. `after` is the same
-    /// work as it now runs — on the evaluation worker.
-    #[test]
-    #[ignore = "measurement harness; run with --ignored --nocapture"]
-    fn measure_display_conversion_cost() {
-        use std::time::Instant;
-
-        for (width, height) in [(1024u32, 576u32), (1920, 1080)] {
-            let count = (width as usize) * (height as usize) * 4;
-            let pixels: Vec<f32> = (0..count).map(|i| (i % 511) as f32 / 510.0).collect();
-            let frame = FrameBuffer::from_f32(width, height, pixels);
-            let runs = 40;
-
-            let mut clone_ns = 0u128;
-            let mut before_ns = 0u128;
-            let mut serial_ns = 0u128;
-            let mut after_ns = 0u128;
-            for _ in 0..runs {
-                let start = Instant::now();
-                let cloned = Arc::new(frame.clone());
-                clone_ns += start.elapsed().as_nanos();
-
-                let start = Instant::now();
-                let bytes = reference_bgra(&cloned);
-                let old = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bytes)
-                    .map(|buffer| {
-                        Arc::new(gpui::RenderImage::new(smallvec::SmallVec::from_elem(
-                            image::Frame::new(buffer),
-                            1,
-                        )))
-                    });
-                before_ns += start.elapsed().as_nanos();
-
-                let start = Instant::now();
-                let serial = serial_conversion(&frame);
-                serial_ns += start.elapsed().as_nanos();
-
-                let start = Instant::now();
-                let new = ViewerImage::from_frame_buffer(&frame);
-                after_ns += start.elapsed().as_nanos();
-
-                assert!(old.is_some() && serial.is_some() && new.is_some());
-            }
-            let ms = |ns: u128| ns as f64 / runs as f64 / 1e6;
-            println!(
-                "{width}x{height}: frame clone {:.3} ms, previous conversion {:.3} ms \
-                 (UI-thread total {:.3} ms), same arithmetic serial {:.3} ms, \
-                 current conversion {:.3} ms (rayon {:.1}x)",
-                ms(clone_ns),
-                ms(before_ns),
-                ms(clone_ns + before_ns),
-                ms(serial_ns),
-                ms(after_ns),
-                serial_ns as f64 / after_ns as f64,
-            );
-        }
+        assert!(ViewerImage::from_display_frame(&display_frame(0, 4, [0; 4])).is_none());
+        // A byte count that disagrees with the dimensions is a broken
+        // readback, not an image: 8 bytes for a 4x4 frame.
+        let mismatched = DisplayFrame::new(4, 4, Arc::from(vec![0u8; 8]));
+        assert!(ViewerImage::from_display_frame(&mismatched).is_none());
     }
 }

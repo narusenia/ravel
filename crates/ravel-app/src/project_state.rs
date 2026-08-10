@@ -35,6 +35,8 @@ use ravel_core::runtime::{
 };
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
+use ravel_i18n::t;
+use ravel_nodes::DisplayFrame;
 use ravel_project::settings::{ResolvedSettings, SettingsLayer};
 use ravel_project::ui_state::UiState;
 use ravel_ui::document::{
@@ -357,6 +359,13 @@ pub(crate) struct ViewerUpdate {
     output: ViewerOutput,
 }
 
+/// Whether an evaluation result is an image the viewer would have drawn had
+/// the display transform run. Both frame representations count: the worker
+/// hands back whichever one it was holding when the transform failed.
+fn frame_shaped(value: &dyn ravel_core::types::NodeData) -> bool {
+    value.downcast_ref::<FrameBuffer>().is_some() || value.is_gpu_resident()
+}
+
 impl ViewerUpdate {
     /// Convert an evaluation result for display. Call sites: the worker
     /// callback below, and tests that drive [`ProjectState::on_eval_update`]
@@ -368,14 +377,24 @@ impl ViewerUpdate {
     /// a request this crate builds, so it blanks rather than erroring.
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
         let output = match update.results.into_iter().next() {
-            Some((_, Ok(data))) => match data.downcast_ref::<FrameBuffer>() {
-                Some(fb) => match ViewerImage::from_frame_buffer(fb) {
+            // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
+            // what arrives is display bytes rather than a linear buffer.
+            Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
+                Some(frame) => match ViewerImage::from_display_frame(frame) {
                     Some(image) => ViewerOutput::Image(image),
                     // A degenerate frame carries nothing to draw; the panel
                     // used to receive it as a `Frame` whose image was `None`
                     // and paint the same black quad it paints for `Blank`.
                     None => ViewerOutput::NotAFrame,
                 },
+                // A frame that is still linear means `finalize` could not run
+                // the display transform — a shader that will not compile, a
+                // lost device. Drawing linear light would be wrong and
+                // blanking would be silent, so say what happened. Anything
+                // that is not a frame at all (a `Scalar`) still blanks.
+                None if frame_shaped(data.as_ref()) => {
+                    ViewerOutput::Failed(t!("viewer.display_transform_failed"))
+                }
                 None => ViewerOutput::NotAFrame,
             },
             Some((_, Err(err))) => ViewerOutput::Failed(err.to_string()),
@@ -433,7 +452,12 @@ impl ProjectState {
                     // once settings reach the runtime (`SET-8`).
                     let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
                     let eval = spawn_viewer_eval_service(
-                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone()),
+                        // The viewer is the one worker whose frames go to a
+                        // screen, so it is the one that finishes them on the
+                        // GPU (`CM-7`). The export worker deliberately does
+                        // not: its own encode step needs the linear frame.
+                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
+                            .with_display_transform(),
                         budget.clone(),
                         update_tx,
                     );
@@ -1627,6 +1651,7 @@ mod tests {
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::network as net;
+    use ravel_core::types::FrameBuffer;
 
     /// The default is what Ravel has always launched with — one composition,
     /// which is also the root — and turning the setting off launches with none
@@ -1667,6 +1692,17 @@ mod tests {
         recorder
     }
 
+    /// A frame as the worker now delivers it: display bytes, not linear
+    /// light (`CM-7`). The colour is irrelevant to these tests — what matters
+    /// is that a viewer result is a `DisplayFrame`.
+    fn blank_display_frame(width: u32, height: u32) -> Arc<dyn ravel_core::types::NodeData> {
+        Arc::new(ravel_nodes::DisplayFrame::new(
+            width,
+            height,
+            Arc::from(vec![0u8; (width as usize) * (height as usize) * 4]),
+        ))
+    }
+
     /// Emits a fixed frame, so an evaluation produces something the viewer
     /// path has to convert.
     struct FrameSource;
@@ -1688,10 +1724,33 @@ mod tests {
         }
     }
 
-    /// Hooks that need no GPU: every node emits a frame.
+    /// Hooks that need no GPU: every node emits a frame, and `finalize`
+    /// stands in for what `GpuEvalHooks` does on the GPU — hand the viewer
+    /// display bytes rather than linear light.
     struct FrameHooks;
 
     impl EvalWorkerHooks for FrameHooks {
+        fn finalize(
+            &mut self,
+            value: &Arc<dyn ravel_core::types::NodeData>,
+            _ctx: &EvalContext,
+        ) -> Option<Arc<dyn ravel_core::types::NodeData>> {
+            let Some(fb) = value.downcast_ref::<FrameBuffer>() else {
+                return Some(value.clone());
+            };
+            let mut bgra = Vec::with_capacity(fb.as_f32().len());
+            for pixel in fb.as_f32().chunks_exact(4) {
+                let display =
+                    ravel_core::color::to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                bgra.extend_from_slice(&[display[2], display[1], display[0], display[3]]);
+            }
+            Some(Arc::new(ravel_nodes::DisplayFrame::new(
+                fb.width,
+                fb.height,
+                Arc::from(bgra),
+            )))
+        }
+
         fn sync(
             &mut self,
             evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
@@ -2052,10 +2111,7 @@ mod tests {
                     ViewerUpdate::from_eval(EvalUpdate {
                         generation,
                         frame: generation,
-                        results: vec![(
-                            NodeId::new(1),
-                            Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))),
-                        )],
+                        results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                         timings: Vec::new(),
                     }),
                     cx,
@@ -2202,7 +2258,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                results: vec![(node, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                results: vec![(node, Ok(blank_display_frame(4, 4)))],
                 timings: vec![(node, std::time::Duration::from_micros(micros))],
             })
         };
@@ -2277,7 +2333,7 @@ mod tests {
                     ViewerUpdate::from_eval(EvalUpdate {
                         generation: project.published_generation + 1,
                         frame: 0,
-                        results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                        results: vec![(first, Ok(blank_display_frame(4, 4)))],
                         timings,
                     }),
                     cx,
@@ -2376,7 +2432,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                    results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                 }),
                 cx,
@@ -2427,7 +2483,7 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    results: vec![(first, Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                    results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                 }),
                 cx,
@@ -2921,6 +2977,53 @@ mod tests {
     /// deleted upstream of a Rasterize) makes the evaluation fail, and the
     /// error must replace the previously shown frame instead of leaving it
     /// on screen; a later successful evaluation restores normal drawing.
+    /// `CM-7`: a frame that reaches the host still linear means the display
+    /// transform did not run — a shader that will not compile, a lost device.
+    /// The viewer must say so rather than blank, which is what it did before
+    /// the error was surfaced. A `Scalar` still blanks: that is not a frame
+    /// anyone expected to see.
+    #[gpui::test]
+    fn an_untransformed_frame_becomes_a_viewer_error(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let update = |generation, value: Arc<dyn ravel_core::types::NodeData>| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                results: vec![(NodeId::new(1), Ok(value))],
+                timings: Vec::new(),
+            })
+        };
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(1, Arc::new(FrameBuffer::new_zeroed(4, 4))), cx)
+        });
+        project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
+            Some(ViewerFrame::Error { message, .. }) => assert_eq!(
+                message.as_ref(),
+                ravel_i18n::translate("viewer.display_transform_failed"),
+                "the error must be the localized display-transform message",
+            ),
+            other => panic!("expected an error overlay, got {other:?}"),
+        });
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(2, Arc::new(ravel_core::types::Scalar(1.0))), cx)
+        });
+        project.read_with(cx, |_, cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "a non-frame output still blanks",
+            )
+        });
+    }
+
     #[gpui::test]
     fn eval_error_replaces_the_frame_and_recovers(cx: &mut TestAppContext) {
         use crate::panels::ViewerFrame;
@@ -2932,7 +3035,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                results: vec![(NodeId::new(1), Ok(Arc::new(FrameBuffer::new_zeroed(4, 4))))],
+                results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                 timings: Vec::new(),
             })
         };
@@ -3035,10 +3138,7 @@ mod tests {
             ViewerUpdate::from_eval(EvalUpdate {
                 generation,
                 frame: 0,
-                results: vec![(
-                    NodeId::new(1),
-                    Ok(Arc::new(FrameBuffer::new_zeroed(size, size))),
-                )],
+                results: vec![(NodeId::new(1), Ok(blank_display_frame(size, size)))],
                 timings: Vec::new(),
             })
         };

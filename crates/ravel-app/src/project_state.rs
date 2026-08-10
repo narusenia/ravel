@@ -33,8 +33,9 @@ use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{
     EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
 };
-use ravel_core::types::FrameRate;
+use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
+use ravel_i18n::t;
 use ravel_nodes::DisplayFrame;
 use ravel_project::settings::{ResolvedSettings, SettingsLayer};
 use ravel_project::ui_state::UiState;
@@ -358,6 +359,13 @@ pub(crate) struct ViewerUpdate {
     output: ViewerOutput,
 }
 
+/// Whether an evaluation result is an image the viewer would have drawn had
+/// the display transform run. Both frame representations count: the worker
+/// hands back whichever one it was holding when the transform failed.
+fn frame_shaped(value: &dyn ravel_core::types::NodeData) -> bool {
+    value.downcast_ref::<FrameBuffer>().is_some() || value.is_gpu_resident()
+}
+
 impl ViewerUpdate {
     /// Convert an evaluation result for display. Call sites: the worker
     /// callback below, and tests that drive [`ProjectState::on_eval_update`]
@@ -370,9 +378,7 @@ impl ViewerUpdate {
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
         let output = match update.results.into_iter().next() {
             // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
-            // what arrives is display bytes rather than a linear buffer. A
-            // linear `FrameBuffer` here means the display transform was
-            // unavailable, and it is not drawable as it stands.
+            // what arrives is display bytes rather than a linear buffer.
             Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
                 Some(frame) => match ViewerImage::from_display_frame(frame) {
                     Some(image) => ViewerOutput::Image(image),
@@ -381,6 +387,14 @@ impl ViewerUpdate {
                     // and paint the same black quad it paints for `Blank`.
                     None => ViewerOutput::NotAFrame,
                 },
+                // A frame that is still linear means `finalize` could not run
+                // the display transform — a shader that will not compile, a
+                // lost device. Drawing linear light would be wrong and
+                // blanking would be silent, so say what happened. Anything
+                // that is not a frame at all (a `Scalar`) still blanks.
+                None if frame_shaped(data.as_ref()) => {
+                    ViewerOutput::Failed(t!("viewer.display_transform_failed"))
+                }
                 None => ViewerOutput::NotAFrame,
             },
             Some((_, Err(err))) => ViewerOutput::Failed(err.to_string()),
@@ -2963,6 +2977,53 @@ mod tests {
     /// deleted upstream of a Rasterize) makes the evaluation fail, and the
     /// error must replace the previously shown frame instead of leaving it
     /// on screen; a later successful evaluation restores normal drawing.
+    /// `CM-7`: a frame that reaches the host still linear means the display
+    /// transform did not run — a shader that will not compile, a lost device.
+    /// The viewer must say so rather than blank, which is what it did before
+    /// the error was surfaced. A `Scalar` still blanks: that is not a frame
+    /// anyone expected to see.
+    #[gpui::test]
+    fn an_untransformed_frame_becomes_a_viewer_error(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let update = |generation, value: Arc<dyn ravel_core::types::NodeData>| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                results: vec![(NodeId::new(1), Ok(value))],
+                timings: Vec::new(),
+            })
+        };
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(1, Arc::new(FrameBuffer::new_zeroed(4, 4))), cx)
+        });
+        project.read_with(cx, |_, cx| match cx.try_global::<ViewerFrame>() {
+            Some(ViewerFrame::Error { message, .. }) => assert_eq!(
+                message.as_ref(),
+                ravel_i18n::translate("viewer.display_transform_failed"),
+                "the error must be the localized display-transform message",
+            ),
+            other => panic!("expected an error overlay, got {other:?}"),
+        });
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(2, Arc::new(ravel_core::types::Scalar(1.0))), cx)
+        });
+        project.read_with(cx, |_, cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "a non-frame output still blanks",
+            )
+        });
+    }
+
     #[gpui::test]
     fn eval_error_replaces_the_frame_and_recovers(cx: &mut TestAppContext) {
         use crate::panels::ViewerFrame;

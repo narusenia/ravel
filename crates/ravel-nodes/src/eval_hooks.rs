@@ -196,7 +196,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
         ) {
             Ok(fb) => Some(fb),
             Err(err) => {
-                tracing::warn!(%err, "viewer rasterize failed; passing geometry through");
+                tracing::warn!(%err, "viewer rasterize failed");
                 None
             }
         }

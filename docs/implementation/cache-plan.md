@@ -445,6 +445,8 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 
 ### 単位 5 (`CACHE-5`): フレームキャッシュ層（comp 単位の無効化）
 
+**設計時の記述**（2026-07-31。下の「実装時の決定」が上書きした箇所がある）:
+
 - `EvalService` 側に出力段のフレームキャッシュを新設。キーは
   `(comp path, CacheIdentity)`。
 - VRAM 層は `GpuFrameBuffer`（`Rgba16Float`）をそのまま保持。RAM 層は

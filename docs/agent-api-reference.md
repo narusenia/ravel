@@ -1337,7 +1337,10 @@ trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
 }                                       // delivered but never cached
 EvalRequest { graph, nodes: Vec<NodeId>, comp: Option<CompId>,
     path: Vec<PathSegment>, ctx, document: Option<Arc<Document>>, hint }
-    // document → Evaluator::set_document before sync (scoped invalidation);
+    // document → Evaluator::set_document AFTER EvalWorkerHooks::sync
+    // (scoped invalidation). A Structural hint resets the evaluator first,
+    // and the reset drops any document installed beforehand, so installing
+    // it earlier would lose it;
     // non-empty path evaluates via evaluate_at
     // comp: Some opts target 0 into the frame cache (CACHE-5). Ignored for a
     // non-empty path or a request without a document; None keeps the

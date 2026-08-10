@@ -389,6 +389,17 @@ impl EvalService {
                         }
                         // `finalize` reporting failure keeps its picture but
                         // loses its place in the cache: see the trait method.
+                        //
+                        // A hook that *panics* instead is not handled, on
+                        // purpose. The unwind ends this thread, the request
+                        // channel's receiver goes with it, and every later
+                        // `request` is silently dropped — the application has
+                        // no evaluation left at all, so the budget
+                        // over-counting a frame nobody can reach is not the
+                        // failure anyone is looking at. Catching it would put
+                        // an `UnwindSafe` bound on every hooks implementation
+                        // to protect accounting in a process that has already
+                        // lost its evaluator.
                         let mut finalized = true;
                         let result = evaluator
                             .evaluate_at(&req.inner.path, &req.inner.graph, node, &req.inner.ctx)

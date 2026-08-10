@@ -704,6 +704,10 @@ impl ViewerImage {
     /// of HIGH-08. The allocation itself cannot be reused across frames: it is
     /// moved into the [`RenderImage`], which GPUI holds (and the panel keeps
     /// alive) until the explicit `drop_image`.
+    ///
+    /// The conversion runs on rayon: every pixel is independent and the
+    /// indexed `zip` keeps the pairing, so the bytes are the same as the
+    /// serial loop's — this buys wall time, not a different picture.
     pub fn from_frame_buffer(fb: &FrameBuffer) -> Option<Self> {
         let span = tracing::debug_span!(
             "frame_to_render_image",
@@ -721,13 +725,23 @@ impl ViewerImage {
         }
 
         let mut bytes = vec![0u8; expected];
-        for (out, pixel) in bytes.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
-            let display = to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
-            // BGRA order.
-            out[0] = display[2];
-            out[1] = display[1];
-            out[2] = display[0];
-            out[3] = display[3];
+        {
+            use rayon::prelude::*;
+            // Per pixel and independent, so the loop parallelises without
+            // changing a single arithmetic operation: `par_chunks_exact*` are
+            // indexed iterators, the zip keeps pixel *i* paired with output
+            // *i*, and the output bytes are identical to the serial form.
+            bytes
+                .par_chunks_exact_mut(4)
+                .zip(pixels.par_chunks_exact(4))
+                .for_each(|(out, pixel)| {
+                    let display = to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                    // BGRA order.
+                    out[0] = display[2];
+                    out[1] = display[1];
+                    out[2] = display[0];
+                    out[3] = display[3];
+                });
         }
 
         let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(fb.width, fb.height, bytes)?;

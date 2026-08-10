@@ -5950,6 +5950,7 @@ dependencies = [
  "ravel-nodes",
  "ravel-project",
  "ravel-ui",
+ "rayon",
  "rust-embed",
  "sha2 0.10.9",
  "smallvec",

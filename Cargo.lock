@@ -6078,6 +6078,7 @@ dependencies = [
  "ffmpeg-the-third",
  "image",
  "ravel-core",
+ "rayon",
  "tempfile",
  "thiserror 2.0.19",
  "tracing",

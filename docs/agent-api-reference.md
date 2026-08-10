@@ -102,6 +102,8 @@ multiply / apply / invert                // 3x3 helpers, IDENTITY
 
 // The two ends of the pipeline. Alpha is quantised, never encoded.
 ingest_rgba8([u8; 4], input: ColorSpace) -> [f32; 4]   // normalise + decode
+ingest_rgba16([u16; 4], input: ColorSpace) -> [f32; 4] // deep-integer sources
+ingest_rgbaf32([f32; 4], input: ColorSpace) -> [f32; 4] // float sources; no clamp
 to_display_rgba8([f32; 4]) -> [u8; 4]                  // encode + quantise
 to_display_rgba16([f32; 4]) -> [u16; 4]
 quantize_u8(f32) -> u8 / quantize_u16(f32) -> u16      // round to nearest

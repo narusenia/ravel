@@ -81,19 +81,32 @@ REQ-RENDER-003（OCIO + GPU LUT カラーマネジメント）。
 TIFF / DPX は float も log も入りうるが**リニア扱いにしない**: 表示参照の
 ファイルをリニアと誤ると二重に明るくなり、その逆より被害が大きい。
 
-変換は `ravel-media` のデコード経路、`u8 → f32 / 255.0` の**直後**
-（`ravel_core::color::ingest_rgba8`）。`ravel-media` の入口は既定で
-無変換（`ColorSpace::WORKING`）なので、ファイルそのものの値が欲しい経路
-（メディアビンのサムネイル）は何も変わらない。
+変換は `ravel-media` のデコード経路、画素の正規化の**直後**
+（`ravel_core::color` の `ingest_rgba8` / `ingest_rgba16` /
+`ingest_rgbaf32` — 素材のビット深度に合うもの）。`ravel-media` の入口は既定で
+無変換（`ColorSpace::WORKING`）なので、ファイルそのものの値が欲しい経路は
+その既定のまま読める。メディアビンのサムネイルは**解決済みの入力色空間を
+渡して**作業空間で読み、他の 8bit 出口と同じ表示変換
+（`to_display_rgba8`）を掛けてから PNG へ量子化する — sRGB 素材では
+その往復が恒等なので見え方は変わらず、リニア素材（EXR / HDR）の
+サムネイルは display 空間で生成される。
 
-### 既知の上限: 取り込みが 8bit を経由する
+### 取り込みのビット深度
 
-**この規範はまだ入口で満たされていない。** デコードは素材の画素形式に
-関わらず 8bit RGBA へ変換してから `ingest_rgba8` に渡すので、リニア EXR の
-1 超の値はクリップされ、float / 10bit の精度は f32 バッファに届く前に
-失われる（`issues/high/HIGH-31-float-decode-through-8bit-rgba.md`）。
-上の解決順のうち**メタデータ（優先順位 2）も常に空**で、実データでは必ず
-拡張子既定に落ちる（`MED-MED-07`）。
+デコードは**素材の画素形式から**取り込み経路を選ぶ（拡張子ではない）。
+
+- float の RGB 形式（EXR などがデコードされる `GBRPF32` 系）はスケーラを
+  通さず面を直接読む。**1 超の値はクリップしない** — HDR の要点なので
+- 8bit を超える整数形式（ProRes 422 10bit、DNxHR、16bit 静止画）は
+  RGBA64（16bit）へスケールしてから `ingest_rgba16` で取り込む
+- 8bit 素材は従来どおり 8bit RGBA 経路で、出力はビット単位で変わらない
+
+メタデータ（優先順位 2）はコンテナの宣言をプローブが読む。
+`VideoStreamInfo` が `color_primaries` / `color_transfer` を Ravel の語彙
+（`Primaries` / `Transfer`）へ写し、**名前のある組だけ**が
+`AssetMetadata::color_space` に載る。宣言が無い、または Ravel が名前を
+持たない組（Rec.2020 原色 + BT.709 OETF など）は `None` のまま拡張子既定へ
+落ちる。
 
 ## 表示変換
 

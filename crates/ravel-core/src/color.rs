@@ -603,6 +603,34 @@ pub fn ingest_rgba8(rgba: [u8; 4], input: ColorSpace) -> [f32; 4] {
     [rgb[0], rgb[1], rgb[2], norm(rgba[3])]
 }
 
+/// [`ingest_rgba8`] at 16 bits, for media whose samples carry more than
+/// 8 bits per channel (10-bit and 16-bit containers decoded through RGBA64).
+///
+/// The same rule holds: normalise, then remove the transfer function in the
+/// same step. Alpha is coverage and is only normalised.
+pub fn ingest_rgba16(rgba: [u16; 4], input: ColorSpace) -> [f32; 4] {
+    let norm = |s: u16| f32::from(s) / 65535.0;
+    let rgb = convert(
+        [norm(rgba[0]), norm(rgba[1]), norm(rgba[2])],
+        input,
+        ColorSpace::WORKING,
+    );
+    [rgb[0], rgb[1], rgb[2], norm(rgba[3])]
+}
+
+/// [`ingest_rgba8`] for samples that are already float — EXR and other
+/// scene-referred sources.
+///
+/// The same rule holds — remove the transfer function, never the alpha —
+/// with one difference: **nothing is clamped or quantised**. Values above
+/// 1.0 are the highlights these formats exist to carry, and the transfer
+/// functions are defined outside `0..=1` exactly so those values survive
+/// (`docs/specifications/color-management.md`).
+pub fn ingest_rgbaf32(rgba: [f32; 4], input: ColorSpace) -> [f32; 4] {
+    let rgb = convert([rgba[0], rgba[1], rgba[2]], input, ColorSpace::WORKING);
+    [rgb[0], rgb[1], rgb[2], rgba[3]]
+}
+
 // ===========================================================================
 // 3D LUT (.cube)
 // ===========================================================================
@@ -1106,6 +1134,45 @@ mod tests {
                 "code {code} did not survive ingest -> display"
             );
         }
+    }
+
+    /// The 16-bit ingest follows the 8-bit one's rule at 65535 steps.
+    #[test]
+    fn ingest_rgba16_decodes_only_the_colour_channels() {
+        let srgb = ingest_rgba16([32768, 32768, 32768, 32768], ColorSpace::SRGB);
+        let expected = ColorSpace::SRGB.transfer.decode(32768.0 / 65535.0);
+        for channel in &srgb[..3] {
+            assert!((channel - expected).abs() < 1e-6, "{srgb:?}");
+        }
+        assert!(
+            (srgb[3] - 32768.0 / 65535.0).abs() < 1e-7,
+            "alpha was converted"
+        );
+
+        // The finer grid survives: 16-bit codes between two 8-bit codes must
+        // not collapse onto the 8-bit one.
+        let lower = ingest_rgba16([128 * 257, 0, 0, 65535], ColorSpace::LINEAR_REC709)[0];
+        let half_step = ingest_rgba16([128 * 257 + 128, 0, 0, 65535], ColorSpace::LINEAR_REC709)[0];
+        assert!(half_step > lower, "{lower} -> {half_step}");
+        assert!(half_step - lower < 1.0 / 255.0, "{lower} -> {half_step}");
+    }
+
+    /// The float ingest removes the transfer function but never clamps:
+    /// values above 1.0 are the point of a scene-referred source.
+    #[test]
+    fn ingest_rgbaf32_keeps_values_above_one() {
+        let linear = ingest_rgbaf32([4.0, 0.25, -0.5, 0.5], ColorSpace::LINEAR_REC709);
+        assert_eq!(linear, [4.0, 0.25, -0.5, 0.5]);
+
+        let srgb = ingest_rgbaf32([4.0, 4.0, 4.0, 1.0], ColorSpace::SRGB);
+        for channel in &srgb[..3] {
+            assert!(*channel > 1.0, "highlight was clipped: {srgb:?}");
+            assert!(
+                (channel - ColorSpace::SRGB.transfer.decode(4.0)).abs() < 1e-4,
+                "{srgb:?}"
+            );
+        }
+        assert_eq!(srgb[3], 1.0, "alpha was converted");
     }
 
     /// CM-3's regression number, at the exit: a 50 % composite of black and

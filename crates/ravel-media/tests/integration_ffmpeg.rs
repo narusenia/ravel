@@ -140,6 +140,53 @@ mod ffmpeg_tests {
         assert_eq!(video.codec, Some(VideoCodec::Vp9));
     }
 
+    /// A container's declared colour metadata reaches the probe, mapped onto
+    /// Ravel's vocabulary; an untagged file declares nothing and the fields
+    /// stay `None` rather than guessing (`MED-MED-07`).
+    #[test]
+    fn probe_reads_container_colour_metadata() {
+        use ravel_core::color::{Primaries, Transfer};
+
+        let dir = tempfile::tempdir().unwrap();
+        // Tagging happens at remux: the muxer is what writes the colr atom
+        // the probe reads back.
+        let base = generate_test_video(dir.path(), "base.mp4");
+        let path = dir.path().join("tagged.mov");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                base.to_str().unwrap(),
+                "-c",
+                "copy",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                "-movflags",
+                "write_colr",
+                path.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg failed to tag the video");
+
+        let info = FfmpegDecoder::probe(&path).expect("probe failed");
+        let video = info.first_video().expect("no video stream");
+        assert_eq!(video.color_primaries, Some(Primaries::Rec709));
+        assert_eq!(video.color_transfer, Some(Transfer::Rec709));
+        assert_eq!(video.color_matrix.as_deref(), Some("bt709"));
+
+        let info = FfmpegDecoder::probe(&base).expect("probe failed");
+        let video = info.first_video().expect("no video stream");
+        assert_eq!(video.color_primaries, None);
+        assert_eq!(video.color_transfer, None);
+    }
+
     // ---- Video decode -----------------------------------------------------
 
     #[test]
@@ -185,6 +232,200 @@ mod ffmpeg_tests {
         assert_eq!(frame.width, 64);
         assert_eq!(frame.height, 64);
         assert_eq!(frame.as_f32().len(), 64 * 64 * 4);
+    }
+
+    // ---- Pixel depth ingest ------------------------------------------------
+
+    use image::ImageEncoder as _;
+
+    /// Write an RGBA f32 EXR, the way the render writers do.
+    fn write_exr(
+        dir: &std::path::Path,
+        name: &str,
+        width: u32,
+        height: u32,
+        pixels: &[f32],
+    ) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut bytes = Vec::with_capacity(pixels.len() * 4);
+        for value in pixels {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::codecs::openexr::OpenExrEncoder::new(&mut out)
+            .write_image(&bytes, width, height, image::ExtendedColorType::Rgba32F)
+            .expect("encode exr");
+        std::fs::write(&path, out.into_inner()).unwrap();
+        path
+    }
+
+    /// Write a 16-bit RGBA PNG from native-endian u16 lanes.
+    fn write_png16(
+        dir: &std::path::Path,
+        name: &str,
+        width: u32,
+        height: u32,
+        pixels: &[u16],
+    ) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut bytes = Vec::with_capacity(pixels.len() * 2);
+        for value in pixels {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(&bytes, width, height, image::ExtendedColorType::Rgba16)
+            .expect("encode png16");
+        std::fs::write(&path, out).unwrap();
+        path
+    }
+
+    /// A float source must reach the [`FrameBuffer`] with values above 1.0
+    /// intact — clipping them was HIGH-31.
+    #[test]
+    fn float_source_keeps_values_above_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (8u32, 8u32);
+        let shades = [4.0f32, 0.25, 1.5, 0.0];
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for i in 0..(width * height) as usize {
+            pixels.extend_from_slice(&[
+                shades[i % 4],
+                shades[(i + 1) % 4],
+                shades[(i + 2) % 4],
+                0.25 + 0.5 * (i % 3) as f32,
+            ]);
+        }
+        let path = write_exr(dir.path(), "hdr.exr", width, height, &pixels);
+
+        let assert_decoded = |frame: &FrameBuffer, route: &str| {
+            assert_eq!((frame.width, frame.height), (width, height), "{route}");
+            for (decoded, &written) in frame.as_f32().iter().zip(pixels.iter()) {
+                assert!(
+                    (decoded - written).abs() < 1e-6,
+                    "{route}: decoded {decoded}, written {written}"
+                );
+            }
+            assert!(
+                frame.as_f32().iter().any(|&v| v > 1.0),
+                "{route}: highlights were clipped"
+            );
+        };
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let stream = decoder
+            .info()
+            .first_video()
+            .expect("no video stream")
+            .stream_index;
+        let frame = decoder
+            .decode_video_frame(stream, 0)
+            .expect("decode failed");
+        assert_decoded(&frame, "container decode");
+
+        // The image-sequence route shares the decoder; it must inherit the
+        // float path too.
+        let frame = ravel_media::image_seq::read_image_frame_in(
+            &path,
+            ravel_core::color::ColorSpace::WORKING,
+        )
+        .expect("sequence read failed");
+        assert_decoded(&frame, "image-sequence decode");
+    }
+
+    /// A source deeper than 8 bits must not be quantised to 256 steps on
+    /// the way into the f32 buffer.
+    #[test]
+    fn deep_integer_source_is_not_quantised_to_8bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (512u32, 2u32);
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&[
+                    (x * 128) as u16,
+                    (y * 16384) as u16,
+                    0,
+                    // A varying alpha keeps the decoder on the RGBA64 format.
+                    if x % 2 == 0 { 65535 } else { 32768 },
+                ]);
+            }
+        }
+        let path = write_png16(dir.path(), "deep.png", width, height, &pixels);
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let stream = decoder
+            .info()
+            .first_video()
+            .expect("no video stream")
+            .stream_index;
+        let frame = decoder
+            .decode_video_frame(stream, 0)
+            .expect("decode failed");
+
+        let row: Vec<f32> = frame.as_f32()[..(width as usize) * 4]
+            .chunks_exact(4)
+            .map(|px| px[0])
+            .collect();
+        let distinct = row
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert!(distinct > 256, "only {distinct} distinct levels");
+        let smallest_step = row
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .filter(|&d| d > 0.0)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            smallest_step < 1.0 / 255.0,
+            "smallest step {smallest_step} is an 8-bit quantum"
+        );
+    }
+
+    /// An 8-bit source decodes exactly as it did before the deep paths
+    /// existed: normalised to `code / 255`, nothing else.
+    #[test]
+    fn eight_bit_source_decodes_bit_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (64u32, 64u32);
+        let mut bytes = Vec::with_capacity((width * height * 4) as usize);
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..(width * height * 4) {
+            // xorshift64 — deterministic pseudo-random bytes.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.push((state >> 32) as u8);
+        }
+        let path = dir.path().join("legacy.png");
+        image::save_buffer(
+            &path,
+            &bytes,
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("encode png8");
+
+        let mut decoder = FfmpegDecoder::open(&path).expect("open failed");
+        let stream = decoder
+            .info()
+            .first_video()
+            .expect("no video stream")
+            .stream_index;
+        let frame = decoder
+            .decode_video_frame(stream, 0)
+            .expect("decode failed");
+
+        for (decoded, &code) in frame.as_f32().iter().zip(bytes.iter()) {
+            assert_eq!(
+                *decoded,
+                f32::from(code) / 255.0,
+                "code {code} decoded differently"
+            );
+        }
     }
 
     // ---- Audio decode -----------------------------------------------------

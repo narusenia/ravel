@@ -22,8 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::App;
+use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
-use ravel_core::media::{ImageSequenceInfo, MediaInfo, MediaResult, StreamInfo};
+use ravel_core::media::{ImageSequenceInfo, MediaInfo, MediaResult, StreamInfo, VideoStreamInfo};
 // Only the no-FFmpeg stub and the tests construct an error of their own; with
 // the feature on, the real backend is the one that fails.
 #[cfg(any(test, not(feature = "ffmpeg")))]
@@ -281,11 +282,25 @@ fn metadata_from_info(info: &MediaInfo) -> AssetMetadata {
         codec: video
             .map(|v| v.codec_name.clone())
             .or_else(|| info.first_audio().map(|a| a.codec_name.clone())),
-        color_space: None,
+        color_space: video.and_then(probed_color_space),
         audio_stream_count: audio_streams.len(),
         audio_streams,
         file_size: 0,
     }
+}
+
+/// The colour space the container declares, as a [`ColorSpace`] name.
+///
+/// Only combinations that have a name in `ColorSpace`'s vocabulary are
+/// written: anything else — an undeclared field, or a pair Ravel has no
+/// name for — stays `None` so the resolution order falls through to the
+/// extension default instead of persisting a string
+/// [`ColorSpace::from_name`] cannot read back
+/// (`docs/specifications/color-management.md`, tier 2 of the input colour
+/// space resolution).
+fn probed_color_space(video: &VideoStreamInfo) -> Option<String> {
+    let space = ColorSpace::new(video.color_primaries?, video.color_transfer?);
+    space.name().map(str::to_owned)
 }
 
 fn file_size(path: &Path) -> u64 {
@@ -317,6 +332,9 @@ mod tests {
                     frame_count: None,
                     duration_secs: duration,
                     pixel_format: "rgba".into(),
+                    color_primaries: None,
+                    color_transfer: None,
+                    color_matrix: None,
                 }),
                 StreamInfo::Audio(ravel_core::media::AudioStreamInfo {
                     stream_index: 1,
@@ -418,6 +436,9 @@ mod tests {
                         frame_count: None,
                         duration_secs: Some(1.0),
                         pixel_format: "rgba".into(),
+                        color_primaries: None,
+                        color_transfer: None,
+                        color_matrix: None,
                     })],
                     duration_secs: Some(1.0),
                 })
@@ -433,6 +454,78 @@ mod tests {
         assert_eq!(asset.metadata.audio_stream_count, 0);
         assert!(asset.metadata.audio_streams.is_empty());
         assert!(!asset.metadata.has_audio());
+    }
+
+    /// The container's declared colour metadata lands in the persisted
+    /// metadata as a `ColorSpace` name — tier 2 of the input colour space
+    /// resolution (`MED-MED-07`).
+    #[test]
+    fn container_carries_probed_colour_space() {
+        let cases: [(
+            Option<ravel_core::color::Primaries>,
+            Option<ravel_core::color::Transfer>,
+            Option<&str>,
+        ); 4] = [
+            (
+                Some(ravel_core::color::Primaries::Rec709),
+                Some(ravel_core::color::Transfer::Rec709),
+                Some("rec709"),
+            ),
+            (
+                Some(ravel_core::color::Primaries::Rec709),
+                Some(ravel_core::color::Transfer::Srgb),
+                Some("srgb"),
+            ),
+            (
+                Some(ravel_core::color::Primaries::Rec2020),
+                Some(ravel_core::color::Transfer::Pq),
+                Some("rec2020_pq"),
+            ),
+            // Undeclared on either axis: nothing is written, so the
+            // resolution falls through to the extension default.
+            (Some(ravel_core::color::Primaries::Rec709), None, None),
+        ];
+        for (primaries, transfer, expected) in cases {
+            let prober = MediaProber::new(
+                Arc::new(move |_path| {
+                    let mut info = container_info(640, 480, FrameRate::new(30, 1), Some(1.0));
+                    if let Some(StreamInfo::Video(video)) = info.streams.first_mut() {
+                        video.color_primaries = primaries;
+                        video.color_transfer = transfer;
+                    }
+                    Ok(info)
+                }),
+                no_sequence(),
+            );
+            let asset = probe_path(Path::new("/fake/clip.mov"), &prober, FrameRate::new(30, 1))
+                .expect("container should import");
+            assert_eq!(
+                asset.metadata.color_space.as_deref(),
+                expected,
+                "primaries {primaries:?} / transfer {transfer:?}"
+            );
+        }
+    }
+
+    /// A probed pair Ravel has no name for (Rec.2020 primaries with the
+    /// BT.709 OETF) is not persisted — guessing would be worse than the
+    /// extension default it falls through to.
+    #[test]
+    fn unnameable_probed_colour_space_is_dropped() {
+        let prober = MediaProber::new(
+            Arc::new(move |_path| {
+                let mut info = container_info(640, 480, FrameRate::new(30, 1), Some(1.0));
+                if let Some(StreamInfo::Video(video)) = info.streams.first_mut() {
+                    video.color_primaries = Some(ravel_core::color::Primaries::Rec2020);
+                    video.color_transfer = Some(ravel_core::color::Transfer::Rec709);
+                }
+                Ok(info)
+            }),
+            no_sequence(),
+        );
+        let asset = probe_path(Path::new("/fake/clip.mov"), &prober, FrameRate::new(30, 1))
+            .expect("container should import");
+        assert_eq!(asset.metadata.color_space, None);
     }
 
     /// An image sequence never carries audio, whatever the representative

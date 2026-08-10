@@ -18,6 +18,7 @@ use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
+use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, MediaAssetEntry};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
@@ -27,6 +28,7 @@ use ravel_ui::panels::media_bin::{
 };
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
@@ -49,8 +51,11 @@ pub struct MediaBinGpuiPanel {
     /// Unit-5 thumbnail cache. Requests are kicked from `rebuild_rows`;
     /// completion notifies, and the observer decodes what is ready.
     thumbnails: Entity<ThumbnailCache>,
-    /// Decoded thumbnails by asset id, filled by `refresh_thumbnails`.
-    thumb_images: HashMap<String, Arc<RenderImage>>,
+    /// Decoded thumbnails by asset id, filled by `refresh_thumbnails`. The
+    /// identity records what the image was generated from: same id but a new
+    /// path, decode source, or resolved input colour space means the stored
+    /// image is stale and must be regenerated.
+    thumb_images: HashMap<String, (ThumbnailIdentity, Arc<RenderImage>)>,
     search: Entity<InputState>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
@@ -176,7 +181,12 @@ impl MediaBinGpuiPanel {
         self.thumbnails.update(cx, |cache, cx| {
             for (_id, entry) in &entries {
                 if let Some(path) = &entry.resolved {
-                    cache.get_or_request(path, thumbnail_source(&entry.kind), cx);
+                    cache.get_or_request(
+                        path,
+                        thumbnail_source(&entry.kind),
+                        entry.input_color_space().0,
+                        cx,
+                    );
                 }
             }
         });
@@ -187,10 +197,9 @@ impl MediaBinGpuiPanel {
     /// Decode whatever the cache has ready into renderable images. Runs on
     /// cache notifications and rebuilds — never in `render()`.
     fn refresh_thumbnails(&mut self, cx: &mut Context<Self>) {
-        let entries: Vec<(String, MediaAssetEntry)> = self
+        let entries: Vec<(String, ThumbnailIdentity)> = self
             .rows
             .iter()
-            .filter(|row| !self.thumb_images.contains_key(&row.asset_id))
             .filter_map(|row| {
                 let entry = self
                     .project
@@ -200,27 +209,46 @@ impl MediaBinGpuiPanel {
                     .media_assets
                     .get(&row.asset_id)?
                     .clone();
-                Some((row.asset_id.clone(), entry))
+                let identity = thumbnail_identity(&entry)?;
+                // A stored image is fresh only if it was generated from this
+                // exact identity. An input-colour-space change keeps the same
+                // id and path, so keying on the id alone would show the old
+                // space's thumbnail forever.
+                if self
+                    .thumb_images
+                    .get(&row.asset_id)
+                    .is_some_and(|(stored, _)| *stored == identity)
+                {
+                    return None;
+                }
+                Some((row.asset_id.clone(), identity))
             })
             .collect();
         if entries.is_empty() {
             return;
         }
-        let ready: Vec<(String, Arc<[u8]>)> = self.thumbnails.update(cx, |cache, cx| {
-            entries
-                .iter()
-                .filter_map(|(id, entry)| {
-                    let path = entry.resolved.as_ref()?;
-                    match cache.get_or_request(path, thumbnail_source(&entry.kind), cx) {
-                        ThumbnailState::Ready(bytes) => Some((id.clone(), bytes)),
-                        ThumbnailState::Pending | ThumbnailState::Unavailable => None,
-                    }
-                })
-                .collect()
-        });
-        for (id, bytes) in ready {
+        let ready: Vec<(String, ThumbnailIdentity, Arc<[u8]>)> =
+            self.thumbnails.update(cx, |cache, cx| {
+                entries
+                    .iter()
+                    .filter_map(|(id, identity)| {
+                        match cache.get_or_request(
+                            &identity.path,
+                            identity.source,
+                            identity.input_color_space,
+                            cx,
+                        ) {
+                            ThumbnailState::Ready(bytes) => {
+                                Some((id.clone(), identity.clone(), bytes))
+                            }
+                            ThumbnailState::Pending | ThumbnailState::Unavailable => None,
+                        }
+                    })
+                    .collect()
+            });
+        for (id, identity, bytes) in ready {
             if let Some(image) = decode_thumbnail(&bytes) {
-                self.thumb_images.insert(id, image);
+                self.thumb_images.insert(id, (identity, image));
             }
         }
         // Assets can leave the document (delete, undo): drop their images so
@@ -413,7 +441,9 @@ impl MediaBinGpuiPanel {
             .bg(colors.muted)
             .overflow_hidden();
         thumb = match self.thumb_images.get(&row.asset_id) {
-            Some(image) => thumb.child(img(image.clone()).size_full().object_fit(ObjectFit::Cover)),
+            Some((_, image)) => {
+                thumb.child(img(image.clone()).size_full().object_fit(ObjectFit::Cover))
+            }
             None => thumb.child(
                 Self::kind_icon(row.kind)
                     .size_3p5()
@@ -554,6 +584,26 @@ fn thumbnail_source(kind: &AssetKind) -> ThumbnailSource {
         AssetKind::Still => ThumbnailSource::Still,
         AssetKind::Sequence { .. } => ThumbnailSource::Sequence,
     }
+}
+
+/// What an asset's thumbnail is generated from. The disk cache keys on the
+/// same triple; keeping it beside the decoded image lets the panel spot a
+/// stale thumbnail when any part changes underneath an unchanged asset id.
+#[derive(Clone, Debug, PartialEq)]
+struct ThumbnailIdentity {
+    path: PathBuf,
+    source: ThumbnailSource,
+    input_color_space: ColorSpace,
+}
+
+/// The identity of `entry`'s thumbnail, or `None` while the asset is
+/// offline (no resolved path to decode from).
+fn thumbnail_identity(entry: &MediaAssetEntry) -> Option<ThumbnailIdentity> {
+    Some(ThumbnailIdentity {
+        path: entry.resolved.clone()?,
+        source: thumbnail_source(&entry.kind),
+        input_color_space: entry.input_color_space().0,
+    })
 }
 
 /// Decode a cached thumbnail PNG into the straight-alpha BGRA
@@ -818,5 +868,167 @@ impl Render for MediaBinGpuiPanel {
             .track_focus(&self.focus_handle)
             .child(self.render_header(cx))
             .child(list)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // No `use super::*;` here: that glob (re-importing the file's `gpui::*`)
+    // combined with the `#[gpui::test]` macro makes rustc 1.95.0 crash with
+    // SIGBUS. Import explicitly instead.
+    use super::{InvalidationHint, MediaBinGpuiPanel, ProjectState, ThumbnailCache};
+    use crate::media::import::ProbedAsset;
+    use crate::media::thumbnail::ThumbnailGenerator;
+    use crate::project_state::ProjectStateHandle;
+    use gpui::{AppContext as _, ParentElement as _, Pixels, Size, Styled as _, px};
+    use ravel_core::color::ColorSpace;
+    use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
+    use ravel_core::types::{FrameBuffer, FrameRate};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    const WINDOW_SIZE: Size<Pixels> = Size {
+        width: px(800.0),
+        height: px(600.0),
+    };
+
+    fn probed_clip(path: &str) -> ProbedAsset {
+        ProbedAsset {
+            path: PathBuf::from(path),
+            kind: AssetKind::Container,
+            metadata: AssetMetadata {
+                width: Some(1920),
+                height: Some(1080),
+                frame_rate: Some(FrameRate::new(24, 1)),
+                duration_secs: Some(2.0),
+                codec: Some("fake".into()),
+                color_space: None,
+                audio_stream_count: 1,
+                audio_streams: vec![AudioStreamMetadata {
+                    stream_index: 1,
+                    codec: Some("fake-audio".into()),
+                    sample_rate: 48_000,
+                    channels: 2,
+                }],
+                file_size: 100,
+            },
+        }
+    }
+
+    /// A stored thumbnail must not survive a change of the asset's resolved
+    /// input colour space: the id and the path are unchanged, so keying the
+    /// decoded image on the id alone would show the old space's thumbnail
+    /// forever (CodeRabbit review on the MED-APP-32 fix).
+    #[gpui::test]
+    fn a_colour_space_change_regenerates_the_thumbnail(cx: &mut gpui::TestAppContext) {
+        // No `ravel_i18n::init` here: i18n is process-global, and the lib
+        // tests share one process — initializing it flips label lookups for
+        // concurrently running tests (node_editor's driven-params test reads
+        // the type id "constant", not the English display name). Uninitialised
+        // `t!` returns the raw key, which this test never asserts on.
+        crate::project_state::disable_background_eval_for_tests();
+        let project = cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(super::super::FocusedPanelGlobal(None));
+            cx.set_global(super::super::SelectedPropertiesTarget::default());
+            cx.set_global(super::super::MediaSelection::default());
+            cx.set_global(super::super::PlaybackPosition::default());
+            let project = cx.new(ProjectState::new);
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            project
+        });
+
+        struct TestRoot {
+            panel: gpui::Entity<MediaBinGpuiPanel>,
+        }
+        impl gpui::Render for TestRoot {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div().size_full().child(self.panel.clone())
+            }
+        }
+
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let captured_in_window = captured.clone();
+        let _window = cx.open_window(WINDOW_SIZE, move |window, cx| {
+            let panel = cx
+                .new(|cx| MediaBinGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx));
+            *captured_in_window.borrow_mut() = Some(panel.clone());
+            gpui_component::Root::new(cx.new(|_| TestRoot { panel }), window, cx)
+        });
+        let panel = captured
+            .borrow_mut()
+            .take()
+            .expect("panel entity should be created");
+
+        // A generator that records the colour space each request carried.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorder = calls.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source, space| {
+            recorder.lock().unwrap().push(space);
+            Ok(FrameBuffer::from_f32(8, 8, vec![0.5; 8 * 8 * 4]))
+        });
+        panel.update(cx, |panel, cx| {
+            panel.thumbnails = cx.new(|_| ThumbnailCache::with_generator(None, generator));
+        });
+
+        // The thumbnail cache keys by statting the source, so the clip needs
+        // a real file behind it.
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let clip = temp.path().join("clip.mov");
+        std::fs::write(&clip, b"media fixture").expect("write media fixture");
+
+        project.update(cx, |project, cx| {
+            project.import_media(vec![probed_clip(clip.to_str().unwrap())], vec![], cx);
+        });
+        cx.run_until_parked();
+        // The injected cache is not the entity the panel's observer
+        // subscribes to, so pull the ready bytes explicitly — the observer
+        // would do the same on the real cache's notification.
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+
+        let asset_id = panel.read_with(cx, |panel, _| panel.rows[0].asset_id.clone());
+        // Untagged .mov: the extension default resolves to sRGB.
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![ColorSpace::SRGB],
+            "first thumbnail request"
+        );
+        panel.read_with(cx, |panel, _| {
+            let (identity, _) = panel
+                .thumb_images
+                .get(&asset_id)
+                .expect("thumbnail image stored");
+            assert_eq!(identity.input_color_space, ColorSpace::SRGB);
+        });
+
+        // The user reinterprets the clip as linear: same id, same path.
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            let entry = doc
+                .media_assets
+                .get_mut(&asset_id)
+                .expect("asset in document");
+            entry.color_space = Some(ColorSpace::LINEAR_REC709);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![ColorSpace::SRGB, ColorSpace::LINEAR_REC709],
+            "the new space must be decoded, not served from the stale image"
+        );
+        panel.read_with(cx, |panel, _| {
+            let (identity, _) = panel
+                .thumb_images
+                .get(&asset_id)
+                .expect("thumbnail image stored");
+            assert_eq!(identity.input_color_space, ColorSpace::LINEAR_REC709);
+        });
     }
 }

@@ -1016,6 +1016,7 @@ mod tests {
             CompId::new(1),
             CacheIdentity::of_frame(&ctx()),
             Arc::new(frame),
+            false,
         );
         assert_eq!(hooks.held.len(), 1, "nothing has settled yet");
 

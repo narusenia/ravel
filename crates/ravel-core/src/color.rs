@@ -699,7 +699,16 @@ fn parse_triple<'a>(
     line: usize,
     raw: &str,
 ) -> Result<[f32; 3], CubeError> {
-    let values: Vec<f32> = parts.filter_map(|v| v.parse::<f32>().ok()).collect();
+    // `collect` into a `Result`, not `filter_map`: dropping the tokens that
+    // do not parse would read `0 foo 0 0` as a valid triple and put a LUT
+    // entry the file never contained into the grade.
+    let values = parts
+        .map(|v| v.parse::<f32>())
+        .collect::<Result<Vec<f32>, _>>()
+        .map_err(|_| CubeError::BadEntry {
+            line,
+            found: raw.to_string(),
+        })?;
     if values.len() != 3 {
         return Err(CubeError::BadEntry {
             line,
@@ -1118,6 +1127,16 @@ DOMAIN_MAX 1.0 1.0 1.0
         ));
         assert!(matches!(
             CubeLut::parse("LUT_3D_SIZE 2\nnot a colour\n"),
+            Err(CubeError::BadEntry { .. })
+        ));
+        // A line with three *readable* numbers among four tokens is not a
+        // triple with a stray word in it; it is a damaged file.
+        assert!(matches!(
+            CubeLut::parse("LUT_3D_SIZE 2\n0.0 foo 0.0 0.0\n"),
+            Err(CubeError::BadEntry { .. })
+        ));
+        assert!(matches!(
+            CubeLut::parse("LUT_3D_SIZE 2\nDOMAIN_MIN 0.0 x 0.0\n"),
             Err(CubeError::BadEntry { .. })
         ));
     }

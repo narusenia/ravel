@@ -1718,11 +1718,11 @@ mod tests {
     impl EvalWorkerHooks for FrameHooks {
         fn finalize(
             &mut self,
-            value: Arc<dyn ravel_core::types::NodeData>,
+            value: &Arc<dyn ravel_core::types::NodeData>,
             _ctx: &EvalContext,
-        ) -> Arc<dyn ravel_core::types::NodeData> {
+        ) -> Option<Arc<dyn ravel_core::types::NodeData>> {
             let Some(fb) = value.downcast_ref::<FrameBuffer>() else {
-                return value;
+                return Some(value.clone());
             };
             let mut bgra = Vec::with_capacity(fb.as_f32().len());
             for pixel in fb.as_f32().chunks_exact(4) {
@@ -1730,11 +1730,11 @@ mod tests {
                     ravel_core::color::to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]);
                 bgra.extend_from_slice(&[display[2], display[1], display[0], display[3]]);
             }
-            Arc::new(ravel_nodes::DisplayFrame::new(
+            Some(Arc::new(ravel_nodes::DisplayFrame::new(
                 fb.width,
                 fb.height,
                 Arc::from(bgra),
-            ))
+            )))
         }
 
         fn sync(

@@ -441,7 +441,7 @@ fn measure_display_transform_cost() {
     };
     let mut shaders = ShaderManager::new(gpu.clone());
     let pool = ravel_nodes::shared_texture_pool(&gpu);
-    let mut display = DisplayTransform::new(&mut shaders).expect("shader");
+    let mut display = DisplayTransform::new();
 
     let load = std::fs::read_to_string("/proc/loadavg")
         .ok()
@@ -472,7 +472,9 @@ fn measure_display_transform_cost() {
             before_gpu += start.elapsed().as_nanos();
 
             let start = Instant::now();
-            let new = display.run(&gpu, &pool, &resident).expect("display");
+            let new = display
+                .run(&gpu, &mut shaders, &pool, &resident)
+                .expect("display");
             after_gpu += start.elapsed().as_nanos();
             assert_eq!(old.len(), new.bgra().len());
 
@@ -482,7 +484,9 @@ fn measure_display_transform_cost() {
             before_cpu += start.elapsed().as_nanos();
 
             let start = Instant::now();
-            let new = display.run(&gpu, &pool, &cpu_frame).expect("display");
+            let new = display
+                .run(&gpu, &mut shaders, &pool, &cpu_frame)
+                .expect("display");
             after_cpu += start.elapsed().as_nanos();
             assert_eq!(old.len(), new.bgra().len());
         }

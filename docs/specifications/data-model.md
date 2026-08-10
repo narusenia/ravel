@@ -757,13 +757,17 @@ disk_enabled = false
 - `root` / `disk_limit_mb` / `disk_enabled` はディスク層の設定。**層の実装は
   未実装で、担当は `docs/implementation/cache-plan.md` の `CACHE-11`。**
   `disk_enabled = false`（既定）では割り当ては 0 になる
-- **この節はまだ実行時に届かない。** パースとマージは他の節と同じように
-  動くが、`Project::resolved_settings` を呼ぶ本番コードが存在しない
-  （設定レイヤー全体の未接続。`issues/medium/app-shell.md` の `MED-APP-10`)。
-  起動時の予算は `CacheBudgetConfig` の既定値から作られ、ファイルに書いた値は
-  無視される。解決済みの設定を走行中の予算へ流す
-  （`SharedCacheBudget::reconfigure`）配線と設定画面からの編集は、どちらも
-  `docs/implementation/settings-screen-plan.md` の `SET-8` が担当する
+- **`vram_limit_mb` / `ram_limit_mb` / `sim_reserve_ratio` は実行時に届く**
+  （`SET-8`）。起動時の予算は解決済みのこの節から作られ、環境設定 ▸
+  キャッシュの編集とプロジェクト層の着脱は `app_settings::apply` 経由で
+  `SharedCacheBudget::reconfigure` に流れる。上限を下げた分は、その層で次に
+  予約が起きたときに退避として回収される（走行中の予約は壊さない）
+- **`root` は「キャッシュを作る側が読む値」**なので、変更は次にそのキャッシュを
+  作るとき（実質は次回起動）から効く。`app_settings::cache_root` が唯一の
+  読み口で、未設定なら `global_config_dir()` を返す。既に書かれたファイルは
+  移動しない
+- **`disk_limit_mb` / `disk_enabled` はまだ実行時に届かない。**
+  `CACHE-11` 待ちで、設定画面にも出していない
 
 ## 制約・前提条件
 

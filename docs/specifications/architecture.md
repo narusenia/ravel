@@ -405,11 +405,14 @@ precomp で他コンプに置かれたコンプの編集は、**それを含む�
 > 評価する。
 > **ディスク層・共有デコードキャッシュは未実装**で、担当は
 > `docs/implementation/cache-plan.md` の `CACHE-8` / `CACHE-11`。
-> 予算の上限は**起動時に `CacheBudgetConfig` の既定値から作られる**。
-> `settings.toml` の `[cache]` はパースとマージまでで実行時には届かず
-> （設定レイヤー全体が未接続。`issues/medium/app-shell.md` の `MED-APP-10`）、
-> 解決済みの設定を走行中の予算へ流す配線は
-> `docs/implementation/settings-screen-plan.md` の `SET-8` が担当する。
+> 予算の上限は**解決済みの `settings.toml` の `[cache]` から作られる**
+> （`SET-8`）。起動時は `ProjectState::new` が
+> `ResolvedSettings::cache_budget()` で予算を作り、その後の変更 —
+> 環境設定 ▸ キャッシュの編集と、プロジェクト層の着脱 — は
+> `app_settings::apply` から `SharedCacheBudget::reconfigure` へ流れる。
+> **`cache.disk_enabled` / `disk_limit_mb` だけは実行時に効かない**。
+> ディスク層自体が `CACHE-11` 待ちで、既定の `disk_enabled = false` では
+> 割り当てが 0 になるため、設定画面にも出していない。
 
 ## プロジェクトファイル構造
 

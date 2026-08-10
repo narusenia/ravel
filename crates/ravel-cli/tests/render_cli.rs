@@ -322,7 +322,7 @@ fn run_with(
     mut recorder: Recorder,
     cancel: &CancelFlag,
 ) -> Run {
-    let result = render_with_hooks(args, || Ok(hooks), cancel, &mut recorder);
+    let result = render_with_hooks(args, |_budget| Ok(hooks), cancel, &mut recorder);
     Run { result, recorder }
 }
 
@@ -777,6 +777,63 @@ fn the_real_entry_point_classifies_before_it_builds_a_device() {
 }
 
 /// The same ordering, stated as the invariant rather than as its symptoms:
+/// `CACHE-3` / `CACHE-8`: the budget handed to the hooks factory is the one
+/// the render worker's evaluator reserves against.
+///
+/// The hooks own caches of their own — the texture pool and the shared decode
+/// cache — and the worker owns the node-result cache. If the CLI built them
+/// from separate budgets, "one authority for the memory limit" would hold in
+/// the GUI and quietly not hold in `ravel-cli render`. Nothing else here
+/// notices: a render with three unrelated ceilings still writes correct
+/// frames.
+#[test]
+fn the_render_worker_reserves_against_the_budget_the_hooks_were_given() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Samples the budget the factory saw, every time the render moves.
+    struct Watcher {
+        budget: Arc<Mutex<Option<ravel_core::cache_budget::SharedCacheBudget>>>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl Reporter for Watcher {
+        fn update(&mut self, _progress: &JobProgress) {
+            let budget = self.budget.lock().expect("budget");
+            if let Some(budget) = budget.as_ref() {
+                self.peak
+                    .fetch_max(budget.stats().entries, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let dir = TempDir::new().expect("tempdir");
+    let project = project_file(dir.path(), document(false));
+    let seen: Arc<Mutex<Option<ravel_core::cache_budget::SharedCacheBudget>>> = Arc::default();
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    let mut watcher = Watcher {
+        budget: Arc::clone(&seen),
+        peak: Arc::clone(&peak),
+    };
+    render_with_hooks(
+        &args(&project, &dir.path().join("out")),
+        |budget| {
+            *seen.lock().expect("budget") = Some(budget.clone());
+            Ok(StubHooks::new())
+        },
+        &CancelFlag::new(),
+        &mut watcher,
+    )
+    .expect("the render runs");
+
+    assert!(
+        peak.load(Ordering::SeqCst) > 0,
+        "the render worker cached node results without reserving on the \
+         budget the hooks were built with"
+    );
+}
+
 /// nothing expensive is built until the render is known to be worth starting.
 #[test]
 fn the_evaluation_hooks_are_not_built_until_the_render_is_decided() {
@@ -787,7 +844,7 @@ fn the_evaluation_hooks_are_not_built_until_the_render_is_decided() {
     let built = AtomicUsize::new(0);
     // Captures only `&built`, so the closure is `Copy` and can be handed to
     // both calls even though the parameter takes it by value.
-    let hooks = || -> Result<StubHooks, CliError> {
+    let hooks = |_budget: &_| -> Result<StubHooks, CliError> {
         built.fetch_add(1, Ordering::SeqCst);
         Ok(StubHooks::new())
     };
@@ -1186,7 +1243,7 @@ mod sound {
 
         let error = render_with_hooks(
             &sound_args(&project, &out, "0-9"),
-            || Err::<StubHooks, _>(CliError::Gpu("no adapter on this machine".into())),
+            |_budget| Err::<StubHooks, _>(CliError::Gpu("no adapter on this machine".into())),
             &CancelFlag::new(),
             &mut Recorder::default(),
         )

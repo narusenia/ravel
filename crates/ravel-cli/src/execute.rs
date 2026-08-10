@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::RecvTimeoutError;
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::runtime::eval_service::EvalWorkerHooks;
 use ravel_core::runtime::{JobProgress, RenderEvent, RenderJob, RenderQueue};
 use ravel_media::encode::ImageSequenceEncoder;
@@ -59,14 +60,19 @@ impl CancelFlag {
 ///
 /// `hooks` decide which processors the private evaluator gets: the GPU ones
 /// in the binary, a stub in the tests that do not need a device.
+///
+/// `budget` is the same one the hooks were built with, so the worker's node
+/// cache, the texture pool and the shared decode cache are counted against
+/// one ceiling rather than three (`cache-plan.md`, `CACHE-3`).
 pub fn execute<H: EvalWorkerHooks>(
     hooks: H,
+    budget: SharedCacheBudget,
     plan: &RenderPlan,
     cancel: &CancelFlag,
     reporter: &mut dyn Reporter,
 ) -> Result<u64, CliError> {
     let (tx, rx) = crossbeam_channel::unbounded();
-    let mut queue = RenderQueue::spawn(hooks, move |event| {
+    let mut queue = RenderQueue::spawn_with_budget(hooks, budget, move |event| {
         // A send that fails means this process is already tearing down; the
         // worker must not panic over it.
         let _ = tx.send(event);

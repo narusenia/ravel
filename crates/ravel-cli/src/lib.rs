@@ -53,12 +53,14 @@ pub mod report;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::runtime::eval_service::EvalWorkerHooks;
 use ravel_core::runtime::{CONFLICT_SAMPLE, OverwritePolicy};
 use ravel_gpu::GpuContext;
 use ravel_media::encode::available_encoders;
 use ravel_nodes::GpuEvalHooks;
 use ravel_project::ProjectFile;
+use ravel_project::settings::ResolvedSettings;
 
 use crate::args::{Cli, Command, ListCommand, RenderArgs};
 use crate::error::{CliError, EXIT_OK};
@@ -185,6 +187,12 @@ fn refuse_existing_output(plan: &RenderPlan) -> Result<(), CliError> {
 /// whether it has a render to run — which is how a headless machine came to
 /// report a misspelled `--param` as "no usable GPU adapter", collapsing every
 /// classified exit code into `1`.
+///
+/// It is handed the process's [`SharedCacheBudget`] because the hooks own
+/// caches of their own — the texture pool and the shared decode cache — and
+/// those have to answer to the same authority as the render worker's
+/// evaluator (`cache-plan.md`, `CACHE-3`). Building the budget here rather
+/// than inside the factory is what keeps the two halves the same one.
 pub fn render_with_hooks<H, F>(
     args: &RenderArgs,
     hooks: F,
@@ -193,7 +201,7 @@ pub fn render_with_hooks<H, F>(
 ) -> Result<Summary, CliError>
 where
     H: EvalWorkerHooks,
-    F: FnOnce() -> Result<H, CliError>,
+    F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>,
 {
     let plan = plan_from_args(args)?;
     refuse_existing_output(&plan)?;
@@ -206,7 +214,10 @@ where
     // render can make — a machine with no adapter — and evaluating it as an
     // argument to `execute` would let it escape past the sound, which is
     // already on disk by then.
-    let hooks = hooks()?;
+    // Settings layers are not loaded by the CLI, so the limits are the
+    // canonical defaults — the same ones `ProjectState` starts from.
+    let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
+    let hooks = hooks(&budget)?;
 
     // Sound first: its warnings are worth having before an hour of frames,
     // and undoing one WAV is simpler than undoing however many frames the
@@ -217,7 +228,7 @@ where
     // its temporary file with it and never touches the soundtrack's real name
     // — so a failed or cancelled render leaves neither a soundtrack without
     // frames nor a `--overwrite` target destroyed for nothing.
-    let frames = execute::execute(hooks, &plan, cancel, reporter)?;
+    let frames = execute::execute(hooks, budget, &plan, cancel, reporter)?;
     let audio = audio.map(audio::PendingAudio::publish).transpose()?;
 
     Ok(Summary {
@@ -239,10 +250,10 @@ pub fn render(
 ) -> Result<Summary, CliError> {
     render_with_hooks(
         args,
-        || {
+        |budget| {
             let gpu =
                 GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
-            Ok(GpuEvalHooks::new(gpu))
+            Ok(GpuEvalHooks::with_budget(gpu, budget.clone()))
         },
         cancel,
         reporter,

@@ -1153,6 +1153,7 @@ fn read_float_rgb_frame(
     let (width, height) = (frame.width(), frame.height());
     let pixel_count = (width * height) as usize;
     let row_len = width as usize * 4;
+    debug_assert!(row_len > 0, "float ingest requires a non-zero row width");
     let mut f32_data = vec![0.0f32; pixel_count * 4];
 
     match layout {
@@ -1616,6 +1617,31 @@ mod tests {
             ColorSpace::SRGB,
         )
         .expect("float frame");
+        assert_eq!(actual.as_f32(), expected.as_f32());
+
+        let mut planar = frame::Video::new(PixelFormat::GBRAPF32LE, 2, 3);
+        for plane in 0..4 {
+            let stride = planar.stride(plane);
+            let data = planar.data_mut(plane);
+            for y in 0..3usize {
+                for x in 0..2usize {
+                    let offset = y * stride + x * 4;
+                    let value = (plane as f32 + 1.0) * 0.1 + (x + y) as f32 * 0.01;
+                    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        let expected = serial_read_float_rgb_frame(
+            &planar,
+            FloatRgbLayout::PlanarAlpha { big_endian: false },
+            ColorSpace::SRGB,
+        );
+        let actual = read_float_rgb_frame(
+            &planar,
+            FloatRgbLayout::PlanarAlpha { big_endian: false },
+            ColorSpace::SRGB,
+        )
+        .expect("planar alpha frame");
         assert_eq!(actual.as_f32(), expected.as_f32());
     }
 

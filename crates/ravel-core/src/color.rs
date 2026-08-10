@@ -19,10 +19,12 @@
 //! # Purity
 //!
 //! This module performs no I/O. [`CubeLut::parse`] takes the file's text, not
-//! its path — the caller reads the file. The one piece of state is
-//! [`to_display_rgba8`]'s lazily built boundary table, which is a memo of a
-//! pure function of compile-time constants: it changes no answer, only how
-//! long the answer takes.
+//! its path — the caller reads the file. The four pieces of state are lazily
+//! built tables (`DISPLAY_CODE_THRESHOLDS`, `PRIMARIES_MATRICES`,
+//! `INGEST_U8_TABLES`, and `INGEST_U16_TABLES`), all memos of pure functions
+//! of compile-time constants: they change no answer, only how long the first
+//! call takes. The u16 ingest tables retain about 1 MiB of resident heap
+//! storage.
 //!
 //! # Out-of-domain values
 //!
@@ -1261,6 +1263,18 @@ mod tests {
         for primaries in Primaries::ALL {
             for transfer in Transfer::ALL {
                 let input = ColorSpace::new(primaries, transfer);
+                let codes = [12, 34, 56, 78];
+                let normalized = codes.map(|code| f32::from(code) / 255.0);
+                let expected = convert(
+                    [normalized[0], normalized[1], normalized[2]],
+                    input,
+                    ColorSpace::WORKING,
+                );
+                assert_eq!(
+                    ingest_rgba8(codes, input),
+                    [expected[0], expected[1], expected[2], normalized[3]],
+                    "{input:?}, distinct channel codes"
+                );
                 for code in 0..=u8::MAX {
                     let normalized = f32::from(code) / 255.0;
                     let expected = convert([normalized; 3], input, ColorSpace::WORKING);
@@ -1282,6 +1296,18 @@ mod tests {
         for primaries in Primaries::ALL {
             for transfer in Transfer::ALL {
                 let input = ColorSpace::new(primaries, transfer);
+                let codes = [1234, 23456, 45678, 56789];
+                let normalized = codes.map(|code| f32::from(code) / 65535.0);
+                let expected = convert(
+                    [normalized[0], normalized[1], normalized[2]],
+                    input,
+                    ColorSpace::WORKING,
+                );
+                assert_eq!(
+                    ingest_rgba16(codes, input),
+                    [expected[0], expected[1], expected[2], normalized[3]],
+                    "{input:?}, distinct channel codes"
+                );
                 for code in 0..=u16::MAX {
                     let normalized = f32::from(code) / 65535.0;
                     let expected = convert([normalized; 3], input, ColorSpace::WORKING);

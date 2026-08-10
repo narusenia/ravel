@@ -2,22 +2,11 @@
 
 ---
 
-## MED-MED-01 | bug | 全ての映像デコードを 8bit RGBA 経由に強制し、10bit / float の精度を f32 バッファ到達前に破壊する
-
-**該当**: `crates/ravel-media/src/decoder.rs:741-750`
-
-`convert_video_frame_to_rgba` は常に `PixelFormat::RGBA`（8bpc）へ変換し 255 で割る。
-ProRes 422 10bit（このクレートが明示的に謳っているコーデック）、DNxHR、
-EXR / DPX 画像シーケンス（`image_seq.rs` も同じ関数を通る）が、
-f32 `FrameBuffer` に入る前に 8bit に量子化される。
-f32 フレーム型がまさにその精度を運ぶために存在するモーショングラフィックスパイプラインで、
-バンディングと HDR / linear データの損失が発生する。
-
-**修正方針**: ソースフォーマットに応じて sws のターゲットを選ぶ。
-高ビット深度 / float ソースは `RGBAF32`（または `RGBA64`）へ変換し適切なスケールで割る。
-8bit RGBA は 8bit ソースのみに使う。
-
-**関連**: [HIGH-17](../high/HIGH-17-sws-scaler-recreated-per-frame.md)（同関数。同時に手を入れる）
+`MED-MED-01`（全ての映像デコードが 8bit RGBA を経由する）は
+[HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md) へ昇格した
+（2026-08-10）。フェーズ CM で仕様が「リニア EXR を取り込む」と規定したため、
+同じ欠陥の深刻さが上がった。**解決ではなく移動**なので `closed/` には無い。
+ID は再利用しない。
 
 ---
 
@@ -65,6 +54,50 @@ rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
 `renamex_np(RENAME_EXCL)`、Windows は `MoveFileEx` を置換フラグなしで）。
 プラットフォーム分岐が `ravel-media` に入るので、**Windows CI が回る状態で
 着手すること**。`EXPORT-1` の書き込み経路に手を入れる変更になる。
+
+---
+
+## MED-MED-07 | bug | 素材の色メタデータが読まれず、入力色空間の解決が常に拡張子既定へ落ちる
+
+**該当**: `crates/ravel-app/src/media/import.rs:255`（`metadata_from_info`）、
+`crates/ravel-core/src/media/*`（`MediaInfo` / `VideoStreamInfo`）
+
+`docs/specifications/color-management.md` は素材の入力色空間を 3 段で解決すると
+規定している。
+
+1. 明示指定（`MediaAssetEntry::color_space`）
+2. **ファイルのメタデータ**（`AssetMetadata::color_space`）
+3. 拡張子ごとの既定（float 形式 → リニア Rec.709、整数形式 → sRGB）
+
+**優先順位 2 が常に空**。`metadata_from_info` は `color_space: None` を
+無条件に書いており、`MediaInfo` / `VideoStreamInfo` にも色に関するフィールドが
+無い（`pixel_format` はあるが色空間ではない）。プローブがファイルから色情報を
+一切取り出していないので、ユーザーが明示指定しない限り**実データでは必ず
+拡張子既定に落ちる**。
+
+**影響**: 拡張子が嘘をつく素材で色が狂う。
+
+- Rec.709 ではなく sRGB でグレーディングされた `.mov`、あるいは
+  逆に log で収録された `.mov` — どちらも「整数形式 → sRGB」で読まれる
+- `.tif` / `.dpx` は仕様どおり**リニア扱いにしない**方針だが、実際に
+  リニアなファイルでもメタデータからそれを知る手段が無い
+- 誤ったときの被害は非対称で、リニアを sRGB と誤ると暗く、逆は明るくなる。
+  仕様はその非対称を承知で既定を選んでいるが、**既定に落ちる頻度が
+  「メタデータが無いとき」ではなく「常に」になっている**のは想定外
+
+**修正方針**: プローブに色情報を通す。
+
+- `VideoStreamInfo` に色空間 / 伝達特性 / 原色（FFmpeg の
+  `AVColorSpace` / `AVColorTransferCharacteristic` / `AVColorPrimaries`）を足し、
+  `metadata_from_info` が `ColorSpace::from_name` の語彙へ写す
+- 静止画は FFmpeg 経由では拾えない情報がある。**EXR の `chromaticities`**、
+  **PNG の `iCCP` / `gAMA`** は専用の読み取りが要る
+- **不明は `None` のまま**。推測で埋めると 3 段目の既定より悪くなる。
+  仕様どおり「2 と 3 のどちらを採ったか」を素材ごとに 1 度ログへ出す
+
+**関連**: [HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md) とは独立。
+あちらは取り込みのビット幅、こちらは入力色空間の判定。
+設定 UI（明示指定を与える手段）は `CM-8`。
 
 ---
 

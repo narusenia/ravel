@@ -83,6 +83,15 @@ TIFF / DPX は float も log も入りうるが**リニア扱いにしない**: 
 無変換（`ColorSpace::WORKING`）なので、ファイルそのものの値が欲しい経路
 （メディアビンのサムネイル）は何も変わらない。
 
+### 既知の上限: 取り込みが 8bit を経由する
+
+**この規範はまだ入口で満たされていない。** デコードは素材の画素形式に
+関わらず 8bit RGBA へ変換してから `ingest_rgba8` に渡すので、リニア EXR の
+1 超の値はクリップされ、float / 10bit の精度は f32 バッファに届く前に
+失われる（`issues/high/HIGH-31-float-decode-through-8bit-rgba.md`）。
+上の解決順のうち**メタデータ（優先順位 2）も常に空**で、実データでは必ず
+拡張子既定に落ちる（`MED-MED-07`）。
+
 ## 表示変換
 
 `ViewerImage::from_frame_buffer`（`ravel-app`）**1 箇所**。`GPUCOMP-9` が

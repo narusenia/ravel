@@ -341,7 +341,7 @@ fn an_out_of_range_limit_is_refused_rather_than_clamped(cx: &mut TestAppContext)
         -1.0,
         f64::NAN,
         f64::INFINITY,
-        settings_dialog::MAX_CACHE_LIMIT_MB + 1.0,
+        app_settings::MAX_CACHE_LIMIT_MB + 1.0,
     ];
     for value in refused {
         cx.update(|cx| {
@@ -368,8 +368,8 @@ fn an_out_of_range_limit_is_refused_rather_than_clamped(cx: &mut TestAppContext)
     // The bounds themselves are accepted, so the range is a range and not an
     // accidental exclusion of every usable value.
     cx.update(|cx| {
-        settings_dialog::set_cache_vram_limit_mb(settings_dialog::MIN_CACHE_LIMIT_MB, cx);
-        settings_dialog::set_cache_ram_limit_mb(settings_dialog::MAX_CACHE_LIMIT_MB, cx);
+        settings_dialog::set_cache_vram_limit_mb(app_settings::MIN_CACHE_LIMIT_MB, cx);
+        settings_dialog::set_cache_ram_limit_mb(app_settings::MAX_CACHE_LIMIT_MB, cx);
         settings_dialog::set_cache_sim_reserve_ratio(1.0, cx);
     });
     cx.run_until_parked();
@@ -482,6 +482,105 @@ fn the_disk_tier_is_not_offered_while_nothing_charges_it(cx: &mut TestAppContext
             .cache_budget()
             .disk_bytes,
         0
+    );
+}
+
+/// Open a session on a hand-written global settings file — the writer the
+/// dialog's rows are not.
+fn start_with_settings_file(
+    text: &str,
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<ProjectState>, tempfile::TempDir) {
+    disable_background_eval_for_tests();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.toml");
+    std::fs::write(&path, text).unwrap();
+
+    let project = cx.new(ProjectState::new);
+    cx.update(|cx| {
+        cx.set_global(ProjectStateHandle(project.downgrade()));
+        app_settings::install(read_global_settings_at(Some(path)), cx);
+    });
+    cx.run_until_parked();
+    (project, dir)
+}
+
+/// **`settings.toml` is a writer too.** The rows refuse a limit the accounting
+/// cannot use, but a hand-edited file reaches the budget without passing a row
+/// — and this unit is what made it reach the budget at all, so the range check
+/// has to be on the apply path and not only on the typing path.
+///
+/// `vram_limit_mb = 0` is the one that matters: a zero ceiling evicts every
+/// entry as it is produced, which reads as the application hanging.
+#[gpui::test]
+fn a_persisted_limit_outside_the_usable_range_falls_back_to_the_default(cx: &mut TestAppContext) {
+    let (project, _dir) =
+        start_with_settings_file("[cache]\nvram_limit_mb = 0\nram_limit_mb = 99999999\n", cx);
+
+    // The file resolved: this is a usable value being refused, not a parse
+    // failure hiding the section.
+    let resolved = cx.update(|cx| app_settings::resolved(cx));
+    assert_eq!(resolved.cache_vram_limit_mb, 0);
+    assert_eq!(resolved.cache_ram_limit_mb, 99_999_999);
+
+    let defaults = ravel_project::settings::ResolvedSettings::default();
+    let stats = project.read_with(cx, |project, _| project.cache_budget().stats());
+    assert_eq!(
+        stats.limit(Tier::Vram),
+        defaults.cache_vram_limit_mb * MIB,
+        "a zero ceiling would evict everything the moment it was produced"
+    );
+    assert_eq!(
+        stats.limit(Tier::Ram),
+        defaults.cache_ram_limit_mb * MIB,
+        "and a limit past the bound is refused at the same range as the row's"
+    );
+}
+
+/// A `NaN` share passes `CacheBudget`'s defensive `clamp` untouched and turns
+/// the simulation reserve into zero — the protection quietly disappearing
+/// rather than a setting being refused. Observed as behaviour: with the reserve
+/// in force, ordinary entries may not fill the whole tier.
+#[gpui::test]
+fn a_persisted_simulation_reserve_that_is_not_a_number_keeps_the_default(cx: &mut TestAppContext) {
+    let (project, _dir) =
+        start_with_settings_file("[cache]\nram_limit_mb = 100\nsim_reserve_ratio = nan\n", cx);
+    assert!(
+        cx.update(|cx| app_settings::resolved(cx))
+            .cache_sim_reserve_ratio
+            .is_nan()
+    );
+
+    let budget = project.read_with(cx, |project, _| project.cache_budget().clone());
+    assert_eq!(budget.stats().limit(Tier::Ram), 100 * MIB);
+
+    // The default share is 0.25, so ordinary entries get 75 MiB of the 100.
+    let held = budget.reserve(CacheKind::NodeResult(Tier::Ram), 60 * MIB).0;
+    let (_next, evicted) = budget.reserve(CacheKind::NodeResult(Tier::Ram), 20 * MIB);
+    assert_eq!(
+        evicted.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+        vec![held.id()],
+        "with the reserve gone, 80 MiB of ordinary entries would have fitted"
+    );
+    drop(held);
+}
+
+/// The same for the location: a relative `cache.root` in the file would put the
+/// cache wherever Ravel was launched from, and move it when that changed.
+#[gpui::test]
+fn a_persisted_relative_cache_location_is_not_adopted(cx: &mut TestAppContext) {
+    let (_project, _dir) = start_with_settings_file("[cache]\nroot = \"relative/cache\"\n", cx);
+
+    assert_eq!(
+        cx.update(|cx| app_settings::resolved(cx))
+            .cache_root
+            .as_deref(),
+        Some("relative/cache")
+    );
+    assert_eq!(
+        cx.update(|cx| app_settings::cache_root(cx)),
+        ravel_project::paths::global_config_dir(),
+        "a relative location falls back rather than resolving against the cwd"
     );
 }
 

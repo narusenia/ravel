@@ -396,14 +396,17 @@ mod tests {
     /// is whether both halves together keep real memory inside the limit.
     #[derive(Default)]
     struct Neighbour {
-        held: Vec<(Reservation, Arc<FrameBuffer>, u64)>,
+        held: Vec<(Reservation, Arc<FrameBuffer>)>,
         foreign: Vec<Evicted>,
     }
 
     impl Neighbour {
-        fn insert(&mut self, budget: &SharedCacheBudget, value: Arc<FrameBuffer>, bytes: u64) {
-            let (reservation, evicted) = budget.reserve(CacheKind::NodeResult(Tier::Ram), bytes);
-            self.held.push((reservation, value, bytes));
+        /// Reserves exactly what `value` costs, so what this neighbour is
+        /// accounted for and what it is really holding are the same number.
+        fn insert(&mut self, budget: &SharedCacheBudget, value: Arc<FrameBuffer>) {
+            let (reservation, evicted) =
+                budget.reserve(CacheKind::NodeResult(Tier::Ram), value.byte_size());
+            self.held.push((reservation, value));
             self.drop_evicted(&evicted);
         }
 
@@ -412,7 +415,7 @@ mod tests {
                 match self
                     .held
                     .iter()
-                    .position(|(reservation, _, _)| reservation.id() == entry.id)
+                    .position(|(reservation, _)| reservation.id() == entry.id)
                 {
                     Some(index) => {
                         self.held.swap_remove(index);
@@ -426,8 +429,10 @@ mod tests {
             std::mem::take(&mut self.foreign)
         }
 
+        /// The bytes of the buffers still alive here — measured, like
+        /// [`MediaFrameCache::resident_bytes`], never declared.
         fn resident_bytes(&self) -> u64 {
-            self.held.iter().map(|(_, _, bytes)| bytes).sum()
+            self.held.iter().map(|(_, value)| value.byte_size()).sum()
         }
     }
 
@@ -441,15 +446,20 @@ mod tests {
     /// why the assertion is on the bytes the two consumers still hold, not on
     /// the budget's own counters.
     ///
-    /// The two insert at **different rates**, which is what makes the least
-    /// recently used entry belong to the other consumer. Alternating one for
-    /// one never crosses: each insert evicts the entry the same consumer made
-    /// two rounds ago, and the leak stays invisible. The counters at the end
-    /// keep the test honest about having exercised both directions.
+    /// The two insert at **different rates** — two decodes per node result —
+    /// which is what makes the least recently used entry belong to the other
+    /// consumer. Alternating one for one never crosses: each insert evicts
+    /// the entry the same consumer made two rounds ago, and the leak stays
+    /// invisible. The counters at the end keep the test honest about having
+    /// exercised both directions.
     #[test]
     fn two_consumers_of_one_pot_keep_real_memory_inside_the_limit() {
         let one = frame(0.5).byte_size();
-        let limit = one * 6;
+        // Seven of them, against a three-insert cycle. A pot that is a whole
+        // number of cycles wide would evict the entry with the same phase as
+        // the one being inserted — always the inserter's own — and the
+        // hand-off would never be exercised at all.
+        let limit = one * 7;
         let shared = budget(limit);
         let cache = MediaFrameCache::new(shared.clone());
         let mut neighbour = Neighbour::default();
@@ -462,7 +472,7 @@ mod tests {
             settle(&cache, &mut neighbour, &mut routed);
             cache.insert(key("/clip.mov", round * 2 + 1), frame(0.2));
             settle(&cache, &mut neighbour, &mut routed);
-            neighbour.insert(&shared, frame(0.3), one * 2);
+            neighbour.insert(&shared, frame(0.3));
             settle(&cache, &mut neighbour, &mut routed);
 
             let resident = cache.resident_bytes() + neighbour.resident_bytes();

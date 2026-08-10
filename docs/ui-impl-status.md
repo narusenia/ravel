@@ -247,6 +247,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 項目 | 状態 | 備考 |
 |------|------|------|
 | FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし）。f32→BGRA 変換は評価ワーカーで済んでいて、UI スレッドは出来上がった `RenderImage` を持つだけ |
+| 表示変換（リニア → sRGB） | ✅ | 評価バッファはリニア光なので `ViewerImage::from_frame_buffer` が `ravel_core::color::to_display_rgba8` を通す（`CM-3`）。**変換点はこの 1 箇所**で、`scripts/lint-patterns.sh` の `raw-pixel-quantisation` が自前の量子化を禁じる。`quality` / `ViewerResolution` と直交。表示色空間は **sRGB 固定**（選択 UI は `CM-8`、`.ocio` は `CM-7` で未着手）|
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |
@@ -270,7 +271,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 
 ## プロジェクト永続化（File メニュー）
 
-**ステータス**: `.ravprj` フォーマット v7
+**ステータス**: `.ravprj` フォーマット v8
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
@@ -278,10 +279,10 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | メディアインポート | ✅ | File ▸ Import…（`CommandId::FileImport`、Cmd+I、複数選択）と OS からのファイル D&D（REQ-UI-010）。probe は background executor、成功分だけ `media_assets` に相対化して登録するだけで、レイヤーは作らない（配置は別操作）。バッチ全体で 1 undo。同じ絶対パスは既存アセットを再利用 |
 | UI 状態の保存 | ✅ | `ui_state.json`（アクティブコンプ、Timeline の BPM グリッド、コンポジションごとのループ範囲）。任意エントリで、欠落時はそれぞれ `root_comp` フォールバックと `BpmGrid` の既定、ループ範囲なし。既定のままの BPM グリッドとループ範囲ゼロ件はエントリ自体を書かない。読み込み時に無いコンプの範囲は捨て、Duration の外は引き戻す。既存 v3 アーカイブと互換（format_version 据え置き、REQ-UI-013） |
 | ワークスペースレイアウトの埋込 | ✅ | 任意エントリ `workspace_layout.toml`。**オプトイン（既定 OFF）**で、OFF のときは書かれない（format_version 据え置き）。詳細は下の[ワークスペース節](#ワークスペースドッキングウィンドウ) |
-| Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、公開パラメータ宣言 `exposed_parameters` を含む、format v7）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳み、v5 以前はカーブパラメータを変換する。v6 以前は宣言ゼロとして読む。宣言の追加・改名・並べ替え・削除は Properties の公開パラメータセクションから行える（EXPO-5） |
+| Document 全体の保存 | ✅ | manifest.json + document/main.ron（Composition・レイヤー・ネットワーク（subnet 入れ子含む）・キーフレーム・予約フィールド・media_assets、決定的 RON。メディアは相対 / 変数パスで記録、公開パラメータ宣言 `exposed_parameters` を含む、format v8）+ settings.toml。保存時に前リビジョンを `.bak` 化。v4 以前のファイルはロード時にベクタパラメータを畳み、v5 以前はカーブパラメータを変換する。v6 以前は宣言ゼロとして読む。v7 以前は作者が指定した色をリニアへ読み替える。宣言の追加・改名・並べ替え・削除は Properties の公開パラメータセクションから行える（EXPO-5） |
 | 設定の適用（3 層マージ、`user` 層は未実装） | 🟡 | 起動時に `default → global → project` を解決して `AppSettings` Global に載せ、**`locale`、`[appearance]`（テーマモード / ライト・ダークのテーマ）、`playback.frame_rate` を適用**。言語と外観は環境設定ダイアログから、既定フレームレートはプロジェクト設定ダイアログから**変更でき、その場で反映される**（言語切替は開いている全ウィンドウを再描画し、メニューバーも組み直す。テーマ名が無効なときは同梱テーマへフォールバック）。未知のロケールは警告して `en` にフォールバック。既定フレームレートは新規コンポジションの初期値と `File ▸ New` の root コンプに効く（**アクティブなコンポジションがあればその書式が勝つ**ので、開いている状態では観測できない。fps 表記 / 有理数の両方を読み、解釈できない値は警告して 30 fps へフォールバック）。書き込み API は層ごとに独立（global = `<config>/ravel/settings.toml` へ即時アトミック、project = 次のプロジェクト保存で `.ravprj` に入り dirty になる）。失敗は通知。「既定に戻す」はその層の値を消す（既定値を書き戻さない）。`playback.stop_returns_to_play_start`（既定 `false`）と `startup.create_composition`（既定 `true`）も**適用済み**で、それぞれ停止の着地点と、起動時 / `File ▸ New` のドキュメントがコンポジションを 1 つ持つかを決める（既定はどちらも従来の挙動）。**環境設定 ▸ 一般**の switch 2 つで切り替えられ、`global` 層へ即時に書かれる。**キャッシュ予算（`SET-8`）・自動保存（`SET-9`）・プロキシ（`SET-10`）・カラー管理（`SET-11`）への配線は未**で、前提機能が入るまで設定画面にも出さない。`user` 層は置き場も呼び出し元も無い |
 | キーバインドのユーザー上書き | 🟡 | 起動時に `<config>/ravel/keybindings.toml` を既定アセットへ重ねる。同じコマンドを別 chord に割り当てると既定の chord は外れ、chord が既定と衝突すればユーザーが勝つ。ファイルが無いのは通常の初回起動、TOML として壊れていれば警告して既定のみ、解釈できない行はその行だけ警告して捨てる。バインドは `AppShell` 経由で登録されるので、ユーザー由来も同じ文脈述語付き（`!Input && !PopupMenu && !AppMenuBar` — テキスト入力に譲る `MED-APP-16` と、開いたメニューに譲る `MED-APP-31`）。環境設定 ▸ キーバインドに**読み取り専用の一覧**（全コマンド / 現在の chord / 由来 = 既定・ユーザー設定・パネル固有・割り当てなし）。パネル固有のバインドは `workspace.rs` の `PANEL_BINDINGS` という 1 つの表から一覧にも出るので、`P`（ペン、Viewer 限定）のようなものが「割り当てなし」に見えることはなく、どのパネル限定かも表示する。その表のコマンドは**ユーザーファイルから再割り当てできない**（受理するとコンテキストの無いグローバルバインドになるため、警告して捨てる）。**画面からの編集は未**（`SET-12`） |
-| マイグレーション | ✅ | v1→v2→…→v7 連鎖（`manifest.json` が起点）。v4 はメディアアセットを相対 / 変数パスで持ち（v3 の絶対 `PathBuf` はそのまま `Absolute` として読める）、`assets/refs.json` を廃止。v2 以前（graph/main.ron のみ）は平坦 Graph を Document に包み、manifest の解像度/fps で root comp を生成。**v5 以降は manifest の版印だけを進め、ドキュメント本体の変換はロード後の型付きパスで行う**: v5 がベクタパラメータの畳み込み（`fold_component_params`）、v6 がカーブパラメータの変換（`upgrade_curve_params`）。v7 は公開パラメータ宣言の追加のみで、変換すべき既存の表現が無いため型付きパスを持たない（`#[serde(default)]` で宣言ゼロとして読む）。`Layer.audio` は既存 v4 への追加フィールド（欠落時 `None`）で版を上げていない |
+| マイグレーション | ✅ | v1→v2→…→v8 連鎖（`manifest.json` が起点）。v4 はメディアアセットを相対 / 変数パスで持ち（v3 の絶対 `PathBuf` はそのまま `Absolute` として読める）、`assets/refs.json` を廃止。v2 以前（graph/main.ron のみ）は平坦 Graph を Document に包み、manifest の解像度/fps で root comp を生成。**v5 以降は manifest の版印だけを進め、ドキュメント本体の変換はロード後の型付きパスで行う**: v5 がベクタパラメータの畳み込み（`fold_component_params`）、v6 がカーブパラメータの変換（`upgrade_curve_params`）。v7 は公開パラメータ宣言の追加のみで、変換すべき既存の表現が無いため型付きパスを持たない（`#[serde(default)]` で宣言ゼロとして読む）。v8 はパイプラインがリニアになったことで作者指定の色の**意味**が変わったので型付きパスを持つ（`linearize_colors`）— ノードの `COLOR` パラメータ・コンプ背景色・公開パラメータの `color` 既定値を一度だけ `srgb → linear` に読み替え、変換できない箇所（式で駆動される色、キーフレーム間の補間のずれ）は警告として出す。**この変換は冪等ではないので、一度だけにするのは版印の仕事**。`Layer.audio` は既存 v4 への追加フィールド（欠落時 `None`）で版を上げていない |
 | サブグラフテンプレート (`*.ravtpl`) | 🟡 | 形式と読み書き API は入っている（`ravel-project::subgraph_template`。RON、`<config>/ravel/subgraph-templates/`、アトミック書き込み、読めないファイルは飛ばす）。サブネットの内部グラフ + そのサブネット内に束縛された公開パラメータ宣言を持ち、貼り付けは ID を振り直して宣言の束縛も追従させる（`ravel-core::subgraph_template`）。**保存・読み込みの UI は無く、アプリからは呼ばれていない**（EXPO-6 はヘッドレス。UI は REQ-PLUGIN-005 として別計画） |
 | ID カウンタ前進 | ✅ | ロード時に NodeId/EdgeId/CompId/LayerId カウンタをドキュメント最大 ID 超へ（REQ-LAYER-009） |
 | undo 履歴 | ✅ | ロード/New は DocumentStore ごと差し替え（undo ステップにしない） |

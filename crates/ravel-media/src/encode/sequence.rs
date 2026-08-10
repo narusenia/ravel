@@ -21,34 +21,28 @@
 //! and what Ravel writes into EXR, so neither format needs an alpha
 //! conversion and both round-trip exactly in that respect.
 //!
-//! # Colour: these values are display-referred, not scene-linear
+//! # Colour
 //!
-//! **No transfer function is applied, in either direction.** That is not an
-//! omission here — it is what the rest of the pipeline does. Ingest
-//! normalises without decoding (`decoder::…`, `byte as f32 / 255.0`), the
-//! viewer displays with `clamp(0,1) * 255 + 0.5`, and the FFmpeg encoder
-//! writes back without a transfer function too. The buffer therefore holds
-//! **display-referred** values — already sRGB-encoded.
+//! Frames arrive **already in the space this writer's format calls for**.
+//! The render worker converts once, in front of the encoder
+//! (`ravel_core::media::encode::to_output_space`, `CM-4`), so nothing here
+//! decides anything about colour — it only quantises, through the one shared
+//! quantiser every exit uses (`ravel_core::color`).
 //!
-//! The transfer function agrees across all four exits (viewer, PNG, EXR,
-//! video). **The quantisation does not.** This writer and the viewer both
-//! round to nearest (`* max + 0.5`); the FFmpeg encoder truncates
-//! (`encoder.rs`, `(px.clamp(0,1) * 255.0) as u8`), so video output sits up
-//! to one LSB below the other two and cannot map `1.0` to `255`. That
-//! predates this module and is recorded in `HIGH-25`; the shared quantisation
-//! that settles it is `CM-1` of `color-management-plan.md`.
+//! - **PNG** receives display-encoded values (sRGB). Decoding an 8-bit image
+//!   into the working space and writing it back out reproduces the original
+//!   bytes, and the file matches what the viewer shows, pixel for pixel.
+//! - **EXR** receives the working space untouched: 32-bit float scene-linear,
+//!   values outside `0.0..=1.0` intact. That is what a compositor opening an
+//!   EXR expects, and it is why the two formats deliberately hold *different
+//!   numbers* for the same frame — converting the EXR to sRGB is what makes
+//!   them agree.
 //!
-//! For PNG that is exactly right: decoding an 8-bit image and writing it back
-//! reproduces the original bytes, and the file matches what the viewer shows.
+//! This retracts the note this module carried before `CM-4`, which recorded
+//! that the buffer was display-referred and that an EXR written by Ravel
+//! looked bright in Nuke or Resolve. Both statements were true and are no
+//! longer.
 //!
-//! For EXR it is a caveat worth stating, because EXR is a format downstream
-//! tools open *assuming* linear: carried straight into Nuke or Resolve these
-//! values look bright. Applying a transform here would be worse — PNG and EXR
-//! would then disagree, and an EXR written by Ravel would no longer read back
-//! into Ravel unchanged. The real fix is colour management (REQ-RENDER-003,
-//! OCIO), planned as phase CM in `color-management-plan.md`; until it lands,
-//! agreement between the four exits is the property worth keeping.
-
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +51,7 @@ use image::codecs::openexr::OpenExrEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 
+use ravel_core::color::{quantize_u8, quantize_u16};
 use ravel_core::media::encode::{
     Encoder, ImageSequenceOutput, PngDepth, SequenceCodec, remove_partial_output,
 };
@@ -440,17 +435,16 @@ impl Drop for PartialFile {
 
 /// Encode straight-alpha RGBA into an 8- or 16-bit PNG.
 ///
-/// `clamp(0, 1) * max + 0.5`, the same conversion the viewer's
-/// `reference_bgra` uses — **not** the one the FFmpeg encoder uses, which
-/// truncates (see the module docs). A channel that came in from an 8-bit
-/// source therefore survives an 8-bit round trip bit for bit.
+/// The samples are already display-encoded, so this only quantises — through
+/// `ravel_core::color`, the same round-to-nearest the viewer and the FFmpeg
+/// encoder now use. A channel that came in from an 8-bit source therefore
+/// survives an 8-bit round trip bit for bit.
 fn encode_png(pixels: &[f32], width: u32, height: u32, depth: PngDepth) -> MediaResult<Vec<u8>> {
-    let scale = depth.max_value() as f32;
     let (bytes, color) = match depth {
         PngDepth::Eight => {
             let mut bytes = Vec::with_capacity(pixels.len());
             for value in pixels {
-                bytes.push((value.clamp(0.0, 1.0) * scale + 0.5) as u8);
+                bytes.push(quantize_u8(*value));
             }
             (bytes, ExtendedColorType::Rgba8)
         }
@@ -460,8 +454,7 @@ fn encode_png(pixels: &[f32], width: u32, height: u32, depth: PngDepth) -> Media
             // `png16_round_trips_every_representable_sample_exactly`).
             let mut bytes = Vec::with_capacity(pixels.len() * 2);
             for value in pixels {
-                let sample = (value.clamp(0.0, 1.0) * scale + 0.5) as u16;
-                bytes.extend_from_slice(&sample.to_ne_bytes());
+                bytes.extend_from_slice(&quantize_u16(*value).to_ne_bytes());
             }
             (bytes, ExtendedColorType::Rgba16)
         }
@@ -501,6 +494,8 @@ fn encode_exr(pixels: &[f32], width: u32, height: u32) -> MediaResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::color::{ColorSpace, ingest_rgba8, to_display_rgba8};
+    use ravel_core::media::encode::to_output_space;
     use ravel_core::types::PixelFormat;
     use tempfile::TempDir;
 
@@ -605,23 +600,112 @@ mod tests {
 
     // ---- round trips -------------------------------------------------------
 
+    /// CM-4: import an sRGB image and export it, and the bytes come back
+    /// unchanged.
+    ///
+    /// The whole chain, not just the writer: `ingest_rgba8` removes the
+    /// transfer function the way `decoder.rs` does, `to_output_space` puts it
+    /// back the way the render worker does, and only then does the encoder
+    /// quantise. Anything that breaks the pairing shows up here.
     #[test]
     fn png8_round_trips_an_ingested_image_bit_for_bit() {
         let dir = TempDir::new().unwrap();
-        // Exactly what `decoder.rs` produces from an 8-bit source: the byte
-        // divided by 255, with no transfer function anywhere. Writing it back
-        // has to reproduce the original bytes, or importing and exporting an
-        // untouched image would shift its colour.
-        let ingested: Vec<u8> = (0..4 * 3 * 4).map(|i| (i * 5 % 256) as u8).collect();
-        let source = frame(4, 3, |i| ingested[i] as f32 / 255.0);
+        let original: Vec<u8> = (0..4 * 3 * 4).map(|i| (i * 5 % 256) as u8).collect();
+        let working = frame(4, 3, |i| {
+            let pixel = i / 4 * 4;
+            ingest_rgba8(
+                [
+                    original[pixel],
+                    original[pixel + 1],
+                    original[pixel + 2],
+                    original[pixel + 3],
+                ],
+                ColorSpace::SRGB,
+            )[i % 4]
+        });
+        let staged = to_output_space(&working, PNG8.color_space());
 
-        write_one(dir.path(), PNG8, &source, 0);
+        write_one(dir.path(), PNG8, &staged, 0);
 
         assert_eq!(
             read_png_u8(&dir.path().join("frame_0000.png")),
-            ingested,
-            "8-bit PNG output must be byte-identical to the ingested image",
+            original,
+            "8-bit PNG output must be byte-identical to the imported image",
         );
+    }
+
+    /// CM-4: the PNG bytes are the bytes the viewer shows.
+    ///
+    /// Both sides reduce to the same two steps in the same order — encode
+    /// into the display space, then `quantize_u8` — so the equality is
+    /// structural rather than a coincidence of these values. The viewer does
+    /// them in one call (`to_display_rgba8`); the render path splits them
+    /// across the stage and the writer.
+    #[test]
+    fn the_png_bytes_are_what_the_viewer_displays() {
+        let dir = TempDir::new().unwrap();
+        let values = [0.0f32, 0.02, 0.18, 0.5, 0.735_356_9, 1.0, 1.4, -0.2];
+        let working = frame(4, 2, |i| values[i % values.len()]);
+        let staged = to_output_space(&working, PNG8.color_space());
+
+        write_one(dir.path(), PNG8, &staged, 0);
+
+        let expected: Vec<u8> = working
+            .as_f32()
+            .chunks_exact(4)
+            .flat_map(|pixel| to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]))
+            .collect();
+        assert_eq!(read_png_u8(&dir.path().join("frame_0000.png")), expected);
+    }
+
+    /// CM-4: EXR holds the working space, PNG holds the display space, and
+    /// converting the EXR to sRGB is what makes them agree.
+    ///
+    /// The two exits are equivalent, not equal — equality of the raw numbers
+    /// would mean one of them was written in the wrong space.
+    #[test]
+    fn exr_keeps_linear_values_and_matches_the_png_once_converted() {
+        let dir = TempDir::new().unwrap();
+        let values = [0.0f32, 0.05, 0.25, 0.5, 0.75, 0.9, 1.0, 0.18];
+        let working = frame(4, 2, |i| values[i % values.len()]);
+
+        write_one(
+            dir.path(),
+            SequenceCodec::Exr,
+            &to_output_space(&working, SequenceCodec::Exr.color_space()),
+            0,
+        );
+        write_one(
+            dir.path(),
+            PNG8,
+            &to_output_space(&working, PNG8.color_space()),
+            0,
+        );
+
+        let (_, _, exr) = read_rgba_f32(
+            &dir.path().join("frame_0000.exr"),
+            image::ImageFormat::OpenExr,
+        );
+        for (written, original) in exr.iter().zip(working.as_f32().iter()) {
+            assert!(
+                (written - original).abs() < 1e-6,
+                "EXR must keep the working space: {written} vs {original}"
+            );
+        }
+
+        let png = read_png_u8(&dir.path().join("frame_0000.png"));
+        // Different numbers for the same frame — that is the point.
+        assert_ne!(
+            png[2] as f32 / 255.0,
+            exr[2],
+            "a display-encoded PNG cannot hold the same value as a linear EXR"
+        );
+        // Equivalent once both are in the display space.
+        let converted: Vec<u8> = exr
+            .chunks_exact(4)
+            .flat_map(|pixel| to_display_rgba8([pixel[0], pixel[1], pixel[2], pixel[3]]))
+            .collect();
+        assert_eq!(converted, png, "the two exits must agree in a common space");
     }
 
     #[test]

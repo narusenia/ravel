@@ -28,7 +28,8 @@
 //! unknown `asset_id` remains a hard error — not pointing at an asset is a
 //! graph bug, not missing footage.
 
-use ravel_core::composition::AssetKind;
+use ravel_core::color::ColorSpace;
+use ravel_core::composition::{AssetKind, ColorSpaceSource};
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::media::{MediaReader, MediaResult, VideoStreamInfo};
@@ -37,14 +38,17 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// Opens a [`MediaReader`] for a path. Injectable for tests and alternate
-/// backends.
-pub type ReaderFactory = Arc<dyn Fn(&Path) -> MediaResult<Box<dyn MediaReader>> + Send + Sync>;
+/// Opens a [`MediaReader`] for a path, told which colour space the file's
+/// samples are in so the decoder can hand back working-space values.
+/// Injectable for tests and alternate backends.
+pub type ReaderFactory =
+    Arc<dyn Fn(&Path, ColorSpace) -> MediaResult<Box<dyn MediaReader>> + Send + Sync>;
 
-/// Reads one still image as an RGBA f32 frame. Injectable for tests; the
-/// default backend is `ravel-media`'s single-image decoder (a one-frame
-/// "video" to FFmpeg).
-pub type ImageReaderFactory = Arc<dyn Fn(&Path) -> MediaResult<FrameBuffer> + Send + Sync>;
+/// Reads one still image as an RGBA f32 frame in the working space.
+/// Injectable for tests; the default backend is `ravel-media`'s single-image
+/// decoder (a one-frame "video" to FFmpeg).
+pub type ImageReaderFactory =
+    Arc<dyn Fn(&Path, ColorSpace) -> MediaResult<FrameBuffer> + Send + Sync>;
 
 /// The frame to request from a media stream for layer-local time `t`
 /// (seconds). Seconds-based mapping keeps differing frame rates aligned
@@ -61,11 +65,16 @@ pub fn media_frame_for(t_seconds: f64, stream: &VideoStreamInfo) -> u64 {
 
 struct OpenReader {
     path: PathBuf,
+    color_space: ColorSpace,
     reader: Box<dyn MediaReader>,
 }
 
 struct CachedImage {
     path: PathBuf,
+    /// Part of the key: the cached frame is already in the working space, so
+    /// a different input colour space is a different picture, not a stale
+    /// one.
+    color_space: ColorSpace,
     frame: Arc<FrameBuffer>,
 }
 
@@ -126,19 +135,48 @@ impl MediaProcessor {
         Arc::new(FrameBuffer::new_zeroed(ctx.resolution.0, ctx.resolution.1))
     }
 
+    /// Log an inferred (not user-set) input colour space once per asset.
+    /// Shares the warn-once set with [`Self::fallback_frame`]: both are
+    /// per-asset notices, and per-frame evaluation would otherwise repeat
+    /// them for every frame of the clip.
+    fn note_inferred_color_space(
+        &self,
+        asset_id: &str,
+        space: ColorSpace,
+        source: ColorSpaceSource,
+    ) {
+        let mut warned = self.warned.lock().expect("media warn lock poisoned");
+        if warned.insert(format!("colour-space:{asset_id}")) {
+            tracing::info!(
+                "media: asset {asset_id:?}: input colour space {} inferred from {}",
+                space.name().unwrap_or("custom"),
+                match source {
+                    ColorSpaceSource::Metadata => "file metadata",
+                    ColorSpaceSource::ExtensionDefault => "the file extension",
+                    ColorSpaceSource::Explicit => "the asset setting",
+                }
+            );
+        }
+    }
+
     /// Decode one frame from a container, reusing the already-open reader
     /// while the resolved path is unchanged.
     fn decode_container_frame(
         &self,
         path: &Path,
+        color_space: ColorSpace,
         ctx: &EvalContext,
     ) -> anyhow::Result<FrameBuffer> {
         let mut open = self.open.lock().expect("media reader lock poisoned");
-        if open.as_ref().is_none_or(|o| o.path != path) {
-            let reader = (self.factory)(path)
+        if open
+            .as_ref()
+            .is_none_or(|o| o.path != path || o.color_space != color_space)
+        {
+            let reader = (self.factory)(path, color_space)
                 .map_err(|e| anyhow::anyhow!("media: failed to open {path:?}: {e}"))?;
             *open = Some(OpenReader {
                 path: path.to_path_buf(),
+                color_space,
                 reader,
             });
         }
@@ -161,14 +199,18 @@ impl MediaProcessor {
     /// resolved path was the last one decoded. The cache key is the path on
     /// disk, so scrubbing back to a sequence frame that is still cached
     /// does not re-decode it either.
-    fn decode_image(&self, path: &Path) -> MediaResult<Arc<FrameBuffer>> {
+    fn decode_image(&self, path: &Path, color_space: ColorSpace) -> MediaResult<Arc<FrameBuffer>> {
         let mut cached = self.image.lock().expect("media image cache lock poisoned");
-        if let Some(hit) = cached.as_ref().filter(|hit| hit.path == path) {
+        if let Some(hit) = cached
+            .as_ref()
+            .filter(|hit| hit.path == path && hit.color_space == color_space)
+        {
             return Ok(Arc::clone(&hit.frame));
         }
-        let frame = Arc::new((self.image_factory)(path)?);
+        let frame = Arc::new((self.image_factory)(path, color_space)?);
         *cached = Some(CachedImage {
             path: path.to_path_buf(),
+            color_space,
             frame: Arc::clone(&frame),
         });
         Ok(frame)
@@ -206,10 +248,21 @@ impl NodeProcessor for MediaProcessor {
             }));
         };
 
+        // CM-2: the values this node yields are working-space, so the file's
+        // own colour space has to be resolved before anything is decoded.
+        // Tiers 2 and 3 are guesses; log which one was taken, once per asset,
+        // so a clip that looks wrong can be traced back to the guess.
+        let (color_space, source) = asset.input_color_space();
+        if source != ColorSpaceSource::Explicit {
+            self.note_inferred_color_space(asset_id, color_space, source);
+        }
+
         let decoded: anyhow::Result<Arc<FrameBuffer>> = match &asset.kind {
-            AssetKind::Container => self.decode_container_frame(path, ctx).map(Arc::new),
+            AssetKind::Container => self
+                .decode_container_frame(path, color_space, ctx)
+                .map(Arc::new),
             AssetKind::Still => self
-                .decode_image(path)
+                .decode_image(path, color_space)
                 .map_err(|e| anyhow::anyhow!("media: decoding still {path:?} failed: {e}")),
             AssetKind::Sequence { start, end, .. } => {
                 // A sequence carries no rate of its own: the probed metadata
@@ -229,9 +282,10 @@ impl NodeProcessor for MediaProcessor {
                 let dir = path.parent().ok_or_else(|| {
                     anyhow::anyhow!("media: sequence frame {path:?} has no directory")
                 })?;
-                self.decode_image(&dir.join(name)).map_err(|e| {
-                    anyhow::anyhow!("media: decoding sequence frame {index} failed: {e}")
-                })
+                self.decode_image(&dir.join(name), color_space)
+                    .map_err(|e| {
+                        anyhow::anyhow!("media: decoding sequence frame {index} failed: {e}")
+                    })
             }
         };
         match decoded {
@@ -250,15 +304,16 @@ impl NodeProcessor for MediaProcessor {
 /// FFmpeg-backed factory (requires the `ffmpeg` feature).
 #[cfg(feature = "ffmpeg")]
 fn default_reader_factory() -> ReaderFactory {
-    Arc::new(|path| {
-        ravel_media::decoder::FfmpegDecoder::open(path).map(|r| Box::new(r) as Box<dyn MediaReader>)
+    Arc::new(|path, color_space| {
+        ravel_media::decoder::FfmpegDecoder::open(path)
+            .map(|r| Box::new(r.with_input_color_space(color_space)) as Box<dyn MediaReader>)
     })
 }
 
 /// Without the `ffmpeg` feature there is no decoding backend.
 #[cfg(not(feature = "ffmpeg"))]
 fn default_reader_factory() -> ReaderFactory {
-    Arc::new(|_path| {
+    Arc::new(|_path, _color_space| {
         Err(ravel_core::media::MediaError::Other(
             "media decoding requires the `ffmpeg` feature of ravel-nodes".into(),
         ))
@@ -268,13 +323,13 @@ fn default_reader_factory() -> ReaderFactory {
 /// FFmpeg-backed single-image reader (requires the `ffmpeg` feature).
 #[cfg(feature = "ffmpeg")]
 fn default_image_reader_factory() -> ImageReaderFactory {
-    Arc::new(ravel_media::image_seq::read_image_frame)
+    Arc::new(ravel_media::image_seq::read_image_frame_in)
 }
 
 /// Without the `ffmpeg` feature there is no image decoding backend.
 #[cfg(not(feature = "ffmpeg"))]
 fn default_image_reader_factory() -> ImageReaderFactory {
-    Arc::new(|_path| {
+    Arc::new(|_path, _color_space| {
         Err(ravel_core::media::MediaError::Other(
             "image decoding requires the `ffmpeg` feature of ravel-nodes".into(),
         ))
@@ -353,7 +408,9 @@ mod tests {
     }
 
     fn fake_factory(fps: FrameRate, frame_count: Option<u64>) -> ReaderFactory {
-        Arc::new(move |_path| Ok(Box::new(FakeReader::new(fps, frame_count)) as Box<_>))
+        Arc::new(move |_path, _color_space| {
+            Ok(Box::new(FakeReader::new(fps, frame_count)) as Box<_>)
+        })
     }
 
     fn media_node(id: u64) -> Node {
@@ -451,7 +508,7 @@ mod tests {
         let opens = Arc::new(AtomicUsize::new(0));
         let factory: ReaderFactory = {
             let opens = Arc::clone(&opens);
-            Arc::new(move |_path| {
+            Arc::new(move |_path, _color_space| {
                 opens.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(FakeReader::new(FrameRate::new(24, 1), None)) as Box<_>)
             })
@@ -462,6 +519,7 @@ mod tests {
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
             "clip",
             MediaAssetEntry {
+                color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
@@ -490,8 +548,10 @@ mod tests {
     fn failed_decode_yields_a_transparent_frame_instead_of_failing() {
         use ravel_core::composition::{AssetKind, AssetMetadata, AssetPath, MediaAssetEntry};
 
-        let factory: ReaderFactory = Arc::new(|_path| Err(MediaError::Other("cannot open".into())));
+        let factory: ReaderFactory =
+            Arc::new(|_path, _color_space| Err(MediaError::Other("cannot open".into())));
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/clip.mov")),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
@@ -518,7 +578,7 @@ mod tests {
         let seen: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(Vec::new()));
         let factory: ReaderFactory = {
             let seen = Arc::clone(&seen);
-            Arc::new(move |path| {
+            Arc::new(move |path, _color_space| {
                 seen.lock().unwrap().push(path.to_path_buf());
                 Ok(Box::new(FakeReader::new(FrameRate::new(24, 1), None)) as Box<_>)
             })
@@ -529,6 +589,7 @@ mod tests {
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
             "clip",
             MediaAssetEntry {
+                color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
@@ -578,7 +639,7 @@ mod tests {
         let decodes = Arc::new(AtomicUsize::new(0));
         let image_factory: ImageReaderFactory = {
             let decodes = Arc::clone(&decodes);
-            Arc::new(move |_path| {
+            Arc::new(move |_path, _color_space| {
                 decodes.fetch_add(1, Ordering::SeqCst);
                 Ok(solid_image(0.5))
             })
@@ -588,6 +649,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/plate.png")),
             kind: AssetKind::Still,
             metadata: AssetMetadata::default(),
@@ -613,6 +675,67 @@ mod tests {
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
 
+    /// CM-2: the resolved input colour space reaches the decoder, and the
+    /// resolution order decides which one. The decoder is what removes the
+    /// transfer function, so handing it the wrong space is the whole failure
+    /// mode this unit exists to prevent.
+    #[test]
+    fn the_resolved_input_colour_space_reaches_the_decoder() {
+        use ravel_core::color::ColorSpace;
+        use ravel_core::composition::{AssetMetadata, AssetPath, MediaAssetEntry};
+        use std::sync::Mutex as StdMutex;
+
+        fn seen(entry: MediaAssetEntry) -> ColorSpace {
+            let seen: Arc<StdMutex<Vec<ColorSpace>>> = Arc::new(StdMutex::new(Vec::new()));
+            let image_factory: ImageReaderFactory = {
+                let seen = Arc::clone(&seen);
+                Arc::new(move |_path, color_space| {
+                    seen.lock().unwrap().push(color_space);
+                    Ok(solid_image(0.5))
+                })
+            };
+            let processor = MediaProcessor::with_factories(
+                fake_factory(FrameRate::new(24, 1), None),
+                image_factory,
+            );
+            let (mut ev, graph) = media_evaluator(processor, entry);
+            ev.evaluate(
+                &graph,
+                NodeId::new(1),
+                &EvalContext::new(0, FrameRate::new(30, 1), (4, 4)),
+            )
+            .unwrap();
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "the still should be decoded exactly once");
+            seen[0]
+        }
+
+        fn still(name: &str) -> MediaAssetEntry {
+            MediaAssetEntry {
+                color_space: None,
+                path: AssetPath::Absolute(PathBuf::from(format!("/fake/{name}"))),
+                kind: AssetKind::Still,
+                metadata: AssetMetadata::default(),
+                resolved: Some(PathBuf::from(format!("/fake/{name}"))),
+            }
+        }
+
+        // Extension default: integer format → sRGB, float format → linear
+        // (so a linear EXR is not decoded a second time).
+        assert_eq!(seen(still("plate.png")), ColorSpace::SRGB);
+        assert_eq!(seen(still("plate.exr")), ColorSpace::LINEAR_REC709);
+
+        // Metadata beats the extension.
+        let mut tagged = still("plate.exr");
+        tagged.metadata.color_space = Some("srgb".into());
+        assert_eq!(seen(tagged.clone()), ColorSpace::SRGB);
+
+        // An explicit setting beats both.
+        let mut explicit = tagged;
+        explicit.color_space = Some(ColorSpace::LINEAR_REC709);
+        assert_eq!(seen(explicit), ColorSpace::LINEAR_REC709);
+    }
+
     /// Sequence frame = `start + floor(t · seq_fps)`, clamped to
     /// `start..=end`, read from the representative frame's directory.
     #[test]
@@ -623,7 +746,7 @@ mod tests {
         let requested: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(Vec::new()));
         let image_factory: ImageReaderFactory = {
             let requested = Arc::clone(&requested);
-            Arc::new(move |path| {
+            Arc::new(move |path, _color_space| {
                 requested.lock().unwrap().push(path.to_path_buf());
                 Ok(solid_image(0.25))
             })
@@ -633,6 +756,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
             kind: AssetKind::Sequence {
                 prefix: "f_".into(),
@@ -682,7 +806,7 @@ mod tests {
         let requested: Arc<StdMutex<Vec<PathBuf>>> = Arc::new(StdMutex::new(Vec::new()));
         let image_factory: ImageReaderFactory = {
             let requested = Arc::clone(&requested);
-            Arc::new(move |path| {
+            Arc::new(move |path, _color_space| {
                 requested.lock().unwrap().push(path.to_path_buf());
                 Ok(solid_image(0.25))
             })
@@ -692,6 +816,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
             kind: AssetKind::Sequence {
                 prefix: "f_".into(),

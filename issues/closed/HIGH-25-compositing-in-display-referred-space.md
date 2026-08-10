@@ -7,6 +7,27 @@
 | 領域 | ravel-media / decode・encode, ravel-app / Viewer, ravel-core / 合成 |
 | 該当 | `crates/ravel-media/src/decoder.rs:921-924`, `crates/ravel-media/src/encoder.rs:160-163`, `crates/ravel-app/src/panels/mod.rs`（`reference_bgra`）, `crates/ravel-media/src/encode/sequence.rs` |
 
+> **解決済み**: フェーズ CM の `CM-1`〜`CM-4` が入った。作業空間はリニア
+> Rec.709 原色になり、取り込み（`ravel_core::color::ingest_rgba8`）で伝達関数を
+> 外し、Viewer（`ViewerImage::from_frame_buffer`）と書き出し
+> （`Encoder` の手前の `to_output_space`）で掛け直す。量子化は
+> `ravel_core::color::quantize_u8` に一本化して**最近接に統一**したので、
+> 動画書き出しの切り捨てによる 1 LSB のずれも消えた。素材ごとの入力色空間は
+> `MediaAssetEntry`（明示指定 → メタデータ → 拡張子の順）に持つ。作者が指定
+> した色は `.ravprj` v8 で一度だけ読み替える。規範は
+> `docs/specifications/color-management.md`。
+> **OCIO / GPU LUT（REQ-RENDER-003 の残り）は `CM-6`〜`CM-8` として別に残る**
+> が、この個票が挙げた検証項目はすべて満たされている。
+>
+> **この個票の範囲外として別に起票したもの**（どれもこの個票の検証項目には
+> 含まれない別の欠陥で、未解決のまま残る）:
+> [HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md)（float / EXR の
+> デコードが 8bit RGBA を経由し、1 超がクリップされる）、
+> `MED-MED-07`（素材の色メタデータが読まれず、入力色空間の解決が常に
+> 拡張子既定へ落ちる）、`MED-APP-32`（EXR サムネイルが暗い）。
+> **「合成がリニア空間で行われる」ことと「取り込みが float の精度を保つ」
+> ことは別の問題**で、前者だけがこの個票の主題。
+
 ## 現状
 
 **色空間変換のコードがリポジトリに 1 行も無い。** `sRGB` / ガンマ / 伝達関数を
@@ -66,7 +87,8 @@ grep しても、`composition/asset.rs:765` のメタデータ文字列 `"sRGB"`
 ## 修正方針
 
 `docs/implementation/color-management-plan.md` が引き受けた。ロードマップの
-**フェーズ CM**（`C4` の直後）。
+**フェーズ CM**（`C4` の直後）。以下は着手前の記述で、`CM-1`〜`CM-4` は
+実装済み。
 
 - `CM-1` 色空間の型と変換関数
 - `CM-2` 素材ごとの入力色空間とデコードの線形化 + `.ravprj` v8 移行
@@ -85,6 +107,8 @@ linear を切り替えるフラグは持たない。
 
 - 黒と白の 50% 不透明度合成が、表示上 188 付近になる（現状 128）
 - Viewer / PNG / 動画が**同じ量子化関数**を通り、ビット単位で一致する
+  （動画は**エンコーダに渡す RGBA8 画素まで**。その先の RGBA → YUV と
+  非可逆エンコードは対象外）
 - sRGB 素材を取り込んで PNG に書き出すとビット単位で元に戻る
   （入力変換と出力変換が往復する）
 - EXR がリニア値を保持し、PNG とは異なる値になる

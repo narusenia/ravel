@@ -873,7 +873,7 @@ fn fake_media_factory(fps: FrameRate) -> ravel_nodes::media::ReaderFactory {
         }
     }
 
-    Arc::new(move |_path| {
+    Arc::new(move |_path, _color_space| {
         Ok(Box::new(FakeReader(MediaInfo {
             container: None,
             container_name: "fake".into(),
@@ -933,6 +933,7 @@ fn offline_media_layer_composes_transparent_and_other_layers_continue() {
         .with_media_asset_entry(
             "clip",
             MediaAssetEntry {
+                color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),

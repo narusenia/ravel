@@ -366,3 +366,59 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 ---
 
+
+## MED-APP-32 | bug | EXR / HDR のサムネイルが暗い（リニア値を表示変換なしで量子化する）
+
+**該当**: `crates/ravel-app/src/media/thumbnail.rs:397`（`encode_thumbnail`）、
+`:455`（`read_image_frame`）
+
+サムネイルは**ファイルそのものの値**を読む。`ThumbnailSource::Still` /
+`Sequence` は `image_seq::read_image_frame` を、`Container` は
+`FfmpegDecoder::open` を通り、どちらも入力色空間の既定
+（`ColorSpace::WORKING` = 無変換）なので伝達関数は外れない。
+そのうえで `encode_thumbnail` が
+
+```rust
+(component.clamp(0.0, 1.0) * 255.0).round() as u8
+```
+
+と**直接量子化**する。
+
+**整数素材ではこれが正しい。** ファイルが sRGB で符号化された値を持ち、
+それをそのまま量子化するので、元のファイルと同じ絵が出る。表示変換を
+足すと逆にすべてのサムネイルが明るくなる。`scripts/lint-patterns.allow` の
+`raw-pixel-quantisation` 免除はこの理屈で入っている。
+
+**float 素材では成立しない。** EXR / HDR が持つのは**リニア値**なので、
+それを sRGB 符号化済みとみなして量子化すると暗くなる。リニア 0.5 は
+sRGB では 188 だが、この経路は 128 を書く。中間調ほど落ち込みが大きく、
+**素材ビンの EXR だけが一様に暗いサムネイルになる**。
+
+**影響**: 表示だけの問題で、合成にも書き出しにも波及しない。ただし
+素材ビンは「どのファイルか」を絵で選ぶ場所なので、露出の判断ができない。
+
+**修正方針**: **解決済みの入力色空間が作業空間（リニア）だったときに**
+表示変換を通す（`ravel_core::color::to_display_rgba8`）。
+
+**「float なら」ではない。** 判定の軸はビット深度ではなく色空間で、
+明示指定やメタデータで `LinearRec709` と解決された整数素材も変換が要る。
+逆に `Rec709` / `Rec2020 + PQ` と解決された素材は**そのまま量子化しては
+いけない**（display-referred なのは sRGB の場合だけ）。厳密には
+「解決済み入力色空間 → `ColorSpace::DISPLAY`」の変換を通すのが正で、
+sRGB 素材ではそれが恒等になるので現状の見え方が保たれる。
+
+そのためには**この呼び出し側が持っていない情報**が要る — 素材の入力色空間。
+`MediaAssetEntry::input_color_space` はプロジェクト側の解決結果で、
+サムネイル生成はそれを受け取っていない。素直な形は
+`read_image_frame_in` に解決済みの色空間を渡し、作業空間で読んだうえで
+表示変換を掛けること。**中で拡張子を見て分岐するのはやってはいけない** —
+解決順（明示指定 > メタデータ > 拡張子既定）が 2 箇所に分かれる。
+
+**関連**:
+- [HIGH-31](../high/HIGH-31-float-decode-through-8bit-rgba.md) — 同じ EXR が
+  8bit を経由して取り込まれるので、暗さに加えて 1 超がクリップされている。
+  暗さだけ直しても白飛びは残る
+- `MED-MED-07`（[media-audio.md](media-audio.md)）— 入力色空間の解決に
+  メタデータが効いていない。この修正が渡す値の質はそちらに依存する
+
+---

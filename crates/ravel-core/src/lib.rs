@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod cache_budget;
+pub mod color;
 pub mod composition;
 pub mod eval;
 pub mod exposed;

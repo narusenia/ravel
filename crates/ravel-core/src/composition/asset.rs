@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::color::ColorSpace;
 use crate::types::FrameRate;
 
 // ===========================================================================
@@ -399,9 +400,41 @@ pub struct MediaAssetEntry {
     pub path: AssetPath,
     pub kind: AssetKind,
     pub metadata: AssetMetadata,
+    /// The colour space the file's samples are in, **set explicitly by the
+    /// user**. `None` — the only value anything writes today — means "infer
+    /// it", and [`MediaAssetEntry::input_color_space`] then reads the
+    /// metadata and finally the extension. Explicit always wins: a `.exr`
+    /// really can carry sRGB-encoded values, and the person who knows that
+    /// must be able to say so (`CM-2`; the UI to set it is `CM-8`).
+    #[serde(default)]
+    pub color_space: Option<ColorSpace>,
     #[serde(skip)]
     pub resolved: Option<PathBuf>,
 }
+
+/// Which tier of the resolution order supplied an asset's input colour
+/// space. Tiers 2 and 3 are *guesses*, and the media node logs which one it
+/// used so a wrong-looking clip can be traced to the guess that produced it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ColorSpaceSource {
+    /// The user said so (`MediaAssetEntry::color_space`).
+    Explicit,
+    /// Read from the file's own metadata (`AssetMetadata::color_space`).
+    Metadata,
+    /// Guessed from the file extension.
+    ExtensionDefault,
+}
+
+/// Extensions whose samples are floating point, and therefore already
+/// scene-linear unless something says otherwise.
+///
+/// Everything else — PNG, JPEG, TIFF, DPX, and every container FFmpeg opens
+/// — is an integer format, and an integer format that does not declare a
+/// colour space is sRGB in practice. TIFF and DPX can hold float or log
+/// data; they are deliberately *not* listed, because guessing linear for a
+/// display-referred file double-brightens it, while guessing sRGB for a
+/// linear file is the milder error and is the one the user can correct.
+const LINEAR_EXTENSIONS: &[&str] = &["exr", "hdr"];
 
 /// Deserialization shadow of [`MediaAssetEntry`].
 ///
@@ -418,6 +451,8 @@ struct MediaAssetEntryRepr {
     kind: Option<AssetKind>,
     #[serde(default)]
     metadata: AssetMetadata,
+    #[serde(default)]
+    color_space: Option<ColorSpace>,
 }
 
 /// Read a **bare** [`AssetKind`] into `Some`.
@@ -445,6 +480,7 @@ impl<'de> Deserialize<'de> for MediaAssetEntry {
             path: repr.path,
             kind,
             metadata: repr.metadata,
+            color_space: repr.color_space,
             // Never persisted: the host re-injects it after the load.
             resolved: None,
         })
@@ -460,6 +496,7 @@ impl MediaAssetEntry {
         Self {
             kind: AssetKind::infer_from_path(&path),
             metadata: AssetMetadata::default(),
+            color_space: None,
             resolved: Some(path.clone()),
             path: AssetPath::Absolute(path),
         }
@@ -468,6 +505,51 @@ impl MediaAssetEntry {
     /// Whether this asset currently has no location on disk.
     pub fn is_offline(&self) -> bool {
         self.resolved.is_none()
+    }
+
+    /// The colour space this asset's samples are in, and which tier of the
+    /// resolution order said so.
+    ///
+    /// The order is fixed (`CM-2`): the user's explicit setting, then the
+    /// file's own metadata, then the extension. It never returns "unknown" —
+    /// decoding has to put the values *somewhere*, and a wrong guess that is
+    /// reported is recoverable while a refusal to decode is not.
+    pub fn input_color_space(&self) -> (ColorSpace, ColorSpaceSource) {
+        if let Some(explicit) = self.color_space {
+            return (explicit, ColorSpaceSource::Explicit);
+        }
+        if let Some(from_metadata) = self
+            .metadata
+            .color_space
+            .as_deref()
+            .and_then(ColorSpace::from_name)
+        {
+            return (from_metadata, ColorSpaceSource::Metadata);
+        }
+        (
+            self.extension_color_space(),
+            ColorSpaceSource::ExtensionDefault,
+        )
+    }
+
+    /// Tier 3: float formats are scene-linear, integer formats are sRGB.
+    fn extension_color_space(&self) -> ColorSpace {
+        // A sequence's persisted path points at its representative frame, so
+        // the extension is the same either way.
+        let text = match &self.path {
+            AssetPath::Absolute(path) => path.to_string_lossy().into_owned(),
+            AssetPath::Relative(rel) | AssetPath::Variable(rel) => rel.clone(),
+        };
+        let extension = Path::new(&text)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if LINEAR_EXTENSIONS.contains(&extension.as_str()) {
+            ColorSpace::LINEAR_REC709
+        } else {
+            ColorSpace::SRGB
+        }
     }
 
     /// A copy with `resolved` recomputed from the persisted path.
@@ -533,6 +615,75 @@ mod tests {
         for case in cases {
             assert_eq!(AssetPath::parse(&case.to_string()), case, "{case:?}");
         }
+    }
+
+    /// CM-2: an explicit setting beats the file's metadata, which beats the
+    /// extension default. All three tiers in one place, because the order is
+    /// the whole rule.
+    #[test]
+    fn input_colour_space_follows_the_resolution_order() {
+        // Tier 3: extension only.
+        let png = MediaAssetEntry::from_absolute("/f/plate.png");
+        assert_eq!(
+            png.input_color_space(),
+            (ColorSpace::SRGB, ColorSpaceSource::ExtensionDefault)
+        );
+        let exr = MediaAssetEntry::from_absolute("/f/plate.EXR");
+        assert_eq!(
+            exr.input_color_space(),
+            (
+                ColorSpace::LINEAR_REC709,
+                ColorSpaceSource::ExtensionDefault
+            )
+        );
+        // A container with no metadata falls to the integer default too.
+        let mov = MediaAssetEntry::from_absolute("/f/clip.mov");
+        assert_eq!(
+            mov.input_color_space(),
+            (ColorSpace::SRGB, ColorSpaceSource::ExtensionDefault)
+        );
+
+        // Tier 2 beats tier 3: an EXR that declares sRGB is sRGB.
+        let mut tagged = exr.clone();
+        tagged.metadata.color_space = Some("sRGB".into());
+        assert_eq!(
+            tagged.input_color_space(),
+            (ColorSpace::SRGB, ColorSpaceSource::Metadata)
+        );
+        // An unrecognised metadata string is not a guess — fall through.
+        let mut gibberish = exr.clone();
+        gibberish.metadata.color_space = Some("aces_1.2".into());
+        assert_eq!(
+            gibberish.input_color_space().1,
+            ColorSpaceSource::ExtensionDefault
+        );
+
+        // Tier 1 beats both.
+        let mut explicit = tagged.clone();
+        explicit.color_space = Some(ColorSpace::REC709);
+        assert_eq!(
+            explicit.input_color_space(),
+            (ColorSpace::REC709, ColorSpaceSource::Explicit)
+        );
+    }
+
+    /// The explicit setting is persisted, and a document written before the
+    /// field existed still loads.
+    #[test]
+    fn explicit_colour_space_round_trips_and_defaults_to_none() {
+        let mut entry = MediaAssetEntry::from_absolute("/f/plate.exr");
+        entry.color_space = Some(ColorSpace::SRGB);
+        let text = ron::ser::to_string(&entry).unwrap();
+        let back: MediaAssetEntry = ron::from_str(&text).unwrap();
+        assert_eq!(back.color_space, Some(ColorSpace::SRGB));
+
+        let legacy: MediaAssetEntry =
+            ron::from_str(r#"MediaAssetEntry(path: "/f/plate.exr", kind: Still)"#).unwrap();
+        assert_eq!(legacy.color_space, None);
+        assert_eq!(
+            legacy.input_color_space().1,
+            ColorSpaceSource::ExtensionDefault
+        );
     }
 
     /// A file name containing `${` is a real path, not a variable: treating
@@ -687,6 +838,7 @@ mod tests {
             path: AssetPath::Variable("${MEDIA}/a.mov".into()),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
+            color_space: None,
             resolved: Some(PathBuf::from("/proj/a.mov")),
         };
         assert_eq!(
@@ -698,6 +850,7 @@ mod tests {
             path: AssetPath::Relative("./gone.mov".into()),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
+            color_space: None,
             resolved: None,
         };
         assert_eq!(
@@ -748,6 +901,7 @@ mod tests {
     #[test]
     fn entry_round_trips_through_ron() {
         let entry = MediaAssetEntry {
+            color_space: None,
             path: AssetPath::Relative("./footage/clip.mov".into()),
             kind: AssetKind::Sequence {
                 prefix: "f_".into(),

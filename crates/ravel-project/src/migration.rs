@@ -100,6 +100,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(7)
         }
+        7 => {
+            migrate_v7_to_v8(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 7,
+                to: 8,
+                reason,
+            })?;
+            Ok(8)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -237,6 +245,26 @@ fn migrate_v5_to_v6(_manifest: &mut Value) -> Result<(), String> {
 /// contract while leaving the artwork intact — a loss the user has no way to
 /// see. The bump turns that into [`MigrationError::TooNew`], a refusal to open.
 fn migrate_v6_to_v7(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// `v7 → v8`: the compositing pipeline became linear, so every authored
+/// colour means something different.
+///
+/// The manifest itself is unchanged. The conversion is a **typed pass** over
+/// the loaded document
+/// ([`Document::linearize_colors`](ravel_core::composition::Document::linearize_colors)),
+/// applied by [`super::ProjectFile::from_archive`] for any archive older than
+/// v8 — the same shape as the v4 → v5 fold and the v5 → v6 curve upgrade, and
+/// for the same reason: this chain never sees `document/main.ron`.
+///
+/// The bump is what makes the conversion happen exactly once. `srgb → linear`
+/// is not idempotent and a stored number carries no record of how often it has
+/// been applied, so the version stamp is the only thing standing between a
+/// re-opened project and a second, silently wrong conversion. It also refuses
+/// the reverse: a v8 project opened by an older, display-referred build would
+/// render every colour too dark, and [`MigrationError::TooNew`] stops it.
+fn migrate_v7_to_v8(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

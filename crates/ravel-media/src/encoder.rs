@@ -7,6 +7,7 @@
 //! [`FrameBuffer`] data, and muxes audio from interleaved f32 PCM
 //! [`AudioBuffer`] data.
 
+use ravel_core::color::quantize_u8;
 use std::path::Path;
 
 use ffmpeg_the_third as ffmpeg;
@@ -157,10 +158,16 @@ impl MediaWriter for FfmpegEncoder {
                 for x in 0..width as usize {
                     let src_idx = (y * width as usize + x) * 4;
                     let dst_idx = y * stride + x * 4;
-                    data[dst_idx] = (px[src_idx].clamp(0.0, 1.0) * 255.0) as u8;
-                    data[dst_idx + 1] = (px[src_idx + 1].clamp(0.0, 1.0) * 255.0) as u8;
-                    data[dst_idx + 2] = (px[src_idx + 2].clamp(0.0, 1.0) * 255.0) as u8;
-                    data[dst_idx + 3] = (px[src_idx + 3].clamp(0.0, 1.0) * 255.0) as u8;
+                    // Already display-encoded by the stage in front of the
+                    // encoder (`CM-4`); this only quantises, through the one
+                    // shared quantiser. It **rounds** — before `CM-1` this
+                    // truncated, which put video output up to one LSB below
+                    // the viewer and the PNG writer and could not map 1.0 to
+                    // 255 at all (`HIGH-25`).
+                    data[dst_idx] = quantize_u8(px[src_idx]);
+                    data[dst_idx + 1] = quantize_u8(px[src_idx + 1]);
+                    data[dst_idx + 2] = quantize_u8(px[src_idx + 2]);
+                    data[dst_idx + 3] = quantize_u8(px[src_idx + 3]);
                 }
             }
         }

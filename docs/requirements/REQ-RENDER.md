@@ -55,11 +55,14 @@
   - [ ] ビューア表示にGPU LUTが適用される
   - [ ] ACES, Rec.709, sRGB, Rec.2020がサポートされる
 - **依存**: REQ-GPU-001
-- **スコープ**: **`render-export-plan.md` の非対象。未着手。** 現状は取り込み・
-  Viewer・エンコーダのいずれも伝達関数を適用せず、バッファは display-referred
-  （sRGB エンコード済みの 0–1）で自己整合している。書き出した EXR が保証するのは
-  **精度**（f32 が劣化しないこと）だけで、色空間の正しさはこの要件の担当。それが
-  入るまでは Viewer / PNG / EXR / 動画の 4 経路が**一致すること**を優先する
+- **スコープ**: **`render-export-plan.md` の非対象。** パイプラインのリニア化は
+  フェーズ CM（`CM-1`〜`CM-5`）で完了しており、取り込みで伝達関数を外し、
+  Viewer と書き出しで掛け直す。作業空間はリニア Rec.709、書き出した EXR は
+  リニア 32bit float。規範は
+  [`../specifications/color-management.md`](../specifications/color-management.md)。
+  **この要件が今も担当するのは残り半分** — `.ocio` 設定の読み込み、GPU 3D LUT
+  へのベイク、ACES / Rec.2020 を含む色空間の選択（`CM-6`〜`CM-8`、未着手）。
+  受入条件のチェックボックスはそちらの担当なので未達のままにしてある
 
 ## REQ-RENDER-004: モーションブラー
 

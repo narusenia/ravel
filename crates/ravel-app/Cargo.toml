@@ -39,6 +39,7 @@ gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
 futures = { workspace = true }
 image = { workspace = true }
+rayon = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true }

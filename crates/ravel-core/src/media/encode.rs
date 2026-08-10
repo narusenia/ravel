@@ -31,9 +31,11 @@
 //! The reasons are structured, not prose: user-visible text is the caller's
 //! job through `t!`.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use super::{ImageFormat, MediaResult, VideoCodec};
+use crate::color::{ColorSpace, convert};
 use crate::types::FrameBuffer;
 
 // ===========================================================================
@@ -164,6 +166,20 @@ impl SequenceCodec {
         }
     }
 
+    /// The colour space a frame must be in when it reaches this writer.
+    ///
+    /// PNG is an 8- or 16-bit interchange format that everything downstream
+    /// reads as display-encoded, so it gets [`ColorSpace::DISPLAY`]. EXR is
+    /// the lossless intermediate and is written in the **working space** —
+    /// 32-bit float scene-linear, which is exactly what a compositor opening
+    /// it expects (`CM-4`).
+    pub const fn color_space(self) -> ColorSpace {
+        match self {
+            Self::Png(_) => ColorSpace::DISPLAY,
+            Self::Exr => ColorSpace::WORKING,
+        }
+    }
+
     /// Pair an [`ImageFormat`] with PNG settings, or `None` when Ravel has no
     /// writer for it. The entry point for a CLI flag or a UI menu choice.
     pub const fn from_image_format(format: ImageFormat, png_depth: PngDepth) -> Option<Self> {
@@ -173,6 +189,45 @@ impl SequenceCodec {
             ImageFormat::Tiff | ImageFormat::Dpx => None,
         }
     }
+}
+
+/// Convert a rendered frame out of the working space, ready for an encoder.
+///
+/// **The stage in front of [`Encoder`], not a part of it.** The trait and
+/// every writer behind it stay unaware of colour management (`CM-4`): the
+/// render worker converts once, then hands the encoder a frame that is
+/// already in the space its format calls for.
+///
+/// Borrowed unchanged when `space` is the working space — the EXR path, and
+/// the reason writing an EXR still costs no copy.
+///
+/// Alpha is coverage and is never converted.
+///
+/// A frame that is not four-channel is handed back untouched. `as_f32` widens
+/// a `MonoF32` buffer just as willingly as an RGBA one, and `chunks_exact(4)`
+/// would then read four consecutive *pixels* as one and drop the remainder —
+/// a silently truncated image rather than a failure. Asking
+/// [`FrameBuffer::as_rgba_f32`] instead makes the shape a precondition, and
+/// passing the frame through unconverted keeps the encoder's own error the
+/// one the caller sees.
+pub fn to_output_space(frame: &FrameBuffer, space: ColorSpace) -> Cow<'_, FrameBuffer> {
+    if space == ColorSpace::WORKING {
+        return Cow::Borrowed(frame);
+    }
+    let Ok(pixels) = frame.as_rgba_f32() else {
+        tracing::warn!(
+            format = ?frame.format,
+            "output colour conversion skipped: frame is not RGBA"
+        );
+        return Cow::Borrowed(frame);
+    };
+    let mut converted = Vec::with_capacity(pixels.len());
+    for pixel in pixels.chunks_exact(4) {
+        let rgb = convert([pixel[0], pixel[1], pixel[2]], ColorSpace::WORKING, space);
+        converted.extend_from_slice(&rgb);
+        converted.push(pixel[3]);
+    }
+    Cow::Owned(FrameBuffer::from_f32(frame.width, frame.height, converted))
 }
 
 /// Where a numbered image sequence is written and how its files are named.
@@ -668,7 +723,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::PixelFormat;
     use std::collections::HashSet;
+
+    /// A frame the conversion cannot interpret is returned untouched rather
+    /// than reinterpreted four pixels at a time. `as_f32` widens a `MonoF32`
+    /// buffer as readily as an RGBA one, so reading it in fours would drop
+    /// three quarters of the samples and hand the encoder a buffer whose
+    /// length no longer matches its own dimensions.
+    #[test]
+    fn a_non_rgba_frame_is_passed_through_instead_of_truncated() {
+        let mono = FrameBuffer::with_format(4, 2, PixelFormat::MonoF32);
+        let out = to_output_space(&mono, ColorSpace::DISPLAY);
+
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "a mono frame must not be rebuilt from four-sample groups"
+        );
+        assert_eq!(out.width, mono.width);
+        assert_eq!(out.height, mono.height);
+        assert_eq!(out.as_f32().len(), mono.as_f32().len());
+    }
 
     /// A hand-built environment. Every question the enumeration can ask is
     /// answered from these three fields, which is the point: the "no FFmpeg"

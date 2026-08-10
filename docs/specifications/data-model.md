@@ -389,6 +389,8 @@ struct MediaAssetEntry {
     path: AssetPath,              // 永続。相対 / 絶対 / 変数
     kind: AssetKind,              // 永続
     metadata: AssetMetadata,      // 永続。probe で埋まる
+    color_space: Option<ColorSpace>,  // 永続。ユーザーの明示指定のみ。
+                                  // None = 推定する（メタデータ → 拡張子）
     #[serde(skip)]
     resolved: Option<PathBuf>,    // 実行時のみ。app が注入。None = オフライン
 }
@@ -534,7 +536,7 @@ struct SubgraphTemplate {
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -545,13 +547,19 @@ struct SubgraphTemplate {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v7)
+### document/main.ron (RON形式、フォーマット v8)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
 ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット
-（`MediaAssetEntry`。v4 で相対 / 変数パス対応）、公開パラメータ宣言
-（`exposed_parameters`。v7 で追加）。
+（`MediaAssetEntry`。v4 で相対 / 変数パス対応、v8 で入力色空間の明示指定
+`color_space` を追加）、公開パラメータ宣言（`exposed_parameters`。v7 で追加）。
+
+**v8 で色の意味が変わった。** 作者が指定した色（ノードの `COLOR` パラメータ、
+`Composition.background_color`、`exposed_parameters` の `color` 既定値）は
+**リニア光**として保存される。v7 以前のファイルはロード後の型付きパスで
+一度だけ読み替える（`Document::linearize_colors`）。規範は
+[color-management.md](color-management.md)。
 `compositions`/`media_assets` は ID・キー昇順にソートされ決定的出力となるため git diff
 が有効。`exposed_parameters` は宣言順そのものが提示順（＝データ）なので
 `Vec` としてそのまま並び、ソートしない。読み込み後は `Document::advance_id_counters()` で全 ID カウンタを文書の最大

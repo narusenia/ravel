@@ -9,8 +9,8 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 8 | 22 | [high/](high/) — 1件1ファイル |
-| medium | 35 | 28 | [medium/](medium/) — 領域別5ファイル |
+| high | 8 | 23 | [high/](high/) — 1件1ファイル |
+| medium | 36 | 28 | [medium/](medium/) — 領域別5ファイル |
 | low | 31 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -107,6 +107,11 @@
     → `docs/implementation/cache-plan.md` の CACHE-8 が引き受ける。
 12. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
+13. **[HIGH-31](high/HIGH-31-float-decode-through-8bit-rgba.md)**
+    同じスケーラが**出力を 8bit RGBA に固定**しているので、float / 10bit の
+    素材は f32 バッファに届く前に 256 段へ落ちる。`MED-MED-01` を昇格した
+    もので（フェーズ CM が仕様に「リニア EXR を取り込む」と書いた結果、
+    深刻さが上がった）、`HIGH-17` と同じ関数を触る。
 
 ### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）
 
@@ -198,23 +203,6 @@ debug ビルドでは音声 1 秒あたり 0.3 秒かかるため（release の�
 どちらも踏む**ので 1 フェーズにまとめてある（フェーズ A4）。
 `MED-AUD-02`（上限超過が無言）と `MED-AUD-03`（準備中が UI に出ない）は
 HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフェーズ。
-
----
-
-## 出力の正しさ（色）
-
-14. **[HIGH-25](high/HIGH-25-compositing-in-display-referred-space.md)**
-    色空間変換のコードがリポジトリに 1 行も無く、**符号化済みの整数素材**の
-    値が伝達関数を外されないまま合成に入っている。素材ごとの入力色空間を
-    記録する場所が無いので、もともとリニアな EXR / float 連番と混ざる。
-    整数素材だけなら 3 経路がほぼ同じ素朴変換で揃うため**単純な通しでは
-    誤りが見えない**（ただし Viewer は最近接、動画は切り捨てで 1 LSB
-    ずれている）。壊れているのは合成の数学で、
-    不透明度・ブレンド・ブラーが非線形空間で行われる。要件
-    （REQ-CORE-009 / REQ-RENDER-003）はリニアを前提としており、実装と
-    食い違っている。
-    → `docs/implementation/color-management-plan.md` の `CM-1`〜`CM-4` が
-    引き受ける（フェーズ CM）。
 
 ---
 

@@ -79,6 +79,43 @@ children, `Geometry` sums its attribute columns and instance sources,
 `GpuFrameBuffer` reads its texture key. Approximate is fine; the order of
 magnitude is not.
 
+### `color` — colour spaces, transfer functions, the one quantiser (`CM-1`)
+
+Pure: no I/O, no state. Spec:
+`docs/specifications/color-management.md`.
+
+```rust
+enum Primaries { Rec709, Rec2020, ApOne }          // ::ALL
+    .rgb_to_xyz() / .xyz_to_rgb() -> Mat3          // [[f64; 3]; 3]
+enum Transfer { Linear, Srgb, Rec709, Pq }         // ::ALL
+    .decode(f32) -> f32                            // encoded -> linear light
+    .encode(f32) -> f32                            // linear light -> encoded
+struct ColorSpace { primaries: Primaries, transfer: Transfer }
+    ::SRGB / ::LINEAR_REC709 / ::REC709 / ::ACES_CG / ::REC2020_PQ
+    ::WORKING   // == LINEAR_REC709; the space compositing happens in
+    ::DISPLAY   // == SRGB;          the space every 8-bit exit targets
+    ::NAMED / ::from_name(&str) -> Option<Self> / .name() -> Option<&'static str>
+    .is_linear() / .to_linear([f32; 3]) / .from_linear([f32; 3])
+convert(rgb: [f32; 3], from: ColorSpace, to: ColorSpace) -> [f32; 3]
+primaries_matrix(from, to) -> Mat3      // IDENTITY when they agree
+multiply / apply / invert                // 3x3 helpers, IDENTITY
+
+// The two ends of the pipeline. Alpha is quantised, never encoded.
+ingest_rgba8([u8; 4], input: ColorSpace) -> [f32; 4]   // normalise + decode
+to_display_rgba8([f32; 4]) -> [u8; 4]                  // encode + quantise
+to_display_rgba16([f32; 4]) -> [u16; 4]
+quantize_u8(f32) -> u8 / quantize_u16(f32) -> u16      // round to nearest
+
+struct CubeLut                            // .cube 3D LUT, trilinear
+    ::parse(&str) -> Result<Self, CubeError>   // text, not a path
+    .size() / .domain() / .sample([f32; 3]) -> [f32; 3]
+```
+
+Transfer functions accept the whole real line: negatives use the odd
+extension, values above 1.0 extrapolate, nothing panics and nothing clamps.
+Round trips are exact to 1e-6. **Never hand-roll `* 255.0`** —
+`scripts/lint-patterns.sh` (`raw-pixel-quantisation`) rejects it.
+
 ### `cache_budget` — the single memory authority (`CACHE-3`)
 
 ```rust
@@ -1339,6 +1376,8 @@ RenderJob { document: Arc<Document>, comp: CompId, range: Range<u64>,
     ::new(document, comp, range, encoder, output)   // OverwritePolicy::Refuse
     .with_overwrite(OverwritePolicy::Replace) / .frame_count()
 RenderOutput::{Sequence(ImageSequenceOutput), Container(PathBuf)}
+    .color_space() -> ColorSpace   // what the encoder is handed: the output
+        // format decides, never the encoder (`CM-4`). Container -> DISPLAY.
     .occupied_paths(Range<u64>) -> Vec<PathBuf>    // one per frame, per name
     .conflicts(Range<u64>) -> Vec<PathBuf>         // the occupied subset; the
         // worker's own OverwritePolicy::Refuse check, callable by a front end
@@ -1445,7 +1484,13 @@ enum PngDepth { Eight, Sixteen }          // Default::default() == Eight
     .bits() / .max_value()                // 8 → 255, 16 → 65535
 enum SequenceCodec { Png(PngDepth), Exr }
     .image_format() -> ImageFormat
+    .color_space() -> ColorSpace      // Png -> DISPLAY, Exr -> WORKING
     .from_image_format(ImageFormat, PngDepth) -> Option<Self>   // None: TIFF/DPX
+
+// The stage in front of Encoder (`CM-4`). The trait knows nothing about
+// colour; the render worker converts once, then hands the frame over.
+// Borrowed unchanged for the working space, so an EXR costs no copy.
+to_output_space(&FrameBuffer, ColorSpace) -> Cow<'_, FrameBuffer>
 ImageSequenceOutput::new(directory, prefix, suffix, codec, padding)
     -> MediaResult<Self>              // Err: prefix/suffix could escape the dir
     .directory() / .prefix() / .suffix() / .codec() / .padding()
@@ -1518,11 +1563,12 @@ are `u32`, so past ~4 GiB it refuses rather than wrapping; a rate or channel
 count whose byte rate or block align does not fit its header field is refused
 by `create` for the same reason (`EXPORT-4`).
 
-**No transfer function is applied on the way out**, matching ingest, the
-viewer, and the FFmpeg encoder — so the written values are display-referred,
-not scene-linear, and an EXR from Ravel looks bright in a tool that assumes
-linear. Deliberate until OCIO (REQ-RENDER-003) exists; see the
-`encode::sequence` module docs.
+**The transfer function is applied in front of the encoder, not inside it**
+(`CM-4`): `to_output_space` converts the frame once, so a PNG or a video
+carries display-encoded values while **an EXR is written in the working space
+— linear, the precision argument EXR rests on made true**. See
+`docs/specifications/color-management.md` for the norm and the
+`encode::sequence` module docs for the writer side.
 
 ## ravel-nodes — built-in processors
 

@@ -67,16 +67,27 @@ pub fn detect_sequence(path: &Path) -> MediaResult<ImageSequenceInfo> {
     })
 }
 
-/// Read a single image frame from disk via FFmpeg.
+/// Read a single image frame from disk via FFmpeg, in the file's own values.
 ///
-/// Returns an RGBA f32 [`FrameBuffer`].
+/// Returns an RGBA f32 [`FrameBuffer`]. No transfer function is removed —
+/// use [`read_image_frame_in`] to decode into the working space.
 #[cfg(feature = "ffmpeg")]
 pub fn read_image_frame(path: &Path) -> MediaResult<ravel_core::types::FrameBuffer> {
+    read_image_frame_in(path, ravel_core::color::ColorSpace::WORKING)
+}
+
+/// Read a single image frame, decoding `input_color_space` into the working
+/// space (`CM-2`).
+#[cfg(feature = "ffmpeg")]
+pub fn read_image_frame_in(
+    path: &Path,
+    input_color_space: ravel_core::color::ColorSpace,
+) -> MediaResult<ravel_core::types::FrameBuffer> {
     use crate::decoder::FfmpegDecoder;
     use ravel_core::media::MediaReader;
 
     // Open the single image as a "video" with one frame.
-    let mut reader = FfmpegDecoder::open(path)?;
+    let mut reader = FfmpegDecoder::open(path)?.with_input_color_space(input_color_space);
     let video_info = reader
         .info()
         .first_video()

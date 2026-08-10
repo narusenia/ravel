@@ -347,6 +347,20 @@ impl ProjectFile {
         } else {
             document
         };
+        // v7 → v8: the pipeline became linear, so every authored colour is
+        // reinterpreted once. Gated on the source version and nowhere else:
+        // `srgb → linear` is not idempotent, so running it twice would darken
+        // the project each time it is opened.
+        let document = if source_version < 8 {
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let (upgraded, report) = document.linearize_colors(&registry);
+            upgraded.validate()?;
+            report_color_migration(&report);
+            upgraded
+        } else {
+            document
+        };
 
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
@@ -485,6 +499,47 @@ impl ProjectFile {
             layers.push(u.clone());
         }
         ResolvedSettings::from_layers(&layers)
+    }
+}
+
+/// Log what the v7 → v8 colour pass could not convert.
+///
+/// A load must not silently change a project's look, and it must not
+/// silently *fail* to. Every note the pass returns names the node and the
+/// parameter, so a colour that did not move can be found and fixed by hand.
+fn report_color_migration(report: &ravel_core::composition::ColorMigrationReport) {
+    if report.converted > 0 {
+        tracing::info!(
+            channels = report.converted,
+            "reinterpreted authored colours for the linear working space (.ravprj v7 → v8)"
+        );
+    }
+    for note in &report.keyframed {
+        tracing::warn!(
+            node = note.node.raw(),
+            node_type = note.type_key,
+            key = note.param,
+            "keyframed colour: the keys were converted, but frames between them \
+             no longer interpolate the same way"
+        );
+    }
+    for note in &report.unresolved {
+        tracing::warn!(
+            node = note.node.raw(),
+            node_type = note.type_key,
+            key = note.param,
+            "colour driven by an expression, another node, or a blend: not converted, \
+             so it now means linear light instead of a display value"
+        );
+    }
+    for note in &report.undecidable {
+        tracing::warn!(
+            node = note.node.raw(),
+            node_type = note.type_key,
+            key = note.param,
+            "cannot tell whether this parameter is a colour (unknown node type or \
+             undeclared parameter): left unconverted"
+        );
     }
 }
 
@@ -1719,6 +1774,182 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // v7 → v8: authored colours are reinterpreted for the linear pipeline
+    // -----------------------------------------------------------------
+
+    /// A v7 archive whose layer network holds one `constant.color` at
+    /// `value` on every colour channel and `alpha` on the fourth.
+    fn v7_colour_archive(value: f32, alpha: f32) -> container::RawArchive {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(800), "constant.color")
+                    .with_output("color", DataTypeId::COLOR)
+                    .with_param(
+                        "color",
+                        ParameterValue::Channel4([
+                            AnimationChannel::constant(value),
+                            AnimationChannel::constant(value),
+                            AnimationChannel::constant(value),
+                            AnimationChannel::constant(alpha),
+                        ]),
+                    ),
+            )
+            .unwrap();
+        let comp = Composition::new(
+            CompId::new(700),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::new(701), "Colour", network).with_time(0, 0, 100));
+        let mut project = ProjectFile::from_document(
+            "Legacy",
+            "2026-08-06T00:00:00Z",
+            Document::default().with_composition(comp),
+        );
+        project.manifest.format_version = 7;
+        project.to_archive().unwrap()
+    }
+
+    fn loaded_colour(project: &ProjectFile) -> Vec<f32> {
+        use ravel_core::animation::channel::ChannelSource;
+        project
+            .document
+            .get_composition(CompId::new(700))
+            .unwrap()
+            .layers[0]
+            .network
+            .node(NodeId::new(800))
+            .expect("colour node")
+            .parameters
+            .iter()
+            .find(|p| p.key == "color")
+            .expect("color")
+            .value
+            .channels()
+            .expect("channels")
+            .iter()
+            .map(|channel| match channel.source {
+                ChannelSource::Constant(v) => v,
+                ref other => panic!("expected a constant, found {other:?}"),
+            })
+            .collect()
+    }
+
+    /// CM-2: a v7 colour is reinterpreted once, `linear → srgb` returns the
+    /// author's number, and alpha is untouched.
+    #[test]
+    fn a_v7_project_opens_with_its_colours_linearised() {
+        let loaded = ProjectFile::from_archive(&v7_colour_archive(0.5, 0.25)).unwrap();
+        assert_eq!(loaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+
+        let colour = loaded_colour(&loaded);
+        for channel in &colour[..3] {
+            assert!((channel - 0.214_041_1).abs() < 1e-5, "{colour:?}");
+        }
+        assert_eq!(colour[3], 0.25, "alpha carries no transfer function");
+
+        let back = ravel_core::color::convert(
+            [colour[0], colour[1], colour[2]],
+            ravel_core::color::ColorSpace::WORKING,
+            ravel_core::color::ColorSpace::SRGB,
+        );
+        for channel in back {
+            assert!((channel - 0.5).abs() < 1e-5, "{back:?}");
+        }
+    }
+
+    /// CM-2: authored colours that live outside every node network — a
+    /// composition background and an `exposed_parameters` colour default —
+    /// are converted too. A walk over node parameters cannot see either.
+    #[test]
+    fn colours_outside_the_graphs_are_linearised_too() {
+        use ravel_core::exposed::{
+            ExposedBinding, ExposedParameter, ExposedParameters, ExposedType, ExposedValue,
+        };
+        use ravel_core::types::Color;
+
+        let mut comp = Composition::new(
+            CompId::new(700),
+            "Comp",
+            (64, 64),
+            FrameRate::new(30, 1),
+            100,
+        );
+        comp.background_color = Color::new(0.5, 0.5, 0.5, 1.0);
+
+        let declaration = ExposedParameter::new(
+            "tint",
+            ExposedType::Color,
+            ExposedValue::Color(Color::new(0.5, 0.25, 1.0, 0.5)),
+            ExposedBinding::new(NodeId::new(800), "color"),
+        )
+        .unwrap();
+        let document = Document::default()
+            .with_composition(comp)
+            .with_exposed_parameters(ExposedParameters::from_declarations([declaration]).unwrap());
+
+        let mut project = ProjectFile::from_document("Legacy", "2026-08-06T00:00:00Z", document);
+        project.manifest.format_version = 7;
+        let loaded = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+
+        let background = loaded
+            .document
+            .get_composition(CompId::new(700))
+            .unwrap()
+            .background_color;
+        assert!((background.r - 0.214_041_1).abs() < 1e-5, "{background:?}");
+        assert_eq!(background.a, 1.0);
+
+        let ExposedValue::Color(tint) = loaded
+            .document
+            .exposed_parameters
+            .iter()
+            .next()
+            .expect("the declaration survives")
+            .default_value()
+        else {
+            panic!("expected a colour default");
+        };
+        assert!((tint.r - 0.214_041_1).abs() < 1e-5, "{tint:?}");
+        assert_eq!(tint.a, 0.5, "alpha carries no transfer function");
+    }
+
+    /// CM-2: the conversion runs exactly once. It is not idempotent on its
+    /// own — the format version is what makes reopening safe.
+    #[test]
+    fn the_linearised_colour_is_not_converted_a_second_time() {
+        let loaded = ProjectFile::from_archive(&v7_colour_archive(0.5, 1.0)).unwrap();
+        let archive = loaded.to_archive().unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(archive.require_text(container::entry::MANIFEST).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["format_version"], CURRENT_FORMAT_VERSION,
+            "the rewritten archive is v8"
+        );
+        let reloaded = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(loaded_colour(&reloaded), loaded_colour(&loaded));
+        assert_eq!(reloaded.document, loaded.document);
+    }
+
+    /// CM-2: a v8 archive is refused by a build that only knows v7 — the
+    /// mechanism that keeps a display-referred build from rendering a linear
+    /// project too dark. Tested through the version guard itself, since this
+    /// build cannot be made to be an older one.
+    #[test]
+    fn a_newer_colour_format_is_refused_rather_than_misread() {
+        let mut manifest = serde_json::json!({ "format_version": CURRENT_FORMAT_VERSION + 1 });
+        assert!(matches!(
+            migration::migrate_to_current(&mut manifest),
+            Err(migration::MigrationError::TooNew { .. })
+        ));
+    }
+
     /// `Layer.audio` was added additively inside format v4. A v4 document
     /// written before that field existed must load, and its first rewrite
     /// must itself remain stable on another load/save cycle.
@@ -1879,6 +2110,7 @@ mod tests {
             .with_media_asset_entry(
                 "plate",
                 MediaAssetEntry {
+                    color_space: None,
                     path: AssetPath::Variable("${PROJECT_ROOT}/footage/plate.mov".into()),
                     kind: AssetKind::Container,
                     metadata: AssetMetadata::default(),
@@ -2001,6 +2233,7 @@ mod tests {
             .with_media_asset_entry(
                 "gone",
                 MediaAssetEntry {
+                    color_space: None,
                     path: AssetPath::Variable("${MISSING_VAR}/a.mov".into()),
                     kind: AssetKind::Container,
                     metadata: AssetMetadata::default(),

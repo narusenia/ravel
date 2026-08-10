@@ -572,6 +572,7 @@ fn inspect(
                     path: path.clone(),
                     kind: AssetKind::infer_from_path(resolved),
                     metadata: Default::default(),
+                    color_space: None,
                     resolved: Some(resolved.to_path_buf()),
                 }),
             },

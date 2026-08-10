@@ -15,6 +15,7 @@
 //! enabling structural sharing for undo.
 
 pub mod asset;
+mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
 pub(crate) mod graph_walk;
@@ -23,8 +24,11 @@ pub mod templates;
 pub mod transform;
 pub mod validate;
 
+pub use color_upgrade::{ColorMigrationNote, ColorMigrationReport, is_color_param};
+
 pub use asset::{
-    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, MediaAssetEntry, expand_variables,
+    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource, MediaAssetEntry,
+    expand_variables,
 };
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
@@ -1042,6 +1046,55 @@ impl Document {
     /// and is logged. Mints no ids. Idempotent.
     pub fn upgrade_curve_params(self) -> Self {
         self.map_graphs(curve_upgrade::upgrade_graph)
+    }
+
+    /// Reinterpret every authored colour for the linear working space
+    /// (`.ravprj` v7 → v8), in every graph of the document — the flat graph,
+    /// each layer network, and nested subnets.
+    ///
+    /// **Not idempotent, and cannot be**: `srgb → linear` applied twice is a
+    /// different colour, and no inspection of a stored number can tell how
+    /// many times it has been applied. Idempotence is the *format version's*
+    /// job — [`ProjectFile::from_archive`](../../ravel_project/struct.ProjectFile.html)
+    /// runs this only for an archive written before v8, and a v8 archive is
+    /// never converted again.
+    ///
+    /// The returned [`ColorMigrationReport`] lists what could not be
+    /// converted; the caller is expected to surface it.
+    pub fn linearize_colors(
+        self,
+        registry: &NodeRegistry,
+    ) -> (Self, color_upgrade::ColorMigrationReport) {
+        let report = std::cell::RefCell::new(color_upgrade::ColorMigrationReport::default());
+        let mut document =
+            self.map_graphs(|graph| color_upgrade::upgrade_graph(graph, registry, &report));
+
+        // Two authored colours live outside every graph, so the node walk
+        // above cannot see them.
+        let comp_ids: Vec<CompId> = document.compositions.keys().copied().collect();
+        for id in comp_ids {
+            let Some(comp) = document.compositions.get(&id) else {
+                continue;
+            };
+            let mut updated = (**comp).clone();
+            updated.background_color = color_upgrade::linearize_color(updated.background_color);
+            report.borrow_mut().converted += 3;
+            document
+                .compositions
+                .insert(id, std::sync::Arc::new(updated));
+        }
+        document.exposed_parameters =
+            document
+                .exposed_parameters
+                .map_defaults(|value| match value {
+                    crate::exposed::ExposedValue::Color(color) => {
+                        report.borrow_mut().converted += 3;
+                        crate::exposed::ExposedValue::Color(color_upgrade::linearize_color(color))
+                    }
+                    other => other,
+                });
+
+        (document, report.into_inner())
     }
 
     /// Apply a graph rewrite to every graph the document owns: the flat

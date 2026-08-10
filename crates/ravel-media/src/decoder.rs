@@ -17,6 +17,8 @@
 
 use std::path::Path;
 
+use ravel_core::color::{ColorSpace, ingest_rgba8};
+
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::ffi;
 use ffmpeg_the_third::ffi::AV_TIME_BASE;
@@ -95,6 +97,15 @@ pub struct FfmpegDecoder {
     audio_decoder: Option<CachedAudioDecoder>,
     /// Hardware device context, shared across all video decoders.
     hw_device_ctx: Option<HwDeviceContext>,
+    /// The colour space the file's samples are in.
+    ///
+    /// Defaults to [`ColorSpace::LINEAR_REC709`], which makes the decode
+    /// path a no-op — the shape every caller that only wants the file's own
+    /// values (thumbnails, probes) keeps. The `media` node resolves the real
+    /// space from the asset and sets it through
+    /// [`FfmpegDecoder::with_input_color_space`], and only then are decoded
+    /// samples converted into the working space.
+    input_color_space: ColorSpace,
 }
 
 /// C-callable `get_format` callback for FFmpeg codec context.
@@ -313,6 +324,13 @@ impl FfmpegDecoder {
         Ok(build_media_info(&ctx))
     }
 
+    /// Declare the colour space this file's samples are in, so decoded
+    /// frames come out in the working space (`CM-2`).
+    pub fn with_input_color_space(mut self, space: ColorSpace) -> Self {
+        self.input_color_space = space;
+        self
+    }
+
     /// Whether hardware-accelerated decoding is active for video.
     pub fn hw_accel_active(&self) -> bool {
         self.video_decoder.as_ref().is_some_and(|d| d.hw_active)
@@ -380,6 +398,7 @@ impl MediaReader for FfmpegDecoder {
             video_decoder: None,
             audio_decoder: None,
             hw_device_ctx,
+            input_color_space: ColorSpace::WORKING,
         })
     }
 
@@ -392,6 +411,8 @@ impl MediaReader for FfmpegDecoder {
         stream_index: usize,
         frame_number: u64,
     ) -> MediaResult<FrameBuffer> {
+        // Copied out before the mutable borrow of the cached decoder below.
+        let input_color_space = self.input_color_space;
         self.ensure_video_decoder(stream_index)?;
         let cached = self.video_decoder.as_mut().unwrap();
 
@@ -482,6 +503,7 @@ impl MediaReader for FfmpegDecoder {
                     let sw_frame = ensure_sw_frame(&decoded_frame)?;
                     return convert_video_frame_to_rgba(
                         sw_frame.as_ref().unwrap_or(&decoded_frame),
+                        input_color_space,
                     );
                 }
 
@@ -503,7 +525,10 @@ impl MediaReader for FfmpegDecoder {
                 // next request has to seek regardless.
                 self.video_decoder.as_mut().unwrap().last_returned_pts = None;
                 let sw_frame = ensure_sw_frame(&decoded_frame)?;
-                return convert_video_frame_to_rgba(sw_frame.as_ref().unwrap_or(&decoded_frame));
+                return convert_video_frame_to_rgba(
+                    sw_frame.as_ref().unwrap_or(&decoded_frame),
+                    input_color_space,
+                );
             }
             let mut stash = frame::Video::empty();
             std::mem::swap(&mut stash, &mut decoded_frame);
@@ -513,7 +538,10 @@ impl MediaReader for FfmpegDecoder {
         if let Some(ref frame) = best_frame {
             self.video_decoder.as_mut().unwrap().last_returned_pts = None;
             let sw_frame = ensure_sw_frame(frame)?;
-            return convert_video_frame_to_rgba(sw_frame.as_ref().unwrap_or(frame));
+            return convert_video_frame_to_rgba(
+                sw_frame.as_ref().unwrap_or(frame),
+                input_color_space,
+            );
         }
 
         Err(MediaError::SeekFailed(frame_number))
@@ -882,8 +910,17 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
     }
 }
 
-/// Convert an FFmpeg video frame to RGBA f32 [`FrameBuffer`].
-fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer> {
+/// Convert an FFmpeg video frame to RGBA f32 [`FrameBuffer`], decoding
+/// `input_color_space` into the working space on the way.
+///
+/// This is the ingest end of the linear pipeline (`CM-2`): the transfer
+/// function is removed **immediately** after the bytes are normalised, so
+/// nothing downstream ever sees an encoded value. Alpha carries no transfer
+/// function and is copied through.
+fn convert_video_frame_to_rgba(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
     let width = frame.width();
     let height = frame.height();
 
@@ -918,10 +955,15 @@ fn convert_video_frame_to_rgba(frame: &frame::Video) -> MediaResult<FrameBuffer>
         let row_start = y * stride;
         for x in 0..width as usize {
             let offset = row_start + x * 4;
-            f32_data.push(data[offset] as f32 / 255.0);
-            f32_data.push(data[offset + 1] as f32 / 255.0);
-            f32_data.push(data[offset + 2] as f32 / 255.0);
-            f32_data.push(data[offset + 3] as f32 / 255.0);
+            f32_data.extend_from_slice(&ingest_rgba8(
+                [
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ],
+                input_color_space,
+            ));
         }
     }
 

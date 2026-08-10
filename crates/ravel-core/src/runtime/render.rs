@@ -45,13 +45,14 @@
 //! here and wants a Windows CI run behind it.
 
 use crate::cache_budget::SharedCacheBudget;
+use crate::color::ColorSpace;
 use crate::composition::Document;
 use crate::composition::compile::{CompileError, compile_composition};
 use crate::eval::{EvalContext, EvalError, Evaluator, Precision, Quality};
 use crate::graph::Graph;
 use crate::id::CompId;
 use crate::media::MediaError;
-use crate::media::encode::{Encoder, ImageSequenceOutput};
+use crate::media::encode::{Encoder, ImageSequenceOutput, to_output_space};
 use crate::runtime::eval_service::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
 use crate::types::FrameBuffer;
 use crossbeam_channel::{Sender, unbounded};
@@ -117,6 +118,20 @@ pub enum RenderOutput {
 }
 
 impl RenderOutput {
+    /// The colour space the encoder behind this output expects its frames
+    /// in.
+    ///
+    /// A container is video: display-encoded. A sequence asks its codec —
+    /// PNG display-encoded, EXR left in the working space. This is what lets
+    /// the conversion sit in front of [`Encoder`] instead of inside it
+    /// (`CM-4`).
+    pub fn color_space(&self) -> ColorSpace {
+        match self {
+            Self::Sequence(sequence) => sequence.codec().color_space(),
+            Self::Container(_) => ColorSpace::DISPLAY,
+        }
+    }
+
     /// Every path this output occupies when `range` is rendered.
     ///
     /// One entry per frame for a sequence — which is what makes the conflict
@@ -769,6 +784,9 @@ fn run_job<H: EvalWorkerHooks>(
     } = job;
 
     let total_frames = range.end.saturating_sub(range.start);
+    // Decided from the output spec, not from the encoder: the trait says
+    // nothing about colour and `CM-4` keeps it that way.
+    let output_color_space = output.color_space();
 
     /// Nothing has been created yet, so a cancellation here needs no cleanup.
     /// The encoder is dropped un-begun, which its own `Drop` treats as a
@@ -851,6 +869,7 @@ fn run_job<H: EvalWorkerHooks>(
         range,
         total_frames,
         encoder.as_mut(),
+        output_color_space,
         cancelled,
         on_event,
     );
@@ -940,6 +959,7 @@ fn render_frames<H: EvalWorkerHooks>(
     range: Range<u64>,
     total_frames: u64,
     encoder: &mut dyn Encoder,
+    output_color_space: ColorSpace,
     cancelled: &Mutex<CancelState>,
     on_event: &dyn Fn(RenderEvent),
 ) -> Result<FrameLoop, RenderError> {
@@ -970,7 +990,11 @@ fn render_frames<H: EvalWorkerHooks>(
             .downcast_ref::<FrameBuffer>()
             .ok_or(RenderError::NotAFrame { frame })?;
 
-        encoder.write_frame(picture, frame)?;
+        // The output transform, in front of the encoder and applied once
+        // per frame (`CM-4`). Borrowed unchanged for an EXR, whose output
+        // space *is* the working space.
+        let picture = to_output_space(picture, output_color_space);
+        encoder.write_frame(&picture, frame)?;
         rendered += 1;
         on_event(RenderEvent::Progress {
             job: id,
@@ -1291,6 +1315,32 @@ mod tests {
         failing_job(dir, document, range, FailAt::Nothing)
     }
 
+    /// A job whose output is EXR, so the recording encoder sees the
+    /// evaluator's own values.
+    ///
+    /// A PNG job is display-encoded by the stage in front of the encoder
+    /// (`CM-4`), which is right for a picture and useless for a test that
+    /// wants to read a number back. EXR's output space *is* the working
+    /// space, so nothing is converted.
+    fn linear_job(dir: &Path, document: Arc<Document>, range: Range<u64>) -> Submitted {
+        let output = ImageSequenceOutput::new(dir, "frame_", "", SequenceCodec::Exr, 4)
+            .expect("fixed test name is valid");
+        let encoder = RecordingEncoder::new(output.clone());
+        let frames = encoder.frames.clone();
+        let log = encoder.log.clone();
+        Submitted {
+            job: RenderJob::new(
+                document,
+                comp_id(),
+                range,
+                Box::new(encoder),
+                RenderOutput::Sequence(output),
+            ),
+            frames,
+            log,
+        }
+    }
+
     fn failing_job(
         dir: &Path,
         document: Arc<Document>,
@@ -1460,14 +1510,14 @@ mod tests {
 
         // The submitter's document at submission time.
         let mut document = document_with(0.0);
-        let first = job(&dir_a, document.clone(), 0..2);
+        let first = linear_job(&dir_a, document.clone(), 0..2);
         let frames_a = first.frames.clone();
         let job_a = h.queue.submit(first.job);
 
         // Edit it while the first render is in flight. `Document` is
         // immutable-by-clone, so this is what a UI edit amounts to.
         document = document_with(1_000.0);
-        let second = job(&dir_b, document, 0..2);
+        let second = linear_job(&dir_b, document, 0..2);
         let frames_b = second.frames.clone();
         let job_b = h.queue.submit(second.job);
 
@@ -1491,6 +1541,54 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// CM-4: the output transform sits in front of the encoder, and which
+    /// transform it is comes from the output spec — not from the encoder,
+    /// which is the same [`RecordingEncoder`] in both halves here.
+    #[test]
+    fn the_output_transform_follows_the_output_format_not_the_encoder() {
+        assert_eq!(
+            RenderOutput::Sequence(sequence_output(Path::new("/tmp"))).color_space(),
+            ColorSpace::DISPLAY,
+            "PNG is an interchange format"
+        );
+        assert_eq!(
+            RenderOutput::Sequence(
+                ImageSequenceOutput::new(Path::new("/tmp"), "f_", "", SequenceCodec::Exr, 4)
+                    .unwrap()
+            )
+            .color_space(),
+            ColorSpace::WORKING,
+            "EXR is the lossless intermediate and stays linear"
+        );
+        assert_eq!(
+            RenderOutput::Container(PathBuf::from("/tmp/out.mp4")).color_space(),
+            ColorSpace::DISPLAY,
+        );
+
+        // And the worker really applies it: 0.5 linear reaches a PNG encoder
+        // as sRGB 0.7354, and an EXR encoder as 0.5.
+        let png_dir = temp_dir("stage-png");
+        let exr_dir = temp_dir("stage-exr");
+        let mut h = spawn(StubHooks::new());
+        let png = job(&png_dir, document_with(0.5), 0..1);
+        let png_frames = png.frames.clone();
+        let png_id = h.queue.submit(png.job);
+        let exr = linear_job(&exr_dir, document_with(0.5), 0..1);
+        let exr_frames = exr.frames.clone();
+        let exr_id = h.queue.submit(exr.job);
+
+        assert!(matches!(h.terminal(png_id), RenderEvent::Completed { .. }));
+        assert!(matches!(h.terminal(exr_id), RenderEvent::Completed { .. }));
+
+        let png_value = png_frames.lock().expect("frames")[0].1;
+        let exr_value = exr_frames.lock().expect("frames")[0].1;
+        assert!((png_value - 0.735_356_9).abs() < 1e-5, "{png_value}");
+        assert!((exr_value - 0.5).abs() < 1e-6, "{exr_value}");
+
+        let _ = std::fs::remove_dir_all(&png_dir);
+        let _ = std::fs::remove_dir_all(&exr_dir);
     }
 
     /// Cancellation lands on a frame boundary and takes the partial output

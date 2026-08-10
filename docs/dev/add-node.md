@@ -191,6 +191,13 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   （波及先の一覧は [`../agent-api-reference.md`](../agent-api-reference.md) の
   `registry` 節）
 - ノード 1 個で解けないものを 1 個に詰め込まない。組み合わせで解く
+- **画素の値はリニア光である。** プロセッサが受け取る `FrameBuffer` も
+  `COLOR` パラメータも作業空間（リニア Rec.709）で、伝達関数はすでに外れて
+  いる。ノードの中でガンマを掛けたり外したりしない — 変換点は入力・表示・
+  出力の 3 つだけ
+  （[`../specifications/color-management.md`](../specifications/color-management.md)）。
+  色を扱うパラメータは `Channel4` で宣言し、`VEC4` のベクタと区別できるように
+  する（`.ravprj` の移行がポート宣言型で色を見分ける）
 
 ## パラメータが外部契約に出られるか (REQ-PROJ-006)
 

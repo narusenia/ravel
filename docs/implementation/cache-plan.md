@@ -481,7 +481,9 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 - 予算の各層は評価器のノード結果と**共有**なので、退避リストは相手の id を
   含みうる。落とさなかった id は予算の過小計上になるため、
   `Evaluator::take_foreign_evictions` / `drop_evicted` と
-  `SharedFrameCache` の対を worker が突き合わせる。
+  `SharedFrameCache` の対を worker が突き合わせる。`CACHE-8` の共有デコード
+  キャッシュが 3 つ目の参加者として加わり、突き合わせは
+  `settle_evictions`（`eval_service.rs`）の 1 パスに統合された。
 - RAM 層の f16 化は**宣言された下限**にだけ従う（`min_precision <= F16` の
   ときだけ `RgbaF16` へ縮約）。ビューアは今も `F32` を要求するので実際には
   眠っている — ビューアの下限を下げるのは製品判断で、本単位の仕事ではない。
@@ -599,12 +601,14 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
   プロセッサへ渡す。プロセッサ側に残るのは開いたリーダー 1 本だけ。
 - 退避は `CacheBudget` に一任し、**このキャッシュは独自の LRU を持たない**。
   ヒットで `touch` するので順序は least-recently-*used*。
-- Ram 層は `CacheKind::NodeResult` と共有なので、`reserve` の退避リストには
-  **他の消費者の id が混ざる**。**現状はそれを読み飛ばしており、これは漏れ
-  である** — `reserve` は返す前に勘定から外すので、飛ばした id は二度と退避
-  対象にならず、実体は生き続ける。`CACHE-5` の
-  `Evaluator::take_foreign_evictions` / `drop_evicted` に乗せて解消する。
-  ここで 2 つ目の受け渡し方式を作らない。
+- Ram 層は `CacheKind::NodeResult` / `CacheKind::Frame` と共有なので、
+  `reserve` の退避リストには**他の消費者の id が混ざる**。読み飛ばすと漏れる
+  — `reserve` は返す前に勘定から外すので、飛ばした id は二度と退避対象に
+  ならず実体は生き続ける。**`CACHE-5` の受け渡しに乗せた**: 自分のものでない
+  id は捨てずに預かり（`MediaFrameCache::take_foreign_evictions`）、worker の
+  `settle_evictions` が 3 者の預かり分を 1 パスで持ち主へ配る。デコード
+  キャッシュは `EvalWorkerHooks::reconcile_evictions` から参加する — 評価器の
+  中に居ないため、hooks が唯一の到達点。3 つ目の方式は作っていない。
 
 **完了条件**
 

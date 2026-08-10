@@ -31,7 +31,8 @@ use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{
-    EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
+    EvalRequest, EvalService, EvalServiceConfig, EvalUpdate, EvalWorkerHooks, InvalidationHint,
+    ReadAhead,
 };
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
@@ -422,7 +423,15 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
     budget: SharedCacheBudget,
     updates: futures::channel::mpsc::UnboundedSender<ViewerUpdate>,
 ) -> EvalService {
-    EvalService::spawn_with_budget(hooks, budget, move |update| {
+    // Read-ahead is on here and nowhere else (`CACHE-9`): this is the one
+    // service with a playhead a user moves, so it is the one worth filling
+    // ahead of. A render and a benchmark evaluate exactly the frames they
+    // name.
+    let config = EvalServiceConfig {
+        budget: Some(budget),
+        read_ahead: Some(ReadAhead::default()),
+    };
+    EvalService::spawn_with_config(hooks, config, move |update| {
         let _ = updates.unbounded_send(ViewerUpdate::from_eval(update));
     })
 }

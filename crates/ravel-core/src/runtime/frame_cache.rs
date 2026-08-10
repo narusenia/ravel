@@ -260,6 +260,20 @@ impl FrameCache {
         ranges
     }
 
+    /// Whether `wanted` would be answered, **without recording anything**.
+    ///
+    /// Read-ahead asks before evaluating a frame (`CACHE-9`), and speculation
+    /// is not a request a user made: counting its probes as hits and misses
+    /// would move the hit rate the logs and the tests read.
+    fn contains(&self, comp: CompId, wanted: &CacheIdentity) -> bool {
+        self.entries
+            .get(&FrameSlot {
+                comp,
+                time: wanted.time,
+            })
+            .is_some_and(|entry| entry.identity.mismatch(wanted).is_none())
+    }
+
     /// A counter that changes exactly when the set of cached frames does.
     pub fn version(&self) -> u64 {
         self.version
@@ -282,7 +296,18 @@ impl FrameCache {
     /// A value the request declared a reduced precision floor for is stored
     /// reduced (see [`store_value`]), so an entry never promises more than it
     /// holds.
-    fn insert(&mut self, comp: CompId, identity: CacheIdentity, value: Arc<dyn NodeData>) {
+    ///
+    /// `speculative` marks a frame produced by read-ahead rather than by a
+    /// request a user waited for (`CACHE-9`). It changes nothing about the
+    /// entry except its eviction rank: under pressure the budget empties
+    /// speculation first.
+    fn insert(
+        &mut self,
+        comp: CompId,
+        identity: CacheIdentity,
+        value: Arc<dyn NodeData>,
+        speculative: bool,
+    ) {
         let slot = FrameSlot {
             comp,
             time: identity.time,
@@ -305,7 +330,11 @@ impl FrameCache {
         };
         let (reservation, evicted) = match &self.budget {
             Some(budget) => {
-                let (reservation, evicted) = budget.reserve(CacheKind::Frame(tier), bytes);
+                let kind = CacheKind::Frame(tier);
+                let (reservation, evicted) = match speculative {
+                    true => budget.reserve_speculative(kind, bytes),
+                    false => budget.reserve(kind, bytes),
+                };
                 (Some(reservation), evicted)
             }
             None => (None, Vec::new()),
@@ -758,8 +787,23 @@ impl SharedFrameCache {
     }
 
     /// Store `value` as the finished frame of `comp` for `identity`.
-    pub(crate) fn insert(&self, comp: CompId, identity: CacheIdentity, value: Arc<dyn NodeData>) {
-        self.lock().insert(comp, identity, value);
+    ///
+    /// `speculative` ranks the entry below anything an interaction paid for
+    /// when the budget has to evict (`CACHE-9`).
+    pub(crate) fn insert(
+        &self,
+        comp: CompId,
+        identity: CacheIdentity,
+        value: Arc<dyn NodeData>,
+        speculative: bool,
+    ) {
+        self.lock().insert(comp, identity, value, speculative);
+    }
+
+    /// Whether a request for `wanted` would be answered, without recording a
+    /// hit or a miss — the probe read-ahead uses before evaluating a frame.
+    pub(crate) fn contains(&self, comp: CompId, wanted: &CacheIdentity) -> bool {
+        self.lock().contains(comp, wanted)
     }
 
     /// Drop the frames `evicted` names that this cache owns.
@@ -905,7 +949,7 @@ mod tests {
         let cache = SharedFrameCache::new(None);
         let identity = CacheIdentity::of_frame(&ctx(7));
         assert!(cache.get(comp_a(), &identity).is_none());
-        cache.insert(comp_a(), identity, frame_value());
+        cache.insert(comp_a(), identity, frame_value(), false);
         assert!(cache.get(comp_a(), &identity).is_some());
 
         let stats = cache.stats();
@@ -917,14 +961,19 @@ mod tests {
     fn another_composition_does_not_answer_for_this_one() {
         let cache = SharedFrameCache::new(None);
         let identity = CacheIdentity::of_frame(&ctx(7));
-        cache.insert(comp_a(), identity, frame_value());
+        cache.insert(comp_a(), identity, frame_value(), false);
         assert!(cache.get(comp_b(), &identity).is_none());
     }
 
     #[test]
     fn a_different_resolution_misses() {
         let cache = SharedFrameCache::new(None);
-        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
         let wide = CacheIdentity::of_frame(&EvalContext::new(0, FPS, (8, 8)));
         assert!(cache.get(comp_a(), &wide).is_none());
         assert_eq!(
@@ -940,7 +989,7 @@ mod tests {
     fn an_export_grade_request_does_not_pick_up_a_preview_entry() {
         let cache = SharedFrameCache::new(None);
         let preview = CacheIdentity::of_frame(&ctx(3).with_min_precision(Precision::F16));
-        cache.insert(comp_a(), preview, frame_value());
+        cache.insert(comp_a(), preview, frame_value(), false);
 
         let export = CacheIdentity::of_frame(&ctx(3).with_min_precision(Precision::F32));
         assert!(cache.get(comp_a(), &export).is_none());
@@ -956,7 +1005,7 @@ mod tests {
     fn a_reduced_floor_stores_a_reduced_buffer() {
         let cache = SharedFrameCache::new(None);
         let identity = CacheIdentity::of_frame(&ctx(0).with_min_precision(Precision::F16));
-        cache.insert(comp_a(), identity, frame_value());
+        cache.insert(comp_a(), identity, frame_value(), false);
 
         let stored = cache.get(comp_a(), &identity).expect("hit");
         let frame = stored.downcast_ref::<FrameBuffer>().expect("frame buffer");
@@ -969,7 +1018,7 @@ mod tests {
     fn an_f32_floor_stores_the_value_untouched() {
         let cache = SharedFrameCache::new(None);
         let identity = CacheIdentity::of_frame(&ctx(0));
-        cache.insert(comp_a(), identity, frame_value());
+        cache.insert(comp_a(), identity, frame_value(), false);
         let stored = cache.get(comp_a(), &identity).expect("hit");
         assert_eq!(
             stored.downcast_ref::<FrameBuffer>().expect("frame").format,
@@ -987,11 +1036,13 @@ mod tests {
                 comp_a(),
                 CacheIdentity::of_frame(&ctx(frame)),
                 frame_value(),
+                false,
             );
             cache.insert(
                 comp_b(),
                 CacheIdentity::of_frame(&ctx(frame)),
                 frame_value(),
+                false,
             );
         }
 
@@ -1076,7 +1127,12 @@ mod tests {
 
     fn fill(cache: &SharedFrameCache, comp: CompId, frames: Range<u64>) {
         for frame in frames {
-            cache.insert(comp, CacheIdentity::of_frame(&ctx(frame)), frame_value());
+            cache.insert(
+                comp,
+                CacheIdentity::of_frame(&ctx(frame)),
+                frame_value(),
+                false,
+            );
         }
     }
 
@@ -1252,7 +1308,12 @@ mod tests {
     #[test]
     fn a_media_asset_change_clears_everything() {
         let cache = SharedFrameCache::new(None);
-        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
 
         let old = document(&[comp_a()]);
         let mut new = old.clone();
@@ -1267,7 +1328,12 @@ mod tests {
     #[test]
     fn the_first_document_invalidates_nothing() {
         let cache = SharedFrameCache::new(None);
-        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
         cache.sync_document(None, &document(&[comp_a()]), None);
         assert_eq!(cache.stats().entries, 1);
     }
@@ -1289,6 +1355,7 @@ mod tests {
                     gpu: false,
                     drops: drops.clone(),
                 }),
+                false,
             );
         }
 
@@ -1331,6 +1398,7 @@ mod tests {
                     gpu: true,
                     drops: drops.clone(),
                 }),
+                false,
             );
         }
 
@@ -1340,6 +1408,43 @@ mod tests {
             budget.stats().used(Tier::Ram),
             0,
             "a GPU-resident frame was charged to host memory"
+        );
+    }
+
+    /// Read-ahead ranks below interaction (`CACHE-9`): a frame nobody asked
+    /// for is given up before one a user waited for, whatever their ages.
+    ///
+    /// The interactive entry goes in **first**, so plain least-recently-used
+    /// order would pick it — the speculative rank is the only thing that
+    /// spares it.
+    #[test]
+    fn a_speculative_frame_is_given_up_before_an_interactive_one() {
+        let budget = budget(0, 100);
+        let cache = SharedFrameCache::new(Some(budget));
+        let sized = || {
+            Arc::new(Sized {
+                bytes: 40,
+                gpu: false,
+                drops: Arc::new(AtomicUsize::new(0)),
+            }) as Arc<dyn NodeData>
+        };
+
+        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), sized(), false);
+        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(1)), sized(), true);
+        // The third entry does not fit: something has to go.
+        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(2)), sized(), false);
+
+        assert!(
+            cache
+                .get(comp_a(), &CacheIdentity::of_frame(&ctx(0)))
+                .is_some(),
+            "the interactive frame was evicted before the speculative one"
+        );
+        assert!(
+            cache
+                .get(comp_a(), &CacheIdentity::of_frame(&ctx(1)))
+                .is_none(),
+            "the speculative frame survived the pressure"
         );
     }
 
@@ -1360,6 +1465,7 @@ mod tests {
                 gpu: false,
                 drops: Arc::new(AtomicUsize::new(0)),
             }),
+            false,
         );
 
         let foreign = cache.take_foreign_evictions();
@@ -1373,7 +1479,7 @@ mod tests {
     fn an_eviction_list_for_someone_else_leaves_our_frames_alone() {
         let cache = SharedFrameCache::new(None);
         let identity = CacheIdentity::of_frame(&ctx(0));
-        cache.insert(comp_a(), identity, frame_value());
+        cache.insert(comp_a(), identity, frame_value(), false);
         let elsewhere = budget(0, 1000);
         let foreign = elsewhere.reserve(CacheKind::NodeResult(Tier::Ram), 1).0;
         cache.drop_evicted(&[Evicted {
@@ -1394,6 +1500,7 @@ mod tests {
                 comp_a(),
                 CacheIdentity::of_frame(&ctx(frame)),
                 frame_value(),
+                false,
             );
         }
         assert_eq!(
@@ -1409,8 +1516,14 @@ mod tests {
             comp_a(),
             CacheIdentity::of_frame(&ctx(0).with_min_precision(Precision::F16)),
             frame_value(),
+            false,
         );
-        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(1)), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(1)),
+            frame_value(),
+            false,
+        );
 
         // An export-grade query sees only the F32 entry.
         assert_eq!(cache.cached_ranges(comp_a(), &ctx(0)), vec![1..2]);
@@ -1439,28 +1552,41 @@ mod tests {
         let wanted = ctx(0);
 
         // Frame 0: matches on every axis.
-        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
         // Frame 1: a different quality stage — a different picture, never a
         // substitute (`Quality` has no order).
         cache.insert(
             comp_a(),
             CacheIdentity::of_frame(&ctx(1).with_quality(crate::eval::Quality::Preview)),
             frame_value(),
+            false,
         );
         // Frame 2: another frame rate.
         cache.insert(
             comp_a(),
             CacheIdentity::of_frame(&EvalContext::new(2, FrameRate { num: 24, den: 1 }, (4, 4))),
             frame_value(),
+            false,
         );
         // Frame 3: another composition-space coordinate basis.
         cache.insert(
             comp_a(),
             CacheIdentity::of_frame(&ctx(3).with_comp_resolution((8, 8))),
             frame_value(),
+            false,
         );
         // Frame 4: matches again, so the band is not simply empty.
-        cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(4)), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(4)),
+            frame_value(),
+            false,
+        );
 
         let reported = cache.cached_ranges(comp_a(), &wanted);
         assert_eq!(reported, vec![0..1, 4..5]);
@@ -1485,7 +1611,12 @@ mod tests {
         let cache = SharedFrameCache::new(None);
         let mut sub = ctx(4);
         sub.time += 0.25 / FPS.as_f64();
-        cache.insert(comp_a(), CacheIdentity::of_frame(&sub), frame_value());
+        cache.insert(
+            comp_a(),
+            CacheIdentity::of_frame(&sub),
+            frame_value(),
+            false,
+        );
         assert_eq!(
             cache.cached_ranges(comp_a(), &ctx(0)),
             Vec::<Range<u64>>::new()

@@ -27,8 +27,8 @@ pub use channels::{DecodedFrame, EvalResponse, decode_channel, eval_channel, rep
 pub use decode_pool::{DecodePool, DecodePoolConfig};
 pub use eval_pool::{EvalPool, EvalPoolConfig};
 pub use eval_service::{
-    EvalOutput, EvalRequest, EvalService, EvalUpdate, EvalWorkerHooks, InvalidationHint,
-    ProcessorSync,
+    EvalOutput, EvalRequest, EvalService, EvalServiceConfig, EvalUpdate, EvalWorkerHooks,
+    InvalidationHint, ProcessorSync, ReadAhead,
 };
 pub use frame_cache::{FrameCache, FrameCacheStats, SharedFrameCache};
 pub use io_runtime::{IoRuntime, IoRuntimeConfig};

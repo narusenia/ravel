@@ -297,6 +297,20 @@ impl EvalContext {
         self
     }
 
+    /// The same context moved to `frame`, on the frame grid.
+    ///
+    /// Every other axis — resolution, coordinate basis, precision floor,
+    /// quality — is carried over unchanged, which is what makes a frame
+    /// produced from it answer the request the playhead will make when it
+    /// arrives there. Any sub-frame offset is dropped: a playhead lands on
+    /// the grid, so `time` is re-derived from `frame` exactly as
+    /// [`EvalContext::new`] does.
+    pub fn with_frame(mut self, frame: u64) -> Self {
+        self.frame = frame;
+        self.time = frame as f64 / self.fps.as_f64();
+        self
+    }
+
     /// Continuous frame position for sampling animation channels.
     ///
     /// Keyframes are anchored to integer frames, but a context may sit between

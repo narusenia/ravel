@@ -105,7 +105,12 @@ impl MediaBinGpuiPanel {
         // Selection highlighting only: the rows themselves do not change.
         let selection_sub = cx.observe_global::<super::MediaSelection>(|_this, cx| cx.notify());
 
-        let thumbnails = cx.new(|_| ThumbnailCache::global());
+        // The cache location is a preference (`SET-8`), read here because here
+        // is where the cache is built — a location changed while the panel is
+        // up applies the next time it is, which in practice is the next
+        // launch. The row's description says so.
+        let root = crate::app_settings::cache_root(cx);
+        let thumbnails = cx.new(|_| ThumbnailCache::new(root));
         let thumbnails_sub = cx.observe(&thumbnails, |this: &mut Self, _cache, cx| {
             this.refresh_thumbnails(cx);
             cx.notify();

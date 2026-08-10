@@ -2473,6 +2473,23 @@ Unknown type keys are skipped silently (plugin space).
   and of `File ▸ New` — `ravel_ui::document::default_document` stays free of
   the settings layers and only receives the resolved frame rate. Both are on
   Preferences ▸ General as switches (`SET-16`).
+  The `[cache]` section (`SET-8`) is applied centrally, unlike those:
+  `apply_cache_budget(&SharedCacheBudget, cx)` puts the resolved limits on the
+  session's budget (`ProjectState::cache_budget()`, which is unconditional —
+  accounting needs no adapter), and `apply` schedules it with `cx.defer`
+  because the project layer is adopted from inside a `ProjectState` update.
+  `cache_root(cx) -> Option<PathBuf>` is the location a `DiskCache` is built on
+  (the setting, else `paths::global_config_dir()`), read where a cache is
+  *constructed* — so a change applies at the next construction, in practice the
+  next launch. **The settings file is a writer the dialog is not**, so the
+  range checks live on the apply path as well as in the rows and are stated
+  once: `cache_limit_mb(f64) -> Option<u64>`
+  (`MIN_CACHE_LIMIT_MB`..=`MAX_CACHE_LIMIT_MB`, 1 MiB to 1 TiB),
+  `cache_sim_reserve_ratio(f64) -> Option<f32>` (finite, `0.0..=1.0` — `NaN`
+  passes `CacheBudget`'s own `clamp` and would zero the reserve), and
+  `cache_root_setting(&str) -> Option<&str>` (absolute only; a relative path
+  would follow the working directory). A value outside them falls back to the
+  built-in default with a warning rather than reaching the budget.
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has
@@ -2493,15 +2510,16 @@ Unknown type keys are skipped silently (plugin space).
 - Settings dialogs (`src/settings_dialog.rs`): `SettingsScope::{Preferences,
   Project}` is the *screen* (and therefore the layer written), not
   `app_settings::SettingsScope`. `SettingsPageKind::{General, Appearance,
-  Language, Keybindings, Project}`; a page carries fields only once its settings
-  apply, and `Settings` hides a page with no item.
+  Language, Cache, Keybindings, Project}`; a page carries fields only once its
+  settings apply, and `Settings` hides a page with no item.
   `fields_for(kind, cx) -> Vec<PageField>`
   is the rows a page shows (`title_key`, `description_key`, `field`) and the seam
   the dialog builds its groups from — a test can ask `PageField::field.any()` for
   `is_resettable(cx)` / `reset(window, cx)`, which a finished `SettingItem` no
-  longer answers. `field` is a `FieldControl::{Text, Toggle}`, because
+  longer answers. `field` is a `FieldControl::{Text, Toggle, Number}`, because
   `SettingField` is generic over the value type and a page mixes string rows with
-  boolean ones; `any()` is the `&dyn AnySettingField` view of either.
+  boolean and numeric ones; `any()` is the `&dyn AnySettingField` view of any of
+  them.
   `label_keys(kind)` is every i18n key a page's fields render.
   Fields bind `SettingField::on_reset(is_dirty, reset)` —
   `is_dirty` = this layer holds a value, `reset` = remove it — and never

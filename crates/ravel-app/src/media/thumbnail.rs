@@ -159,15 +159,11 @@ pub struct ThumbnailCache {
 }
 
 impl ThumbnailCache {
-    /// Use the global `cache/thumbnails` directory when it is available.
-    pub fn global() -> Self {
-        Self::global_with_config_provider(
-            Arc::new(default_thumbnail_frame),
-            ravel_project::paths::global_config_dir,
-        )
-    }
-
     /// Use an injected application configuration root.
+    ///
+    /// The root is the caller's decision because it is a *setting*
+    /// ([`crate::app_settings::cache_root`], `SET-8`), and reading it here
+    /// would put a second answer next to the one the panel already has.
     pub fn new(root: Option<PathBuf>) -> Self {
         Self::with_generator(root, Arc::new(default_thumbnail_frame))
     }
@@ -175,15 +171,6 @@ impl ThumbnailCache {
     /// Use an injected decoder and configuration root.
     pub fn with_generator(root: Option<PathBuf>, generator: ThumbnailGenerator) -> Self {
         Self::with_capacity(root, generator, MEMORY_CACHE_CAPACITY)
-    }
-
-    fn global_with_config_provider(
-        generator: ThumbnailGenerator,
-        config_dir: impl FnOnce() -> Option<PathBuf>,
-    ) -> Self {
-        // Keep the production constructor and its test seam on the same path:
-        // `global` supplies `global_config_dir`, while tests can supply `None`.
-        Self::with_generator(config_dir(), generator)
     }
 
     fn with_capacity(
@@ -966,7 +953,7 @@ mod tests {
         let path = source_file(&temp, "clip.mov");
         let calls = Arc::new(AtomicUsize::new(0));
         let generator = successful_generator(calls.clone());
-        let cache = cx.new(|_| ThumbnailCache::global_with_config_provider(generator, || None));
+        let cache = cx.new(|_| ThumbnailCache::with_generator(None, generator));
 
         assert_eq!(
             get_or_request(&cache, &path, ThumbnailSource::Container, cx),

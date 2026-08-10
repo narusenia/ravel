@@ -34,7 +34,7 @@ the design behind a unit.
 | `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
 | `viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, plus input-driven adaptive resolution — **the only way to inspect output at full resolution today** | VRES-1 done — 2026-08-06 (no UI to change the factor until VRES-2) | REQ-UI-004 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
-| `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
+| `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
 ## Planned
 
@@ -139,9 +139,10 @@ resolved at launch and the locale, the appearance, and the project's default
 frame rate are applied from it, so `ja.toml` is reachable from the language
 picker — the core of MED-APP-10, though the finding itself stays open while
 auto-save, proxy, and colour are unwired. Its governing rule is that **an item appears in the
-dialog only when the setting changes behaviour** — so cache, auto-save, proxy,
-and colour items are gated on their features landing rather than shown as dead
-controls, which is why the plan stays live with SET-8–SET-15 open. Anything
+dialog only when the setting changes behaviour** — so auto-save, proxy, and
+colour items (and the cache's disk tier) are gated on their features landing
+rather than shown as dead controls, which is why the plan stays live with
+SET-9–SET-15 open. Anything
 that wants a user-facing preference goes through that plan instead of adding
 its own dialog.
 

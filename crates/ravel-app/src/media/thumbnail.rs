@@ -410,20 +410,18 @@ fn encode_thumbnail(frame: &FrameBuffer) -> Result<Vec<u8>, ThumbnailError> {
         return Err(ThumbnailError::InvalidFrame);
     }
 
-    // The frame arrives in the working space, so the thumbnail — an 8-bit
-    // exit — goes through the one display transform like every other exit.
-    // For an sRGB source the ingest/display pair is the identity
-    // (`ingest_and_display_round_trip_every_code` pins it), so integer-source
-    // thumbnails keep exactly the bytes they had; a linear source (EXR / HDR)
-    // is display-encoded instead of quantised raw, which is what made those
-    // thumbnails dark (MED-APP-32).
-    let pixels = frame
-        .as_f32()
-        .chunks_exact(4)
-        .flat_map(|px| to_display_rgba8([px[0], px[1], px[2], px[3]]))
-        .collect::<Vec<_>>();
-    let image = image::RgbaImage::from_raw(frame.width, frame.height, pixels)
-        .ok_or(ThumbnailError::InvalidFrame)?;
+    // Resize in the working space — linear light. Filtering after the
+    // display transform would average encoded sRGB values, and a checker of
+    // 0.0 / 1.0 would shrink to 128 instead of 188: the dark-thumbnail
+    // symptom of MED-APP-32 all over again. The transform is the last step
+    // before quantisation, so at 1:1 an sRGB source still keeps its exact
+    // bytes (`ingest_and_display_round_trip_every_code` pins the identity).
+    let image = image::ImageBuffer::<image::Rgba<f32>, _>::from_raw(
+        frame.width,
+        frame.height,
+        frame.as_f32().to_vec(),
+    )
+    .ok_or(ThumbnailError::InvalidFrame)?;
     let long_edge = frame.width.max(frame.height);
     let (width, height) = if long_edge <= THUMBNAIL_LONG_EDGE {
         (frame.width, frame.height)
@@ -436,8 +434,18 @@ fn encode_thumbnail(frame: &FrameBuffer) -> Result<Vec<u8>, ThumbnailError> {
         .max(1) as u32;
         (width, height)
     };
+    let resized = if (width, height) == (frame.width, frame.height) {
+        image
+    } else {
+        image::imageops::resize(&image, width, height, image::imageops::FilterType::Lanczos3)
+    };
+
+    let mut pixels = Vec::with_capacity((width * height) as usize * 4);
+    for px in resized.pixels() {
+        pixels.extend_from_slice(&to_display_rgba8(px.0));
+    }
     let resized =
-        image::imageops::resize(&image, width, height, image::imageops::FilterType::Lanczos3);
+        image::RgbaImage::from_raw(width, height, pixels).ok_or(ThumbnailError::InvalidFrame)?;
 
     let mut output = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(resized).write_to(&mut output, image::ImageFormat::Png)?;
@@ -620,6 +628,35 @@ mod tests {
             .expect("decode thumbnail png")
             .to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [255, 255, 255, 255]);
+    }
+
+    /// A downscaled linear source must be filtered **in linear light**. A
+    /// 1-pixel checkerboard of 0.0 and 1.0 averages to linear 0.5 at 2:1,
+    /// which displays as ~188; filtering after the display transform would
+    /// average the encoded 0 and 255 to ~128 — the dark thumbnail of
+    /// MED-APP-32 again, only at shrink time.
+    #[test]
+    fn downscaled_linear_frames_are_filtered_in_linear_light() {
+        let mut data = Vec::with_capacity(512 * 512 * 4);
+        for y in 0..512 {
+            for x in 0..512 {
+                let value = ((x + y) % 2) as f32;
+                data.extend_from_slice(&[value, value, value, 1.0]);
+            }
+        }
+        let frame = FrameBuffer::from_f32(512, 512, data);
+        let png = encode_thumbnail(&frame).expect("encode thumbnail");
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode thumbnail png")
+            .to_rgba8();
+        assert_eq!(decoded.dimensions(), (256, 256));
+        for xy in [(10, 10), (128, 128), (200, 40)] {
+            let px = decoded.get_pixel(xy.0, xy.1).0;
+            assert!(
+                (183..=193).contains(&px[0]),
+                "pixel at {xy:?} is {px:?} — filtered in the encoded space"
+            );
+        }
     }
 
     /// An sRGB source keeps the file's exact bytes: the working-space ingest

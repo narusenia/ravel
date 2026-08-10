@@ -102,7 +102,7 @@ TIFF / DPX は float も log も入りうるが**リニア扱いにしない**: 
 - 8bit 素材は従来どおり 8bit RGBA 経路で、出力はビット単位で変わらない
 
 メタデータ（優先順位 2）はコンテナの宣言をプローブが読む。
-`VideoStreamInfo` が `color_primaries` / `color_trc` を Ravel の語彙
+`VideoStreamInfo` が `color_primaries` / `color_transfer` を Ravel の語彙
 （`Primaries` / `Transfer`）へ写し、**名前のある組だけ**が
 `AssetMetadata::color_space` に載る。宣言が無い、または Ravel が名前を
 持たない組（Rec.2020 原色 + BT.709 OETF など）は `None` のまま拡張子既定へ

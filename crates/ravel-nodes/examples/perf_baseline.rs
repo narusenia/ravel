@@ -1212,6 +1212,7 @@ fn main() -> anyhow::Result<()> {
         let samples = run_scenario(90, |i| {
             graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + i as f32 * 0.25);
             service.request(EvalRequest {
+                comp: None,
                 graph: graph.clone(),
                 nodes: vec![nid(MERGE)],
                 path: Vec::new(),
@@ -1289,6 +1290,7 @@ fn main() -> anyhow::Result<()> {
         let mut samples = Vec::new();
         graph = set_float_param(&graph, nid(BLUR), "radius", 1.0);
         service.request(EvalRequest {
+            comp: None,
             graph: graph.clone(),
             nodes: vec![nid(MERGE)],
             path: Vec::new(),
@@ -1308,6 +1310,7 @@ fn main() -> anyhow::Result<()> {
                 published += 1;
                 graph = set_float_param(&graph, nid(BLUR), "radius", 1.0 + frame as f32 * 0.25);
                 service.request(EvalRequest {
+                    comp: None,
                     graph: graph.clone(),
                     nodes: vec![nid(MERGE)],
                     path: Vec::new(),
@@ -1378,6 +1381,7 @@ fn main() -> anyhow::Result<()> {
         let start_all = Instant::now();
         let samples = run_scenario(90, |frame| {
             service.request(EvalRequest {
+                comp: None,
                 graph: graph.clone(),
                 nodes: vec![output],
                 path: Vec::new(),
@@ -1465,6 +1469,7 @@ fn main() -> anyhow::Result<()> {
                 last_frame = frame;
                 published += 1;
                 service.request(EvalRequest {
+                    comp: None,
                     graph: graph.clone(),
                     nodes: vec![output],
                     path: Vec::new(),

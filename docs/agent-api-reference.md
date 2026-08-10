@@ -1334,10 +1334,13 @@ trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
     fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
     fn finalize(&mut self, Arc<dyn NodeData>, &EvalContext) -> Arc<dyn NodeData>;
 }
-EvalRequest { graph, nodes: Vec<NodeId>, path: Vec<PathSegment>, ctx,
-    document: Option<Arc<Document>>, hint }
+EvalRequest { graph, nodes: Vec<NodeId>, comp: Option<CompId>,
+    path: Vec<PathSegment>, ctx, document: Option<Arc<Document>>, hint }
     // document → Evaluator::set_document before sync (scoped invalidation);
     // non-empty path evaluates via evaluate_at
+    // comp: Some opts target 0 into the frame cache (CACHE-5). Ignored for a
+    // non-empty path or a request without a document; None keeps the
+    // pre-CACHE-5 behaviour (renders, benchmarks)
     // nodes are pulled in order through one Evaluator, so a target upstream
     // of an earlier one is a cache hit; a failing target does not stop the
     // rest. Coalescing is per request, so all targets survive or none do
@@ -1349,6 +1352,7 @@ ProcessorSync<'a>            // what `sync` gets: register / processor /
     ::new(&mut Evaluator)    // invalidate_node, and nothing else
     .request(EvalRequest) -> u64              // generation; latest-wins queue
     .cancel_pending() / .latest_generation()
+    .frame_cache() -> &SharedFrameCache       // shared with the worker
 EvalOutput = Result<Arc<dyn NodeData>, EvalError>  // one target's outcome
 EvalUpdate { generation, frame, timings,          // worker thread; timings
     results: Vec<(NodeId, EvalOutput)> }
@@ -1367,6 +1371,28 @@ rasterizes `Geometry` outputs for the Viewer. A `Params` hint whose node
 already has a processor reporting `rebuild_on_node_change() == false` is
 served by `Evaluator::invalidate_node` instead of a rebuild — a GPU
 processor's construction compiles a shader and creates a pipeline.
+
+### `runtime::frame_cache` — the output-stage frame cache (`CACHE-5`)
+
+```rust
+SharedFrameCache::new(Option<SharedCacheBudget>)   // EvalService builds one
+    .cached_ranges(CompId, Precision, (u32, u32)) -> Vec<Range<u64>>
+        // half-open integer-frame spans; the timeline's cache band (CACHE-6)
+    .stats() -> FrameCacheStats { hits, misses_by_reason, entries,
+        bytes_by_tier }                            // .hit_rate() / .bytes(Tier)
+    .invalidate_comp(CompId) / .clear()
+```
+
+Sits **outside** evaluation: the worker consults it before `evaluate_at` and
+fills it with the finalized value, so a hit costs neither a `process()` call
+nor the GPU→CPU readback `finalize` performs. Keyed by `(CompId, TimeKey)`
+plus the evaluator's own `CacheIdentity` match — `precision` by order, every
+other axis by equality, which is why an export's `F32` request can never be
+served a reduced preview entry. Invalidation is per composition and driven by
+the same document diff `Evaluator::set_document` reads (`Arc<Composition>`
+identity), not by `InvalidationHint`: many document commits carry
+`InvalidationHint::None`. Entries hold `CacheKind::Frame(Tier)` reservations,
+tier chosen from the stored value's `is_gpu_resident()`.
 
 ### `runtime::render` — sequential render worker and queue
 

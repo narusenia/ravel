@@ -1810,6 +1810,7 @@ mod tests {
         let comp = document.get_composition(comp_id()).expect("comp").clone();
         let compiled = compile_composition(&comp, Graph::new()).expect("compile");
         let request = |frame: u64| EvalRequest {
+            comp: None,
             graph: compiled.graph.clone(),
             nodes: vec![compiled.output_node],
             path: Vec::new(),

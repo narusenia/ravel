@@ -1341,6 +1341,7 @@ impl ProjectState {
             return Ok(None);
         };
         Ok(Some(EvalRequest {
+            comp: Some(comp.id),
             graph: compiled.graph.clone(),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
             // reads that position, and inspection targets are appended after
@@ -1645,6 +1646,7 @@ mod tests {
             .add_node(Node::new(node, "test.frame").with_output("out", DataTypeId::FRAME_BUFFER))
             .expect("graph");
         service.request(EvalRequest {
+            comp: None,
             graph,
             nodes: vec![node],
             path: Vec::new(),

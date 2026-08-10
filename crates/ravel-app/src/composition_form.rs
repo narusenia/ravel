@@ -241,18 +241,28 @@ fn format_fps(fps: f64) -> String {
     }
 }
 
+/// Working-space background colour → the picker's display-referred `Hsla`.
+///
+/// `Composition.background_color` is linear light from `.ravprj` v8 on
+/// (`CM-2`), and a colour picker is a display — so it gets the display
+/// encoding, exactly like the Properties picker. Without the pair the form
+/// **writes a display value into a linear field** the moment the user opens
+/// it and confirms.
 fn hsla_from_rgba(color: ravel_core::types::Color) -> Hsla {
+    let display = ravel_core::color::ColorSpace::DISPLAY.from_linear([color.r, color.g, color.b]);
     Hsla::from(Rgba {
-        r: color.r,
-        g: color.g,
-        b: color.b,
+        r: display[0],
+        g: display[1],
+        b: display[2],
         a: color.a,
     })
 }
 
+/// The inverse. Must stay a pair with [`hsla_from_rgba`].
 fn rgba_from_hsla(hsla: Hsla) -> ravel_core::types::Color {
     let rgba = Rgba::from(hsla);
-    ravel_core::types::Color::new(rgba.r, rgba.g, rgba.b, rgba.a)
+    let linear = ravel_core::color::ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b]);
+    ravel_core::types::Color::new(linear[0], linear[1], linear[2], rgba.a)
 }
 
 /// Title of the dialog that hosts the form.
@@ -302,6 +312,31 @@ mod tests {
         assert!((back.g - color.g).abs() < 0.01);
         assert!((back.b - color.b).abs() < 0.01);
         assert!((back.a - color.a).abs() < 0.01);
+    }
+
+    /// The picker shows the *display* value of a working-space colour, and
+    /// hands back a working-space colour. Opening the form and confirming it
+    /// unchanged must not shift the background — which is exactly what a
+    /// missing encode/decode pair does, silently.
+    #[test]
+    fn the_background_picker_speaks_the_display_space() {
+        // 0.5 linear is sRGB 0.7354; the picker must not show 0.5.
+        let linear = Color::new(0.5, 0.5, 0.5, 1.0);
+        let shown = Rgba::from(hsla_from_rgba(linear));
+        assert!((shown.r - 0.735_356_9).abs() < 1e-3, "{shown:?}");
+        assert_eq!(shown.a, 1.0, "alpha carries no transfer function");
+
+        // And a value that came out of a v8 migration survives the trip.
+        let migrated = Color::new(0.214_041_1, 0.05, 0.9, 0.5);
+        let back = rgba_from_hsla(hsla_from_rgba(migrated));
+        for (a, b) in [
+            (back.r, migrated.r),
+            (back.g, migrated.g),
+            (back.b, migrated.b),
+            (back.a, migrated.a),
+        ] {
+            assert!((a - b).abs() < 1e-3, "{back:?} vs {migrated:?}");
+        }
     }
 
     #[gpui::test]

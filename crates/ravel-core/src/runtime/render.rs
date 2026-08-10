@@ -982,19 +982,20 @@ fn render_frames<H: EvalWorkerHooks>(
             .with_quality(Quality::Final)
             .with_min_precision(Precision::F32);
 
-        let value = evaluator
-            .evaluate_at(&[], &compiled.graph, compiled.output_node, &ctx)
-            .map_err(|source| RenderError::Eval { frame, source })?;
-        // A finalize failure keeps the raw value, which then fails the
-        // `FrameBuffer` downcast below as `NotAFrame` — a render must not
-        // silently write whatever the fallback happens to be.
-        let value = hooks.finalize(&value, &ctx).unwrap_or(value);
-        // A render worker has two caches under one budget — the node results
-        // and whatever the hooks own (the shared decode cache, `CACHE-8`) —
-        // and either can be told to give up the other's entry. An eviction
-        // nobody acts on leaves the budget counting fewer bytes than the
-        // process holds, so the ids are routed rather than skipped. There is
-        // no output-stage frame cache here: a render walks each frame once.
+        let evaluated = evaluator.evaluate_at(&[], &compiled.graph, compiled.output_node, &ctx);
+        // Settled here, between the evaluation and the first `?`, because a
+        // failing frame parks ids too: a partial evaluation caches upstream
+        // results, and one of those inserts can name an entry the hooks own.
+        // Returning first would strand them — the next job's
+        // `Evaluator::reset` throws the buffer away, and the budget is left
+        // counting fewer bytes than the process holds. Nothing between here
+        // and the end of the frame reserves, so one settling covers every
+        // exit below.
+        //
+        // A render worker has two caches under one budget: the node results
+        // and whatever the hooks own (the shared decode cache, `CACHE-8`).
+        // There is no output-stage frame cache — a render walks each frame
+        // once.
         let unowned = hooks.reconcile_evictions(evaluator.take_foreign_evictions());
         if !unowned.is_empty() {
             evaluator.drop_evicted(&unowned);
@@ -1006,6 +1007,11 @@ fn render_frames<H: EvalWorkerHooks>(
                 );
             }
         }
+        let value = evaluated.map_err(|source| RenderError::Eval { frame, source })?;
+        // A finalize failure keeps the raw value, which then fails the
+        // `FrameBuffer` downcast below as `NotAFrame` — a render must not
+        // silently write whatever the fallback happens to be.
+        let value = hooks.finalize(&value, &ctx).unwrap_or(value);
         let picture = value
             .downcast_ref::<FrameBuffer>()
             .ok_or(RenderError::NotAFrame { frame })?;
@@ -1166,6 +1172,9 @@ mod tests {
         sync_entered: Option<Sender<()>>,
         /// Held until the test lets `sync` return.
         sync_gate: Option<Receiver<()>>,
+        /// How many times the worker offered this implementation an eviction
+        /// list. A frame that fails must still be counted (`CACHE-8`).
+        settlings: Arc<AtomicUsize>,
     }
 
     impl StubHooks {
@@ -1179,6 +1188,7 @@ mod tests {
                 syncs: Arc::new(AtomicUsize::new(0)),
                 sync_entered: None,
                 sync_gate: None,
+                settlings: Arc::new(AtomicUsize::new(0)),
             }
         }
     }
@@ -1229,6 +1239,14 @@ mod tests {
         ) -> Option<Arc<dyn NodeData>> {
             self.contexts.lock().expect("contexts").push(*ctx);
             Some(value.clone())
+        }
+
+        fn reconcile_evictions(
+            &mut self,
+            evicted: Vec<crate::cache_budget::Evicted>,
+        ) -> Vec<crate::cache_budget::Evicted> {
+            self.settlings.fetch_add(1, Ordering::SeqCst);
+            evicted
         }
     }
 
@@ -1713,6 +1731,33 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir_bad);
         let _ = std::fs::remove_dir_all(&dir_next);
+    }
+
+    /// `CACHE-8`: a frame whose evaluation fails still settles its eviction
+    /// list.
+    ///
+    /// A partial evaluation caches the upstream nodes it did reach, and one
+    /// of those inserts can name an entry the hooks own. Returning the error
+    /// first strands those ids: the next job's `Evaluator::reset` discards
+    /// the buffer, and the budget is left counting fewer bytes than the
+    /// process holds — silently, because nothing about the failed render
+    /// looks wrong.
+    #[test]
+    fn a_failing_frame_still_settles_its_evictions() {
+        let dir = temp_dir("fail-settle");
+        let mut hooks = StubHooks::new();
+        hooks.fail = true;
+        let settlings = hooks.settlings.clone();
+        let mut h = spawn(hooks);
+
+        let bad = job(&dir, document_with(0.0), 0..1);
+        let id = h.queue.submit(bad.job);
+        assert!(matches!(h.terminal(id), RenderEvent::Failed { .. }));
+        assert!(
+            settlings.load(Ordering::SeqCst) > 0,
+            "the failing frame returned before handing its eviction list over"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A job whose output is already on disk is refused **before the first

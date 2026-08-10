@@ -57,6 +57,7 @@ rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
 
 ---
 
+
 ## MED-MED-08 | bug | 共有デコードキャッシュのキーに素材の版が無く、同一パスの上書きで古いフレームを返し続ける
 
 **該当**: `crates/ravel-media/src/frame_cache.rs`（`FrameKey`）
@@ -85,6 +86,47 @@ mtime も内容の版も含まない**。プロジェクトを開いたまま素
   エントリだけ落とす
 
 どちらも `CACHE-8` の範囲外で、素材の版という概念を先に決める必要がある。
+## MED-MED-09 | bug | 静止画・連番の EXR / PNG の色メタデータ（chromaticities / iCCP / gAMA）が読まれない
+
+**該当**: `crates/ravel-media/src/decoder.rs`（`build_media_info` のプローブ）、
+`crates/ravel-media/src/image_seq.rs`
+
+[MED-MED-07](../closed/medium-media-audio.md) でコンテナの色宣言
+（`color_primaries` / `color_trc`）はプローブが読むようになったが、
+**静止画と連番はその経路では拾えない情報を持つ**。EXR の `chromaticities`
+属性と PNG の `iCCP` / `gAMA` チャンクは FFmpeg の codecpar に載らない
+ので、専用の読み取り（EXR ヘッダ属性 / PNG チャンクのパース）が要る。
+
+現状、これらの素材はメタデータ段（解決順の優先順位 2）が常に空で、
+**拡張子既定へ落ちる** — float 形式（`exr` / `hdr`）はリニア Rec.709、
+整数形式（PNG など）は sRGB とみなされる
+（`docs/specifications/color-management.md` の解決順 3 段目）。
+
+これは実害になりうる。color-management.md の前提として、**EXR は別の
+色空間の値を入れて配布されうる**（`MediaAssetEntry::color_space` の
+コメントが「a `.exr` really can carry sRGB-encoded values」と明記している
+とおり）。`chromaticities` に Rec.2020 原色が書かれた EXR や、
+`gAMA` / `iCCP` が sRGB と異なる PNG は、ファイルが自分の色を告げているのに
+それを読まず既定で上書きすることになる。誤ったときの被害は非対称で、
+リニアを sRGB と誤ると暗く、逆は明るくなる。
+
+**修正方針**:
+
+- EXR はヘッダの `chromaticities` 属性を、PNG は `iCCP` / `gAMA` チャンクを
+  読み、`VideoStreamInfo` の `color_primaries` / `color_transfer`（
+  MED-MED-07 で足したフィールド）へ写す。`image_seq` の連番経路は代表
+  フレームから同じ読み取りを行う
+- **不明・解釈不能は `None` のまま** — MED-MED-07 と同じ規約で、推測で
+  埋めると拡張子既定より悪くなる。どちらを採ったかは media ノードの
+  `ColorSpaceSource` ログがそのまま効く
+- `image` クレートの EXR / PNG デコーダがこれらの属性を公開するかを
+  まず確認すること。公開しない場合は最小限のヘッダパースを自前で持つか
+  どうかの判断になる（依存追加は要相談）
+
+**関連**: [MED-MED-07](../closed/medium-media-audio.md)（コンテナ側の
+色メタデータ。本項目は静止画・連番側の残り）、
+[HIGH-31](../closed/HIGH-31-float-decode-through-8bit-rgba.md)（取り込みの
+ビット幅。色空間の判定とは独立）
 
 ---
 

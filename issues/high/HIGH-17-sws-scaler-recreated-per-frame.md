@@ -18,7 +18,7 @@
 
 ## 影響
 
-デコード経路の CPU 時間を支配する。[HIGH-16](HIGH-16-no-decoded-frame-cache.md) と乗算的に効く。
+デコード経路の CPU 時間を支配する。[HIGH-16](../closed/HIGH-16-no-decoded-frame-cache.md) と乗算的に効く。
 
 ## 修正方針
 
@@ -34,5 +34,5 @@
 
 ## 関連
 
-- [HIGH-16](HIGH-16-no-decoded-frame-cache.md)
+- [HIGH-16](../closed/HIGH-16-no-decoded-frame-cache.md)
 - [medium/media-audio.md](../medium/media-audio.md) — 同関数の 8bit 固定変換による精度損失

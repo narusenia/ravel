@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 23 | 1件1ファイル |
+| high | 24 | 1件1ファイル |
 | medium | 28 | 領域別4ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
@@ -26,7 +26,7 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（23件）
+## high（24件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
@@ -42,6 +42,7 @@
 | [HIGH-13](HIGH-13-seek-does-not-flush-audio-queue.md) | Seek でチャンクキューを flush しない | フェーズ A3（epoch） |
 | [HIGH-14](HIGH-14-clock-advances-over-underrun.md) | アンダーラン中も同期クロックが進む | フェーズ A3（epoch） |
 | [HIGH-15](HIGH-15-settrack-resamples-on-prep-thread.md) | `SetTrack` が prep スレッドで全長リサンプル | フェーズ A3 / A4 |
+| [HIGH-16](HIGH-16-no-decoded-frame-cache.md) | デコード済みフレームキャッシュが無く逆方向スクラブが GOP を再デコード | `CACHE-8` |
 | [HIGH-18](HIGH-18-open-failure-invisible.md) | プロジェクトを開けないが無言 | フェーズ A2 |
 | [HIGH-20](HIGH-20-media-import-failure-invisible.md) | メディアインポート失敗が無言 | フェーズ A2 |
 | [HIGH-21](HIGH-21-node-editor-repaints-every-playback-frame.md) | NodeEditor が再生中毎フレーム全再構築 | フェーズ A |

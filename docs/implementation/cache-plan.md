@@ -1,6 +1,6 @@
 # キャッシュ実装計画（REQ-CORE-006）
 
-> **Status**: 単位 1〜6 実装済み — 2026-08-10
+> **Status**: 単位 1〜6 / 8 実装済み — 2026-08-10
 
 対象要件: REQ-CORE-006（三層キャッシュ）。関連: REQ-CORE-002（Hybrid Pull）、
 REQ-CORE-005（スレッド分離）、REQ-CORE-011（ステートフル評価）、
@@ -24,8 +24,8 @@ REQ-CORE-013（スコープ軸）、REQ-GPU-001、REQ-PROJ-001、REQ-RENDER-004�
 | シェーダモジュール | `ravel-gpu/src/shader.rs:82` | ソースの SHA-256 | なし | —（HIGH-06 は #193 で解決） |
 | Compute パイプライン | `ravel-gpu/src/compute.rs:148` | レイアウトの描画形 + エントリポイント | なし | —（HIGH-06 は #193 で解決） |
 | テクスチャ | `ravel-gpu/src/texture_pool.rs:86` | `TextureKey`（w, h, format, usage） | **バイト予算あり**（ただしアイドル分のみ） | — |
-| 動画デコーダ | `ravel-media/src/decoder.rs:50` | stream_index | 1 エントリ | HIGH-16 / HIGH-17 |
-| 静止画 | `ravel-nodes/src/media.rs:67` | 解決済みパス | 1 エントリ | MED-MED-02 |
+| デコード済みフレーム | `ravel-media/src/frame_cache.rs` | パス + 入力色空間 + ストリーム + フレーム番号 | **`CacheKind::MediaFrame`**（`CACHE-8`） | —（HIGH-16 は解決） |
+| 動画デコーダ | `ravel-media/src/decoder.rs:50` | stream_index | 1 エントリ | HIGH-17 |
 | ディスク派生物 | `ravel-app/src/media/cache.rs` | 絶対パス + mtime + size + extra | なし（GC もなし） | — |
 | 音声 mixdown | `ravel-app/src/audio/mixdown.rs:48` | asset_id + stream | — | LOW-APP-08（パスを含まずリリンクで stale） |
 
@@ -574,13 +574,34 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 - 単位 5 の「comp 単位で全破棄」と結果が矛盾しない（絞り込みが
   取りこぼさない）ことの比較テスト。
 
-### 単位 8 (`CACHE-8`): 共有デコードフレームキャッシュ
+### 単位 8 ✅ (`CACHE-8`): 共有デコードフレームキャッシュ
 
 - `ravel-media` にアセット単位の共有キャッシュを追加。予算は
   `CacheKind::MediaFrame`（**HIGH-16 を回収**）。
 - 静止画・画像シーケンスの複数エントリ化（**MED-MED-02 の後半を回収**。HW
   デバイス作成の回避は issue 側に残る）。
 - キーにパスを含め、リリンク後に stale ヒットしないこと。
+
+**実装時の決定**（コードが正）:
+
+- 置き場は `crates/ravel-media/src/frame_cache.rs`、`ffmpeg` フィーチャの
+  **外**。デコードした主体が誰であれフレームは同じもので、注入されたリーダー
+  しか無いビルドでもキャッシュは効く必要がある。
+- キーは `(解決済みパス, 入力色空間, ストリーム番号, フレーム番号)`。
+  **入力色空間がキーに入るのはフェーズ CM の帰結** — 取り込み時に伝達関数を
+  外すようになったので、保持しているのは変換後の絵であり、同じファイルを
+  別の入力色空間で読んだ結果は「古いコピー」ではなく**別の絵**。パスを含む
+  ことがリリンク後の stale ヒットを構造的に不可能にする。
+- **mtime はキーに入れない。** 毎フレームの `stat` を払うことになり、
+  置き換えた既存キャッシュも見ていなかった。同一パスの上書きは検出しない。
+- 所有者は評価ワーカー（`GpuEvalHooks`）で、`processor_for_node` /
+  `register_all_processors` がテクスチャプールと同じ形で各 `media`
+  プロセッサへ渡す。プロセッサ側に残るのは開いたリーダー 1 本だけ。
+- 退避は `CacheBudget` に一任し、**このキャッシュは独自の LRU を持たない**。
+  ヒットで `touch` するので順序は least-recently-*used*。
+- Ram 層は `CacheKind::NodeResult` と共有なので、`reserve` の退避リストには
+  **他の消費者の id が混ざる**。自分の id だけを落とし、残りは debug ログを
+  出して飛ばす（評価器側も同じことをしている）。
 
 **完了条件**
 

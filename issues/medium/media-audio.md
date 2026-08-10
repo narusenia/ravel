@@ -17,14 +17,14 @@ ID は再利用しない。
 画像シーケンスの各フレームが `FfmpegDecoder::open` を通り、avformat のプローブと
 `HwDeviceContext::try_create`（VideoToolbox / CUDA デバイス作成）を実行する
 — HW アクセラレーションを使えない PNG / EXR 静止画に対して。
-`MediaProcessor::decode_image` はパスキーで1フレームだけキャッシュするため、
-24fps のシーケンス再生ではフレームごとにデバイス作成 + プローブ + open を払う。
+**複数フレームキャッシュの側は `CACHE-8` が解決した**（2026-08-10）。シーケンスの
+各フレームは `ravel-media` の共有デコードキャッシュに入り、予算が許すかぎり
+常駐する（`crates/ravel-media/src/frame_cache.rs`。回帰テストは
+`a_sequence_keeps_the_recent_frames`）。**残っているのは HW デバイス作成の回避
+だけ**で、それはキャッシュがミスしたフレームの代価として今も払われている。
 
 **修正方針**: 単一画像入力では HW デバイス作成をスキップする
 （`open` ではなく最初の映像デコード呼び出し時に遅延生成する）。
-併せてシーケンスに複数フレームキャッシュを与える — **後者は
-`docs/implementation/cache-plan.md` の CACHE-8（アセット単位の共有キャッシュ）が
-引き受ける**ので、この項目に残るのは HW デバイス作成の回避だけ。
 
 ---
 

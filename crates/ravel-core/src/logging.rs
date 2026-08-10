@@ -118,18 +118,37 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_log::NormalizeEvent as _;
 
-    /// Counts the events that survive the filter, restricted to the targets a
-    /// test emits itself.
+    /// The a11y target the pinned list silences.
+    const A11Y_TARGET: &str = "gpui::window::a11y";
+    /// A target of Ravel's own, which the suppression must not touch.
+    const RAVEL_TARGET: &str = "ravel_core::logging";
+
+    /// How many events reached a layer, **per target**.
     ///
-    /// The count has to be narrowed because one of these tests installs a
-    /// **global** subscriber, and the harness runs the crate's tests as
-    /// threads of one process: an unrelated test emitting anything the filter
-    /// admits would otherwise land in the same counter and make the assertion
-    /// fail for a reason that has nothing to do with the directive under test.
-    /// Narrowing here rather than tightening the `EnvFilter` keeps the filter
-    /// the thing being tested.
-    struct CountEvents(Arc<AtomicUsize>, &'static [&'static str]);
+    /// Per target rather than a total for two reasons. One is correctness: a
+    /// total of 1 also passes when the a11y warning survives and Ravel's own
+    /// is dropped — the exact inversion of what the suppression is for. The
+    /// other is isolation: one of these tests installs a **global**
+    /// subscriber, and the harness runs the crate's tests as threads of one
+    /// process, so a total would also count whatever unrelated tests emit.
+    #[derive(Clone, Default)]
+    struct TargetCounts {
+        a11y: Arc<AtomicUsize>,
+        ravel: Arc<AtomicUsize>,
+    }
+
+    impl TargetCounts {
+        fn get(&self) -> (usize, usize) {
+            (
+                self.a11y.load(Ordering::Relaxed),
+                self.ravel.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    struct CountEvents(TargetCounts);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountEvents {
         fn on_event(
@@ -137,32 +156,30 @@ mod tests {
             event: &tracing::Event<'_>,
             _ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            if self.1.contains(&event.metadata().target()) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
+            // `tracing-log` dispatches every bridged record under one static
+            // metadata whose target is `"log"`; the record's own target is
+            // what `normalized_metadata` gives back. Reading it here is what
+            // lets the bridged test recognise its own events instead of
+            // counting every bridged record in the process.
+            let normalized = event.normalized_metadata();
+            let target = normalized
+                .as_ref()
+                .map_or_else(|| event.metadata().target(), |meta| meta.target());
+            match target {
+                A11Y_TARGET => self.0.a11y.fetch_add(1, Ordering::Relaxed),
+                RAVEL_TARGET => self.0.ravel.fetch_add(1, Ordering::Relaxed),
+                _ => 0,
+            };
         }
     }
 
-    /// Targets for the tests that emit through `tracing` directly.
-    const DIRECT_TARGETS: &[&str] = &["gpui::window::a11y", "ravel_core::logging"];
-
-    /// Target for the test that emits through the `log` facade.
-    ///
-    /// `tracing-log` dispatches every bridged record under one static
-    /// metadata whose target is `"log"`; the record's own target survives as a
-    /// field and is what the `EnvFilter` is consulted with, which is why the
-    /// a11y suppression still works. So the bridged test cannot recognise its
-    /// events by the emitted target the way the direct ones can — it counts
-    /// the bridge instead, and it is the only test that installs `LogTracer`.
-    const BRIDGED_TARGETS: &[&str] = &["log"];
-
     /// Emits one a11y warning and one ordinary warning under `directives`,
-    /// returning how many reached a layer.
-    fn events_passing(directives: &str) -> usize {
-        let count = Arc::new(AtomicUsize::new(0));
+    /// returning how many of each reached a layer.
+    fn events_passing(directives: &str) -> (usize, usize) {
+        let counts = TargetCounts::default();
         let subscriber = tracing_subscriber::registry()
             .with(pin_quiet_targets(EnvFilter::new(directives)))
-            .with(CountEvents(count.clone(), DIRECT_TARGETS));
+            .with(CountEvents(counts.clone()));
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(
                 target: "gpui::window::a11y",
@@ -170,7 +187,7 @@ mod tests {
             );
             tracing::warn!(target: "ravel_core::logging", "something Ravel can act on");
         });
-        count.load(Ordering::Relaxed)
+        counts.get()
     }
 
     /// `init_logging` unwraps these, so a malformed one would panic at startup
@@ -189,7 +206,7 @@ mod tests {
     /// level, and Ravel's own warnings are not collateral.
     #[test]
     fn the_a11y_warning_is_dropped_and_other_warnings_are_not() {
-        assert_eq!(events_passing("info"), 1);
+        assert_eq!(events_passing("info"), (0, 1));
     }
 
     /// Raising the level to chase a Ravel bug must not bring it back — that is
@@ -198,7 +215,7 @@ mod tests {
     #[test]
     fn raising_the_level_does_not_unmute_the_a11y_warning() {
         for directives in ["debug", "trace", "ravel_core=trace,warn"] {
-            assert_eq!(events_passing(directives), 1, "{directives}");
+            assert_eq!(events_passing(directives), (0, 1), "{directives}");
         }
     }
 
@@ -217,10 +234,10 @@ mod tests {
     /// is the only test in the crate that sets one.
     #[test]
     fn the_a11y_warning_is_dropped_when_it_arrives_through_the_log_facade() {
-        let count = Arc::new(AtomicUsize::new(0));
+        let counts = TargetCounts::default();
         let subscriber = tracing_subscriber::registry()
             .with(pin_quiet_targets(EnvFilter::new("info")))
-            .with(CountEvents(count.clone(), BRIDGED_TARGETS));
+            .with(CountEvents(counts.clone()));
         tracing::subscriber::set_global_default(subscriber)
             .expect("no other test installs a global subscriber");
         tracing_log::LogTracer::init().expect("the log bridge installs once");
@@ -232,8 +249,8 @@ mod tests {
         log::warn!(target: "ravel_core::logging", "something Ravel can act on");
 
         assert_eq!(
-            count.load(Ordering::Relaxed),
-            1,
+            counts.get(),
+            (0, 1),
             "the a11y warning must be dropped and the ordinary one kept"
         );
     }

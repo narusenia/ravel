@@ -16,6 +16,13 @@
 //! readers through [`MediaProcessor::with_reader_factory`] and
 //! [`MediaProcessor::with_factories`].
 //!
+//! Decoded frames are not kept here. They go into the
+//! [`MediaFrameCache`](ravel_media::frame_cache::MediaFrameCache) the
+//! processor was built with (`CACHE-8`), which is shared by every `media`
+//! node of an evaluation worker and keyed by the footage rather than by the
+//! node — so two layers on one clip decode it once, and scrubbing backwards
+//! re-reads instead of re-decoding a GOP.
+//!
 //! The type key was renamed from `video` to `media` when the kinds were
 //! unified (`docs/implementation/media-import-plan.md`, decision 2).
 //! Documents persisted with `type_key: "video"` are rewritten on load by
@@ -34,6 +41,7 @@ use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::media::{MediaReader, MediaResult, VideoStreamInfo};
 use ravel_core::types::{FrameBuffer, NodeData};
+use ravel_media::frame_cache::{FrameKey, MediaFrameCache};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -69,27 +77,18 @@ struct OpenReader {
     reader: Box<dyn MediaReader>,
 }
 
-struct CachedImage {
-    path: PathBuf,
-    /// Part of the key: the cached frame is already in the working space, so
-    /// a different input colour space is a different picture, not a stale
-    /// one.
-    color_space: ColorSpace,
-    frame: Arc<FrameBuffer>,
-}
-
 /// Decodes one media frame per evaluation, branching on the asset's
-/// [`AssetKind`]. Open decoders and decoded images are cached and keyed by
-/// the resolved path — never by parameter values — so `asset_id` edits only
-/// require dirty marking. Both caches hold a single entry (`OpenReader`'s
-/// "one open at a time" policy): enough for a still to decode once and for
-/// a sequence to revisit the previous frame, without letting a whole
-/// sequence accumulate in memory.
+/// [`AssetKind`]. The open decoder is kept here and keyed by the resolved
+/// path — never by parameter values — so `asset_id` edits only require dirty
+/// marking; it stays a single entry ("one open at a time"). The frames that
+/// decoder produces live in the shared [`MediaFrameCache`] instead, so the
+/// number of frames retained is a budget decision rather than a property of
+/// how many `media` nodes exist.
 pub struct MediaProcessor {
     factory: ReaderFactory,
     image_factory: ImageReaderFactory,
     open: Mutex<Option<OpenReader>>,
-    image: Mutex<Option<CachedImage>>,
+    frames: MediaFrameCache,
     /// Asset ids already warned about. Offline assets and decode failures
     /// degrade to a transparent frame instead of failing, so without this
     /// set every frame of a broken clip would re-log the same warning.
@@ -97,22 +96,41 @@ pub struct MediaProcessor {
 }
 
 impl MediaProcessor {
-    pub fn from_node(_node: &Node) -> Self {
-        Self::with_factories(default_reader_factory(), default_image_reader_factory())
+    /// The production constructor: every `media` node of one evaluation
+    /// worker is handed the same `frames`, which is what makes a decode
+    /// shared rather than per node.
+    pub fn from_node(_node: &Node, frames: &MediaFrameCache) -> Self {
+        Self::with_factories_and_cache(
+            default_reader_factory(),
+            default_image_reader_factory(),
+            frames.clone(),
+        )
     }
 
     /// Inject only the container backend; stills and sequences keep the
-    /// default single-image reader.
+    /// default single-image reader. The decode cache is this processor's
+    /// own — for tests and standalone hosts.
     pub fn with_reader_factory(factory: ReaderFactory) -> Self {
         Self::with_factories(factory, default_image_reader_factory())
     }
 
+    /// Inject both backends, with a decode cache of this processor's own.
     pub fn with_factories(factory: ReaderFactory, image_factory: ImageReaderFactory) -> Self {
+        Self::with_factories_and_cache(factory, image_factory, MediaFrameCache::standalone())
+    }
+
+    /// Inject both backends and the decode cache — what a test that has to
+    /// observe sharing between two processors uses.
+    pub fn with_factories_and_cache(
+        factory: ReaderFactory,
+        image_factory: ImageReaderFactory,
+        frames: MediaFrameCache,
+    ) -> Self {
         Self {
             factory,
             image_factory,
             open: Mutex::new(None),
-            image: Mutex::new(None),
+            frames,
             warned: Mutex::new(HashSet::new()),
         }
     }
@@ -161,12 +179,18 @@ impl MediaProcessor {
 
     /// Decode one frame from a container, reusing the already-open reader
     /// while the resolved path is unchanged.
+    ///
+    /// The shared cache is consulted **after** the stream is known, because
+    /// the frame number the key names is `floor(t · media_fps)` and only the
+    /// open reader knows that rate. Opening is the cheap half — the single
+    /// `OpenReader` entry already amortizes it across frames — while the
+    /// decode a hit skips is the seek-and-replay of a whole GOP.
     fn decode_container_frame(
         &self,
         path: &Path,
         color_space: ColorSpace,
         ctx: &EvalContext,
-    ) -> anyhow::Result<FrameBuffer> {
+    ) -> anyhow::Result<Arc<FrameBuffer>> {
         let mut open = self.open.lock().expect("media reader lock poisoned");
         if open
             .as_ref()
@@ -190,29 +214,31 @@ impl MediaProcessor {
             .ok_or_else(|| anyhow::anyhow!("media: {:?} has no video stream", open.path))?
             .clone();
         let frame = media_frame_for(ctx.time, &stream);
-        open.reader
-            .decode_video_frame(stream.stream_index, frame)
-            .map_err(|e| anyhow::anyhow!("media: decoding frame {frame} failed: {e}"))
+        let key = FrameKey::video(path, color_space, stream.stream_index, frame);
+        if let Some(hit) = self.frames.get(&key) {
+            return Ok(hit);
+        }
+        let decoded = Arc::new(
+            open.reader
+                .decode_video_frame(stream.stream_index, frame)
+                .map_err(|e| anyhow::anyhow!("media: decoding frame {frame} failed: {e}"))?,
+        );
+        self.frames.insert(key, Arc::clone(&decoded));
+        Ok(decoded)
     }
 
-    /// Read a single image, returning the cached frame when this exact
-    /// resolved path was the last one decoded. The cache key is the path on
-    /// disk, so scrubbing back to a sequence frame that is still cached
-    /// does not re-decode it either.
+    /// Read a single image, serving the shared cache when this exact file in
+    /// this exact input colour space has already been decoded. A still or a
+    /// sequence frame is one picture per file, so the path is the position:
+    /// scrubbing back over a sequence hits every frame the budget still
+    /// holds, not merely the previous one.
     fn decode_image(&self, path: &Path, color_space: ColorSpace) -> MediaResult<Arc<FrameBuffer>> {
-        let mut cached = self.image.lock().expect("media image cache lock poisoned");
-        if let Some(hit) = cached
-            .as_ref()
-            .filter(|hit| hit.path == path && hit.color_space == color_space)
-        {
-            return Ok(Arc::clone(&hit.frame));
+        let key = FrameKey::image(path, color_space);
+        if let Some(hit) = self.frames.get(&key) {
+            return Ok(hit);
         }
         let frame = Arc::new((self.image_factory)(path, color_space)?);
-        *cached = Some(CachedImage {
-            path: path.to_path_buf(),
-            color_space,
-            frame: Arc::clone(&frame),
-        });
+        self.frames.insert(key, Arc::clone(&frame));
         Ok(frame)
     }
 }
@@ -258,9 +284,7 @@ impl NodeProcessor for MediaProcessor {
         }
 
         let decoded: anyhow::Result<Arc<FrameBuffer>> = match &asset.kind {
-            AssetKind::Container => self
-                .decode_container_frame(path, color_space, ctx)
-                .map(Arc::new),
+            AssetKind::Container => self.decode_container_frame(path, color_space, ctx),
             AssetKind::Still => self
                 .decode_image(path, color_space)
                 .map_err(|e| anyhow::anyhow!("media: decoding still {path:?} failed: {e}")),
@@ -347,14 +371,24 @@ mod tests {
     use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate};
 
     /// Emits a solid frame whose red channel encodes the requested frame
-    /// index (`frame / 1000`), recording nothing else.
+    /// index (`frame / 1000`), counting the decodes it was asked for.
     struct FakeReader {
         info: MediaInfo,
+        decodes: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl FakeReader {
         fn new(fps: FrameRate, frame_count: Option<u64>) -> Self {
+            Self::counting(fps, frame_count, Arc::default())
+        }
+
+        fn counting(
+            fps: FrameRate,
+            frame_count: Option<u64>,
+            decodes: Arc<std::sync::atomic::AtomicUsize>,
+        ) -> Self {
             Self {
+                decodes,
                 info: MediaInfo {
                     container: None,
                     container_name: "fake".into(),
@@ -389,6 +423,8 @@ mod tests {
             _stream_index: usize,
             frame_number: u64,
         ) -> MediaResult<FrameBuffer> {
+            self.decodes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let value = frame_number as f32 / 1000.0;
             let mut data = Vec::with_capacity(4 * 4 * 4);
             for _ in 0..16 {
@@ -841,5 +877,304 @@ mod tests {
             requested.lock().unwrap().as_slice(),
             [PathBuf::from("/fake/seq/f_0115.png")]
         );
+    }
+
+    // =======================================================================
+    // CACHE-8: the shared decode cache
+    // =======================================================================
+
+    use ravel_core::composition::{AssetMetadata, AssetPath};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A container factory whose readers all report to one decode counter.
+    fn counting_factory(
+        fps: FrameRate,
+        frame_count: Option<u64>,
+    ) -> (ReaderFactory, Arc<AtomicUsize>) {
+        let decodes: Arc<AtomicUsize> = Arc::default();
+        let factory: ReaderFactory = {
+            let decodes = Arc::clone(&decodes);
+            Arc::new(move |_path, _color_space| {
+                Ok(
+                    Box::new(FakeReader::counting(fps, frame_count, Arc::clone(&decodes)))
+                        as Box<_>,
+                )
+            })
+        };
+        (factory, decodes)
+    }
+
+    /// A single-image factory counting reads and colouring each frame by the
+    /// file it came from.
+    fn counting_image_factory() -> (ImageReaderFactory, Arc<AtomicUsize>) {
+        let reads: Arc<AtomicUsize> = Arc::default();
+        let factory: ImageReaderFactory = {
+            let reads = Arc::clone(&reads);
+            Arc::new(move |path: &Path, _color_space| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                // The last digits of the file name become the pixel value, so
+                // a wrong hit is visible in the picture and not only in the
+                // counter.
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let digits: String = stem.chars().filter(|c| c.is_ascii_digit()).collect();
+                Ok(solid_image(digits.parse::<f32>().unwrap_or(0.0) / 1000.0))
+            })
+        };
+        (factory, reads)
+    }
+
+    fn container(path: &str) -> MediaAssetEntry {
+        MediaAssetEntry {
+            color_space: None,
+            path: AssetPath::Absolute(PathBuf::from(path)),
+            kind: AssetKind::Container,
+            metadata: AssetMetadata::default(),
+            resolved: Some(PathBuf::from(path)),
+        }
+    }
+
+    fn still(path: &str) -> MediaAssetEntry {
+        MediaAssetEntry {
+            kind: AssetKind::Still,
+            ..container(path)
+        }
+    }
+
+    /// The media frame a comp frame decodes, as the fake reader encodes it.
+    fn decoded_frame_index(value: &Arc<dyn NodeData>) -> f32 {
+        value.downcast_ref::<FrameBuffer>().unwrap().as_f32()[0] * 1000.0
+    }
+
+    /// A `MediaFrameCache` whose budget holds `frames` of the fake reader's
+    /// 4×4 output and no more.
+    fn cache_for(frames: u64) -> MediaFrameCache {
+        use ravel_core::cache_budget::{CacheBudgetConfig, SharedCacheBudget};
+        let one = solid_image(0.0).byte_size();
+        MediaFrameCache::new(SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 0,
+            ram_bytes: one * frames,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        }))
+    }
+
+    /// HIGH-16: scrubbing back over frames already decoded must not decode
+    /// them again. Before the shared cache every backward step flushed the
+    /// decoder, sought the preceding keyframe and replayed the GOP.
+    #[test]
+    fn scrubbing_backwards_does_not_decode_again() {
+        let (factory, decodes) = counting_factory(FrameRate::new(30, 1), None);
+        let processor = MediaProcessor::with_factories_and_cache(
+            factory,
+            default_image_reader_factory(),
+            MediaFrameCache::standalone(),
+        );
+        let (mut ev, graph) = media_evaluator(processor, container("/fake/clip.mov"));
+
+        let fps = FrameRate::new(30, 1);
+        let at = |ev: &mut Evaluator, frame: u64| {
+            decoded_frame_index(
+                &ev.evaluate(
+                    &graph,
+                    NodeId::new(1),
+                    &EvalContext::new(frame, fps, (4, 4)),
+                )
+                .unwrap(),
+            )
+        };
+
+        for frame in 0..6 {
+            assert_eq!(at(&mut ev, frame), frame as f32);
+        }
+        let forward = decodes.load(Ordering::SeqCst);
+        assert_eq!(forward, 6, "each frame is decoded once on the way out");
+
+        // Back over the same frames: the pictures must still be right, and
+        // nothing may reach the decoder.
+        for frame in (0..6).rev() {
+            assert_eq!(at(&mut ev, frame), frame as f32, "backward frame {frame}");
+        }
+        assert_eq!(
+            decodes.load(Ordering::SeqCst),
+            forward,
+            "a backward scrub re-decoded frames"
+        );
+    }
+
+    /// The cache is keyed by the footage, not by the node, so two layers
+    /// pointing at one clip decode it once between them.
+    #[test]
+    fn two_layers_on_one_clip_share_the_decode() {
+        let (factory, decodes) = counting_factory(FrameRate::new(30, 1), None);
+        let frames = MediaFrameCache::standalone();
+        let processor = |factory: ReaderFactory| {
+            MediaProcessor::with_factories_and_cache(
+                factory,
+                default_image_reader_factory(),
+                frames.clone(),
+            )
+        };
+
+        // Two `media` nodes, each with its own processor — what two layers on
+        // one asset compile to.
+        let graph = Graph::new()
+            .add_node(media_node(1))
+            .unwrap()
+            .add_node(media_node(2))
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.set_document(Arc::new(
+            Document::default().with_media_asset_entry("clip", container("/fake/clip.mov")),
+        ));
+        ev.register(NodeId::new(1), Arc::new(processor(Arc::clone(&factory))));
+        ev.register(NodeId::new(2), Arc::new(processor(factory)));
+
+        let ctx = EvalContext::new(4, FrameRate::new(30, 1), (4, 4));
+        let first = decoded_frame_index(&ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap());
+        let second = decoded_frame_index(&ev.evaluate(&graph, NodeId::new(2), &ctx).unwrap());
+
+        assert_eq!(first, 4.0);
+        assert_eq!(second, 4.0);
+        assert_eq!(
+            decodes.load(Ordering::SeqCst),
+            1,
+            "the second layer decoded the clip a second time"
+        );
+    }
+
+    /// The budget is the only limit: past it the least recently used frame
+    /// goes, and revisiting it costs a decode again. Without this the
+    /// eviction path could be dead and every other test would still pass.
+    #[test]
+    fn a_frame_past_the_budget_is_dropped_and_decoded_again() {
+        let (factory, decodes) = counting_factory(FrameRate::new(30, 1), None);
+        let processor = MediaProcessor::with_factories_and_cache(
+            factory,
+            default_image_reader_factory(),
+            // Room for two frames of this clip.
+            cache_for(2),
+        );
+        let (mut ev, graph) = media_evaluator(processor, container("/fake/clip.mov"));
+
+        let fps = FrameRate::new(30, 1);
+        let at = |ev: &mut Evaluator, frame: u64| {
+            decoded_frame_index(
+                &ev.evaluate(
+                    &graph,
+                    NodeId::new(1),
+                    &EvalContext::new(frame, fps, (4, 4)),
+                )
+                .unwrap(),
+            )
+        };
+
+        for frame in 0..3 {
+            at(&mut ev, frame);
+        }
+        assert_eq!(decodes.load(Ordering::SeqCst), 3);
+
+        // Frames 1 and 2 are still resident.
+        at(&mut ev, 2);
+        at(&mut ev, 1);
+        assert_eq!(
+            decodes.load(Ordering::SeqCst),
+            3,
+            "a resident frame decoded"
+        );
+
+        // Frame 0 fell out when frame 2 arrived, and comes back correct.
+        assert_eq!(at(&mut ev, 0), 0.0);
+        assert_eq!(
+            decodes.load(Ordering::SeqCst),
+            4,
+            "the evicted frame was served from a cache that should not have it"
+        );
+    }
+
+    /// MED-MED-02 (second half): a sequence used to keep exactly one frame,
+    /// so playback paid a decoder construction per frame and a step back paid
+    /// another. Now the recent frames stay resident up to the budget.
+    #[test]
+    fn a_sequence_keeps_the_recent_frames() {
+        let (image_factory, reads) = counting_image_factory();
+        let processor = MediaProcessor::with_factories_and_cache(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+            MediaFrameCache::standalone(),
+        );
+        let entry = MediaAssetEntry {
+            kind: AssetKind::Sequence {
+                prefix: "f_".into(),
+                suffix: ".png".into(),
+                padding: 4,
+                start: 100,
+                end: 200,
+            },
+            metadata: AssetMetadata {
+                frame_rate: Some(FrameRate::new(30, 1)),
+                ..AssetMetadata::default()
+            },
+            ..still("/fake/seq/f_0100.png")
+        };
+        let (mut ev, graph) = media_evaluator(processor, entry);
+
+        let fps = FrameRate::new(30, 1);
+        let at = |ev: &mut Evaluator, frame: u64| {
+            decoded_frame_index(
+                &ev.evaluate(
+                    &graph,
+                    NodeId::new(1),
+                    &EvalContext::new(frame, fps, (4, 4)),
+                )
+                .unwrap(),
+            )
+        };
+
+        // Play frames 100..=104, then walk back over all of them.
+        for frame in 0..5 {
+            assert_eq!(at(&mut ev, frame), 100.0 + frame as f32);
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 5);
+        for frame in (0..5).rev() {
+            assert_eq!(at(&mut ev, frame), 100.0 + frame as f32);
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            5,
+            "the sequence still kept only one frame"
+        );
+    }
+
+    /// The key names the resolved path, so a relinked asset cannot be served
+    /// the frame decoded from the file it used to point at. Getting this
+    /// wrong shows the old footage with no way to tell.
+    #[test]
+    fn a_relinked_asset_never_hits_the_old_paths_frame() {
+        let (image_factory, reads) = counting_image_factory();
+        let processor = MediaProcessor::with_factories_and_cache(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+            MediaFrameCache::standalone(),
+        );
+        let (mut ev, graph) = media_evaluator(processor, still("/fake/old/plate_0001.png"));
+
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
+        assert_eq!(
+            decoded_frame_index(&ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap()),
+            1.0
+        );
+
+        // Relink: the same asset id now resolves elsewhere.
+        ev.set_document(Arc::new(
+            Document::default().with_media_asset_entry("clip", still("/fake/new/plate_0002.png")),
+        ));
+        ev.invalidate_all();
+
+        assert_eq!(
+            decoded_frame_index(&ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap()),
+            2.0,
+            "the relinked asset was served the old file's frame"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "the new file was read");
     }
 }

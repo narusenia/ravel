@@ -194,8 +194,14 @@ fn a_frame_of_gpu_nodes_submits_once() {
         (NodeId::new(3), cc),
         (NodeId::new(4), merge),
     ] {
-        let proc = ravel_nodes::processor_for_node(&node, &gpu, &mut shaders, &pool)
-            .expect("built-in processor");
+        let proc = ravel_nodes::processor_for_node(
+            &node,
+            &gpu,
+            &mut shaders,
+            &pool,
+            &ravel_media::frame_cache::MediaFrameCache::standalone(),
+        )
+        .expect("built-in processor");
         ev.register(id, proc);
     }
 

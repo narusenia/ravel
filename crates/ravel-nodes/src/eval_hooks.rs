@@ -28,6 +28,7 @@ use ravel_core::types::NodeData;
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 
 use crate::display::DisplayTransform;
+use ravel_media::frame_cache::MediaFrameCache;
 use std::sync::{Arc, Mutex};
 
 pub struct GpuEvalHooks {
@@ -39,11 +40,16 @@ pub struct GpuEvalHooks {
     /// `to_output_space` while the frame is still float, and it has no
     /// business inheriting the viewer's display LUT.
     display: Option<DisplayTransform>,
+    /// One decode cache for the whole worker, so every `media` node it
+    /// registers shares it (`CACHE-8`). Built here for the same reason the
+    /// texture pool is: the processors are constructed from these hooks.
+    media_frames: MediaFrameCache,
 }
 
 impl GpuEvalHooks {
-    /// Hooks with a standalone texture pool (fixed idle budget). For tests
-    /// and any host without a cache budget.
+    /// Hooks with a standalone texture pool and decode cache (each with a
+    /// fixed budget of its own). For tests and any host without a process
+    /// cache budget.
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
         let pool = crate::shared_texture_pool(&gpu);
@@ -52,22 +58,24 @@ impl GpuEvalHooks {
             shaders,
             pool,
             display: None,
+            media_frames: MediaFrameCache::standalone(),
         }
     }
 
-    /// Hooks whose texture pool answers to `budget`.
+    /// Hooks whose texture pool and decode cache answer to `budget`.
     ///
-    /// The pool is built here, before the evaluation worker exists, so the
-    /// budget has to reach both this call and `EvalService::spawn_with_budget`
+    /// Both are built here, before the evaluation worker exists, so the
+    /// budget has to reach this call and `EvalService::spawn_with_budget`
     /// from the same place — see `ProjectState::new`.
     pub fn with_budget(gpu: GpuContext, budget: SharedCacheBudget) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
-        let pool = crate::shared_texture_pool_with_budget(&gpu, budget);
+        let pool = crate::shared_texture_pool_with_budget(&gpu, budget.clone());
         Self {
             gpu,
             shaders,
             pool,
             display: None,
+            media_frames: MediaFrameCache::new(budget),
         }
     }
 
@@ -157,6 +165,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                             &self.gpu,
                             &mut self.shaders,
                             &self.pool,
+                            &self.media_frames,
                         )
                     {
                         evaluator.register(*id, proc);
@@ -173,6 +182,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                     &self.gpu,
                     &mut self.shaders,
                     &self.pool,
+                    &self.media_frames,
                 );
                 // Layer networks are evaluated through the document, not the
                 // requested graph — register their processors too
@@ -186,6 +196,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                                 &self.gpu,
                                 &mut self.shaders,
                                 &self.pool,
+                                &self.media_frames,
                             );
                         }
                     }

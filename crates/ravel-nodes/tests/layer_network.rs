@@ -19,6 +19,7 @@ use ravel_core::id::{
 use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData, Scalar};
 use ravel_gpu::{GpuContext, ShaderManager};
+use ravel_media::frame_cache::MediaFrameCache;
 use ravel_nodes::{register_all_processors, shared_texture_pool};
 use std::sync::Arc;
 
@@ -83,10 +84,25 @@ fn setup(comp: &Composition, networks: &[&Graph]) -> (Evaluator, Graph, NodeId) 
     let gpu = GpuContext::new_blocking().expect("GPU adapter required for registration");
     let mut shaders = ShaderManager::new(gpu.clone());
     let pool = shared_texture_pool(&gpu);
+    let media_frames = MediaFrameCache::standalone();
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, &result.graph, &gpu, &mut shaders, &pool);
+    register_all_processors(
+        &mut evaluator,
+        &result.graph,
+        &gpu,
+        &mut shaders,
+        &pool,
+        &media_frames,
+    );
     for network in networks {
-        register_all_processors(&mut evaluator, network, &gpu, &mut shaders, &pool);
+        register_all_processors(
+            &mut evaluator,
+            network,
+            &gpu,
+            &mut shaders,
+            &pool,
+            &media_frames,
+        );
     }
     (evaluator, result.graph, result.output_node)
 }

@@ -21,6 +21,7 @@ use ravel_core::id::{
 use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager};
+use ravel_media::frame_cache::MediaFrameCache;
 use ravel_nodes::{register_all_processors, shared_texture_pool};
 use std::sync::Arc;
 
@@ -99,10 +100,25 @@ fn build_evaluator(
     let gpu = GpuContext::new_blocking().expect("GPU adapter required for registration");
     let mut shaders = ShaderManager::new(gpu.clone());
     let pool = shared_texture_pool(&gpu);
+    let media_frames = MediaFrameCache::standalone();
     let mut evaluator = Evaluator::new();
-    register_all_processors(&mut evaluator, &result.graph, &gpu, &mut shaders, &pool);
+    register_all_processors(
+        &mut evaluator,
+        &result.graph,
+        &gpu,
+        &mut shaders,
+        &pool,
+        &media_frames,
+    );
     for network in networks {
-        register_all_processors(&mut evaluator, network, &gpu, &mut shaders, &pool);
+        register_all_processors(
+            &mut evaluator,
+            network,
+            &gpu,
+            &mut shaders,
+            &pool,
+            &media_frames,
+        );
     }
     // Pin the CPU reference rasterizer for deterministic pixels.
     if let Some((rasterize_id, network)) = cpu_rasterize {

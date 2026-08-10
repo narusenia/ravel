@@ -128,6 +128,26 @@ pub enum EvalError {
     Cancelled(NodeId),
 }
 
+impl EvalError {
+    /// Whether this error is a read-ahead cancellation, **including one that
+    /// travelled up through a nested evaluation**.
+    ///
+    /// `comp.network`, `subnet` and `layer.ref` run their inner graph from
+    /// inside `process()` and propagate its error with `?`, so the evaluator
+    /// wraps a nested [`EvalError::Cancelled`] in
+    /// [`EvalError::ProcessFailed`]. Matching only the outer variant would
+    /// report an interrupted read-ahead as a failed evaluation.
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled(_) => true,
+            Self::ProcessFailed { source, .. } => source
+                .downcast_ref::<EvalError>()
+                .is_some_and(EvalError::is_cancelled),
+            _ => false,
+        }
+    }
+}
+
 // ===========================================================================
 // Cache identity axes: TimeKey / Precision
 // ===========================================================================

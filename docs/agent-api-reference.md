@@ -1376,6 +1376,8 @@ ReadAhead { idle: Duration, frames: u64 }   // CACHE-9; ::DEFAULT_IDLE 250ms,
     // asked for. On in ravel-app's viewer service and nowhere else
 ProcessorSync<'a>            // what `sync` gets: register / processor /
     ::new(&mut Evaluator)    // invalidate_node, and nothing else
+
+EvalService                  // the four below are EvalService, not ProcessorSync
     .request(EvalRequest) -> u64              // generation; latest-wins queue
     .request_speculative(EvalRequest)         // CACHE-9; &self, no generation,
         // no on_update, own queue that any interactive request discards.

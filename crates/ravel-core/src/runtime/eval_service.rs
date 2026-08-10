@@ -803,8 +803,13 @@ impl EvalService {
                         // inspection target is broken, and vice versa. A
                         // cancelled read-ahead is not a failure and is not
                         // logged as one.
+                        // `is_cancelled` rather than a `matches!` on the
+                        // outer variant: `comp.network`, `subnet` and
+                        // `layer.ref` run their inner graph from inside
+                        // `process()`, so a nested cancellation arrives
+                        // wrapped in `ProcessFailed`.
                         if let Err(err) = &result
-                            && !matches!(err, EvalError::Cancelled(_))
+                            && !err.is_cancelled()
                         {
                             tracing::debug!(
                                 generation = generation,

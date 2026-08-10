@@ -606,7 +606,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
             BindingDesc::new(
                 1,
-                BindingKind::OutputStorageTexture,
+                BindingKind::OutputStorageTexture(TextureFormat::Rgba32Float),
                 ShaderVisibility::COMPUTE,
             ),
             BindingDesc::new(2, BindingKind::UniformBuffer, ShaderVisibility::COMPUTE),

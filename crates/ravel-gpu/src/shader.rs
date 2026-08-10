@@ -328,6 +328,7 @@ pub mod hot_reload {
 mod tests {
     use super::*;
     use crate::binding::{BindingKind, ShaderVisibility};
+    use crate::texture_desc::TextureFormat;
 
     const GOOD: &str = r#"
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -428,7 +429,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
             BindingDesc::new(
                 1,
-                BindingKind::OutputStorageTexture,
+                BindingKind::OutputStorageTexture(TextureFormat::Rgba32Float),
                 ShaderVisibility::COMPUTE,
             ),
         ];

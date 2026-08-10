@@ -15,8 +15,13 @@
 pub enum BindingKind {
     /// A read-only sampled 2D float texture (non-filterable).
     InputTexture,
-    /// A write-only 2D `Rgba32Float` storage texture.
-    OutputStorageTexture,
+    /// A write-only 2D storage texture of the given format.
+    ///
+    /// The format is part of the slot, not a crate-wide constant: a storage
+    /// binding's layout entry must name the same format the WGSL declares, and
+    /// the display transform (`CM-7`) writes `rgba8unorm` while every filter
+    /// writes `rgba32float`.
+    OutputStorageTexture(crate::texture_desc::TextureFormat),
     /// A uniform buffer.
     UniformBuffer,
     /// A read-only storage buffer.
@@ -86,9 +91,9 @@ impl BindingDesc {
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
-            BindingKind::OutputStorageTexture => wgpu::BindingType::StorageTexture {
+            BindingKind::OutputStorageTexture(format) => wgpu::BindingType::StorageTexture {
                 access: wgpu::StorageTextureAccess::WriteOnly,
-                format: wgpu::TextureFormat::Rgba32Float,
+                format: format.to_wgpu(),
                 view_dimension: wgpu::TextureViewDimension::D2,
             },
             BindingKind::UniformBuffer => wgpu::BindingType::Buffer {

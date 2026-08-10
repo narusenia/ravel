@@ -169,7 +169,7 @@ fn a_shared_context_runs_the_abstract_api_end_to_end() {
             BindingDesc::new(0, BindingKind::InputTexture, ShaderVisibility::COMPUTE),
             BindingDesc::new(
                 1,
-                BindingKind::OutputStorageTexture,
+                BindingKind::OutputStorageTexture(TextureFormat::Rgba32Float),
                 ShaderVisibility::COMPUTE,
             ),
         ],

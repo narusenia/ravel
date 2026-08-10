@@ -209,12 +209,25 @@ pub trait EvalWorkerHooks: Send + 'static {
         hint: &InvalidationHint,
     );
 
-    /// Post-process a successful evaluation output (e.g. rasterize
-    /// `Geometry` into a `FrameBuffer` for the viewer). Defaults to a
-    /// pass-through.
-    fn finalize(&mut self, value: Arc<dyn NodeData>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+    /// Post-process a successful evaluation output (e.g. read a GPU frame
+    /// back, or rasterize `Geometry` into a `FrameBuffer` for the viewer).
+    /// Defaults to a pass-through.
+    ///
+    /// **`None` means the post-processing failed.** The worker then delivers
+    /// `value` unchanged — the same picture a hook that swallowed its own
+    /// error would have produced — but **does not cache it**. That
+    /// distinction is the whole reason this returns an `Option`: the frame
+    /// cache stores the finalized form and a hit never re-runs this method,
+    /// so caching a fallback would freeze one transient failure (a readback
+    /// that lost the device, a rasterize that ran out of memory) into a
+    /// viewer that stays blank until the composition is edited.
+    fn finalize(
+        &mut self,
+        value: &Arc<dyn NodeData>,
+        ctx: &EvalContext,
+    ) -> Option<Arc<dyn NodeData>> {
         let _ = ctx;
-        value
+        Some(value.clone())
     }
 }
 
@@ -374,9 +387,18 @@ impl EvalService {
                             results.push((node, Ok(value)));
                             continue;
                         }
+                        // `finalize` reporting failure keeps its picture but
+                        // loses its place in the cache: see the trait method.
+                        let mut finalized = true;
                         let result = evaluator
                             .evaluate_at(&req.inner.path, &req.inner.graph, node, &req.inner.ctx)
-                            .map(|value| hooks.finalize(value, &req.inner.ctx));
+                            .map(|value| match hooks.finalize(&value, &req.inner.ctx) {
+                                Some(value) => value,
+                                None => {
+                                    finalized = false;
+                                    value
+                                }
+                            });
                         // The budget's tiers are shared, so a node-result
                         // reservation can push a cached frame out. Whoever is
                         // handed an id it does not own routes it to the cache
@@ -386,7 +408,8 @@ impl EvalService {
                         if !foreign.is_empty() {
                             frames.drop_evicted(&foreign);
                         }
-                        if let (Some(comp), Ok(value)) = (frame_comp, &result) {
+                        if let (Some(comp), Ok(value)) = (frame_comp.filter(|_| finalized), &result)
+                        {
                             frames.insert(comp, frame_identity, value.clone());
                             let foreign = frames.take_foreign_evictions();
                             if !foreign.is_empty() {
@@ -1150,6 +1173,8 @@ mod tests {
     struct FrameHooks {
         processed: Arc<AtomicUsize>,
         finalized: Arc<AtomicUsize>,
+        /// How many leading `finalize` calls report failure (`0`: none).
+        fails_until: usize,
     }
 
     impl EvalWorkerHooks for FrameHooks {
@@ -1167,9 +1192,16 @@ mod tests {
             }
         }
 
-        fn finalize(&mut self, value: Arc<dyn NodeData>, _ctx: &EvalContext) -> Arc<dyn NodeData> {
+        fn finalize(
+            &mut self,
+            value: &Arc<dyn NodeData>,
+            _ctx: &EvalContext,
+        ) -> Option<Arc<dyn NodeData>> {
             self.finalized.fetch_add(1, Ordering::SeqCst);
-            value
+            // `fails_until` finalize failures first, then success — the shape
+            // of a transient readback loss.
+            let ok = self.finalized.load(Ordering::SeqCst) > self.fails_until;
+            ok.then(|| value.clone())
         }
     }
 
@@ -1232,6 +1264,7 @@ mod tests {
             FrameHooks {
                 processed: processed.clone(),
                 finalized: finalized.clone(),
+                fails_until: 0,
             },
             move |update| {
                 let _ = update_tx.send(update);
@@ -1288,6 +1321,70 @@ mod tests {
         assert_eq!(service.frame_cache().stats().hits, 1);
     }
 
+    /// A `finalize` failure must not become a permanent one.
+    ///
+    /// The cache stores the *finalized* form and a hit never re-runs
+    /// `finalize`, so caching the fallback a failed readback returns would
+    /// freeze one transient loss into a viewer that never recovers. The
+    /// failure is delivered, not stored, and the next request retries.
+    #[test]
+    fn a_failed_finalize_is_not_cached_and_is_retried() {
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: finalized.clone(),
+                // The first call fails, every later one succeeds.
+                fails_until: 1,
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+
+        service.request(frame_request(
+            graph.clone(),
+            node,
+            0,
+            document.clone(),
+            InvalidationHint::None,
+        ));
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            update.results[0].1.is_ok(),
+            "the fallback picture was not delivered"
+        );
+        assert_eq!(
+            service.frame_cache().stats().entries,
+            0,
+            "the failed finalize was cached"
+        );
+
+        // Same frame again: the retry reaches `finalize`, succeeds, and only
+        // now is the frame worth keeping.
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            document,
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            finalized.load(Ordering::SeqCst),
+            2,
+            "the retry never reached finalize"
+        );
+        assert_eq!(service.frame_cache().stats().entries, 1);
+    }
+
     /// The frame cache follows the document, not the invalidation hint: many
     /// document commits carry `InvalidationHint::None` and rely on the
     /// evaluator's own diff, so a hint-driven frame cache would serve those
@@ -1300,6 +1397,7 @@ mod tests {
             FrameHooks {
                 processed: processed.clone(),
                 finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
             },
             move |update| {
                 let _ = update_tx.send(update);
@@ -1348,6 +1446,7 @@ mod tests {
             FrameHooks {
                 processed: processed.clone(),
                 finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
             },
             move |update| {
                 let _ = update_tx.send(update);
@@ -1387,6 +1486,7 @@ mod tests {
             FrameHooks {
                 processed: Arc::new(AtomicUsize::new(0)),
                 finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
             },
             move |update| {
                 let _ = update_tx.send(update);
@@ -1452,6 +1552,7 @@ mod tests {
             FrameHooks {
                 processed: Arc::new(AtomicUsize::new(0)),
                 finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
             },
             budget.clone(),
             move |update| {

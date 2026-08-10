@@ -985,7 +985,10 @@ fn render_frames<H: EvalWorkerHooks>(
         let value = evaluator
             .evaluate_at(&[], &compiled.graph, compiled.output_node, &ctx)
             .map_err(|source| RenderError::Eval { frame, source })?;
-        let value = hooks.finalize(value, &ctx);
+        // A finalize failure keeps the raw value, which then fails the
+        // `FrameBuffer` downcast below as `NotAFrame` — a render must not
+        // silently write whatever the fallback happens to be.
+        let value = hooks.finalize(&value, &ctx).unwrap_or(value);
         let picture = value
             .downcast_ref::<FrameBuffer>()
             .ok_or(RenderError::NotAFrame { frame })?;
@@ -1202,9 +1205,13 @@ mod tests {
             }
         }
 
-        fn finalize(&mut self, value: Arc<dyn NodeData>, ctx: &EvalContext) -> Arc<dyn NodeData> {
+        fn finalize(
+            &mut self,
+            value: &Arc<dyn NodeData>,
+            ctx: &EvalContext,
+        ) -> Option<Arc<dyn NodeData>> {
             self.contexts.lock().expect("contexts").push(*ctx);
-            value
+            Some(value.clone())
         }
     }
 

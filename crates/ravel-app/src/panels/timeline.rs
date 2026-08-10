@@ -6610,6 +6610,35 @@ mod tests {
         });
     }
 
+    /// `CACHE-6`: an edit must clear the band **at the edit**, not when the
+    /// next evaluation completes. The Timeline repaints from the document
+    /// notify long before then, and a band published before the edit claims
+    /// frames the frame cache has just dropped.
+    #[gpui::test]
+    fn a_document_edit_clears_the_cache_band_immediately(cx: &mut TestAppContext) {
+        let (_window, project, comp_id, a, _b) = setup(cx);
+        cx.update(|cx| {
+            super::super::set_cache_band(comp_id, vec![0..10, 20..30], cx);
+        });
+
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp_id, a, |l| {
+                l.start_frame = 42;
+            })
+            .unwrap();
+            // The weakest hint there is, and background evaluation is off in
+            // tests — so nothing but the edit itself can clear the band.
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+
+        cx.update(|cx| {
+            assert!(
+                super::super::cache_band(cx).is_empty(),
+                "the band survived the edit that dropped its frames"
+            );
+        });
+    }
+
     /// A document change caused by someone else (e.g. a node parameter
     /// edit) must not overwrite a node-properties target with this panel's
     /// selected layer (regression: node scrub flipped Properties to the

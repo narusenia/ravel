@@ -493,6 +493,23 @@ pub(crate) fn set_cache_band(comp: CompId, ranges: Vec<Range<u64>>, cx: &mut App
     true
 }
 
+/// Drop every composition's band.
+///
+/// Called the moment the document changes — before the evaluation that would
+/// republish it — and on the paths where no evaluation follows at all (an
+/// emptied composition, one that stopped compiling). A band that outlives the
+/// frames it describes is worse than no band: it says a scrub will be free
+/// when it will not.
+pub(crate) fn clear_cache_band(cx: &mut App) {
+    if cx
+        .try_global::<CacheBandState>()
+        .is_none_or(|state| state.0.is_empty())
+    {
+        return;
+    }
+    cx.set_global(CacheBandState::default());
+}
+
 /// The active composition id, `None` when the document has no composition
 /// (or before any project state published one).
 pub fn active_composition(cx: &App) -> Option<CompId> {

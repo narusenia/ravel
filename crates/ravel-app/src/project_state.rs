@@ -1225,6 +1225,12 @@ impl ProjectState {
     fn document_changed(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
         self.compiled = None;
         self.mirror_epoch += 1;
+        // The band goes now, not when the next evaluation lands: the panel
+        // repaints from the notify at the bottom of this function, and a band
+        // published before the edit would claim frames the frame cache is
+        // about to drop. It comes back frame by frame as evaluations
+        // complete.
+        crate::panels::clear_cache_band(cx);
         // Only a topology change can add or remove nodes; a parameter edit
         // (a scrub drag, one call per mouse move) leaves the node set alone.
         if matches!(hint, InvalidationHint::Structural) {
@@ -1298,6 +1304,10 @@ impl ProjectState {
                 }
                 let frame = self.viewer_blank(cx);
                 cx.set_global(frame);
+                // Nothing will be evaluated, so nothing will republish the
+                // band: it has to be cleared on the way out or an emptied
+                // composition keeps the band of the one before it forever.
+                crate::panels::clear_cache_band(cx);
                 return;
             }
             Err(err) => {
@@ -1310,6 +1320,9 @@ impl ProjectState {
                 }
                 let frame = self.viewer_error(err.to_string().into(), cx);
                 cx.set_global(frame);
+                // Same reason as the blank path above: no evaluation follows
+                // a composition that does not compile.
+                crate::panels::clear_cache_band(cx);
                 return;
             }
         };

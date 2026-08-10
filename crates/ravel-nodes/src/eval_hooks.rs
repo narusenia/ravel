@@ -243,11 +243,15 @@ impl EvalWorkerHooks for GpuEvalHooks {
         if self.display.is_some() && crate::gpu_util::frame_size(value.as_ref()).is_some() {
             // Split borrows: the transform compiles its pipeline through the
             // shader manager the hooks own, and both live on this worker.
+            // `media_frames` is named rather than elided with `..` so that a
+            // field added later is a compile error here again — the split
+            // borrow has to be revisited whenever this struct grows.
             let Self {
                 gpu,
                 shaders,
                 pool,
                 display,
+                media_frames: _,
             } = self;
             let display = display.as_mut().expect("checked above");
             return match display.run(gpu, shaders, pool, value.as_ref()) {

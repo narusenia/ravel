@@ -1162,8 +1162,8 @@ mod viewer_image_tests {
     /// of the implementation.
     ///
     /// Until `CM-3` this was `GPUCOMP-9`'s "the pixels must not change"
-    /// reference — the raw `clamp(0,1) * 255 + 0.5` the viewer used before
-    /// the work moved to the worker thread. The buffer is linear light now,
+    /// reference — the bare clamp-and-scale the viewer used before the work
+    /// moved to the worker thread. The buffer is linear light now,
     /// so that reference would assert the *absence* of the display
     /// transform. It encodes first, and the golden values below moved with
     /// it (0.5 linear displays as 188, not 128).

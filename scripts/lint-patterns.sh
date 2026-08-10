@@ -280,6 +280,13 @@ done < <(rg -nU --no-heading \
 # `color.rs` defines the conversion and is exempt. Anything else that really
 # wants the file's own values rather than a display of the composite needs a
 # justified allow entry.
+#
+# The scale factor is matched on either side of the `*` and with the spacing
+# and trailing zeros optional, because `255.0 * v`, `v*255.0` and `v * 255.`
+# are the same mistake written three ways. A bare `as u8` is deliberately not
+# matched: most casts in the tree are indices and counts, and a lint that
+# cries wolf gets an allow entry rather than a fix. Neither is `* scale` —
+# `scale` is what half the geometry code calls a geometric factor.
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line content; do
     [ -z "${file:-}" ] && continue
@@ -292,9 +299,11 @@ while IFS=: read -r file line content; do
             "hand-rolled pixel quantisation (${content#"${content%%[![:space:]]*}"}) — use ravel_core::color::to_display_rgba8 so every exit agrees (CM-1)"
     fi
 done < <(rg -n --no-heading \
-    -e '\* 255\.0' \
-    -e '\* 65535\.0' \
-    -e '\* max as f32' \
+    -e '\*[[:space:]]*255(\.[0-9]*)?([^0-9]|$)' \
+    -e '[^0-9A-Za-z_.]255(\.[0-9]*)?[[:space:]]*\*' \
+    -e '\*[[:space:]]*65535(\.[0-9]*)?([^0-9]|$)' \
+    -e '[^0-9A-Za-z_.]65535(\.[0-9]*)?[[:space:]]*\*' \
+    -e '\*[[:space:]]*max[[:space:]]+as[[:space:]]+f32' \
     crates -g '*.rs' 2>/dev/null)
 
 if [ "$violations" -gt 0 ]; then

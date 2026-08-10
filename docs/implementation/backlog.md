@@ -46,7 +46,6 @@
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
 | SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
-| SET-16 | 停止位置と起動時コンポの設定の露出 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -77,8 +76,6 @@
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
-| UX-9 | ループ範囲とループ再生 | `refactor-plan-0808.md` |
-| UX-10 | 素材からレイヤーへの経路 | `refactor-plan-0808.md` |
 | NGR-1 | 自動整列の計算（ヘッドレス） | `node-graph-readability-plan.md` |
 | NGR-3 | `node_editor` 設定節と `edge_style` の永続化 | `node-graph-readability-plan.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
@@ -93,7 +90,7 @@
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
 | EXPO-3 | 宣言の機械可読な列挙（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
-| CM-1 | 色空間の型と変換関数（純粋関数のみ） | `color-management-plan.md` |
+| CM-7 | 表示変換を GPU で行う（自前 + `.cube`。`CM-6` を待たない） | `color-management-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -139,7 +136,7 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 | GPUCOMP-8 | ✅ | リードバック実装の改善（HIGH-04） | GPUBK-6（#282）が回収 |
 | GPUCOMP-9 | ✅ | f32→BGRA 変換を評価ワーカーへ（HIGH-08。HIGH-09 は一部） | #284 |
 | GPUCOMP-10 | ❌ | 非同期リードバック（GPUBK-6 の測定で不要と判断） | — |
-| GPUCOMP-11 | ❓ | `VIEWER_MAX_DIM` 引き上げ / ゼロコピー表示の判断（測定ゲート） | GPUCOMP-9 ✅ |
+| GPUCOMP-11 | ❓ | ゼロコピー表示（**判断は済み、実装の引受先が未定**） | GPUCOMP-9 ✅ |
 
 GPUCOMP-1（#197）で測定の土台が入り、readback が **N 回 / 完成評価**であることを
 実測で確認した。10 レイヤー再生形では `comp.transform` が `evaluate` の 78% で、
@@ -156,6 +153,23 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 0.02〜0.05 ms/回）。残る1回はアプリ側 `GpuEvalHooks::finalize` の表示用で、
 「完成評価あたり 1」の pin は GPUCOMP-7 で入れる。
 数字は `perf-baseline.md`「GPU シェル merge 投入後」。
+
+**`GPUCOMP-11` の現在地（2026-08-10 に整理）。** 元の単位は 2 つを抱えていた。
+
+- **`VIEWER_MAX_DIM` の引き上げ** — **`VRES-1`（✅ #300）が回収済み。**
+  定数そのものを撤去し、係数モデル（`ViewerResolution`）に置き換えた。
+  判断の根拠は `GPUBK-9` の計測（`perf-baseline.md`、「常時フル解像度は
+  目標に置かない」）で、そこから `viewer-preview-resolution-plan.md` が
+  生まれている。**`VIEWER_MAX_DIM` という識別子はコードに存在しない**ので、
+  文書で見かけたら過去の計測記録としてだけ読むこと
+- **ゼロコピー表示** — **判断は `GPUBK-9`（✅ #296）で済んでいるが、実装の
+  引受先が無い。** `gpu-backend-plan.md` の非対象節が「ゼロコピー表示の実装。
+  `GPUBK-9` で判断し、必要なら別計画」と書いており、その別計画はまだ無い。
+  `HIGH-09` の残りはこれ
+
+`CM-3` の表示変換が rayon と境界表で 10.1× 速くなった（#363）ので、
+**往復のうち CPU 変換が占めていた分は既に消えている。** ゼロコピー化の
+判断はこの数字で測り直すこと。
 
 ### キャッシュ（REQ-CORE-006）
 
@@ -208,7 +222,7 @@ CACHE-3 / 4 も済み（#230 / #227）。評価キャッシュは `CacheBudget` 
 | SET-13 | ❓ | 設定の import / export | 項目が揃ってから |
 | SET-14 | ❓ | UI スケーリング | 調査（パネルが `Theme.font_size` を尊重しているか） |
 | SET-15 | ❓ | 色覚多様性テーマ / アニメーション削減 | テーマ資産の追加とアニメーション箇所の棚卸し |
-| SET-16 | 🟡 | 停止位置と起動時コンポの設定を設定画面へ出す | UX-11 ✅ #352（ゲートは開いている） |
+| SET-16 | ✅ #361 | 停止位置と起動時コンポの設定を設定画面へ出す | UX-11 ✅ #352 |
 
 **「出す項目 = 実際に効く項目」が規約**なので、SET-8 以降は前提機能の
 マージ後に着手する（`settings-screen-plan.md`）。
@@ -621,10 +635,10 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | UX-6 | ✅ #356 | Timeline 上での値スクラブ | — |
 | UX-7 | ✅ #357 | プレイヘッド操作（キーへのスナップ、AE 相当のショートカット） | — |
 | UX-8 | ✅ #353 | 時間ルーラ（コンポ終端の可視化と BPM グリッド） | — |
-| UX-9 | 🟡 | ループ範囲とループ再生 | — |
-| UX-10 | 🟡 | 素材からレイヤーへの経路（自動配置の廃止 / ドラッグ / Outliner） | — |
+| UX-9 | ✅ #362 | ループ範囲とループ再生 | — |
+| UX-10 | ✅ #360 | 素材からレイヤーへの経路（自動配置の廃止 / ドラッグ / Outliner） | — |
 | UX-11 | ✅ #352 | 再生停止位置と起動時コンポの設定 2 つ | — |
-| UX-12 | ⬜ | ロケール / 文書 | UX-4〜11 |
+| UX-12 | ✅ | ロケール / 文書（**各単位の PR が自分の分を運んだので新規作業なし**。ja/en のキー集合が一致し、Timeline / MediaBin / Outliner の仕様と `ui-impl-status.md` が追随済みであることを実測で確認） | UX-4〜11 ✅ |
 
 **`UX-4` 以降は `UX-1`〜`UX-3` に依存しない。** 測定は優先順位付けと
 見落としの発見に使うもので、実装の前提条件ではない（計画書の決定事項）。
@@ -705,19 +719,29 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| CM-1 | 🟡 | 色空間の型と変換関数（伝達関数・原色行列・`.cube`）（HIGH-25） | — |
-| CM-2 | ⬜ | 素材の入力色空間とデコードの線形化 + `.ravprj` v8（HIGH-25） | CM-1 |
-| CM-3 | ⬜ | Viewer の表示変換（HIGH-25） | CM-1 |
-| CM-4 | ⬜ | 書き出しの出力変換（HIGH-25） | CM-1, EXPORT-1 |
-| CM-5 | ⬜ | 文書更新（骨格） | CM-2, CM-3, CM-4 |
-| CM-6 | ⬜ | `ocio-rs` の導入とビルド戦略（着手前に採否を再判断） | CM-5 |
-| CM-7 | ⬜ | `.ocio` の読み込みと GPU シェーダ抽出 | CM-6 |
-| CM-8 | ⬜ | カラー設定 UI（SET-11 を回収）と文書 | CM-7 |
+| CM-1 | ✅ #363 | 色空間の型と変換関数（伝達関数・原色行列・`.cube`）（HIGH-25） | — |
+| CM-2 | ✅ #363 | 素材の入力色空間とデコードの線形化 + `.ravprj` v8（HIGH-25） | CM-1 |
+| CM-3 | ✅ #363 | Viewer の表示変換（HIGH-25） | CM-1 |
+| CM-4 | ✅ #363 | 書き出しの出力変換（HIGH-25） | CM-1, EXPORT-1 |
+| CM-5 | ✅ #363 | 文書更新（骨格） | CM-2, CM-3, CM-4 |
+| CM-7 | 🟡 | 表示変換を GPU で行う（自前 + ユーザー提供の `.cube`） | CM-5 ✅ |
+| CM-6 | ❓ | `ocio-rs` の導入とビルド戦略（**見送り。需要ゲート**） | CM-5 ✅ |
+| CM-9 | ⬜ | `.ocio` の読み込みと GPU シェーダ抽出 | CM-6, CM-7 |
+| CM-8 | ⬜ | カラー設定 UI（SET-11 を回収）と文書 | CM-9 |
 
-CM-1〜5 は自前の固定変換で骨格を作る単位。CM-6 以降が OCIO 連携で、
-`ocio-rs` が若いクレートのため **CM-6 の着手時点で採否を再判断する**。
-落としても骨格は残る。作業空間はリニア Rec.709 原色で、プロジェクト単位の
-切り替えフラグは持たない（`color-management-plan.md` の決定事項）。
+CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ済み。`HIGH-25` を
+回収した。作業空間はリニア Rec.709 原色で、プロジェクト単位の切り替えフラグは
+持たない（`color-management-plan.md` の決定事項）。
+
+**`CM-6`（`ocio-rs`）は 2026-08-10 に見送りを判断した。** 成熟度が計画時から
+変わっておらず（0.2.1 が 4 週間更新なし、star 3、直近のコミットが全部ビルド
+検出の修正）、着手条件を日付から「**`.ocio` か ACES が実際に要求されたとき**」へ
+変えた。`REQ-RENDER-003` は Must のままなので capability を落としたのでは
+なく、払う時期を需要に合わせただけ。バインディングもその時点で選び直す
+（`ocio-rs` か自前の `cxx` / `bindgen` か）。
+
+**OCIO を必要としない GPU 表示変換を `CM-7` として切り出した**（旧 `CM-7` の
+内容は `CM-9` へ）。依存は `CM-5` だけなので**今すぐ着手できる**。
 
 ### プラグインシステム（REQ-PLUGIN-002 / REQ-PLUGIN-004）
 

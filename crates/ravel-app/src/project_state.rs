@@ -38,7 +38,7 @@ use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
 use ravel_i18n::t;
 use ravel_nodes::DisplayFrame;
-use ravel_project::settings::{ResolvedSettings, SettingsLayer};
+use ravel_project::settings::SettingsLayer;
 use ravel_project::ui_state::UiState;
 use ravel_ui::document::{
     CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
@@ -225,7 +225,12 @@ pub struct ProjectState {
     /// same reason: the render worker's evaluator gets a clone, so both
     /// answer to one authority rather than two independent limits
     /// (`cache-plan.md`, `CACHE-3`).
-    cache_budget: Option<SharedCacheBudget>,
+    ///
+    /// Unconditional, unlike `eval` and `gpu`: accounting needs no adapter,
+    /// and a session whose budget only exists on a machine with a GPU would
+    /// leave the settings that move it (`SET-8`) with nothing to apply to
+    /// exactly where that wiring is checked.
+    cache_budget: SharedCacheBudget,
     /// GPU initialization failure captured at startup. The workspace shows it
     /// after its Root exists, so adapter-less systems get a visible error
     /// instead of a constructor panic.
@@ -438,58 +443,58 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
 
 impl ProjectState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (eval, gpu, cache_budget, startup_gpu_error) = if EVAL_DISABLED_FOR_TESTS
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            (None, None, None, None)
-        } else {
-            match GpuContext::new_blocking() {
-                Ok(gpu_ctx) => {
-                    let (update_tx, mut update_rx) =
-                        futures::channel::mpsc::unbounded::<ViewerUpdate>();
-                    // The one place a `CacheBudget` is created. The
-                    // texture pool is built inside `GpuEvalHooks`, before
-                    // the worker thread that builds the `Evaluator`
-                    // exists, so both have to be handed the same budget
-                    // from here — that is what "one authority" means in
-                    // practice (`cache-plan.md`, `CACHE-3`).
-                    //
-                    // Project and user settings layers are not loaded
-                    // yet at startup, so the limits come from the
-                    // defaults; `SharedCacheBudget::reconfigure` applies
-                    // a resolved `[cache]` section to the running budget
-                    // once settings reach the runtime (`SET-8`).
-                    let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
-                    let eval = spawn_viewer_eval_service(
-                        // The viewer is the one worker whose frames go to a
-                        // screen, so it is the one that finishes them on the
-                        // GPU (`CM-7`). The export worker deliberately does
-                        // not: its own encode step needs the linear frame.
-                        ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
-                            .with_display_transform(),
-                        budget.clone(),
-                        update_tx,
-                    );
-                    cx.spawn(async move |this, cx| {
-                        use futures::StreamExt as _;
-                        while let Some(update) = update_rx.next().await {
-                            if this
-                                .update(cx, |this, cx| this.on_eval_update(update, cx))
-                                .is_err()
-                            {
-                                break;
+        // The one place a `CacheBudget` is created. The texture pool is built
+        // inside `GpuEvalHooks`, before the worker thread that builds the
+        // `Evaluator` exists, so both have to be handed the same budget from
+        // here — that is what "one authority" means in practice
+        // (`cache-plan.md`, `CACHE-3`).
+        //
+        // The global layer is installed before the first window opens
+        // (`main`), so its `[cache]` limits are in force from the first
+        // reservation rather than after a correction. The project layer
+        // arrives later, with the document — that one, and every preferences
+        // edit, reach the budget through `app_settings::apply_cache_budget`
+        // (`SET-8`).
+        let cache_budget = SharedCacheBudget::new(app_settings::resolved(cx).cache_budget());
+        let (eval, gpu, startup_gpu_error) =
+            if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+                (None, None, None)
+            } else {
+                match GpuContext::new_blocking() {
+                    Ok(gpu_ctx) => {
+                        let (update_tx, mut update_rx) =
+                            futures::channel::mpsc::unbounded::<ViewerUpdate>();
+                        let budget = cache_budget.clone();
+                        let eval = spawn_viewer_eval_service(
+                            // The viewer is the one worker whose frames go to a
+                            // screen, so it is the one that finishes them on the
+                            // GPU (`CM-7`). The export worker deliberately does
+                            // not: its own encode step needs the linear frame.
+                            ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
+                                .with_display_transform(),
+                            budget.clone(),
+                            update_tx,
+                        );
+                        cx.spawn(async move |this, cx| {
+                            use futures::StreamExt as _;
+                            while let Some(update) = update_rx.next().await {
+                                if this
+                                    .update(cx, |this, cx| this.on_eval_update(update, cx))
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
-                        }
-                    })
-                    .detach();
-                    (Some(eval), Some(gpu_ctx), Some(budget), None)
+                        })
+                        .detach();
+                        (Some(eval), Some(gpu_ctx), None)
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "GPU context initialization failed");
+                        (None, None, Some(error.to_string()))
+                    }
                 }
-                Err(error) => {
-                    tracing::error!(%error, "GPU context initialization failed");
-                    (None, None, None, Some(error.to_string()))
-                }
-            }
-        };
+            };
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
@@ -539,8 +544,8 @@ impl ProjectState {
 
     /// The cache budget the evaluation worker answers to; see
     /// [`Self::cache_budget`](Self::cache_budget) on the field.
-    pub fn cache_budget(&self) -> Option<&SharedCacheBudget> {
-        self.cache_budget.as_ref()
+    pub fn cache_budget(&self) -> &SharedCacheBudget {
+        &self.cache_budget
     }
 
     /// Generation of what the document-mirroring panels display; see
@@ -1780,7 +1785,9 @@ mod tests {
     #[test]
     fn the_display_conversion_runs_on_the_evaluation_worker() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
-        let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
         let mut service = spawn_viewer_eval_service(FrameHooks, budget, tx);
 
         let node = NodeId::new(1);

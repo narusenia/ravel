@@ -16,7 +16,7 @@
 //! <config>/ravel/settings.toml ─┐
 //!                               ├→ AppSettings (Global) → ravel_i18n::set_locale
 //! .ravprj settings.toml ────────┘                       → gpui_component::Theme
-//!                                                       → (SET-8) cache budget
+//!                                                       → SharedCacheBudget
 //! ```
 //!
 //! Three rules shape the code here:
@@ -45,6 +45,7 @@ use std::rc::Rc;
 
 use gpui::{App, Global};
 use gpui_component::{Theme, ThemeConfig, ThemeMode, ThemeRegistry};
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::types::FrameRate;
 use ravel_ui::document::CompositionSettings;
 use ravel_ui::properties::composition::frame_rate_from_fps;
@@ -130,6 +131,10 @@ impl AppSettings {
             appearance: previous.theme_mode != self.resolved.theme_mode
                 || previous.light_theme != self.resolved.light_theme
                 || previous.dark_theme != self.resolved.dark_theme,
+            // The limits, not the whole `[cache]` section: `cache.root` is read
+            // where a cache is *built* and has nothing running to re-apply it
+            // to ([`cache_root`]).
+            cache: previous.cache_budget() != self.resolved.cache_budget(),
         }
     }
 
@@ -163,6 +168,7 @@ impl AppSettings {
 struct Changed {
     locale: bool,
     appearance: bool,
+    cache: bool,
 }
 
 impl Changed {
@@ -171,6 +177,7 @@ impl Changed {
     const ALL: Self = Self {
         locale: true,
         appearance: true,
+        cache: true,
     };
 }
 
@@ -551,6 +558,65 @@ fn apply(changed: Changed, cx: &mut App) {
     }
     if changed.appearance {
         apply_resolved_appearance(cx);
+    }
+    if changed.cache {
+        apply_resolved_cache_budget(cx);
+    }
+}
+
+/// Move the running cache budget's ceilings to the resolved `[cache]` limits
+/// (`SET-8`).
+///
+/// **Deferred**, unlike the other two: the project layer is adopted from inside
+/// a [`ProjectState`](crate::project_state::ProjectState) update
+/// (`replace_document` → [`set_project_layer`]), and reading that entity while
+/// it is being updated is a circular lease. Running on the next effect flush
+/// costs nothing here — the budget is consulted by the evaluation worker, not
+/// by this frame — and it keeps one apply path for all three sources of a
+/// change: startup, a preferences edit, and a project opening or closing.
+///
+/// No session (shutdown, or a tool that never opened one) is the same no-op the
+/// other reports through [`ProjectStateHandle`] are.
+fn apply_resolved_cache_budget(cx: &mut App) {
+    cx.defer(|cx| {
+        let Some(project) = cx
+            .try_global::<ProjectStateHandle>()
+            .and_then(|handle| handle.0.upgrade())
+        else {
+            return;
+        };
+        let budget = project.read(cx).cache_budget().clone();
+        apply_cache_budget(&budget, cx);
+    });
+}
+
+/// Put the resolved limits on `budget`.
+///
+/// Split out of [`apply_resolved_cache_budget`] so a test can drive it against
+/// a budget of its own without a session.
+/// [`SharedCacheBudget::reconfigure`] moves the ceiling without disturbing live
+/// reservations, so an entry that no longer fits is collected by the next
+/// reservation in its tier rather than dropped from under a reader.
+pub fn apply_cache_budget(budget: &SharedCacheBudget, cx: &App) {
+    budget.reconfigure(resolved(cx).cache_budget());
+}
+
+/// Where a disk cache puts its files: the `cache.root` setting when it names
+/// one, and otherwise the platform config directory the caches have always
+/// used.
+///
+/// `None` — no setting and no config directory — is what
+/// [`crate::media::cache::DiskCache`] takes as "no disk persistence", which is
+/// the answer a headless environment without `HOME` already got.
+///
+/// Read where a cache is **constructed**, so a change takes effect the next
+/// time that cache is built, in practice the next launch (the row's description
+/// says so). Moving files that are already written is not something a settings
+/// row should do behind the user's back.
+pub fn cache_root(cx: &App) -> Option<PathBuf> {
+    match resolved(cx).cache_root {
+        Some(root) if !root.trim().is_empty() => Some(PathBuf::from(root.trim())),
+        _ => paths::global_config_dir(),
     }
 }
 

@@ -379,11 +379,10 @@ impl RenderService {
             .ok_or_else(|| SharedString::from(t!("export.error.no_gpu")))?;
         let (gpu, budget) = {
             let project = project.read(cx);
-            let gpu = project.gpu_context().cloned();
-            let budget = project.cache_budget().cloned();
-            match (gpu, budget) {
-                (Some(gpu), Some(budget)) => (gpu, budget),
-                _ => return Err(SharedString::from(t!("export.error.no_gpu"))),
+            let budget = project.cache_budget().clone();
+            match project.gpu_context().cloned() {
+                Some(gpu) => (gpu, budget),
+                None => return Err(SharedString::from(t!("export.error.no_gpu"))),
             }
         };
         let events = self.events.clone();

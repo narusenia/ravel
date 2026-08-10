@@ -120,6 +120,32 @@ pub enum EvalError {
         #[source]
         source: anyhow::Error,
     },
+
+    /// A read-ahead evaluation gave way to interactive work before running
+    /// `node` (`CACHE-9`). Not a failure: the frames already computed stay
+    /// cached and the request is simply not answered.
+    #[error("evaluation cancelled before node {0}")]
+    Cancelled(NodeId),
+}
+
+impl EvalError {
+    /// Whether this error is a read-ahead cancellation, **including one that
+    /// travelled up through a nested evaluation**.
+    ///
+    /// `comp.network`, `subnet` and `layer.ref` run their inner graph from
+    /// inside `process()` and propagate its error with `?`, so the evaluator
+    /// wraps a nested [`EvalError::Cancelled`] in
+    /// [`EvalError::ProcessFailed`]. Matching only the outer variant would
+    /// report an interrupted read-ahead as a failed evaluation.
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled(_) => true,
+            Self::ProcessFailed { source, .. } => source
+                .downcast_ref::<EvalError>()
+                .is_some_and(EvalError::is_cancelled),
+            _ => false,
+        }
+    }
 }
 
 // ===========================================================================
@@ -294,6 +320,20 @@ impl EvalContext {
     /// served to the other (see [`Quality`]).
     pub fn with_quality(mut self, quality: Quality) -> Self {
         self.quality = quality;
+        self
+    }
+
+    /// The same context moved to `frame`, on the frame grid.
+    ///
+    /// Every other axis — resolution, coordinate basis, precision floor,
+    /// quality — is carried over unchanged, which is what makes a frame
+    /// produced from it answer the request the playhead will make when it
+    /// arrives there. Any sub-frame offset is dropped: a playhead lands on
+    /// the grid, so `time` is re-derived from `frame` exactly as
+    /// [`EvalContext::new`] does.
+    pub fn with_frame(mut self, frame: u64) -> Self {
+        self.frame = frame;
+        self.time = frame as f64 / self.fps.as_f64();
         self
     }
 
@@ -1020,6 +1060,12 @@ mod cache_store {
         /// cache. Drained by the worker (see [`Self::drop_evicted`]).
         foreign_evictions: Vec<Evicted>,
         budget: Option<SharedCacheBudget>,
+        /// Whether values produced right now come from read-ahead
+        /// (`CACHE-9`). Speculative reservations are the first the budget
+        /// gives up, so a frame nobody asked for cannot push out one a user
+        /// waited for — the node results of a speculative evaluation
+        /// included.
+        speculative: bool,
         /// Bytes cached per [`Tier`], in [`Tier::ALL`] order.
         used: [u64; 3],
         /// Cache/dirty entries this store has looked at, ever.
@@ -1045,6 +1091,11 @@ mod cache_store {
         /// a fresh store that still answers to the same one.
         pub(super) fn budget(&self) -> Option<&SharedCacheBudget> {
             self.budget.as_ref()
+        }
+
+        /// Rank values produced from now on as read-ahead, or stop.
+        pub(super) fn set_speculative(&mut self, speculative: bool) {
+            self.speculative = speculative;
         }
 
         #[cfg(test)]
@@ -1135,7 +1186,11 @@ mod cache_store {
             };
             let (reservation, evicted) = match &self.budget {
                 Some(budget) => {
-                    let (reservation, evicted) = budget.reserve(CacheKind::NodeResult(tier), bytes);
+                    let kind = CacheKind::NodeResult(tier);
+                    let (reservation, evicted) = match self.speculative {
+                        true => budget.reserve_speculative(kind, bytes),
+                        false => budget.reserve(kind, bytes),
+                    };
                     (Some(reservation), evicted)
                 }
                 None => (None, Vec::new()),
@@ -1466,11 +1521,17 @@ impl ScopeReach {
 // Evaluator
 // ===========================================================================
 
+/// Asked before every `process()` of a read-ahead evaluation: `true` gives
+/// way (`CACHE-9`).
+pub type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// Hybrid Pull + Dirty Notification evaluator.
 ///
 /// Owns the per-node processors, the result cache, and the dirty set. The
 /// graph itself is passed in to each call so the same evaluator can follow an
 /// immutable graph across undo/redo (version switching).
+///
+/// (See [`CancelCheck`] for the read-ahead yield point.)
 ///
 /// Processors are registered by [`NodeId`] alone: ids are globally unique
 /// (`NodeId::next`), so nodes from every graph (root graph, layer networks)
@@ -1483,6 +1544,11 @@ pub struct Evaluator {
     /// [`cache_store`]).
     store: CacheStore,
     document: Option<Arc<Document>>,
+    /// Set while this evaluator is running read-ahead (`CACHE-9`): node
+    /// results are reserved at the speculative rank, and this is asked
+    /// before every `process()` so speculation gives way to a request a user
+    /// is waiting for.
+    read_ahead: Option<CancelCheck>,
     path: Vec<PathSegment>,
     active_scopes: Vec<PathSegment>,
     bindings_stack: Vec<Bindings>,
@@ -1642,6 +1708,28 @@ impl Evaluator {
             store: CacheStore::new(budget),
             ..Self::default()
         };
+    }
+
+    /// Run the evaluations that follow as read-ahead, or stop (`CACHE-9`).
+    ///
+    /// One switch for both halves of what "speculative" means, because they
+    /// are the same statement:
+    ///
+    /// - **Rank.** Node results are reserved at the speculative rank, so
+    ///   budget pressure empties everything a read-ahead produced before it
+    ///   touches anything an interaction paid for. Ranking only the finished
+    ///   frame would leave the node results of a speculative pull able to
+    ///   evict an interactive entry.
+    /// - **Yield.** `cancelled` is asked before every `process()`; a `true`
+    ///   ends the pull with [`EvalError::Cancelled`]. The values already
+    ///   computed stay cached — each is a complete, correct result — so the
+    ///   work is not lost, only the answer.
+    ///
+    /// `None` restores ordinary evaluation, and is what an interactive
+    /// request runs under.
+    pub fn set_read_ahead(&mut self, cancelled: Option<CancelCheck>) {
+        self.store.set_speculative(cancelled.is_some());
+        self.read_ahead = cancelled;
     }
 
     // ----- registration ----------------------------------------------------
@@ -2436,6 +2524,18 @@ impl Evaluator {
             let mut params = self.materialize_params(&node_ref, resolved_channels, &overridden);
             for (param_key, resolved) in overlays {
                 params.set(&param_key, resolved);
+            }
+            // The one place read-ahead can give way (`CACHE-9`). Checked
+            // *here* rather than on entry to `eval_node`, because the pull is
+            // top-down: a node's own check runs before its inputs are
+            // evaluated, so it would have passed long before the interactive
+            // request landed. Immediately before `process()` is where the
+            // cost is about to be paid, and it is the one site every node
+            // routes through.
+            if let Some(cancelled) = &self.read_ahead
+                && cancelled()
+            {
+                return Err(EvalError::Cancelled(node));
             }
             let span = tracing::debug_span!(
                 "node_process",
@@ -7038,6 +7138,61 @@ mod tests {
             node: NodeId::new(115),
         }));
         assert!(ev.store.index_is_consistent());
+    }
+
+    /// `CACHE-9`: a read-ahead pull gives way before it spends anything.
+    ///
+    /// The check sits immediately before `process()`, so nothing is computed
+    /// and nothing is cached — the request simply goes unanswered.
+    #[test]
+    fn a_read_ahead_pull_yields_before_processing() {
+        let mut ev = Evaluator::new();
+        let graph = frame_source_graph(&mut ev, 1, 8);
+        ev.set_read_ahead(Some(Arc::new(|| true)));
+
+        let result = ev.evaluate(&graph, NodeId::new(100), &ctx_at(0));
+        assert!(
+            matches!(&result, Err(EvalError::Cancelled(node)) if *node == NodeId::new(100)),
+            "a refused pull must end as Cancelled"
+        );
+        assert_eq!(
+            ev.cache_stats().entries,
+            0,
+            "a cancelled pull cached a value"
+        );
+    }
+
+    /// `CACHE-9`: the node results of a read-ahead pull are ranked
+    /// speculative too, not just the finished frame — otherwise budget
+    /// pressure lets a frame nobody asked for evict one a user waited for.
+    ///
+    /// The interactive entry is produced **first**, so plain
+    /// least-recently-used order would pick it; the speculative rank is the
+    /// only thing that spares it.
+    #[test]
+    fn a_read_ahead_node_result_is_evicted_before_an_interactive_one() {
+        let entry_bytes = 64u64 * 64 * 16;
+        let mut ev = Evaluator::with_budget(budget_of(entry_bytes * 2 + 4 * 1024));
+        let graph = frame_source_graph(&mut ev, 3, 64);
+        let key = |index: u64| NodeKey {
+            path: Vec::new(),
+            node: NodeId::new(100 + index),
+        };
+
+        ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
+        ev.set_read_ahead(Some(Arc::new(|| false)));
+        ev.evaluate(&graph, NodeId::new(101), &ctx_at(0)).unwrap();
+        ev.set_read_ahead(None);
+        ev.evaluate(&graph, NodeId::new(102), &ctx_at(0)).unwrap();
+
+        assert!(
+            ev.cache_contains(&key(0)),
+            "the interactive result went before the speculative one"
+        );
+        assert!(
+            !ev.cache_contains(&key(1)),
+            "the speculative result survived the pressure"
+        );
     }
 
     #[test]

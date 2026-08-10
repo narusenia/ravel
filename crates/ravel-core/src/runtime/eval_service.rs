@@ -38,9 +38,10 @@ use crate::graph::Graph;
 use crate::id::{CompId, NodeId};
 use crate::runtime::frame_cache::SharedFrameCache;
 use crate::types::NodeData;
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, select, unbounded};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// What changed in the graph since the previous request.
 ///
@@ -298,9 +299,224 @@ struct Request {
     generation: u64,
 }
 
+/// Read-ahead policy: how long the worker must be unoccupied before it fills
+/// frames nobody has asked for, and how far ahead of the playhead it goes
+/// (`CACHE-9`).
+///
+/// **Opt-in.** [`EvalService::spawn`] and
+/// [`EvalService::spawn_with_budget`] leave it off, so every caller that
+/// wants exactly the frames it requested — a render, a benchmark, a test
+/// counting `process()` calls — keeps that. The application turns it on
+/// through [`EvalServiceConfig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadAhead {
+    /// How long both queues must stay empty before read-ahead starts.
+    ///
+    /// The threshold is what keeps speculation off the interactive path:
+    /// evaluation is not interruptible, so a frame started too eagerly delays
+    /// the next real request by its own cost. Waiting until nothing has
+    /// arrived for this long means the user has stopped scrubbing.
+    pub idle: Duration,
+    /// How many frames past the playhead to fill.
+    pub frames: u64,
+}
+
+impl ReadAhead {
+    /// Idle threshold, 250 ms.
+    ///
+    /// Long enough that a scrub — which posts on every mouse move, tens of
+    /// milliseconds apart — never trips it, short enough that letting go of
+    /// the playhead starts filling before the user looks away.
+    pub const DEFAULT_IDLE: Duration = Duration::from_millis(250);
+
+    /// Frames filled ahead of the playhead, 24 — about a second of footage,
+    /// which is the run a "play from here" gets through before the worker
+    /// could have caught up on its own.
+    pub const DEFAULT_FRAMES: u64 = 24;
+}
+
+impl Default for ReadAhead {
+    fn default() -> Self {
+        Self {
+            idle: Self::DEFAULT_IDLE,
+            frames: Self::DEFAULT_FRAMES,
+        }
+    }
+}
+
+/// Everything optional an [`EvalService`] can be spawned with.
+#[derive(Clone, Default)]
+pub struct EvalServiceConfig {
+    /// The process cache budget the worker's caches report to.
+    pub budget: Option<crate::cache_budget::SharedCacheBudget>,
+    /// Read-ahead policy, or `None` to evaluate only what is requested.
+    pub read_ahead: Option<ReadAhead>,
+}
+
+/// What the worker picked up.
+enum Job {
+    /// A request someone is waiting for.
+    Interactive(Request),
+    /// A frame read-ahead asked for. No generation, no `on_update`, and the
+    /// first interactive request throws away whatever is still queued.
+    Speculative(EvalRequest),
+}
+
+/// Outcome of a wait with nothing to do.
+enum Wait {
+    Work(Job),
+    /// Nothing arrived within the read-ahead threshold.
+    Idle,
+    /// The service was dropped.
+    Closed,
+}
+
+/// Block until either queue has work, or — when `idle` is set — until that
+/// long has passed with neither producing any.
+///
+/// The wait **is** the idle detector: "no interactive request for `idle`" is
+/// read off the channel rather than off a clock the worker samples, so there
+/// is no timer to drift and a test can set the threshold to zero and get a
+/// deterministic "the queues are empty" trigger.
+fn wait_for_work(
+    rx: &Receiver<Request>,
+    speculative: &Receiver<EvalRequest>,
+    idle: Option<Duration>,
+) -> Wait {
+    let interactive = |result: Result<Request, crossbeam_channel::RecvError>| match result {
+        Ok(request) => Wait::Work(Job::Interactive(request)),
+        Err(_) => Wait::Closed,
+    };
+    match idle {
+        Some(idle) => select! {
+            recv(rx) -> result => interactive(result),
+            recv(speculative) -> result => match result {
+                Ok(request) => Wait::Work(Job::Speculative(request)),
+                Err(_) => Wait::Closed,
+            },
+            default(idle) => Wait::Idle,
+        },
+        None => select! {
+            recv(rx) -> result => interactive(result),
+            recv(speculative) -> result => match result {
+                Ok(request) => Wait::Work(Job::Speculative(request)),
+                Err(_) => Wait::Closed,
+            },
+        },
+    }
+}
+
+/// Throw away every queued speculative request.
+///
+/// Called whenever an interactive request is picked up: read-ahead was
+/// filling from a playhead position the user has since left, so the queue is
+/// stale by construction (`cache-plan.md`: 対話要求が来たら投機は即破棄).
+fn discard_speculative(speculative: &Receiver<EvalRequest>) {
+    while speculative.try_recv().is_ok() {}
+}
+
+/// The interactive request read-ahead extends.
+struct ReadAheadTemplate {
+    graph: Graph,
+    node: NodeId,
+    comp: CompId,
+    ctx: EvalContext,
+    document: Arc<Document>,
+}
+
+impl ReadAheadTemplate {
+    /// The template `request` provides, if it is one read-ahead can extend:
+    /// a root-scope composition request with a document. Everything else — a
+    /// render, a network preview, an inspection-only pull — has no playhead
+    /// to run ahead of.
+    fn of(request: &EvalRequest) -> Option<Self> {
+        Some(Self {
+            graph: request.graph.clone(),
+            node: *request.nodes.first()?,
+            comp: request.comp.filter(|_| request.path.is_empty())?,
+            ctx: request.ctx,
+            document: request.document.clone()?,
+        })
+    }
+
+    /// Queue the frames after the playhead that are not cached already.
+    ///
+    /// The probe is [`SharedFrameCache::contains`], which records neither a
+    /// hit nor a miss: speculation is not a request anyone made, and counting
+    /// it would move the hit rate the logs and the tests read.
+    fn queue(
+        &self,
+        speculative: &Sender<EvalRequest>,
+        frames: &SharedFrameCache,
+        config: ReadAhead,
+    ) {
+        let duration = self
+            .document
+            .compositions
+            .get(&self.comp)
+            .map_or(0, |comp| comp.duration_frames);
+        let mut queued = 0u64;
+        for offset in 1..=config.frames {
+            let frame = self.ctx.frame.saturating_add(offset);
+            if frame >= duration {
+                break;
+            }
+            let ctx = self.ctx.with_frame(frame);
+            if frames.contains(self.comp, &CacheIdentity::of_frame(&ctx)) {
+                continue;
+            }
+            let request = EvalRequest {
+                graph: self.graph.clone(),
+                nodes: vec![self.node],
+                comp: Some(self.comp),
+                path: Vec::new(),
+                ctx,
+                document: Some(self.document.clone()),
+                hint: InvalidationHint::None,
+            };
+            if speculative.send(request).is_err() {
+                return;
+            }
+            queued += 1;
+        }
+        if queued > 0 {
+            tracing::debug!(
+                from = self.ctx.frame,
+                queued,
+                "read-ahead queued speculative frames"
+            );
+        }
+    }
+}
+
+/// The nodes a hint names, or `None` when it names none (`CACHE-7`).
+fn params_of(hint: &InvalidationHint) -> Option<Vec<NodeId>> {
+    match hint {
+        InvalidationHint::Params(ids) => Some(ids.clone()),
+        InvalidationHint::None | InvalidationHint::Structural => None,
+    }
+}
+
+/// Union two coalesced requests' narrowing sets. **Absorbing**, not merging:
+/// one request that named nothing means the document step holds a change no
+/// node list explains, and the frame cache has to fall back to dropping whole
+/// compositions.
+fn merge_narrow(older: Option<Vec<NodeId>>, newer: Option<Vec<NodeId>>) -> Option<Vec<NodeId>> {
+    let (mut older, newer) = (older?, newer?);
+    for id in newer {
+        if !older.contains(&id) {
+            older.push(id);
+        }
+    }
+    Some(older)
+}
+
 /// Handle owned by the UI thread. Dropping it shuts the worker down.
 pub struct EvalService {
     tx: Option<Sender<Request>>,
+    /// The read-ahead queue (`CACHE-9`). Separate from `tx` so an
+    /// interactive request can discard everything on it.
+    speculative: Option<Sender<EvalRequest>>,
     generation: u64,
     worker: Option<JoinHandle<()>>,
     frames: SharedFrameCache,
@@ -319,7 +535,7 @@ impl EvalService {
         H: EvalWorkerHooks,
         F: Fn(EvalUpdate) + Send + 'static,
     {
-        Self::spawn_inner(hooks, None, on_update)
+        Self::spawn_with_config(hooks, EvalServiceConfig::default(), on_update)
     }
 
     /// Spawn the worker thread with a result cache bounded by `budget`.
@@ -338,19 +554,28 @@ impl EvalService {
         H: EvalWorkerHooks,
         F: Fn(EvalUpdate) + Send + 'static,
     {
-        Self::spawn_inner(hooks, Some(budget), on_update)
+        Self::spawn_with_config(
+            hooks,
+            EvalServiceConfig {
+                budget: Some(budget),
+                read_ahead: None,
+            },
+            on_update,
+        )
     }
 
-    fn spawn_inner<H, F>(
-        mut hooks: H,
-        budget: Option<crate::cache_budget::SharedCacheBudget>,
-        on_update: F,
-    ) -> Self
+    /// Spawn the worker thread with everything optional spelled out — the
+    /// constructor the application uses, because it is the one that can turn
+    /// read-ahead on (`CACHE-9`).
+    pub fn spawn_with_config<H, F>(mut hooks: H, config: EvalServiceConfig, on_update: F) -> Self
     where
         H: EvalWorkerHooks,
         F: Fn(EvalUpdate) + Send + 'static,
     {
+        let EvalServiceConfig { budget, read_ahead } = config;
         let (tx, rx) = unbounded::<Request>();
+        let (speculative_tx, speculative_rx) = unbounded::<EvalRequest>();
+        let worker_speculative_tx = speculative_tx.clone();
         let frames = SharedFrameCache::new(budget.clone());
         let worker_frames = frames.clone();
         let worker = std::thread::Builder::new()
@@ -370,32 +595,104 @@ impl EvalService {
                 // structural resync clears the evaluator's copy, and the
                 // frame cache must still be able to tell an edit from a
                 // composition switch.
+                // "An interactive request is waiting", as a predicate a
+                // read-ahead evaluation can ask between nodes.
+                let interrupt: crate::eval::CancelCheck = {
+                    let rx = rx.clone();
+                    Arc::new(move || !rx.is_empty())
+                };
                 let mut cached_document: Option<Arc<Document>> = None;
                 let mut first = true;
-                while let Ok(first_req) = rx.recv() {
+                // What read-ahead would extend, and whether it already has
+                // for this playhead position (`CACHE-9`).
+                let mut template: Option<ReadAheadTemplate> = None;
+                let mut filled = false;
+                loop {
+                    // Interactive work always wins, and picking it up drops
+                    // every queued speculative frame: read-ahead was filling
+                    // from a playhead the user has moved off.
+                    let job = match rx.try_recv() {
+                        Ok(request) => {
+                            discard_speculative(&speculative_rx);
+                            Job::Interactive(request)
+                        }
+                        Err(TryRecvError::Disconnected) => break,
+                        Err(TryRecvError::Empty) => match speculative_rx.try_recv() {
+                            Ok(request) => Job::Speculative(request),
+                            Err(_) => {
+                                // Nothing to do. The wait doubles as the idle
+                                // detector, but only while there is something
+                                // left to fill.
+                                let idle = read_ahead
+                                    .filter(|_| !filled && template.is_some())
+                                    .map(|config| config.idle);
+                                match wait_for_work(&rx, &speculative_rx, idle) {
+                                    Wait::Work(Job::Interactive(request)) => {
+                                        discard_speculative(&speculative_rx);
+                                        Job::Interactive(request)
+                                    }
+                                    Wait::Work(job) => job,
+                                    Wait::Idle => {
+                                        if let (Some(config), Some(template)) =
+                                            (read_ahead, &template)
+                                        {
+                                            template.queue(&worker_speculative_tx, &frames, config);
+                                        }
+                                        filled = true;
+                                        continue;
+                                    }
+                                    Wait::Closed => break,
+                                }
+                            }
+                        },
+                    };
                     // Latest-wins: drain everything queued behind the first
                     // request, merging hints so skipped rebuilds still occur.
-                    let mut req = first_req;
-                    let mut coalesced = 0u32;
-                    while let Ok(newer) = rx.try_recv() {
-                        coalesced += 1;
-                        let prev_hint = req.inner.hint;
-                        req = newer;
-                        req.inner.hint = prev_hint.merge(std::mem::replace(
-                            &mut req.inner.hint,
-                            InvalidationHint::None,
-                        ));
-                    }
+                    // A speculative job is never coalesced — read-ahead posts
+                    // one request per frame and wants all of them.
+                    let (mut request, generation, speculative, coalesced, mut narrow) = match job {
+                        Job::Interactive(first_req) => {
+                            filled = false;
+                            let mut req = first_req;
+                            let mut coalesced = 0u32;
+                            // The nodes the frame cache may narrow this
+                            // document step to (`CACHE-7`). Tracked beside
+                            // the merged hint rather than read back off it:
+                            // `InvalidationHint::merge` folds `None` into
+                            // `Params` (documented as "nothing changed", but
+                            // shell edits post it *with* a new document), so
+                            // a merged `Params` cannot tell whether an
+                            // unexplained edit rode along. Narrowing
+                            // therefore requires that every coalesced request
+                            // named its nodes.
+                            let mut narrow = params_of(&req.inner.hint);
+                            while let Ok(newer) = rx.try_recv() {
+                                coalesced += 1;
+                                let prev_hint = req.inner.hint;
+                                req = newer;
+                                narrow = merge_narrow(narrow, params_of(&req.inner.hint));
+                                req.inner.hint = prev_hint.merge(std::mem::replace(
+                                    &mut req.inner.hint,
+                                    InvalidationHint::None,
+                                ));
+                            }
+                            let generation = req.generation;
+                            (req.inner, generation, false, coalesced, narrow)
+                        }
+                        Job::Speculative(request) => (request, 0, true, 0, None),
+                    };
                     if first {
-                        req.inner.hint = InvalidationHint::Structural;
+                        request.hint = InvalidationHint::Structural;
+                        narrow = None;
                         first = false;
                     }
                     tracing::debug!(
-                        generation = req.generation,
-                        targets = req.inner.nodes.len(),
-                        frame = req.inner.ctx.frame,
-                        hint = ?req.inner.hint,
-                        path_depth = req.inner.path.len(),
+                        generation,
+                        speculative,
+                        targets = request.nodes.len(),
+                        frame = request.ctx.frame,
+                        hint = ?request.hint,
+                        path_depth = request.path.len(),
                         coalesced,
                         "eval request picked up"
                     );
@@ -405,40 +702,51 @@ impl EvalService {
                     // the service owns; keeping it here means the one place
                     // that knows about the budget is the one place that
                     // clears the evaluator.
-                    if matches!(req.inner.hint, InvalidationHint::Structural) {
+                    if matches!(request.hint, InvalidationHint::Structural) {
                         evaluator.reset();
                     }
                     hooks.sync(
                         &mut ProcessorSync::new(&mut evaluator),
-                        &req.inner.graph,
-                        req.inner.document.as_deref(),
-                        &req.inner.hint,
+                        &request.graph,
+                        request.document.as_deref(),
+                        &request.hint,
                     );
                     // The document diff drives scoped cache invalidation
                     // (network edits, shell edits, layer.ref referrers).
                     // Installed strictly *after* the reset above, which drops
                     // any document installed beforehand.
-                    if let Some(document) = &req.inner.document {
+                    if let Some(document) = &request.document {
                         evaluator.set_document(document.clone());
                         // The frame cache reads the same diff: many document
                         // commits carry `InvalidationHint::None` and rely on
                         // it, so a hint-driven frame cache would serve those
                         // edits a stale picture.
-                        frames.sync_document(cached_document.as_deref(), document);
+                        frames.sync_document(
+                            cached_document.as_deref(),
+                            document,
+                            narrow.as_deref(),
+                        );
                         cached_document = Some(document.clone());
                     }
                     // Only the first target is the composition output, and
                     // only a root-scope request with a document has the
                     // invalidation signal this layer needs.
-                    let cached_comp = req
-                        .inner
+                    let cached_comp = request
                         .comp
-                        .filter(|_| req.inner.path.is_empty() && req.inner.document.is_some());
-                    let frame_identity = CacheIdentity::of_frame(&req.inner.ctx);
+                        .filter(|_| request.path.is_empty() && request.document.is_some());
+                    // Read-ahead runs at the speculative budget rank and
+                    // gives way the moment an interactive request lands: the
+                    // queue-level discard only covers frames that have not
+                    // started, and one heavy frame is exactly the case that
+                    // would otherwise delay a scrub. The predicate reads the
+                    // channel, never a clock. Installed after the structural
+                    // reset above, which would otherwise clear it.
+                    evaluator.set_read_ahead(speculative.then(|| interrupt.clone()));
+                    let frame_identity = CacheIdentity::of_frame(&request.ctx);
                     let started = std::time::Instant::now();
-                    let mut results = Vec::with_capacity(req.inner.nodes.len());
+                    let mut results = Vec::with_capacity(request.nodes.len());
                     let mut timings = Vec::new();
-                    for (index, &node) in req.inner.nodes.iter().enumerate() {
+                    for (index, &node) in request.nodes.iter().enumerate() {
                         let frame_comp = cached_comp.filter(|_| index == 0);
                         if let Some(comp) = frame_comp
                             && let Some(value) = frames.get(comp, &frame_identity)
@@ -464,8 +772,8 @@ impl EvalService {
                         // lost its evaluator.
                         let mut finalized = true;
                         let result = evaluator
-                            .evaluate_at(&req.inner.path, &req.inner.graph, node, &req.inner.ctx)
-                            .map(|value| match hooks.finalize(&value, &req.inner.ctx) {
+                            .evaluate_at(&request.path, &request.graph, node, &request.ctx)
+                            .map(|value| match hooks.finalize(&value, &request.ctx) {
                                 Some(value) => value,
                                 None => {
                                     finalized = false;
@@ -474,7 +782,7 @@ impl EvalService {
                             });
                         if let (Some(comp), Ok(value)) = (frame_comp.filter(|_| finalized), &result)
                         {
-                            frames.insert(comp, frame_identity, value.clone());
+                            frames.insert(comp, frame_identity, value.clone(), speculative);
                         }
                         // The budget's tiers are shared, so any of the three
                         // caches can push another's entry out. Settling after
@@ -492,12 +800,21 @@ impl EvalService {
                         timings.append(&mut evaluator.take_timings());
                         // One failing target must not cost the others their
                         // result: the viewer keeps drawing while an
-                        // inspection target is broken, and vice versa.
-                        if let Err(err) = &result {
+                        // inspection target is broken, and vice versa. A
+                        // cancelled read-ahead is not a failure and is not
+                        // logged as one.
+                        // `is_cancelled` rather than a `matches!` on the
+                        // outer variant: `comp.network`, `subnet` and
+                        // `layer.ref` run their inner graph from inside
+                        // `process()`, so a nested cancellation arrives
+                        // wrapped in `ProcessFailed`.
+                        if let Err(err) = &result
+                            && !err.is_cancelled()
+                        {
                             tracing::debug!(
-                                generation = req.generation,
+                                generation = generation,
                                 node = node.raw(),
-                                frame = req.inner.ctx.frame,
+                                frame = request.ctx.frame,
                                 %err,
                                 "eval target failed"
                             );
@@ -519,8 +836,8 @@ impl EvalService {
                     let node_stats = evaluator.cache_stats();
                     let budget_stats = worker_budget.as_ref().map(|budget| budget.stats());
                     tracing::debug!(
-                        generation = req.generation,
-                        frame = req.inner.ctx.frame,
+                        generation = generation,
+                        frame = request.ctx.frame,
                         targets = results.len(),
                         ok = results.iter().filter(|(_, r)| r.is_ok()).count(),
                         timings = timings.len(),
@@ -540,9 +857,19 @@ impl EvalService {
                             budget_stats.map(|stats| stats.limit(crate::cache_budget::Tier::Vram)),
                         "eval result sent"
                     );
+                    if speculative {
+                        // Deliberately silent: read-ahead writes to the cache
+                        // and nothing else. Emitting an update here would
+                        // replace what the viewer is showing with a frame
+                        // nobody asked for.
+                        continue;
+                    }
+                    // The playhead read-ahead runs on from, refreshed after
+                    // every interactive request.
+                    template = read_ahead.and_then(|_| ReadAheadTemplate::of(&request));
                     on_update(EvalUpdate {
-                        generation: req.generation,
-                        frame: req.inner.ctx.frame,
+                        generation,
+                        frame: request.ctx.frame,
                         results,
                         timings,
                     });
@@ -551,6 +878,7 @@ impl EvalService {
             .expect("failed to spawn eval service worker");
         Self {
             tx: Some(tx),
+            speculative: Some(speculative_tx),
             generation: 0,
             worker: Some(worker),
             frames,
@@ -580,6 +908,19 @@ impl EvalService {
         generation
     }
 
+    /// Post a read-ahead request (`CACHE-9`).
+    ///
+    /// Deliberately `&self` and returning nothing: speculation **does not
+    /// advance the generation**, so a result the viewer is still waiting for
+    /// cannot be outdated by a frame nobody asked for. It also never reaches
+    /// `on_update` — it only fills the frame cache — and the worker throws
+    /// away everything still queued here the moment a real request arrives.
+    pub fn request_speculative(&self, request: EvalRequest) {
+        if let Some(tx) = &self.speculative {
+            let _ = tx.send(request);
+        }
+    }
+
     /// Invalidate all in-flight results without posting a new request
     /// (e.g. when the selection is cleared and the viewer is blanked).
     /// Returns the new latest generation.
@@ -604,6 +945,7 @@ impl Drop for EvalService {
         // UI thread (panel teardown, layout rebuild) and a join would block
         // it for up to one full evaluation.
         drop(self.tx.take());
+        drop(self.speculative.take());
         drop(self.worker.take());
     }
 }
@@ -697,6 +1039,7 @@ mod tests {
             CompId::new(1),
             CacheIdentity::of_frame(&ctx()),
             Arc::new(frame),
+            false,
         );
         assert_eq!(hooks.held.len(), 1, "nothing has settled yet");
 
@@ -1342,6 +1685,41 @@ mod tests {
         finalized: Arc<AtomicUsize>,
         /// How many leading `finalize` calls report failure (`0`: none).
         fails_until: usize,
+        /// Reports the frame of every evaluation that completed.
+        ///
+        /// Read-ahead produces no `EvalUpdate` to wait on, so without this a
+        /// test would have to poll the shared cache — the fragility class
+        /// that has already cost this repository two CI runs. A completed
+        /// frame announces itself instead.
+        done: Option<Sender<u64>>,
+    }
+
+    impl FrameHooks {
+        fn new(processed: Arc<AtomicUsize>) -> Self {
+            Self {
+                processed,
+                finalized: Arc::new(AtomicUsize::new(0)),
+                fails_until: 0,
+                done: None,
+            }
+        }
+
+        fn counting_finalize(mut self, finalized: Arc<AtomicUsize>) -> Self {
+            self.finalized = finalized;
+            self
+        }
+
+        fn failing_until(mut self, fails_until: usize) -> Self {
+            self.fails_until = fails_until;
+            self
+        }
+
+        /// Announce every completed frame on `done`.
+        fn reporting(mut self) -> (Self, Receiver<u64>) {
+            let (tx, rx) = unbounded();
+            self.done = Some(tx);
+            (self, rx)
+        }
     }
 
     impl EvalWorkerHooks for FrameHooks {
@@ -1362,12 +1740,15 @@ mod tests {
         fn finalize(
             &mut self,
             value: &Arc<dyn NodeData>,
-            _ctx: &EvalContext,
+            ctx: &EvalContext,
         ) -> Option<Arc<dyn NodeData>> {
             self.finalized.fetch_add(1, Ordering::SeqCst);
             // `fails_until` finalize failures first, then success — the shape
             // of a transient readback loss.
             let ok = self.finalized.load(Ordering::SeqCst) > self.fails_until;
+            if ok && let Some(done) = &self.done {
+                let _ = done.send(ctx.frame);
+            }
             ok.then(|| value.clone())
         }
     }
@@ -1428,11 +1809,7 @@ mod tests {
         let finalized = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: finalized.clone(),
-                fails_until: 0,
-            },
+            FrameHooks::new(processed.clone()).counting_finalize(finalized.clone()),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1499,12 +1876,9 @@ mod tests {
         let finalized = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: finalized.clone(),
-                // The first call fails, every later one succeeds.
-                fails_until: 1,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0)))
+                .counting_finalize(finalized.clone())
+                .failing_until(1),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1560,16 +1934,9 @@ mod tests {
     fn a_document_edit_drops_the_frames_even_without_a_hint() {
         let processed = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
-        let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
-            move |update| {
-                let _ = update_tx.send(update);
-            },
-        );
+        let mut service = EvalService::spawn(FrameHooks::new(processed.clone()), move |update| {
+            let _ = update_tx.send(update);
+        });
 
         let node = NodeId::new(1);
         let graph = Graph::new()
@@ -1610,11 +1977,7 @@ mod tests {
     fn a_cache_hit_leaves_the_frame_cache_version_alone() {
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1659,16 +2022,9 @@ mod tests {
     fn a_request_without_a_composition_is_not_frame_cached() {
         let processed = Arc::new(AtomicUsize::new(0));
         let (update_tx, update_rx) = unbounded();
-        let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: processed.clone(),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
-            move |update| {
-                let _ = update_tx.send(update);
-            },
-        );
+        let mut service = EvalService::spawn(FrameHooks::new(processed.clone()), move |update| {
+            let _ = update_tx.send(update);
+        });
 
         let node = NodeId::new(1);
         let graph = Graph::new()
@@ -1700,11 +2056,7 @@ mod tests {
     fn the_cached_range_grows_with_playback_and_vanishes_on_an_edit() {
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
             move |update| {
                 let _ = update_tx.send(update);
             },
@@ -1750,6 +2102,564 @@ mod tests {
         );
     }
 
+    // ---- read-ahead (`CACHE-9`) --------------------------------------------
+
+    /// A service whose read-ahead starts the moment both queues are empty.
+    ///
+    /// `idle: ZERO` is what keeps these tests deterministic — the trigger is
+    /// "the worker has nothing to do", an event, rather than a wall-clock
+    /// threshold a loaded machine can miss.
+    fn spawn_reading_ahead<H: EvalWorkerHooks>(
+        hooks: H,
+        frames: u64,
+    ) -> (EvalService, Receiver<EvalUpdate>) {
+        let (tx, rx) = unbounded();
+        let service = EvalService::spawn_with_config(
+            hooks,
+            EvalServiceConfig {
+                budget: None,
+                read_ahead: Some(ReadAhead {
+                    idle: Duration::ZERO,
+                    frames,
+                }),
+            },
+            move |update| {
+                let _ = tx.send(update);
+            },
+        );
+        (service, rx)
+    }
+
+    fn frame_graph(node: NodeId) -> Graph {
+        Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap()
+    }
+
+    /// The frames `done` reports, in the order they completed.
+    fn completed(done: &Receiver<u64>, count: usize) -> Vec<u64> {
+        (0..count)
+            .map(|index| {
+                done.recv_timeout(Duration::from_secs(5))
+                    .unwrap_or_else(|_| panic!("only {index} of {count} frames completed"))
+            })
+            .collect()
+    }
+
+    /// The band grows past the playhead while nobody is asking for anything,
+    /// and — the half a ranges-only assertion would miss — the frames it
+    /// claims are frames a real request is actually served.
+    #[test]
+    fn read_ahead_extends_the_band_with_frames_a_request_would_hit() {
+        let (hooks, done) = FrameHooks::new(Arc::new(AtomicUsize::new(0))).reporting();
+        let (mut service, update_rx) = spawn_reading_ahead(hooks, 3);
+
+        let node = NodeId::new(1);
+        let frames = service.frame_cache().clone();
+        // One document `Arc` throughout: a fresh one per request is a fresh
+        // composition `Arc` too, and the diff would drop the cache.
+        let document = frame_document();
+        service.request(frame_request(
+            frame_graph(node),
+            node,
+            0,
+            document.clone(),
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // The interactive frame plus the three read-ahead filled, announced
+        // by the hooks rather than discovered by polling the cache.
+        let mut filled = completed(&done, 4);
+        filled.sort_unstable();
+        assert_eq!(filled, vec![0, 1, 2, 3]);
+        assert_eq!(
+            frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2))),
+            vec![0..4]
+        );
+
+        // The band is only honest if the identity read-ahead produced matches
+        // the one the playhead will ask with. Requesting frame 3 the ordinary
+        // way must be a hit, not a recompute. `take_timings` lists only nodes
+        // that actually ran, so an empty list *is* "nothing was processed".
+        service.request(frame_request(
+            frame_graph(node),
+            node,
+            3,
+            document,
+            InvalidationHint::None,
+        ));
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            update.timings.is_empty(),
+            "a read-ahead frame was recomputed when the playhead reached it: {:?}",
+            update.timings
+        );
+        assert_eq!(service.frame_cache().stats().hits, 1);
+    }
+
+    /// Read-ahead fills the cache and nothing else: no update reaches the
+    /// consumer, so the viewer keeps showing the frame the user is on.
+    #[test]
+    fn read_ahead_never_emits_an_update_or_moves_the_generation() {
+        let (hooks, done) = FrameHooks::new(Arc::new(AtomicUsize::new(0))).reporting();
+        let (mut service, update_rx) = spawn_reading_ahead(hooks, 3);
+
+        let node = NodeId::new(1);
+        let frames = service.frame_cache().clone();
+        let generation = service.request(frame_request(
+            frame_graph(node),
+            node,
+            0,
+            frame_document(),
+            InvalidationHint::None,
+        ));
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.generation, generation);
+
+        assert_eq!(completed(&done, 4).len(), 4);
+        assert_eq!(frames.stats().entries, 4);
+        assert!(
+            update_rx.try_recv().is_err(),
+            "a speculative frame was delivered to the consumer"
+        );
+        assert_eq!(
+            service.latest_generation(),
+            generation,
+            "speculation advanced the latest-wins generation"
+        );
+    }
+
+    /// An interactive request throws away everything read-ahead still has
+    /// queued: the playhead has moved and those frames are filling from where
+    /// it used to be.
+    ///
+    /// Gated rather than timed — the worker is held inside `process()` while
+    /// the test queues the interactive request, so the discard happens on a
+    /// sequence the test controls, not on a race it hopes to win.
+    #[test]
+    fn an_interactive_request_discards_the_queued_speculation() {
+        let (gate_tx, gate_rx) = unbounded();
+        let (start_tx, started) = unbounded();
+        let (mut service, update_rx) = spawn_reading_ahead(GatedFrames::new(gate_rx, start_tx), 8);
+
+        let node = NodeId::new(1);
+        let document = frame_document();
+        // Frame 0, released immediately.
+        service.request(frame_request(
+            frame_graph(node),
+            node,
+            0,
+            document.clone(),
+            InvalidationHint::None,
+        ));
+        gate_tx.send(()).unwrap();
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // The worker now has eight speculative frames queued and is blocked
+        // inside the first one — announced, not guessed.
+        assert_eq!(
+            started.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (0, node)
+        );
+        assert_eq!(
+            started.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (1, node)
+        );
+        // The user scrubs. The request is queued *before* the gate is
+        // released, so the worker cannot miss it.
+        service.request(frame_request(
+            frame_graph(node),
+            node,
+            50,
+            document,
+            InvalidationHint::None,
+        ));
+        gate_tx.send(()).unwrap(); // finishes the speculative frame
+        gate_tx.send(()).unwrap(); // frame 50
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.frame, 50);
+
+        // Frames 0 and 1 were finished before the scrub; 50 is the new
+        // position. Everything read-ahead had queued between them was
+        // dropped, and the read-ahead the *new* position starts is held at
+        // its first frame by the (now empty) gate, so this set is stable.
+        assert_eq!(
+            service
+                .frame_cache()
+                .cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2))),
+            vec![0..2, 50..51],
+            "the queued speculation kept running after the playhead moved"
+        );
+    }
+
+    /// A speculative frame **already being evaluated** gives way too, not
+    /// just the ones still queued (`CACHE-9`). Dropping the queue alone would
+    /// still let one expensive frame delay a scrub by its whole cost.
+    ///
+    /// The chain is two nodes so the yield point — immediately before a
+    /// `process()` — falls *between* them: the upstream is held in the gate
+    /// while the interactive request is posted, and the downstream must never
+    /// run. The token accounting is what makes it deterministic: five
+    /// `process()` calls are paid for, and a speculation that did not yield
+    /// would spend one of frame 50's on the abandoned frame and never
+    /// deliver its update.
+    #[test]
+    fn an_in_flight_speculative_frame_gives_way_to_an_interactive_request() {
+        let (gate_tx, gate_rx) = unbounded();
+        let (start_tx, started) = unbounded();
+        let (mut service, update_rx) = spawn_reading_ahead(GatedFrames::new(gate_rx, start_tx), 8);
+
+        let upstream = NodeId::new(1);
+        let downstream = NodeId::new(2);
+        let graph = || {
+            Graph::new()
+                .add_node(Node::new(upstream, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+                .unwrap()
+                .add_node(
+                    Node::new(downstream, "frame")
+                        .with_output("out", DataTypeId::FRAME_BUFFER)
+                        .with_input("in", &[DataTypeId::FRAME_BUFFER]),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    upstream,
+                    OutputPortIndex(0),
+                    downstream,
+                    InputPortIndex(0),
+                )
+                .unwrap()
+        };
+        let document = frame_document();
+
+        service.request(frame_request(
+            graph(),
+            downstream,
+            0,
+            document.clone(),
+            InvalidationHint::None,
+        ));
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(completed_pair(&started), (0, upstream));
+        assert_eq!(completed_pair(&started), (0, downstream));
+
+        // Read-ahead has started frame 1 and is inside the upstream node.
+        assert_eq!(completed_pair(&started), (1, upstream));
+        service.request(frame_request(
+            graph(),
+            downstream,
+            50,
+            document,
+            InvalidationHint::None,
+        ));
+        // One token finishes the upstream; the downstream of frame 1 must
+        // then find the interactive request waiting and yield, leaving both
+        // remaining tokens to frame 50.
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        gate_tx.send(()).unwrap();
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.frame, 50);
+
+        // The abandoned frame reached exactly one `process()` — the yield
+        // sits before the second — and produced no cache entry.
+        assert_eq!(completed_pair(&started), (50, upstream));
+        assert_eq!(completed_pair(&started), (50, downstream));
+        assert_eq!(
+            service
+                .frame_cache()
+                .cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2))),
+            vec![0..1, 50..51],
+            "the abandoned speculative frame was cached anyway"
+        );
+    }
+
+    fn completed_pair(started: &Receiver<(u64, NodeId)>) -> (u64, NodeId) {
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a process() call was expected")
+    }
+
+    /// Emits a frame after waiting on a gate, announcing each `process()` it
+    /// enters, so a test can hold the worker inside an evaluation and know
+    /// exactly where it is.
+    struct GatedFrames {
+        gate: Receiver<()>,
+        started: Sender<(u64, NodeId)>,
+    }
+
+    impl GatedFrames {
+        fn new(gate: Receiver<()>, started: Sender<(u64, NodeId)>) -> Self {
+            Self { gate, started }
+        }
+    }
+
+    impl NodeProcessor for GatedFrames {
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            _scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let _ = self.started.send((ctx.frame, node.id));
+            // A closed gate (the test finished) releases rather than panics:
+            // the worker may still be parked in a speculative frame when the
+            // service is dropped.
+            let _ = self.gate.recv_timeout(Duration::from_secs(5));
+            Ok(Arc::new(crate::types::FrameBuffer::from_f32(
+                2,
+                2,
+                vec![0.25; 2 * 2 * 4],
+            )))
+        }
+    }
+
+    impl EvalWorkerHooks for GatedFrames {
+        fn sync(
+            &mut self,
+            evaluator: &mut ProcessorSync<'_>,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(
+                        node.id,
+                        Arc::new(GatedFrames::new(self.gate.clone(), self.started.clone())),
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- scoped invalidation (`CACHE-7`) -----------------------------------
+
+    /// A composition output that mirrors the shell's real time gate: a layer
+    /// contributes its network's value only at composition frames inside
+    /// `[start_frame, start_frame + duration)`, exactly as
+    /// `ravel_nodes::comp` gates the layer network. That gate is the property
+    /// narrowing rests on, so the stand-in has to have it.
+    struct GatedLayer;
+
+    impl GatedLayer {
+        /// The `value` parameter of the layer's single network node.
+        fn value(layer: &crate::composition::Layer) -> f32 {
+            layer
+                .network
+                .nodes()
+                .find_map(|node| {
+                    node.parameters
+                        .iter()
+                        .find(|param| param.key == "value")
+                        .and_then(|param| match param.value {
+                            ParameterValue::Float(v) => Some(v),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(0.0)
+        }
+    }
+
+    impl NodeProcessor for GatedLayer {
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let document = scope
+                .document()
+                .ok_or_else(|| anyhow::anyhow!("no document"))?;
+            let comp = document
+                .compositions
+                .get(&comp_id())
+                .ok_or_else(|| anyhow::anyhow!("no composition"))?;
+            let frame = ctx.frame as i64;
+            let value: f32 = comp
+                .layers
+                .iter()
+                .filter(|layer| frame >= layer.start_frame && frame < layer.end_frame())
+                .map(Self::value)
+                .sum();
+            Ok(Arc::new(crate::types::FrameBuffer::from_f32(
+                1,
+                1,
+                vec![value; 4],
+            )))
+        }
+    }
+
+    struct GatedHooks;
+
+    impl EvalWorkerHooks for GatedHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ProcessorSync<'_>,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            // The processor reads everything from the document handed to
+            // `process`, so a parameter edit needs no re-registration — the
+            // same shape `rebuild_on_node_change() == false` gives the real
+            // GPU processors.
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(GatedLayer));
+                }
+            }
+        }
+    }
+
+    /// A document whose composition holds one layer at `[2, 5)` carrying
+    /// `value`.
+    fn layered_document(value: f32) -> Arc<Document> {
+        let network = Graph::new().add_node(value_node(100, value)).unwrap();
+        let layer = crate::composition::Layer::new(crate::id::LayerId::new(1), "l", network)
+            .with_time(2, 0, 3);
+        let mut comp = crate::composition::Composition::new(comp_id(), "c", (2, 2), FPS, 100);
+        comp.layers.push_back(layer);
+        let mut document = Document::default();
+        document.compositions.insert(comp_id(), Arc::new(comp));
+        Arc::new(document)
+    }
+
+    /// The criterion that keeps the optimisation honest: narrowing may only
+    /// keep frames whose **picture** is unchanged.
+    ///
+    /// A set-theoretic check ("the drop covers the layer's span") would be
+    /// tautological — it restates the implementation. So this evaluates the
+    /// same edit twice, once through the narrowed frame cache and once
+    /// through a service that has no frame cache at all, and compares the
+    /// pictures frame by frame. A frame the narrowing kept that the layer
+    /// edit actually changed shows up as a difference.
+    #[test]
+    fn a_narrowed_edit_serves_the_same_pictures_as_an_uncached_evaluation() {
+        fn spawn() -> (EvalService, Receiver<EvalUpdate>) {
+            let (tx, rx) = unbounded();
+            (
+                EvalService::spawn(GatedHooks, move |update| {
+                    let _ = tx.send(update);
+                }),
+                rx,
+            )
+        }
+        fn pixel(update: &EvalUpdate) -> f32 {
+            update.results[0]
+                .1
+                .as_ref()
+                .expect("evaluation succeeded")
+                .downcast_ref::<crate::types::FrameBuffer>()
+                .expect("frame buffer")
+                .as_f32()[0]
+        }
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let (mut cached, cached_rx) = spawn();
+        let (mut reference, reference_rx) = spawn();
+
+        let frames = 0..8u64;
+        let post = |service: &mut EvalService,
+                    rx: &Receiver<EvalUpdate>,
+                    frame: u64,
+                    document: Arc<Document>,
+                    hint: InvalidationHint,
+                    frame_cached: bool| {
+            let mut request = frame_request(graph.clone(), node, frame, document, hint);
+            if !frame_cached {
+                // The reference must recompute, and dropping the *frame*
+                // cache alone would not make it: the evaluator's own node
+                // cache still answers, so a stale node result would be
+                // compared against a stale frame and agree. `comp = None`
+                // keeps the frame cache out, and `Structural` resets the
+                // evaluator before every pull, so each reference answer is
+                // computed from an empty cache.
+                request.comp = None;
+                request.hint = InvalidationHint::Structural;
+            }
+            service.request(request);
+            pixel(&rx.recv_timeout(Duration::from_secs(5)).unwrap())
+        };
+
+        // One `Arc` for the whole fill: a fresh document per request would
+        // be a fresh composition `Arc` too, and the diff would drop the
+        // cache on every frame.
+        let original = layered_document(1.0);
+        for frame in frames.clone() {
+            post(
+                &mut cached,
+                &cached_rx,
+                frame,
+                original.clone(),
+                InvalidationHint::None,
+                true,
+            );
+            post(
+                &mut reference,
+                &reference_rx,
+                frame,
+                original.clone(),
+                InvalidationHint::None,
+                false,
+            );
+        }
+
+        // The edit: the layer's parameter, named the way the editor names it.
+        let edited = layered_document(2.0);
+        for frame in frames.clone() {
+            let hint = InvalidationHint::Params(vec![NodeId::new(100)]);
+            let served = post(
+                &mut cached,
+                &cached_rx,
+                frame,
+                edited.clone(),
+                hint.clone(),
+                true,
+            );
+            let fresh = post(
+                &mut reference,
+                &reference_rx,
+                frame,
+                edited.clone(),
+                hint,
+                false,
+            );
+            assert_eq!(
+                served, fresh,
+                "frame {frame}: the narrowed cache served a stale picture"
+            );
+        }
+
+        // And the narrowing did happen: the layer covers `[2, 5)`, padded by
+        // one frame for shutter samples, so frames 0, 6 and 7 were still
+        // answered from the cache. Without this the test would also pass with
+        // narrowing switched off entirely.
+        assert_eq!(
+            cached.frame_cache().stats().hits,
+            3,
+            "the frames outside the edited layer's span were recomputed"
+        );
+    }
+
     /// Cross-cache eviction routing: the frame cache and the node-result
     /// cache share the budget's pots, so an eviction list one of them is
     /// handed can name the other's entries. An id nobody drops leaves the
@@ -1766,11 +2676,7 @@ mod tests {
         });
         let (update_tx, update_rx) = unbounded();
         let mut service = EvalService::spawn_with_budget(
-            FrameHooks {
-                processed: Arc::new(AtomicUsize::new(0)),
-                finalized: Arc::new(AtomicUsize::new(0)),
-                fails_until: 0,
-            },
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
             budget.clone(),
             move |update| {
                 let _ = update_tx.send(update);

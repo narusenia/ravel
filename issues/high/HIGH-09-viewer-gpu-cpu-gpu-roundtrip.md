@@ -7,6 +7,25 @@
 | 領域 | ravel-gpu / frame, ravel-app / Viewer |
 | 該当 | `crates/ravel-gpu/src/frame.rs:134-143`, `crates/ravel-app/src/eval_hooks.rs:121-130`, `crates/ravel-ui/src/panels/viewer.rs`（`ViewerResolution`）, `crates/ravel-app/src/panels/viewer.rs:283-288`, `:1599-1604` |
 
+> **残っているのはゼロコピー表示だけ（2026-08-10 時点）。** この個票が挙げた
+> 4 つの症状のうち 3 つは片付いている。
+>
+> | 症状 | 状態 |
+> |---|---|
+> | UI スレッドでの f32 → BGRA 変換 | ✅ `GPUCOMP-9`（#284）が評価ワーカーへ移した（`HIGH-08` 解決）。さらに #363 で **10.1× 高速化**（rayon + 境界表、`perf-baseline.md`） |
+> | リードバック実装そのもの | ✅ `GPUCOMP-8` を `GPUBK-6`（#282）が回収 |
+> | 解像度上限（`VIEWER_MAX_DIM`） | ✅ `VRES-1`（#300）が定数を撤去し係数モデルへ |
+> | **GPU→CPU→GPU の往復そのもの** | ❌ **未実装。引受先の計画が無い** |
+>
+> `GPUBK-9`（#296）は**判断の単位**で、`gpu-backend-plan.md` の非対象節が
+> 「ゼロコピー表示の実装。`GPUBK-9` で判断し、必要なら別計画」と書いている。
+> **その別計画はまだ書かれていない。** 前提として `MED-GPU-07`（`Cargo.lock`
+> に wgpu が 2 本入っていて GPUI の device を受け取れない）の解消と、
+> GPUI フォークの範囲決めが要る。
+>
+> **着手の判断は #363 の数字で測り直すこと。** CPU 変換が 38ms → 3.7ms に
+> なったので、往復を消して得られる残りの利得は個票を書いた時点より小さい。
+
 ## 現状
 
 GPU 評価されたフレームは毎回

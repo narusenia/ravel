@@ -298,6 +298,28 @@ struct Request {
     generation: u64,
 }
 
+/// The nodes a hint names, or `None` when it names none (`CACHE-7`).
+fn params_of(hint: &InvalidationHint) -> Option<Vec<NodeId>> {
+    match hint {
+        InvalidationHint::Params(ids) => Some(ids.clone()),
+        InvalidationHint::None | InvalidationHint::Structural => None,
+    }
+}
+
+/// Union two coalesced requests' narrowing sets. **Absorbing**, not merging:
+/// one request that named nothing means the document step holds a change no
+/// node list explains, and the frame cache has to fall back to dropping whole
+/// compositions.
+fn merge_narrow(older: Option<Vec<NodeId>>, newer: Option<Vec<NodeId>>) -> Option<Vec<NodeId>> {
+    let (mut older, newer) = (older?, newer?);
+    for id in newer {
+        if !older.contains(&id) {
+            older.push(id);
+        }
+    }
+    Some(older)
+}
+
 /// Handle owned by the UI thread. Dropping it shuts the worker down.
 pub struct EvalService {
     tx: Option<Sender<Request>>,
@@ -377,10 +399,20 @@ impl EvalService {
                     // request, merging hints so skipped rebuilds still occur.
                     let mut req = first_req;
                     let mut coalesced = 0u32;
+                    // The nodes the frame cache may narrow this document step
+                    // to (`CACHE-7`). Tracked beside the merged hint rather
+                    // than read back off it: `InvalidationHint::merge` folds
+                    // `None` into `Params` (documented as "nothing changed",
+                    // but shell edits post it *with* a new document), so a
+                    // merged `Params` cannot tell whether an unexplained edit
+                    // rode along. Narrowing therefore requires that every
+                    // coalesced request named its nodes.
+                    let mut narrow = params_of(&req.inner.hint);
                     while let Ok(newer) = rx.try_recv() {
                         coalesced += 1;
                         let prev_hint = req.inner.hint;
                         req = newer;
+                        narrow = merge_narrow(narrow, params_of(&req.inner.hint));
                         req.inner.hint = prev_hint.merge(std::mem::replace(
                             &mut req.inner.hint,
                             InvalidationHint::None,
@@ -388,6 +420,7 @@ impl EvalService {
                     }
                     if first {
                         req.inner.hint = InvalidationHint::Structural;
+                        narrow = None;
                         first = false;
                     }
                     tracing::debug!(
@@ -424,7 +457,11 @@ impl EvalService {
                         // commits carry `InvalidationHint::None` and rely on
                         // it, so a hint-driven frame cache would serve those
                         // edits a stale picture.
-                        frames.sync_document(cached_document.as_deref(), document);
+                        frames.sync_document(
+                            cached_document.as_deref(),
+                            document,
+                            narrow.as_deref(),
+                        );
                         cached_document = Some(document.clone());
                     }
                     // Only the first target is the composition output, and
@@ -1747,6 +1784,219 @@ mod tests {
             ranges(),
             vec![0..1],
             "the edit left the pre-edit frames in the band"
+        );
+    }
+
+    // ---- scoped invalidation (`CACHE-7`) -----------------------------------
+
+    /// A composition output that mirrors the shell's real time gate: a layer
+    /// contributes its network's value only at composition frames inside
+    /// `[start_frame, start_frame + duration)`, exactly as
+    /// `ravel_nodes::comp` gates the layer network. That gate is the property
+    /// narrowing rests on, so the stand-in has to have it.
+    struct GatedLayer;
+
+    impl GatedLayer {
+        /// The `value` parameter of the layer's single network node.
+        fn value(layer: &crate::composition::Layer) -> f32 {
+            layer
+                .network
+                .nodes()
+                .find_map(|node| {
+                    node.parameters
+                        .iter()
+                        .find(|param| param.key == "value")
+                        .and_then(|param| match param.value {
+                            ParameterValue::Float(v) => Some(v),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(0.0)
+        }
+    }
+
+    impl NodeProcessor for GatedLayer {
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &crate::eval::ResolvedParams,
+            scope: &mut dyn crate::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let document = scope
+                .document()
+                .ok_or_else(|| anyhow::anyhow!("no document"))?;
+            let comp = document
+                .compositions
+                .get(&comp_id())
+                .ok_or_else(|| anyhow::anyhow!("no composition"))?;
+            let frame = ctx.frame as i64;
+            let value: f32 = comp
+                .layers
+                .iter()
+                .filter(|layer| frame >= layer.start_frame && frame < layer.end_frame())
+                .map(Self::value)
+                .sum();
+            Ok(Arc::new(crate::types::FrameBuffer::from_f32(
+                1,
+                1,
+                vec![value; 4],
+            )))
+        }
+    }
+
+    struct GatedHooks;
+
+    impl EvalWorkerHooks for GatedHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ProcessorSync<'_>,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            // The processor reads everything from the document handed to
+            // `process`, so a parameter edit needs no re-registration — the
+            // same shape `rebuild_on_node_change() == false` gives the real
+            // GPU processors.
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(GatedLayer));
+                }
+            }
+        }
+    }
+
+    /// A document whose composition holds one layer at `[2, 5)` carrying
+    /// `value`.
+    fn layered_document(value: f32) -> Arc<Document> {
+        let network = Graph::new().add_node(value_node(100, value)).unwrap();
+        let layer = crate::composition::Layer::new(crate::id::LayerId::new(1), "l", network)
+            .with_time(2, 0, 3);
+        let mut comp = crate::composition::Composition::new(comp_id(), "c", (2, 2), FPS, 100);
+        comp.layers.push_back(layer);
+        let mut document = Document::default();
+        document.compositions.insert(comp_id(), Arc::new(comp));
+        Arc::new(document)
+    }
+
+    /// The criterion that keeps the optimisation honest: narrowing may only
+    /// keep frames whose **picture** is unchanged.
+    ///
+    /// A set-theoretic check ("the drop covers the layer's span") would be
+    /// tautological — it restates the implementation. So this evaluates the
+    /// same edit twice, once through the narrowed frame cache and once
+    /// through a service that has no frame cache at all, and compares the
+    /// pictures frame by frame. A frame the narrowing kept that the layer
+    /// edit actually changed shows up as a difference.
+    #[test]
+    fn a_narrowed_edit_serves_the_same_pictures_as_an_uncached_evaluation() {
+        fn spawn() -> (EvalService, Receiver<EvalUpdate>) {
+            let (tx, rx) = unbounded();
+            (
+                EvalService::spawn(GatedHooks, move |update| {
+                    let _ = tx.send(update);
+                }),
+                rx,
+            )
+        }
+        fn pixel(update: &EvalUpdate) -> f32 {
+            update.results[0]
+                .1
+                .as_ref()
+                .expect("evaluation succeeded")
+                .downcast_ref::<crate::types::FrameBuffer>()
+                .expect("frame buffer")
+                .as_f32()[0]
+        }
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let (mut cached, cached_rx) = spawn();
+        let (mut reference, reference_rx) = spawn();
+
+        let frames = 0..8u64;
+        let post = |service: &mut EvalService,
+                    rx: &Receiver<EvalUpdate>,
+                    frame: u64,
+                    document: Arc<Document>,
+                    hint: InvalidationHint,
+                    frame_cached: bool| {
+            let mut request = frame_request(graph.clone(), node, frame, document, hint);
+            if !frame_cached {
+                // No composition named: the reference never consults the
+                // frame cache, so every one of its answers is freshly
+                // evaluated.
+                request.comp = None;
+            }
+            service.request(request);
+            pixel(&rx.recv_timeout(Duration::from_secs(5)).unwrap())
+        };
+
+        // One `Arc` for the whole fill: a fresh document per request would
+        // be a fresh composition `Arc` too, and the diff would drop the
+        // cache on every frame.
+        let original = layered_document(1.0);
+        for frame in frames.clone() {
+            post(
+                &mut cached,
+                &cached_rx,
+                frame,
+                original.clone(),
+                InvalidationHint::None,
+                true,
+            );
+            post(
+                &mut reference,
+                &reference_rx,
+                frame,
+                original.clone(),
+                InvalidationHint::None,
+                false,
+            );
+        }
+
+        // The edit: the layer's parameter, named the way the editor names it.
+        let edited = layered_document(2.0);
+        for frame in frames.clone() {
+            let hint = InvalidationHint::Params(vec![NodeId::new(100)]);
+            let served = post(
+                &mut cached,
+                &cached_rx,
+                frame,
+                edited.clone(),
+                hint.clone(),
+                true,
+            );
+            let fresh = post(
+                &mut reference,
+                &reference_rx,
+                frame,
+                edited.clone(),
+                hint,
+                false,
+            );
+            assert_eq!(
+                served, fresh,
+                "frame {frame}: the narrowed cache served a stale picture"
+            );
+        }
+
+        // And the narrowing did happen: the layer covers `[2, 5)`, padded by
+        // one frame for shutter samples, so frames 0, 6 and 7 were still
+        // answered from the cache. Without this the test would also pass with
+        // narrowing switched off entirely.
+        assert_eq!(
+            cached.frame_cache().stats().hits,
+            3,
+            "the frames outside the edited layer's span were recomputed"
         );
     }
 

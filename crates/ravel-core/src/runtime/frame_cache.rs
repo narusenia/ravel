@@ -45,27 +45,39 @@
 //!
 //! # Invalidation
 //!
-//! Whole compositions, driven by the same document diff the evaluator uses:
-//! `Document::compositions` holds `Arc<Composition>`, so an untouched
+//! **Which compositions** is driven by the same document diff the evaluator
+//! uses: `Document::compositions` holds `Arc<Composition>`, so an untouched
 //! composition is pointer-equal across snapshots and an edited one is not.
 //! Doing it this way rather than from [`InvalidationHint`] is not a
 //! refinement — many document commits pass `InvalidationHint::None` and rely
 //! on the evaluator's diff, and a hint-driven frame cache would serve those
 //! edits a stale picture.
 //!
-//! Narrowing invalidation to the frames a layer's time range actually covers
-//! is `CACHE-7`. Correctness first.
+//! **Which frames of those compositions** is `CACHE-7`. The document diff has
+//! no idea *what* changed, so on its own it can only drop everything. An
+//! [`InvalidationHint::Params`] does know, and a layer only reaches the
+//! composition output inside its own `[start_frame, start_frame + duration)`
+//! (`comp/mod.rs` gates the layer network on exactly that span, and
+//! `layer.ref` gates on the *target's* span, so a reference cannot widen it).
+//! So when — and only when — every coalesced request carried a `Params` hint
+//! and every named node resolves to an owning layer, the drop is narrowed to
+//! those layers' spans. Anything else keeps the whole-composition drop:
+//! narrowing is an optimisation on top of a safe default, never a
+//! replacement for it. See [`invalidation_plan`].
 //!
 //! [`InvalidationHint`]: super::InvalidationHint
+//! [`InvalidationHint::Params`]: super::InvalidationHint::Params
 
 use crate::cache_budget::{
     CacheKind, Evicted, Reservation, ReservationId, SharedCacheBudget, Tier,
 };
-use crate::composition::Document;
+use crate::composition::validate::{PRECOMP_COMP_ID_PARAM, PRECOMP_TYPE_KEY};
+use crate::composition::{Composition, Document, Layer};
 use crate::eval::{CacheMiss, EvalContext, Precision, TimeKey};
-use crate::id::CompId;
+use crate::graph::{Graph, ParameterValue};
+use crate::id::{CompId, LayerId, NodeId};
 use crate::types::{FrameBuffer, NodeData};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -361,6 +373,27 @@ impl FrameCache {
         debug_assert_eq!(self.used, [0; 3], "frame cache byte accounting drifted");
     }
 
+    /// Drop the frames of `comp` that `spans` (in composition frames) covers.
+    fn invalidate_spans(&mut self, comp: CompId, spans: &[Range<i64>]) {
+        let scale = TimeKey::SUBFRAME_SCALE as i64;
+        let victims: Vec<FrameSlot> = self
+            .entries
+            .keys()
+            .filter(|slot| slot.comp == comp && !slot.time.is_timeless())
+            .filter(|slot| {
+                let ticks = slot.time.ticks();
+                spans.iter().any(|span| {
+                    ticks >= span.start.saturating_mul(scale)
+                        && ticks < span.end.saturating_mul(scale)
+                })
+            })
+            .copied()
+            .collect();
+        for slot in victims {
+            self.drop_slot(&slot);
+        }
+    }
+
     /// Drop the frames the step from `old` to `new` invalidates.
     ///
     /// Reads the same signals [`Evaluator::set_document`] does: media assets
@@ -370,8 +403,14 @@ impl FrameCache {
     /// document the worker ever sees and invalidates nothing — there is no
     /// earlier snapshot the cache could hold frames from.
     ///
+    /// `params` carries the node ids of an [`InvalidationHint::Params`] when
+    /// **every** request the worker coalesced into this step carried one; it
+    /// is what lets [`invalidation_plan`] narrow the drop to the frames those
+    /// nodes' layers reach. `None` keeps the whole-composition drop.
+    ///
     /// [`Evaluator::set_document`]: crate::eval::Evaluator::set_document
-    fn sync_document(&mut self, old: Option<&Document>, new: &Document) {
+    /// [`InvalidationHint::Params`]: super::InvalidationHint::Params
+    fn sync_document(&mut self, old: Option<&Document>, new: &Document, params: Option<&[NodeId]>) {
         let Some(old) = old else {
             return;
         };
@@ -388,8 +427,14 @@ impl FrameCache {
             })
             .map(|(id, _)| *id)
             .collect();
-        for comp in stale {
-            self.invalidate_comp(comp);
+        if stale.is_empty() {
+            return;
+        }
+        for (comp, spans) in invalidation_plan(new, &stale, params) {
+            match spans {
+                Some(spans) => self.invalidate_spans(comp, &spans),
+                None => self.invalidate_comp(comp),
+            }
         }
     }
 
@@ -405,6 +450,256 @@ impl FrameCache {
         self.used[tier_index(entry.tier)] =
             self.used[tier_index(entry.tier)].saturating_sub(entry.bytes);
     }
+}
+
+// ===========================================================================
+// Scoped invalidation (`CACHE-7`)
+// ===========================================================================
+
+/// How much of one composition an edit takes out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Scope {
+    /// Every frame — the `CACHE-5` default, and still what any edit the hint
+    /// cannot account for gets.
+    Whole,
+    /// Only the frames these layers reach.
+    Layers(Vec<LayerId>),
+}
+
+/// Record that `scope` also applies to `comp`, reporting whether that added
+/// anything. [`Scope::Whole`] absorbs; layer sets union.
+fn merge_scope(scopes: &mut HashMap<CompId, Scope>, comp: CompId, scope: Scope) -> bool {
+    match scopes.entry(comp) {
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(scope);
+            true
+        }
+        std::collections::hash_map::Entry::Occupied(mut slot) => match (slot.get_mut(), scope) {
+            (Scope::Whole, _) => false,
+            (held @ Scope::Layers(_), Scope::Whole) => {
+                *held = Scope::Whole;
+                true
+            }
+            (Scope::Layers(held), Scope::Layers(added)) => {
+                let mut changed = false;
+                for id in added {
+                    if !held.contains(&id) {
+                        held.push(id);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+        },
+    }
+}
+
+/// Which frames of which compositions the step that made `stale` invalidates.
+///
+/// `None` in the returned span list means the whole composition. The
+/// narrowing rules, in the order they decide:
+///
+/// 1. **No `params`** (the hint was `None`, `Structural`, or the coalesced
+///    requests disagreed): every stale composition loses everything. This is
+///    `CACHE-5` unchanged, and it is the branch every edit that does not name
+///    its nodes still takes.
+/// 2. **A node that resolves to no layer** — a synthetic node of a compiled
+///    shell graph, or one the document no longer holds — disables narrowing
+///    entirely. The hint is then describing something this function cannot
+///    place, and placing it wrong serves a stale picture.
+/// 3. A stale composition **no named node lives in** also loses everything:
+///    its `Arc` moved for a reason the hint does not explain.
+/// 4. Otherwise the drop is the union of the owning layers' spans, plus the
+///    spans of every layer parented to one of them (a node in a layer's
+///    network can drive that layer's transform channels, which its children
+///    inherit outside the parent's own span).
+///
+/// Then propagation: a composition placed inside another through a `precomp`
+/// node invalidates the **whole span of the layer holding that node**, up the
+/// chain. The child's affected range is deliberately *not* mapped onto the
+/// parent's timeline: no processor implements `precomp` yet, so a mapping
+/// would encode a time relationship nothing in the codebase actually
+/// performs, while the containing layer's own span is a bound the shell's
+/// time gate already guarantees.
+fn invalidation_plan(
+    document: &Document,
+    stale: &[CompId],
+    params: Option<&[NodeId]>,
+) -> Vec<(CompId, Option<Vec<Range<i64>>>)> {
+    let owners = params.and_then(|ids| owning_layers(document, ids));
+    let mut scopes: HashMap<CompId, Scope> = HashMap::new();
+    for &comp in stale {
+        let scope = match &owners {
+            Some(owners) => {
+                let layers: Vec<LayerId> = owners
+                    .iter()
+                    .filter(|(owner, _)| *owner == comp)
+                    .map(|(_, layer)| *layer)
+                    .collect();
+                if layers.is_empty() {
+                    Scope::Whole
+                } else {
+                    Scope::Layers(layers)
+                }
+            }
+            None => Scope::Whole,
+        };
+        merge_scope(&mut scopes, comp, scope);
+    }
+    propagate_to_containers(document, &mut scopes);
+
+    scopes
+        .into_iter()
+        .map(|(comp, scope)| {
+            let spans = match (scope, document.compositions.get(&comp)) {
+                (Scope::Layers(layers), Some(composition)) => affected_spans(composition, &layers),
+                _ => None,
+            };
+            (comp, spans)
+        })
+        .collect()
+}
+
+/// Extend `scopes` up the `precomp` chain: a composition placed inside
+/// another one takes the containing layer's frames with it.
+///
+/// Runs to a fixed point. Scopes only ever grow and each pass that changes
+/// anything adds a composition or a layer, so the bound is reached; it is
+/// stated explicitly rather than relying on
+/// [`validate_precomp_cycles`](crate::composition::validate::validate_precomp_cycles),
+/// because a cache must terminate on documents that never met the validator.
+fn propagate_to_containers(document: &Document, scopes: &mut HashMap<CompId, Scope>) {
+    for _ in 0..document.compositions.len() {
+        let targets: HashSet<CompId> = scopes.keys().copied().collect();
+        let mut changed = false;
+        for (parent, composition) in &document.compositions {
+            let layers: Vec<LayerId> = composition
+                .layers
+                .iter()
+                .filter(|layer| references_any(&layer.network, &targets))
+                .map(|layer| layer.id)
+                .collect();
+            if layers.is_empty() {
+                continue;
+            }
+            changed |= merge_scope(scopes, *parent, Scope::Layers(layers));
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
+/// Whether `network` (subnets included) holds a `precomp` node pointing at
+/// one of `targets`.
+fn references_any(network: &Graph, targets: &HashSet<CompId>) -> bool {
+    network.nodes().any(|node| {
+        if node.type_key == PRECOMP_TYPE_KEY
+            && node
+                .parameters
+                .iter()
+                .find(|param| param.key == PRECOMP_COMP_ID_PARAM)
+                .and_then(|param| match &param.value {
+                    ParameterValue::Int(id) if *id >= 0 => Some(CompId::new(*id as u64)),
+                    _ => None,
+                })
+                .is_some_and(|id| targets.contains(&id))
+        {
+            return true;
+        }
+        node.subnet
+            .as_ref()
+            .is_some_and(|subnet| references_any(subnet, targets))
+    })
+}
+
+/// The `(composition, layer)` pairs owning `ids`, or `None` when any id
+/// belongs to no layer network at all.
+fn owning_layers(document: &Document, ids: &[NodeId]) -> Option<Vec<(CompId, LayerId)>> {
+    let mut owners: Vec<(CompId, LayerId)> = Vec::new();
+    for &id in ids {
+        let mut found = false;
+        for (comp, composition) in &document.compositions {
+            for layer in &composition.layers {
+                if !contains_node(&layer.network, id) {
+                    continue;
+                }
+                found = true;
+                if !owners.contains(&(*comp, layer.id)) {
+                    owners.push((*comp, layer.id));
+                }
+            }
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some(owners)
+}
+
+/// Whether `network` or one of its subnets holds `id`.
+fn contains_node(network: &Graph, id: NodeId) -> bool {
+    network.node(id).is_some()
+        || network
+            .nodes()
+            .filter_map(|node| node.subnet.as_ref())
+            .any(|subnet| contains_node(subnet, id))
+}
+
+/// The composition frames `layers` reach, merged and sorted.
+///
+/// `None` when a named layer is not in the composition, which is the same
+/// "cannot place it" answer as an unresolvable node.
+fn affected_spans(composition: &Composition, layers: &[LayerId]) -> Option<Vec<Range<i64>>> {
+    let mut reached: HashSet<LayerId> = HashSet::new();
+    for id in layers {
+        composition.get_layer(*id)?;
+        reached.insert(*id);
+    }
+    // Transform inheritance: a node inside a layer's network can drive that
+    // layer's transform channels (`ChannelSource::NodeOutput`), and every
+    // layer parented to it inherits the result — at frames the parent's own
+    // span does not cover. The children's spans are therefore part of the
+    // reach.
+    loop {
+        let mut grew = false;
+        for layer in &composition.layers {
+            if let Some(parent) = layer.parent
+                && reached.contains(&parent)
+                && reached.insert(layer.id)
+            {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    let mut spans: Vec<Range<i64>> = composition
+        .layers
+        .iter()
+        .filter(|layer| reached.contains(&layer.id))
+        .map(layer_span)
+        .collect();
+    spans.sort_unstable_by_key(|span| span.start);
+    let mut merged: Vec<Range<i64>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.start <= last.end => last.end = last.end.max(span.end),
+            _ => merged.push(span),
+        }
+    }
+    Some(merged)
+}
+
+/// Composition frames an edit to `layer` can reach.
+///
+/// The layer's own `[start_frame, start_frame + duration)` plus one frame of
+/// slack on each side: motion-blur shutter samples sit between frames, so the
+/// evaluation of the frame next to the span can sample inside it.
+fn layer_span(layer: &Layer) -> Range<i64> {
+    (layer.start_frame - 1)..(layer.end_frame() + 1)
 }
 
 /// The form `value` is stored in for an entry that promises `precision`.
@@ -479,9 +774,16 @@ impl SharedFrameCache {
         self.lock().take_foreign_evictions()
     }
 
-    /// Drop the frames the step from `old` to `new` invalidates.
-    pub(crate) fn sync_document(&self, old: Option<&Document>, new: &Document) {
-        self.lock().sync_document(old, new);
+    /// Drop the frames the step from `old` to `new` invalidates, narrowed to
+    /// the layers `params` names when the worker could establish one
+    /// (`CACHE-7`).
+    pub(crate) fn sync_document(
+        &self,
+        old: Option<&Document>,
+        new: &Document,
+        params: Option<&[NodeId]>,
+    ) {
+        self.lock().sync_document(old, new, params);
     }
 
     /// Drop every frame of `comp`.
@@ -528,9 +830,8 @@ impl std::fmt::Debug for SharedFrameCache {
 mod tests {
     use super::*;
     use crate::cache_budget::{CacheBudgetConfig, CacheKind};
-    use crate::composition::Composition;
     use crate::eval::EvalContext;
-    use crate::id::{DataTypeId, LayerId};
+    use crate::id::DataTypeId;
     use crate::types::{FrameRate, PixelFormat};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -705,7 +1006,7 @@ mod tests {
         ));
         new.compositions.insert(comp_a(), Arc::new(edited));
 
-        cache.sync_document(Some(&old), &new);
+        cache.sync_document(Some(&old), &new, None);
 
         assert_eq!(
             cache.cached_ranges(comp_a(), &ctx(0)),
@@ -719,6 +1020,235 @@ mod tests {
         );
     }
 
+    // ----- scoped invalidation (`CACHE-7`) ---------------------------------
+
+    /// A layer whose network holds `node`, placed at `start` for `duration`
+    /// composition frames.
+    fn timed_layer(layer: u64, node: u64, start: i64, duration: u64) -> crate::composition::Layer {
+        let network = crate::graph::Graph::new()
+            .add_node(crate::graph::Node::new(NodeId::new(node), "test.value"))
+            .expect("node added");
+        crate::composition::Layer::new(LayerId::new(layer), "l", network)
+            .with_time(start, 0, duration)
+    }
+
+    /// A layer holding a `precomp` node that places `target` inside it.
+    fn precomp_layer(
+        layer: u64,
+        node: u64,
+        target: CompId,
+        start: i64,
+        duration: u64,
+    ) -> crate::composition::Layer {
+        let network = crate::graph::Graph::new()
+            .add_node(
+                crate::graph::Node::new(NodeId::new(node), PRECOMP_TYPE_KEY).with_param(
+                    PRECOMP_COMP_ID_PARAM,
+                    ParameterValue::Int(target.raw() as i32),
+                ),
+            )
+            .expect("node added");
+        crate::composition::Layer::new(LayerId::new(layer), "p", network)
+            .with_time(start, 0, duration)
+    }
+
+    fn document_with(comps: &[(CompId, Vec<crate::composition::Layer>)]) -> Document {
+        let mut document = Document::default();
+        for (id, layers) in comps {
+            let mut comp = Composition::new(*id, "c", (4, 4), FPS, 100);
+            for layer in layers {
+                comp.layers.push_back(layer.clone());
+            }
+            document.compositions.insert(*id, Arc::new(comp));
+        }
+        document
+    }
+
+    /// Replace `comp` with a fresh `Arc` — what any edit looks like to the
+    /// document diff.
+    fn touch_comp(document: &Document, comp: CompId) -> Document {
+        let mut next = document.clone();
+        let mut edited = (*next.compositions[&comp]).clone();
+        edited.name = format!("{}!", edited.name);
+        next.compositions.insert(comp, Arc::new(edited));
+        next
+    }
+
+    fn fill(cache: &SharedFrameCache, comp: CompId, frames: Range<u64>) {
+        for frame in frames {
+            cache.insert(comp, CacheIdentity::of_frame(&ctx(frame)), frame_value());
+        }
+    }
+
+    /// The point of the unit: an edit that names its nodes only costs the
+    /// frames the owning layer actually reaches. The span is the layer's
+    /// `[start, start + duration)` with one frame of slack on each side for
+    /// shutter samples, so a layer at `[5, 10)` takes `[4, 11)`.
+    #[test]
+    fn a_layer_edit_drops_its_span_and_leaves_the_rest() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..20);
+
+        let old = document_with(&[(comp_a(), vec![timed_layer(1, 100, 5, 5)])]);
+        let new = touch_comp(&old, comp_a());
+        cache.sync_document(Some(&old), &new, Some(&[NodeId::new(100)]));
+
+        assert_eq!(
+            cache.cached_ranges(comp_a(), &ctx(0)),
+            vec![0..4, 11..20],
+            "the drop did not follow the layer's span"
+        );
+    }
+
+    /// The safe default is unchanged: an edit that names nothing still costs
+    /// the whole composition (`CACHE-5`).
+    #[test]
+    fn an_edit_without_named_nodes_still_drops_the_whole_composition() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..20);
+
+        let old = document_with(&[(comp_a(), vec![timed_layer(1, 100, 5, 5)])]);
+        let new = touch_comp(&old, comp_a());
+        cache.sync_document(Some(&old), &new, None);
+
+        assert_eq!(cache.stats().entries, 0);
+    }
+
+    /// A node the document cannot place — a synthetic node of a compiled
+    /// shell graph, say — disables narrowing rather than narrowing wrongly.
+    #[test]
+    fn a_node_that_belongs_to_no_layer_disables_narrowing() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..20);
+
+        let old = document_with(&[(comp_a(), vec![timed_layer(1, 100, 5, 5)])]);
+        let new = touch_comp(&old, comp_a());
+        cache.sync_document(Some(&old), &new, Some(&[NodeId::new(999)]));
+
+        assert_eq!(cache.stats().entries, 0, "an unplaceable node narrowed");
+    }
+
+    /// A composition whose `Arc` moved for a reason none of the named nodes
+    /// explains keeps nothing: the hint describes an edit somewhere else.
+    #[test]
+    fn a_stale_composition_the_hint_does_not_explain_loses_everything() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..20);
+        fill(&cache, comp_b(), 0..20);
+
+        let old = document_with(&[
+            (comp_a(), vec![timed_layer(1, 100, 5, 5)]),
+            (comp_b(), vec![timed_layer(2, 200, 5, 5)]),
+        ]);
+        // Both compositions changed, but only A's node is named.
+        let new = touch_comp(&touch_comp(&old, comp_a()), comp_b());
+        cache.sync_document(Some(&old), &new, Some(&[NodeId::new(100)]));
+
+        assert_eq!(cache.cached_ranges(comp_a(), &ctx(0)), vec![0..4, 11..20]);
+        assert_eq!(
+            cache.cached_ranges(comp_b(), &ctx(0)),
+            Vec::<Range<u64>>::new(),
+            "the unexplained composition kept frames"
+        );
+    }
+
+    /// Transform inheritance: a node in a layer's network can drive that
+    /// layer's transform channels, and a child layer inherits the result at
+    /// frames the parent's own span never covers.
+    #[test]
+    fn a_parented_child_extends_the_edited_layers_span() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..30);
+
+        let child = timed_layer(2, 200, 20, 5).with_parent(LayerId::new(1));
+        let old = document_with(&[(comp_a(), vec![timed_layer(1, 100, 5, 5), child])]);
+        let new = touch_comp(&old, comp_a());
+        cache.sync_document(Some(&old), &new, Some(&[NodeId::new(100)]));
+
+        assert_eq!(
+            cache.cached_ranges(comp_a(), &ctx(0)),
+            vec![0..4, 11..19, 26..30],
+            "the child layer's span survived its parent's edit"
+        );
+    }
+
+    /// Propagation through `precomp`: editing a composition placed inside
+    /// another one costs the container the frames of the layer holding it.
+    /// The parent is not in the document diff at all — its own `Arc` never
+    /// moved — so without this the container serves a pre-edit picture.
+    #[test]
+    fn an_edit_inside_a_precomp_reaches_the_containing_layers_span() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..30);
+        fill(&cache, comp_b(), 0..30);
+
+        let old = document_with(&[
+            // A contains B through a layer at [20, 25).
+            (comp_a(), vec![precomp_layer(1, 100, comp_b(), 20, 5)]),
+            (comp_b(), vec![timed_layer(2, 200, 0, 10)]),
+        ]);
+        let new = touch_comp(&old, comp_b());
+        cache.sync_document(Some(&old), &new, Some(&[NodeId::new(200)]));
+
+        assert_eq!(
+            cache.cached_ranges(comp_b(), &ctx(0)),
+            vec![11..30],
+            "the edited composition kept frames inside the layer's span"
+        );
+        assert_eq!(
+            cache.cached_ranges(comp_a(), &ctx(0)),
+            vec![0..19, 26..30],
+            "the containing composition was not invalidated"
+        );
+    }
+
+    /// The same propagation with no narrowing available: the container still
+    /// loses only the span of the layer holding the child, because that span
+    /// is the only place the child can reach.
+    #[test]
+    fn a_precomp_container_is_invalidated_even_without_a_hint() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..30);
+
+        let old = document_with(&[
+            (comp_a(), vec![precomp_layer(1, 100, comp_b(), 20, 5)]),
+            (comp_b(), vec![timed_layer(2, 200, 0, 10)]),
+        ]);
+        let new = touch_comp(&old, comp_b());
+        cache.sync_document(Some(&old), &new, None);
+
+        assert_eq!(cache.cached_ranges(comp_a(), &ctx(0)), vec![0..19, 26..30]);
+    }
+
+    /// A composition switch moves no `Arc`, so the band survives it — the
+    /// property `CACHE-5` records and `CACHE-7` must not break, since a
+    /// switch arrives as a `Structural` hint with no narrowing.
+    #[test]
+    fn an_unchanged_document_drops_nothing() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..5);
+        let document = document_with(&[(comp_a(), vec![timed_layer(1, 100, 0, 5)])]);
+        cache.sync_document(Some(&document), &document.clone(), None);
+        assert_eq!(cache.stats().entries, 5);
+    }
+
+    /// Cycles are the validator's job, not the cache's: propagation must
+    /// still terminate on a document that never met it.
+    #[test]
+    fn a_precomp_cycle_does_not_hang_propagation() {
+        let cache = SharedFrameCache::new(None);
+        fill(&cache, comp_a(), 0..5);
+        fill(&cache, comp_b(), 0..5);
+
+        let old = document_with(&[
+            (comp_a(), vec![precomp_layer(1, 100, comp_b(), 0, 5)]),
+            (comp_b(), vec![precomp_layer(2, 200, comp_a(), 0, 5)]),
+        ]);
+        let new = touch_comp(&old, comp_a());
+        cache.sync_document(Some(&old), &new, None);
+        assert_eq!(cache.stats().entries, 0);
+    }
+
     #[test]
     fn a_media_asset_change_clears_everything() {
         let cache = SharedFrameCache::new(None);
@@ -730,7 +1260,7 @@ mod tests {
             "a".into(),
             crate::composition::MediaAssetEntry::from_absolute("/tmp/clip.mov"),
         );
-        cache.sync_document(Some(&old), &new);
+        cache.sync_document(Some(&old), &new, None);
         assert_eq!(cache.stats().entries, 0);
     }
 
@@ -738,7 +1268,7 @@ mod tests {
     fn the_first_document_invalidates_nothing() {
         let cache = SharedFrameCache::new(None);
         cache.insert(comp_a(), CacheIdentity::of_frame(&ctx(0)), frame_value());
-        cache.sync_document(None, &document(&[comp_a()]));
+        cache.sync_document(None, &document(&[comp_a()]), None);
         assert_eq!(cache.stats().entries, 1);
     }
 

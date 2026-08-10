@@ -1,5 +1,15 @@
 # [HIGH-32] 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる
 
+**解決済み**: #378（2026-08-11）。u8/u16 の厳密 transfer LUT、float 経路の rayon 行分割、
+decoder 経路の一致テストと 1080p 交互測定を実施した。HIGH-17 のスケーラキャッシュと
+出力バッファプールは対象外のまま。
+
+**追補（2026-08-11）**: PQ の残余コストは transfer ではなく、Rec.2020 → Rec.709 の
+primaries 行列を画素ごとに構築していたことが真因だった。3 種の Primaries の 9 組を
+`LazyLock` の表として一度だけ構築し、`invert` の 3×3 固定計算から `Vec` のヒープ確保も
+除去した。修正前の Rec.2020 → Rec.709 の結果はビット列でテストに固定し、同じ
+`measure_ingest_transfer_cost` を再実行して PQ の整数経路も更新した。
+
 | 項目 | 内容 |
 | --- | --- |
 | 深刻度 | high |
@@ -90,7 +100,7 @@ Apple M 系 / macOS、loadavg 6〜19、3 ラウンド）:
 
 ## 関連
 
-- [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) — 同じ関数。
+- [HIGH-17](../high/HIGH-17-sws-scaler-recreated-per-frame.md) — 同じ関数。
   スケーラ再生成と per-pixel ループ。**同時に直すのが自然**
 - [HIGH-16](../closed/HIGH-16-no-decoded-frame-cache.md) — 解決済み。
   順再生では効かないので本件を隠さない

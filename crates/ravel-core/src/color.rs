@@ -19,10 +19,12 @@
 //! # Purity
 //!
 //! This module performs no I/O. [`CubeLut::parse`] takes the file's text, not
-//! its path — the caller reads the file. The one piece of state is
-//! [`to_display_rgba8`]'s lazily built boundary table, which is a memo of a
-//! pure function of compile-time constants: it changes no answer, only how
-//! long the answer takes.
+//! its path — the caller reads the file. The four pieces of state are lazily
+//! built tables (`DISPLAY_CODE_THRESHOLDS`, `PRIMARIES_MATRICES`,
+//! `INGEST_U8_TABLES`, and `INGEST_U16_TABLES`), all memos of pure functions
+//! of compile-time constants: they change no answer, only how long the first
+//! call takes. The u16 ingest tables retain about 1 MiB of resident heap
+//! storage.
 //!
 //! # Out-of-domain values
 //!
@@ -37,10 +39,8 @@
 //!
 //! [`Primaries::rgb_to_xyz`] carries each set's native white point (D65 for
 //! Rec.709 and Rec.2020, ACES white for AP1), and [`primaries_matrix`]
-//! composes them without a chromatic adaptation transform. Every conversion
-//! Ravel performs today is Rec.709 → Rec.709, where the matrix is the
-//! identity and the question does not arise; the Bradford adaptation a real
-//! AP1 conversion needs arrives with OCIO in `CM-7`.
+//! composes them without a chromatic adaptation transform. The Bradford
+//! adaptation a real AP1 conversion needs arrives with OCIO in `CM-7`.
 
 // ===========================================================================
 // Transfer
@@ -260,18 +260,38 @@ impl Primaries {
 
 /// The matrix converting linear RGB in `from` to linear RGB in `to`.
 ///
-/// The identity when the two agree — the only case the shipped pipeline
-/// reaches, since the working space and every display Ravel targets today
-/// are Rec.709.
+/// The identity when the two agree. The three supported primary sets have
+/// only nine ordered pairs, so the matrices are built once on first use and
+/// then copied from a [`std::sync::LazyLock`] table. Keeping the public
+/// function pure and unchanged lets every pixel call site share the same
+/// cached result.
 pub fn primaries_matrix(from: Primaries, to: Primaries) -> Mat3 {
+    PRIMARIES_MATRICES[primaries_index(from)][primaries_index(to)]
+}
+
+/// The 3×3 identity.
+pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+fn primaries_index(primaries: Primaries) -> usize {
+    match primaries {
+        Primaries::Rec709 => 0,
+        Primaries::Rec2020 => 1,
+        Primaries::ApOne => 2,
+    }
+}
+
+fn build_primaries_matrix(from: Primaries, to: Primaries) -> Mat3 {
     if from == to {
         return IDENTITY;
     }
     multiply(to.xyz_to_rgb(), from.rgb_to_xyz())
 }
 
-/// The 3×3 identity.
-pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+static PRIMARIES_MATRICES: std::sync::LazyLock<[[Mat3; 3]; 3]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|from| {
+        std::array::from_fn(|to| build_primaries_matrix(Primaries::ALL[from], Primaries::ALL[to]))
+    })
+});
 
 /// `a × b`.
 pub fn multiply(a: Mat3, b: Mat3) -> Mat3 {
@@ -293,11 +313,29 @@ pub fn apply(m: Mat3, v: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// Rotate already-linear RGB between two primary sets.
+fn convert_linear_primaries(rgb: [f32; 3], from: Primaries, to: Primaries) -> [f32; 3] {
+    if from == to {
+        return rgb;
+    }
+    let m = primaries_matrix(from, to);
+    let v = apply(m, [f64::from(rgb[0]), f64::from(rgb[1]), f64::from(rgb[2])]);
+    [v[0] as f32, v[1] as f32, v[2] as f32]
+}
+
 /// The inverse of `m`, or `None` when it is singular.
 pub fn invert(m: Mat3) -> Option<Mat3> {
     let cofactor = |r: usize, c: usize| {
-        let rows: Vec<usize> = (0..3).filter(|&i| i != r).collect();
-        let cols: Vec<usize> = (0..3).filter(|&i| i != c).collect();
+        let rows = match r {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
+        let cols = match c {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
         let minor =
             m[rows[0]][cols[0]] * m[rows[1]][cols[1]] - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
         if (r + c).is_multiple_of(2) {
@@ -438,20 +476,7 @@ pub fn convert(rgb: [f32; 3], from: ColorSpace, to: ColorSpace) -> [f32; 3] {
         return rgb;
     }
     let linear = from.to_linear(rgb);
-    let rotated = if from.primaries == to.primaries {
-        linear
-    } else {
-        let m = primaries_matrix(from.primaries, to.primaries);
-        let v = apply(
-            m,
-            [
-                f64::from(linear[0]),
-                f64::from(linear[1]),
-                f64::from(linear[2]),
-            ],
-        );
-        [v[0] as f32, v[1] as f32, v[2] as f32]
-    };
+    let rotated = convert_linear_primaries(linear, from.primaries, to.primaries);
     to.from_linear(rotated)
 }
 
@@ -556,6 +581,56 @@ static DISPLAY_CODE_THRESHOLDS: std::sync::LazyLock<[f32; 255]> = std::sync::Laz
     })
 });
 
+/// Exact ingest tables for quantised samples.
+///
+/// The key is [`Transfer`], rather than [`ColorSpace`]. Primaries are a
+/// separate axis: [`convert`] decodes the transfer first and then applies the
+/// primary matrix. Sharing one table among all three primary sets therefore
+/// preserves the exact `convert()` result while avoiding twelve duplicate
+/// tables.
+///
+/// Each entry is built by the same `f32` normalisation and
+/// [`Transfer::decode`] call that the old per-sample path used. The table is
+/// exact, not an approximation: quantised input has only a finite set of
+/// possible values. The four u8 tables occupy 4 KiB; the four u16 tables
+/// occupy 1 MiB.
+static INGEST_U8_TABLES: std::sync::LazyLock<[[f32; 256]; 4]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|transfer| {
+        std::array::from_fn(|code| {
+            let value = f32::from(code as u8) / 255.0;
+            Transfer::ALL[transfer].decode(value)
+        })
+    })
+});
+
+static INGEST_U16_TABLES: std::sync::LazyLock<[Vec<f32>; 4]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|transfer| {
+        (0..=u16::MAX)
+            .map(|code| {
+                let value = f32::from(code) / 65_535.0;
+                Transfer::ALL[transfer].decode(value)
+            })
+            .collect()
+    })
+});
+
+fn transfer_index(transfer: Transfer) -> usize {
+    match transfer {
+        Transfer::Linear => 0,
+        Transfer::Srgb => 1,
+        Transfer::Rec709 => 2,
+        Transfer::Pq => 3,
+    }
+}
+
+fn ingest_u8_linear(code: u8, transfer: Transfer) -> f32 {
+    INGEST_U8_TABLES[transfer_index(transfer)][code as usize]
+}
+
+fn ingest_u16_linear(code: u16, transfer: Transfer) -> f32 {
+    INGEST_U16_TABLES[transfer_index(transfer)][code as usize]
+}
+
 /// One linear colour channel → its display code.
 ///
 /// `partition_point` counts the boundaries at or below `linear`, which *is*
@@ -595,11 +670,15 @@ pub fn quantize_u16(value: f32) -> u16 {
 /// it through one would change what "half covered" means.
 pub fn ingest_rgba8(rgba: [u8; 4], input: ColorSpace) -> [f32; 4] {
     let norm = |b: u8| f32::from(b) / 255.0;
-    let rgb = convert(
-        [norm(rgba[0]), norm(rgba[1]), norm(rgba[2])],
-        input,
-        ColorSpace::WORKING,
-    );
+    if input == ColorSpace::WORKING {
+        return [norm(rgba[0]), norm(rgba[1]), norm(rgba[2]), norm(rgba[3])];
+    }
+    let linear = [
+        ingest_u8_linear(rgba[0], input.transfer),
+        ingest_u8_linear(rgba[1], input.transfer),
+        ingest_u8_linear(rgba[2], input.transfer),
+    ];
+    let rgb = convert_linear_primaries(linear, input.primaries, ColorSpace::WORKING.primaries);
     [rgb[0], rgb[1], rgb[2], norm(rgba[3])]
 }
 
@@ -610,11 +689,15 @@ pub fn ingest_rgba8(rgba: [u8; 4], input: ColorSpace) -> [f32; 4] {
 /// same step. Alpha is coverage and is only normalised.
 pub fn ingest_rgba16(rgba: [u16; 4], input: ColorSpace) -> [f32; 4] {
     let norm = |s: u16| f32::from(s) / 65535.0;
-    let rgb = convert(
-        [norm(rgba[0]), norm(rgba[1]), norm(rgba[2])],
-        input,
-        ColorSpace::WORKING,
-    );
+    if input == ColorSpace::WORKING {
+        return [norm(rgba[0]), norm(rgba[1]), norm(rgba[2]), norm(rgba[3])];
+    }
+    let linear = [
+        ingest_u16_linear(rgba[0], input.transfer),
+        ingest_u16_linear(rgba[1], input.transfer),
+        ingest_u16_linear(rgba[2], input.transfer),
+    ];
+    let rgb = convert_linear_primaries(linear, input.primaries, ColorSpace::WORKING.primaries);
     [rgb[0], rgb[1], rgb[2], norm(rgba[3])]
 }
 
@@ -1070,6 +1153,22 @@ mod tests {
         }
     }
 
+    /// The bit pattern is captured from the pre-cache implementation. This
+    /// pins the Rec.2020 → Rec.709 result while allowing the matrix lookup
+    /// implementation to change underneath it.
+    #[test]
+    fn rec2020_to_rec709_matches_the_legacy_matrix_result_exactly() {
+        let converted = convert(
+            [0.25, 0.5, 0.75],
+            ColorSpace::new(Primaries::Rec2020, Transfer::Linear),
+            ColorSpace::LINEAR_REC709,
+        );
+        assert_eq!(
+            converted.map(f32::to_bits),
+            [1_032_357_772, 1_057_451_991, 1_061_733_030]
+        );
+    }
+
     /// CM-1: quantisation at the boundaries and the midpoint.
     #[test]
     fn quantisation_boundaries() {
@@ -1155,6 +1254,83 @@ mod tests {
         let half_step = ingest_rgba16([128 * 257 + 128, 0, 0, 65535], ColorSpace::LINEAR_REC709)[0];
         assert!(half_step > lower, "{lower} -> {half_step}");
         assert!(half_step - lower < 1.0 / 255.0, "{lower} -> {half_step}");
+    }
+
+    /// Quantised ingest is a table lookup, but it must remain exactly the
+    /// same operation as `convert` for every transfer and every primary set.
+    #[test]
+    fn ingest_u8_lut_reproduces_convert_for_every_code() {
+        for primaries in Primaries::ALL {
+            for transfer in Transfer::ALL {
+                let input = ColorSpace::new(primaries, transfer);
+                let codes = [12, 34, 56, 78];
+                let normalized = codes.map(|code| f32::from(code) / 255.0);
+                let expected = convert(
+                    [normalized[0], normalized[1], normalized[2]],
+                    input,
+                    ColorSpace::WORKING,
+                );
+                assert_eq!(
+                    ingest_rgba8(codes, input),
+                    [expected[0], expected[1], expected[2], normalized[3]],
+                    "{input:?}, distinct channel codes"
+                );
+                for code in 0..=u8::MAX {
+                    let normalized = f32::from(code) / 255.0;
+                    let expected = convert([normalized; 3], input, ColorSpace::WORKING);
+                    assert_eq!(
+                        ingest_rgba8([code; 4], input),
+                        [expected[0], expected[1], expected[2], normalized],
+                        "{input:?}, code {code}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The u16 table has the same exactness guarantee as the u8 table. Keep
+    /// the full 65,536-code sweep here so a tempting interpolation or reduced
+    /// table cannot silently replace it later.
+    #[test]
+    fn ingest_u16_lut_reproduces_convert_for_every_code() {
+        for primaries in Primaries::ALL {
+            for transfer in Transfer::ALL {
+                let input = ColorSpace::new(primaries, transfer);
+                let codes = [1234, 23456, 45678, 56789];
+                let normalized = codes.map(|code| f32::from(code) / 65535.0);
+                let expected = convert(
+                    [normalized[0], normalized[1], normalized[2]],
+                    input,
+                    ColorSpace::WORKING,
+                );
+                assert_eq!(
+                    ingest_rgba16(codes, input),
+                    [expected[0], expected[1], expected[2], normalized[3]],
+                    "{input:?}, distinct channel codes"
+                );
+                for code in 0..=u16::MAX {
+                    let normalized = f32::from(code) / 65535.0;
+                    let expected = convert([normalized; 3], input, ColorSpace::WORKING);
+                    assert_eq!(
+                        ingest_rgba16([code; 4], input),
+                        [expected[0], expected[1], expected[2], normalized],
+                        "{input:?}, code {code}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn working_ingest_is_normalisation_only() {
+        assert_eq!(
+            ingest_rgba8([0, 127, 128, 255], ColorSpace::WORKING),
+            [0.0, 127.0 / 255.0, 128.0 / 255.0, 1.0]
+        );
+        assert_eq!(
+            ingest_rgba16([0, 32_767, 32_768, 65_535], ColorSpace::WORKING),
+            [0.0, 32_767.0 / 65_535.0, 32_768.0 / 65_535.0, 1.0]
+        );
     }
 
     /// The float ingest removes the transfer function but never clamps:

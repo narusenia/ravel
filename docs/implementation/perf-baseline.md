@@ -1515,3 +1515,46 @@ cargo test -p ravel-app --release --test viewer_roundtrip \
 効かない**ので、上積みされることはあっても差し引かれることはない。
 よって計画を凍結する条件（得が 0.835 ms を下回る）は満たされず、
 **`ZC-2` 以降へ進む**。
+
+## 線形 ingest の transfer LUT / float 行分割（`HIGH-32`）
+
+計測日: 2026-08-11。環境: Apple M 系 / arm64 / macOS 26.3 (25D125) /
+`--release`。1080p (1920×1080) の合成フレームを decoder の ingest ループへ
+渡し、旧経路（画素ごとの `convert`）と新経路（u8/u16 は厳密 LUT、float は
+rayon の行分割）を 1 ラウンド内で交互に測った。`ColorSpace::REC2020_PQ` は
+PQ transfer に加えて Rec.2020 → Rec.709 の primaries 行列も含む。
+
+PQ の残余コストを調査した結果、transfer ではなく、`convert_linear_primaries`
+が画素ごとに primaries 行列を構築し、`invert` 内で `Vec` を確保していたことが
+原因だった。3 種の Primaries の 9 組を `LazyLock` の表にして初回だけ構築し、
+`invert` の 3×3 小行列抽出も固定長配列にした。API と計算順序は維持し、行列表は
+計時前に warm up して初期化コストを除外した。
+
+測定前の `uptime`:
+
+```text
+5:56  up 55 days, 19:05, 2 users, load averages: 3.96 3.90 4.46
+```
+
+測定条件は 3 ラウンド、各ラウンドで各色空間について旧/新を交互に 1 回ずつ、
+各経路・色空間あたり実行回数 3 回。LUT と primaries 行列 9 組は計時前に warm up
+した。表は harness の 3 回合計を 3 で割った 1 フレームあたり平均（ms）。
+
+| 入力色空間 | RGBA8 旧 → 新 | RGBA64 旧 → 新 | float RGBA 旧 → 新 |
+|---|---:|---:|---:|
+| sRGB | 133.076 → **18.710** | 133.380 → **24.781** | 130.815 → **29.782** |
+| Rec709 | 134.769 → **18.620** | 131.808 → **22.525** | 125.682 → **26.552** |
+| PQ (`REC2020_PQ`) | 300.120 → **21.634** | 293.993 → **26.870** | 291.481 → **57.440** |
+| Linear (`WORKING`) | 21.308 → **18.833** | 26.064 → **20.625** | 29.344 → **10.012** |
+
+再現コマンド（この順で実行）:
+
+```bash
+uptime
+cargo test -p ravel-media --features ffmpeg --release measure_ingest_transfer_cost -- --ignored --nocapture
+```
+
+ハーネスは `crates/ravel-media/src/decoder.rs` の
+`measure_ingest_transfer_cost`。旧経路をローカルに再現し、同じ入力フレームを
+新経路と交互に処理するため、スケーラ生成・HIGH-17 の出力バッファプールは
+この測定に含めていない。

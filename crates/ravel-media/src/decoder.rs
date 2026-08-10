@@ -31,6 +31,7 @@ use ffmpeg_the_third::util::color;
 use ffmpeg_the_third::util::format::pixel::Pixel as PixelFormat;
 use ffmpeg_the_third::util::format::sample::Sample as SampleFormat;
 use ffmpeg_the_third::util::frame;
+use rayon::prelude::*;
 use tracing::{debug, warn};
 
 use crate::audio_sample::{self, SampleEncoding};
@@ -1151,7 +1152,9 @@ fn read_float_rgb_frame(
 ) -> MediaResult<FrameBuffer> {
     let (width, height) = (frame.width(), frame.height());
     let pixel_count = (width * height) as usize;
-    let mut f32_data = Vec::with_capacity(pixel_count * 4);
+    let row_len = width as usize * 4;
+    debug_assert!(row_len > 0, "float ingest requires a non-zero row width");
+    let mut f32_data = vec![0.0f32; pixel_count * 4];
 
     match layout {
         FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
@@ -1162,36 +1165,42 @@ fn read_float_rgb_frame(
                 FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
                 _ => None,
             };
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    let rgb = [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
-                    let a = alpha.map_or(1.0, |(data, stride)| {
-                        layout.sample(data, y * stride + x * 4)
-                    });
-                    f32_data.extend_from_slice(&ingest_rgbaf32(
-                        [rgb[0], rgb[1], rgb[2], a],
-                        input_color_space,
-                    ));
-                }
-            }
+            f32_data
+                .par_chunks_exact_mut(row_len)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    for x in 0..width as usize {
+                        let rgb =
+                            [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
+                        let a = alpha.map_or(1.0, |(data, stride)| {
+                            layout.sample(data, y * stride + x * 4)
+                        });
+                        let pixel = ingest_rgbaf32([rgb[0], rgb[1], rgb[2], a], input_color_space);
+                        out_row[x * 4..x * 4 + 4].copy_from_slice(&pixel);
+                    }
+                });
         }
         FloatRgbLayout::Packed { .. } => {
             let data = frame.data(0);
             let stride = frame.stride(0);
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    let offset = y * stride + x * 16;
-                    f32_data.extend_from_slice(&ingest_rgbaf32(
-                        [
-                            layout.sample(data, offset),
-                            layout.sample(data, offset + 4),
-                            layout.sample(data, offset + 8),
-                            layout.sample(data, offset + 12),
-                        ],
-                        input_color_space,
-                    ));
-                }
-            }
+            f32_data
+                .par_chunks_exact_mut(row_len)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    for x in 0..width as usize {
+                        let offset = y * stride + x * 16;
+                        let pixel = ingest_rgbaf32(
+                            [
+                                layout.sample(data, offset),
+                                layout.sample(data, offset + 4),
+                                layout.sample(data, offset + 8),
+                                layout.sample(data, offset + 12),
+                            ],
+                            input_color_space,
+                        );
+                        out_row[x * 4..x * 4 + 4].copy_from_slice(&pixel);
+                    }
+                });
         }
     }
 
@@ -1441,5 +1450,350 @@ mod tests {
     fn init_ffmpeg_is_idempotent() {
         init_ffmpeg();
         init_ffmpeg();
+    }
+
+    /// Reconstruct the pre-LUT u8 ingest loop for the measurement harness.
+    fn serial_framebuffer_from_rgba8(
+        frame: &frame::Video,
+        input_color_space: ColorSpace,
+    ) -> FrameBuffer {
+        let (width, height) = (frame.width(), frame.height());
+        let stride = frame.stride(0);
+        let data = frame.data(0);
+        let mut f32_data = Vec::with_capacity((width * height * 4) as usize);
+
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            for x in 0..width as usize {
+                let offset = row_start + x * 4;
+                let norm = |value: u8| f32::from(value) / 255.0;
+                let rgb = ravel_core::color::convert(
+                    [
+                        norm(data[offset]),
+                        norm(data[offset + 1]),
+                        norm(data[offset + 2]),
+                    ],
+                    input_color_space,
+                    ColorSpace::WORKING,
+                );
+                f32_data.extend_from_slice(&[rgb[0], rgb[1], rgb[2], norm(data[offset + 3])]);
+            }
+        }
+
+        FrameBuffer::from_f32(width, height, f32_data)
+    }
+
+    /// Reconstruct the pre-LUT u16 ingest loop for the measurement harness.
+    fn serial_framebuffer_from_rgba64(
+        frame: &frame::Video,
+        input_color_space: ColorSpace,
+    ) -> FrameBuffer {
+        let (width, height) = (frame.width(), frame.height());
+        let stride = frame.stride(0);
+        let data = frame.data(0);
+        let mut f32_data = Vec::with_capacity((width * height * 4) as usize);
+        let lane = |offset: usize| u16::from_ne_bytes([data[offset], data[offset + 1]]);
+
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            for x in 0..width as usize {
+                let offset = row_start + x * 8;
+                let norm = |value: u16| f32::from(value) / 65_535.0;
+                let rgb = ravel_core::color::convert(
+                    [
+                        norm(lane(offset)),
+                        norm(lane(offset + 2)),
+                        norm(lane(offset + 4)),
+                    ],
+                    input_color_space,
+                    ColorSpace::WORKING,
+                );
+                f32_data.extend_from_slice(&[rgb[0], rgb[1], rgb[2], norm(lane(offset + 6))]);
+            }
+        }
+
+        FrameBuffer::from_f32(width, height, f32_data)
+    }
+
+    /// Reconstruct the pre-rayon float ingest loop for the measurement
+    /// harness and for an exact output comparison with the parallel path.
+    fn serial_read_float_rgb_frame(
+        frame: &frame::Video,
+        layout: FloatRgbLayout,
+        input_color_space: ColorSpace,
+    ) -> FrameBuffer {
+        let (width, height) = (frame.width(), frame.height());
+        let mut f32_data = Vec::with_capacity((width * height * 4) as usize);
+
+        match layout {
+            FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
+                let planes = [frame.data(2), frame.data(0), frame.data(1)];
+                let strides = [frame.stride(2), frame.stride(0), frame.stride(1)];
+                let alpha = match layout {
+                    FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
+                    _ => None,
+                };
+                for y in 0..height as usize {
+                    for x in 0..width as usize {
+                        let rgb =
+                            [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
+                        let a = alpha.map_or(1.0, |(data, stride)| {
+                            layout.sample(data, y * stride + x * 4)
+                        });
+                        let converted =
+                            ravel_core::color::convert(rgb, input_color_space, ColorSpace::WORKING);
+                        f32_data.extend_from_slice(&[converted[0], converted[1], converted[2], a]);
+                    }
+                }
+            }
+            FloatRgbLayout::Packed { .. } => {
+                let data = frame.data(0);
+                let stride = frame.stride(0);
+                for y in 0..height as usize {
+                    for x in 0..width as usize {
+                        let offset = y * stride + x * 16;
+                        let rgb = [
+                            layout.sample(data, offset),
+                            layout.sample(data, offset + 4),
+                            layout.sample(data, offset + 8),
+                        ];
+                        let converted =
+                            ravel_core::color::convert(rgb, input_color_space, ColorSpace::WORKING);
+                        f32_data.extend_from_slice(&[
+                            converted[0],
+                            converted[1],
+                            converted[2],
+                            layout.sample(data, offset + 12),
+                        ]);
+                    }
+                }
+            }
+        }
+
+        FrameBuffer::from_f32(width, height, f32_data)
+    }
+
+    #[test]
+    fn integer_decoder_ingest_paths_use_the_core_ingest_results() {
+        let mut rgba8 = frame::Video::new(PixelFormat::RGBA, 1, 1);
+        rgba8.data_mut(0)[..4].copy_from_slice(&[128, 64, 32, 255]);
+        let actual = framebuffer_from_rgba8(&rgba8, ColorSpace::SRGB);
+        let expected = ravel_core::color::ingest_rgba8([128, 64, 32, 255], ColorSpace::SRGB);
+        assert_eq!(actual.as_f32().as_ref(), expected.as_slice());
+
+        let mut rgba64 = frame::Video::new(DEEP_OUTPUT, 1, 1);
+        let data = rgba64.data_mut(0);
+        for (offset, value) in [32_768u16, 16_384, 8_192, 65_535].into_iter().enumerate() {
+            data[offset * 2..offset * 2 + 2].copy_from_slice(&value.to_ne_bytes());
+        }
+        let actual = framebuffer_from_rgba64(&rgba64, ColorSpace::SRGB);
+        let expected =
+            ravel_core::color::ingest_rgba16([32_768, 16_384, 8_192, 65_535], ColorSpace::SRGB);
+        assert_eq!(actual.as_f32().as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn float_decoder_ingest_matches_the_serial_reference() {
+        let mut packed = frame::Video::new(PixelFormat::RGBAF32LE, 2, 3);
+        let stride = packed.stride(0);
+        let data = packed.data_mut(0);
+        for y in 0..3usize {
+            for x in 0..2usize {
+                let offset = y * stride + x * 16;
+                for (channel, value) in [0.1, 0.2, 0.3, 1.0].into_iter().enumerate() {
+                    data[offset + channel * 4..offset + channel * 4 + 4]
+                        .copy_from_slice(&(value + (x + y) as f32 * 0.01).to_le_bytes());
+                }
+            }
+        }
+        let expected = serial_read_float_rgb_frame(
+            &packed,
+            FloatRgbLayout::Packed { big_endian: false },
+            ColorSpace::SRGB,
+        );
+        let actual = read_float_rgb_frame(
+            &packed,
+            FloatRgbLayout::Packed { big_endian: false },
+            ColorSpace::SRGB,
+        )
+        .expect("float frame");
+        assert_eq!(actual.as_f32(), expected.as_f32());
+
+        let mut planar = frame::Video::new(PixelFormat::GBRAPF32LE, 2, 3);
+        for plane in 0..4 {
+            let stride = planar.stride(plane);
+            let data = planar.data_mut(plane);
+            for y in 0..3usize {
+                for x in 0..2usize {
+                    let offset = y * stride + x * 4;
+                    let value = (plane as f32 + 1.0) * 0.1 + (x + y) as f32 * 0.01;
+                    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        let expected = serial_read_float_rgb_frame(
+            &planar,
+            FloatRgbLayout::PlanarAlpha { big_endian: false },
+            ColorSpace::SRGB,
+        );
+        let actual = read_float_rgb_frame(
+            &planar,
+            FloatRgbLayout::PlanarAlpha { big_endian: false },
+            ColorSpace::SRGB,
+        )
+        .expect("planar alpha frame");
+        assert_eq!(actual.as_f32(), expected.as_f32());
+    }
+
+    /// Alternating old/new 1080p ingest measurements.
+    ///
+    /// ```text
+    /// uptime
+    /// cargo test -p ravel-media --features ffmpeg --release \
+    ///     measure_ingest_transfer_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// The old loop is reconstructed locally so the comparison remains
+    /// available after the production path changes. Each colour-space/path
+    /// pair runs three old and three new executions, alternating within each
+    /// round. LUTs and the nine primary-matrix pairs are warmed before
+    /// timing.
+    #[test]
+    #[ignore = "measurement harness; run with --ignored --nocapture"]
+    fn measure_ingest_transfer_cost() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const WIDTH: u32 = 1920;
+        const HEIGHT: u32 = 1080;
+        const ROUNDS: usize = 3;
+        const SPACES: [(&str, ColorSpace); 4] = [
+            ("sRGB", ColorSpace::SRGB),
+            ("Rec709", ColorSpace::REC709),
+            ("PQ", ColorSpace::REC2020_PQ),
+            ("Linear", ColorSpace::WORKING),
+        ];
+
+        let mut rgba8 = frame::Video::new(PixelFormat::RGBA, WIDTH, HEIGHT);
+        let stride = rgba8.stride(0);
+        let data = rgba8.data_mut(0);
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                let i = y * WIDTH as usize + x;
+                let offset = y * stride + x * 4;
+                data[offset..offset + 4].copy_from_slice(&[
+                    (i.wrapping_mul(3) % 256) as u8,
+                    (i.wrapping_mul(5).wrapping_add(17) % 256) as u8,
+                    (i.wrapping_mul(7).wrapping_add(31) % 256) as u8,
+                    255,
+                ]);
+            }
+        }
+
+        let mut rgba64 = frame::Video::new(DEEP_OUTPUT, WIDTH, HEIGHT);
+        let stride = rgba64.stride(0);
+        let data = rgba64.data_mut(0);
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                let i = y * WIDTH as usize + x;
+                let offset = y * stride + x * 8;
+                for (lane, value) in [
+                    i.wrapping_mul(3) % 65_536,
+                    i.wrapping_mul(5).wrapping_add(4_321) % 65_536,
+                    i.wrapping_mul(7).wrapping_add(8_765) % 65_536,
+                    65_535,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    data[offset + lane * 2..offset + lane * 2 + 2]
+                        .copy_from_slice(&(value as u16).to_ne_bytes());
+                }
+            }
+        }
+
+        let mut float_frame = frame::Video::new(PixelFormat::RGBAF32LE, WIDTH, HEIGHT);
+        let stride = float_frame.stride(0);
+        let data = float_frame.data_mut(0);
+        for y in 0..HEIGHT as usize {
+            for x in 0..WIDTH as usize {
+                let i = y * WIDTH as usize + x;
+                let offset = y * stride + x * 16;
+                let base = (i % 1024) as f32 / 1023.0;
+                for (channel, value) in [base, base * 0.75, base * 0.5, 1.0].into_iter().enumerate()
+                {
+                    data[offset + channel * 4..offset + channel * 4 + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+
+        // Do not include one-time table construction in the new-path timing.
+        for (_, space) in SPACES {
+            black_box(ravel_core::color::ingest_rgba8([1, 2, 3, 4], space));
+            black_box(ravel_core::color::ingest_rgba16([1, 2, 3, 4], space));
+        }
+        for from in Primaries::ALL {
+            for to in Primaries::ALL {
+                black_box(ravel_core::color::primaries_matrix(from, to));
+            }
+        }
+
+        let time = |f: &dyn Fn() -> FrameBuffer| {
+            let start = Instant::now();
+            let output = black_box(f());
+            black_box(output.as_f32()[0]);
+            start.elapsed().as_nanos()
+        };
+
+        let mut old_u8 = [0u128; SPACES.len()];
+        let mut new_u8 = [0u128; SPACES.len()];
+        let mut old_u16 = [0u128; SPACES.len()];
+        let mut new_u16 = [0u128; SPACES.len()];
+        let mut old_float = [0u128; SPACES.len()];
+        let mut new_float = [0u128; SPACES.len()];
+
+        for _ in 0..ROUNDS {
+            for (index, (_, space)) in SPACES.into_iter().enumerate() {
+                old_u8[index] += time(&|| serial_framebuffer_from_rgba8(&rgba8, space));
+                new_u8[index] += time(&|| framebuffer_from_rgba8(&rgba8, space));
+                old_u16[index] += time(&|| serial_framebuffer_from_rgba64(&rgba64, space));
+                new_u16[index] += time(&|| framebuffer_from_rgba64(&rgba64, space));
+                old_float[index] += time(&|| {
+                    serial_read_float_rgb_frame(
+                        &float_frame,
+                        FloatRgbLayout::Packed { big_endian: false },
+                        space,
+                    )
+                });
+                new_float[index] += time(&|| {
+                    read_float_rgb_frame(
+                        &float_frame,
+                        FloatRgbLayout::Packed { big_endian: false },
+                        space,
+                    )
+                    .expect("float frame")
+                });
+            }
+        }
+
+        eprintln!("1080p ingest measurement: rounds={ROUNDS}, executions=3 per path/space");
+        for (index, (name, _)) in SPACES.into_iter().enumerate() {
+            eprintln!(
+                "u8 {name}: old={:.3} ms new={:.3} ms",
+                old_u8[index] as f64 / 1_000_000.0,
+                new_u8[index] as f64 / 1_000_000.0
+            );
+            eprintln!(
+                "u16 {name}: old={:.3} ms new={:.3} ms",
+                old_u16[index] as f64 / 1_000_000.0,
+                new_u16[index] as f64 / 1_000_000.0
+            );
+            eprintln!(
+                "float {name}: old={:.3} ms new={:.3} ms",
+                old_float[index] as f64 / 1_000_000.0,
+                new_float[index] as f64 / 1_000_000.0
+            );
+        }
     }
 }

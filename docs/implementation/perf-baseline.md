@@ -1515,6 +1515,7 @@ cargo test -p ravel-app --release --test viewer_roundtrip \
 効かない**ので、上積みされることはあっても差し引かれることはない。
 よって計画を凍結する条件（得が 0.835 ms を下回る）は満たされず、
 **`ZC-2` 以降へ進む**。
+
 ## 線形 ingest の transfer LUT / float 行分割（`HIGH-32`）
 
 計測日: 2026-08-11。環境: Apple M 系 / arm64 / macOS 26.3 (25D125) /

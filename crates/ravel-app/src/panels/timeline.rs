@@ -20,7 +20,7 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -111,6 +111,15 @@ const BEAT_LINE_ALPHA: f32 = 0.45;
 const LOOP_RANGE_ALPHA: f32 = 0.22;
 /// Height of the loop-range band's edge markers, as a fraction of the ruler.
 const LOOP_RANGE_EDGE_RATIO: f32 = 1.0;
+
+/// Height of the frame-cache band along the bottom of the ruler, in pixels
+/// (`CACHE-6`).
+///
+/// A thin strip rather than a full-height band: it reports a fact about the
+/// cache, not a transport setting, so it must stay readable next to the loop
+/// range without competing with it — the same relationship After Effects'
+/// cache bar has with its work area.
+const CACHE_BAND_HEIGHT: f32 = 3.0;
 /// Width of the `BPM` toggle — three glyphs, so wider than `S` / `M` / `L`.
 const BPM_TOGGLE_WIDTH: f32 = 32.0;
 /// Width of one BPM readout / editor in the transport toolbar.
@@ -3703,6 +3712,7 @@ impl TimelineGpuiPanel {
         theme_colors: &ThemeColor,
         bpm: BpmGrid,
         loop_range: Option<LoopRange>,
+        cache_band: Vec<Range<u64>>,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
@@ -3744,6 +3754,7 @@ impl TimelineGpuiPanel {
                     if let Some(range) = loop_range {
                         paint_loop_range(&state, range, bounds, &colors, window);
                     }
+                    paint_cache_band(&state, &cache_band, bounds, &colors, window);
                     paint_out_of_range(&state, bounds, &colors, window);
                     return;
                 }
@@ -3823,6 +3834,10 @@ impl TimelineGpuiPanel {
                 if let Some(range) = loop_range {
                     paint_loop_range(&state, range, bounds, &colors, window);
                 }
+                // Over both bands: the strip is 3 px of fact and the ticks
+                // rise from the same edge, so drawing it earlier would let
+                // them cut it into dashes.
+                paint_cache_band(&state, &cache_band, bounds, &colors, window);
                 // Last, so the ticks and labels past the composition end are
                 // knocked back with everything else — the lane paints its
                 // band over its content for the same reason.
@@ -4889,7 +4904,12 @@ impl Render for TimelineGpuiPanel {
             .is_some_and(|controller| controller.read(cx).transport().is_playing());
         let transport_toolbar = self.build_transport_toolbar(is_playing, cx);
         let bpm = super::bpm_grid(cx);
-        let ruler = self.build_ruler(&theme.colors, bpm, super::loop_range(cx));
+        let ruler = self.build_ruler(
+            &theme.colors,
+            bpm,
+            super::loop_range(cx),
+            super::cache_band(cx),
+        );
         let view_mode = self.state.view_mode();
         let right_pane = match view_mode {
             TimelineViewMode::Bars => self
@@ -5972,6 +5992,39 @@ fn paint_loop_range(
     }
 }
 
+/// Draws the frame-cache band along the bottom of the ruler (`CACHE-6`).
+///
+/// Green is the RAM tier, the only one that exists: the disk tier
+/// (`CACHE-11`, blue) has no entries to report yet, and `cached_ranges`
+/// carries no tier, so introducing a second colour now would be a promise the
+/// data cannot keep.
+///
+/// Ruler only, for the same reason [`paint_loop_range`] is: a lane-wide band
+/// would compete with the content the lanes exist to show.
+fn paint_cache_band(
+    state: &TimelinePanel,
+    ranges: &[Range<u64>],
+    bounds: Bounds<Pixels>,
+    colors: &ThemeColor,
+    window: &mut Window,
+) {
+    if ranges.is_empty() {
+        return;
+    }
+    // One pixel clear of the ruler's bottom border, which separates the ruler
+    // from the lanes and must stay a continuous line.
+    let top = bounds.origin.y + bounds.size.height - px(CACHE_BAND_HEIGHT) - px(1.0);
+    for (x, width) in state.cache_band_spans(ranges, f64::from(f32::from(bounds.size.width))) {
+        window.paint_quad(fill(
+            Bounds::new(
+                point(bounds.origin.x + px(x as f32), top),
+                size(px(width as f32), px(CACHE_BAND_HEIGHT)),
+            ),
+            colors.success,
+        ));
+    }
+}
+
 /// Draws the musical beat grid across `bounds`, when it is enabled and beats
 /// are far enough apart to read as lines.
 fn paint_beat_lines(
@@ -6524,6 +6577,37 @@ mod tests {
                 .unwrap()
                 .clone()
         })
+    }
+
+    /// The cache band must not cost the Timeline a repaint it was not
+    /// already going to make (`HIGH-21`): the publish path writes the global
+    /// **only** when the ranges changed, so an evaluation that added nothing
+    /// to the frame cache wakes nobody. Nothing observes the global either —
+    /// the panel reads it while repainting for the playhead or the document.
+    #[gpui::test]
+    fn republishing_an_unchanged_cache_band_does_not_write_the_global(cx: &mut TestAppContext) {
+        let (_window, _project, comp_id, ..) = setup(cx);
+        cx.update(|cx| {
+            assert!(
+                super::super::cache_band(cx).is_empty(),
+                "band before any evaluation"
+            );
+            assert!(
+                super::super::set_cache_band(comp_id, vec![0..3, 8..9], cx),
+                "the first band was not published"
+            );
+            assert!(
+                !super::super::set_cache_band(comp_id, vec![0..3, 8..9], cx),
+                "an unchanged band wrote the global"
+            );
+            // Playback extends it: a genuinely different band does publish.
+            assert!(super::super::set_cache_band(comp_id, vec![0..4, 8..9], cx));
+            assert_eq!(super::super::cache_band(cx), vec![0..4, 8..9]);
+            // An edit empties it.
+            assert!(super::super::set_cache_band(comp_id, Vec::new(), cx));
+            assert!(super::super::cache_band(cx).is_empty());
+            assert!(!super::super::set_cache_band(comp_id, Vec::new(), cx));
+        });
     }
 
     /// A document change caused by someone else (e.g. a node parameter

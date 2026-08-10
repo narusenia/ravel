@@ -31,6 +31,7 @@ use ravel_ui::panels::timeline::BpmGrid;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 /// The reason a refused custom-port edit gives the user.
@@ -431,6 +432,65 @@ pub(crate) fn set_loop_range(range: Option<LoopRange>, cx: &mut App) -> bool {
 /// on a project load or File ▸ New.
 pub(crate) fn set_loop_ranges(ranges: BTreeMap<CompId, LoopRange>, cx: &mut App) {
     cx.set_global(LoopRangeState(ranges));
+}
+
+/// Durable shared state: which frames of each composition the output-stage
+/// frame cache is currently holding — the Timeline's cache band (`CACHE-6`).
+///
+/// Written by [`crate::project_state::ProjectState`] when an evaluation
+/// completes, and **only when the ranges actually changed** (see
+/// [`set_cache_band`]).
+///
+/// # Why nothing observes this global
+///
+/// The Timeline reads it during `render` instead of subscribing. A
+/// subscription would notify the panel on every evaluation, which during
+/// playback is every frame — a second repaint on top of the one the playhead
+/// already causes, which is exactly the shape of `HIGH-21`. The band grows
+/// with playback anyway because the playhead repaint re-reads this global,
+/// and an edit repaints the Timeline through the document it mirrors. The
+/// cost of the band is therefore one map lookup per repaint that was going to
+/// happen regardless.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CacheBandState(BTreeMap<CompId, Vec<Range<u64>>>);
+
+impl Global for CacheBandState {}
+
+/// The active composition's cached frame ranges; empty when nothing is
+/// cached, or before any evaluation completed.
+pub fn cache_band(cx: &App) -> Vec<Range<u64>> {
+    let Some(comp) = active_composition(cx) else {
+        return Vec::new();
+    };
+    cx.try_global::<CacheBandState>()
+        .and_then(|state| state.0.get(&comp).cloned())
+        .unwrap_or_default()
+}
+
+/// Publish `ranges` as `comp`'s cached frames. Returns whether anything
+/// changed.
+///
+/// The comparison is the point: an evaluation that adds nothing to the cache
+/// (a hit, a failed target) must not write the global, so no present or
+/// future observer of it wakes for a band that looks the same.
+pub(crate) fn set_cache_band(comp: CompId, ranges: Vec<Range<u64>>, cx: &mut App) -> bool {
+    let mut bands = cx
+        .try_global::<CacheBandState>()
+        .map_or_else(BTreeMap::new, |state| state.0.clone());
+    let changed = match bands.get(&comp) {
+        Some(current) => *current != ranges,
+        None => !ranges.is_empty(),
+    };
+    if !changed {
+        return false;
+    }
+    if ranges.is_empty() {
+        bands.remove(&comp);
+    } else {
+        bands.insert(comp, ranges);
+    }
+    cx.set_global(CacheBandState(bands));
+    true
 }
 
 /// The active composition id, `None` when the document has no composition

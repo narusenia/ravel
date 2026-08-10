@@ -1508,6 +1508,38 @@ impl ProjectState {
         );
         self.published_generation = update.generation;
         cx.set_global(frame);
+        self.publish_cache_band(cx);
+    }
+
+    /// Republish the active composition's cached frame ranges for the
+    /// Timeline's cache band (`CACHE-6`).
+    ///
+    /// Called when an evaluation completes, which is the only moment the
+    /// frame cache can have grown, and asked at the resolution and precision
+    /// the viewer is *currently* requesting — a band drawn from another
+    /// factor's entries would claim frames a scrub would miss.
+    ///
+    /// [`crate::panels::set_cache_band`] compares before it writes, so an
+    /// evaluation that added nothing (a cache hit, a failed target) does not
+    /// touch the global at all. Nothing observes it either: the Timeline
+    /// reads it while repainting for the playhead or the document, which is
+    /// what keeps the band off the repaint budget (`HIGH-21`).
+    fn publish_cache_band(&mut self, cx: &mut Context<Self>) {
+        let Some(eval) = self.eval.as_ref() else {
+            return;
+        };
+        let Some(comp) = self.active_composition(cx) else {
+            return;
+        };
+        let (id, resolution) = (comp.id, comp.resolution);
+        let ranges = eval.frame_cache().cached_ranges(
+            id,
+            // The viewer's floor, so the band and the viewer agree on which
+            // entries count (`EvalContext::new`'s default today).
+            ravel_core::eval::Precision::F32,
+            self.viewer_resolution.apply(resolution),
+        );
+        crate::panels::set_cache_band(id, ranges, cx);
     }
 
     /// Frame rate and duration of the active composition, for the playback

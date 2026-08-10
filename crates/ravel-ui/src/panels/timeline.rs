@@ -18,6 +18,7 @@ use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::FrameRate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::ops::Range;
 
 const DEFAULT_PPF: f64 = 4.0;
 pub const MIN_PPF: f64 = 0.1;
@@ -625,6 +626,25 @@ impl TimelinePanel {
         Some((start, end.min(viewport_width) - start))
     }
 
+    /// Pixel spans `(x, width)` of the cached frame ranges the frame cache
+    /// reports, clipped to a ruler `viewport_width` pixels wide (`CACHE-6`).
+    ///
+    /// `ranges` are the half-open `[start, end)` spans of
+    /// `SharedFrameCache::cached_ranges`. Each becomes the band over exactly
+    /// those frames, so the picture and the cache agree by construction:
+    /// mapping goes through [`Self::loop_range_span`], the one place the
+    /// ruler turns an inclusive frame span into pixels. Ranges scrolled out
+    /// of sight, and empty ones, contribute nothing.
+    pub fn cache_band_spans(&self, ranges: &[Range<u64>], viewport_width: f64) -> Vec<(f64, f64)> {
+        ranges
+            .iter()
+            .filter(|range| range.end > range.start)
+            .filter_map(|range| {
+                self.loop_range_span(LoopRange::new(range.start, range.end - 1), viewport_width)
+            })
+            .collect()
+    }
+
     fn x_to_frame_f64(&self, x: f64) -> f64 {
         x / self.pixels_per_frame + self.scroll_offset
     }
@@ -1114,6 +1134,41 @@ mod tests {
         assert_eq!(p.loop_range_span(LoopRange::new(10, 39), 400.0), None);
         p.set_scroll_offset(0.0);
         assert_eq!(p.loop_range_span(LoopRange::new(10, 39), 0.0), None);
+    }
+
+    /// The band has to show exactly the frames `cached_ranges` reports —
+    /// a band drawn one frame wide of the truth is a band that lies about
+    /// what a scrub will cost.
+    #[test]
+    fn the_cache_band_spans_cover_exactly_the_cached_ranges() {
+        let mut p = panel_with_duration(1000);
+        // 2 px per frame: 0..3 occupies [0, 6), 10..12 occupies [20, 24).
+        assert_eq!(
+            p.cache_band_spans(&[0..3, 10..12], 400.0),
+            vec![(0.0, 6.0), (20.0, 4.0)]
+        );
+        // One cached frame is one frame wide.
+        assert_eq!(
+            p.cache_band_spans(&[7..8, 20..21], 400.0),
+            vec![(14.0, 2.0), (40.0, 2.0)]
+        );
+        // Empty ranges contribute nothing rather than a zero-width quad.
+        assert_eq!(
+            p.cache_band_spans(&[5..5, 9..9], 400.0),
+            Vec::<(f64, f64)>::new()
+        );
+        assert_eq!(p.cache_band_spans(&[], 400.0), Vec::<(f64, f64)>::new());
+        // Scrolled out of sight, and a degenerate viewport, draw nothing.
+        p.set_scroll_offset(300.0);
+        assert_eq!(
+            p.cache_band_spans(&[0..3, 4..6], 400.0),
+            Vec::<(f64, f64)>::new()
+        );
+        p.set_scroll_offset(0.0);
+        assert_eq!(
+            p.cache_band_spans(&[0..3, 4..6], 0.0),
+            Vec::<(f64, f64)>::new()
+        );
     }
 
     // ----- BPM grid --------------------------------------------------------

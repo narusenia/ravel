@@ -1383,6 +1383,14 @@ SharedFrameCache::new(Option<SharedCacheBudget>)   // EvalService builds one
     .invalidate_comp(CompId) / .clear()
 ```
 
+The Timeline's band reads it through two hops that keep GPUI out of the
+cache: `ProjectState::publish_cache_band` writes `panels::CacheBandState`
+(a `BTreeMap<CompId, Vec<Range<u64>>>`) when an evaluation completes and the
+ranges changed, and `TimelinePanel::cache_band_spans(&[Range<u64>], width)`
+(ravel-ui) turns them into ruler pixels through `loop_range_span`. **Nothing
+observes the global** — the panel reads it during a repaint it was already
+making (`HIGH-21`).
+
 Sits **outside** evaluation: the worker consults it before `evaluate_at` and
 fills it with the finalized value, so a hit costs neither a `process()` call
 nor the GPU→CPU readback `finalize` performs. Keyed by `(CompId, TimeKey)`

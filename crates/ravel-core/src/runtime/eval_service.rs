@@ -282,6 +282,10 @@ impl EvalService {
             .name("ravel-eval-service".into())
             .spawn(move || {
                 let frames = worker_frames;
+                // Kept beside the evaluator so the per-request log line can
+                // say what the caches are spending *against* — a byte figure
+                // with no ceiling next to it says nothing about pressure.
+                let worker_budget = budget.clone();
                 let mut evaluator = match budget {
                     Some(budget) => Evaluator::with_budget(budget),
                     None => Evaluator::new(),
@@ -422,6 +426,8 @@ impl EvalService {
                     // readable as a ratio over a session, not from any one
                     // request (`CACHE-6`).
                     let frame_stats = frames.stats();
+                    let node_stats = evaluator.cache_stats();
+                    let budget_stats = worker_budget.as_ref().map(|budget| budget.stats());
                     tracing::debug!(
                         generation = req.generation,
                         frame = req.inner.ctx.frame,
@@ -433,6 +439,15 @@ impl EvalService {
                         frame_hit_rate = frame_stats.hit_rate(),
                         frame_bytes_vram = frame_stats.bytes(crate::cache_budget::Tier::Vram),
                         frame_bytes_ram = frame_stats.bytes(crate::cache_budget::Tier::Ram),
+                        node_hit_rate = node_stats.hit_rate(),
+                        budget_ram_used =
+                            budget_stats.map(|stats| stats.used(crate::cache_budget::Tier::Ram)),
+                        budget_ram_limit =
+                            budget_stats.map(|stats| stats.limit(crate::cache_budget::Tier::Ram)),
+                        budget_vram_used =
+                            budget_stats.map(|stats| stats.used(crate::cache_budget::Tier::Vram)),
+                        budget_vram_limit =
+                            budget_stats.map(|stats| stats.limit(crate::cache_budget::Tier::Vram)),
                         "eval result sent"
                     );
                     on_update(EvalUpdate {
@@ -1360,6 +1375,62 @@ mod tests {
         assert!(processed.load(Ordering::SeqCst) >= 1);
         assert_eq!(service.frame_cache().stats().entries, 0);
         assert_eq!(service.frame_cache().stats().requests(), 0);
+    }
+
+    /// The band the Timeline draws (`CACHE-6`) is `cached_ranges` over the
+    /// frames playback has already produced: it grows as the playhead
+    /// advances and is gone the moment the composition is edited.
+    #[test]
+    fn the_cached_range_grows_with_playback_and_vanishes_on_an_edit() {
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks {
+                processed: Arc::new(AtomicUsize::new(0)),
+                finalized: Arc::new(AtomicUsize::new(0)),
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+        let frames = service.frame_cache().clone();
+        let ranges = || frames.cached_ranges(comp_id(), crate::eval::Precision::F32, (2, 2));
+
+        for frame in 0..3u64 {
+            service.request(frame_request(
+                graph.clone(),
+                node,
+                frame,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+            update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                ranges(),
+                vec![0..frame + 1],
+                "the band did not follow the playhead"
+            );
+        }
+
+        // An edit to the composition, with the weakest hint there is.
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            edited_document(),
+            InvalidationHint::None,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            ranges(),
+            vec![0..1],
+            "the edit left the pre-edit frames in the band"
+        );
     }
 
     /// Cross-cache eviction routing: the frame cache and the node-result

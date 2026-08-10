@@ -37,10 +37,8 @@
 //!
 //! [`Primaries::rgb_to_xyz`] carries each set's native white point (D65 for
 //! Rec.709 and Rec.2020, ACES white for AP1), and [`primaries_matrix`]
-//! composes them without a chromatic adaptation transform. Every conversion
-//! Ravel performs today is Rec.709 → Rec.709, where the matrix is the
-//! identity and the question does not arise; the Bradford adaptation a real
-//! AP1 conversion needs arrives with OCIO in `CM-7`.
+//! composes them without a chromatic adaptation transform. The Bradford
+//! adaptation a real AP1 conversion needs arrives with OCIO in `CM-7`.
 
 // ===========================================================================
 // Transfer
@@ -260,18 +258,38 @@ impl Primaries {
 
 /// The matrix converting linear RGB in `from` to linear RGB in `to`.
 ///
-/// The identity when the two agree — the only case the shipped pipeline
-/// reaches, since the working space and every display Ravel targets today
-/// are Rec.709.
+/// The identity when the two agree. The three supported primary sets have
+/// only nine ordered pairs, so the matrices are built once on first use and
+/// then copied from a [`std::sync::LazyLock`] table. Keeping the public
+/// function pure and unchanged lets every pixel call site share the same
+/// cached result.
 pub fn primaries_matrix(from: Primaries, to: Primaries) -> Mat3 {
+    PRIMARIES_MATRICES[primaries_index(from)][primaries_index(to)]
+}
+
+/// The 3×3 identity.
+pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+fn primaries_index(primaries: Primaries) -> usize {
+    match primaries {
+        Primaries::Rec709 => 0,
+        Primaries::Rec2020 => 1,
+        Primaries::ApOne => 2,
+    }
+}
+
+fn build_primaries_matrix(from: Primaries, to: Primaries) -> Mat3 {
     if from == to {
         return IDENTITY;
     }
     multiply(to.xyz_to_rgb(), from.rgb_to_xyz())
 }
 
-/// The 3×3 identity.
-pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+static PRIMARIES_MATRICES: std::sync::LazyLock<[[Mat3; 3]; 3]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|from| {
+        std::array::from_fn(|to| build_primaries_matrix(Primaries::ALL[from], Primaries::ALL[to]))
+    })
+});
 
 /// `a × b`.
 pub fn multiply(a: Mat3, b: Mat3) -> Mat3 {
@@ -306,8 +324,16 @@ fn convert_linear_primaries(rgb: [f32; 3], from: Primaries, to: Primaries) -> [f
 /// The inverse of `m`, or `None` when it is singular.
 pub fn invert(m: Mat3) -> Option<Mat3> {
     let cofactor = |r: usize, c: usize| {
-        let rows: Vec<usize> = (0..3).filter(|&i| i != r).collect();
-        let cols: Vec<usize> = (0..3).filter(|&i| i != c).collect();
+        let rows = match r {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
+        let cols = match c {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
         let minor =
             m[rows[0]][cols[0]] * m[rows[1]][cols[1]] - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
         if (r + c).is_multiple_of(2) {
@@ -1123,6 +1149,22 @@ mod tests {
         for channel in converted {
             assert!((channel - 0.214_041_14).abs() < 1e-6, "{channel}");
         }
+    }
+
+    /// The bit pattern is captured from the pre-cache implementation. This
+    /// pins the Rec.2020 → Rec.709 result while allowing the matrix lookup
+    /// implementation to change underneath it.
+    #[test]
+    fn rec2020_to_rec709_matches_the_legacy_matrix_result_exactly() {
+        let converted = convert(
+            [0.25, 0.5, 0.75],
+            ColorSpace::new(Primaries::Rec2020, Transfer::Linear),
+            ColorSpace::LINEAR_REC709,
+        );
+        assert_eq!(
+            converted.map(f32::to_bits),
+            [1_032_357_772, 1_057_451_991, 1_061_733_030]
+        );
     }
 
     /// CM-1: quantisation at the boundaries and the midpoint.

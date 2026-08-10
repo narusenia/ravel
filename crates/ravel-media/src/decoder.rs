@@ -1630,7 +1630,8 @@ mod tests {
     /// The old loop is reconstructed locally so the comparison remains
     /// available after the production path changes. Each colour-space/path
     /// pair runs three old and three new executions, alternating within each
-    /// round. LUTs are warmed before timing.
+    /// round. LUTs and the nine primary-matrix pairs are warmed before
+    /// timing.
     #[test]
     #[ignore = "measurement harness; run with --ignored --nocapture"]
     fn measure_ingest_transfer_cost() {
@@ -1705,6 +1706,11 @@ mod tests {
         for (_, space) in SPACES {
             black_box(ravel_core::color::ingest_rgba8([1, 2, 3, 4], space));
             black_box(ravel_core::color::ingest_rgba16([1, 2, 3, 4], space));
+        }
+        for from in Primaries::ALL {
+            for to in Primaries::ALL {
+                black_box(ravel_core::color::primaries_matrix(from, to));
+            }
         }
 
         let time = |f: &dyn Fn() -> FrameBuffer| {

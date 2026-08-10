@@ -69,8 +69,6 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
-| CACHE-5 | フレームキャッシュ層（comp 単位の無効化） | `cache-plan.md` |
-| CACHE-8 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | `cache-plan.md` |
 | DISK-1 | `IntChannel` と解決層（Int のキーフレーム） | `discrete-keyframes-plan.md` |
 | AID-1 | `AssetId` 型と `MediaAssetEntry` の分離 | `asset-identity-plan.md` |
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
@@ -197,14 +195,14 @@ macOS の gpui が wgpu ではなく Metal ネイティブであること。
 | CACHE-2 | ✅ | `CacheIdentity` の抽出と時間基準化（旧 BLUR-2、HIGH-03） | — |
 | CACHE-3 | ✅ #230 | `CacheBudget` と退避（MED-CORE-06 / 07） | CACHE-1, CACHE-2 |
 | CACHE-4 | ✅ #227 | スコープ無効化の粒度修正（MED-CORE-02） | CACHE-2 |
-| CACHE-5 | 🟡 | フレームキャッシュ層（comp 単位の無効化） | CACHE-3, GPUCOMP-7 |
-| CACHE-6 | ⬜ | Timeline のキャッシュ帯と `cache_stats` | CACHE-5 |
-| CACHE-7 | ⬜ | 無効化を時間範囲に絞る | CACHE-5 |
-| CACHE-8 | 🟡 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | CACHE-3 |
-| CACHE-9 | ⬜ | 先読み（投機充填） | CACHE-5 |
-| CACHE-10 | ⬜ | 文書更新 | CACHE-7 |
+| CACHE-5 | ✅ #366 | フレームキャッシュ層（comp 単位の無効化） | CACHE-3 ✅, GPUCOMP-7 ✅ |
+| CACHE-6 | ✅ #366 | Timeline のキャッシュ帯と `cache_stats` | CACHE-5 ✅ |
+| CACHE-7 | ✅ #370 | 無効化を時間範囲に絞る | CACHE-5 ✅ |
+| CACHE-8 | ✅ #368 | 共有デコードフレームキャッシュ（HIGH-16 / MED-MED-02） | CACHE-3 ✅ |
+| CACHE-9 | ✅ #370 | 先読み（投機充填。中断可能） | CACHE-5 ✅ |
+| CACHE-10 | ✅ #370 | 文書更新 | CACHE-7 ✅ |
 | CACHE-Y | ❓ | per-pixel ループの format 汎用化（実測後。他は依存しない） | CACHE-1 |
-| CACHE-11 | ❓ | ディスク層（測定ゲート） | CACHE-5 |
+| CACHE-11 | ❓ | ディスク層（測定ゲート） | CACHE-5 ✅ |
 
 CACHE-1 は `3D-1a` / `3D-1b` と同じ理由で早いほど安い（`FX-1`〜`FX-4` が
 per-pixel ループを増やす前に規約を確定させる）。`FrameBuffer` は

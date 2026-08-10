@@ -109,6 +109,7 @@ quantize_u8(f32) -> u8 / quantize_u16(f32) -> u16      // round to nearest
 struct CubeLut                            // .cube 3D LUT, trilinear
     ::parse(&str) -> Result<Self, CubeError>   // text, not a path
     .size() / .domain() / .sample([f32; 3]) -> [f32; 3]
+    .entries() -> &[[f32; 3]]              // grid, red fastest (CM-7 uploads it)
 ```
 
 Transfer functions accept the whole real line: negatives use the odd
@@ -1371,7 +1372,15 @@ starved the viewer whenever one evaluation outlived one playback tick);
 `ravel_nodes::GpuEvalHooks` (`crates/ravel-nodes/src/eval_hooks.rs`) owns
 `GpuContext` + `ShaderManager`, maps hints to `register_all_processors` /
 `processor_for_node` (searching the document's layer networks too), and
-rasterizes `Geometry` outputs for the Viewer. A `Params` hint whose node
+rasterizes `Geometry` outputs for the Viewer. `.with_display_transform()`
+adds the viewer's display transform (`CM-7`): `finalize` then finishes the
+frame on the GPU and yields a `ravel_nodes::DisplayFrame` (display-encoded
+BGRA8, `width()` / `height()` / `bgra()`) instead of a linear `FrameBuffer`,
+which shrinks the readback to four bytes a pixel. **Only the interactive
+viewer opts in** — the export worker and `ravel-cli` need the linear frame
+their own `to_output_space` step encodes. `set_display_lut(Option<CubeLut>)`
+installs a user `.cube` on the hooks that have one; there is no UI for it
+until `CM-8`. A `Params` hint whose node
 already has a processor reporting `rebuild_on_node_change() == false` is
 served by `Evaluator::invalidate_node` instead of a rebuild — a GPU
 processor's construction compiles a shader and creates a pipeline.
@@ -2366,10 +2375,12 @@ Unknown type keys are skipped silently (plugin space).
   (`CacheMiss::ResolutionChanged`). It is view state and never reaches the
   `.ravprj`. The `image` is a `panels::ViewerImage` — a
   straight-alpha BGRA `RenderImage` plus the evaluation buffer's dimensions —
-  converted from the evaluated `FrameBuffer` by
-  `ViewerImage::from_frame_buffer` **on the evaluation worker thread**
+  wrapped from the `ravel_nodes::DisplayFrame` the worker produced, by
+  `ViewerImage::from_display_frame` **on the evaluation worker thread**
   (`EvalService` invokes its result callback there), so publishing a frame
-  costs the UI thread an `Arc` move rather than a per-pixel conversion. Results also merge per-node durations into the
+  costs the UI thread an `Arc` move. The display transform itself ran on the
+  GPU before the readback (`CM-7`), so no per-pixel colour arithmetic happens
+  on either thread. Results also merge per-node durations into the
   `NodeEvalTimings` global (node editor load readout: muted < 8 ms, yellow <
   33 ms, red beyond; hidden while a node
   is bypassed — the pass-through records no timings). Only nodes the document

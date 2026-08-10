@@ -714,6 +714,11 @@ Vulkan は `timeout_ns = 0`）、かつ**タイムアウトしても wgpu はフ
 
 ### 表示変換を評価ワーカーへ移した後（GPUCOMP-9 / HIGH-08）
 
+> **`CM-7` 以降、このハーネスは無い。** 表示変換は GPU（リードバック前の
+> 1 パス）へ移り、`ViewerImage::from_frame_buffer` と
+> `measure_display_conversion_cost` / `reference_bgra` は削除された。
+> 以下は**当時の記録**であって、再現できるコマンドではない。
+
 引き受けた issue:
 [HIGH-08](../../issues/closed/HIGH-08-ui-thread-f32-to-bgra-conversion.md)。
 計測日: 2026-08-05。環境: Apple M5 / macOS 26.3 / release ビルド。
@@ -1339,6 +1344,11 @@ BGRA u8 の毎ピクセル CPU ループ。20 回の中央値）:
 | 境界表（現行） | 13.59 ms | **2.5×** |
 
 ### Viewer の変換関数全体（`from_frame_buffer`、40 回平均）
+
+> **`CM-7` 以降、このハーネスは無い。** 表示変換は GPU（リードバック前の
+> 1 パス）へ移り、`ViewerImage::from_frame_buffer` と
+> `measure_display_conversion_cost` / `reference_bgra` は削除された。
+> 以下は**当時の記録**であって、再現できるコマンドではない。
 
 | 経路 | 1920×1080 | 1024×576 |
 |---|---|---|

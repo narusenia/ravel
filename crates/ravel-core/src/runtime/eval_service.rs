@@ -252,22 +252,32 @@ pub trait EvalWorkerHooks: Send + 'static {
 /// Hand every id in the caches' eviction buffers to the cache that owns it.
 ///
 /// One pass settles the list because each [`Evicted`] belongs to exactly one
-/// of the three caches an evaluation worker has — the node results, the
-/// output-stage frames, and whatever the hooks own — and each of the three
-/// sees the whole list. What survives all three is an id nobody present
-/// owns, which is the only kind that may be discarded
-/// ([`crate::cache_budget`]).
-fn settle_evictions<H: EvalWorkerHooks>(
+/// of the caches sharing the budget — the node results, the output-stage
+/// frames, and whatever the hooks own — and each of them sees the whole
+/// list. What survives them all is an id nobody present owns, which is the
+/// only kind that may be discarded ([`crate::cache_budget`]).
+///
+/// `frames` is optional because a render worker has no output-stage frame
+/// cache: a render walks each frame once, so caching the finished picture
+/// would only cost memory. **The routing itself is not optional**, which is
+/// why both workers call this rather than each writing the sequence out —
+/// two copies of budget-critical bookkeeping have to be kept identical by
+/// hand, and nothing would enforce it.
+pub(crate) fn settle_evictions<H: EvalWorkerHooks>(
     evaluator: &mut Evaluator,
-    frames: &SharedFrameCache,
+    frames: Option<&SharedFrameCache>,
     hooks: &mut H,
 ) {
     let mut pending = evaluator.take_foreign_evictions();
-    pending.extend(frames.take_foreign_evictions());
+    if let Some(frames) = frames {
+        pending.extend(frames.take_foreign_evictions());
+    }
     // Hooks first: the call both drops what it owns and surrenders what it
     // is holding, so the later legs see the decode cache's leftovers too.
     pending = hooks.reconcile_evictions(pending);
-    if !pending.is_empty() {
+    if let Some(frames) = frames
+        && !pending.is_empty()
+    {
         frames.drop_evicted(&pending);
         pending = frames.take_foreign_evictions();
     }
@@ -472,7 +482,7 @@ impl EvalService {
                         // every id to its owner — an eviction nobody acts on
                         // leaves the budget counting fewer bytes than the
                         // process holds.
-                        settle_evictions(&mut evaluator, &frames, &mut hooks);
+                        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
                         // Drained per target: `evaluate_at` clears the
                         // evaluator's timing buffer on entry, so reading it
                         // only after the loop would report the last target
@@ -690,7 +700,7 @@ mod tests {
         );
         assert_eq!(hooks.held.len(), 1, "nothing has settled yet");
 
-        settle_evictions(&mut evaluator, &frames, &mut hooks);
+        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
         assert!(
             hooks.held.is_empty(),
             "the frame cache's eviction never reached the hooks' cache"
@@ -703,7 +713,7 @@ mod tests {
             !hooks.foreign.is_empty(),
             "the hooks dropped an id they do not own on the floor"
         );
-        settle_evictions(&mut evaluator, &frames, &mut hooks);
+        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
         assert_eq!(
             frames.stats().entries,
             0,

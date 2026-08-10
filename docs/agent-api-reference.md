@@ -1335,7 +1335,15 @@ trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
     fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
     fn finalize(&mut self, &Arc<dyn NodeData>, &EvalContext)
         -> Option<Arc<dyn NodeData>>;   // None = failed: the raw value is
-}                                       // delivered but never cached
+                                        // delivered but never cached
+    fn reconcile_evictions(&mut self, Vec<Evicted>) -> Vec<Evicted>;
+        // routes shared-budget evictions; default is the identity. A hooks
+        // impl that owns a cache under the same CacheBudget MUST drop the
+        // ids it owns and return the rest (plus anything it was holding for
+        // someone else) — an id nobody drops leaves the budget counting
+        // fewer bytes than the process holds (`cache_budget`). GpuEvalHooks
+        // overrides it for the shared decode cache (CACHE-8)
+}
 EvalRequest { graph, nodes: Vec<NodeId>, comp: Option<CompId>,
     path: Vec<PathSegment>, ctx, document: Option<Arc<Document>>, hint }
     // document → Evaluator::set_document AFTER EvalWorkerHooks::sync

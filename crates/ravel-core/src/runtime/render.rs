@@ -53,7 +53,9 @@ use crate::graph::Graph;
 use crate::id::CompId;
 use crate::media::MediaError;
 use crate::media::encode::{Encoder, ImageSequenceOutput, to_output_space};
-use crate::runtime::eval_service::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
+use crate::runtime::eval_service::{
+    EvalWorkerHooks, InvalidationHint, ProcessorSync, settle_evictions,
+};
 use crate::types::FrameBuffer;
 use crossbeam_channel::{Sender, unbounded};
 use std::collections::HashSet;
@@ -994,19 +996,12 @@ fn render_frames<H: EvalWorkerHooks>(
         //
         // A render worker has two caches under one budget: the node results
         // and whatever the hooks own (the shared decode cache, `CACHE-8`).
-        // There is no output-stage frame cache — a render walks each frame
-        // once.
-        let unowned = hooks.reconcile_evictions(evaluator.take_foreign_evictions());
-        if !unowned.is_empty() {
-            evaluator.drop_evicted(&unowned);
-            let unowned = evaluator.take_foreign_evictions();
-            if !unowned.is_empty() {
-                tracing::debug!(
-                    count = unowned.len(),
-                    "eviction ids no cache in this render owns"
-                );
-            }
-        }
+        // `None` is the missing third — a render walks each frame once, so
+        // there is no output-stage frame cache to hold the finished picture.
+        // The routing is shared with the evaluation worker rather than
+        // written out again here: two copies of budget-critical bookkeeping
+        // would have to be kept identical by hand.
+        settle_evictions(evaluator, None, hooks);
         let value = evaluated.map_err(|source| RenderError::Eval { frame, source })?;
         // A finalize failure keeps the raw value, which then fails the
         // `FrameBuffer` downcast below as `NotAFrame` — a render must not

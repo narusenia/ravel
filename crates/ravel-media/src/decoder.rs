@@ -2122,18 +2122,18 @@ mod tests {
         for (index, (name, _)) in SPACES.into_iter().enumerate() {
             eprintln!(
                 "u8 {name}: old={:.3} ms new={:.3} ms",
-                old_u8[index] as f64 / 1_000_000.0,
-                new_u8[index] as f64 / 1_000_000.0
+                old_u8[index] as f64 / ROUNDS as f64 / 1_000_000.0,
+                new_u8[index] as f64 / ROUNDS as f64 / 1_000_000.0
             );
             eprintln!(
                 "u16 {name}: old={:.3} ms new={:.3} ms",
-                old_u16[index] as f64 / 1_000_000.0,
-                new_u16[index] as f64 / 1_000_000.0
+                old_u16[index] as f64 / ROUNDS as f64 / 1_000_000.0,
+                new_u16[index] as f64 / ROUNDS as f64 / 1_000_000.0
             );
             eprintln!(
                 "float {name}: old={:.3} ms new={:.3} ms",
-                old_float[index] as f64 / 1_000_000.0,
-                new_float[index] as f64 / 1_000_000.0
+                old_float[index] as f64 / ROUNDS as f64 / 1_000_000.0,
+                new_float[index] as f64 / ROUNDS as f64 / 1_000_000.0
             );
         }
     }

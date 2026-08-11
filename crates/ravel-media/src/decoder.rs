@@ -16,7 +16,6 @@
 //! transparently.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use ravel_core::color::{
     ColorSpace, Primaries, Transfer, ingest_rgba8, ingest_rgba16, ingest_rgbaf32,
@@ -43,7 +42,7 @@ use ravel_core::media::{
     AudioCodec, AudioStreamInfo, ContainerFormat, MediaError, MediaInfo, MediaReader, MediaResult,
     StreamInfo, VideoCodec, VideoStreamInfo,
 };
-use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate, PixelFormat as FramePixelFormat};
+use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate};
 
 /// Ensure FFmpeg is initialized (safe to call multiple times).
 pub(crate) fn init_ffmpeg() {
@@ -69,11 +68,8 @@ struct CachedVideoDecoder {
     /// Cached software scaler and its output frame. The scaler key includes
     /// every input and output property that changes the filter tables.
     scaler: ScalerCache,
-    /// Decoder-owned RGBA output buffers. A buffer is reused only while no
-    /// returned `FrameBuffer` still refers to it.
-    output_buffers: DecoderFrameBuffers,
-    #[cfg(test)]
     /// Test-only switch used by the old/new performance harness.
+    #[cfg(test)]
     legacy_conversion: bool,
 }
 
@@ -104,6 +100,7 @@ impl ScalerKey {
 /// Cache one scaler and its output frame for the currently active format and
 /// dimensions. A stream can change its decoded pixel format or dimensions,
 /// so the full [`ScalerKey`] is checked before every run.
+#[derive(Default)]
 struct ScalerCache {
     key: Option<ScalerKey>,
     scaler: Option<sws::Context>,
@@ -119,18 +116,6 @@ struct ScalerCache {
 // preserves the same ownership invariant as the decoder's other FFmpeg
 // contexts.
 unsafe impl Send for ScalerCache {}
-
-impl Default for ScalerCache {
-    fn default() -> Self {
-        Self {
-            key: None,
-            scaler: None,
-            output_frame: None,
-            #[cfg(test)]
-            creations: 0,
-        }
-    }
-}
 
 impl ScalerCache {
     fn ensure(&mut self, frame: &frame::Video, output: PixelFormat) -> MediaResult<()> {
@@ -181,44 +166,6 @@ impl ScalerCache {
     #[cfg(test)]
     fn creations(&self) -> usize {
         self.creations
-    }
-}
-
-/// Reusable decoder output storage. Returned frame buffers share these
-/// allocations through `Arc`; a slot is reused only after its previous
-/// returned frame has been dropped.
-#[derive(Default)]
-struct DecoderFrameBuffers {
-    buffers: Vec<Arc<[u8]>>,
-}
-
-impl DecoderFrameBuffers {
-    fn with_frame<F>(&mut self, width: u32, height: u32, fill: F) -> FrameBuffer
-    where
-        F: FnOnce(&mut [u8]),
-    {
-        let byte_len = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .and_then(|channels| channels.checked_mul(std::mem::size_of::<f32>()))
-            .expect("decoded frame dimensions overflow output buffer length");
-        let index = self
-            .buffers
-            .iter()
-            .position(|buffer| buffer.len() == byte_len && Arc::strong_count(buffer) == 1);
-        let index = index.unwrap_or_else(|| {
-            self.buffers.push(vec![0u8; byte_len].into());
-            self.buffers.len() - 1
-        });
-
-        let buffer = &mut self.buffers[index];
-        fill(Arc::get_mut(buffer).expect("reusable buffer must be uniquely owned"));
-        FrameBuffer {
-            width,
-            height,
-            format: FramePixelFormat::RgbaF32,
-            data: buffer.clone(),
-        }
     }
 }
 
@@ -415,7 +362,6 @@ fn create_video_decoder(
             hw_active,
             last_returned_pts: None,
             scaler: ScalerCache::default(),
-            output_buffers: DecoderFrameBuffers::default(),
             #[cfg(test)]
             legacy_conversion: false,
         }),
@@ -440,7 +386,6 @@ fn create_video_decoder(
                 hw_active: false,
                 last_returned_pts: None,
                 scaler: ScalerCache::default(),
-                output_buffers: DecoderFrameBuffers::default(),
                 #[cfg(test)]
                 legacy_conversion: false,
             })
@@ -1112,6 +1057,21 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
     }
 }
 
+/// Convert one decoded frame, switching to the pre-cache seam the performance
+/// harness measures against.
+fn convert_decoded_video_frame(
+    cached: &mut CachedVideoDecoder,
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
+    #[cfg(test)]
+    if cached.legacy_conversion {
+        return convert_video_frame_to_rgba_legacy(frame, input_color_space);
+    }
+
+    convert_video_frame_to_rgba(frame, input_color_space, &mut cached.scaler)
+}
+
 /// Convert an FFmpeg video frame to RGBA f32 [`FrameBuffer`], decoding
 /// `input_color_space` into the working space on the way.
 ///
@@ -1130,29 +1090,10 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
 ///   stills) scale to RGBA64 and ingest at 16 bits.
 /// - **Everything else** keeps the 8-bit RGBA path it has always had; its
 ///   output is unchanged bit for bit.
-fn convert_decoded_video_frame(
-    cached: &mut CachedVideoDecoder,
-    frame: &frame::Video,
-    input_color_space: ColorSpace,
-) -> MediaResult<FrameBuffer> {
-    #[cfg(test)]
-    if cached.legacy_conversion {
-        return convert_video_frame_to_rgba_legacy(frame, input_color_space);
-    }
-
-    convert_video_frame_to_rgba(
-        frame,
-        input_color_space,
-        &mut cached.scaler,
-        &mut cached.output_buffers,
-    )
-}
-
 fn convert_video_frame_to_rgba(
     frame: &frame::Video,
     input_color_space: ColorSpace,
     scaler: &mut ScalerCache,
-    output_buffers: &mut DecoderFrameBuffers,
 ) -> MediaResult<FrameBuffer> {
     let width = frame.width();
     let height = frame.height();
@@ -1164,18 +1105,12 @@ fn convert_video_frame_to_rgba(
     }
 
     if let Some(layout) = FloatRgbLayout::of(frame.format()) {
-        return read_float_rgb_frame(frame, layout, input_color_space, output_buffers);
+        return read_float_rgb_frame(frame, layout, input_color_space);
     }
 
     if source_depth(frame.format()) > 8 {
         match scaler.run(frame, DEEP_OUTPUT) {
-            Ok(scaled) => {
-                return Ok(framebuffer_from_rgba64(
-                    scaled,
-                    input_color_space,
-                    output_buffers,
-                ));
-            }
+            Ok(scaled) => return Ok(framebuffer_from_rgba64(scaled, input_color_space)),
             Err(error) => warn!(
                 format = ?frame.format(),
                 %error,
@@ -1185,11 +1120,7 @@ fn convert_video_frame_to_rgba(
     }
 
     let scaled = scaler.run(frame, PixelFormat::RGBA)?;
-    Ok(framebuffer_from_rgba8(
-        scaled,
-        input_color_space,
-        output_buffers,
-    ))
+    Ok(framebuffer_from_rgba8(scaled, input_color_space))
 }
 
 /// The scaler output format for sources deeper than 8 bits, in host byte
@@ -1217,75 +1148,59 @@ fn source_depth(format: PixelFormat) -> u32 {
 }
 
 /// Ingest an 8-bit RGBA frame into the working space.
-fn framebuffer_from_rgba8(
-    frame: &frame::Video,
-    input_color_space: ColorSpace,
-    output_buffers: &mut DecoderFrameBuffers,
-) -> FrameBuffer {
+fn framebuffer_from_rgba8(frame: &frame::Video, input_color_space: ColorSpace) -> FrameBuffer {
     let (width, height) = (frame.width(), frame.height());
     let stride = frame.stride(0);
     let data = frame.data(0);
+    let pixel_count = (width * height) as usize;
+    let mut f32_data = Vec::with_capacity(pixel_count * 4);
 
-    output_buffers.with_frame(width, height, |f32_data| {
-        for y in 0..height as usize {
-            let row_start = y * stride;
-            for x in 0..width as usize {
-                let offset = row_start + x * 4;
-                let pixel = ingest_rgba8(
-                    [
-                        data[offset],
-                        data[offset + 1],
-                        data[offset + 2],
-                        data[offset + 3],
-                    ],
-                    input_color_space,
-                );
-                write_f32_pixel(f32_data, (y * width as usize + x) * 16, pixel);
-            }
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        for x in 0..width as usize {
+            let offset = row_start + x * 4;
+            f32_data.extend_from_slice(&ingest_rgba8(
+                [
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ],
+                input_color_space,
+            ));
         }
-    })
+    }
+
+    FrameBuffer::from_f32(width, height, f32_data)
 }
 
 /// Ingest a 16-bit RGBA frame (native-endian, see [`DEEP_OUTPUT`]) into the
 /// working space.
-fn framebuffer_from_rgba64(
-    frame: &frame::Video,
-    input_color_space: ColorSpace,
-    output_buffers: &mut DecoderFrameBuffers,
-) -> FrameBuffer {
+fn framebuffer_from_rgba64(frame: &frame::Video, input_color_space: ColorSpace) -> FrameBuffer {
     let (width, height) = (frame.width(), frame.height());
     let stride = frame.stride(0);
     let data = frame.data(0);
+    let pixel_count = (width * height) as usize;
+    let mut f32_data = Vec::with_capacity(pixel_count * 4);
 
     let lane = |offset: usize| u16::from_ne_bytes([data[offset], data[offset + 1]]);
-
-    output_buffers.with_frame(width, height, |f32_data| {
-        for y in 0..height as usize {
-            let row_start = y * stride;
-            for x in 0..width as usize {
-                let offset = row_start + x * 8;
-                let pixel = ingest_rgba16(
-                    [
-                        lane(offset),
-                        lane(offset + 2),
-                        lane(offset + 4),
-                        lane(offset + 6),
-                    ],
-                    input_color_space,
-                );
-                write_f32_pixel(f32_data, (y * width as usize + x) * 16, pixel);
-            }
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        for x in 0..width as usize {
+            let offset = row_start + x * 8;
+            f32_data.extend_from_slice(&ingest_rgba16(
+                [
+                    lane(offset),
+                    lane(offset + 2),
+                    lane(offset + 4),
+                    lane(offset + 6),
+                ],
+                input_color_space,
+            ));
         }
-    })
-}
-
-/// Store one RGBA pixel using the same native-endian representation as
-/// [`FrameBuffer::from_f32`].
-fn write_f32_pixel(output: &mut [u8], offset: usize, pixel: [f32; 4]) {
-    for (channel, value) in pixel.into_iter().enumerate() {
-        let start = offset + channel * std::mem::size_of::<f32>();
-        output[start..start + std::mem::size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
     }
+
+    FrameBuffer::from_f32(width, height, f32_data)
 }
 
 /// How a float RGB frame lays its samples out. These formats are read
@@ -1341,86 +1256,86 @@ fn read_float_rgb_frame(
     frame: &frame::Video,
     layout: FloatRgbLayout,
     input_color_space: ColorSpace,
-    output_buffers: &mut DecoderFrameBuffers,
 ) -> MediaResult<FrameBuffer> {
     let (width, height) = (frame.width(), frame.height());
-    let row_len = width as usize * 16;
+    let pixel_count = (width * height) as usize;
+    let row_len = width as usize * 4;
     debug_assert!(row_len > 0, "float ingest requires a non-zero row width");
+    let mut f32_data = vec![0.0f32; pixel_count * 4];
 
-    Ok(output_buffers.with_frame(width, height, |f32_data| {
-        match layout {
-            FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
-                // GBRP order: plane 0 is green, 1 is blue, 2 is red.
-                let planes = [frame.data(2), frame.data(0), frame.data(1)];
-                let strides = [frame.stride(2), frame.stride(0), frame.stride(1)];
-                let alpha = match layout {
-                    FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
-                    _ => None,
-                };
-                f32_data
-                    .par_chunks_exact_mut(row_len)
-                    .enumerate()
-                    .for_each(|(y, out_row)| {
-                        for x in 0..width as usize {
-                            let rgb =
-                                [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
-                            let a = alpha.map_or(1.0, |(data, stride)| {
-                                layout.sample(data, y * stride + x * 4)
-                            });
-                            let pixel =
-                                ingest_rgbaf32([rgb[0], rgb[1], rgb[2], a], input_color_space);
-                            write_f32_pixel(out_row, x * 16, pixel);
-                        }
-                    });
-            }
-            FloatRgbLayout::Packed { .. } => {
-                let data = frame.data(0);
-                let stride = frame.stride(0);
-                f32_data
-                    .par_chunks_exact_mut(row_len)
-                    .enumerate()
-                    .for_each(|(y, out_row)| {
-                        for x in 0..width as usize {
-                            let offset = y * stride + x * 16;
-                            let pixel = ingest_rgbaf32(
-                                [
-                                    layout.sample(data, offset),
-                                    layout.sample(data, offset + 4),
-                                    layout.sample(data, offset + 8),
-                                    layout.sample(data, offset + 12),
-                                ],
-                                input_color_space,
-                            );
-                            write_f32_pixel(out_row, x * 16, pixel);
-                        }
-                    });
-            }
+    match layout {
+        FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
+            // GBRP order: plane 0 is green, 1 is blue, 2 is red.
+            let planes = [frame.data(2), frame.data(0), frame.data(1)];
+            let strides = [frame.stride(2), frame.stride(0), frame.stride(1)];
+            let alpha = match layout {
+                FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
+                _ => None,
+            };
+            f32_data
+                .par_chunks_exact_mut(row_len)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    for x in 0..width as usize {
+                        let rgb =
+                            [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
+                        let a = alpha.map_or(1.0, |(data, stride)| {
+                            layout.sample(data, y * stride + x * 4)
+                        });
+                        let pixel = ingest_rgbaf32([rgb[0], rgb[1], rgb[2], a], input_color_space);
+                        out_row[x * 4..x * 4 + 4].copy_from_slice(&pixel);
+                    }
+                });
         }
-    }))
+        FloatRgbLayout::Packed { .. } => {
+            let data = frame.data(0);
+            let stride = frame.stride(0);
+            f32_data
+                .par_chunks_exact_mut(row_len)
+                .enumerate()
+                .for_each(|(y, out_row)| {
+                    for x in 0..width as usize {
+                        let offset = y * stride + x * 16;
+                        let pixel = ingest_rgbaf32(
+                            [
+                                layout.sample(data, offset),
+                                layout.sample(data, offset + 4),
+                                layout.sample(data, offset + 8),
+                                layout.sample(data, offset + 12),
+                            ],
+                            input_color_space,
+                        );
+                        out_row[x * 4..x * 4 + 4].copy_from_slice(&pixel);
+                    }
+                });
+        }
+    }
+
+    Ok(FrameBuffer::from_f32(width, height, f32_data))
 }
 
-/// Reconstruct the pre-HIGH-17 conversion path for the performance harness.
-/// It deliberately keeps the current colour ingest functions so the harness
-/// isolates scaler and output-buffer reuse from the already-landed HIGH-32
-/// transfer optimisations.
+/// Reconstruct the pre-cache conversion path for the performance harness.
+/// It differs from [`convert_video_frame_to_rgba`] in exactly one respect —
+/// the scaler is built per frame instead of reused — so the harness isolates
+/// scaler reuse from every other difference, including the already-landed
+/// transfer-function optimisations, which both paths share.
 #[cfg(test)]
 fn convert_video_frame_to_rgba_legacy(
     frame: &frame::Video,
     input_color_space: ColorSpace,
 ) -> MediaResult<FrameBuffer> {
     if let Some(layout) = FloatRgbLayout::of(frame.format()) {
-        let mut output_buffers = DecoderFrameBuffers::default();
-        return read_float_rgb_frame(frame, layout, input_color_space, &mut output_buffers);
+        return read_float_rgb_frame(frame, layout, input_color_space);
     }
 
-    if source_depth(frame.format()) > 8 {
-        if let Ok(scaled) = scale_frame_legacy(frame, DEEP_OUTPUT) {
-            return Ok(framebuffer_from_rgba64_legacy(&scaled, input_color_space));
-        }
+    if source_depth(frame.format()) > 8
+        && let Ok(scaled) = scale_frame_legacy(frame, DEEP_OUTPUT)
+    {
+        return Ok(framebuffer_from_rgba64(&scaled, input_color_space));
     }
 
     let scaled = scale_frame_legacy(frame, PixelFormat::RGBA)?;
-    Ok(framebuffer_from_rgba8_legacy(&scaled, input_color_space))
+    Ok(framebuffer_from_rgba8(&scaled, input_color_space))
 }
 
 #[cfg(test)]
@@ -1441,67 +1356,6 @@ fn scale_frame_legacy(frame: &frame::Video, output: PixelFormat) -> MediaResult<
         .run(frame, &mut scaled)
         .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
     Ok(scaled)
-}
-
-#[cfg(test)]
-fn framebuffer_from_rgba8_legacy(
-    frame: &frame::Video,
-    input_color_space: ColorSpace,
-) -> FrameBuffer {
-    let (width, height) = (frame.width(), frame.height());
-    let stride = frame.stride(0);
-    let data = frame.data(0);
-    let pixel_count = (width * height) as usize;
-    let mut f32_data = Vec::with_capacity(pixel_count * 4);
-
-    for y in 0..height as usize {
-        let row_start = y * stride;
-        for x in 0..width as usize {
-            let offset = row_start + x * 4;
-            f32_data.extend_from_slice(&ingest_rgba8(
-                [
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ],
-                input_color_space,
-            ));
-        }
-    }
-
-    FrameBuffer::from_f32(width, height, f32_data)
-}
-
-#[cfg(test)]
-fn framebuffer_from_rgba64_legacy(
-    frame: &frame::Video,
-    input_color_space: ColorSpace,
-) -> FrameBuffer {
-    let (width, height) = (frame.width(), frame.height());
-    let stride = frame.stride(0);
-    let data = frame.data(0);
-    let pixel_count = (width * height) as usize;
-    let mut f32_data = Vec::with_capacity(pixel_count * 4);
-    let lane = |offset: usize| u16::from_ne_bytes([data[offset], data[offset + 1]]);
-
-    for y in 0..height as usize {
-        let row_start = y * stride;
-        for x in 0..width as usize {
-            let offset = row_start + x * 8;
-            f32_data.extend_from_slice(&ingest_rgba16(
-                [
-                    lane(offset),
-                    lane(offset + 2),
-                    lane(offset + 4),
-                    lane(offset + 6),
-                ],
-                input_color_space,
-            ));
-        }
-    }
-
-    FrameBuffer::from_f32(width, height, f32_data)
 }
 
 /// Map an FFmpeg sample format onto its numeric encoding.
@@ -1771,18 +1625,6 @@ mod tests {
         assert_eq!(cache.creations(), 4);
     }
 
-    #[test]
-    fn decoder_output_buffers_reuse_after_the_returned_frame_is_dropped() {
-        let mut buffers = DecoderFrameBuffers::default();
-        let first = buffers.with_frame(2, 2, |data| data.fill(1));
-        let first_ptr = Arc::as_ptr(&first.data);
-        drop(first);
-
-        let second = buffers.with_frame(2, 2, |data| data.fill(2));
-        assert_eq!(Arc::as_ptr(&second.data), first_ptr);
-        assert_eq!(second.data[0], 2);
-    }
-
     /// Reconstruct the pre-LUT u8 ingest loop for the measurement harness.
     fn serial_framebuffer_from_rgba8(
         frame: &frame::Video,
@@ -1908,8 +1750,7 @@ mod tests {
     fn integer_decoder_ingest_paths_use_the_core_ingest_results() {
         let mut rgba8 = frame::Video::new(PixelFormat::RGBA, 1, 1);
         rgba8.data_mut(0)[..4].copy_from_slice(&[128, 64, 32, 255]);
-        let mut buffers = DecoderFrameBuffers::default();
-        let actual = framebuffer_from_rgba8(&rgba8, ColorSpace::SRGB, &mut buffers);
+        let actual = framebuffer_from_rgba8(&rgba8, ColorSpace::SRGB);
         let expected = ravel_core::color::ingest_rgba8([128, 64, 32, 255], ColorSpace::SRGB);
         assert_eq!(actual.as_f32().as_ref(), expected.as_slice());
 
@@ -1918,7 +1759,7 @@ mod tests {
         for (offset, value) in [32_768u16, 16_384, 8_192, 65_535].into_iter().enumerate() {
             data[offset * 2..offset * 2 + 2].copy_from_slice(&value.to_ne_bytes());
         }
-        let actual = framebuffer_from_rgba64(&rgba64, ColorSpace::SRGB, &mut buffers);
+        let actual = framebuffer_from_rgba64(&rgba64, ColorSpace::SRGB);
         let expected =
             ravel_core::color::ingest_rgba16([32_768, 16_384, 8_192, 65_535], ColorSpace::SRGB);
         assert_eq!(actual.as_f32().as_ref(), expected.as_slice());
@@ -1943,12 +1784,10 @@ mod tests {
             FloatRgbLayout::Packed { big_endian: false },
             ColorSpace::SRGB,
         );
-        let mut buffers = DecoderFrameBuffers::default();
         let actual = read_float_rgb_frame(
             &packed,
             FloatRgbLayout::Packed { big_endian: false },
             ColorSpace::SRGB,
-            &mut buffers,
         )
         .expect("float frame");
         assert_eq!(actual.as_f32(), expected.as_f32());
@@ -1974,7 +1813,6 @@ mod tests {
             &planar,
             FloatRgbLayout::PlanarAlpha { big_endian: false },
             ColorSpace::SRGB,
-            &mut buffers,
         )
         .expect("planar alpha frame");
         assert_eq!(actual.as_f32(), expected.as_f32());
@@ -2087,18 +1925,13 @@ mod tests {
         let mut new_u16 = [0u128; SPACES.len()];
         let mut old_float = [0u128; SPACES.len()];
         let mut new_float = [0u128; SPACES.len()];
-        let mut new_u8_buffers = DecoderFrameBuffers::default();
-        let mut new_u16_buffers = DecoderFrameBuffers::default();
-        let mut new_float_buffers = DecoderFrameBuffers::default();
 
         for _ in 0..ROUNDS {
             for (index, (_, space)) in SPACES.into_iter().enumerate() {
                 old_u8[index] += time(&mut || serial_framebuffer_from_rgba8(&rgba8, space));
-                new_u8[index] +=
-                    time(&mut || framebuffer_from_rgba8(&rgba8, space, &mut new_u8_buffers));
+                new_u8[index] += time(&mut || framebuffer_from_rgba8(&rgba8, space));
                 old_u16[index] += time(&mut || serial_framebuffer_from_rgba64(&rgba64, space));
-                new_u16[index] +=
-                    time(&mut || framebuffer_from_rgba64(&rgba64, space, &mut new_u16_buffers));
+                new_u16[index] += time(&mut || framebuffer_from_rgba64(&rgba64, space));
                 old_float[index] += time(&mut || {
                     serial_read_float_rgb_frame(
                         &float_frame,
@@ -2111,7 +1944,6 @@ mod tests {
                         &float_frame,
                         FloatRgbLayout::Packed { big_endian: false },
                         space,
-                        &mut new_float_buffers,
                     )
                     .expect("float frame")
                 });

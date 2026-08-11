@@ -47,12 +47,15 @@ fn display(hooks: &mut GpuEvalHooks, fb: &FrameBuffer) -> Vec<u8> {
         .downcast_ref::<DisplayFrame>()
         .expect("a viewer hook yields display bytes");
     assert_eq!((frame.width(), frame.height()), (fb.width, fb.height));
+    let bgra = frame
+        .bgra()
+        .expect("these hooks take the readback road, not the surface one");
     assert_eq!(
-        frame.bgra().len(),
+        bgra.len(),
         (fb.width as usize) * (fb.height as usize) * 4,
         "the readback is four bytes per pixel, not sixteen",
     );
-    frame.bgra().to_vec()
+    bgra.to_vec()
 }
 
 /// The first pixel, back in RGBA order.
@@ -312,7 +315,7 @@ fn the_display_transform_ignores_quality_and_buffer_size() {
                 .expect("a viewer frame must finalize");
             let frame = out.downcast_ref::<DisplayFrame>().expect("display bytes");
             assert_eq!((frame.width(), frame.height()), (width, height));
-            let first = first_rgba(frame.bgra());
+            let first = first_rgba(frame.bgra().expect("the readback road yields bytes"));
             match seen {
                 None => seen = Some(first),
                 Some(previous) => assert_eq!(
@@ -476,7 +479,10 @@ fn measure_display_transform_cost() {
                 .run(&gpu, &mut shaders, &pool, &resident)
                 .expect("display");
             after_gpu += start.elapsed().as_nanos();
-            assert_eq!(old.len(), new.bgra().len());
+            assert_eq!(
+                old.len(),
+                new.bgra().expect("the readback road yields bytes").len()
+            );
 
             // CPU-resident input.
             let start = Instant::now();
@@ -488,7 +494,10 @@ fn measure_display_transform_cost() {
                 .run(&gpu, &mut shaders, &pool, &cpu_frame)
                 .expect("display");
             after_cpu += start.elapsed().as_nanos();
-            assert_eq!(old.len(), new.bgra().len());
+            assert_eq!(
+                old.len(),
+                new.bgra().expect("the readback road yields bytes").len()
+            );
         }
         let ms = |ns: u128| ns as f64 / rounds as f64 / 1e6;
         eprintln!(

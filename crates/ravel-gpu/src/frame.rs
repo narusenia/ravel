@@ -62,6 +62,15 @@ pub struct GpuFrameBuffer {
     height: u32,
 }
 
+impl std::fmt::Debug for GpuFrameBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuFrameBuffer")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
 impl GpuFrameBuffer {
     /// Wrap a pool-acquired texture. `pool` is the shared pool the texture
     /// came from; it is held weakly so dropping the pool itself is safe.

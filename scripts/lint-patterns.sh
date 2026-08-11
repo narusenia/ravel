@@ -200,7 +200,8 @@ done < <(rg -no --no-heading \
 # ---------------------------------------------------------------------------
 # gpu-device-sharing: `interop::context_from_wgpu`,
 # `interop::context_from_native`, `interop::wgpu_instance`,
-# `native_gpu_handles` and `NativeGpuHandles` are the other direction — Ravel
+# `native_gpu_handles`, `NativeGpuHandles`, `native_device_matches` and
+# `with_surface_texture` are the other direction — Ravel
 # receives the graphics objects instead of handing them out. REQ-GPU-001
 # requires the UI framework and the compute pipeline to run on one device, and
 # a shared device is by definition one the host creates and Ravel accepts, so
@@ -212,6 +213,13 @@ done < <(rg -no --no-heading \
 # Called once at startup, it bypasses neither dispatch batching nor the texture
 # pool — every subsystem is built on the context it returns — which is exactly
 # why it does not belong to the rule above.
+#
+# `native_device_matches` and `with_surface_texture` (`ZC-3`) belong here for
+# the same reason rather than to the rule above: they exist so the GPUI host
+# can draw a worker-owned texture **without** naming a handle type, and both
+# refuse unless the caller's device is the one the texture was made on. The
+# pointer `with_surface_texture` yields is scoped to its callback, so no handle
+# outlives the check — which is what keeps the escape rule from applying.
 # ---------------------------------------------------------------------------
 while IFS=: read -r file line symbol; do
     [ -z "${file:-}" ] && continue
@@ -228,6 +236,8 @@ done < <(rg -no --no-heading \
     -e '\bcontext_from_native\b' \
     -e '\bnative_gpu_handles\b' \
     -e '\bNativeGpuHandles\b' \
+    -e '\bnative_device_matches\b' \
+    -e '\bwith_surface_texture\b' \
     -e '\bwgpu_instance\b' \
     crates -g '*.rs' 2>/dev/null)
 

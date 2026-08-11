@@ -106,14 +106,25 @@
     デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
     → `docs/implementation/cache-plan.md` の CACHE-8 が回収した（`ravel-media` の
     アセット単位共有キャッシュ、予算は `CacheKind::MediaFrame`）。
-12. **[HIGH-17](closed/HIGH-17-sws-scaler-recreated-per-frame.md)** — 解決済み（この PR）
-    sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
+12. **[HIGH-32](closed/HIGH-32-linear-ingest-powf-per-pixel.md)** — 解決済み（2026-08-11、#378）
+    線形 ingest が画素ごとに f64 の transfer function を評価し、直列で舐めていた。
+    厳密な LUT（u8 は 256 要素、u16 は 65,536 要素）と primaries 行列のキャッシュ、
+    float 経路の rayon 行分割で **sRGB 7 倍 / PQ 13 倍**。**行列は票に無かった第二の
+    真因**で、`invert` が画素ごとに `Vec` を 24 回確保していた（`cc7e194` が HDR を
+    Rec.2020 に解決するまで恒等行列しか通らず露出していなかった）。
+13. **[HIGH-17](closed/HIGH-17-sws-scaler-recreated-per-frame.md)** — 解決済み（2026-08-11、#380）
+    sws スケーラをフレームごとに再生成。**票の「デコード経路の CPU 時間を支配する」は
+    実測で成立しなかった** — 1080p の内訳は ingest 89% / scale 4% / デコード 6% で、
+    このキャッシュの取り分は **-0.8%**。初回に出た -6.4% は計測順バイアスだった
+    （順序を入れ替えると符号が反転する）。同時に、出力バッファのプールが
+    `CacheBudget` の会計を壊していたので取り下げた。数字は小さいが、毎フレームの
+    フィルタテーブル構築は消え、**再利用スケーラの画素同一性テスト**が入った。
 
 ### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）
 
 **解決済み**（フェーズ A、`HIGH-21` / `HIGH-22`）。
 
-13. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
+14. **[HIGH-21](closed/HIGH-21-node-editor-repaints-every-playback-frame.md)**
     **解消（2026-08-02 再調査 → 2026-08-03 修正）。** 当初挙げた 3 原因のうち
     2 つ（`NodeEvalTimings` の無条件 notify、`add_node_menu_model` の毎 render
     再構築）は再調査の時点で既に直っており、3 つ目（`shape_line` がノード毎・

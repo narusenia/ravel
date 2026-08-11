@@ -28,9 +28,19 @@ use serde::{Deserialize, Serialize};
 const MIB: u64 = 1024 * 1024;
 
 /// The smallest cache tier limit a setting may hold, in MiB.
+///
+/// Not zero: a zero ceiling evicts every entry as it is produced, which is a
+/// way to make the application appear to hang rather than a cache size anyone
+/// wants. One 1080p RGBA f32 frame is about 32 MiB, so anything below that is
+/// already degenerate; 1 MiB is the floor that keeps the setting honest without
+/// pretending to know the user's working set.
 pub const MIN_CACHE_LIMIT_MB: f64 = 1.0;
 
 /// The largest cache tier limit a setting may hold, in MiB (1 TiB).
+///
+/// A bound rather than a technical limit, for the reason the frame rate is
+/// bounded where it is parsed: an unbounded field turns a stray keystroke into
+/// a number the accounting can only be surprised by.
 pub const MAX_CACHE_LIMIT_MB: f64 = 1024.0 * 1024.0;
 
 /// Read the global settings layer from its platform location.
@@ -70,18 +80,37 @@ pub fn read_global_settings_at(path: Option<&Path>) -> SettingsLayer {
     }
 }
 
-/// The MiB figure `value` names, or `None` when no tier limit may hold.
+/// The MiB figure `value` names, or `None` for one no tier limit may hold.
+///
+/// **The one range check for a cache limit**, used both where the value is
+/// typed (`ravel-app`'s settings dialog) and where it is applied
+/// ([`usable_cache_budget`]) — the dialog is not the only writer, and two
+/// copies of a range are two ranges.
+///
+/// A fraction of a MiB is truncated: the setting's unit is whole MiB, and
+/// refusing `512.5` would be pedantry rather than safety.
 pub fn cache_limit_mb(value: f64) -> Option<u64> {
     (value.is_finite() && (MIN_CACHE_LIMIT_MB..=MAX_CACHE_LIMIT_MB).contains(&value))
         .then(|| value.trunc() as u64)
 }
 
-/// The simulation reserve share `value` names, or `None` when it is unusable.
+/// The simulation reserve share `value` names, or `None` for one no tier may
+/// hold. [`cache_limit_mb`]'s argument, for the share.
+///
+/// `CacheBudget` clamps this defensively, so an out-of-range share is not
+/// dangerous — but a `NaN` passes `clamp` untouched and silently turns the
+/// reserve into zero, which is the protection quietly disappearing rather than
+/// a setting being refused.
 pub fn cache_sim_reserve_ratio(value: f64) -> Option<f32> {
     (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value as f32)
 }
 
-/// The absolute path `text` names, or `None` for an empty or relative path.
+/// The absolute path `text` names, or `None` when it names none — an empty
+/// field ("no location of my own") and a relative path are both that.
+///
+/// Relative is refused rather than resolved because the working directory of a
+/// desktop application is not something the user chose: the cache would land
+/// wherever Ravel happened to be launched from, and move when that changed.
 pub fn cache_root_setting(text: &str) -> Option<&str> {
     let trimmed = text.trim();
     (!trimmed.is_empty() && Path::new(trimmed).is_absolute()).then_some(trimmed)
@@ -567,12 +596,20 @@ impl ResolvedSettings {
     }
 }
 
-/// Convert settings to an accounting-safe cache budget.
+/// The budget `settings` imply, with anything the file could hold but the
+/// accounting cannot use replaced by the built-in default and warned about.
 ///
-/// Settings files are hand-editable and reach the budget without passing
-/// through a dialog field, so both GUI and headless callers use this boundary.
-/// The disk limit remains governed by `disk_enabled`; nothing charges
-/// `Tier::Disk` until `CACHE-11` is implemented.
+/// The settings dialog's rows refuse these values already, and this is not a
+/// second opinion about them: `settings.toml` and a project's settings layer
+/// are hand-editable and reach the budget without passing a row at all — and
+/// `ravel-cli` has no rows to pass. A `vram_limit_mb = 0` written there would
+/// otherwise arrive as a ceiling that evicts everything the moment it is
+/// produced. Both checks call the same functions ([`cache_limit_mb`],
+/// [`cache_sim_reserve_ratio`]), so the range is stated once.
+///
+/// The **disk** limit is left alone: nothing charges `Tier::Disk` yet
+/// (`CACHE-11`), and the default `disk_enabled = false` resolves it to a zero
+/// allowance regardless.
 pub fn usable_cache_budget(settings: &ResolvedSettings) -> CacheBudgetConfig {
     let defaults = ResolvedSettings::default();
     let mut settings = settings.clone();
@@ -594,9 +631,12 @@ pub fn usable_cache_budget(settings: &ResolvedSettings) -> CacheBudgetConfig {
             );
             defaults.cache_sim_reserve_ratio
         });
+    // The MiB→bytes conversion stays in `ResolvedSettings::cache_budget`, so
+    // the corrected values go back through it rather than around it.
     settings.cache_budget()
 }
 
+/// One tier limit, or the default with a warning.
 fn usable_limit_mb(value: u64, default: u64, tier: &'static str) -> u64 {
     cache_limit_mb(value as f64).unwrap_or_else(|| {
         tracing::warn!(

@@ -124,8 +124,9 @@ REQ-UI-004（スコープ付きビューア）。
 | ZC-2 | gpui-ce に Metal デバイス / キューの取得口を足す | ZC-1 |
 | ZC-3 | Ravel の出力テクスチャを GPUI のカスタム要素で描く | ZC-2 |
 | ZC-4 | 同期と寿命（フレーム跨ぎの取り違えを起こさない） | ZC-3 |
-| ZC-5 | Linux / Windows の経路（(A) のデバイス公開アクセサ） | ZC-3 |
+| ZC-5 | Linux の経路（(A) のデバイス公開アクセサ） | ZC-3 |
 | ZC-6 | 文書更新と `HIGH-09` のクローズ | ZC-4, ZC-5 |
+| ZC-7 | Windows の経路（`ZC-5` から分離。**実機が要る**） | ZC-5 |
 
 ### ZC-1 往復の内訳を測り直す（判断ゲート）
 
@@ -198,20 +199,66 @@ REQ-UI-004（スコープ付きビューア）。
 - **テクスチャがプールへ返るのは GPUI が読み終わった後**であることのテスト
 - デバイス喪失・ウィンドウ再作成で破綻しない
 
-### ZC-5 Linux / Windows の経路
+### ZC-5 Linux の経路
 
 `gpui_wgpu` を使う経路では、**同じ `wgpu::Device` を共有できる**ので Metal の
 interop は要らない。`architecture.md` の (A)。
 
+> **この単位は当初「Linux / Windows」だった。Windows は `ZC-7` へ切り出した。**
+> 理由は下の `ZC-7` 節に書く。ここは Linux / FreeBSD だけを見る。
+
 **完了条件**
 
-- Linux / Windows でもリードバックが 0 回
+- Linux でもリードバックが 0 回
 - **プラットフォームで分岐するのは 1 箇所**（デバイスの入手方法のみ）で、
   描画側は共通
 
+> **1 つ目は開発機では検証できない。** 開発機は macOS で、CI の matrix は
+> `macos-latest` と `windows-latest` だけ（Linux ランナーが無い）。
+> 実機が用意できるまで、この条件は**未検証のまま**である。
+
+### ZC-7 Windows の経路（`ZC-5` から分離）
+
+**Windows でゼロコピーができないわけではない。配線が無いだけ。**
+`ZC-5` の実装時に確かめた事実:
+
+- `gpui_windows` には `gpui_wgpu` レンダラが**ある**が、非既定の `wgpu`
+  feature の裏。既定は DirectX ネイティブ
+- `PlatformWindow::gpu_context` は `#[cfg(any(linux, freebsd))]` で宣言されて
+  おり、**Windows には生えていない**
+- Ravel 側の D3D12 interop は**既にある**（`NativeApi::Direct3D12` で
+  `ID3D12Device*` / `ID3D12Resource*` の両方）
+
+したがって道は 2 つ:
+
+- **(1) `gpui_windows` の `wgpu` feature を使う。** `gpu_context` の `cfg` に
+  Windows を足して実装すれば `ZC-5` の経路にそのまま乗る。ただし
+  **既定の DirectX レンダラを捨てる**判断になり、Windows の描画品質・性能・
+  安定性が gpui-ce の非既定パスに乗る
+- **(2) D3D12 レベルで interop する。** macOS が Metal でやったことの D3D12 版。
+  フォークに `ID3D12Device*` アクセサと surface の腕が要る。Ravel 側の
+  受け口は既にある
+
+**どちらも Windows 実機がないと判断できない**（性能も正しさも）。
+`ZC-5` と同じく開発機でも CI でも実行検証できないため、**実機が用意できるまで
+着手しない**。
+
+**完了条件**
+
+- Windows でリードバックが 0 回
+- (1) / (2) のどちらを採るかの判断が根拠付きで記録されている
+- `ZC-5` が置いた「分岐は 1 箇所」を壊さない
+
 ### ZC-6 文書更新と `HIGH-09` のクローズ
 
-- `HIGH-09` を `issues/closed/` へ（**個票が挙げた症状がすべて解決してから**）
+> **`ZC-7`（Windows）は未着手のまま `ZC-6` を行う。** `HIGH-09` の症状は
+> 開発機（macOS）の往復であり、そこは `ZC-2`〜`ZC-4` で消えた。Windows は
+> 同じ往復が残るが、**実機が無いので着手も検証もできない**。個票を閉じるとき
+> に「macOS / Linux は解決、Windows は `ZC-7`」と**残っている範囲を明記する**
+> こと。全部解決したかのように閉じない。
+
+- `HIGH-09` を `issues/closed/` へ（**個票が挙げた症状がすべて解決してから**。
+  Windows 分は上の注記のとおり残課題として記録する）
 - `gpu-compositing-plan.md` の `GPUCOMP-11`、`architecture.md` の
   「デバイス共有との関係」、`gpu-backend-plan.md` の非対象節
 - `perf-baseline.md` に往復除去後の実測

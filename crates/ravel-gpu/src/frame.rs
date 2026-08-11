@@ -153,6 +153,20 @@ impl GpuFrameBuffer {
         &self.ctx
     }
 
+    /// Create a completion callback for an external renderer that samples the
+    /// frame's native texture.
+    ///
+    /// The callback retains a frame clone. The renderer owns the callback
+    /// through its submitted command, so dropping that callback after the
+    /// command completes returns the pooled texture only after the consumer
+    /// has finished reading it.
+    pub fn completion_signal(&self) -> Arc<dyn Fn() + Send + Sync + 'static> {
+        let keep_alive = self.clone();
+        Arc::new(move || {
+            let _ = &keep_alive;
+        })
+    }
+
     /// Read the frame back into a CPU [`FrameBuffer`]. Blocks until this
     /// frame's GPU copy completes — call only at true CPU boundaries (viewer
     /// display, export, CPU-only nodes).
@@ -286,6 +300,39 @@ mod tests {
             pool.lock().unwrap().idle_count(),
             1,
             "released on last drop"
+        );
+    }
+
+    #[test]
+    fn completion_signal_keeps_texture_until_renderer_releases_it() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let pool = Arc::new(Mutex::new(TexturePool::new(ctx.clone(), 64 * 1024 * 1024)));
+        let texture = pool.lock().unwrap().acquire(rw_key(8, 8));
+        let frame = GpuFrameBuffer::new(ctx, &pool, texture, 8, 8);
+        let completion = frame.completion_signal();
+
+        drop(frame);
+        assert_eq!(
+            pool.lock().unwrap().idle_count(),
+            0,
+            "the renderer callback still owns the frame"
+        );
+
+        completion();
+        assert_eq!(
+            pool.lock().unwrap().idle_count(),
+            0,
+            "the callback must remain the owner through its completion handler"
+        );
+
+        drop(completion);
+        assert_eq!(
+            pool.lock().unwrap().idle_count(),
+            1,
+            "the texture returns after the renderer releases its callback"
         );
     }
 

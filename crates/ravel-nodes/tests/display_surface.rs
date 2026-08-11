@@ -135,6 +135,37 @@ fn the_surface_path_removes_the_readback_and_the_fallback_keeps_it() {
     assert!(frame.gpu_frame().is_none());
 }
 
+/// Consecutive worker results must keep their own contents when the output
+/// texture is borrowed by the surface path. Distinct solid colours make a
+/// stale-frame or frame-crossing reuse visible in the first pixel.
+#[test]
+fn consecutive_surface_frames_keep_their_sequence() {
+    let Ok(gpu) = GpuContext::new_blocking() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let zero_copy = Arc::new(AtomicBool::new(true));
+    let mut hooks = viewer_hooks(gpu, &zero_copy);
+    let pixels = [
+        [0.05, 0.2, 0.8, 1.0],
+        [0.7, 0.1, 0.25, 1.0],
+        [0.15, 0.85, 0.35, 1.0],
+        [0.95, 0.45, 0.05, 1.0],
+    ];
+
+    for (index, pixel) in pixels.into_iter().enumerate() {
+        let frame = finalize(&mut hooks, &solid(8, 8, pixel), &eval_ctx(8, 8));
+        assert!(frame.gpu_frame().is_some());
+        let bytes = display_bytes(&frame);
+        let expected = ravel_core::color::to_display_rgba8(pixel);
+        assert_eq!(
+            &bytes[..4],
+            &[expected[2], expected[1], expected[0], expected[3]],
+            "surface frame {index} did not retain its own pixels",
+        );
+    }
+}
+
 /// Removing the round trip must not change a pixel. Both roads run the same
 /// dispatch into the same `Rgba8Unorm` texture; only what happens afterwards
 /// differs, so the bytes must be identical rather than merely close.

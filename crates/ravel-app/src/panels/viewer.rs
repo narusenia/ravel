@@ -1733,6 +1733,10 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
     let Some(handles) = window.native_gpu_handles() else {
         return false;
     };
+    // GPUI owns this callback through the Metal command buffer, so the pooled
+    // texture cannot return to Ravel's pool until the surface has finished
+    // sampling it.
+    let completion = frame.completion_signal();
     ravel_gpu::interop::with_surface_texture(frame, handles.device(), |texture, width, height| {
         window.paint_surface(
             bounds,
@@ -1742,6 +1746,7 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
                     DevicePixels::from(width as i32),
                     DevicePixels::from(height as i32),
                 ),
+                completion: Some(completion),
             },
         );
     })

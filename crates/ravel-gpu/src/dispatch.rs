@@ -371,7 +371,7 @@ impl DispatchState {
         dispatch: &ComputeDispatch<'_>,
     ) {
         if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
-            self.flush(queue);
+            let _ = self.flush(queue);
         }
         let buffer = (!dispatch.uniform.is_empty())
             .then(|| self.uniform_buffer(device, dispatch.label, dispatch.uniform));
@@ -407,7 +407,7 @@ impl DispatchState {
         draw: &QuadDraw<'_>,
     ) {
         if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
-            self.flush(queue);
+            let _ = self.flush(queue);
         }
         let (uniform, storage) = {
             // The span name is read by `ravel-nodes/examples/perf_baseline.rs`
@@ -479,14 +479,18 @@ impl DispatchState {
 
     /// Submit the pending batch, if any. Afterwards every pooled texture is
     /// safe to reuse again.
-    pub(crate) fn flush(&mut self, queue: &wgpu::Queue) {
-        if let Some(encoder) = self.encoder.take() {
-            queue.submit(Some(encoder.finish()));
+    pub(crate) fn flush(&mut self, queue: &wgpu::Queue) -> Option<wgpu::SubmissionIndex> {
+        let submission = self
+            .encoder
+            .take()
+            .map(|encoder| queue.submit(Some(encoder.finish())));
+        if submission.is_some() {
             self.submits += 1;
         }
         self.pending_dispatches = 0;
         self.used.clear();
         self.written.clear();
+        submission
     }
 
     /// Flush when `texture` is about to be overwritten by `write_texture`
@@ -495,7 +499,7 @@ impl DispatchState {
     /// clobber the fresh upload.
     pub(crate) fn flush_for_upload(&mut self, queue: &wgpu::Queue, texture: &wgpu::Texture) {
         if self.used.contains(&texture_ptr(texture)) {
-            self.flush(queue);
+            let _ = self.flush(queue);
         }
     }
 
@@ -503,7 +507,7 @@ impl DispatchState {
     /// still writes it, so the copy sees the batch's output.
     pub(crate) fn flush_for_readback(&mut self, queue: &wgpu::Queue, texture: &wgpu::Texture) {
         if self.written.contains(&texture_ptr(texture)) {
-            self.flush(queue);
+            let _ = self.flush(queue);
         }
     }
 

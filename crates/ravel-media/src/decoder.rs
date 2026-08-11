@@ -105,6 +105,10 @@ struct ScalerCache {
     key: Option<ScalerKey>,
     scaler: Option<sws::Context>,
     output_frame: Option<frame::Video>,
+    /// Input formats sws has already refused to scale to [`DEEP_OUTPUT`].
+    /// A linear scan over one or two entries in practice — a stream keeps its
+    /// decoded format — so `PixelFormat` not being `Hash` costs nothing here.
+    deep_scale_broken: Vec<PixelFormat>,
     #[cfg(test)]
     creations: usize,
 }
@@ -161,6 +165,16 @@ impl ScalerCache {
             .run(frame, output_frame)
             .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
         Ok(output_frame)
+    }
+
+    fn deep_scale_known_broken(&self, format: PixelFormat) -> bool {
+        self.deep_scale_broken.contains(&format)
+    }
+
+    fn mark_deep_scale_broken(&mut self, format: PixelFormat) {
+        if !self.deep_scale_known_broken(format) {
+            self.deep_scale_broken.push(format);
+        }
     }
 
     #[cfg(test)]
@@ -1108,14 +1122,21 @@ fn convert_video_frame_to_rgba(
         return read_float_rgb_frame(frame, layout, input_color_space);
     }
 
-    if source_depth(frame.format()) > 8 {
+    if source_depth(frame.format()) > 8 && !scaler.deep_scale_known_broken(frame.format()) {
         match scaler.run(frame, DEEP_OUTPUT) {
             Ok(scaled) => return Ok(framebuffer_from_rgba64(scaled, input_color_space)),
-            Err(error) => warn!(
-                format = ?frame.format(),
-                %error,
-                "16-bit scaling unavailable; decoding through 8-bit RGBA"
-            ),
+            Err(error) => {
+                // sws support is a property of the format pair, not of this
+                // frame, so record the refusal: without it the next frame
+                // retries the deep scale, fails again, and rebuilds the RGBA
+                // scaler the fallback just replaced.
+                scaler.mark_deep_scale_broken(frame.format());
+                warn!(
+                    format = ?frame.format(),
+                    %error,
+                    "16-bit scaling unavailable; decoding through 8-bit RGBA"
+                );
+            }
         }
     }
 

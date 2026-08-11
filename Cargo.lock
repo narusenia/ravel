@@ -5940,6 +5940,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "pollster 0.4.0",
  "ravel-audio",
  "ravel-cli",
  "ravel-core",

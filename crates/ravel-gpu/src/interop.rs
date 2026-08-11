@@ -263,11 +263,16 @@ impl<'a> NativeGpuContext<'a> {
 
 /// Accept a host renderer's native device and command queue.
 ///
-/// This is the native import route in a backend-neutral shape. It enumerates
-/// the wgpu adapters for `api`, creates a logical wgpu device for each
-/// candidate, and returns only when the candidate's native device pointer is
-/// the same as `device`. The returned [`NativeGpuContext::gpu_context`] is
-/// therefore the abstract API running on the host's physical device.
+/// This is the native import route in a backend-neutral shape. It builds an
+/// instance restricted to `api`'s backend, enumerates its adapters, creates a
+/// logical wgpu device for each candidate, and returns only when the
+/// candidate's native device pointer is the same as `device`. The returned
+/// [`NativeGpuContext::gpu_context`] is therefore the abstract API running on
+/// the host's physical device.
+///
+/// Unlike [`context_from_wgpu`], the caller supplies no wgpu objects: on a
+/// platform whose renderer is not wgpu-backed there are none to supply, which
+/// is the whole reason this route exists.
 ///
 /// # Safety
 ///
@@ -287,7 +292,6 @@ impl<'a> NativeGpuContext<'a> {
 ///   devices. The caller must treat `None` as "no shared device" and must not
 ///   use a separately-created context with the native pair.
 pub async unsafe fn context_from_native<'a>(
-    instance: wgpu::Instance,
     api: NativeApi,
     device: *mut c_void,
     command_queue: *mut c_void,
@@ -298,6 +302,10 @@ pub async unsafe fn context_from_native<'a>(
         NativeApi::Metal => wgpu::Backends::METAL,
         NativeApi::Direct3D12 => wgpu::Backends::DX12,
     };
+
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = backends;
+    let instance = wgpu::Instance::new(desc);
 
     for adapter in instance.enumerate_adapters(backends).await {
         let adapter_limits = adapter.limits();

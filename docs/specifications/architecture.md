@@ -2,7 +2,7 @@
 
 ## 概要
 
-Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済みで、GPUI 側の配線は未了 → 「UI フレームワークのフォーク方針」）。
+Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済み。macOS は GPUI の Metal デバイスを取り込めるようになり、Linux / Windows の配線と実際のビューア描画は未了 → 「UI フレームワークのフォーク方針」）。
 
 ## レイヤー構成
 
@@ -518,7 +518,7 @@ Ravel は UI フレームワークを**フォークして使う**。これは選
 
 | 依存 | フォーク | 固定方法 |
 |---|---|---|
-| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `645682c` |
+| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `dd4cc74` |
 | `gpui-component` / `-assets` | `narusenia/gpui-component` | rev `8327eb4` |
 
 系譜は `zed-industries/zed` の gpui → gpui-ce（コミュニティ版）→
@@ -532,11 +532,14 @@ patch していない（proc-macro で型を運ばないので 2 本入っても
 ### フォークに載せるもの / 載せないもの
 
 **載せる**のは「Ravel が要求し、かつ上流にも汎用 API として通る形のもの」。
-実績は 2 つで、どちらもウィンドウ系:
+実績は 3 つ:
 
 - `Window::set_always_on_top(bool)` — 分離ウィンドウのピン留め（REQ-UI-001 の
   AlwaysOnTop）。macOS は NSWindow のレベル切替
 - `Context::observe_window_minimized` — メイン窓の最小化に分離窓を追従させる
+- `Window::native_gpu_handles()` — レンダラのネイティブデバイスとコマンド
+  キューを不透明な組で返す（`ZC-2`）。macOS 以外は `None`。デバイス共有
+  （REQ-GPU-001）はアプリ側では原理的に書けない
 
 **載せない**のは、アプリ側で代替できるもの。カスタムカーソル描画・
 `CursorStyle::Move` の追加・カーソル非表示はいずれも gpui-ce へのパッチが
@@ -546,7 +549,11 @@ patch していない（proc-macro で型を運ばないので 2 本入っても
 **形の制約**: パッチは上流（gpui-ce）へ PR できる汎用 API の形に保つ。
 Ravel 固有の分岐をフォークに置くと、上流へ返せないまま差分が増え、
 追従コストが恒久化する。`gpui-ce-ravel` の runtime 確認は
-`cargo run -p ravel-app --example always_on_top`。
+`cargo run -p ravel-app --example always_on_top` と
+`cargo run -p ravel-app --example shared_metal_device`（後者は実ウィンドウの
+デバイスを `interop::context_from_native` に通し、共有できたアダプタ名を
+表示する）。ウィンドウを開かないと確かめられないので、どちらも自動テストに
+できない。
 
 ### デバイス共有との関係
 

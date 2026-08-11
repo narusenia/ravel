@@ -408,14 +408,11 @@ fn a_native_host_pair_matches_wgpu_and_runs_the_abstract_api() {
         return;
     }
 
-    let instance = host.instance.clone();
-
     // SAFETY: both retained Objective-C objects remain alive through every
     // assertion below; the import only borrows their non-null pointers and
-    // creates a matching wgpu context from the supplied instance.
+    // builds its own wgpu instance to match them against.
     let native = pollster::block_on(unsafe {
         interop::context_from_native(
-            instance,
             interop::NativeApi::Metal,
             native_device_ptr,
             native_queue_ptr,

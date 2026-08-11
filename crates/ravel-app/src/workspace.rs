@@ -906,11 +906,15 @@ impl RavelWorkspace {
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
         ));
-        // The viewer surface is enabled only when the window exposes a Metal
-        // device matching Ravel's device. The completion signal attached by
-        // `paint_gpu_surface` keeps each pooled frame alive until GPUI's
-        // renderer has finished sampling it; missing handles and device
-        // mismatches keep the CPU fallback available.
+        // Whether this window's renderer can sample Ravel's textures. **This
+        // is the one place that differs per platform** — how the host's device
+        // is obtained. Everything downstream (publishing a GPU frame, painting
+        // it, retiring it, falling back) is common code.
+        //
+        // macOS asks the Metal renderer for its device and checks it is the
+        // one Ravel runs on; the wgpu-backed platforms need no check because
+        // the device came from the toolkit in the first place. Missing handles
+        // and mismatches keep the CPU fallback available.
         let capability = {
             #[cfg(target_os = "macos")]
             {
@@ -927,7 +931,13 @@ impl RavelWorkspace {
                     false
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                // `gpu_context` panics while the device is lost, and the
+                // renderer only exposes one when it is wgpu-backed.
+                !window.gpu_device_lost().unwrap_or(true) && window.gpu_context().is_some()
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
             {
                 false
             }

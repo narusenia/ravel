@@ -1753,7 +1753,39 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
     .is_some()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The wgpu-backed platforms need no interop at all: GPUI's renderer runs on
+/// the device Ravel was handed at startup, so the frame's own texture is
+/// already the host's. Only the way the texture is named differs from the
+/// Metal arm above — the bounds, the fallback and the lifetime rule are the
+/// same, which is what keeps the platform split to the two functions.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+    // A lost device recovers on a later draw; `gpu_context` panics meanwhile,
+    // so this frame falls back rather than asking.
+    if window.gpu_device_lost().unwrap_or(false) {
+        return false;
+    }
+    let texture = ravel_gpu::interop::surface_texture_wgpu(frame);
+    let size = size(
+        DevicePixels::from(frame.width() as i32),
+        DevicePixels::from(frame.height() as i32),
+    );
+    window.paint_surface(bounds, texture, size);
+    true
+}
+
+/// Windows keeps the CPU road for now — **wiring, not impossibility**.
+///
+/// `gpui_windows` does have a `gpui_wgpu` renderer, but only behind its
+/// non-default `wgpu` feature; the default build is DirectX-native, and
+/// `PlatformWindow::gpu_context` is declared `#[cfg(any(linux, freebsd))]`,
+/// so nothing reaches the device from here. Two routes exist when someone
+/// takes the unit: enable that feature (Windows then joins the arm above), or
+/// share at the D3D12 level the way macOS shares at the Metal level —
+/// `interop` already covers `ID3D12Device*` and `ID3D12Resource*` under
+/// [`NativeApi::Direct3D12`](ravel_gpu::interop::NativeApi). Both need a
+/// Windows machine to judge, which is why neither is done here.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 fn paint_gpu_surface(
     _frame: &GpuFrameBuffer,
     _bounds: Bounds<Pixels>,

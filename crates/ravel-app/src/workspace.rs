@@ -987,22 +987,13 @@ impl RavelWorkspace {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
             {
-                // Nothing to compare: the context above *is* the renderer's,
-                // so a session that started on it is on the right device by
-                // construction. What is still worth asking is whether the
-                // adoption happened at all — a renderer that had no context to
-                // give, or a device lost since, leaves Ravel on its own device
-                // and the textures unshareable.
-                //
-                // **The lifetime gap keeps this off for now.** The fork's wgpu
-                // `SurfaceSource::Texture` arm carries no completion callback,
-                // so the pool could reclaim a texture the renderer is still
-                // sampling — the race `ZC-4` closed on macOS. Adding that
-                // callback is the remaining half of this unit's Linux story;
-                // until it lands, adopting the device is correct and drawing
-                // through it is not.
-                let _ = window.gpu_device_lost();
-                false
+                // The context above is the renderer's, so adoption proves the
+                // device identity. The surface path also retains each pooled
+                // frame through GPUI's wgpu completion callback. If adoption
+                // failed, or the backend reports a lost/unknown device, keep
+                // the CPU fallback instead; `None` is deliberately treated as
+                // lost for the same safe asymmetry used by the viewer.
+                adopted_host_gpu && !window.gpu_device_lost().unwrap_or(true)
             }
             #[cfg(not(any(
                 target_os = "macos",

@@ -1755,17 +1755,9 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
 
 /// The wgpu-backed platforms need no interop at all: GPUI's renderer runs on
 /// the device Ravel was handed at startup, so the frame's own texture is
-/// already the host's. Only the way the texture is named differs from the
-/// Metal arm above — the bounds and the fallback are the same.
-///
-/// **The lifetime rule is not yet the same, and that is why this path stays
-/// disabled.** The Metal arm hands GPUI a completion callback (`ZC-4`) so the
-/// pool cannot reclaim a texture the renderer is still sampling; the fork's
-/// wgpu `SurfaceSource::Texture` arm carries no such field, and the
-/// `Arc<wgpu::Texture>` here keeps the *texture* alive without keeping the
-/// *pool lease*. Enabling this before closing that gap would reintroduce
-/// exactly the race `ZC-4` fixed — so `ZC-8`, which turns the capability on,
-/// owns the completion signal for this arm too.
+/// already the host's. The completion callback is retained by GPUI's wgpu
+/// submission until the renderer has finished sampling the texture, keeping
+/// the pooled frame lease alive across the surface draw.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
     // A lost device recovers on a later draw; sampling its textures meanwhile
@@ -1780,7 +1772,7 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
         DevicePixels::from(frame.width() as i32),
         DevicePixels::from(frame.height() as i32),
     );
-    window.paint_surface(bounds, texture, size);
+    window.paint_surface(bounds, texture, size, Some(frame.completion_signal()));
     true
 }
 

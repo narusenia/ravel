@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 26 | 1件1ファイル |
+| high | 27 | 1件1ファイル |
 | medium | 31 | 領域別4ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
@@ -26,7 +26,7 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（26件）
+## high（27件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
@@ -55,6 +55,7 @@
 | [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |
 | [HIGH-31](HIGH-31-float-decode-through-8bit-rgba.md) | float / 高ビット深度のデコードが 8bit RGBA を経由 | 画素形式別の取り込み経路（float 直読み / RGBA64） |
 | [HIGH-32](HIGH-32-linear-ingest-powf-per-pixel.md) | 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる | #378 |
+| [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) | sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換 | この PR |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
 ## medium（31件）

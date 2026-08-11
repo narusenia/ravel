@@ -1557,4 +1557,42 @@ cargo test -p ravel-media --features ffmpeg --release measure_ingest_transfer_co
 ハーネスは `crates/ravel-media/src/decoder.rs` の
 `measure_ingest_transfer_cost`。旧経路をローカルに再現し、同じ入力フレームを
 新経路と交互に処理するため、スケーラ生成・HIGH-17 の出力バッファプールは
-この測定に含めていない。
+この記録時点の測定には含めていない。HIGH-17 実装後のフル経路は次節で測定する。
+
+## sws scaler / decoder output buffer cache（`HIGH-17`）
+
+計測日: 2026-08-11。環境: Apple M 系 / arm64 / macOS 26.3 (25D125) /
+`--release`。1080p (1920×1080) の合成 H.264 (YUV420P) を同じ decoder へ渡し、
+`REC2020_PQ` の入力色空間で、旧経路（フレームごとに `sws::Context::get` と
+出力バッファを確保）と新経路（4 要素キーの scaler cache と decoder 所有の
+再利用可能バッファ）を 1 ラウンド内で交互に測った。先頭フレームは decoder と
+FFmpeg の初期化を warm up するため除外し、フレーム 1〜3 を計時した。
+
+測定前の `uptime`:
+
+```text
+16:34  up 56 days,  5:43, 2 users, load averages: 4.19 8.26 6.72
+```
+
+測定条件は 3 ラウンド、旧／新を交互に各 3 回実行。表は各経路の 3 回合計を
+3 で割った 1080p 1 フレームあたり平均（ms）。
+
+| 対象 | 旧 → 新 | 差分 |
+|---|---:|---:|
+| `decode_video_frame` (REC2020_PQ) | 8.616 → **8.065** | **-0.551 ms (-6.4%)** |
+
+再現コマンド（この順で実行）:
+
+```bash
+uptime
+cargo test -p ravel-media --features ffmpeg --release \
+    measure_decoder_frame_cost -- --ignored --nocapture
+```
+
+ハーネスは `crates/ravel-media/src/decoder.rs` の
+`measure_decoder_frame_cost`。テスト内で同じ合成入力を旧／新 decoder に開き、
+先頭フレームを warm up したあと、同じフレーム番号を旧→新の順で 3 回ずつ処理
+する。`HIGH-32` の 18〜27 ms は ingest ループ単体（色空間ごとの RGBA8 / RGBA64 /
+float）に残る床であり、今回の `decode_video_frame` 全体の数字とは測定対象が
+異なる。HIGH-17 は色変換そのものを変更していないため、その ingest 床は維持され、
+今回確認できた改善は scaler 生成と出力バッファ確保の 0.551 ms 分である。

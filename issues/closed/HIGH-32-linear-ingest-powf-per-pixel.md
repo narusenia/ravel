@@ -100,7 +100,7 @@ Apple M 系 / macOS、loadavg 6〜19、3 ラウンド）:
 
 ## 関連
 
-- [HIGH-17](../high/HIGH-17-sws-scaler-recreated-per-frame.md) — 同じ関数。
+- [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) — 同じ関数。
   スケーラ再生成と per-pixel ループ。**同時に直すのが自然**
 - [HIGH-16](../closed/HIGH-16-no-decoded-frame-cache.md) — 解決済み。
   順再生では効かないので本件を隠さない

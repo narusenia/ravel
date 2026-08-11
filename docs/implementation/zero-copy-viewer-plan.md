@@ -124,8 +124,10 @@ REQ-UI-004（スコープ付きビューア）。
 | ZC-2 | gpui-ce に Metal デバイス / キューの取得口を足す | ZC-1 |
 | ZC-3 | Ravel の出力テクスチャを GPUI のカスタム要素で描く | ZC-2 |
 | ZC-4 | 同期と寿命（フレーム跨ぎの取り違えを起こさない） | ZC-3 |
-| ZC-5 | Linux / Windows の経路（(A) のデバイス公開アクセサ） | ZC-3 |
-| ZC-6 | 文書更新と `HIGH-09` のクローズ | ZC-4, ZC-5 |
+| ZC-5 | Linux の経路（(A) のデバイス公開アクセサ） | ZC-3 |
+| ZC-6 | 文書更新（`HIGH-09` の現在地。**クローズは ZC-7/8 の後**） | ZC-4, ZC-5 |
+| ZC-7 | Windows の経路（`ZC-5` から分離。**実機確認は手動**） | ZC-5 |
+| ZC-8 | 起動時に GPUI のデバイスを採用する（`ZC-5` が露呈させた欠落） | ZC-5 |
 
 ### ZC-1 往復の内訳を測り直す（判断ゲート）
 
@@ -198,20 +200,159 @@ REQ-UI-004（スコープ付きビューア）。
 - **テクスチャがプールへ返るのは GPUI が読み終わった後**であることのテスト
 - デバイス喪失・ウィンドウ再作成で破綻しない
 
-### ZC-5 Linux / Windows の経路
+### ZC-5 Linux の経路
 
 `gpui_wgpu` を使う経路では、**同じ `wgpu::Device` を共有できる**ので Metal の
 interop は要らない。`architecture.md` の (A)。
 
+> **この単位は当初「Linux / Windows」だった。Windows は `ZC-7` へ切り出した。**
+> 理由は下の `ZC-7` 節に書く。ここは Linux / FreeBSD だけを見る。
+
 **完了条件**
 
-- Linux / Windows でもリードバックが 0 回
-- **プラットフォームで分岐するのは 1 箇所**（デバイスの入手方法のみ）で、
-  描画側は共通
+- Linux でもリードバックが 0 回
+- **プラットフォームで分岐するのは「テクスチャをどう名指すか」だけ**で、
+  何をいつ描くか・いつ諦めるかは共通
 
-### ZC-6 文書更新と `HIGH-09` のクローズ
+> **2 つ目は当初「デバイスの入手方法のみ」と書いていた。実装が示した形に
+> 合わせて改めた。** macOS は不透明ポインタ＋完了コールバック、wgpu 経路は
+> `Arc<wgpu::Texture>` と、**渡す型そのものがプラットフォームで違う**ので、
+> `paint_gpu_surface` を 1 本にはできない。共通に保てるのは呼び出し側 —
+> フレームの取り出し、bounds の計算、失敗時に CPU へ落ちる判断 — で、
+> そこは実際に共通のままにしてある。「入手方法だけ」という当初の言い方は
+> 実装前の見込みで、条件として満たしようがない。
 
-- `HIGH-09` を `issues/closed/` へ（**個票が挙げた症状がすべて解決してから**）
+> **1 つ目は実行では検証できない。ビルドは Docker で検証できる。**
+> `docker run --platform linux/arm64 rust:1.95-slim` に
+> `pkg-config libfontconfig1-dev libasound2-dev libx11-dev libxkbcommon-dev
+> libwayland-dev libxcb1-dev libssl-dev cmake clang` を入れれば
+> **`cargo check -p ravel-app` が Linux で通る**（Apple Silicon なので
+> エミュレーション無しの aarch64 ネイティブ、3 分程度）。
+> ただし**コンテナに GPU は無い**ので、GPU テストは
+> `skipping: no GPU adapter available` で全部飛ぶ。
+> 型と cfg の検証には使えるが、**リードバック 0 の証明には使えない**。
+> CI の matrix は `macos-latest` と `windows-latest` だけで Linux ランナーは
+> 無いが、Docker があるので**この計画で Linux のコンパイル検証を怠る理由は
+> 無い**。
+
+> **1 つ目は達成していない。理由は検証環境ではなく前提の欠落。**
+> この単位の実装中に分かったことだが、**Ravel は GPUI のデバイスを採用して
+> いない** — `ProjectState::new` は `GpuContext::new_blocking()` で自前の
+> デバイスを作り、そのために用意された `interop::context_from_wgpu` には
+> **本番の呼び出し元が 1 つも無い**。macOS はポインタ照合で同一性を確認して
+> いるので安全だが、Linux には確認する手段が無く、**別デバイスのテクスチャを
+> GPUI へ渡すのは未定義動作**になる。
+> そこで Linux の capability は `false` に固定してある（描画側の腕は残して
+> あり、配線が入れば効く）。配線は `ZC-8`。
+
+### ZC-8 起動時に GPUI のデバイスを採用する
+
+**`REQ-GPU-001` が要求する「UI と評価パイプラインが 1 つのデバイス」は、
+macOS 以外では成立していない。** `GPUBK-9` が `interop::context_from_wgpu` を
+契約として固定し、`crates/ravel-gpu/tests/device_sharing.rs` が「他人の
+デバイスで抽象 API が最後まで動く」ことを機械的に確認しているが、
+**アプリがそれを呼んでいない**。
+
+`ProjectState::new` が `GpuContext::new_blocking()` で自前のデバイスを作る
+現状を、ウィンドウの `gpu_context()` を採用する形へ変える。
+
+- **評価パイプライン全体の生成方法が変わる**単位なので、`ZC-5` の射程外として
+  分離した
+- macOS にも影響する（今はポインタ照合で「たまたま同じ」ことを確認している
+  だけで、採用しているわけではない）
+- ウィンドウより先に `ProjectState` が作られる現在の順序をどうするかが要点
+
+**完了条件**
+
+- `interop::context_from_wgpu` に本番の呼び出し元がある
+- **wgpu 経路にも完了通知がある。** フォークの
+  `SurfaceSource::Texture`（Linux 腕）には `completion` フィールドが無く、
+  `Arc<wgpu::Texture>` は**テクスチャは生かすがプールのリースは保持しない**。
+  `ZC-4` が macOS で塞いだ「読み取り中のテクスチャをプールが再利用する」
+  race が、そのままでは Linux に残る。**capability を `true` にする前に
+  ここを閉じること**（フォークの Linux 腕にも `completion` を足すのが素直）
+- Linux で capability が `true` になり、リードバックが 0 回
+  （**Linux 実機が要る**）
+- macOS が退行しない（`ZC-2`〜`ZC-4` のテストが全部通る）
+- デバイス喪失・ウィンドウ再作成で破綻しない
+
+### ZC-7 Windows の経路（`ZC-5` から分離）
+
+**Windows でゼロコピーができないわけではない。配線が無いだけ。**
+`ZC-5` の実装時に確かめた事実:
+
+- `gpui_windows` には `gpui_wgpu` レンダラが**ある**が、非既定の `wgpu`
+  feature の裏
+- **既定のレンダラは D3D11**（`gpui_windows/src/directx_renderer.rs` は
+  `Direct3D11::*` を使い、`ID3D11Device` / `ID3D11Texture2D` を持つ）
+- **Ravel は Windows で D3D12 に乗る**（`wgpu::Backends::PRIMARY`）。
+  `interop` の D3D12 対応（`NativeApi::Direct3D12`）は既にあるが、
+  **相手が D3D11 なので直接は噛み合わない**
+- `PlatformWindow::gpu_context` は `#[cfg(any(linux, freebsd))]` で宣言されて
+  おり、**Windows には生えていない**
+- **`gpui_wgpu` は Windows では DX12 を選ぶ**
+  （`wgpu_context.rs:213-215`: 非 Windows は `VULKAN | GL`、Windows は `DX12`）。
+  Ravel も `Backends::PRIMARY`（`VULKAN | METAL | DX12 | BROWSER_WEBGPU`）から
+  Windows では DX12 を選ぶので、**wgpu feature を有効にすれば両者は同じ
+  D3D12 に揃う**
+- **wgpu-hal 29 に D3D11 バックエンドは無い**（`dx12` / `vulkan` / `gles` /
+  `metal` のみ）。したがって **Ravel 側に D3D11 の口を生やすことはできない** —
+  取り出す先の実装が存在しない
+
+したがって道は 2 つ:
+
+- **(1) `gpui_windows` の `wgpu` feature を使う。** `gpu_context` の `cfg` に
+  Windows を足して実装すれば `ZC-5` / `ZC-8` の経路にそのまま乗り、
+  **両者が同じ D3D12 デバイスになる**ので interop 自体が要らなくなる。
+  ただし**既定の D3D11 レンダラを捨てる**判断で、Windows の描画品質・性能・
+  安定性が gpui-ce の非既定パスに乗る。**最も筋が良いが、影響が最も大きい**
+- **(2) D3D12 → D3D11 の共有ハンドル。** 向きに注意 — Ravel（D3D12）が作った
+  リソースを GPUI（D3D11）が開く形になる。逆は成立しない（上記のとおり
+  Ravel に D3D11 は無い）。定石は
+  `CreateSharedHandle` → `ID3D11Device5::OpenSharedResource1` で、
+  同期も `D3D12_FENCE_FLAG_SHARED` のフェンスを跨がせる。
+  **障害は wgpu 側**: `dx12` バックエンドはテクスチャを
+  `D3D12_HEAP_FLAG_NONE` で作る（`wgpu-hal/src/dx12/device.rs:102`）ので、
+  **共有可能なリソースにならない**。`texture_from_raw` は `pub unsafe` なので
+  共有テクスチャだけ自前で `CreateCommittedResource` する逃げ道はあるが、
+  **プールの外にテクスチャができる**ので `ZC-4` が解いた寿命問題を別系統で
+  もう一度解くことになる
+
+**(1) を先に評価する。** (2) は (1) が使えないと分かった場合の退路で、
+**(1) より確実に重い**（wgpu の共有フラグ欠如 + 跨ぎフェンス + プール外資源）。
+
+**Windows 実機は利用可能**（このプロジェクトの開発者が保有）。ただし
+**CI では実行検証できない**（`windows-latest` ランナーに GPU が無い）ので、
+実機確認は**ブランチを push して手動で行う**運用にする。
+
+**完了条件**
+
+- Windows でリードバックが 0 回（**実機で確認**）
+- (1) / (2) のどちらを採るかの判断が根拠付きで記録されている
+- 既定レンダラを変更する場合、その影響（描画品質・性能・安定性）を
+  実機で確認した結果が残っている
+- `ZC-5` が置いた「テクスチャの名指し方だけが分岐する」形を壊さない
+
+### ZC-6 文書更新（`HIGH-09` は現在地を書き直す）
+
+> **`HIGH-09` はこの単位では閉じない。** 個票の症状は「毎フレームの
+> GPU→CPU→GPU 往復」であり、**それが残っているプラットフォームがある** —
+> Linux は配線（`ZC-8`）が、Windows は経路そのもの（`ZC-7`）が未了。
+> `issues/README.md` は open な findings の索引なので、**まだそこに居るのが
+> 正しい**。
+>
+> この単位がやるのは**現在地を正確に書くこと**で、閉じることではない。
+> 個票の冒頭に「macOS は `ZC-2`〜`ZC-4` で解決、Linux は `ZC-8`、Windows は
+> `ZC-7`」と**プラットフォーム別の状態表**を置き、「引受先の計画が無い」
+> という古い記述を落とす。**クローズは `ZC-7` / `ZC-8` が済んでから**、
+> どちらかの単位の一部として行う。
+>
+> （当初この節は「`ZC-6` で閉じる、ただし Windows は残課題と明記」と書いて
+> いたが、**「症状がすべて解決してから閉じる」と両立しない**。矛盾したまま
+> 運用すると、次に読む人がどちらに従うか分からなくなる。）
+
+- **`HIGH-09` は `issues/high/` に残す。** 個票をプラットフォーム別の現在地へ
+  書き換え、`ZC-7` / `ZC-8` を引受先として名指しする
 - `gpu-compositing-plan.md` の `GPUCOMP-11`、`architecture.md` の
   「デバイス共有との関係」、`gpu-backend-plan.md` の非対象節
 - `perf-baseline.md` に往復除去後の実測

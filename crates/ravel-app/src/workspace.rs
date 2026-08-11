@@ -906,11 +906,15 @@ impl RavelWorkspace {
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
         ));
-        // The viewer surface is enabled only when the window exposes a Metal
-        // device matching Ravel's device. The completion signal attached by
-        // `paint_gpu_surface` keeps each pooled frame alive until GPUI's
-        // renderer has finished sampling it; missing handles and device
-        // mismatches keep the CPU fallback available.
+        // Whether this window's renderer can sample Ravel's textures. **This
+        // is the one place that differs per platform** — how the host's device
+        // is obtained. Everything downstream (publishing a GPU frame, painting
+        // it, retiring it, falling back) is common code.
+        //
+        // macOS asks the Metal renderer for its device and checks it is the
+        // one Ravel runs on; the wgpu-backed platforms need no check because
+        // the device came from the toolkit in the first place. Missing handles
+        // and mismatches keep the CPU fallback available.
         let capability = {
             #[cfg(target_os = "macos")]
             {
@@ -927,7 +931,27 @@ impl RavelWorkspace {
                     false
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                // **Not enabled yet, and the reason is not the renderer.**
+                //
+                // Sharing a texture requires the two sides to be on one
+                // device. On macOS that is checked (`native_device_matches`);
+                // here it cannot be, because Ravel never adopts GPUI's device
+                // in the first place: `ProjectState::new` builds its own with
+                // `GpuContext::new_blocking()`, and `interop::context_from_wgpu`
+                // — the entry point that exists precisely for this — has no
+                // production caller. Handing GPUI a texture from a *different*
+                // wgpu device is undefined, not merely slow.
+                //
+                // Wiring the startup path to adopt `window.gpu_context()` is a
+                // change to how the whole evaluation pipeline is created, so it
+                // belongs to its own unit rather than to this one. Until then
+                // the arm below is reachable code kept honest by staying off.
+                let _ = window.gpu_device_lost();
+                false
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
             {
                 false
             }

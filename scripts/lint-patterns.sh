@@ -199,15 +199,15 @@ done < <(rg -no --no-heading \
 
 # ---------------------------------------------------------------------------
 # gpu-device-sharing: `interop::context_from_wgpu`,
-# `interop::context_from_native` and `interop::wgpu_instance` are the other
-# direction — Ravel *receives* the graphics objects instead of
-# handing them out. REQ-GPU-001 requires the UI framework and the compute
-# pipeline to run on one device, and a shared device is by definition one the
-# host creates and Ravel accepts, so this is a contract to keep rather than a
-# hole to close (GPUBK-9). It is still not free-for-all: whoever calls it
-# decides which device the whole evaluation pipeline runs on, and that is the
-# application host's job alone. Allowed callers: ravel-gpu itself and
-# ravel-app, the GPUI host.
+# `interop::context_from_native`, `interop::wgpu_instance`,
+# `native_gpu_handles` and `NativeGpuHandles` are the other direction — Ravel
+# receives the graphics objects instead of handing them out. REQ-GPU-001
+# requires the UI framework and the compute pipeline to run on one device, and
+# a shared device is by definition one the host creates and Ravel accepts, so
+# this is a contract to keep rather than a hole to close (GPUBK-9). It is still
+# not free-for-all: whoever calls it decides which device the whole evaluation
+# pipeline runs on, and that is the application host's job alone. Allowed
+# callers: ravel-gpu itself and ravel-app, the GPUI host.
 #
 # Called once at startup, it bypasses neither dispatch batching nor the texture
 # pool — every subsystem is built on the context it returns — which is exactly
@@ -226,6 +226,8 @@ while IFS=: read -r file line symbol; do
 done < <(rg -no --no-heading \
     -e '\bcontext_from_wgpu\b' \
     -e '\bcontext_from_native\b' \
+    -e '\bnative_gpu_handles\b' \
+    -e '\bNativeGpuHandles\b' \
     -e '\bwgpu_instance\b' \
     crates -g '*.rs' 2>/dev/null)
 

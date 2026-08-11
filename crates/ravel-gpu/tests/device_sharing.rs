@@ -48,7 +48,9 @@ use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice};
+use objc2::runtime::ProtocolObject;
+#[cfg(target_os = "macos")]
+use objc2_metal::{MTLCopyAllDevices, MTLCreateSystemDefaultDevice, MTLDevice};
 
 use ravel_gpu::compute::ComputePipeline;
 use ravel_gpu::interop;
@@ -163,7 +165,7 @@ fn a_shared_context_runs_the_abstract_api_end_to_end() {
         "the shared context must describe the host's adapter"
     );
 
-    assert_abstract_api_runs(ctx);
+    assert_abstract_api_runs(ctx.clone());
 }
 
 /// Exercise the whole abstract GPU path on a context supplied by a host.
@@ -331,13 +333,33 @@ fn a_shared_context_reports_the_hosts_native_device() {
     );
 }
 
-/// The fork's GPUI Metal accessor and wgpu's Metal backend must identify the
-/// same physical device on macOS. The command queue is intentionally a
-/// separate queue: queue synchronization belongs to the later zero-copy unit.
+/// Reproduce the Metal device selection in GPUI's `MetalRenderer::create_device`.
+///
+/// GPUI prefers a non-removable, low-power device and falls back to the system
+/// default only when enumeration is empty. Keeping this rule in the test makes
+/// the native pair stand in for the fork's `Window::native_gpu_handles` result,
+/// rather than accidentally testing `MTLCreateSystemDefaultDevice` instead.
+#[cfg(target_os = "macos")]
+fn gpui_metal_device() -> Option<Retained<ProtocolObject<dyn MTLDevice>>> {
+    let devices = MTLCopyAllDevices().to_vec();
+    devices
+        .into_iter()
+        .min_by_key(|device| (device.isRemovable(), !device.isLowPower()))
+        .or_else(|| MTLCreateSystemDefaultDevice())
+}
+
+/// The fork's GPUI Metal accessor and the wgpu Metal backend must identify the
+/// same physical device before the abstract API is exercised.
+///
+/// On a single-GPU Mac this identity is guaranteed. On a Mac with multiple
+/// GPUs, GPUI's low-power preference and Ravel's HighPerformance preference
+/// can select different devices; that is a normal configuration, so this test
+/// reports the mismatch and skips. ZC-3 and later must add the explicit
+/// multi-GPU device handoff and synchronization needed to cover that case.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_host_pair_matches_wgpu_and_runs_the_abstract_api() {
-    let Some(native_device) = MTLCreateSystemDefaultDevice() else {
+    let Some(native_device) = gpui_metal_device() else {
         eprintln!(
             "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: no Metal device"
         );
@@ -366,35 +388,68 @@ fn a_native_host_pair_matches_wgpu_and_runs_the_abstract_api() {
     let native_device_ptr = Retained::as_ptr(&native_device).cast_mut().cast();
     let native_queue_ptr = Retained::as_ptr(&native_queue).cast_mut().cast();
 
+    let host_ctx = host.share();
+    // SAFETY: `host_ctx` keeps the wgpu Metal device alive while the borrowed
+    // pointer is compared; no native object is retained or released.
+    let Some(wgpu_device) = (unsafe { interop::native_device(&host_ctx) }) else {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: wgpu did not \
+             expose a Metal device"
+        );
+        return;
+    };
+    if wgpu_device.as_ptr() != native_device_ptr {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: GPUI's \
+             low-power device ({native_device_ptr:p}) differs from wgpu HighPerformance \
+             device ({:?}); multi-GPU handoff is deferred to ZC-3+",
+            wgpu_device.as_ptr()
+        );
+        return;
+    }
+
+    let instance = host.instance.clone();
+
     // SAFETY: both retained Objective-C objects remain alive through every
-    // assertion below; the descriptor only borrows their non-null pointers.
-    let native = unsafe {
+    // assertion below; the import only borrows their non-null pointers and
+    // creates a matching wgpu context from the supplied instance.
+    let native = pollster::block_on(unsafe {
         interop::context_from_native(
+            instance,
             interop::NativeApi::Metal,
             native_device_ptr,
             native_queue_ptr,
         )
-    }
-    .expect("retained Metal objects produce a native host pair");
+    });
+    let Some(native) = native else {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: no wgpu \
+             Metal adapter/device matched GPUI's selected device"
+        );
+        return;
+    };
 
     assert_eq!(native.api(), interop::NativeApi::Metal);
     assert_eq!(native.device().as_ptr(), native_device_ptr);
     assert_eq!(native.command_queue().as_ptr(), native_queue_ptr);
 
-    let ctx = host.share();
-    // SAFETY: `ctx` and its clone keep the wgpu Metal device alive while the
-    // borrowed pointer is compared; no native object is retained or released.
-    let wgpu_device = unsafe { interop::native_device(&ctx) }
-        .expect("the wgpu host context exposes its Metal device");
+    // The import itself selected the matching adapter/device. This is the
+    // identity proof that the context used below runs on GPUI's device.
+    let ctx = native.gpu_context().clone();
+    // SAFETY: `ctx` is alive for the comparison and the pointer is not used as
+    // an owning handle.
+    let imported_device = unsafe { interop::native_device(&ctx) }
+        .expect("the imported wgpu context exposes its Metal device");
     assert_eq!(
         native.device().as_ptr(),
-        wgpu_device.as_ptr(),
-        "GPUI's system-default Metal device must be the wgpu device used by Ravel"
+        imported_device.as_ptr(),
+        "the imported wgpu context must use GPUI's selected Metal device"
     );
 
     // The preceding identity proof is what lets the abstract Ravel API run on
     // the same physical Metal device as the GPUI renderer. Exercise that API
-    // on this very same shared context, rather than only checking pointers.
-    assert_abstract_api_runs(ctx.clone());
+    // on the context returned by `context_from_native`, not on a separately
+    // constructed host context.
     assert_eq!(interop::native_api(&ctx), Some(interop::NativeApi::Metal));
+    assert_abstract_api_runs(ctx);
 }

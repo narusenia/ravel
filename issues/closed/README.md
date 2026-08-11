@@ -43,6 +43,7 @@
 | [HIGH-14](HIGH-14-clock-advances-over-underrun.md) | アンダーラン中も同期クロックが進む | フェーズ A3（epoch） |
 | [HIGH-15](HIGH-15-settrack-resamples-on-prep-thread.md) | `SetTrack` が prep スレッドで全長リサンプル | フェーズ A3 / A4 |
 | [HIGH-16](HIGH-16-no-decoded-frame-cache.md) | デコード済みフレームキャッシュが無く逆方向スクラブが GOP を再デコード | `CACHE-8` |
+| [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) | sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換 | この PR |
 | [HIGH-18](HIGH-18-open-failure-invisible.md) | プロジェクトを開けないが無言 | フェーズ A2 |
 | [HIGH-20](HIGH-20-media-import-failure-invisible.md) | メディアインポート失敗が無言 | フェーズ A2 |
 | [HIGH-21](HIGH-21-node-editor-repaints-every-playback-frame.md) | NodeEditor が再生中毎フレーム全再構築 | フェーズ A |
@@ -55,7 +56,6 @@
 | [HIGH-30](HIGH-30-subnet-port-rename-drops-outer-edges.md) | Subnet 内のポート名変更で外側のエッジが消える | 実機フィードバック |
 | [HIGH-31](HIGH-31-float-decode-through-8bit-rgba.md) | float / 高ビット深度のデコードが 8bit RGBA を経由 | 画素形式別の取り込み経路（float 直読み / RGBA64） |
 | [HIGH-32](HIGH-32-linear-ingest-powf-per-pixel.md) | 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる | #378 |
-| [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) | sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換 | この PR |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
 ## medium（31件）

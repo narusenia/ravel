@@ -26,7 +26,8 @@ REQ-CORE-013（スコープ軸）、REQ-GPU-001、REQ-PROJ-001、REQ-RENDER-004�
 | Compute パイプライン | `ravel-gpu/src/compute.rs:148` | レイアウトの描画形 + エントリポイント | なし | —（HIGH-06 は #193 で解決） |
 | テクスチャ | `ravel-gpu/src/texture_pool.rs:86` | `TextureKey`（w, h, format, usage） | **バイト予算あり**（ただしアイドル分のみ） | — |
 | デコード済みフレーム | `ravel-media/src/frame_cache.rs` | パス + 入力色空間 + ストリーム + フレーム番号 | **`CacheKind::MediaFrame`**（`CACHE-8`） | —（HIGH-16 は解決） |
-| 動画デコーダ | `ravel-media/src/decoder.rs:50` | stream_index | 1 エントリ | HIGH-17 |
+| 動画デコーダ | `ravel-media/src/decoder.rs:50` | stream_index | 1 エントリ | —（HIGH-17 は解決） |
+| sws スケーラ | `ravel-media/src/decoder.rs` の `ScalerCache` | 入力 fmt + 入力寸法 + 出力 fmt + 出力寸法 | 1 エントリ | —（HIGH-17 / #380） |
 | ディスク派生物 | `ravel-app/src/media/cache.rs` | 絶対パス + mtime + size + extra | なし（GC もなし） | — |
 | 音声 mixdown | `ravel-app/src/audio/mixdown.rs:48` | asset_id + stream | — | LOW-APP-08（パスを含まずリリンクで stale） |
 
@@ -778,7 +779,11 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
   未実装）。台帳には載せるが本計画では扱わない。HIGH-06（検証がハッシュ照合の
   前 / パイプライン共有なし）は **#193 で解決済み**で、シェーダとパイプラインの
   メモリキャッシュは既に効いている（残るのは上限が無いことだけ）。
-- **sws スケーラのキャッシュ**（HIGH-17）。同上。
+- **sws スケーラのキャッシュ**（HIGH-17）。**#380 で解決した**（本計画の外で）。
+  ただし実測の得は 1080p で -0.8% にとどまり、票の「デコード経路の CPU 時間を
+  支配する」という見立ては成立しなかった。デコードを支配しているのは ingest で、
+  それは `HIGH-32`（#378）が既に 6〜13 倍速くしている。数字は
+  `perf-baseline.md` の該当 2 節にある。
 - **CPU→GPU 変換結果のキャッシュ**（`MED-GPU-05`）。同上。
 - **UI 側のメモ化 3 件**（`issues/low/backlog.md` のグラデーション・
   エッジ整形文字列・Viewer bbox）。同上。

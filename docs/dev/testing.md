@@ -65,6 +65,33 @@ cargo test --workspace --features ffmpeg
   warm cache の数字を cold の根拠に使わない
 - テストが書けない場合は**その旨を明示する**（`AGENTS.md` の Definition of done）
 
+## 他プラットフォーム向けのコードをどこまで確かめられるか
+
+CI の matrix は `macos-latest` と `windows-latest` だけで、**Linux ランナーは
+無い**。それでも Linux 向けのコードを書いたまま放置する理由にはならない。
+
+**ビルドはコンテナで確かめられる**（Apple Silicon ならエミュレーション無しの
+aarch64 ネイティブ、`ravel-app` 全体で 3 分程度）:
+
+```bash
+docker run --rm --platform linux/arm64 -v "$PWD":/work \
+  -v ravel-linux-cargo:/usr/local/cargo/registry -w /work rust:1.95-slim bash -c '
+    apt-get update -qq && apt-get install -y -qq pkg-config \
+      libfontconfig1-dev libasound2-dev libx11-dev libxkbcommon-dev \
+      libwayland-dev libxcb1-dev libssl-dev cmake clang
+    cargo check -p ravel-app'
+```
+
+名前付きボリュームに registry を残すと 2 回目以降が速い。
+
+**コンテナに GPU は無い。** GPU テストは
+`skipping: no GPU adapter available` で全部飛び、`test result: ok` と
+表示される — **通ったのではなく飛んだ**ので、`--nocapture` で確かめること。
+実行時の挙動（リードバック回数、実際の描画）は実機でしか確かめられない。
+
+つまりコンテナで言えるのは「型と `cfg` が成立する」ところまでで、
+そこから先は下の節と同じ扱いになる。
+
 ## カーソルや描画結果のように検証できないもの
 
 プラットフォーム状態（マウスカーソルの形など）はテストプラットフォームで

@@ -332,8 +332,14 @@ impl DisplayTransform {
             // surface sampler, so the worker waits before publishing the
             // borrowed texture. Wait only for the submission containing this
             // transform rather than stalling behind unrelated older work.
-            ctx.wait_for_pending()
-                .map_err(|error| anyhow::anyhow!("display transform wait: {error}"))?;
+            // Wait first, release unconditionally, judge afterwards — the same
+            // order the readback road below uses. Returning through `?` while
+            // still holding `output` would strand the lease: nothing else owns
+            // it yet, so the pool would never get it back.
+            if let Err(error) = ctx.wait_for_pending() {
+                pool.lock().unwrap().release(output);
+                return Err(anyhow::anyhow!("display transform wait: {error}"));
+            }
             return Ok(DisplayFrame::from_gpu(GpuFrameBuffer::new(
                 ctx.clone(),
                 pool,

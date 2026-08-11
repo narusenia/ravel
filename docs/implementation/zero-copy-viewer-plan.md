@@ -222,9 +222,18 @@ interop は要らない。`architecture.md` の (A)。
 > そこは実際に共通のままにしてある。「入手方法だけ」という当初の言い方は
 > 実装前の見込みで、条件として満たしようがない。
 
-> **1 つ目は開発機では検証できない。** 開発機は macOS で、CI の matrix は
-> `macos-latest` と `windows-latest` だけ（Linux ランナーが無い）。
-> 実機が用意できるまで、この条件は**未検証のまま**である。
+> **1 つ目は実行では検証できない。ビルドは Docker で検証できる。**
+> `docker run --platform linux/arm64 rust:1.95-slim` に
+> `pkg-config libfontconfig1-dev libasound2-dev libx11-dev libxkbcommon-dev
+> libwayland-dev libxcb1-dev libssl-dev cmake clang` を入れれば
+> **`cargo check -p ravel-app` が Linux で通る**（Apple Silicon なので
+> エミュレーション無しの aarch64 ネイティブ、3 分程度）。
+> ただし**コンテナに GPU は無い**ので、GPU テストは
+> `skipping: no GPU adapter available` で全部飛ぶ。
+> 型と cfg の検証には使えるが、**リードバック 0 の証明には使えない**。
+> CI の matrix は `macos-latest` と `windows-latest` だけで Linux ランナーは
+> 無いが、Docker があるので**この計画で Linux のコンパイル検証を怠る理由は
+> 無い**。
 
 > **1 つ目は達成していない。理由は検証環境ではなく前提の欠落。**
 > この単位の実装中に分かったことだが、**Ravel は GPUI のデバイスを採用して

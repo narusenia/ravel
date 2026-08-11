@@ -895,6 +895,54 @@ enum PendingProjectAction {
     CloseWindow,
 }
 
+/// The window renderer's own GPU context, when it has one to share.
+///
+/// `None` on a renderer that is not wgpu-backed (macOS is Metal-native, and
+/// Windows without the `wgpu` feature is D3D11-native), before the renderer has
+/// acquired its context, and while a lost device recovers. Every one of those
+/// leaves Ravel to choose its own device, which is what it did before this
+/// existed.
+///
+/// The fork hands the four objects back through `Box<dyn Any>` so that `gpui`
+/// need not name `wgpu` in its own signatures; unpacking them here is the price
+/// of that, and a failed downcast means the fork changed shape rather than that
+/// the device is unavailable — hence the log.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+fn host_gpu_context(window: &Window) -> Option<ravel_gpu::GpuContext> {
+    use std::sync::Arc;
+
+    if window.gpu_device_lost().unwrap_or(false) {
+        return None;
+    }
+    let boxed = window.gpu_context_full()?;
+    let Ok(parts) = boxed.downcast::<(
+        wgpu::Instance,
+        wgpu::Adapter,
+        Arc<wgpu::Device>,
+        Arc<wgpu::Queue>,
+    )>() else {
+        tracing::warn!("the renderer's GPU context had an unexpected shape");
+        return None;
+    };
+    let (instance, adapter, device, queue) = *parts;
+    // `context_from_wgpu` takes the objects by value; the renderer keeps its
+    // own `Arc` clones, so both sides stay alive independently.
+    Some(ravel_gpu::interop::context_from_wgpu(
+        instance,
+        adapter,
+        (*device).clone(),
+        (*queue).clone(),
+    ))
+}
+
+/// macOS has no wgpu renderer to adopt from — `gpui_macos` is Metal-native, so
+/// Ravel picks its own device and `interop::context_from_native` checks the two
+/// landed on the same one (`ZC-2`).
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
+fn host_gpu_context(_window: &Window) -> Option<ravel_gpu::GpuContext> {
+    None
+}
+
 impl RavelWorkspace {
     /// Builds the session inside the main window.
     ///
@@ -902,7 +950,13 @@ impl RavelWorkspace {
     /// title, notifications, minimize follow) belong to it; the session itself
     /// is window-independent and outlives every individual pane.
     pub fn new(shell: AppShell, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let project = cx.new(crate::project_state::ProjectState::new);
+        // REQ-GPU-001: run the evaluation pipeline on the window renderer's
+        // own device when it has one to give. `GPUBK-9` fixed the entry point
+        // for this years before there was a caller — this is that caller.
+        let host_gpu = host_gpu_context(window);
+        let adopted_host_gpu = host_gpu.is_some();
+        let project =
+            cx.new(|cx| crate::project_state::ProjectState::new_on_host_gpu(host_gpu, cx));
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
         ));
@@ -931,32 +985,40 @@ impl RavelWorkspace {
                     false
                 }
             }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
             {
-                // **Not enabled yet, and the reason is not the renderer.**
+                // Nothing to compare: the context above *is* the renderer's,
+                // so a session that started on it is on the right device by
+                // construction. What is still worth asking is whether the
+                // adoption happened at all — a renderer that had no context to
+                // give, or a device lost since, leaves Ravel on its own device
+                // and the textures unshareable.
                 //
-                // Sharing a texture requires the two sides to be on one
-                // device. On macOS that is checked (`native_device_matches`);
-                // here it cannot be, because Ravel never adopts GPUI's device
-                // in the first place: `ProjectState::new` builds its own with
-                // `GpuContext::new_blocking()`, and `interop::context_from_wgpu`
-                // — the entry point that exists precisely for this — has no
-                // production caller. Handing GPUI a texture from a *different*
-                // wgpu device is undefined, not merely slow.
-                //
-                // Wiring the startup path to adopt `window.gpu_context()` is a
-                // change to how the whole evaluation pipeline is created, so it
-                // belongs to its own unit rather than to this one. Until then
-                // the arm below is reachable code kept honest by staying off.
+                // **The lifetime gap keeps this off for now.** The fork's wgpu
+                // `SurfaceSource::Texture` arm carries no completion callback,
+                // so the pool could reclaim a texture the renderer is still
+                // sampling — the race `ZC-4` closed on macOS. Adding that
+                // callback is the remaining half of this unit's Linux story;
+                // until it lands, adopting the device is correct and drawing
+                // through it is not.
                 let _ = window.gpu_device_lost();
                 false
             }
-            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
+            #[cfg(not(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "windows"
+            )))]
             {
                 false
             }
         };
-        tracing::info!(capability, "viewer GPU surface capability detected");
+        tracing::info!(
+            capability,
+            adopted_host_gpu,
+            "viewer GPU surface capability detected"
+        );
         project.update(cx, |project, cx| {
             project.configure_viewer_surface(capability, cx);
         });

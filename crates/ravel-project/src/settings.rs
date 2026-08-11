@@ -743,6 +743,41 @@ mod tests {
         assert_eq!(resolved.cache_budget().ram_bytes, 1024 * MIB);
     }
 
+    /// The rules this crate owns, checked here rather than only in the crates
+    /// that call them: a hand-edited `settings.toml` reaches the budget without
+    /// passing a dialog row, and `ravel-cli` has no rows at all.
+    #[test]
+    fn an_unusable_cache_setting_falls_back_to_the_default() {
+        let defaults = ResolvedSettings::default();
+        let unusable = |vram: u64, ram: u64, ratio: f32| {
+            usable_cache_budget(&ResolvedSettings {
+                cache_vram_limit_mb: vram,
+                cache_ram_limit_mb: ram,
+                cache_sim_reserve_ratio: ratio,
+                ..defaults.clone()
+            })
+        };
+
+        // Below MIN (a zero ceiling evicts everything it produces), above MAX,
+        // and the `NaN` that would pass `CacheBudget`'s own `clamp` and zero
+        // the simulation reserve without a word.
+        let budget = unusable(0, MAX_CACHE_LIMIT_MB as u64 + 1, f32::NAN);
+        assert_eq!(budget.vram_bytes, defaults.cache_vram_limit_mb * MIB);
+        assert_eq!(budget.ram_bytes, defaults.cache_ram_limit_mb * MIB);
+        assert_eq!(budget.sim_reserve_ratio, defaults.cache_sim_reserve_ratio);
+
+        // The bounds themselves are usable, so the range is closed on both ends.
+        let budget = unusable(MIN_CACHE_LIMIT_MB as u64, MAX_CACHE_LIMIT_MB as u64, 1.0);
+        assert_eq!(budget.vram_bytes, MIB);
+        assert_eq!(budget.ram_bytes, MAX_CACHE_LIMIT_MB as u64 * MIB);
+        assert_eq!(budget.sim_reserve_ratio, 1.0);
+
+        // The cache location is refused rather than resolved when it is not
+        // absolute — the working directory is not something the user chose.
+        assert!(cache_root_setting("relative/cache").is_none());
+        assert!(cache_root_setting("  ").is_none());
+    }
+
     #[test]
     fn a_disabled_disk_tier_resolves_to_no_allowance() {
         let layer = SettingsLayer {

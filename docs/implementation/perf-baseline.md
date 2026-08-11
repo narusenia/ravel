@@ -1638,7 +1638,7 @@ decoder が 1 フレームしか生きないので、scaler cache の恩恵を�
 
 ## 往復を消した後（`ZC-2`〜`ZC-4`、macOS）
 
-計画: `zero-copy-viewer-plan.md`。記録日: 2026-08-12。
+計画: `zero-copy-viewer-plan.md`。記録日: 2026-08-11。
 
 **時間の実測は載せない。載せられない。** `ZC-1` が分解した 4 段のうち、
 ゼロコピーで消えるのは段 2（リードバック）・段 3（CPU 側の包み）・
@@ -1667,7 +1667,7 @@ decoder が 1 フレームしか生きないので、scaler cache の恩恵を�
 
 ### この節が「測り直し」を載せていない理由
 
-2026-08-12 に `measure_viewer_roundtrip_breakdown` を回したが、
+2026-08-11 に `measure_viewer_roundtrip_breakdown` を回したが、
 **その数字は破棄した**。ハーネス（`crates/ravel-app/tests/viewer_roundtrip.rs`）は
 ゼロコピー経路を有効化しないので CPU 経路を測っており、しかも直前の
 release ビルドで loadavg が 14 まで上がっていた（`ZC-1` 時は 2.5 前後）。

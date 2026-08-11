@@ -7,7 +7,7 @@
 | 領域 | ravel-gpu / frame, ravel-app / Viewer |
 | 該当 | `crates/ravel-gpu/src/frame.rs:134-143`, `crates/ravel-app/src/eval_hooks.rs:121-130`, `crates/ravel-ui/src/panels/viewer.rs`（`ViewerResolution`）, `crates/ravel-app/src/panels/viewer.rs:283-288`, `:1599-1604` |
 
-> **macOS では往復が消えた。Linux / Windows には残っている（2026-08-12 時点）。**
+> **macOS では往復が消えた。Linux / Windows には残っている（2026-08-11 時点）。**
 > 個票が挙げた 4 つの症状のうち 3 つは以前から片付いており、4 つ目（往復）が
 > プラットフォームで状態が分かれる。**この個票が open なのは 4 つ目のため。**
 >
@@ -18,7 +18,7 @@
 > | 解像度上限（`VIEWER_MAX_DIM`） | ✅ `VRES-1`（#300）が定数を撤去し係数モデルへ |
 > | **GPU→CPU→GPU の往復** | **macOS ✅ / Linux ❌ / Windows ❌**（下記） |
 >
-> ### 往復のプラットフォーム別状態
+> **往復のプラットフォーム別状態**
 >
 > | | 状態 | 引受先 |
 > |---|---|---|
@@ -43,6 +43,9 @@
 
 ## 現状
 
+**以下は往復が残っているプラットフォーム（Linux / Windows）の話。**
+macOS はテクスチャのまま描くので 1〜3 のどれも通らない。
+
 GPU 評価されたフレームは毎回
 
 1. `read_texture` で CPU f32 にリードバック
@@ -62,6 +65,8 @@ GPU 評価されたフレームは毎回
 まともに踏むこと。`GPUBK-9` の計測（`perf-baseline.md`）では 1080p 全体
 約 15.8 ms のうち転送 2.04 ms + BGRA 変換 1.63 ms が本 issue の範囲で、
 支配項ではない（約 23%）。
+
+**macOS ではこの影響が消えている。** 残るのは Linux / Windows。
 
 ## 修正方針
 
@@ -87,7 +92,8 @@ GPU 評価されたフレームは毎回
 - **時間の実測は載せていない。** 消える段のうち「GPUI のアップロードと
   アトラス churn」は gpui-ce の内部にありウィンドウ無しには測れず、
   総和を主張すると測れない部分を含んだ数字になる。`ZC-1` の推定
-  （`perf-baseline.md`）が上限を示している
+  （`perf-baseline.md`、段 2 + 段 3 = 1.70〜4.70 ms）は**下限** —
+  測れない段 4 はそこに上積みされる
 
 ## 関連
 

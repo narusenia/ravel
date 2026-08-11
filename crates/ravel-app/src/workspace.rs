@@ -906,19 +906,11 @@ impl RavelWorkspace {
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
         ));
-        // The device check below is what `ZC-3` built; the reason it does not
-        // turn the path on yet is lifetime, not capability.
-        //
-        // A frame handed to GPUI is released one UI turn after it is replaced,
-        // which delays the pool's reuse but does not wait for the Metal
-        // command buffer that samples it. Until `ZC-4` retires a lease against
-        // the renderer's completion signal, a stall between the two timelines
-        // can put the next frame's contents into the texture still on screen.
-        // The machinery and its tests belong on `main` — the default does not.
-        // `ZC-4` flips this to `capability` and owns the criterion "the viewer
-        // performs no readback" for the running application; the tests in
-        // `crates/ravel-nodes/tests/display_surface.rs` already hold it for the
-        // worker.
+        // The viewer surface is enabled only when the window exposes a Metal
+        // device matching Ravel's device. The completion signal attached by
+        // `paint_gpu_surface` keeps each pooled frame alive until GPUI's
+        // renderer has finished sampling it; missing handles and device
+        // mismatches keep the CPU fallback available.
         let capability = {
             #[cfg(target_os = "macos")]
             {
@@ -940,13 +932,9 @@ impl RavelWorkspace {
                 false
             }
         };
-        let viewer_surface_enabled = false;
-        tracing::info!(
-            capability,
-            "viewer GPU surface disabled pending frame-lifetime synchronization (ZC-4)"
-        );
+        tracing::info!(capability, "viewer GPU surface capability detected");
         project.update(cx, |project, cx| {
-            project.configure_viewer_surface(viewer_surface_enabled, cx);
+            project.configure_viewer_surface(capability, cx);
         });
         let playback = cx.new(|_| crate::playback::PlaybackController::new());
         cx.set_global(crate::playback::PlaybackControllerHandle(

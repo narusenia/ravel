@@ -65,6 +65,122 @@ struct CachedVideoDecoder {
     /// last one stopped instead of seeking again (see
     /// [`FfmpegDecoder::decode_video_frame`]).
     last_returned_pts: Option<i64>,
+    /// Cached software scaler and its output frame. The scaler key includes
+    /// every input and output property that changes the filter tables.
+    scaler: ScalerCache,
+    /// Test-only switch used by the old/new performance harness.
+    #[cfg(test)]
+    legacy_conversion: bool,
+}
+
+/// The complete configuration that determines an sws scaler's filter tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScalerKey {
+    input_format: PixelFormat,
+    input_width: u32,
+    input_height: u32,
+    output_format: PixelFormat,
+    output_width: u32,
+    output_height: u32,
+}
+
+impl ScalerKey {
+    fn new(frame: &frame::Video, output: PixelFormat) -> Self {
+        Self {
+            input_format: frame.format(),
+            input_width: frame.width(),
+            input_height: frame.height(),
+            output_format: output,
+            output_width: frame.width(),
+            output_height: frame.height(),
+        }
+    }
+}
+
+/// Cache one scaler and its output frame for the currently active format and
+/// dimensions. A stream can change its decoded pixel format or dimensions,
+/// so the full [`ScalerKey`] is checked before every run.
+#[derive(Default)]
+struct ScalerCache {
+    key: Option<ScalerKey>,
+    scaler: Option<sws::Context>,
+    output_frame: Option<frame::Video>,
+    /// Input formats sws has already refused to scale to [`DEEP_OUTPUT`].
+    /// A linear scan over one or two entries in practice — a stream keeps its
+    /// decoded format — so `PixelFormat` not being `Hash` costs nothing here.
+    deep_scale_broken: Vec<PixelFormat>,
+    #[cfg(test)]
+    creations: usize,
+}
+
+// `FfmpegDecoder` is moved to a worker through `MediaReader: Send`. The sws
+// context is owned exclusively by that decoder and is only ever accessed
+// through `&mut self`; it is never shared between threads or used
+// concurrently. Moving the FFmpeg-owned pointer with its decoder therefore
+// preserves the same ownership invariant as the decoder's other FFmpeg
+// contexts.
+unsafe impl Send for ScalerCache {}
+
+impl ScalerCache {
+    fn ensure(&mut self, frame: &frame::Video, output: PixelFormat) -> MediaResult<()> {
+        let key = ScalerKey::new(frame, output);
+        if self.key == Some(key) {
+            return Ok(());
+        }
+
+        let output_changed = self.key.is_some_and(|previous| {
+            previous.output_format != key.output_format
+                || previous.output_width != key.output_width
+                || previous.output_height != key.output_height
+        });
+        let scaler = sws::Context::get(
+            key.input_format,
+            key.input_width,
+            key.input_height,
+            key.output_format,
+            key.output_width,
+            key.output_height,
+            sws::Flags::BILINEAR,
+        )
+        .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
+
+        self.key = Some(key);
+        self.scaler = Some(scaler);
+        if output_changed {
+            self.output_frame = None;
+        }
+        #[cfg(test)]
+        {
+            self.creations += 1;
+        }
+        Ok(())
+    }
+
+    fn run(&mut self, frame: &frame::Video, output: PixelFormat) -> MediaResult<&frame::Video> {
+        self.ensure(frame, output)?;
+        let output_frame = self.output_frame.get_or_insert_with(frame::Video::empty);
+        self.scaler
+            .as_mut()
+            .expect("scaler is initialized by ensure")
+            .run(frame, output_frame)
+            .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
+        Ok(output_frame)
+    }
+
+    fn deep_scale_known_broken(&self, format: PixelFormat) -> bool {
+        self.deep_scale_broken.contains(&format)
+    }
+
+    fn mark_deep_scale_broken(&mut self, format: PixelFormat) {
+        if !self.deep_scale_known_broken(format) {
+            self.deep_scale_broken.push(format);
+        }
+    }
+
+    #[cfg(test)]
+    fn creations(&self) -> usize {
+        self.creations
+    }
 }
 
 /// Cached audio decoder context, persisted across `decode_audio_chunk` calls.
@@ -259,6 +375,9 @@ fn create_video_decoder(
             frame_rate,
             hw_active,
             last_returned_pts: None,
+            scaler: ScalerCache::default(),
+            #[cfg(test)]
+            legacy_conversion: false,
         }),
         Err(e) if hw_active => {
             // HW accel failed to open — retry without it.
@@ -280,6 +399,9 @@ fn create_video_decoder(
                 frame_rate,
                 hw_active: false,
                 last_returned_pts: None,
+                scaler: ScalerCache::default(),
+                #[cfg(test)]
+                legacy_conversion: false,
             })
         }
         Err(e) => Err(MediaError::DecodeError(format!("open video decoder: {e}"))),
@@ -491,7 +613,7 @@ impl MediaReader for FfmpegDecoder {
                 continue;
             }
 
-            let decoder = &mut self.video_decoder.as_mut().unwrap().decoder;
+            let decoder = &mut cached.decoder;
 
             decoder
                 .send_packet(&packet)
@@ -503,9 +625,10 @@ impl MediaReader for FfmpegDecoder {
                 if pts >= target_pts {
                     // Remember where playback stopped so the next forward
                     // request can continue instead of seeking.
-                    self.video_decoder.as_mut().unwrap().last_returned_pts = Some(pts);
+                    cached.last_returned_pts = Some(pts);
                     let sw_frame = ensure_sw_frame(&decoded_frame)?;
-                    return convert_video_frame_to_rgba(
+                    return convert_decoded_video_frame(
+                        cached,
                         sw_frame.as_ref().unwrap_or(&decoded_frame),
                         input_color_space,
                     );
@@ -518,7 +641,7 @@ impl MediaReader for FfmpegDecoder {
         }
 
         // Flush decoder.
-        let decoder = &mut self.video_decoder.as_mut().unwrap().decoder;
+        let decoder = &mut cached.decoder;
         decoder
             .send_eof()
             .map_err(|e| MediaError::DecodeError(format!("flush: {e}")))?;
@@ -527,9 +650,10 @@ impl MediaReader for FfmpegDecoder {
             if pts >= target_pts {
                 // Drained at EOF: the decoder holds no more packets, so the
                 // next request has to seek regardless.
-                self.video_decoder.as_mut().unwrap().last_returned_pts = None;
+                cached.last_returned_pts = None;
                 let sw_frame = ensure_sw_frame(&decoded_frame)?;
-                return convert_video_frame_to_rgba(
+                return convert_decoded_video_frame(
+                    cached,
                     sw_frame.as_ref().unwrap_or(&decoded_frame),
                     input_color_space,
                 );
@@ -540,9 +664,10 @@ impl MediaReader for FfmpegDecoder {
         }
 
         if let Some(ref frame) = best_frame {
-            self.video_decoder.as_mut().unwrap().last_returned_pts = None;
+            cached.last_returned_pts = None;
             let sw_frame = ensure_sw_frame(frame)?;
-            return convert_video_frame_to_rgba(
+            return convert_decoded_video_frame(
+                cached,
                 sw_frame.as_ref().unwrap_or(frame),
                 input_color_space,
             );
@@ -946,6 +1071,21 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
     }
 }
 
+/// Convert one decoded frame, switching to the pre-cache seam the performance
+/// harness measures against.
+fn convert_decoded_video_frame(
+    cached: &mut CachedVideoDecoder,
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
+    #[cfg(test)]
+    if cached.legacy_conversion {
+        return convert_video_frame_to_rgba_legacy(frame, input_color_space);
+    }
+
+    convert_video_frame_to_rgba(frame, input_color_space, &mut cached.scaler)
+}
+
 /// Convert an FFmpeg video frame to RGBA f32 [`FrameBuffer`], decoding
 /// `input_color_space` into the working space on the way.
 ///
@@ -967,6 +1107,7 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
 fn convert_video_frame_to_rgba(
     frame: &frame::Video,
     input_color_space: ColorSpace,
+    scaler: &mut ScalerCache,
 ) -> MediaResult<FrameBuffer> {
     let width = frame.width();
     let height = frame.height();
@@ -981,19 +1122,26 @@ fn convert_video_frame_to_rgba(
         return read_float_rgb_frame(frame, layout, input_color_space);
     }
 
-    if source_depth(frame.format()) > 8 {
-        match scale_frame(frame, DEEP_OUTPUT) {
-            Ok(scaled) => return Ok(framebuffer_from_rgba64(&scaled, input_color_space)),
-            Err(error) => warn!(
-                format = ?frame.format(),
-                %error,
-                "16-bit scaling unavailable; decoding through 8-bit RGBA"
-            ),
+    if source_depth(frame.format()) > 8 && !scaler.deep_scale_known_broken(frame.format()) {
+        match scaler.run(frame, DEEP_OUTPUT) {
+            Ok(scaled) => return Ok(framebuffer_from_rgba64(scaled, input_color_space)),
+            Err(error) => {
+                // sws support is a property of the format pair, not of this
+                // frame, so record the refusal: without it the next frame
+                // retries the deep scale, fails again, and rebuilds the RGBA
+                // scaler the fallback just replaced.
+                scaler.mark_deep_scale_broken(frame.format());
+                warn!(
+                    format = ?frame.format(),
+                    %error,
+                    "16-bit scaling unavailable; decoding through 8-bit RGBA"
+                );
+            }
         }
     }
 
-    let scaled = scale_frame(frame, PixelFormat::RGBA)?;
-    Ok(framebuffer_from_rgba8(&scaled, input_color_space))
+    let scaled = scaler.run(frame, PixelFormat::RGBA)?;
+    Ok(framebuffer_from_rgba8(scaled, input_color_space))
 }
 
 /// The scaler output format for sources deeper than 8 bits, in host byte
@@ -1018,26 +1166,6 @@ fn source_depth(format: PixelFormat) -> u32 {
         .map(|index| desc.comp[index].depth as u32)
         .max()
         .unwrap_or(8)
-}
-
-/// Run a frame through the sws scaler into `output`, same size.
-fn scale_frame(frame: &frame::Video, output: PixelFormat) -> MediaResult<frame::Video> {
-    let mut scaler = sws::Context::get(
-        frame.format(),
-        frame.width(),
-        frame.height(),
-        output,
-        frame.width(),
-        frame.height(),
-        sws::Flags::BILINEAR,
-    )
-    .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
-
-    let mut scaled = frame::Video::empty();
-    scaler
-        .run(frame, &mut scaled)
-        .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
-    Ok(scaled)
 }
 
 /// Ingest an 8-bit RGBA frame into the working space.
@@ -1205,6 +1333,50 @@ fn read_float_rgb_frame(
     }
 
     Ok(FrameBuffer::from_f32(width, height, f32_data))
+}
+
+/// Reconstruct the pre-cache conversion path for the performance harness.
+/// It differs from [`convert_video_frame_to_rgba`] in exactly one respect —
+/// the scaler is built per frame instead of reused — so the harness isolates
+/// scaler reuse from every other difference, including the already-landed
+/// transfer-function optimisations, which both paths share.
+#[cfg(test)]
+fn convert_video_frame_to_rgba_legacy(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
+    if let Some(layout) = FloatRgbLayout::of(frame.format()) {
+        return read_float_rgb_frame(frame, layout, input_color_space);
+    }
+
+    if source_depth(frame.format()) > 8
+        && let Ok(scaled) = scale_frame_legacy(frame, DEEP_OUTPUT)
+    {
+        return Ok(framebuffer_from_rgba64(&scaled, input_color_space));
+    }
+
+    let scaled = scale_frame_legacy(frame, PixelFormat::RGBA)?;
+    Ok(framebuffer_from_rgba8(&scaled, input_color_space))
+}
+
+#[cfg(test)]
+fn scale_frame_legacy(frame: &frame::Video, output: PixelFormat) -> MediaResult<frame::Video> {
+    let mut scaler = sws::Context::get(
+        frame.format(),
+        frame.width(),
+        frame.height(),
+        output,
+        frame.width(),
+        frame.height(),
+        sws::Flags::BILINEAR,
+    )
+    .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
+
+    let mut scaled = frame::Video::empty();
+    scaler
+        .run(frame, &mut scaled)
+        .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
+    Ok(scaled)
 }
 
 /// Map an FFmpeg sample format onto its numeric encoding.
@@ -1450,6 +1622,132 @@ mod tests {
     fn init_ffmpeg_is_idempotent() {
         init_ffmpeg();
         init_ffmpeg();
+    }
+
+    #[test]
+    fn scaler_cache_recreates_only_when_its_key_changes() {
+        init_ffmpeg();
+        let mut cache = ScalerCache::default();
+        let rgba = frame::Video::new(PixelFormat::RGBA, 4, 4);
+
+        cache.ensure(&rgba, PixelFormat::RGBA).unwrap();
+        cache.ensure(&rgba, PixelFormat::RGBA).unwrap();
+        assert_eq!(cache.creations(), 1);
+
+        let resized = frame::Video::new(PixelFormat::RGBA, 8, 4);
+        cache.ensure(&resized, PixelFormat::RGBA).unwrap();
+        assert_eq!(cache.creations(), 2);
+
+        let reformatted = frame::Video::new(PixelFormat::RGB24, 8, 4);
+        cache.ensure(&reformatted, PixelFormat::RGBA).unwrap();
+        assert_eq!(cache.creations(), 3);
+
+        cache.ensure(&reformatted, PixelFormat::BGRA).unwrap();
+        assert_eq!(cache.creations(), 4);
+    }
+
+    /// The cached scaler must not change a single pixel. Decode the same
+    /// frames through the per-frame scaler the cache replaced and through the
+    /// cached one, and require the bytes to match exactly — several frames in
+    /// a row, so the comparison covers a scaler that has been reused rather
+    /// than only a freshly built one.
+    #[test]
+    fn a_reused_scaler_decodes_the_same_pixels_as_a_per_frame_one() {
+        use std::process::Command;
+
+        const FRAMES: u64 = 4;
+
+        init_ffmpeg();
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("scaler-identity.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=96x64:rate=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "ultrafast",
+                "-an",
+                path.to_str().expect("UTF-8 temporary path"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg failed to generate the fixture");
+
+        // A non-trivial transfer function, so the comparison exercises the
+        // ingest path rather than a pass-through.
+        let open = || {
+            let mut decoder = FfmpegDecoder::open(&path)
+                .expect("open decoder")
+                .with_input_color_space(ColorSpace::REC2020_PQ);
+            let stream = decoder
+                .info()
+                .first_video()
+                .expect("video stream")
+                .stream_index;
+            decoder
+                .ensure_video_decoder(stream)
+                .expect("decoder context");
+            (decoder, stream)
+        };
+
+        let (mut legacy, legacy_stream) = open();
+        legacy
+            .video_decoder
+            .as_mut()
+            .expect("cached decoder")
+            .legacy_conversion = true;
+        let (mut cached, cached_stream) = open();
+
+        let mut previous: Option<FrameBuffer> = None;
+        for number in 0..FRAMES {
+            let expected = legacy
+                .decode_video_frame(legacy_stream, number)
+                .expect("per-frame scaler decode");
+            let actual = cached
+                .decode_video_frame(cached_stream, number)
+                .expect("cached scaler decode");
+
+            assert_eq!(
+                (actual.width, actual.height, actual.format),
+                (expected.width, expected.height, expected.format),
+                "frame {number} changed shape"
+            );
+            assert!(
+                actual.data == expected.data,
+                "frame {number} differs between the cached and per-frame scalers"
+            );
+
+            // Guard against a fixture that decodes to the same picture every
+            // time, which would make the comparison above vacuous.
+            if let Some(previous) = previous.replace(actual)
+                && number == FRAMES - 1
+            {
+                assert!(
+                    previous.data != expected.data,
+                    "fixture frames are identical; the comparison proves nothing"
+                );
+            }
+        }
+
+        assert_eq!(
+            cached
+                .video_decoder
+                .as_ref()
+                .expect("cached decoder")
+                .scaler
+                .creations(),
+            1,
+            "the cached path rebuilt its scaler, so reuse was never exercised"
+        );
     }
 
     /// Reconstruct the pre-LUT u8 ingest loop for the measurement harness.
@@ -1739,7 +2037,7 @@ mod tests {
             }
         }
 
-        let time = |f: &dyn Fn() -> FrameBuffer| {
+        let time = |f: &mut dyn FnMut() -> FrameBuffer| {
             let start = Instant::now();
             let output = black_box(f());
             black_box(output.as_f32()[0]);
@@ -1755,18 +2053,18 @@ mod tests {
 
         for _ in 0..ROUNDS {
             for (index, (_, space)) in SPACES.into_iter().enumerate() {
-                old_u8[index] += time(&|| serial_framebuffer_from_rgba8(&rgba8, space));
-                new_u8[index] += time(&|| framebuffer_from_rgba8(&rgba8, space));
-                old_u16[index] += time(&|| serial_framebuffer_from_rgba64(&rgba64, space));
-                new_u16[index] += time(&|| framebuffer_from_rgba64(&rgba64, space));
-                old_float[index] += time(&|| {
+                old_u8[index] += time(&mut || serial_framebuffer_from_rgba8(&rgba8, space));
+                new_u8[index] += time(&mut || framebuffer_from_rgba8(&rgba8, space));
+                old_u16[index] += time(&mut || serial_framebuffer_from_rgba64(&rgba64, space));
+                new_u16[index] += time(&mut || framebuffer_from_rgba64(&rgba64, space));
+                old_float[index] += time(&mut || {
                     serial_read_float_rgb_frame(
                         &float_frame,
                         FloatRgbLayout::Packed { big_endian: false },
                         space,
                     )
                 });
-                new_float[index] += time(&|| {
+                new_float[index] += time(&mut || {
                     read_float_rgb_frame(
                         &float_frame,
                         FloatRgbLayout::Packed { big_endian: false },
@@ -1781,19 +2079,133 @@ mod tests {
         for (index, (name, _)) in SPACES.into_iter().enumerate() {
             eprintln!(
                 "u8 {name}: old={:.3} ms new={:.3} ms",
-                old_u8[index] as f64 / 1_000_000.0,
-                new_u8[index] as f64 / 1_000_000.0
+                old_u8[index] as f64 / ROUNDS as f64 / 1_000_000.0,
+                new_u8[index] as f64 / ROUNDS as f64 / 1_000_000.0
             );
             eprintln!(
                 "u16 {name}: old={:.3} ms new={:.3} ms",
-                old_u16[index] as f64 / 1_000_000.0,
-                new_u16[index] as f64 / 1_000_000.0
+                old_u16[index] as f64 / ROUNDS as f64 / 1_000_000.0,
+                new_u16[index] as f64 / ROUNDS as f64 / 1_000_000.0
             );
             eprintln!(
                 "float {name}: old={:.3} ms new={:.3} ms",
-                old_float[index] as f64 / 1_000_000.0,
-                new_float[index] as f64 / 1_000_000.0
+                old_float[index] as f64 / ROUNDS as f64 / 1_000_000.0,
+                new_float[index] as f64 / ROUNDS as f64 / 1_000_000.0
             );
         }
+    }
+
+    /// Alternate the per-frame-scaler and cached-scaler decoder paths on the
+    /// same 1080p input. The first frame warms the decoder and is not timed;
+    /// the measured frames exercise a reused scaler in the new path. The two
+    /// paths swap timing order every frame, because the one that runs second
+    /// is measurably faster and that bias is as large as the effect.
+    ///
+    /// ```text
+    /// uptime
+    /// cargo test -p ravel-media --features ffmpeg --release \
+    ///     measure_decoder_frame_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "measurement harness; run with --ignored --nocapture"]
+    fn measure_decoder_frame_cost() {
+        use std::hint::black_box;
+        use std::process::Command;
+        use std::time::Instant;
+
+        const WIDTH: usize = 1920;
+        const HEIGHT: usize = 1080;
+        // Even, so each path is timed first exactly half the time.
+        const ROUNDS: usize = 4;
+
+        init_ffmpeg();
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("high17-1080p.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=duration=2:size={WIDTH}x{HEIGHT}:rate=30"),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "ultrafast",
+                "-an",
+                path.to_str().expect("UTF-8 temporary path"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg failed to generate 1080p input");
+
+        let mut old = FfmpegDecoder::open(&path)
+            .expect("open old decoder")
+            .with_input_color_space(ColorSpace::REC2020_PQ);
+        let old_stream = old
+            .info()
+            .first_video()
+            .expect("old video stream")
+            .stream_index;
+        old.ensure_video_decoder(old_stream)
+            .expect("old decoder context");
+        old.video_decoder
+            .as_mut()
+            .expect("old cached decoder")
+            .legacy_conversion = true;
+
+        let mut new = FfmpegDecoder::open(&path)
+            .expect("open new decoder")
+            .with_input_color_space(ColorSpace::REC2020_PQ);
+        let new_stream = new
+            .info()
+            .first_video()
+            .expect("new video stream")
+            .stream_index;
+
+        black_box(
+            old.decode_video_frame(old_stream, 0)
+                .expect("warm old decoder"),
+        );
+        black_box(
+            new.decode_video_frame(new_stream, 0)
+                .expect("warm new decoder"),
+        );
+
+        fn timed_decode(decoder: &mut FfmpegDecoder, stream: usize, frame_number: u64) -> u128 {
+            let start = Instant::now();
+            let frame = decoder
+                .decode_video_frame(stream, frame_number)
+                .expect("frame");
+            black_box(frame.as_f32()[0]);
+            start.elapsed().as_nanos()
+        }
+
+        let mut old_total = 0u128;
+        let mut new_total = 0u128;
+        for frame_number in 1..=ROUNDS as u64 {
+            // Alternate which path is timed first. Whichever runs second on a
+            // given frame is systematically 0.3-0.6 ms faster — the file is in
+            // the page cache and the allocator is warm — and that bias is the
+            // same size as the effect being measured, so an unbalanced order
+            // reports the bias rather than the cache.
+            if frame_number.is_multiple_of(2) {
+                new_total += timed_decode(&mut new, new_stream, frame_number);
+                old_total += timed_decode(&mut old, old_stream, frame_number);
+            } else {
+                old_total += timed_decode(&mut old, old_stream, frame_number);
+                new_total += timed_decode(&mut new, new_stream, frame_number);
+            }
+        }
+
+        eprintln!(
+            "1080p decoder measurement: rounds={ROUNDS}, alternating order, old={:.3} ms, new={:.3} ms",
+            old_total as f64 / ROUNDS as f64 / 1_000_000.0,
+            new_total as f64 / ROUNDS as f64 / 1_000_000.0,
+        );
     }
 }

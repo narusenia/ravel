@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 6 | 26 | [high/](high/) — 1件1ファイル |
+| high | 5 | 27 | [high/](high/) — 1件1ファイル |
 | medium | 36 | 31 | [medium/](medium/) — 領域別5ファイル |
 | low | 31 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -106,7 +106,7 @@
     デコード済みフレームキャッシュが無く、逆方向スクラブと再描画で GOP を丸ごと再デコード。
     → `docs/implementation/cache-plan.md` の CACHE-8 が回収した（`ravel-media` の
     アセット単位共有キャッシュ、予算は `CacheKind::MediaFrame`）。
-12. **[HIGH-17](high/HIGH-17-sws-scaler-recreated-per-frame.md)**
+12. **[HIGH-17](closed/HIGH-17-sws-scaler-recreated-per-frame.md)** — 解決済み（この PR）
     sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換。
 
 ### 独立: NodeEditor 固有の再描画（第1段の効果を打ち消していた）

@@ -57,5 +57,5 @@ GOP を前方デコードし直す。60フレーム GOP の H.264 なら表示1�
 
 - **`docs/implementation/cache-plan.md` の CACHE-8 が引き受ける**（アセット単位の
   共有キャッシュにし、バイト予算を単一の権威の下に置く）
-- [HIGH-17](../high/HIGH-17-sws-scaler-recreated-per-frame.md) — 同じデコード経路のコスト
+- [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) — 同じデコード経路のコスト
 - [medium/media-audio.md](../medium/media-audio.md) — 画像シーケンスの毎フレームデコーダ生成

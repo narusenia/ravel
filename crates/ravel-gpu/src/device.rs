@@ -367,11 +367,28 @@ impl GpuContext {
     /// Submit any batched dispatches not yet submitted. A no-op when the
     /// batch is empty.
     pub fn flush(&self) {
-        self.inner
+        let _ = self
+            .inner
             .dispatch
             .lock()
             .expect("dispatch state poisoned")
             .flush(self.queue());
+    }
+
+    /// Submit pending work and wait only for the submission created by that
+    /// flush. Unlike [`Self::wait`], this does not wait for older submissions
+    /// that are unrelated to the caller's current output.
+    pub fn wait_for_pending(&self) -> GpuResult<()> {
+        let submission = self
+            .inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .flush(self.queue());
+        if let Some(submission) = submission {
+            self.wait_for_submission(&submission, None)?;
+        }
+        Ok(())
     }
 
     /// Flush the batch when it still uses `texture` and that texture is

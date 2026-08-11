@@ -330,9 +330,10 @@ impl DisplayTransform {
             // GPUI's Metal renderer uses a separate native command queue. A
             // flush would only submit this dispatch; it would still race the
             // surface sampler, so the worker waits before publishing the
-            // borrowed texture. Frame/texture lifetime remains the next unit's
-            // responsibility (ZC-4).
-            ctx.wait();
+            // borrowed texture. Wait only for the submission containing this
+            // transform rather than stalling behind unrelated older work.
+            ctx.wait_for_pending()
+                .map_err(|error| anyhow::anyhow!("display transform wait: {error}"))?;
             return Ok(DisplayFrame::from_gpu(GpuFrameBuffer::new(
                 ctx.clone(),
                 pool,

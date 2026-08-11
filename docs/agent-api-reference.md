@@ -2188,6 +2188,36 @@ Unknown type keys are skipped silently (plugin space).
   `WorkspaceLayout`, dummy panes, theme toggle. Run with
   `cargo run -p ravel-dock --example gallery`.
 
+## ravel-project — the settings rules every front end shares
+
+`crates/ravel-project`, GUI-free. The `.ravprj` container itself is described
+under `ravel-app`'s persistence bullet; what lives here is the part **both**
+binaries need, because `ravel-cli` resolves the same layers without linking
+`gpui` and a second copy of a range is a second range.
+
+```rust
+// crates/ravel-project/src/settings.rs
+settings::read_global_settings_at(Option<&Path>) -> SettingsLayer
+    // `<config>/ravel/settings.toml` via `paths::global_settings_path()`;
+    // missing / unreadable / malformed is no override, never an error.
+    // `None` is "no global layer" — the shape a caller (and a test) passes
+    // when it must not depend on the machine's own file
+settings::MIN_CACHE_LIMIT_MB / MAX_CACHE_LIMIT_MB     // 1 MiB … 1 TiB
+settings::cache_limit_mb(f64) -> Option<u64>          // the one range check
+settings::cache_sim_reserve_ratio(f64) -> Option<f32> // finite, 0.0..=1.0:
+    // `NaN` passes `CacheBudget`'s own `clamp` and would zero the reserve
+settings::cache_root_setting(&str) -> Option<&str>    // absolute only; a
+    // relative path would follow the working directory
+settings::usable_cache_budget(&ResolvedSettings) -> CacheBudgetConfig
+    // the apply boundary: anything the file may hold but the accounting
+    // cannot use becomes the built-in default, with a warning
+```
+
+`ravel-app` applies the result through `app_settings::apply_cache_budget`, and
+`ravel-cli` through `render_with_hooks`. `cache_root_setting`'s consumers are
+both in `ravel-app` — the settings dialog's row and `cache_root(cx)` — because
+the CLI builds no `DiskCache` yet (`CACHE-11`).
+
 ## ravel-app — GPUI host rules (see `.agents/rules/gpui.md`)
 
 - One command path: KeyBinding/menu/button → GPUI Action → nearest
@@ -2482,14 +2512,11 @@ Unknown type keys are skipped silently (plugin space).
   (the setting, else `paths::global_config_dir()`), read where a cache is
   *constructed* — so a change applies at the next construction, in practice the
   next launch. **The settings file is a writer the dialog is not**, so the
-  range checks live on the apply path as well as in the rows and are stated
-  once: `cache_limit_mb(f64) -> Option<u64>`
-  (`MIN_CACHE_LIMIT_MB`..=`MAX_CACHE_LIMIT_MB`, 1 MiB to 1 TiB),
-  `cache_sim_reserve_ratio(f64) -> Option<f32>` (finite, `0.0..=1.0` — `NaN`
-  passes `CacheBudget`'s own `clamp` and would zero the reserve), and
-  `cache_root_setting(&str) -> Option<&str>` (absolute only; a relative path
-  would follow the working directory). A value outside them falls back to the
-  built-in default with a warning rather than reaching the budget.
+  range checks run on the apply path as well as in the rows — and they belong
+  to `ravel_project::settings`, not to this module, because `ravel-cli` has to
+  apply the same ones without linking `gpui` (see the `ravel-project` section).
+  The rows and `apply_cache_budget` both call them; a value outside them falls
+  back to the built-in default with a warning rather than reaching the budget.
   `set_project_layer(layer, cx)` is called only from the document replacement
   path, so a project's overrides start applying when it opens and stop when it
   is replaced. Resolution is `default → global → project`; the `user` layer has
@@ -2844,13 +2871,16 @@ load_project(&Path) -> Result<ProjectFile, CliError>   // never writes
 plan_from_args(&RenderArgs) -> Result<RenderPlan, CliError>
 render_with_hooks<H: EvalWorkerHooks,
                   F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>>(
-    &RenderArgs, F, &CancelFlag, &mut dyn Reporter)
+    &RenderArgs, global_settings: Option<&Path>, F, &CancelFlag,
+    &mut dyn Reporter)
     -> Result<Summary, CliError>   // hooks are a factory: plan, then refuse
                                    // an existing output, only then build them.
                                    // The budget is built here and given to
                                    // both the hooks and the render worker, so
                                    // `ravel-cli render` has one ceiling, not
-                                   // three (CACHE-3)
+                                   // three (CACHE-3). `global_settings` is a
+                                   // parameter so a test renders against a
+                                   // file of its own, never the machine's
 render(&RenderArgs, &CancelFlag, &mut dyn Reporter)    // GpuEvalHooks
 run(Cli) -> u8                                          // the exit code
 
@@ -2916,6 +2946,16 @@ Four seams are load-bearing for later units:
   fails without having written a note of sound.
 - **Progress arithmetic is `ravel_core::runtime::JobProgress`**, not a CLI
   type, so `EXPORT-5`'s render queue panel reads the same projection.
+
+**A render obeys the settings layers, as the GUI does** (`MED-APP-33`): the
+cache budget comes from `default → global → project`, so
+`<config>/ravel/settings.toml` and the `.ravprj`'s own `settings.toml` change
+what `ravel-cli render` may hold in memory — until this, a headless render ran
+on the built-in defaults whatever either file said. The layers are resolved
+through `ravel_project::settings::usable_cache_budget`, the same boundary the
+application applies, so a hand-edited `vram_limit_mb = 0` is refused for a
+render as it is for a session. The `user` layer stays unused; no flag
+overrides a setting yet.
 
 `--param` is parsed against the **declared** type, so `--param scale=2` for a
 float declaration is `Float(2.0)`; a value that will not read is `CliError::

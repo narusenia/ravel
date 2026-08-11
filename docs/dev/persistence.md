@@ -49,6 +49,12 @@
 - **アトミック書き込みは共有する。** `crates/ravel-project/src/atomic_write.rs`
   が temp ファイル + sync + 名前入れ替えの 1 実装で、`.ravprj` の書き込みも
   これを使う（Windows の置換プリミティブを 2 箇所に持たないため）
+- **読むのは GUI だけではない。** `ravel-cli render` も `global` + `project` を
+  解決してキャッシュ予算に流す（`render_with_hooks` の `global_settings` 引数が
+  global 層のファイルを指す）。だから設定値の検証は
+  `crates/ravel-project/src/settings.rs`（`cache_limit_mb` /
+  `cache_sim_reserve_ratio` / `cache_root_setting` / `usable_cache_budget`）に
+  置く。`ravel-app` にあると CLI から呼べず、範囲のコピーが 2 つになる
 - project 層は**ドキュメント差し替えの経路だけ**が入れ替える
   （`app_settings::set_project_layer`）。開いたプロジェクトの上書きが開いた
   瞬間から効き、閉じた瞬間に効かなくなる

@@ -247,7 +247,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
-| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由、`img` 要素 + `ObjectFit::ScaleDown`（アスペクト維持・拡大なし）。表示バイト列は GPU で出来上がって降りてくる（`DisplayFrame`）ので、UI スレッドは出来上がった `RenderImage` を持つだけ |
+| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由。**macOS は GPU テクスチャを GPUI の surface としてそのまま描く**（`ZC-2`〜`ZC-4`）ので、フレームが CPU に降りてこない — リードバック 0 回。テクスチャは GPUI の描画完了通知でプールへ返る。macOS 以外、および共有デバイスが取れない場合（複数 GPU 機など）は従来どおり `RenderImage` を `img` 要素で描く CPU 経路にフォールバックする。どちらの経路でも表示バイト列は GPU で出来上がっている（`DisplayFrame`） |
 | 表示変換（リニア → sRGB） | ✅ | 評価バッファはリニア光なので、リードバック前に GPU で 1 パス掛ける（`ravel_nodes::DisplayTransform`、`CM-7`）。**変換点はこの 1 箇所**で、CPU 側に画素ごとの色計算は無い。`scripts/lint-patterns.sh` の `raw-pixel-quantisation` が自前の量子化を禁じる。`quality` / `ViewerResolution` と直交。CPU の `to_display_rgba8` との一致基準は **8bit で ±1 コード**。ユーザー提供の `.cube` を差し込めるが**選ぶ UI は `CM-8`**、`.ocio` は `CM-9`（表示色空間は **sRGB 固定**）。変換が走らなかったフレームは Viewer のエラーオーバーレイになる（CPU 救済はしない）|
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |

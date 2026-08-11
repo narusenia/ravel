@@ -1635,3 +1635,40 @@ HIGH-17 は色変換そのものを変更していないので **ingest の床�
 なお 1 枚ごとに decoder を open / drop する経路（`crates/ravel-media/src/image_seq.rs`
 の静止画・画像シーケンス、`crates/ravel-app/src/media/thumbnail.rs` のサムネイル）は
 decoder が 1 フレームしか生きないので、scaler cache の恩恵をまったく受けない。
+
+## 往復を消した後（`ZC-2`〜`ZC-4`、macOS）
+
+計画: `zero-copy-viewer-plan.md`。記録日: 2026-08-12。
+
+**時間の実測は載せない。載せられない。** `ZC-1` が分解した 4 段のうち、
+ゼロコピーで消えるのは段 2（リードバック）・段 3（CPU 側の包み）・
+段 4（GPUI のアップロードとアトラス churn）で、**段 4 は gpui-ce の内部に
+あってウィンドウ無しには測れない**（`ZC-1` 節に同じ制約を書いた）。
+「消えた時間」を主張すれば、測れない段を含んだ数字になる。
+
+`ZC-1` の推定はそのまま有効: 段 2 + 段 3 が **1.70〜4.70 ms**（18 セル）で、
+これが消えた分の下限。段 4 はそこに上積みされる。
+
+### 代わりに何で確認したか — 回数
+
+計画書の検証節が「**時間ではなく回数を pin する** — 時間は負荷で動くが回数は
+動かない」と定めており、そちらで固定した。
+
+| 観測 | 手段 |
+|---|---|
+| ゼロコピー経路のリードバックが **0 回** | `crates/ravel-nodes/tests/display_surface.rs` の `the_surface_path_removes_the_readback_and_the_fallback_keeps_it` |
+| フォールバック経路は **1 回**（退行検出のため両方見る） | 同上 |
+| 絵が変わらない | 同ファイル `both_roads_produce_the_same_display_bytes`（両経路のバイト列が**完全一致**） |
+| フレーム跨ぎの取り違えが無い | 同ファイル `consecutive_surface_frames_keep_their_sequence` |
+| 実機で破綻しない | 平面レイヤーを 299 フレーム再生、ティアリング・パニック・フォールバック警告なし（`ZC-4`） |
+
+**0 回と 1 回の両方を固定しているのが要点。** ゼロコピー側だけを見ると、
+フォールバックが壊れて両方 0 になった場合に気づけない。
+
+### この節が「測り直し」を載せていない理由
+
+2026-08-12 に `measure_viewer_roundtrip_breakdown` を回したが、
+**その数字は破棄した**。ハーネス（`crates/ravel-app/tests/viewer_roundtrip.rs`）は
+ゼロコピー経路を有効化しないので CPU 経路を測っており、しかも直前の
+release ビルドで loadavg が 14 まで上がっていた（`ZC-1` 時は 2.5 前後）。
+**ゼロコピー後の時間を測るには、その経路を通すハーネスを別に書く必要がある。**

@@ -126,7 +126,7 @@ REQ-UI-004（スコープ付きビューア）。
 | ZC-4 | 同期と寿命（フレーム跨ぎの取り違えを起こさない） | ZC-3 |
 | ZC-5 | Linux の経路（(A) のデバイス公開アクセサ） | ZC-3 |
 | ZC-6 | 文書更新と `HIGH-09` のクローズ | ZC-4, ZC-5 |
-| ZC-7 | Windows の経路（`ZC-5` から分離。**実機が要る**） | ZC-5 |
+| ZC-7 | Windows の経路（`ZC-5` から分離。**実機確認は手動**） | ZC-5 |
 | ZC-8 | 起動時に GPUI のデバイスを採用する（`ZC-5` が露呈させた欠落） | ZC-5 |
 
 ### ZC-1 往復の内訳を測り直す（判断ゲート）
@@ -267,31 +267,42 @@ macOS 以外では成立していない。** `GPUBK-9` が `interop::context_fro
 `ZC-5` の実装時に確かめた事実:
 
 - `gpui_windows` には `gpui_wgpu` レンダラが**ある**が、非既定の `wgpu`
-  feature の裏。既定は DirectX ネイティブ
+  feature の裏
+- **既定のレンダラは D3D11**（`gpui_windows/src/directx_renderer.rs` は
+  `Direct3D11::*` を使い、`ID3D11Device` / `ID3D11Texture2D` を持つ）
+- **Ravel は Windows で D3D12 に乗る**（`wgpu::Backends::PRIMARY`）。
+  `interop` の D3D12 対応（`NativeApi::Direct3D12`）は既にあるが、
+  **相手が D3D11 なので直接は噛み合わない**
 - `PlatformWindow::gpu_context` は `#[cfg(any(linux, freebsd))]` で宣言されて
   おり、**Windows には生えていない**
-- Ravel 側の D3D12 interop は**既にある**（`NativeApi::Direct3D12` で
-  `ID3D12Device*` / `ID3D12Resource*` の両方）
 
 したがって道は 2 つ:
 
 - **(1) `gpui_windows` の `wgpu` feature を使う。** `gpu_context` の `cfg` に
-  Windows を足して実装すれば `ZC-5` の経路にそのまま乗る。ただし
-  **既定の DirectX レンダラを捨てる**判断になり、Windows の描画品質・性能・
-  安定性が gpui-ce の非既定パスに乗る
-- **(2) D3D12 レベルで interop する。** macOS が Metal でやったことの D3D12 版。
-  フォークに `ID3D12Device*` アクセサと surface の腕が要る。Ravel 側の
-  受け口は既にある
+  Windows を足して実装すれば `ZC-5` / `ZC-8` の経路にそのまま乗り、
+  **両者が同じ wgpu デバイスになる**ので interop 自体が要らなくなる。
+  ただし**既定の D3D11 レンダラを捨てる**判断で、Windows の描画品質・性能・
+  安定性が gpui-ce の非既定パスに乗る。**最も筋が良いが、影響が最も大きい**
+- **(2) D3D11 と D3D12 を跨ぐ共有。** macOS の Metal interop に相当するが、
+  **macOS より難しい** — 同じ API の同じデバイスではなく、**別 API 間**の
+  共有になる。`IDXGIResource1` の共有ハンドル（`CreateSharedHandle` →
+  `ID3D12Device::OpenSharedHandle`）を使う定石はあるが、フェンス同期も
+  跨ぐ必要がある。`ZC-4` が Metal で解いた寿命問題を、より厳しい条件で
+  解き直すことになる
 
-**どちらも Windows 実機がないと判断できない**（性能も正しさも）。
-`ZC-5` と同じく開発機でも CI でも実行検証できないため、**実機が用意できるまで
-着手しない**。
+**(1) を先に評価する。** (2) は (1) が使えないと分かった場合の退路。
+
+**Windows 実機は利用可能**（このプロジェクトの開発者が保有）。ただし
+**CI では実行検証できない**（`windows-latest` ランナーに GPU が無い）ので、
+実機確認は**ブランチを push して手動で行う**運用にする。
 
 **完了条件**
 
-- Windows でリードバックが 0 回
+- Windows でリードバックが 0 回（**実機で確認**）
 - (1) / (2) のどちらを採るかの判断が根拠付きで記録されている
-- `ZC-5` が置いた「分岐は 1 箇所」を壊さない
+- 既定レンダラを変更する場合、その影響（描画品質・性能・安定性）を
+  実機で確認した結果が残っている
+- `ZC-5` が置いた「テクスチャの名指し方だけが分岐する」形を壊さない
 
 ### ZC-6 文書更新と `HIGH-09` のクローズ
 

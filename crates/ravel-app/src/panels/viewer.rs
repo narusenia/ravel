@@ -1758,7 +1758,7 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
 /// already the host's. The completion callback is retained by GPUI's wgpu
 /// submission until the renderer has finished sampling the texture, keeping
 /// the pooled frame lease alive across the surface draw.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
     // A lost device recovers on a later draw; sampling its textures meanwhile
     // is not safe, so this frame falls back instead. `None` means the backend
@@ -1776,18 +1776,17 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
     true
 }
 
-/// Windows keeps the CPU road for now — **wiring, not impossibility**.
+/// Targets without a wgpu-backed GPUI renderer keep the CPU road.
 ///
-/// `gpui_windows` does have a `gpui_wgpu` renderer, but only behind its
-/// non-default `wgpu` feature; the default build is DirectX-native, and
-/// `PlatformWindow::gpu_context` is declared `#[cfg(any(linux, freebsd))]`,
-/// so nothing reaches the device from here. Two routes exist when someone
-/// takes the unit: enable that feature (Windows then joins the arm above), or
-/// share at the D3D12 level the way macOS shares at the Metal level —
-/// `interop` already covers `ID3D12Device*` and `ID3D12Resource*` under
-/// [`NativeApi::Direct3D12`](ravel_gpu::interop::NativeApi). Both need a
-/// Windows machine to judge, which is why neither is done here.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
+/// Ravel enables GPUI's `wgpu` renderer on Windows, so Windows uses the
+/// wgpu-backed implementation above and shares the adopted DX12 device. The
+/// remaining targets have no compatible surface API and must fall back.
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
 fn paint_gpu_surface(
     _frame: &GpuFrameBuffer,
     _bounds: Bounds<Pixels>,

@@ -44,6 +44,22 @@ sha2 = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true }
 
+# **Windows only: use GPUI's wgpu renderer instead of its default D3D11 one.**
+#
+# `ZC-7` step 1. Ravel's evaluation pipeline runs on wgpu, which picks DX12 on
+# Windows; `gpui_wgpu` picks DX12 there too (`wgpu_context.rs`). Standing both
+# on the same backend is what makes a shared device possible at all — the
+# default D3D11 renderer has no counterpart on Ravel's side, because wgpu 29
+# dropped its D3D11 backend entirely.
+#
+# **This changes how every Windows window is drawn, not just the viewer.**
+# Text, atlases and blur all move to a path gpui-ce does not build by default.
+# It is landed on its own so the rendering change can be judged on a real
+# machine before any zero-copy wiring rides on it; the sharing itself is a
+# later commit.
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_platform = { workspace = true, features = ["wgpu"] }
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 # **Examples only.** `examples/shared_metal_device.rs` drives the async

@@ -3134,6 +3134,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_collections",
+ "gpui_wgpu",
  "gpui_zed_util",
  "image",
  "itertools 0.14.0",

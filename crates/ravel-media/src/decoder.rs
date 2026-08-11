@@ -16,6 +16,7 @@
 //! transparently.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use ravel_core::color::{
     ColorSpace, Primaries, Transfer, ingest_rgba8, ingest_rgba16, ingest_rgbaf32,
@@ -42,7 +43,7 @@ use ravel_core::media::{
     AudioCodec, AudioStreamInfo, ContainerFormat, MediaError, MediaInfo, MediaReader, MediaResult,
     StreamInfo, VideoCodec, VideoStreamInfo,
 };
-use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate};
+use ravel_core::types::{AudioBuffer, FrameBuffer, FrameRate, PixelFormat as FramePixelFormat};
 
 /// Ensure FFmpeg is initialized (safe to call multiple times).
 pub(crate) fn init_ffmpeg() {
@@ -65,6 +66,160 @@ struct CachedVideoDecoder {
     /// last one stopped instead of seeking again (see
     /// [`FfmpegDecoder::decode_video_frame`]).
     last_returned_pts: Option<i64>,
+    /// Cached software scaler and its output frame. The scaler key includes
+    /// every input and output property that changes the filter tables.
+    scaler: ScalerCache,
+    /// Decoder-owned RGBA output buffers. A buffer is reused only while no
+    /// returned `FrameBuffer` still refers to it.
+    output_buffers: DecoderFrameBuffers,
+    #[cfg(test)]
+    /// Test-only switch used by the old/new performance harness.
+    legacy_conversion: bool,
+}
+
+/// The complete configuration that determines an sws scaler's filter tables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScalerKey {
+    input_format: PixelFormat,
+    input_width: u32,
+    input_height: u32,
+    output_format: PixelFormat,
+    output_width: u32,
+    output_height: u32,
+}
+
+impl ScalerKey {
+    fn new(frame: &frame::Video, output: PixelFormat) -> Self {
+        Self {
+            input_format: frame.format(),
+            input_width: frame.width(),
+            input_height: frame.height(),
+            output_format: output,
+            output_width: frame.width(),
+            output_height: frame.height(),
+        }
+    }
+}
+
+/// Cache one scaler and its output frame for the currently active format and
+/// dimensions. A stream can change its decoded pixel format or dimensions,
+/// so the full [`ScalerKey`] is checked before every run.
+struct ScalerCache {
+    key: Option<ScalerKey>,
+    scaler: Option<sws::Context>,
+    output_frame: Option<frame::Video>,
+    #[cfg(test)]
+    creations: usize,
+}
+
+// `FfmpegDecoder` is moved to a worker through `MediaReader: Send`. The sws
+// context is owned exclusively by that decoder and is only ever accessed
+// through `&mut self`; it is never shared between threads or used
+// concurrently. Moving the FFmpeg-owned pointer with its decoder therefore
+// preserves the same ownership invariant as the decoder's other FFmpeg
+// contexts.
+unsafe impl Send for ScalerCache {}
+
+impl Default for ScalerCache {
+    fn default() -> Self {
+        Self {
+            key: None,
+            scaler: None,
+            output_frame: None,
+            #[cfg(test)]
+            creations: 0,
+        }
+    }
+}
+
+impl ScalerCache {
+    fn ensure(&mut self, frame: &frame::Video, output: PixelFormat) -> MediaResult<()> {
+        let key = ScalerKey::new(frame, output);
+        if self.key == Some(key) {
+            return Ok(());
+        }
+
+        let output_changed = self.key.is_some_and(|previous| {
+            previous.output_format != key.output_format
+                || previous.output_width != key.output_width
+                || previous.output_height != key.output_height
+        });
+        let scaler = sws::Context::get(
+            key.input_format,
+            key.input_width,
+            key.input_height,
+            key.output_format,
+            key.output_width,
+            key.output_height,
+            sws::Flags::BILINEAR,
+        )
+        .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
+
+        self.key = Some(key);
+        self.scaler = Some(scaler);
+        if output_changed {
+            self.output_frame = None;
+        }
+        #[cfg(test)]
+        {
+            self.creations += 1;
+        }
+        Ok(())
+    }
+
+    fn run(&mut self, frame: &frame::Video, output: PixelFormat) -> MediaResult<&frame::Video> {
+        self.ensure(frame, output)?;
+        let output_frame = self.output_frame.get_or_insert_with(frame::Video::empty);
+        self.scaler
+            .as_mut()
+            .expect("scaler is initialized by ensure")
+            .run(frame, output_frame)
+            .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
+        Ok(output_frame)
+    }
+
+    #[cfg(test)]
+    fn creations(&self) -> usize {
+        self.creations
+    }
+}
+
+/// Reusable decoder output storage. Returned frame buffers share these
+/// allocations through `Arc`; a slot is reused only after its previous
+/// returned frame has been dropped.
+#[derive(Default)]
+struct DecoderFrameBuffers {
+    buffers: Vec<Arc<[u8]>>,
+}
+
+impl DecoderFrameBuffers {
+    fn with_frame<F>(&mut self, width: u32, height: u32, fill: F) -> FrameBuffer
+    where
+        F: FnOnce(&mut [u8]),
+    {
+        let byte_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|channels| channels.checked_mul(std::mem::size_of::<f32>()))
+            .expect("decoded frame dimensions overflow output buffer length");
+        let index = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.len() == byte_len && Arc::strong_count(buffer) == 1);
+        let index = index.unwrap_or_else(|| {
+            self.buffers.push(vec![0u8; byte_len].into());
+            self.buffers.len() - 1
+        });
+
+        let buffer = &mut self.buffers[index];
+        fill(Arc::get_mut(buffer).expect("reusable buffer must be uniquely owned"));
+        FrameBuffer {
+            width,
+            height,
+            format: FramePixelFormat::RgbaF32,
+            data: buffer.clone(),
+        }
+    }
 }
 
 /// Cached audio decoder context, persisted across `decode_audio_chunk` calls.
@@ -259,6 +414,10 @@ fn create_video_decoder(
             frame_rate,
             hw_active,
             last_returned_pts: None,
+            scaler: ScalerCache::default(),
+            output_buffers: DecoderFrameBuffers::default(),
+            #[cfg(test)]
+            legacy_conversion: false,
         }),
         Err(e) if hw_active => {
             // HW accel failed to open — retry without it.
@@ -280,6 +439,10 @@ fn create_video_decoder(
                 frame_rate,
                 hw_active: false,
                 last_returned_pts: None,
+                scaler: ScalerCache::default(),
+                output_buffers: DecoderFrameBuffers::default(),
+                #[cfg(test)]
+                legacy_conversion: false,
             })
         }
         Err(e) => Err(MediaError::DecodeError(format!("open video decoder: {e}"))),
@@ -491,7 +654,7 @@ impl MediaReader for FfmpegDecoder {
                 continue;
             }
 
-            let decoder = &mut self.video_decoder.as_mut().unwrap().decoder;
+            let decoder = &mut cached.decoder;
 
             decoder
                 .send_packet(&packet)
@@ -503,9 +666,10 @@ impl MediaReader for FfmpegDecoder {
                 if pts >= target_pts {
                     // Remember where playback stopped so the next forward
                     // request can continue instead of seeking.
-                    self.video_decoder.as_mut().unwrap().last_returned_pts = Some(pts);
+                    cached.last_returned_pts = Some(pts);
                     let sw_frame = ensure_sw_frame(&decoded_frame)?;
-                    return convert_video_frame_to_rgba(
+                    return convert_decoded_video_frame(
+                        cached,
                         sw_frame.as_ref().unwrap_or(&decoded_frame),
                         input_color_space,
                     );
@@ -518,7 +682,7 @@ impl MediaReader for FfmpegDecoder {
         }
 
         // Flush decoder.
-        let decoder = &mut self.video_decoder.as_mut().unwrap().decoder;
+        let decoder = &mut cached.decoder;
         decoder
             .send_eof()
             .map_err(|e| MediaError::DecodeError(format!("flush: {e}")))?;
@@ -527,9 +691,10 @@ impl MediaReader for FfmpegDecoder {
             if pts >= target_pts {
                 // Drained at EOF: the decoder holds no more packets, so the
                 // next request has to seek regardless.
-                self.video_decoder.as_mut().unwrap().last_returned_pts = None;
+                cached.last_returned_pts = None;
                 let sw_frame = ensure_sw_frame(&decoded_frame)?;
-                return convert_video_frame_to_rgba(
+                return convert_decoded_video_frame(
+                    cached,
                     sw_frame.as_ref().unwrap_or(&decoded_frame),
                     input_color_space,
                 );
@@ -540,9 +705,10 @@ impl MediaReader for FfmpegDecoder {
         }
 
         if let Some(ref frame) = best_frame {
-            self.video_decoder.as_mut().unwrap().last_returned_pts = None;
+            cached.last_returned_pts = None;
             let sw_frame = ensure_sw_frame(frame)?;
-            return convert_video_frame_to_rgba(
+            return convert_decoded_video_frame(
+                cached,
                 sw_frame.as_ref().unwrap_or(frame),
                 input_color_space,
             );
@@ -964,9 +1130,29 @@ fn extract_audio_params(params: &ffmpeg::codec::ParametersRef<'_>) -> (u32, u32)
 ///   stills) scale to RGBA64 and ingest at 16 bits.
 /// - **Everything else** keeps the 8-bit RGBA path it has always had; its
 ///   output is unchanged bit for bit.
+fn convert_decoded_video_frame(
+    cached: &mut CachedVideoDecoder,
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
+    #[cfg(test)]
+    if cached.legacy_conversion {
+        return convert_video_frame_to_rgba_legacy(frame, input_color_space);
+    }
+
+    convert_video_frame_to_rgba(
+        frame,
+        input_color_space,
+        &mut cached.scaler,
+        &mut cached.output_buffers,
+    )
+}
+
 fn convert_video_frame_to_rgba(
     frame: &frame::Video,
     input_color_space: ColorSpace,
+    scaler: &mut ScalerCache,
+    output_buffers: &mut DecoderFrameBuffers,
 ) -> MediaResult<FrameBuffer> {
     let width = frame.width();
     let height = frame.height();
@@ -978,12 +1164,18 @@ fn convert_video_frame_to_rgba(
     }
 
     if let Some(layout) = FloatRgbLayout::of(frame.format()) {
-        return read_float_rgb_frame(frame, layout, input_color_space);
+        return read_float_rgb_frame(frame, layout, input_color_space, output_buffers);
     }
 
     if source_depth(frame.format()) > 8 {
-        match scale_frame(frame, DEEP_OUTPUT) {
-            Ok(scaled) => return Ok(framebuffer_from_rgba64(&scaled, input_color_space)),
+        match scaler.run(frame, DEEP_OUTPUT) {
+            Ok(scaled) => {
+                return Ok(framebuffer_from_rgba64(
+                    scaled,
+                    input_color_space,
+                    output_buffers,
+                ));
+            }
             Err(error) => warn!(
                 format = ?frame.format(),
                 %error,
@@ -992,8 +1184,12 @@ fn convert_video_frame_to_rgba(
         }
     }
 
-    let scaled = scale_frame(frame, PixelFormat::RGBA)?;
-    Ok(framebuffer_from_rgba8(&scaled, input_color_space))
+    let scaled = scaler.run(frame, PixelFormat::RGBA)?;
+    Ok(framebuffer_from_rgba8(
+        scaled,
+        input_color_space,
+        output_buffers,
+    ))
 }
 
 /// The scaler output format for sources deeper than 8 bits, in host byte
@@ -1020,80 +1216,76 @@ fn source_depth(format: PixelFormat) -> u32 {
         .unwrap_or(8)
 }
 
-/// Run a frame through the sws scaler into `output`, same size.
-fn scale_frame(frame: &frame::Video, output: PixelFormat) -> MediaResult<frame::Video> {
-    let mut scaler = sws::Context::get(
-        frame.format(),
-        frame.width(),
-        frame.height(),
-        output,
-        frame.width(),
-        frame.height(),
-        sws::Flags::BILINEAR,
-    )
-    .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
-
-    let mut scaled = frame::Video::empty();
-    scaler
-        .run(frame, &mut scaled)
-        .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
-    Ok(scaled)
-}
-
 /// Ingest an 8-bit RGBA frame into the working space.
-fn framebuffer_from_rgba8(frame: &frame::Video, input_color_space: ColorSpace) -> FrameBuffer {
+fn framebuffer_from_rgba8(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+    output_buffers: &mut DecoderFrameBuffers,
+) -> FrameBuffer {
     let (width, height) = (frame.width(), frame.height());
     let stride = frame.stride(0);
     let data = frame.data(0);
-    let pixel_count = (width * height) as usize;
-    let mut f32_data = Vec::with_capacity(pixel_count * 4);
 
-    for y in 0..height as usize {
-        let row_start = y * stride;
-        for x in 0..width as usize {
-            let offset = row_start + x * 4;
-            f32_data.extend_from_slice(&ingest_rgba8(
-                [
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ],
-                input_color_space,
-            ));
+    output_buffers.with_frame(width, height, |f32_data| {
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            for x in 0..width as usize {
+                let offset = row_start + x * 4;
+                let pixel = ingest_rgba8(
+                    [
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ],
+                    input_color_space,
+                );
+                write_f32_pixel(f32_data, (y * width as usize + x) * 16, pixel);
+            }
         }
-    }
-
-    FrameBuffer::from_f32(width, height, f32_data)
+    })
 }
 
 /// Ingest a 16-bit RGBA frame (native-endian, see [`DEEP_OUTPUT`]) into the
 /// working space.
-fn framebuffer_from_rgba64(frame: &frame::Video, input_color_space: ColorSpace) -> FrameBuffer {
+fn framebuffer_from_rgba64(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+    output_buffers: &mut DecoderFrameBuffers,
+) -> FrameBuffer {
     let (width, height) = (frame.width(), frame.height());
     let stride = frame.stride(0);
     let data = frame.data(0);
-    let pixel_count = (width * height) as usize;
-    let mut f32_data = Vec::with_capacity(pixel_count * 4);
 
     let lane = |offset: usize| u16::from_ne_bytes([data[offset], data[offset + 1]]);
-    for y in 0..height as usize {
-        let row_start = y * stride;
-        for x in 0..width as usize {
-            let offset = row_start + x * 8;
-            f32_data.extend_from_slice(&ingest_rgba16(
-                [
-                    lane(offset),
-                    lane(offset + 2),
-                    lane(offset + 4),
-                    lane(offset + 6),
-                ],
-                input_color_space,
-            ));
-        }
-    }
 
-    FrameBuffer::from_f32(width, height, f32_data)
+    output_buffers.with_frame(width, height, |f32_data| {
+        for y in 0..height as usize {
+            let row_start = y * stride;
+            for x in 0..width as usize {
+                let offset = row_start + x * 8;
+                let pixel = ingest_rgba16(
+                    [
+                        lane(offset),
+                        lane(offset + 2),
+                        lane(offset + 4),
+                        lane(offset + 6),
+                    ],
+                    input_color_space,
+                );
+                write_f32_pixel(f32_data, (y * width as usize + x) * 16, pixel);
+            }
+        }
+    })
+}
+
+/// Store one RGBA pixel using the same native-endian representation as
+/// [`FrameBuffer::from_f32`].
+fn write_f32_pixel(output: &mut [u8], offset: usize, pixel: [f32; 4]) {
+    for (channel, value) in pixel.into_iter().enumerate() {
+        let start = offset + channel * std::mem::size_of::<f32>();
+        output[start..start + std::mem::size_of::<f32>()].copy_from_slice(&value.to_ne_bytes());
+    }
 }
 
 /// How a float RGB frame lays its samples out. These formats are read
@@ -1149,62 +1341,167 @@ fn read_float_rgb_frame(
     frame: &frame::Video,
     layout: FloatRgbLayout,
     input_color_space: ColorSpace,
+    output_buffers: &mut DecoderFrameBuffers,
 ) -> MediaResult<FrameBuffer> {
     let (width, height) = (frame.width(), frame.height());
-    let pixel_count = (width * height) as usize;
-    let row_len = width as usize * 4;
+    let row_len = width as usize * 16;
     debug_assert!(row_len > 0, "float ingest requires a non-zero row width");
-    let mut f32_data = vec![0.0f32; pixel_count * 4];
 
-    match layout {
-        FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
-            // GBRP order: plane 0 is green, 1 is blue, 2 is red.
-            let planes = [frame.data(2), frame.data(0), frame.data(1)];
-            let strides = [frame.stride(2), frame.stride(0), frame.stride(1)];
-            let alpha = match layout {
-                FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
-                _ => None,
-            };
-            f32_data
-                .par_chunks_exact_mut(row_len)
-                .enumerate()
-                .for_each(|(y, out_row)| {
-                    for x in 0..width as usize {
-                        let rgb =
-                            [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
-                        let a = alpha.map_or(1.0, |(data, stride)| {
-                            layout.sample(data, y * stride + x * 4)
-                        });
-                        let pixel = ingest_rgbaf32([rgb[0], rgb[1], rgb[2], a], input_color_space);
-                        out_row[x * 4..x * 4 + 4].copy_from_slice(&pixel);
-                    }
-                });
+    Ok(output_buffers.with_frame(width, height, |f32_data| {
+        match layout {
+            FloatRgbLayout::Planar { .. } | FloatRgbLayout::PlanarAlpha { .. } => {
+                // GBRP order: plane 0 is green, 1 is blue, 2 is red.
+                let planes = [frame.data(2), frame.data(0), frame.data(1)];
+                let strides = [frame.stride(2), frame.stride(0), frame.stride(1)];
+                let alpha = match layout {
+                    FloatRgbLayout::PlanarAlpha { .. } => Some((frame.data(3), frame.stride(3))),
+                    _ => None,
+                };
+                f32_data
+                    .par_chunks_exact_mut(row_len)
+                    .enumerate()
+                    .for_each(|(y, out_row)| {
+                        for x in 0..width as usize {
+                            let rgb =
+                                [0, 1, 2].map(|c| layout.sample(planes[c], y * strides[c] + x * 4));
+                            let a = alpha.map_or(1.0, |(data, stride)| {
+                                layout.sample(data, y * stride + x * 4)
+                            });
+                            let pixel =
+                                ingest_rgbaf32([rgb[0], rgb[1], rgb[2], a], input_color_space);
+                            write_f32_pixel(out_row, x * 16, pixel);
+                        }
+                    });
+            }
+            FloatRgbLayout::Packed { .. } => {
+                let data = frame.data(0);
+                let stride = frame.stride(0);
+                f32_data
+                    .par_chunks_exact_mut(row_len)
+                    .enumerate()
+                    .for_each(|(y, out_row)| {
+                        for x in 0..width as usize {
+                            let offset = y * stride + x * 16;
+                            let pixel = ingest_rgbaf32(
+                                [
+                                    layout.sample(data, offset),
+                                    layout.sample(data, offset + 4),
+                                    layout.sample(data, offset + 8),
+                                    layout.sample(data, offset + 12),
+                                ],
+                                input_color_space,
+                            );
+                            write_f32_pixel(out_row, x * 16, pixel);
+                        }
+                    });
+            }
         }
-        FloatRgbLayout::Packed { .. } => {
-            let data = frame.data(0);
-            let stride = frame.stride(0);
-            f32_data
-                .par_chunks_exact_mut(row_len)
-                .enumerate()
-                .for_each(|(y, out_row)| {
-                    for x in 0..width as usize {
-                        let offset = y * stride + x * 16;
-                        let pixel = ingest_rgbaf32(
-                            [
-                                layout.sample(data, offset),
-                                layout.sample(data, offset + 4),
-                                layout.sample(data, offset + 8),
-                                layout.sample(data, offset + 12),
-                            ],
-                            input_color_space,
-                        );
-                        out_row[x * 4..x * 4 + 4].copy_from_slice(&pixel);
-                    }
-                });
+    }))
+}
+
+/// Reconstruct the pre-HIGH-17 conversion path for the performance harness.
+/// It deliberately keeps the current colour ingest functions so the harness
+/// isolates scaler and output-buffer reuse from the already-landed HIGH-32
+/// transfer optimisations.
+#[cfg(test)]
+fn convert_video_frame_to_rgba_legacy(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> MediaResult<FrameBuffer> {
+    if let Some(layout) = FloatRgbLayout::of(frame.format()) {
+        let mut output_buffers = DecoderFrameBuffers::default();
+        return read_float_rgb_frame(frame, layout, input_color_space, &mut output_buffers);
+    }
+
+    if source_depth(frame.format()) > 8 {
+        if let Ok(scaled) = scale_frame_legacy(frame, DEEP_OUTPUT) {
+            return Ok(framebuffer_from_rgba64_legacy(&scaled, input_color_space));
         }
     }
 
-    Ok(FrameBuffer::from_f32(width, height, f32_data))
+    let scaled = scale_frame_legacy(frame, PixelFormat::RGBA)?;
+    Ok(framebuffer_from_rgba8_legacy(&scaled, input_color_space))
+}
+
+#[cfg(test)]
+fn scale_frame_legacy(frame: &frame::Video, output: PixelFormat) -> MediaResult<frame::Video> {
+    let mut scaler = sws::Context::get(
+        frame.format(),
+        frame.width(),
+        frame.height(),
+        output,
+        frame.width(),
+        frame.height(),
+        sws::Flags::BILINEAR,
+    )
+    .map_err(|e| MediaError::DecodeError(format!("create scaler: {e}")))?;
+
+    let mut scaled = frame::Video::empty();
+    scaler
+        .run(frame, &mut scaled)
+        .map_err(|e| MediaError::DecodeError(format!("scale frame: {e}")))?;
+    Ok(scaled)
+}
+
+#[cfg(test)]
+fn framebuffer_from_rgba8_legacy(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> FrameBuffer {
+    let (width, height) = (frame.width(), frame.height());
+    let stride = frame.stride(0);
+    let data = frame.data(0);
+    let pixel_count = (width * height) as usize;
+    let mut f32_data = Vec::with_capacity(pixel_count * 4);
+
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        for x in 0..width as usize {
+            let offset = row_start + x * 4;
+            f32_data.extend_from_slice(&ingest_rgba8(
+                [
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ],
+                input_color_space,
+            ));
+        }
+    }
+
+    FrameBuffer::from_f32(width, height, f32_data)
+}
+
+#[cfg(test)]
+fn framebuffer_from_rgba64_legacy(
+    frame: &frame::Video,
+    input_color_space: ColorSpace,
+) -> FrameBuffer {
+    let (width, height) = (frame.width(), frame.height());
+    let stride = frame.stride(0);
+    let data = frame.data(0);
+    let pixel_count = (width * height) as usize;
+    let mut f32_data = Vec::with_capacity(pixel_count * 4);
+    let lane = |offset: usize| u16::from_ne_bytes([data[offset], data[offset + 1]]);
+
+    for y in 0..height as usize {
+        let row_start = y * stride;
+        for x in 0..width as usize {
+            let offset = row_start + x * 8;
+            f32_data.extend_from_slice(&ingest_rgba16(
+                [
+                    lane(offset),
+                    lane(offset + 2),
+                    lane(offset + 4),
+                    lane(offset + 6),
+                ],
+                input_color_space,
+            ));
+        }
+    }
+
+    FrameBuffer::from_f32(width, height, f32_data)
 }
 
 /// Map an FFmpeg sample format onto its numeric encoding.
@@ -1452,6 +1749,40 @@ mod tests {
         init_ffmpeg();
     }
 
+    #[test]
+    fn scaler_cache_recreates_only_when_its_key_changes() {
+        init_ffmpeg();
+        let mut cache = ScalerCache::default();
+        let rgba = frame::Video::new(PixelFormat::RGBA, 4, 4);
+
+        cache.ensure(&rgba, PixelFormat::RGBA).unwrap();
+        cache.ensure(&rgba, PixelFormat::RGBA).unwrap();
+        assert_eq!(cache.creations(), 1);
+
+        let resized = frame::Video::new(PixelFormat::RGBA, 8, 4);
+        cache.ensure(&resized, PixelFormat::RGBA).unwrap();
+        assert_eq!(cache.creations(), 2);
+
+        let reformatted = frame::Video::new(PixelFormat::RGB24, 8, 4);
+        cache.ensure(&reformatted, PixelFormat::RGBA).unwrap();
+        assert_eq!(cache.creations(), 3);
+
+        cache.ensure(&reformatted, PixelFormat::BGRA).unwrap();
+        assert_eq!(cache.creations(), 4);
+    }
+
+    #[test]
+    fn decoder_output_buffers_reuse_after_the_returned_frame_is_dropped() {
+        let mut buffers = DecoderFrameBuffers::default();
+        let first = buffers.with_frame(2, 2, |data| data.fill(1));
+        let first_ptr = Arc::as_ptr(&first.data);
+        drop(first);
+
+        let second = buffers.with_frame(2, 2, |data| data.fill(2));
+        assert_eq!(Arc::as_ptr(&second.data), first_ptr);
+        assert_eq!(second.data[0], 2);
+    }
+
     /// Reconstruct the pre-LUT u8 ingest loop for the measurement harness.
     fn serial_framebuffer_from_rgba8(
         frame: &frame::Video,
@@ -1577,7 +1908,8 @@ mod tests {
     fn integer_decoder_ingest_paths_use_the_core_ingest_results() {
         let mut rgba8 = frame::Video::new(PixelFormat::RGBA, 1, 1);
         rgba8.data_mut(0)[..4].copy_from_slice(&[128, 64, 32, 255]);
-        let actual = framebuffer_from_rgba8(&rgba8, ColorSpace::SRGB);
+        let mut buffers = DecoderFrameBuffers::default();
+        let actual = framebuffer_from_rgba8(&rgba8, ColorSpace::SRGB, &mut buffers);
         let expected = ravel_core::color::ingest_rgba8([128, 64, 32, 255], ColorSpace::SRGB);
         assert_eq!(actual.as_f32().as_ref(), expected.as_slice());
 
@@ -1586,7 +1918,7 @@ mod tests {
         for (offset, value) in [32_768u16, 16_384, 8_192, 65_535].into_iter().enumerate() {
             data[offset * 2..offset * 2 + 2].copy_from_slice(&value.to_ne_bytes());
         }
-        let actual = framebuffer_from_rgba64(&rgba64, ColorSpace::SRGB);
+        let actual = framebuffer_from_rgba64(&rgba64, ColorSpace::SRGB, &mut buffers);
         let expected =
             ravel_core::color::ingest_rgba16([32_768, 16_384, 8_192, 65_535], ColorSpace::SRGB);
         assert_eq!(actual.as_f32().as_ref(), expected.as_slice());
@@ -1611,10 +1943,12 @@ mod tests {
             FloatRgbLayout::Packed { big_endian: false },
             ColorSpace::SRGB,
         );
+        let mut buffers = DecoderFrameBuffers::default();
         let actual = read_float_rgb_frame(
             &packed,
             FloatRgbLayout::Packed { big_endian: false },
             ColorSpace::SRGB,
+            &mut buffers,
         )
         .expect("float frame");
         assert_eq!(actual.as_f32(), expected.as_f32());
@@ -1640,6 +1974,7 @@ mod tests {
             &planar,
             FloatRgbLayout::PlanarAlpha { big_endian: false },
             ColorSpace::SRGB,
+            &mut buffers,
         )
         .expect("planar alpha frame");
         assert_eq!(actual.as_f32(), expected.as_f32());
@@ -1739,7 +2074,7 @@ mod tests {
             }
         }
 
-        let time = |f: &dyn Fn() -> FrameBuffer| {
+        let time = |f: &mut dyn FnMut() -> FrameBuffer| {
             let start = Instant::now();
             let output = black_box(f());
             black_box(output.as_f32()[0]);
@@ -1752,25 +2087,31 @@ mod tests {
         let mut new_u16 = [0u128; SPACES.len()];
         let mut old_float = [0u128; SPACES.len()];
         let mut new_float = [0u128; SPACES.len()];
+        let mut new_u8_buffers = DecoderFrameBuffers::default();
+        let mut new_u16_buffers = DecoderFrameBuffers::default();
+        let mut new_float_buffers = DecoderFrameBuffers::default();
 
         for _ in 0..ROUNDS {
             for (index, (_, space)) in SPACES.into_iter().enumerate() {
-                old_u8[index] += time(&|| serial_framebuffer_from_rgba8(&rgba8, space));
-                new_u8[index] += time(&|| framebuffer_from_rgba8(&rgba8, space));
-                old_u16[index] += time(&|| serial_framebuffer_from_rgba64(&rgba64, space));
-                new_u16[index] += time(&|| framebuffer_from_rgba64(&rgba64, space));
-                old_float[index] += time(&|| {
+                old_u8[index] += time(&mut || serial_framebuffer_from_rgba8(&rgba8, space));
+                new_u8[index] +=
+                    time(&mut || framebuffer_from_rgba8(&rgba8, space, &mut new_u8_buffers));
+                old_u16[index] += time(&mut || serial_framebuffer_from_rgba64(&rgba64, space));
+                new_u16[index] +=
+                    time(&mut || framebuffer_from_rgba64(&rgba64, space, &mut new_u16_buffers));
+                old_float[index] += time(&mut || {
                     serial_read_float_rgb_frame(
                         &float_frame,
                         FloatRgbLayout::Packed { big_endian: false },
                         space,
                     )
                 });
-                new_float[index] += time(&|| {
+                new_float[index] += time(&mut || {
                     read_float_rgb_frame(
                         &float_frame,
                         FloatRgbLayout::Packed { big_endian: false },
                         space,
+                        &mut new_float_buffers,
                     )
                     .expect("float frame")
                 });
@@ -1795,5 +2136,108 @@ mod tests {
                 new_float[index] as f64 / 1_000_000.0
             );
         }
+    }
+
+    /// Alternate the pre-HIGH-17 and cached decoder paths on the same 1080p
+    /// input. The first frame warms the decoder and is not timed; the three
+    /// measured frames exercise a reused scaler in the new path.
+    ///
+    /// ```text
+    /// uptime
+    /// cargo test -p ravel-media --features ffmpeg --release \
+    ///     measure_decoder_frame_cost -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "measurement harness; run with --ignored --nocapture"]
+    fn measure_decoder_frame_cost() {
+        use std::hint::black_box;
+        use std::process::Command;
+        use std::time::Instant;
+
+        const WIDTH: usize = 1920;
+        const HEIGHT: usize = 1080;
+        const ROUNDS: usize = 3;
+
+        init_ffmpeg();
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("high17-1080p.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=duration=2:size={WIDTH}x{HEIGHT}:rate=30"),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "ultrafast",
+                "-an",
+                path.to_str().expect("UTF-8 temporary path"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg failed to generate 1080p input");
+
+        let mut old = FfmpegDecoder::open(&path)
+            .expect("open old decoder")
+            .with_input_color_space(ColorSpace::REC2020_PQ);
+        let old_stream = old
+            .info()
+            .first_video()
+            .expect("old video stream")
+            .stream_index;
+        old.ensure_video_decoder(old_stream)
+            .expect("old decoder context");
+        old.video_decoder
+            .as_mut()
+            .expect("old cached decoder")
+            .legacy_conversion = true;
+
+        let mut new = FfmpegDecoder::open(&path)
+            .expect("open new decoder")
+            .with_input_color_space(ColorSpace::REC2020_PQ);
+        let new_stream = new
+            .info()
+            .first_video()
+            .expect("new video stream")
+            .stream_index;
+
+        black_box(
+            old.decode_video_frame(old_stream, 0)
+                .expect("warm old decoder"),
+        );
+        black_box(
+            new.decode_video_frame(new_stream, 0)
+                .expect("warm new decoder"),
+        );
+
+        let mut old_total = 0u128;
+        let mut new_total = 0u128;
+        for frame_number in 1..=ROUNDS as u64 {
+            let start = Instant::now();
+            let old_frame = old
+                .decode_video_frame(old_stream, frame_number)
+                .expect("old frame");
+            black_box(old_frame.as_f32()[0]);
+            old_total += start.elapsed().as_nanos();
+
+            let start = Instant::now();
+            let new_frame = new
+                .decode_video_frame(new_stream, frame_number)
+                .expect("new frame");
+            black_box(new_frame.as_f32()[0]);
+            new_total += start.elapsed().as_nanos();
+        }
+
+        eprintln!(
+            "1080p decoder measurement: rounds={ROUNDS}, executions=3 per path, old={:.3} ms, new={:.3} ms",
+            old_total as f64 / ROUNDS as f64 / 1_000_000.0,
+            new_total as f64 / ROUNDS as f64 / 1_000_000.0,
+        );
     }
 }

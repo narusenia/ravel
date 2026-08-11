@@ -55,7 +55,10 @@ use ravel_ui::panel::PanelKind;
 use crate::keybindings::{KeybindingRow, current_row};
 
 use crate::app_settings::{self, SettingsScope as SettingsLayerScope};
-use ravel_project::settings::AppearanceMode;
+use ravel_project::settings::{
+    AppearanceMode, MAX_CACHE_LIMIT_MB, MIN_CACHE_LIMIT_MB, cache_limit_mb, cache_root_setting,
+    cache_sim_reserve_ratio,
+};
 
 /// Height of the dialog body. The settings component fills its container
 /// (sidebar and page list both scroll inside it), so the dialog has to give it
@@ -658,7 +661,7 @@ const CACHE_LIMIT_STEP_MB: f64 = 64.0;
 /// closure is out of a test's reach, and "which layer does this row write, and
 /// what does it refuse" is the part worth pinning.
 pub fn set_cache_vram_limit_mb(value: f64, cx: &mut App) {
-    let Some(limit) = app_settings::cache_limit_mb(value) else {
+    let Some(limit) = cache_limit_mb(value) else {
         tracing::warn!(value, "ignoring an out-of-range VRAM cache limit");
         return;
     };
@@ -671,7 +674,7 @@ pub fn set_cache_vram_limit_mb(value: f64, cx: &mut App) {
 
 /// [`set_cache_vram_limit_mb`] for the host-memory ceiling.
 pub fn set_cache_ram_limit_mb(value: f64, cx: &mut App) {
-    let Some(limit) = app_settings::cache_limit_mb(value) else {
+    let Some(limit) = cache_limit_mb(value) else {
         tracing::warn!(value, "ignoring an out-of-range RAM cache limit");
         return;
     };
@@ -688,7 +691,7 @@ pub fn set_cache_ram_limit_mb(value: f64, cx: &mut App) {
 /// clamps defensively, so a clamp here would write a value the file keeps and
 /// the budget then reinterprets — two answers to "what did I set".
 pub fn set_cache_sim_reserve_ratio(value: f64, cx: &mut App) {
-    let Some(ratio) = app_settings::cache_sim_reserve_ratio(value) else {
+    let Some(ratio) = cache_sim_reserve_ratio(value) else {
         tracing::warn!(value, "ignoring an out-of-range simulation cache reserve");
         return;
     };
@@ -710,7 +713,7 @@ pub fn set_cache_sim_reserve_ratio(value: f64, cx: &mut App) {
 /// be launched from.
 pub fn set_cache_root(value: SharedString, cx: &mut App) {
     let trimmed = value.trim();
-    let usable = app_settings::cache_root_setting(trimmed);
+    let usable = cache_root_setting(trimmed);
     if usable.is_none() && !trimmed.is_empty() {
         tracing::warn!(root = trimmed, "ignoring a relative cache location");
         return;
@@ -738,8 +741,8 @@ fn cache_limit_field(
         field: FieldControl::Number(
             SettingField::number_input(
                 NumberFieldOptions {
-                    min: app_settings::MIN_CACHE_LIMIT_MB,
-                    max: app_settings::MAX_CACHE_LIMIT_MB,
+                    min: MIN_CACHE_LIMIT_MB,
+                    max: MAX_CACHE_LIMIT_MB,
                     step: CACHE_LIMIT_STEP_MB,
                 },
                 value,
@@ -849,7 +852,7 @@ fn cache_root_in_force(cx: &App) -> String {
     app_settings::resolved(cx)
         .cache_root
         .as_deref()
-        .and_then(app_settings::cache_root_setting)
+        .and_then(cache_root_setting)
         .unwrap_or_default()
         .to_owned()
 }

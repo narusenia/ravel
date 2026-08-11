@@ -16,6 +16,8 @@
 //! [`ResolvedSettings::resolve`] collapses the merged layer into concrete
 //! values using built-in defaults for anything still unset.
 
+use std::path::Path;
+
 use ravel_core::cache_budget::CacheBudgetConfig;
 use ravel_ui::node_editor::EdgeStyle;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,66 @@ use serde::{Deserialize, Serialize};
 /// budget counts bytes, and a settings file full of ten-digit numbers is not
 /// something anyone edits correctly.
 const MIB: u64 = 1024 * 1024;
+
+/// The smallest cache tier limit a setting may hold, in MiB.
+pub const MIN_CACHE_LIMIT_MB: f64 = 1.0;
+
+/// The largest cache tier limit a setting may hold, in MiB (1 TiB).
+pub const MAX_CACHE_LIMIT_MB: f64 = 1024.0 * 1024.0;
+
+/// Read the global settings layer from its platform location.
+pub fn read_global_settings() -> SettingsLayer {
+    read_global_settings_at(crate::paths::global_settings_path().as_deref())
+}
+
+/// Read one global settings layer from an explicit path.
+///
+/// A missing, unreadable, or malformed file is no override. This is the same
+/// launch-safe behaviour the GUI uses, and keeps headless callers from having
+/// to duplicate TOML and filesystem error handling.
+pub fn read_global_settings_at(path: Option<&Path>) -> SettingsLayer {
+    let Some(path) = path else {
+        return SettingsLayer::default();
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return SettingsLayer::default();
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "could not read the settings file");
+            return SettingsLayer::default();
+        }
+    };
+    match SettingsLayer::from_toml(&text) {
+        Ok(layer) => layer,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %path.display(),
+                "ignoring the settings file; starting on the defaults"
+            );
+            SettingsLayer::default()
+        }
+    }
+}
+
+/// The MiB figure `value` names, or `None` when no tier limit may hold.
+pub fn cache_limit_mb(value: f64) -> Option<u64> {
+    (value.is_finite() && (MIN_CACHE_LIMIT_MB..=MAX_CACHE_LIMIT_MB).contains(&value))
+        .then(|| value.trunc() as u64)
+}
+
+/// The simulation reserve share `value` names, or `None` when it is unusable.
+pub fn cache_sim_reserve_ratio(value: f64) -> Option<f32> {
+    (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value as f32)
+}
+
+/// The absolute path `text` names, or `None` for an empty or relative path.
+pub fn cache_root_setting(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty() && Path::new(trimmed).is_absolute()).then_some(trimmed)
+}
 
 // ===========================================================================
 // Partial (overridable) settings
@@ -503,6 +565,47 @@ impl ResolvedSettings {
             sim_reserve_ratio: self.cache_sim_reserve_ratio,
         }
     }
+}
+
+/// Convert settings to an accounting-safe cache budget.
+///
+/// Settings files are hand-editable and reach the budget without passing
+/// through a dialog field, so both GUI and headless callers use this boundary.
+/// The disk limit remains governed by `disk_enabled`; nothing charges
+/// `Tier::Disk` until `CACHE-11` is implemented.
+pub fn usable_cache_budget(settings: &ResolvedSettings) -> CacheBudgetConfig {
+    let defaults = ResolvedSettings::default();
+    let mut settings = settings.clone();
+    settings.cache_vram_limit_mb = usable_limit_mb(
+        settings.cache_vram_limit_mb,
+        defaults.cache_vram_limit_mb,
+        "vram",
+    );
+    settings.cache_ram_limit_mb = usable_limit_mb(
+        settings.cache_ram_limit_mb,
+        defaults.cache_ram_limit_mb,
+        "ram",
+    );
+    settings.cache_sim_reserve_ratio =
+        cache_sim_reserve_ratio(f64::from(settings.cache_sim_reserve_ratio)).unwrap_or_else(|| {
+            tracing::warn!(
+                sim_reserve_ratio = settings.cache_sim_reserve_ratio,
+                "unusable simulation cache reserve in the settings; using the default"
+            );
+            defaults.cache_sim_reserve_ratio
+        });
+    settings.cache_budget()
+}
+
+fn usable_limit_mb(value: u64, default: u64, tier: &'static str) -> u64 {
+    cache_limit_mb(value as f64).unwrap_or_else(|| {
+        tracing::warn!(
+            limit_mb = value,
+            tier,
+            "cache limit out of range in the settings; using the default"
+        );
+        default
+    })
 }
 
 #[cfg(test)]

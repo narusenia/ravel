@@ -2095,9 +2095,11 @@ mod tests {
         }
     }
 
-    /// Alternate the pre-HIGH-17 and cached decoder paths on the same 1080p
-    /// input. The first frame warms the decoder and is not timed; the three
-    /// measured frames exercise a reused scaler in the new path.
+    /// Alternate the per-frame-scaler and cached-scaler decoder paths on the
+    /// same 1080p input. The first frame warms the decoder and is not timed;
+    /// the measured frames exercise a reused scaler in the new path. The two
+    /// paths swap timing order every frame, because the one that runs second
+    /// is measurably faster and that bias is as large as the effect.
     ///
     /// ```text
     /// uptime
@@ -2113,7 +2115,8 @@ mod tests {
 
         const WIDTH: usize = 1920;
         const HEIGHT: usize = 1080;
-        const ROUNDS: usize = 3;
+        // Even, so each path is timed first exactly half the time.
+        const ROUNDS: usize = 4;
 
         init_ffmpeg();
         let dir = tempfile::tempdir().expect("temporary directory");
@@ -2173,26 +2176,34 @@ mod tests {
                 .expect("warm new decoder"),
         );
 
+        fn timed_decode(decoder: &mut FfmpegDecoder, stream: usize, frame_number: u64) -> u128 {
+            let start = Instant::now();
+            let frame = decoder
+                .decode_video_frame(stream, frame_number)
+                .expect("frame");
+            black_box(frame.as_f32()[0]);
+            start.elapsed().as_nanos()
+        }
+
         let mut old_total = 0u128;
         let mut new_total = 0u128;
         for frame_number in 1..=ROUNDS as u64 {
-            let start = Instant::now();
-            let old_frame = old
-                .decode_video_frame(old_stream, frame_number)
-                .expect("old frame");
-            black_box(old_frame.as_f32()[0]);
-            old_total += start.elapsed().as_nanos();
-
-            let start = Instant::now();
-            let new_frame = new
-                .decode_video_frame(new_stream, frame_number)
-                .expect("new frame");
-            black_box(new_frame.as_f32()[0]);
-            new_total += start.elapsed().as_nanos();
+            // Alternate which path is timed first. Whichever runs second on a
+            // given frame is systematically 0.3-0.6 ms faster — the file is in
+            // the page cache and the allocator is warm — and that bias is the
+            // same size as the effect being measured, so an unbalanced order
+            // reports the bias rather than the cache.
+            if frame_number.is_multiple_of(2) {
+                new_total += timed_decode(&mut new, new_stream, frame_number);
+                old_total += timed_decode(&mut old, old_stream, frame_number);
+            } else {
+                old_total += timed_decode(&mut old, old_stream, frame_number);
+                new_total += timed_decode(&mut new, new_stream, frame_number);
+            }
         }
 
         eprintln!(
-            "1080p decoder measurement: rounds={ROUNDS}, executions=3 per path, old={:.3} ms, new={:.3} ms",
+            "1080p decoder measurement: rounds={ROUNDS}, alternating order, old={:.3} ms, new={:.3} ms",
             old_total as f64 / ROUNDS as f64 / 1_000_000.0,
             new_total as f64 / ROUNDS as f64 / 1_000_000.0,
         );

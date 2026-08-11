@@ -2,7 +2,7 @@
 
 ## 概要
 
-Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済みで、GPUI 側の配線は未了 → 「UI フレームワークのフォーク方針」）。
+Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済み。macOS は GPUI の Metal デバイスを取り込めるようになり、Linux / Windows の配線と実際のビューア描画は未了 → 「UI フレームワークのフォーク方針」）。
 
 ## レイヤー構成
 
@@ -518,7 +518,7 @@ Ravel は UI フレームワークを**フォークして使う**。これは選
 
 | 依存 | フォーク | 固定方法 |
 |---|---|---|
-| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `645682c` |
+| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `dd4cc74` |
 | `gpui-component` / `-assets` | `narusenia/gpui-component` | rev `8327eb4` |
 
 系譜は `zed-industries/zed` の gpui → gpui-ce（コミュニティ版）→
@@ -532,11 +532,14 @@ patch していない（proc-macro で型を運ばないので 2 本入っても
 ### フォークに載せるもの / 載せないもの
 
 **載せる**のは「Ravel が要求し、かつ上流にも汎用 API として通る形のもの」。
-実績は 2 つで、どちらもウィンドウ系:
+実績は 3 つ:
 
 - `Window::set_always_on_top(bool)` — 分離ウィンドウのピン留め（REQ-UI-001 の
   AlwaysOnTop）。macOS は NSWindow のレベル切替
 - `Context::observe_window_minimized` — メイン窓の最小化に分離窓を追従させる
+- `Window::native_gpu_handles()` — レンダラのネイティブデバイスとコマンド
+  キューを不透明な組で返す（`ZC-2`）。macOS 以外は `None`。デバイス共有
+  （REQ-GPU-001）はアプリ側では原理的に書けない
 
 **載せない**のは、アプリ側で代替できるもの。カスタムカーソル描画・
 `CursorStyle::Move` の追加・カーソル非表示はいずれも gpui-ce へのパッチが
@@ -546,7 +549,11 @@ patch していない（proc-macro で型を運ばないので 2 本入っても
 **形の制約**: パッチは上流（gpui-ce）へ PR できる汎用 API の形に保つ。
 Ravel 固有の分岐をフォークに置くと、上流へ返せないまま差分が増え、
 追従コストが恒久化する。`gpui-ce-ravel` の runtime 確認は
-`cargo run -p ravel-app --example always_on_top`。
+`cargo run -p ravel-app --example always_on_top` と
+`cargo run -p ravel-app --example shared_metal_device`（後者は実ウィンドウの
+デバイスを `interop::context_from_native` に通し、共有できたアダプタ名を
+表示する）。ウィンドウを開かないと確かめられないので、どちらも自動テストに
+できない。
 
 ### デバイス共有との関係
 
@@ -557,30 +564,39 @@ lint（`gpu-device-sharing`）が呼び出し元を `ravel-gpu` と `ravel-app` 
 `crates/ravel-gpu/tests/device_sharing.rs` が「他人のデバイスで抽象 API が
 最後まで動く」ことを機械的に確認している。
 
-**Ravel 側は受け取れる。GPUI 側がまだ渡せない。**穴は 2 つ:
+穴は 2 つあった。**macOS 側は塞がった**:
 
-1. **gpui はレンダラのデバイスを公開していない。** アプリ側に向いた GPU の
+1. **gpui はレンダラのデバイスを公開していなかった。** アプリ側に向いた GPU の
    口は `App::set_gpu_requirements`（features / limits を渡す）と
-   `gpu_specs()`（情報のみ）だけ。`gpui_wgpu::WgpuContext` は
+   `gpu_specs()`（情報のみ）だけだった。`gpui_wgpu::WgpuContext` は
    instance / adapter / device / queue を `pub` フィールドで持つが、
-   `gpui` からは辿れない
+   `gpui` からは辿れない。**フォークの `Window::native_gpu_handles()` が
+   macOS の口を開けた**（`ZC-2`）。Linux / Windows の `gpui_wgpu` 経路は
+   まだ `None` を返す
 2. **macOS の gpui は wgpu ではない。** `gpui_wgpu` を使うのは Linux /
    Windows（feature）/ web で、macOS は `gpui_macos` の Metal ネイティブ
-   レンダラ。つまり macOS には「共有すべき同じ `wgpu::Device`」が存在しない
+   レンダラ。つまり macOS には「共有すべき同じ `wgpu::Device`」が存在しない。
+   **`ravel_gpu::interop::context_from_native` はこれを迂回する**: 渡された
+   `MTLDevice` と同じネイティブデバイスを持つ wgpu アダプタを列挙から探し、
+   その上に `GpuContext` を立てる。wgpu 29 の公開 API には既存の
+   `MTLDevice` から直接アダプタを作る道が無い（`AdapterShared::expose` は
+   private）ため、照合が唯一の安全な手段
 
-したがってフォーク側の作業は 2 択で、**どちらも本仕様の範囲外**（実装は別計画）:
+したがってフォーク側の作業は 2 択だった:
 
 - **(A) デバイス公開アクセサを足す。** Linux / Windows では成立する。
-  macOS には効かない
+  macOS には効かない。**`ZC-5` が担当**
 - **(B) macOS のレンダラを wgpu へ寄せる、または Metal レベルで interop する。**
   ゼロコピー表示（GPUI カスタム要素にビューアのテクスチャを直接描かせる）は
-  こちら側の話
+  こちら側の話。**`ZC-2` が後者（Metal レベルの interop）を採った**
 
-順序の含意: 開発機が macOS なので、デバイス共有の実利であるビューアの
-ゼロコピー表示は (B) に依存する。(A) だけを入れても macOS のビューアは
-CPU 経由のままで、`VIEWER_MAX_DIM` の判断
-（[`perf-baseline.md`](../implementation/perf-baseline.md)）はその前提で
-読む必要がある。
+**残る制約: デバイス選択方針が両者で違う。** GPUI は
+`MetalRenderer::create_device` で低消費電力・非リムーバブルを優先し、Ravel の
+`GpuContext::new` は `PowerPreference::HighPerformance` を要求する。単一 GPU の
+Apple Silicon では同じデバイスに落ちるが、**複数 GPU の Mac では別デバイスを
+選びうる**。`context_from_native` はその場合 `None` を返す（照合が失敗する）ので、
+呼び出し側は「共有デバイス無し」として扱う必要がある。複数 GPU での受け渡しは
+`ZC-3` 以降の課題。
 
 ### 上流追従のコスト
 

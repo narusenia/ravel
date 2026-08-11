@@ -57,13 +57,16 @@
 //! non-dispatchable `u64` handle, not a pointer, so it does not fit
 //! [`NativeHandle`] and needs its own shape when `GPUBK-12` lands.
 //!
-//! The **command queue** is not exposed here yet, but nothing blocks it any
-//! more: wgpu 29.0.4 restored `wgpu_hal::metal::Queue::as_raw`, which the
-//! revision this crate used to pin had made private, and D3D12 and Vulkan
-//! already had it. An OFX host needs `id<MTLCommandQueue>` for
-//! `kOfxImageEffectPropMetalCommandQueue`, so the accessor belongs here — it
-//! is left for the OFX host plan to add alongside its first consumer, in
-//! keeping with the import direction below.
+//! A host that owns native renderer objects can pass a borrowed device and
+//! command queue pair through [`context_from_native`]. The import route
+//! enumerates the wgpu adapters for that native API, finds the adapter whose
+//! device is the same native object, and returns a [`NativeGpuContext`] that
+//! contains the matching abstract [`GpuContext`]. The public wgpu 29 API still
+//! has no way to turn an existing `MTLDevice` directly into a
+//! `wgpu::hal::ExposedAdapter`; matching an adapter and creating a logical
+//! wgpu device from it is the safe public alternative. The native queue remains
+//! a separate timeline, so synchronization belongs to the caller (for example
+//! an OFX host or the zero-copy viewer).
 //!
 //! # Device sharing
 //!
@@ -91,12 +94,11 @@
 //! pins the contract — a context built from someone else's device runs the
 //! abstract API end to end, and the device it runs on is theirs.
 //!
-//! What is **not** wired yet is the GPUI side. gpui exposes no accessor for the
-//! device its renderer uses, and on macOS its renderer is Metal-native rather
-//! than wgpu-backed, so handing Ravel that device needs a patch on the
-//! `gpui-ce-ravel` fork. The policy for that lives in
-//! `docs/specifications/architecture.md`; the implementation is a separate
-//! plan.
+//! The GPUI fork now exposes its native pair through a platform-neutral
+//! `Window::native_gpu_handles` method. Ravel's application-side window wiring
+//! is intentionally still separate: this module only defines the receiving
+//! boundary, and a later viewer unit decides when to retain the window and
+//! synchronize work between the two command queues.
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
@@ -121,8 +123,10 @@ pub enum NativeApi {
 /// A borrowed pointer to an object owned by the native graphics API.
 ///
 /// The lifetime is the borrow of the Ravel object the handle was taken from
-/// ([`GpuContext`], [`GpuFrameBuffer`]). That object keeps the native object
-/// alive, so a `NativeHandle` cannot outlive what it points at.
+/// ([`GpuContext`], [`GpuFrameBuffer`]) or of a [`NativeGpuContext`] descriptor
+/// supplied by an external host. The former keeps the native object alive; the
+/// latter is only a typed borrow of an object whose lifetime the caller
+/// promised to uphold when calling [`context_from_native`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NativeHandle<'a> {
     api: NativeApi,
@@ -212,6 +216,137 @@ impl<'a> NativeTexture<'a> {
     pub fn handle(self) -> NativeHandle<'a> {
         self.0
     }
+}
+
+/// A borrowed native device and command queue supplied by a host renderer,
+/// together with an abstract context on the same native device.
+///
+/// The native pair is opaque to the GPU façade and is useful for native
+/// interop consumers that need both objects to agree on a device. It does not
+/// own or retain either native object. The [`GpuContext`] is created by
+/// [`context_from_native`] after it finds a wgpu adapter with the same native
+/// device; the command queue is still a separate native timeline.
+#[derive(Clone)]
+pub struct NativeGpuContext<'a> {
+    api: NativeApi,
+    device: NonNull<c_void>,
+    command_queue: NonNull<c_void>,
+    owner: PhantomData<&'a ()>,
+    context: GpuContext,
+}
+
+impl<'a> NativeGpuContext<'a> {
+    /// Which native graphics API owns both objects.
+    #[inline]
+    pub fn api(&self) -> NativeApi {
+        self.api
+    }
+
+    /// The borrowed native device.
+    #[inline]
+    pub fn device(&self) -> NativeDevice<'a> {
+        NativeDevice(NativeHandle::new(self.api, self.device))
+    }
+
+    /// The borrowed native command queue.
+    #[inline]
+    pub fn command_queue(&self) -> NativeHandle<'a> {
+        NativeHandle::new(self.api, self.command_queue)
+    }
+
+    /// The abstract Ravel context built on the same native device.
+    #[inline]
+    pub fn gpu_context(&self) -> &GpuContext {
+        &self.context
+    }
+}
+
+/// Accept a host renderer's native device and command queue.
+///
+/// This is the native import route in a backend-neutral shape. It builds an
+/// instance restricted to `api`'s backend, enumerates its adapters, creates a
+/// logical wgpu device for each candidate, and returns only when the
+/// candidate's native device pointer is the same as `device`. The returned
+/// [`NativeGpuContext::gpu_context`] is therefore the abstract API running on
+/// the host's physical device.
+///
+/// Unlike [`context_from_wgpu`], the caller supplies no wgpu objects: on a
+/// platform whose renderer is not wgpu-backed there are none to supply, which
+/// is the whole reason this route exists.
+///
+/// # Safety
+///
+/// The caller must guarantee all of the following for as long as the returned
+/// descriptor, or any handle borrowed from it, is used:
+///
+/// * `device` and `command_queue` are non-null, valid native objects owned by
+///   `api`;
+/// * `command_queue` belongs to `device` and both objects remain alive; and
+/// * neither object is released, destroyed, or given to code that assumes
+///   ownership through this descriptor. The descriptor performs no retain or
+///   reference-count operation.
+/// * The caller passes the renderer's actual device, not a device obtained
+///   from a different selection policy. GPUI prefers a non-removable,
+///   low-power Metal device while Ravel's default wgpu request prefers
+///   high-performance; on a multi-GPU Mac those policies can select different
+///   devices. The caller must treat `None` as "no shared device" and must not
+///   use a separately-created context with the native pair.
+pub async unsafe fn context_from_native<'a>(
+    api: NativeApi,
+    device: *mut c_void,
+    command_queue: *mut c_void,
+) -> Option<NativeGpuContext<'a>> {
+    let host_device = NonNull::new(device)?;
+    let native_command_queue = NonNull::new(command_queue)?;
+    let backends = match api {
+        NativeApi::Metal => wgpu::Backends::METAL,
+        NativeApi::Direct3D12 => wgpu::Backends::DX12,
+    };
+
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = backends;
+    let instance = wgpu::Instance::new(desc);
+
+    for adapter in instance.enumerate_adapters(backends).await {
+        let adapter_limits = adapter.limits();
+        let Ok((device, queue)) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("native host device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+                    max_buffer_size: adapter_limits.max_buffer_size,
+                    max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+                    ..wgpu::Limits::default()
+                },
+                ..Default::default()
+            })
+            .await
+        else {
+            continue;
+        };
+
+        let context = context_from_wgpu(instance.clone(), adapter, device, queue);
+        // SAFETY: `context` owns the wgpu device for the duration of this
+        // comparison. `native_device` only reads the backend handle and does
+        // not transfer ownership of it.
+        let Some(wgpu_device) = (unsafe { native_device(&context) }) else {
+            continue;
+        };
+        if wgpu_device.api() != api || wgpu_device.as_ptr() != host_device.as_ptr().cast() {
+            continue;
+        }
+
+        return Some(NativeGpuContext {
+            api,
+            device: host_device,
+            command_queue: native_command_queue,
+            owner: PhantomData,
+            context,
+        });
+    }
+
+    None
 }
 
 /// Build a [`GpuContext`] on wgpu objects the caller already owns.

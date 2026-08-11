@@ -46,6 +46,11 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# **Examples only.** `examples/shared_metal_device.rs` drives the async
+# `interop::context_from_native` from a synchronous GPUI render pass. The
+# shipped binary keeps its GPU work on the evaluation worker and never blocks
+# a thread on a future, so this edge stops at the dev-dependency boundary.
+pollster = { workspace = true }
 tempfile = { workspace = true }
 # **Tests only.** `tests/export_pipeline.rs` is the unit's "the GUI goes
 # through the same worker and the same encoder as the CLI" criterion, and the

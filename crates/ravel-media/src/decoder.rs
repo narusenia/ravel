@@ -1646,6 +1646,110 @@ mod tests {
         assert_eq!(cache.creations(), 4);
     }
 
+    /// The cached scaler must not change a single pixel. Decode the same
+    /// frames through the per-frame scaler the cache replaced and through the
+    /// cached one, and require the bytes to match exactly — several frames in
+    /// a row, so the comparison covers a scaler that has been reused rather
+    /// than only a freshly built one.
+    #[test]
+    fn a_reused_scaler_decodes_the_same_pixels_as_a_per_frame_one() {
+        use std::process::Command;
+
+        const FRAMES: u64 = 4;
+
+        init_ffmpeg();
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("scaler-identity.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=96x64:rate=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "ultrafast",
+                "-an",
+                path.to_str().expect("UTF-8 temporary path"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("ffmpeg CLI not found");
+        assert!(status.success(), "ffmpeg failed to generate the fixture");
+
+        // A non-trivial transfer function, so the comparison exercises the
+        // ingest path rather than a pass-through.
+        let open = || {
+            let mut decoder = FfmpegDecoder::open(&path)
+                .expect("open decoder")
+                .with_input_color_space(ColorSpace::REC2020_PQ);
+            let stream = decoder
+                .info()
+                .first_video()
+                .expect("video stream")
+                .stream_index;
+            decoder
+                .ensure_video_decoder(stream)
+                .expect("decoder context");
+            (decoder, stream)
+        };
+
+        let (mut legacy, legacy_stream) = open();
+        legacy
+            .video_decoder
+            .as_mut()
+            .expect("cached decoder")
+            .legacy_conversion = true;
+        let (mut cached, cached_stream) = open();
+
+        let mut previous: Option<FrameBuffer> = None;
+        for number in 0..FRAMES {
+            let expected = legacy
+                .decode_video_frame(legacy_stream, number)
+                .expect("per-frame scaler decode");
+            let actual = cached
+                .decode_video_frame(cached_stream, number)
+                .expect("cached scaler decode");
+
+            assert_eq!(
+                (actual.width, actual.height, actual.format),
+                (expected.width, expected.height, expected.format),
+                "frame {number} changed shape"
+            );
+            assert!(
+                actual.data == expected.data,
+                "frame {number} differs between the cached and per-frame scalers"
+            );
+
+            // Guard against a fixture that decodes to the same picture every
+            // time, which would make the comparison above vacuous.
+            if let Some(previous) = previous.replace(actual)
+                && number == FRAMES - 1
+            {
+                assert!(
+                    previous.data != expected.data,
+                    "fixture frames are identical; the comparison proves nothing"
+                );
+            }
+        }
+
+        assert_eq!(
+            cached
+                .video_decoder
+                .as_ref()
+                .expect("cached decoder")
+                .scaler
+                .creations(),
+            1,
+            "the cached path rebuilt its scaler, so reuse was never exercised"
+        );
+    }
+
     /// Reconstruct the pre-LUT u8 ingest loop for the measurement harness.
     fn serial_framebuffer_from_rgba8(
         frame: &frame::Video,

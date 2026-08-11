@@ -103,6 +103,7 @@
 use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::device::{GpuBackend, GpuContext};
 use crate::frame::GpuFrameBuffer;
@@ -503,6 +504,26 @@ pub fn with_surface_texture<T>(
         return None;
     }
     Some(consume(texture.as_ptr(), frame.width(), frame.height()))
+}
+
+/// Share a display texture with a host renderer that runs on the **same wgpu
+/// device** — the counterpart of [`with_surface_texture`] for the platforms
+/// whose toolkit is wgpu-backed rather than native.
+///
+/// Where the Metal route has to name a platform object and prove the two
+/// devices are one, this route has nothing to prove: the caller reached the
+/// context through [`context_from_wgpu`], so the device is already the host's.
+/// What it hands out is therefore the *current implementation's* texture
+/// rather than a backend pointer, which is the same layer
+/// [`context_from_wgpu`] trades in and the reason this belongs beside it
+/// rather than under the handle rule.
+///
+/// The `Arc` is what keeps the texture alive for the toolkit: a renderer that
+/// stores it in its scene holds a reference until the frame is drawn. It does
+/// **not** keep the pool lease — hold the [`GpuFrameBuffer`] (or its
+/// [`completion_signal`](GpuFrameBuffer::completion_signal)) for that.
+pub fn surface_texture_wgpu(frame: &GpuFrameBuffer) -> Arc<wgpu::Texture> {
+    Arc::new(frame.texture().clone())
 }
 
 #[cfg(target_os = "macos")]

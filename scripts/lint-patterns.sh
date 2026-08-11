@@ -200,9 +200,9 @@ done < <(rg -no --no-heading \
 # ---------------------------------------------------------------------------
 # gpu-device-sharing: `interop::context_from_wgpu`,
 # `interop::context_from_native`, `interop::wgpu_instance`,
-# `native_gpu_handles`, `NativeGpuHandles`, `native_device_matches` and
-# `with_surface_texture` are the other direction — Ravel
-# receives the graphics objects instead of handing them out. REQ-GPU-001
+# `native_gpu_handles`, `NativeGpuHandles`, `native_device_matches`,
+# `with_surface_texture` and `surface_texture_wgpu` are the other direction —
+# Ravel receives the graphics objects instead of handing them out. REQ-GPU-001
 # requires the UI framework and the compute pipeline to run on one device, and
 # a shared device is by definition one the host creates and Ravel accepts, so
 # this is a contract to keep rather than a hole to close (GPUBK-9). It is still
@@ -238,6 +238,7 @@ done < <(rg -no --no-heading \
     -e '\bNativeGpuHandles\b' \
     -e '\bnative_device_matches\b' \
     -e '\bwith_surface_texture\b' \
+    -e '\bsurface_texture_wgpu\b' \
     -e '\bwgpu_instance\b' \
     crates -g '*.rs' 2>/dev/null)
 

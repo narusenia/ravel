@@ -933,9 +933,23 @@ impl RavelWorkspace {
             }
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             {
-                // `gpu_context` panics while the device is lost, and the
-                // renderer only exposes one when it is wgpu-backed.
-                !window.gpu_device_lost().unwrap_or(true) && window.gpu_context().is_some()
+                // **Not enabled yet, and the reason is not the renderer.**
+                //
+                // Sharing a texture requires the two sides to be on one
+                // device. On macOS that is checked (`native_device_matches`);
+                // here it cannot be, because Ravel never adopts GPUI's device
+                // in the first place: `ProjectState::new` builds its own with
+                // `GpuContext::new_blocking()`, and `interop::context_from_wgpu`
+                // — the entry point that exists precisely for this — has no
+                // production caller. Handing GPUI a texture from a *different*
+                // wgpu device is undefined, not merely slow.
+                //
+                // Wiring the startup path to adopt `window.gpu_context()` is a
+                // change to how the whole evaluation pipeline is created, so it
+                // belongs to its own unit rather than to this one. Until then
+                // the arm below is reachable code kept honest by staying off.
+                let _ = window.gpu_device_lost();
+                false
             }
             #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
             {

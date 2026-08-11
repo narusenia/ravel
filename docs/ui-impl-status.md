@@ -254,7 +254,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
 | 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。音声同期も実装済み: 音声トラックあり + デバイス稼働時は `SyncClock` が再生位置の正（`ClockSource::Audio`）、それ以外は従来の wall clock（`audio-plan.md` 単位 3） |
-| GPU テクスチャ共有（ゼロコピー） | ⚠️ | **macOS / Linux / Windows の実装済み**（`ZC-2`〜`ZC-5`、`ZC-7`、`ZC-8`）。macOS は Metal、Linux / Windows は wgpu の出力テクスチャを surface としてそのまま描き、完了通知の後にプールへ返す。Windows は Ravel が GPUI の wgpu/DX12 renderer feature を有効化する。Linux / Windows の実機確認は未了。共有できない場合、デバイス喪失、または context を取得できない場合は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）の従来経路へフォールバックする |
+| GPU テクスチャ共有（ゼロコピー） | ⚠️ | **macOS / Linux / Windows で実装済み**（`ZC-2`〜`ZC-5`、`ZC-7`、`ZC-8`）。macOS は Metal、Linux / Windows は wgpu の出力テクスチャを surface としてそのまま描き、完了通知の後にプールへ返す。Windows は Ravel が GPUI の wgpu/DX12 renderer feature を有効化する。Linux / Windows の実機確認は未了。共有できない場合、デバイス喪失、または context を取得できない場合は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）の従来経路へフォールバックする |
 | ツールバー（選択/ペン等） | ✅ | 選択 / ペン / 矩形 / 楕円 / ハンド / ズーム（`ToolState` Global、REQ-UI-011、`tool-system-plan.md`） |
 | 選択 bbox とハンドル | ⚠️ | **ハンドルは描画のみで動作を持たない** — スケール / 回転のジェスチャーはコード上に存在せず、動くのは bbox 内側からの移動だけ（担当は `viewer-overlay-manipulator-plan.md` の OVL-7）。ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
 | 複数レイヤーの同時ドラッグ | ✅ | レイヤー bbox の内側からドラッグで選択レイヤー全体を移動。`center` ベクタ再構築方式（REQ-UI-011）を全 target 分 1 つの Document に適用 → 1 undo。シェル変換が単位行列でないレイヤーは対象外 |

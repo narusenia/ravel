@@ -1758,6 +1758,15 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
 /// already the host's. The completion callback is retained by GPUI's wgpu
 /// submission until the renderer has finished sampling the texture, keeping
 /// the pooled frame lease alive across the surface draw.
+///
+/// **The release is late, never early.** GPUI hands the callback to
+/// `wgpu::Queue::on_submitted_work_done`, and wgpu only runs such callbacks
+/// during a later `submit` / `poll` — which for GPUI means the next frame it
+/// draws. So a frame's lease returns to the pool one draw after the GPU
+/// actually finished with it. That errs on the safe side of the race `ZC-4`
+/// closed, and it cannot stall evaluation: `TexturePool::acquire` allocates
+/// when nothing idle matches rather than waiting. The cost is at most one
+/// extra pooled texture held while the window sits idle.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
     // A lost device recovers on a later draw; sampling its textures meanwhile

@@ -322,7 +322,10 @@ fn run_with(
     mut recorder: Recorder,
     cancel: &CancelFlag,
 ) -> Run {
-    let result = render_with_hooks(args, |_budget| Ok(hooks), cancel, &mut recorder);
+    // `None`, never the platform settings path: a test that read the
+    // developer's own `settings.toml` would render against a cache budget
+    // nobody here chose, and would answer differently on the next machine.
+    let result = render_with_hooks(args, None, |_budget| Ok(hooks), cancel, &mut recorder);
     Run { result, recorder }
 }
 
@@ -809,6 +812,11 @@ fn the_render_worker_reserves_against_the_budget_the_hooks_were_given() {
 
     let dir = TempDir::new().expect("tempdir");
     let project = project_file(dir.path(), document(false));
+    // A global settings file of this test's own — the one budget both halves
+    // share is also the one the settings layers asked for, and the figure is
+    // this file's rather than the machine's.
+    let settings = dir.path().join("settings.toml");
+    std::fs::write(&settings, "[cache]\nram_limit_mb = 512\n").expect("global settings");
     let seen: Arc<Mutex<Option<ravel_core::cache_budget::SharedCacheBudget>>> = Arc::default();
     let peak = Arc::new(AtomicUsize::new(0));
 
@@ -818,6 +826,7 @@ fn the_render_worker_reserves_against_the_budget_the_hooks_were_given() {
     };
     render_with_hooks(
         &args(&project, &dir.path().join("out")),
+        Some(&settings),
         |budget| {
             *seen.lock().expect("budget") = Some(budget.clone());
             Ok(StubHooks::new())
@@ -831,6 +840,16 @@ fn the_render_worker_reserves_against_the_budget_the_hooks_were_given() {
         peak.load(Ordering::SeqCst) > 0,
         "the render worker cached node results without reserving on the \
          budget the hooks were built with"
+    );
+    let budget = seen.lock().expect("budget");
+    assert_eq!(
+        budget
+            .as_ref()
+            .expect("the factory ran")
+            .stats()
+            .limit(ravel_core::cache_budget::Tier::Ram),
+        512 * 1024 * 1024,
+        "the render resolved its budget from the settings file it was given"
     );
 }
 
@@ -853,6 +872,7 @@ fn the_evaluation_hooks_are_not_built_until_the_render_is_decided() {
     refused.params = vec!["nosuch=1".to_string()];
     let result = render_with_hooks(
         &refused,
+        None,
         hooks,
         &CancelFlag::new(),
         &mut Recorder::default(),
@@ -867,6 +887,7 @@ fn the_evaluation_hooks_are_not_built_until_the_render_is_decided() {
     let accepted = args(&project, &dir.path().join("accepted"));
     render_with_hooks(
         &accepted,
+        None,
         hooks,
         &CancelFlag::new(),
         &mut Recorder::default(),
@@ -1243,6 +1264,7 @@ mod sound {
 
         let error = render_with_hooks(
             &sound_args(&project, &out, "0-9"),
+            None,
             |_budget| Err::<StubHooks, _>(CliError::Gpu("no adapter on this machine".into())),
             &CancelFlag::new(),
             &mut Recorder::default(),

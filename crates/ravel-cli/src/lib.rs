@@ -53,14 +53,14 @@ pub mod report;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use ravel_core::cache_budget::SharedCacheBudget;
+use ravel_core::cache_budget::{CacheBudgetConfig, SharedCacheBudget};
 use ravel_core::runtime::eval_service::EvalWorkerHooks;
 use ravel_core::runtime::{CONFLICT_SAMPLE, OverwritePolicy};
 use ravel_gpu::GpuContext;
 use ravel_media::encode::available_encoders;
 use ravel_nodes::GpuEvalHooks;
 use ravel_project::ProjectFile;
-use ravel_project::settings::ResolvedSettings;
+use ravel_project::settings::{self, SettingsLayer};
 
 use crate::args::{Cli, Command, ListCommand, RenderArgs};
 use crate::error::{CliError, EXIT_OK};
@@ -139,13 +139,23 @@ fn project_root(path: &Path) -> Option<PathBuf> {
 
 /// Plan a render from arguments and the project they name.
 pub fn plan_from_args(args: &RenderArgs) -> Result<RenderPlan, CliError> {
+    load_plan(args).map(|(_, plan)| plan)
+}
+
+fn load_plan(args: &RenderArgs) -> Result<(ProjectFile, RenderPlan), CliError> {
     let project = load_project(&args.project)?;
-    plan::plan_render(
+    let plan = plan::plan_render(
         args,
         &project.document,
         project_root(&args.project).as_deref(),
         &available_encoders(),
-    )
+    )?;
+    Ok((project, plan))
+}
+
+fn cache_budget_for_layers(project: &ProjectFile, global: &SettingsLayer) -> CacheBudgetConfig {
+    let resolved = project.resolved_settings(Some(global), None);
+    settings::usable_cache_budget(&resolved)
 }
 
 /// Refuse a render that would land on files that are already there.
@@ -193,8 +203,16 @@ fn refuse_existing_output(plan: &RenderPlan) -> Result<(), CliError> {
 /// those have to answer to the same authority as the render worker's
 /// evaluator (`cache-plan.md`, `CACHE-3`). Building the budget here rather
 /// than inside the factory is what keeps the two halves the same one.
+///
+/// `global_settings` names the global settings file the budget is resolved
+/// from, and is a parameter rather than the platform location because
+/// otherwise every test of this function would render against whatever
+/// `settings.toml` the developer happens to have. [`render`] passes the
+/// platform location; `None` is "no global layer", which is also what an
+/// absent file resolves to.
 pub fn render_with_hooks<H, F>(
     args: &RenderArgs,
+    global_settings: Option<&Path>,
     hooks: F,
     cancel: &CancelFlag,
     reporter: &mut dyn Reporter,
@@ -203,7 +221,7 @@ where
     H: EvalWorkerHooks,
     F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>,
 {
-    let plan = plan_from_args(args)?;
+    let (project, plan) = load_plan(args)?;
     refuse_existing_output(&plan)?;
     for warning in &plan.warnings {
         let (id, message) = warning_text(warning);
@@ -214,9 +232,11 @@ where
     // render can make — a machine with no adapter — and evaluating it as an
     // argument to `execute` would let it escape past the sound, which is
     // already on disk by then.
-    // Settings layers are not loaded by the CLI, so the limits are the
-    // canonical defaults — the same ones `ProjectState` starts from.
-    let budget = SharedCacheBudget::new(ResolvedSettings::default().cache_budget());
+    // Resolve the same global → project settings layers the GUI uses, then
+    // pass them through the shared cache validation before the budget is
+    // handed to both the hooks and the evaluation worker.
+    let global = settings::read_global_settings_at(global_settings);
+    let budget = SharedCacheBudget::new(cache_budget_for_layers(&project, &global));
     let hooks = hooks(&budget)?;
 
     // Sound first: its warnings are worth having before an hour of frames,
@@ -250,6 +270,7 @@ pub fn render(
 ) -> Result<Summary, CliError> {
     render_with_hooks(
         args,
+        ravel_project::paths::global_settings_path().as_deref(),
         |budget| {
             let gpu =
                 GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
@@ -388,6 +409,59 @@ mod tests {
             Some(PathBuf::from("/abs")),
             "an absolute path keeps its own parent"
         );
+    }
+
+    #[test]
+    fn a_headless_render_uses_persisted_global_and_project_cache_settings() {
+        const MIB: u64 = 1024 * 1024;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_path = dir.path().join("settings.toml");
+        std::fs::write(
+            &global_path,
+            "[cache]\nvram_limit_mb = 64\nram_limit_mb = 256\nsim_reserve_ratio = 0.5\n",
+        )
+        .expect("global settings");
+        let global = settings::read_global_settings_at(Some(&global_path));
+
+        let mut project = ProjectFile::new("render", "2026-01-01T00:00:00Z");
+        // The same key both layers state, so the assertion below fails if the
+        // two are ever resolved in the other order.
+        project.settings.cache.vram_limit_mb = Some(128);
+        let budget = cache_budget_for_layers(&project, &global);
+
+        assert_eq!(budget.vram_bytes, 128 * MIB, "the project layer wins");
+        assert_eq!(
+            budget.ram_bytes,
+            256 * MIB,
+            "the global layer still applies"
+        );
+        assert_eq!(budget.sim_reserve_ratio, 0.5);
+    }
+
+    #[test]
+    fn a_headless_render_reuses_shared_cache_validation_rules() {
+        const MIB: u64 = 1024 * 1024;
+
+        let global = SettingsLayer::from_toml(
+            "[cache]\nvram_limit_mb = 0\nsim_reserve_ratio = 2.0\nroot = \"relative/cache\"\n",
+        )
+        .expect("settings parse");
+        let mut project = ProjectFile::new("render", "2026-01-01T00:00:00Z");
+        project.settings.cache.ram_limit_mb = Some(99_999_999);
+        let resolved = project.resolved_settings(Some(&global), None);
+        let budget = cache_budget_for_layers(&project, &global);
+        let defaults = ravel_project::settings::ResolvedSettings::default();
+
+        assert_eq!(budget.vram_bytes, defaults.cache_vram_limit_mb * MIB);
+        assert_eq!(budget.ram_bytes, defaults.cache_ram_limit_mb * MIB);
+        assert_eq!(budget.sim_reserve_ratio, defaults.cache_sim_reserve_ratio);
+        // The unusable `cache.root` reaches the resolved settings untouched and
+        // changes nothing here: the CLI builds no disk cache yet (`CACHE-11`),
+        // so it has no consumer of the setting. Whether a relative location is
+        // refused is `ravel_project::settings::cache_root_setting`'s rule and is
+        // pinned in that crate's own tests, not through this path.
+        assert_eq!(resolved.cache_root.as_deref(), Some("relative/cache"));
     }
 
     /// The interrupt handler is a precondition, not a nicety: when it cannot

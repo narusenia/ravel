@@ -296,11 +296,16 @@ impl DisplayTransform {
             },
         };
 
+        // `TEXTURE_BINDING` is what makes the result *sampleable*, and the
+        // zero-copy path needs it: without it wgpu asks Metal for a
+        // `ShaderWrite`-only texture (`wgpu-hal`'s `map_texture_usage`), and
+        // GPUI's surface fragment shader may not read one. The readback road
+        // never needed it, which is why it was absent.
         let output = pool.lock().unwrap().acquire(TextureKey::new(
             width,
             height,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC,
+            TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC | TextureUsage::TEXTURE_BINDING,
         ));
         let input_binding = image.binding();
         // Nothing reads the LUT slot when there is no LUT, but a bind group

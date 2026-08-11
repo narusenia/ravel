@@ -908,7 +908,7 @@ enum PendingProjectAction {
 /// of that, and a failed downcast means the fork changed shape rather than that
 /// the device is unavailable — hence the log.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
-fn host_gpu_context(window: &Window) -> Option<ravel_gpu::GpuContext> {
+fn host_gpu_context(window: &Window, cx: &mut gpui::App) -> Option<ravel_gpu::GpuContext> {
     use std::sync::Arc;
 
     if window.gpu_device_lost().unwrap_or(false) {
@@ -927,19 +927,64 @@ fn host_gpu_context(window: &Window) -> Option<ravel_gpu::GpuContext> {
     let (instance, adapter, device, queue) = *parts;
     // `context_from_wgpu` takes the objects by value; the renderer keeps its
     // own `Arc` clones, so both sides stay alive independently.
-    Some(ravel_gpu::interop::context_from_wgpu(
+    let context = ravel_gpu::interop::context_from_wgpu(
         instance,
         adapter,
         (*device).clone(),
         (*queue).clone(),
-    ))
+    );
+    cx.set_global(AdoptedHostDevice((*device).clone()));
+    Some(context)
+}
+
+/// The device Ravel adopted from the window renderer, kept so the viewer can
+/// tell it apart from the one the renderer is using *now*.
+///
+/// **A recovered renderer is a different device.** `WgpuRenderer::recover()`
+/// builds a whole new `WgpuContext` after a device loss, while Ravel keeps the
+/// one it adopted at startup; `gpu_device_lost()` then reads `false` again and
+/// says nothing about the swap. Handing the renderer a texture from the dead
+/// device is undefined and trips wgpu's uncaptured-error handler, so the viewer
+/// compares identity against this before every surface paint.
+///
+/// Durable, window-independent state for the whole session — the pipeline is
+/// built on this device once and never rebuilt (`issues/high/HIGH-33`).
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+pub struct AdoptedHostDevice(pub wgpu::Device);
+
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+impl gpui::Global for AdoptedHostDevice {}
+
+/// Whether the renderer is still on the device Ravel adopted.
+///
+/// `false` when it never adopted one, when the renderer has no context to
+/// report, or when it came back from a loss on a new device.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+pub fn host_device_unchanged(window: &Window, cx: &gpui::App) -> bool {
+    use std::sync::Arc;
+
+    let Some(adopted) = cx.try_global::<AdoptedHostDevice>() else {
+        return false;
+    };
+    let Some(boxed) = window.gpu_context_full() else {
+        return false;
+    };
+    let Ok(parts) = boxed.downcast::<(
+        wgpu::Instance,
+        wgpu::Adapter,
+        Arc<wgpu::Device>,
+        Arc<wgpu::Queue>,
+    )>() else {
+        return false;
+    };
+    *parts.2 == adopted.0
 }
 
 /// macOS has no wgpu renderer to adopt from — `gpui_macos` is Metal-native, so
 /// Ravel picks its own device and `interop::context_from_native` checks the two
 /// landed on the same one (`ZC-2`).
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
-fn host_gpu_context(_window: &Window) -> Option<ravel_gpu::GpuContext> {
+fn host_gpu_context(_window: &Window, _cx: &mut gpui::App) -> Option<ravel_gpu::GpuContext> {
     None
 }
 
@@ -953,7 +998,7 @@ impl RavelWorkspace {
         // REQ-GPU-001: run the evaluation pipeline on the window renderer's
         // own device when it has one to give. `GPUBK-9` fixed the entry point
         // for this years before there was a caller — this is that caller.
-        let host_gpu = host_gpu_context(window);
+        let host_gpu = host_gpu_context(window, cx);
         let adopted_host_gpu = host_gpu.is_some();
         let project =
             cx.new(|cx| crate::project_state::ProjectState::new_on_host_gpu(host_gpu, cx));

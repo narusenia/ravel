@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 5 | 27 | [high/](high/) — 1件1ファイル |
+| high | 6 | 27 | [high/](high/) — 1件1ファイル |
 | medium | 36 | 31 | [medium/](medium/) — 領域別5ファイル |
 | low | 32 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -263,4 +263,10 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
 
 残る latent な項目は `MED-CORE-04` のデシリアライズ経路と、
 [low/backlog.md](low/backlog.md) の `LOW-APP-16`（Timeline の壊れやすい
-panic 箇所）。
+panic 箇所）、そして下の `HIGH-33`。
+
+- **[HIGH-33](high/HIGH-33-no-gpu-device-loss-recovery.md)**
+  GPU デバイス喪失から復帰できない。`ravel-gpu` に復旧経路が無く、`ZC-8` で
+  ウィンドウのレンダラとデバイスを共有するようになったため、GPUI が新しい
+  デバイスで復旧しても Ravel は死んだデバイスを持ち続ける。クロスデバイス
+  描画だけは `ZC-8` が塞いだが、**復帰後に GPU 評価が動かないことは未解決**

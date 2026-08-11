@@ -1760,9 +1760,11 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
 /// same, which is what keeps the platform split to the two functions.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
-    // A lost device recovers on a later draw; `gpu_context` panics meanwhile,
-    // so this frame falls back rather than asking.
-    if window.gpu_device_lost().unwrap_or(false) {
+    // A lost device recovers on a later draw; sampling its textures meanwhile
+    // is not safe, so this frame falls back instead. `None` means the backend
+    // cannot say, which is not the same as "healthy" — treat the unknown as
+    // lost and take the CPU road, the way the capability check does.
+    if window.gpu_device_lost().unwrap_or(true) {
         return false;
     }
     let texture = ravel_gpu::interop::surface_texture_wgpu(frame);

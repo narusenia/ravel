@@ -29,6 +29,7 @@
 //! `docs/specifications/color-management.md` records and
 //! `tests/display_transform.rs` pins.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ravel_core::color::CubeLut;
@@ -59,7 +60,22 @@ const LUT_ROW: u32 = 4096;
 pub struct DisplayFrame {
     width: u32,
     height: u32,
-    bgra: Arc<[u8]>,
+    /// CPU bytes are retained for the compatibility/test fallback. The
+    /// interactive macOS path normally carries `gpu` instead.
+    bgra: Option<Arc<[u8]>>,
+    /// The display-encoded texture the GPUI surface samples directly.
+    gpu: Option<GpuFrameBuffer>,
+}
+
+impl Clone for DisplayFrame {
+    fn clone(&self) -> Self {
+        Self {
+            width: self.width,
+            height: self.height,
+            bgra: self.bgra.clone(),
+            gpu: self.gpu.clone(),
+        }
+    }
 }
 
 impl DisplayFrame {
@@ -73,7 +89,18 @@ impl DisplayFrame {
         Self {
             width,
             height,
-            bgra,
+            bgra: Some(bgra),
+            gpu: None,
+        }
+    }
+
+    /// Keep a display-encoded GPU texture for a zero-copy viewer surface.
+    pub fn from_gpu(frame: GpuFrameBuffer) -> Self {
+        Self {
+            width: frame.width(),
+            height: frame.height(),
+            bgra: None,
+            gpu: Some(frame),
         }
     }
 
@@ -87,9 +114,21 @@ impl DisplayFrame {
         self.height
     }
 
-    /// The straight-alpha BGRA bytes, tightly packed, row-major.
-    pub fn bgra(&self) -> &[u8] {
-        &self.bgra
+    /// The straight-alpha BGRA bytes, tightly packed, row-major — `None` on a
+    /// frame that carries [`Self::gpu_frame`] instead.
+    ///
+    /// The two representations are exclusive, and this returns an `Option`
+    /// rather than an empty slice on purpose: a caller that measured
+    /// `len() != w * h * 4` to reject a degenerate frame would otherwise read
+    /// "zero-copy" as "degenerate" and blank the viewer, which is the one
+    /// failure this path must not have.
+    pub fn bgra(&self) -> Option<&[u8]> {
+        self.bgra.as_deref()
+    }
+
+    /// The display-encoded GPU texture, when the zero-copy path is active.
+    pub fn gpu_frame(&self) -> Option<&GpuFrameBuffer> {
+        self.gpu.as_ref()
     }
 }
 
@@ -102,8 +141,13 @@ impl NodeData for DisplayFrame {
         self
     }
 
+    fn is_gpu_resident(&self) -> bool {
+        self.gpu.is_some()
+    }
+
     fn byte_size(&self) -> u64 {
-        self.bgra.len() as u64
+        self.bgra.as_ref().map_or(0, |bgra| bgra.len() as u64)
+            + self.gpu.as_ref().map_or(0, |frame| frame.byte_size())
     }
 }
 
@@ -130,6 +174,10 @@ pub struct DisplayTransform {
     /// The LUT uploaded as an atlas texture, rebuilt when [`Self::set_lut`]
     /// changes the table and never per frame.
     lut_texture: Option<GpuFrameBuffer>,
+    /// Shared with the application host. `false` keeps the old worker-side
+    /// readback fallback until the host proves that GPUI samples the same
+    /// native device; the flag is never read from `render()`.
+    zero_copy_surface: Arc<AtomicBool>,
 }
 
 impl Default for DisplayTransform {
@@ -145,6 +193,17 @@ impl DisplayTransform {
             pipeline: None,
             lut: None,
             lut_texture: None,
+            zero_copy_surface: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A transform whose output mode follows a host capability flag.
+    pub fn with_surface_mode(zero_copy_surface: Arc<AtomicBool>) -> Self {
+        Self {
+            pipeline: None,
+            lut: None,
+            lut_texture: None,
+            zero_copy_surface,
         }
     }
 
@@ -237,11 +296,16 @@ impl DisplayTransform {
             },
         };
 
+        // `TEXTURE_BINDING` is what makes the result *sampleable*, and the
+        // zero-copy path needs it: without it wgpu asks Metal for a
+        // `ShaderWrite`-only texture (`wgpu-hal`'s `map_texture_usage`), and
+        // GPUI's surface fragment shader may not read one. The readback road
+        // never needed it, which is why it was absent.
         let output = pool.lock().unwrap().acquire(TextureKey::new(
             width,
             height,
             TextureFormat::Rgba8Unorm,
-            TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC,
+            TextureUsage::STORAGE_BINDING | TextureUsage::COPY_SRC | TextureUsage::TEXTURE_BINDING,
         ));
         let input_binding = image.binding();
         // Nothing reads the LUT slot when there is no LUT, but a bind group
@@ -262,6 +326,22 @@ impl DisplayTransform {
             height,
         });
 
+        if self.zero_copy_surface.load(Ordering::Acquire) {
+            // GPUI's Metal renderer uses a separate native command queue. A
+            // flush would only submit this dispatch; it would still race the
+            // surface sampler, so the worker waits before publishing the
+            // borrowed texture. Frame/texture lifetime remains the next unit's
+            // responsibility (ZC-4).
+            ctx.wait();
+            return Ok(DisplayFrame::from_gpu(GpuFrameBuffer::new(
+                ctx.clone(),
+                pool,
+                output,
+                width,
+                height,
+            )));
+        }
+
         // Read first, release unconditionally, judge afterwards.
         let bgra = ravel_gpu::read_texture_shared(ctx, &output);
         pool.lock().unwrap().release(output);
@@ -277,7 +357,8 @@ impl DisplayTransform {
         Ok(DisplayFrame {
             width,
             height,
-            bgra,
+            bgra: Some(bgra),
+            gpu: None,
         })
     }
 

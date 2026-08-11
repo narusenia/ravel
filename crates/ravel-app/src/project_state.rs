@@ -35,7 +35,7 @@ use ravel_core::runtime::{
     ReadAhead,
 };
 use ravel_core::types::{FrameBuffer, FrameRate};
-use ravel_gpu::GpuContext;
+use ravel_gpu::{GpuContext, GpuFrameBuffer};
 use ravel_i18n::t;
 use ravel_nodes::DisplayFrame;
 use ravel_project::settings::SettingsLayer;
@@ -51,6 +51,7 @@ use ravel_ui::panels::viewer::ViewerResolution;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// When set, [`ProjectState::new`] skips spawning the background evaluation
@@ -221,6 +222,10 @@ pub struct ProjectState {
     /// REQ-GPU-001 puts the whole pipeline on one device, and `GpuContext` is
     /// cheap to clone precisely so a second consumer shares it.
     gpu: Option<GpuContext>,
+    /// Host capability shared with the evaluation worker. It is false until
+    /// the live GPUI window proves that both renderers use the same device;
+    /// false also selects the worker-side CPU fallback on unsupported hosts.
+    viewer_surface_enabled: Arc<AtomicBool>,
     /// The cache budget the evaluation worker answers to, retained for the
     /// same reason: the render worker's evaluator gets a clone, so both
     /// answer to one authority rather than two independent limits
@@ -343,6 +348,9 @@ fn document_node_ids(document: &Document) -> HashSet<NodeId> {
 enum ViewerOutput {
     /// A frame, already converted to the display image.
     Image(ViewerImage),
+    /// A display-encoded frame whose texture is ready for GPUI to sample
+    /// without a CPU round trip.
+    Gpu(GpuFrameBuffer),
     /// The output is not a displayable frame (a `Scalar`, or a frame with
     /// degenerate dimensions): the viewer blanks.
     NotAFrame,
@@ -386,12 +394,16 @@ impl ViewerUpdate {
             // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
             // what arrives is display bytes rather than a linear buffer.
             Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
-                Some(frame) => match ViewerImage::from_display_frame(frame) {
-                    Some(image) => ViewerOutput::Image(image),
-                    // A degenerate frame carries nothing to draw; the panel
-                    // used to receive it as a `Frame` whose image was `None`
-                    // and paint the same black quad it paints for `Blank`.
-                    None => ViewerOutput::NotAFrame,
+                Some(frame) => match frame.gpu_frame() {
+                    Some(gpu) => ViewerOutput::Gpu(gpu.clone()),
+                    None => match ViewerImage::from_display_frame(frame) {
+                        Some(image) => ViewerOutput::Image(image),
+                        // A degenerate frame carries nothing to draw; the
+                        // panel used to receive it as a `Frame` whose image
+                        // was `None` and paint the same black quad it paints
+                        // for `Blank`.
+                        None => ViewerOutput::NotAFrame,
+                    },
                 },
                 // A frame that is still linear means `finalize` could not run
                 // the display transform — a shader that will not compile, a
@@ -456,6 +468,7 @@ impl ProjectState {
         // edit, reach the budget through `app_settings::apply_cache_budget`
         // (`SET-8`).
         let cache_budget = SharedCacheBudget::new(app_settings::resolved(cx).cache_budget());
+        let viewer_surface_enabled = Arc::new(AtomicBool::new(false));
         let (eval, gpu, startup_gpu_error) =
             if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
                 (None, None, None)
@@ -471,7 +484,7 @@ impl ProjectState {
                             // GPU (`CM-7`). The export worker deliberately does
                             // not: its own encode step needs the linear frame.
                             ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
-                                .with_display_transform(),
+                                .with_display_surface_mode(viewer_surface_enabled.clone()),
                             budget.clone(),
                             update_tx,
                         );
@@ -510,6 +523,7 @@ impl ProjectState {
             registry,
             eval,
             gpu,
+            viewer_surface_enabled,
             cache_budget,
             startup_gpu_error,
             compiled: None,
@@ -540,6 +554,18 @@ impl ProjectState {
     /// in tests, which is the same condition as `eval` being absent.
     pub fn gpu_context(&self) -> Option<&GpuContext> {
         self.gpu.as_ref()
+    }
+
+    /// Configure whether the live GPUI host can sample the worker's output
+    /// texture directly. A change requests one fresh viewer frame so an old
+    /// CPU/GPU representation is not kept after a window/device transition.
+    pub fn configure_viewer_surface(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.viewer_surface_enabled.swap(enabled, Ordering::Release) == enabled {
+            return;
+        }
+        tracing::info!(enabled, "viewer GPU surface capability changed");
+        self.request_viewer_eval(InvalidationHint::None, cx);
+        cx.notify();
     }
 
     /// The cache budget the evaluation worker answers to; see
@@ -1554,6 +1580,13 @@ impl ProjectState {
                     .unwrap_or((image.width(), image.height())),
                 image,
             },
+            ViewerOutput::Gpu(frame) => crate::panels::ViewerFrame::GpuFrame {
+                composition_resolution: self
+                    .active_composition(cx)
+                    .map(|c| c.resolution)
+                    .unwrap_or((frame.width(), frame.height())),
+                frame,
+            },
             ViewerOutput::NotAFrame => self.viewer_blank(cx),
             ViewerOutput::Failed(message) => {
                 tracing::debug!(%message, "viewer evaluation failed");
@@ -1562,6 +1595,7 @@ impl ProjectState {
         };
         let published = match &frame {
             crate::panels::ViewerFrame::Frame { .. } => "frame",
+            crate::panels::ViewerFrame::GpuFrame { .. } => "gpu-frame",
             crate::panels::ViewerFrame::Blank { .. } => "blank",
             crate::panels::ViewerFrame::Error { .. } => "error",
         };

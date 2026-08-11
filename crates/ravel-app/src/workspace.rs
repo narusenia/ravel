@@ -906,6 +906,48 @@ impl RavelWorkspace {
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
         ));
+        // The device check below is what `ZC-3` built; the reason it does not
+        // turn the path on yet is lifetime, not capability.
+        //
+        // A frame handed to GPUI is released one UI turn after it is replaced,
+        // which delays the pool's reuse but does not wait for the Metal
+        // command buffer that samples it. Until `ZC-4` retires a lease against
+        // the renderer's completion signal, a stall between the two timelines
+        // can put the next frame's contents into the texture still on screen.
+        // The machinery and its tests belong on `main` — the default does not.
+        // `ZC-4` flips this to `capability` and owns the criterion "the viewer
+        // performs no readback" for the running application; the tests in
+        // `crates/ravel-nodes/tests/display_surface.rs` already hold it for the
+        // worker.
+        let capability = {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(handles) = window.native_gpu_handles() {
+                    let gpu = project.read(cx).gpu_context();
+                    gpu.is_some_and(|gpu| {
+                        ravel_gpu::interop::native_device_matches(
+                            gpu,
+                            ravel_gpu::interop::NativeApi::Metal,
+                            handles.device(),
+                        )
+                    })
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        };
+        let viewer_surface_enabled = false;
+        tracing::info!(
+            capability,
+            "viewer GPU surface disabled pending frame-lifetime synchronization (ZC-4)"
+        );
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(viewer_surface_enabled, cx);
+        });
         let playback = cx.new(|_| crate::playback::PlaybackController::new());
         cx.set_global(crate::playback::PlaybackControllerHandle(
             playback.downgrade(),

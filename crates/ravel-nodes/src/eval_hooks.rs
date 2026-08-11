@@ -29,6 +29,7 @@ use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 
 use crate::display::DisplayTransform;
 use ravel_media::frame_cache::MediaFrameCache;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 pub struct GpuEvalHooks {
@@ -93,6 +94,14 @@ impl GpuEvalHooks {
     /// work that belongs there.
     pub fn with_display_transform(mut self) -> Self {
         self.display = Some(DisplayTransform::new());
+        self
+    }
+
+    /// Install the viewer display transform with a host-controlled output
+    /// mode. The flag is shared because the hooks run on the evaluation
+    /// worker while the GPUI device capability is discovered by the host.
+    pub fn with_display_surface_mode(mut self, zero_copy_surface: Arc<AtomicBool>) -> Self {
+        self.display = Some(DisplayTransform::with_surface_mode(zero_copy_surface));
         self
     }
 

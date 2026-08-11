@@ -462,6 +462,49 @@ pub unsafe fn native_texture(frame: &GpuFrameBuffer) -> Option<NativeTexture<'_>
     Some(NativeTexture(handle))
 }
 
+/// Whether `ctx` names the native device supplied by a host renderer.
+///
+/// This is deliberately a predicate rather than a handle accessor: the host
+/// can decide whether a borrowed texture may be sampled without naming
+/// [`NativeDevice`] or [`NativeHandle`] outside this module. A null host
+/// pointer is never considered a match.
+pub fn native_device_matches(ctx: &GpuContext, api: NativeApi, host_device: *mut c_void) -> bool {
+    let Some(host_device) = NonNull::new(host_device) else {
+        return false;
+    };
+    // SAFETY: this only compares the borrowed pointer and never dereferences,
+    // retains, releases, or transfers ownership of it.
+    let Some(device) = (unsafe { native_device(ctx) }) else {
+        return false;
+    };
+    device.api() == api && device.as_ptr() == host_device.as_ptr()
+}
+
+/// Loan a display texture to a native surface consumer after proving that the
+/// consumer's device is the one that owns it.
+///
+/// The callback is the narrow bridge to a toolkit such as GPUI. It must use
+/// the pointer only during the callback; the [`GpuFrameBuffer`] itself must be
+/// kept alive by the caller until the toolkit has finished its scene. The
+/// helper never retains or releases the native object.
+pub fn with_surface_texture<T>(
+    frame: &GpuFrameBuffer,
+    host_device: *mut c_void,
+    consume: impl FnOnce(*mut c_void, u32, u32) -> T,
+) -> Option<T> {
+    if !native_device_matches(frame.context(), NativeApi::Metal, host_device) {
+        return None;
+    }
+    // SAFETY: the frame owns the wgpu texture and remains borrowed for the
+    // whole callback. The callback receives a non-owning pointer and cannot
+    // outlive that borrow through this function.
+    let texture = unsafe { native_texture(frame) }?;
+    if texture.api() != NativeApi::Metal {
+        return None;
+    }
+    Some(consume(texture.as_ptr(), frame.width(), frame.height()))
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn device_handle(ctx: &GpuContext) -> Option<NativeHandle<'_>> {
     let device = unsafe { ctx.device().as_hal::<wgpu::hal::api::Metal>() }?;

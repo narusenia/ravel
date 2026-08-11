@@ -284,22 +284,36 @@ macOS 以外では成立していない。** `GPUBK-9` が `interop::context_fro
   **相手が D3D11 なので直接は噛み合わない**
 - `PlatformWindow::gpu_context` は `#[cfg(any(linux, freebsd))]` で宣言されて
   おり、**Windows には生えていない**
+- **`gpui_wgpu` は Windows では DX12 を選ぶ**
+  （`wgpu_context.rs:213-215`: 非 Windows は `VULKAN | GL`、Windows は `DX12`）。
+  Ravel も `Backends::PRIMARY`（`VULKAN | METAL | DX12 | BROWSER_WEBGPU`）から
+  Windows では DX12 を選ぶので、**wgpu feature を有効にすれば両者は同じ
+  D3D12 に揃う**
+- **wgpu-hal 29 に D3D11 バックエンドは無い**（`dx12` / `vulkan` / `gles` /
+  `metal` のみ）。したがって **Ravel 側に D3D11 の口を生やすことはできない** —
+  取り出す先の実装が存在しない
 
 したがって道は 2 つ:
 
 - **(1) `gpui_windows` の `wgpu` feature を使う。** `gpu_context` の `cfg` に
   Windows を足して実装すれば `ZC-5` / `ZC-8` の経路にそのまま乗り、
-  **両者が同じ wgpu デバイスになる**ので interop 自体が要らなくなる。
+  **両者が同じ D3D12 デバイスになる**ので interop 自体が要らなくなる。
   ただし**既定の D3D11 レンダラを捨てる**判断で、Windows の描画品質・性能・
   安定性が gpui-ce の非既定パスに乗る。**最も筋が良いが、影響が最も大きい**
-- **(2) D3D11 と D3D12 を跨ぐ共有。** macOS の Metal interop に相当するが、
-  **macOS より難しい** — 同じ API の同じデバイスではなく、**別 API 間**の
-  共有になる。`IDXGIResource1` の共有ハンドル（`CreateSharedHandle` →
-  `ID3D12Device::OpenSharedHandle`）を使う定石はあるが、フェンス同期も
-  跨ぐ必要がある。`ZC-4` が Metal で解いた寿命問題を、より厳しい条件で
-  解き直すことになる
+- **(2) D3D12 → D3D11 の共有ハンドル。** 向きに注意 — Ravel（D3D12）が作った
+  リソースを GPUI（D3D11）が開く形になる。逆は成立しない（上記のとおり
+  Ravel に D3D11 は無い）。定石は
+  `CreateSharedHandle` → `ID3D11Device5::OpenSharedResource1` で、
+  同期も `D3D12_FENCE_FLAG_SHARED` のフェンスを跨がせる。
+  **障害は wgpu 側**: `dx12` バックエンドはテクスチャを
+  `D3D12_HEAP_FLAG_NONE` で作る（`wgpu-hal/src/dx12/device.rs:102`）ので、
+  **共有可能なリソースにならない**。`texture_from_raw` は `pub unsafe` なので
+  共有テクスチャだけ自前で `CreateCommittedResource` する逃げ道はあるが、
+  **プールの外にテクスチャができる**ので `ZC-4` が解いた寿命問題を別系統で
+  もう一度解くことになる
 
-**(1) を先に評価する。** (2) は (1) が使えないと分かった場合の退路。
+**(1) を先に評価する。** (2) は (1) が使えないと分かった場合の退路で、
+**(1) より確実に重い**（wgpu の共有フラグ欠如 + 跨ぎフェンス + プール外資源）。
 
 **Windows 実機は利用可能**（このプロジェクトの開発者が保有）。ただし
 **CI では実行検証できない**（`windows-latest` ランナーに GPU が無い）ので、

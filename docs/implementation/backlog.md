@@ -174,8 +174,8 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | ZC-1 | ✅ #373 | 往復の内訳を `CM-7` 後の姿で測り直す（**判断ゲート**） | — |
-| ZC-2 | 🟡 | gpui-ce に Metal デバイス / キューの取得口を足す | ZC-1 ✅ |
-| ZC-3 | ⬜ | 出力テクスチャを GPUI のカスタム要素で描く | ZC-2 |
+| ZC-2 | ✅ #382 | gpui-ce に Metal デバイス / キューの取得口を足す | ZC-1 ✅ |
+| ZC-3 | 🟡 | 出力テクスチャを GPUI のカスタム要素で描く | ZC-2 ✅ |
 | ZC-4 | ⬜ | 同期と寿命（フレーム跨ぎの取り違えを防ぐ） | ZC-3 |
 | ZC-5 | ⬜ | Linux / Windows の経路（デバイス公開アクセサ） | ZC-3 |
 | ZC-6 | ⬜ | 文書更新と `HIGH-09` のクローズ | ZC-4, ZC-5 |
@@ -189,6 +189,14 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 変わらない。凍結条件は成立せず、`ZC-2` 以降へ進む。`MED-GPU-07` は前提では
 ない（解決済み）。障害は GPUI 側で、macOS の gpui が wgpu ではなく Metal
 ネイティブであること。
+
+**`ZC-2`（#382）が macOS 側の障害を取り除いた。** フォークの
+`Window::native_gpu_handles()` がレンダラの `MTLDevice` / `MTLCommandQueue` を
+返し、`interop::context_from_native` が**同じネイティブデバイスを持つ wgpu
+アダプタを列挙から照合して** `GpuContext` を立てる（wgpu 29 の公開 API には
+既存 `MTLDevice` からアダプタを作る道が無いため）。ただし GPUI は低消費電力を、
+Ravel は HighPerformance を優先するので、**複数 GPU の Mac では照合が失敗して
+`None` になる** — `ZC-3` はその場合に CPU 経路へ落とす必要がある。
 
 ### キャッシュ（REQ-CORE-006）
 

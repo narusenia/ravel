@@ -446,6 +446,8 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 - GPUI をハードフォークして同じバックエンドに載せる方針・範囲・
   上流追従のコストを文書化する（実装は別 PR 群）
 - `GPUCOMP-11`（`VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示）をここで判断する
+  → 判断は済み、実装は `zero-copy-viewer-plan.md` が引き受けた。
+  **macOS は完了**（#382 / #384 / #386）、Linux は `ZC-8`、Windows は `ZC-7`
 
 > **`GPUBK-4` が残した棘を先に解く。** デバイス共有の入口
 > （`interop::context_from_wgpu` / `interop::wgpu_instance`）は `interop`

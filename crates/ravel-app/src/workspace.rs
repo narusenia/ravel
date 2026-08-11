@@ -906,6 +906,35 @@ impl RavelWorkspace {
         cx.set_global(crate::project_state::ProjectStateHandle(
             project.downgrade(),
         ));
+        let viewer_surface_enabled = {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(handles) = window.native_gpu_handles() {
+                    let gpu = project.read(cx).gpu_context();
+                    gpu.is_some_and(|gpu| {
+                        ravel_gpu::interop::native_device_matches(
+                            gpu,
+                            ravel_gpu::interop::NativeApi::Metal,
+                            handles.device(),
+                        )
+                    })
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        };
+        if !viewer_surface_enabled {
+            tracing::info!(
+                "viewer GPU surface fallback enabled: GPUI and Ravel do not share a Metal device"
+            );
+        }
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(viewer_surface_enabled, cx);
+        });
         let playback = cx.new(|_| crate::playback::PlaybackController::new());
         cx.set_global(crate::playback::PlaybackControllerHandle(
             playback.downgrade(),

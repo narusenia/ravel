@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Minimal Viewer panel: displays the frame from the current evaluation
-//! result. `ProjectState`'s background evaluation publishes the outcome via
-//! [`super::ViewerFrame`], already converted to a GPUI [`RenderImage`] on the
-//! evaluation worker ([`super::ViewerImage`], issue HIGH-08); this panel
-//! stores it per update and draws it with the `img` element (one textured
-//! quad) instead of the previous per-pixel-run `paint_quad` ladder, which
-//! degraded to one quad per pixel on gradient/media content. A failed
-//! evaluation drops the stale frame and shows a black frame with a small
-//! error overlay, so structural edits (e.g. deleting a Geometry node feeding
-//! a Rasterize) are immediately visible instead of leaving stale content.
+//! result. `ProjectState`'s background evaluation publishes either a CPU
+//! [`RenderImage`] fallback or a display-encoded GPU texture via
+//! [`super::ViewerFrame`]. The shared-device path uses GPUI's custom surface
+//! primitive directly; unsupported hosts keep the existing textured-quad
+//! fallback. A failed evaluation drops the stale frame and shows a black
+//! frame with a small error overlay, so structural edits (e.g. deleting a
+//! Geometry node feeding a Rasterize) are immediately visible instead of
+//! leaving stale content.
 
 pub mod overlay;
 mod viewport;
@@ -32,6 +31,7 @@ use crate::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
+use ravel_gpu::GpuFrameBuffer;
 use ravel_ui::document::NetworkPath;
 use viewport::ViewerViewport;
 
@@ -251,6 +251,8 @@ pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
     image: Option<Arc<RenderImage>>,
+    /// The current display-encoded texture for GPUI's native surface path.
+    gpu_frame: Option<GpuFrameBuffer>,
     /// The latest evaluation error, shown over the composition's black quad.
     error: Option<SharedString>,
     composition_resolution: Option<(u32, u32)>,
@@ -383,6 +385,12 @@ impl ViewerPanel {
             if let Some(old) = std::mem::replace(&mut this.image, content.image) {
                 cx.defer(move |cx| cx.drop_image(old, None));
             }
+            if let Some(old) = std::mem::replace(&mut this.gpu_frame, content.gpu_frame) {
+                // Keep the old pooled lease alive until this update's paint
+                // turn has completed. Full cross-frame synchronization is
+                // ZC-4; this defer closes the immediate replacement hole.
+                cx.defer(move |_cx| drop(old));
+            }
             cx.notify();
         });
 
@@ -391,6 +399,7 @@ impl ViewerPanel {
             if let Some(old) = this.image.take() {
                 cx.drop_image(old, None);
             }
+            this.gpu_frame.take();
         })
         .detach();
 
@@ -399,6 +408,7 @@ impl ViewerPanel {
 
         Self {
             image: content.image,
+            gpu_frame: content.gpu_frame,
             error: content.error,
             composition_resolution: content.composition_resolution,
             viewport: ViewerViewport::default(),
@@ -1703,8 +1713,41 @@ fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<P
     }
 }
 
+/// Paint a worker-owned display texture through the fork's generic surface
+/// path. The texture pointer is borrowed only for this call; `gpu_frame` stays
+/// in the panel until the scene has consumed it.
+#[cfg(target_os = "macos")]
+fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+    let Some(handles) = window.native_gpu_handles() else {
+        return false;
+    };
+    ravel_gpu::interop::with_surface_texture(frame, handles.device(), |texture, width, height| {
+        window.paint_surface(
+            bounds,
+            gpui::SurfaceSource::Texture {
+                texture,
+                size: size(
+                    DevicePixels::from(width as i32),
+                    DevicePixels::from(height as i32),
+                ),
+            },
+        );
+    })
+    .is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paint_gpu_surface(
+    _frame: &GpuFrameBuffer,
+    _bounds: Bounds<Pixels>,
+    _window: &mut Window,
+) -> bool {
+    false
+}
+
 struct ViewerContent {
     image: Option<Arc<RenderImage>>,
+    gpu_frame: Option<GpuFrameBuffer>,
     error: Option<SharedString>,
     composition_resolution: Option<(u32, u32)>,
 }
@@ -1721,6 +1764,16 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
             // Already BGRA and already wrapped — the conversion ran on the
             // evaluation worker (HIGH-08).
             image: Some(image.into_image()),
+            gpu_frame: None,
+            error: None,
+            composition_resolution: Some(composition_resolution),
+        },
+        ViewerFrame::GpuFrame {
+            frame,
+            composition_resolution,
+        } => ViewerContent {
+            image: None,
+            gpu_frame: Some(frame),
             error: None,
             composition_resolution: Some(composition_resolution),
         },
@@ -1728,6 +1781,7 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
             composition_resolution,
         } => ViewerContent {
             image: None,
+            gpu_frame: None,
             error: None,
             composition_resolution,
         },
@@ -1736,6 +1790,7 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
             composition_resolution,
         } => ViewerContent {
             image: None,
+            gpu_frame: None,
             error: Some(message),
             composition_resolution,
         },
@@ -1756,6 +1811,7 @@ impl Render for ViewerPanel {
         let viewport = self.viewport;
         let composition_resolution = self.composition_resolution;
         let image = self.image.clone();
+        let gpu_frame = self.gpu_frame.clone();
         let viewport_origin = self.viewport_origin.clone();
         let viewport_size = self.viewport_size.clone();
         let background_mode = self.background_mode;
@@ -1821,6 +1877,13 @@ impl Render for ViewerPanel {
                             window.paint_image(frame_bounds, Corners::default(), image, 0, false)
                     {
                         tracing::error!(%err, "failed to paint viewer image");
+                    }
+                    if let Some(frame) = gpu_frame.as_ref()
+                        && !paint_gpu_surface(frame, frame_bounds, window)
+                    {
+                        tracing::warn!(
+                            "viewer GPU surface unavailable; waiting for CPU fallback frame"
+                        );
                     }
                     let mut painter = OverlayPainter::new(frame_bounds, resolution);
                     overlays.paint(&overlay_context, &mut painter);

@@ -22,6 +22,7 @@ use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::network::NetworkError;
 use ravel_core::runtime::playback::LoopRange;
 use ravel_dock::PaneContent;
+use ravel_gpu::GpuFrameBuffer;
 use ravel_i18n::t;
 use ravel_nodes::DisplayFrame;
 use ravel_ui::layout::{PanelInstance, PanelInstanceId};
@@ -792,11 +793,15 @@ impl ViewerImage {
         if width == 0 || height == 0 {
             return None;
         }
-        if frame.bgra().len() != width as usize * height as usize * 4 {
+        // `None` here means the frame is GPU-resident, which the caller has
+        // already routed to the surface path; reaching this with one is a bug
+        // rather than a degenerate frame, but blanking is still the safe read.
+        let bgra = frame.bgra()?;
+        if bgra.len() != width as usize * height as usize * 4 {
             return None;
         }
 
-        let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, frame.bgra().to_vec())?;
+        let buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, bgra.to_vec())?;
         Some(Self {
             image: Arc::new(RenderImage::new(SmallVec::from_elem(
                 ImageFrame::new(buffer),
@@ -868,6 +873,13 @@ pub enum ViewerFrame {
     /// resolution.
     Frame {
         image: ViewerImage,
+        composition_resolution: (u32, u32),
+    },
+    /// A display-encoded GPU texture ready for the GPUI surface path. The
+    /// handle stays alive in this durable global until the next frame replaces
+    /// it.
+    GpuFrame {
+        frame: GpuFrameBuffer,
         composition_resolution: (u32, u32),
     },
     /// The latest evaluation failed; the panel drops the stale frame and

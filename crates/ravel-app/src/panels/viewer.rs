@@ -386,9 +386,21 @@ impl ViewerPanel {
                 cx.defer(move |cx| cx.drop_image(old, None));
             }
             if let Some(old) = std::mem::replace(&mut this.gpu_frame, content.gpu_frame) {
-                // Keep the old pooled lease alive until this update's paint
-                // turn has completed. Full cross-frame synchronization is
-                // ZC-4; this defer closes the immediate replacement hole.
+                // Hold the outgoing lease one turn past the swap so the frame
+                // GPUI is still painting is not returned to the pool underneath
+                // it.
+                //
+                // **This is a delay, not a synchronisation.** `defer` runs when
+                // the app finishes the current update; Metal may not have
+                // finished the command buffer that samples the texture. The
+                // window is one turn wide rather than zero, which is enough for
+                // the interactive rates this path is for and is why the picture
+                // holds in practice — but a stall between the two timelines can
+                // still let the pool hand this texture to the next frame while
+                // the old one is on screen. Closing it needs the renderer's
+                // completion signal (a `MTLSharedEvent` or GPUI's
+                // command-buffer callback), which is `ZC-4`'s subject; the
+                // lease must not be released on a timer until then.
                 cx.defer(move |_cx| drop(old));
             }
             cx.notify();
@@ -1851,7 +1863,7 @@ impl Render for ViewerPanel {
                     viewport_origin.set((bounds.origin.x.into(), bounds.origin.y.into()));
                     viewport_size.set((bounds.size.width.into(), bounds.size.height.into()));
                 },
-                move |bounds: Bounds<Pixels>, _, window, _cx| {
+                move |bounds: Bounds<Pixels>, _, window, cx| {
                     let Some(resolution) = composition_resolution else {
                         return;
                     };
@@ -1881,9 +1893,24 @@ impl Render for ViewerPanel {
                     if let Some(frame) = gpu_frame.as_ref()
                         && !paint_gpu_surface(frame, frame_bounds, window)
                     {
+                        // This window cannot sample the worker's texture — a
+                        // second window on another device, or a device that
+                        // changed under us. Painting nothing would leave the
+                        // viewer blank for good, so turn the path off and ask
+                        // for a CPU frame; the next update repaints normally.
                         tracing::warn!(
-                            "viewer GPU surface unavailable; waiting for CPU fallback frame"
+                            "viewer GPU surface unavailable; falling back to the CPU frame"
                         );
+                        if let Some(project) = cx
+                            .try_global::<ProjectStateHandle>()
+                            .and_then(|handle| handle.0.upgrade())
+                        {
+                            cx.defer(move |cx| {
+                                project.update(cx, |project, cx| {
+                                    project.configure_viewer_surface(false, cx);
+                                });
+                            });
+                        }
                     }
                     let mut painter = OverlayPainter::new(frame_bounds, resolution);
                     overlays.paint(&overlay_context, &mut painter);

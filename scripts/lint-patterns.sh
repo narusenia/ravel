@@ -155,8 +155,9 @@ done < <(rg -n --no-heading '\.data\[' crates -g '*.rs' 2>/dev/null)
 # second is the contract REQ-GPU-001 rests on.
 #
 # gpu-native-handle-escape: the handle vocabulary — `native_device`,
-# `native_texture`, `NativeHandle`, `NativeDevice`, `NativeTexture` — hands out
-# backend-native pointers. It is the documented hole in the GPU façade
+# `native_texture`, `NativeHandle`, `NativeDevice`, `NativeTexture`,
+# `NativeGpuContext` — hands out or carries backend-native pointers. It is the
+# documented hole in the GPU façade
 # (GPUBK-8) and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode
 # (REQ-GPU-001) only. Reaching it from a node processor pins that node to one
 # backend and bypasses dispatch batching and the texture pool's lifetime
@@ -193,11 +194,13 @@ done < <(rg -no --no-heading \
     -e '\bNativeHandle\b' \
     -e '\bNativeDevice\b' \
     -e '\bNativeTexture\b' \
+    -e '\bNativeGpuContext\b' \
     crates -g '*.rs' 2>/dev/null)
 
 # ---------------------------------------------------------------------------
-# gpu-device-sharing: `interop::context_from_wgpu` and `interop::wgpu_instance`
-# are the other direction — Ravel *receives* the graphics objects instead of
+# gpu-device-sharing: `interop::context_from_wgpu`,
+# `interop::context_from_native` and `interop::wgpu_instance` are the other
+# direction — Ravel *receives* the graphics objects instead of
 # handing them out. REQ-GPU-001 requires the UI framework and the compute
 # pipeline to run on one device, and a shared device is by definition one the
 # host creates and Ravel accepts, so this is a contract to keep rather than a
@@ -222,6 +225,7 @@ while IFS=: read -r file line symbol; do
     fi
 done < <(rg -no --no-heading \
     -e '\bcontext_from_wgpu\b' \
+    -e '\bcontext_from_native\b' \
     -e '\bwgpu_instance\b' \
     crates -g '*.rs' 2>/dev/null)
 

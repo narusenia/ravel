@@ -21,8 +21,9 @@
 //! 2. resources Ravel allocates are validated against the **caller's** device
 //!    limits — proof by error scope, which is per-device, that the device was
 //!    adopted rather than re-created;
-//! 3. the interop handle path keeps working on a context whose device came from
-//!    outside, which is what an OFX host on a shared device depends on.
+//! 3. the native interop descriptor accepts a host-owned device/queue pair; on
+//!    macOS that pair is compared with the wgpu device used by the abstract
+//!    API, which is what an OFX host or GPUI-backed viewer depends on.
 //!
 //! Breaking the contract fails these mechanically: making the entry point
 //! `pub(crate)` or moving it out of `interop` fails compilation, and replacing
@@ -34,16 +35,20 @@
 //! hardware, not about which `wgpu::Device` Ravel holds — the identity proofs
 //! are 1 and 2.
 //!
-//! What is deliberately **not** here is GPUI. gpui exposes no accessor for the
-//! device its renderer uses, and on macOS its renderer is Metal-native rather
-//! than wgpu-backed, so the toolkit half of the wiring waits on a patch to the
-//! `gpui-ce-ravel` fork (policy: `docs/specifications/architecture.md`). This
-//! file pins the half that is Ravel's to keep.
+//! On macOS, GPUI's Metal renderer and wgpu both obtain the process system
+//! default `MTLDevice`. The native test below receives the same shape exposed
+//! by the fork's `Window::native_gpu_handles` accessor and compares it with
+//! the wgpu device before exercising the abstract API on that device.
 //!
 //! Skips gracefully when no GPU adapter is available, like the other GPU tests
 //! here.
 
 use std::sync::Arc;
+
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice};
 
 use ravel_gpu::compute::ComputePipeline;
 use ravel_gpu::interop;
@@ -52,6 +57,11 @@ use ravel_gpu::{
     ShaderVisibility, TextureFormat, TextureKey, TexturePool, TextureUsage, read_texture,
     upload_texture,
 };
+
+#[cfg(target_os = "macos")]
+// `MTLCreateSystemDefaultDevice` pulls CoreGraphics into the link on macOS.
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {}
 
 /// The graphics objects a UI toolkit would already own by the time Ravel starts.
 struct HostGpu {
@@ -153,8 +163,11 @@ fn a_shared_context_runs_the_abstract_api_end_to_end() {
         "the shared context must describe the host's adapter"
     );
 
-    // From here on, only the abstract API: compile, allocate, dispatch, read
-    // back. This is the whole crate exercised on a device it never requested.
+    assert_abstract_api_runs(ctx);
+}
+
+/// Exercise the whole abstract GPU path on a context supplied by a host.
+fn assert_abstract_api_runs(ctx: GpuContext) {
     let width = 4u32;
     let height = 4u32;
     let format = TextureFormat::Rgba32Float;
@@ -316,4 +329,72 @@ fn a_shared_context_reports_the_hosts_native_device() {
         "the context reports a different MTLDevice than the host created — the device was not \
          shared"
     );
+}
+
+/// The fork's GPUI Metal accessor and wgpu's Metal backend must identify the
+/// same physical device on macOS. The command queue is intentionally a
+/// separate queue: queue synchronization belongs to the later zero-copy unit.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_host_pair_matches_wgpu_and_runs_the_abstract_api() {
+    let Some(native_device) = MTLCreateSystemDefaultDevice() else {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: no Metal device"
+        );
+        return;
+    };
+    let Some(native_queue) = native_device.newCommandQueue() else {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: no Metal queue"
+        );
+        return;
+    };
+    let Some(host) = HostGpu::new(None) else {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: no GPU adapter"
+        );
+        return;
+    };
+    if host.adapter.get_info().backend != wgpu::Backend::Metal {
+        eprintln!(
+            "skipping a_native_host_pair_matches_wgpu_and_runs_the_abstract_api: backend {:?} is not Metal",
+            host.adapter.get_info().backend
+        );
+        return;
+    }
+
+    let native_device_ptr = Retained::as_ptr(&native_device).cast_mut().cast();
+    let native_queue_ptr = Retained::as_ptr(&native_queue).cast_mut().cast();
+
+    // SAFETY: both retained Objective-C objects remain alive through every
+    // assertion below; the descriptor only borrows their non-null pointers.
+    let native = unsafe {
+        interop::context_from_native(
+            interop::NativeApi::Metal,
+            native_device_ptr,
+            native_queue_ptr,
+        )
+    }
+    .expect("retained Metal objects produce a native host pair");
+
+    assert_eq!(native.api(), interop::NativeApi::Metal);
+    assert_eq!(native.device().as_ptr(), native_device_ptr);
+    assert_eq!(native.command_queue().as_ptr(), native_queue_ptr);
+
+    let ctx = host.share();
+    // SAFETY: `ctx` and its clone keep the wgpu Metal device alive while the
+    // borrowed pointer is compared; no native object is retained or released.
+    let wgpu_device = unsafe { interop::native_device(&ctx) }
+        .expect("the wgpu host context exposes its Metal device");
+    assert_eq!(
+        native.device().as_ptr(),
+        wgpu_device.as_ptr(),
+        "GPUI's system-default Metal device must be the wgpu device used by Ravel"
+    );
+
+    // The preceding identity proof is what lets the abstract Ravel API run on
+    // the same physical Metal device as the GPUI renderer. Exercise that API
+    // on this very same shared context, rather than only checking pointers.
+    assert_abstract_api_runs(ctx.clone());
+    assert_eq!(interop::native_api(&ctx), Some(interop::NativeApi::Metal));
 }

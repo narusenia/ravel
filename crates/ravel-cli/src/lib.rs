@@ -153,11 +153,6 @@ fn load_plan(args: &RenderArgs) -> Result<(ProjectFile, RenderPlan), CliError> {
     Ok((project, plan))
 }
 
-fn cache_budget_for_project(project: &ProjectFile) -> CacheBudgetConfig {
-    let global = settings::read_global_settings();
-    cache_budget_for_layers(project, &global)
-}
-
 fn cache_budget_for_layers(project: &ProjectFile, global: &SettingsLayer) -> CacheBudgetConfig {
     let resolved = project.resolved_settings(Some(global), None);
     settings::usable_cache_budget(&resolved)
@@ -208,8 +203,16 @@ fn refuse_existing_output(plan: &RenderPlan) -> Result<(), CliError> {
 /// those have to answer to the same authority as the render worker's
 /// evaluator (`cache-plan.md`, `CACHE-3`). Building the budget here rather
 /// than inside the factory is what keeps the two halves the same one.
+///
+/// `global_settings` names the global settings file the budget is resolved
+/// from, and is a parameter rather than the platform location because
+/// otherwise every test of this function would render against whatever
+/// `settings.toml` the developer happens to have. [`render`] passes the
+/// platform location; `None` is "no global layer", which is also what an
+/// absent file resolves to.
 pub fn render_with_hooks<H, F>(
     args: &RenderArgs,
+    global_settings: Option<&Path>,
     hooks: F,
     cancel: &CancelFlag,
     reporter: &mut dyn Reporter,
@@ -232,7 +235,8 @@ where
     // Resolve the same global → project settings layers the GUI uses, then
     // pass them through the shared cache validation before the budget is
     // handed to both the hooks and the evaluation worker.
-    let budget = SharedCacheBudget::new(cache_budget_for_project(&project));
+    let global = settings::read_global_settings_at(global_settings);
+    let budget = SharedCacheBudget::new(cache_budget_for_layers(&project, &global));
     let hooks = hooks(&budget)?;
 
     // Sound first: its warnings are worth having before an hour of frames,
@@ -266,6 +270,7 @@ pub fn render(
 ) -> Result<Summary, CliError> {
     render_with_hooks(
         args,
+        ravel_project::paths::global_settings_path().as_deref(),
         |budget| {
             let gpu =
                 GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
@@ -414,12 +419,14 @@ mod tests {
         let global_path = dir.path().join("settings.toml");
         std::fs::write(
             &global_path,
-            "[cache]\nram_limit_mb = 256\nsim_reserve_ratio = 0.5\n",
+            "[cache]\nvram_limit_mb = 64\nram_limit_mb = 256\nsim_reserve_ratio = 0.5\n",
         )
         .expect("global settings");
         let global = settings::read_global_settings_at(Some(&global_path));
 
         let mut project = ProjectFile::new("render", "2026-01-01T00:00:00Z");
+        // The same key both layers state, so the assertion below fails if the
+        // two are ever resolved in the other order.
         project.settings.cache.vram_limit_mb = Some(128);
         let budget = cache_budget_for_layers(&project, &global);
 
@@ -449,11 +456,12 @@ mod tests {
         assert_eq!(budget.vram_bytes, defaults.cache_vram_limit_mb * MIB);
         assert_eq!(budget.ram_bytes, defaults.cache_ram_limit_mb * MIB);
         assert_eq!(budget.sim_reserve_ratio, defaults.cache_sim_reserve_ratio);
+        // The unusable `cache.root` reaches the resolved settings untouched and
+        // changes nothing here: the CLI builds no disk cache yet (`CACHE-11`),
+        // so it has no consumer of the setting. Whether a relative location is
+        // refused is `ravel_project::settings::cache_root_setting`'s rule and is
+        // pinned in that crate's own tests, not through this path.
         assert_eq!(resolved.cache_root.as_deref(), Some("relative/cache"));
-        assert!(
-            settings::cache_root_setting(resolved.cache_root.as_deref().unwrap()).is_none(),
-            "the shared path rule rejects a relative cache location"
-        );
     }
 
     /// The interrupt handler is a precondition, not a nicety: when it cannot

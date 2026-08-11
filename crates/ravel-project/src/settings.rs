@@ -43,11 +43,6 @@ pub const MIN_CACHE_LIMIT_MB: f64 = 1.0;
 /// a number the accounting can only be surprised by.
 pub const MAX_CACHE_LIMIT_MB: f64 = 1024.0 * 1024.0;
 
-/// Read the global settings layer from its platform location.
-pub fn read_global_settings() -> SettingsLayer {
-    read_global_settings_at(crate::paths::global_settings_path().as_deref())
-}
-
 /// Read one global settings layer from an explicit path.
 ///
 /// A missing, unreadable, or malformed file is no override. This is the same

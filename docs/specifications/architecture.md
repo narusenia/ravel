@@ -557,30 +557,39 @@ lint（`gpu-device-sharing`）が呼び出し元を `ravel-gpu` と `ravel-app` 
 `crates/ravel-gpu/tests/device_sharing.rs` が「他人のデバイスで抽象 API が
 最後まで動く」ことを機械的に確認している。
 
-**Ravel 側は受け取れる。GPUI 側がまだ渡せない。**穴は 2 つ:
+穴は 2 つあった。**macOS 側は塞がった**:
 
-1. **gpui はレンダラのデバイスを公開していない。** アプリ側に向いた GPU の
+1. **gpui はレンダラのデバイスを公開していなかった。** アプリ側に向いた GPU の
    口は `App::set_gpu_requirements`（features / limits を渡す）と
-   `gpu_specs()`（情報のみ）だけ。`gpui_wgpu::WgpuContext` は
+   `gpu_specs()`（情報のみ）だけだった。`gpui_wgpu::WgpuContext` は
    instance / adapter / device / queue を `pub` フィールドで持つが、
-   `gpui` からは辿れない
+   `gpui` からは辿れない。**フォークの `Window::native_gpu_handles()` が
+   macOS の口を開けた**（`ZC-2`）。Linux / Windows の `gpui_wgpu` 経路は
+   まだ `None` を返す
 2. **macOS の gpui は wgpu ではない。** `gpui_wgpu` を使うのは Linux /
    Windows（feature）/ web で、macOS は `gpui_macos` の Metal ネイティブ
-   レンダラ。つまり macOS には「共有すべき同じ `wgpu::Device`」が存在しない
+   レンダラ。つまり macOS には「共有すべき同じ `wgpu::Device`」が存在しない。
+   **`ravel_gpu::interop::context_from_native` はこれを迂回する**: 渡された
+   `MTLDevice` と同じネイティブデバイスを持つ wgpu アダプタを列挙から探し、
+   その上に `GpuContext` を立てる。wgpu 29 の公開 API には既存の
+   `MTLDevice` から直接アダプタを作る道が無い（`AdapterShared::expose` は
+   private）ため、照合が唯一の安全な手段
 
-したがってフォーク側の作業は 2 択で、**どちらも本仕様の範囲外**（実装は別計画）:
+したがってフォーク側の作業は 2 択だった:
 
 - **(A) デバイス公開アクセサを足す。** Linux / Windows では成立する。
-  macOS には効かない
+  macOS には効かない。**`ZC-5` が担当**
 - **(B) macOS のレンダラを wgpu へ寄せる、または Metal レベルで interop する。**
   ゼロコピー表示（GPUI カスタム要素にビューアのテクスチャを直接描かせる）は
-  こちら側の話
+  こちら側の話。**`ZC-2` が後者（Metal レベルの interop）を採った**
 
-順序の含意: 開発機が macOS なので、デバイス共有の実利であるビューアの
-ゼロコピー表示は (B) に依存する。(A) だけを入れても macOS のビューアは
-CPU 経由のままで、`VIEWER_MAX_DIM` の判断
-（[`perf-baseline.md`](../implementation/perf-baseline.md)）はその前提で
-読む必要がある。
+**残る制約: デバイス選択方針が両者で違う。** GPUI は
+`MetalRenderer::create_device` で低消費電力・非リムーバブルを優先し、Ravel の
+`GpuContext::new` は `PowerPreference::HighPerformance` を要求する。単一 GPU の
+Apple Silicon では同じデバイスに落ちるが、**複数 GPU の Mac では別デバイスを
+選びうる**。`context_from_native` はその場合 `None` を返す（照合が失敗する）ので、
+呼び出し側は「共有デバイス無し」として扱う必要がある。複数 GPU での受け渡しは
+`ZC-3` 以降の課題。
 
 ### 上流追従のコスト
 

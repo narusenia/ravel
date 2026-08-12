@@ -171,12 +171,11 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     curve: curve.clone(),
                 },
-                // The gradient editor is a later unit; until it exists the
-                // row states what the ramp holds rather than pretending to
-                // be editable.
-                ParameterValue::Ramp(ramp) => PropertyField::ReadOnly {
+                // Ramps carry their stops into the row the same way; the host
+                // shows a gradient band and expands an inline editor under it.
+                ParameterValue::Ramp(ramp) => PropertyField::Ramp {
                     key: p.key.clone(),
-                    value: format!("{} stops", ramp.len()),
+                    ramp: ramp.clone(),
                 },
             }
         })
@@ -499,6 +498,46 @@ mod tests {
                 .iter()
                 .any(|field| matches!(field, PropertyField::Curve { key, .. } if key == "curve")),
             "math.curve must offer the same editable curve row: {:?}",
+            section.fields
+        );
+    }
+
+    /// Ramp parameters reach the panel as a ramp row carrying the stops, so
+    /// the inline gradient editor edits the stored ramp rather than a
+    /// re-parsed summary — the same contract curve rows have.
+    #[test]
+    fn params_section_maps_ramps_to_ramp_rows() {
+        use ravel_core::param_ramp::{RampInterpolation, RampParam};
+        use ravel_core::types::Color;
+        let stored = RampParam::linear([(0.0, Color::BLACK), (0.5, Color::WHITE)])
+            .with_interpolation(RampInterpolation::Smooth);
+        let node = Node::new(NodeId::new(1), "field.ramp")
+            .with_param("stops", ParameterValue::Ramp(stored.clone()));
+        let section = node_params_section(&node, &registry(), 0, &eval(), &[]);
+        match &section.fields[0] {
+            PropertyField::Ramp { key, ramp } => {
+                assert_eq!(key, "stops");
+                assert_eq!(ramp, &stored);
+            }
+            other => panic!("expected Ramp, got {other:?}"),
+        }
+    }
+
+    /// The registry template of `field.ramp` — the shipped ramp consumer —
+    /// produces a ramp row without any per-node special casing.
+    #[test]
+    fn the_field_ramp_template_produces_a_ramp_row() {
+        let registry = registry();
+        let node = registry
+            .create_node("field.ramp", NodeId::new(1))
+            .expect("field.ramp is registered");
+        let section = node_params_section(&node, &registry, 0, &eval(), &[]);
+        assert!(
+            section
+                .fields
+                .iter()
+                .any(|field| matches!(field, PropertyField::Ramp { key, .. } if key == "stops")),
+            "field.ramp must offer an editable ramp row: {:?}",
             section.fields
         );
     }

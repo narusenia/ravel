@@ -224,6 +224,25 @@ fn field_display(field: &PropertyField) -> String {
             .map(|point| format!("{}:{}", number(point.x), number(point.y)))
             .collect::<Vec<_>>()
             .join(", "),
+        // A ramp answers the same question the same way: the stops and the
+        // mode, so two ramps that differ anywhere read as different text.
+        PropertyField::Ramp { ramp, .. } => {
+            let stops = ramp
+                .stops()
+                .iter()
+                .map(|stop| {
+                    let [r, g, b, a] = ravel_core::color::to_display_rgba8([
+                        stop.color.r,
+                        stop.color.g,
+                        stop.color.b,
+                        stop.color.a,
+                    ]);
+                    format!("{}:#{r:02X}{g:02X}{b:02X}{a:02X}", number(stop.position))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{:?} {stops}", ramp.interpolation())
+        }
         // A port list belongs to an interface node, never to a layer's shell
         // fields, so this arm is unreachable through `sections_for_layers`.
         // Naming the rows anyway keeps the "same displayed text = same value"

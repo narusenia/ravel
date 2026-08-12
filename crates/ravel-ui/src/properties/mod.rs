@@ -18,6 +18,7 @@ use exposed::ExposedRow;
 use ravel_core::graph::PortSide;
 use ravel_core::network::CustomPortType;
 use ravel_core::param_curve::CurveParam;
+use ravel_core::param_ramp::RampParam;
 use std::ops::RangeInclusive;
 
 /// One row of a [`PropertyField::PortList`]: a port that exists on the
@@ -102,6 +103,15 @@ pub enum PropertyField {
         key: String,
         curve: CurveParam,
     },
+    /// A colour ramp edited by an inline gradient editor: the row shows a
+    /// gradient band while collapsed and expands the editor underneath itself,
+    /// exactly as [`PropertyField::Curve`] does. The expansion is host view
+    /// state, never part of the field — it must not reach the Document (and
+    /// therefore undo).
+    Ramp {
+        key: String,
+        ramp: RampParam,
+    },
     /// A value the panel shows but cannot edit.
     ///
     /// `value` is displayed verbatim unless it names a locale key (a state
@@ -162,6 +172,7 @@ impl PropertyField {
             | Self::Color { key, .. }
             | Self::Vector { key, .. }
             | Self::Curve { key, .. }
+            | Self::Ramp { key, .. }
             | Self::ReadOnly { key, .. }
             | Self::PortList { key, .. }
             | Self::ExposedList { key, .. } => key,
@@ -242,6 +253,10 @@ pub enum PropertyValue {
     /// scrub's: live edits apply uncommitted and the gesture's last value
     /// records one undo step.
     Curve(CurveParam),
+    /// A whole edited ramp, on the same terms as [`PropertyValue::Curve`]:
+    /// a stop move, an add, a remove, a colour change or an interpolation
+    /// switch all replace the stop set rather than one scalar.
+    Ramp(RampParam),
 }
 
 #[cfg(test)]

@@ -171,6 +171,13 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     curve: curve.clone(),
                 },
+                // The gradient editor is a later unit; until it exists the
+                // row states what the ramp holds rather than pretending to
+                // be editable.
+                ParameterValue::Ramp(ramp) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: format!("{} stops", ramp.len()),
+                },
             }
         })
         .collect();

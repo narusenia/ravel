@@ -157,6 +157,7 @@ bool_true = "True"
 bool_false = "False"
 points = "points"
 curve = "Curve"
+ramp = "Ramp"
 
 [node_graph.popover.port_type]
 frame_buffer = "Frame Buffer"

@@ -154,6 +154,7 @@ bool_true = "はい"
 bool_false = "いいえ"
 points = "点"
 curve = "カーブ"
+ramp = "ランプ"
 
 [node_graph.popover.port_type]
 frame_buffer = "フレームバッファ"

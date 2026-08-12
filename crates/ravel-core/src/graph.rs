@@ -197,10 +197,11 @@ pub struct PathPoint {
 /// Scalar static values are stored directly; animatable values are stored as
 /// [`AnimationChannel`]s (per component for vectors/colors) so any parameter
 /// can carry keyframes, expressions, node-output bindings, or blends
-/// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1; `PathPoints`
-/// and `Curve` are constant-only as well (path animation is the future
-/// PathChannel design, see the tool-system plan; animating a curve's own
-/// shape is out of scope for v1, see the properties parameter-editor plan).
+/// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1; `PathPoints`,
+/// `Curve` and `Ramp` are constant-only as well (path animation is the future
+/// PathChannel design, see the tool-system plan; animating a curve's or a
+/// ramp's own shape is out of scope for v1, see the properties
+/// parameter-editor plan).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterValue {
     Float(f32),
@@ -226,6 +227,12 @@ pub enum ParameterValue {
     /// stable for older values, and the layout change is covered by the
     /// journal format version bump (v7).
     Curve(crate::param_curve::CurveParam),
+    /// A colour ramp (`field.ramp`'s stops, and the value-domain ramp that
+    /// follows). Appended last for the same reason as `PathPoints` and
+    /// `Curve`: bincode indexes variants by position, so only the tail is a
+    /// safe place to grow. No stored value carries it yet, so nothing has to
+    /// be migrated.
+    Ramp(crate::param_ramp::RampParam),
 }
 
 impl ParameterValue {
@@ -249,7 +256,7 @@ impl ParameterValue {
     ///
     /// `Float` and `Channel` are 1-component values, so a plain float reads
     /// as a constant channel. `None` for the kinds that carry no float
-    /// components (`Int`, `Bool`, `String`, `PathPoints`, `Curve`).
+    /// components (`Int`, `Bool`, `String`, `PathPoints`, `Curve`, `Ramp`).
     pub fn channels(&self) -> Option<Vec<AnimationChannel>> {
         match self {
             ParameterValue::Float(v) => Some(vec![AnimationChannel::constant(*v)]),
@@ -316,11 +323,19 @@ impl ParameterValue {
         }
     }
 
+    /// Colour ramp, if this is a `Ramp`.
+    pub fn as_ramp(&self) -> Option<&crate::param_ramp::RampParam> {
+        match self {
+            ParameterValue::Ramp(ramp) => Some(ramp),
+            _ => None,
+        }
+    }
+
     /// The *principal* wire type of this value — what the parameter reads as
     /// when one type has to stand for it (port colour, a nominal type in a
     /// message). `None` for the kinds that cannot be exposed as a port in v1
     /// (`String` has no driving node; `PathPoints` has no path wire type, and
-    /// neither has `Curve`).
+    /// neither `Curve` nor `Ramp` has one either).
     ///
     /// This is **not** the acceptance rule: a port may take more than its
     /// principal type. Use [`port_accepted_types`](Self::port_accepted_types)
@@ -337,7 +352,8 @@ impl ParameterValue {
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
             ParameterValue::String(_)
             | ParameterValue::PathPoints(_)
-            | ParameterValue::Curve(_) => None,
+            | ParameterValue::Curve(_)
+            | ParameterValue::Ramp(_) => None,
         }
     }
 
@@ -589,7 +605,8 @@ fn collect_parameter_sources(value: &ParameterValue, out: &mut Vec<(NodeId, Outp
         | ParameterValue::Bool(_)
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
-        | ParameterValue::Curve(_) => {}
+        | ParameterValue::Curve(_)
+        | ParameterValue::Ramp(_) => {}
     }
 }
 
@@ -1927,7 +1944,8 @@ pub(crate) fn remap_parameter_node_outputs(
         | ParameterValue::Bool(_)
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
-        | ParameterValue::Curve(_) => {}
+        | ParameterValue::Curve(_)
+        | ParameterValue::Ramp(_) => {}
     }
 }
 
@@ -1962,7 +1980,8 @@ fn remap_parameter_output_ports(
         | ParameterValue::Bool(_)
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
-        | ParameterValue::Curve(_) => {}
+        | ParameterValue::Curve(_)
+        | ParameterValue::Ramp(_) => {}
     }
 }
 
@@ -2812,6 +2831,36 @@ mod tests {
         );
     }
 
+    /// RON persistence of ramp parameters: a `Ramp` survives the project-file
+    /// format with its stops, their colours and the interpolation mode intact.
+    #[test]
+    fn ramp_param_roundtrips_through_ron() {
+        use crate::param_ramp::{RampInterpolation, RampParam};
+        use crate::types::Color;
+        let ramp = RampParam::linear([
+            (0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+            (0.5, Color::new(0.0, 1.0, 0.0, 0.5)),
+            (1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
+        ])
+        .with_interpolation(RampInterpolation::Smooth);
+        let node = Node::new(NodeId::new(1), "field.ramp")
+            .with_param("stops", ParameterValue::Ramp(ramp.clone()));
+        let g = Graph::new().add_node(node).unwrap();
+        let text = ron::to_string(&g).unwrap();
+        let restored: Graph = ron::from_str(&text).unwrap();
+        assert_eq!(g, restored);
+        assert_eq!(
+            restored
+                .node(NodeId::new(1))
+                .unwrap()
+                .parameters
+                .iter()
+                .find(|p| p.key == "stops")
+                .and_then(|p| p.value.as_ramp()),
+            Some(&ramp)
+        );
+    }
+
     #[test]
     fn malformed_subnet_edges_are_rejected_on_deserialize() {
         // Serialize a valid graph, then corrupt an edge target id.
@@ -3142,6 +3191,10 @@ mod tests {
             ParameterValue::PathPoints(Vec::new()).port_data_type(),
             None
         );
+        let ramp = ParameterValue::Ramp(crate::param_ramp::RampParam::default());
+        assert_eq!(ramp.port_data_type(), None);
+        assert!(ramp.port_accepted_types().is_empty());
+        assert!(ramp.channels().is_none());
         let curve = ParameterValue::Curve(crate::param_curve::CurveParam::identity());
         assert_eq!(curve.port_data_type(), None);
         assert!(curve.port_accepted_types().is_empty());

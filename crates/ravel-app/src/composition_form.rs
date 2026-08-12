@@ -219,9 +219,10 @@ fn placeholder_value(field: &PropertyField) -> String {
             format!("{}, {}, {}, {a}", display[0], display[1], display[2])
         }
         PropertyField::Vector { components, .. } => format!("{components:?}"),
-        // Composition settings carry no curve; the dialog only needs a form
-        // that cannot panic if one is ever added.
+        // Composition settings carry neither a curve nor a ramp; the dialog
+        // only needs a form that cannot panic if one is ever added.
         PropertyField::Curve { curve, .. } => format!("{} points", curve.len()),
+        PropertyField::Ramp { ramp, .. } => format!("{} stops", ramp.len()),
         // A port list belongs to a network interface node, never to
         // composition settings — the count is a placeholder, not a UI.
         PropertyField::PortList { rows, .. } => format!("{} ports", rows.len()),

@@ -452,6 +452,17 @@ input_range = "In range"
 output_range = "Out range"
 pinned_input = "The ends keep their input — only the output is editable. To widen the domain add a point beyond this end; to narrow it remove this end (3+ points)"
 
+[properties.ramp]
+expand = "Show the gradient editor — double-click to add or remove a stop, drag to move one, click to select"
+no_selection = "No stop selected"
+position = "Position"
+color = "Stop colour"
+
+[properties.ramp.interpolation]
+linear = "Blend straight between stops"
+smooth = "Ease between stops (smoothstep)"
+constant = "Hold each stop's colour until the next (hard bands)"
+
 [properties.field]
 selected_count = "Selected"
 name = "Name"

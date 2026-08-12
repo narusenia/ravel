@@ -114,17 +114,35 @@ impl VectorSplitProcessor {
 impl NodeProcessor for VectorSplitProcessor {
     fn process(
         &self,
-        _node: &Node,
+        node: &Node,
         _ctx: &EvalContext,
         inputs: &[Option<Arc<dyn NodeData>>],
         _params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let c = vector_of_arity(inputs, 0, "vector", self.arity)?;
-        let record: Vec<Arc<dyn NodeData>> = c[..self.arity.components()]
+        // Built from the node's declared outputs, not from the arity, because
+        // `PortRecord::extract` indexes by output-port position. Removing a
+        // port re-indexes the edges after it (`Graph::remove_output_port`), so
+        // a record laid out as `[x, y, z]` would hand a `z` edge that moved to
+        // index 1 the value of `y`. Reading the port names keeps the record in
+        // step with whatever the node actually declares.
+        let record: Vec<Arc<dyn NodeData>> = node
+            .outputs
             .iter()
-            .map(|v| Arc::new(Scalar(*v)) as Arc<dyn NodeData>)
-            .collect();
+            .map(|port| {
+                let index = VECTOR_COMPONENT_KEYS
+                    .iter()
+                    .position(|key| *key == port.name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "`{}` is not a vector component output, so it has no value",
+                            port.name
+                        )
+                    })?;
+                Ok(Arc::new(Scalar(c[index])) as Arc<dyn NodeData>)
+            })
+            .collect::<anyhow::Result<_>>()?;
         Ok(Arc::new(PortRecord(record)))
     }
 }
@@ -187,8 +205,28 @@ impl NodeProcessor for VectorSwizzleProcessor {
 pub struct VectorLengthProcessor;
 
 /// Euclidean length of the first `arity` components of `c`.
+///
+/// Scaled by the largest component rather than summing the raw squares.
+/// `(f32::MAX, 0)` squares to an infinity and `(f32::MIN_POSITIVE, 0)`
+/// squares to zero, so the direct form answers `inf` and `0` for two vectors
+/// whose lengths are perfectly representable — and `normalize`, which divides
+/// by this, turns both into the zero vector. Dividing through by the largest
+/// component first keeps every square inside `0..=1`.
 fn magnitude(arity: usize, c: [f32; 4]) -> f32 {
-    c[..arity].iter().map(|v| v * v).sum::<f32>().sqrt()
+    let comps = &c[..arity];
+    let scale = comps.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    // Scaling needs a finite, non-zero divisor. A zero vector, an infinity
+    // and a `NaN` all already have their answer in the raw sum — and `max`
+    // skips `NaN`, so that case has to come back here to stay a `NaN`.
+    if !scale.is_finite() || scale == 0.0 {
+        return comps.iter().map(|v| v * v).sum::<f32>().sqrt();
+    }
+    scale
+        * comps
+            .iter()
+            .map(|v| (v / scale).powi(2))
+            .sum::<f32>()
+            .sqrt()
 }
 
 impl NodeProcessor for VectorLengthProcessor {
@@ -702,9 +740,12 @@ mod tests {
     /// An unconnected input splits into zeros instead of failing.
     #[test]
     fn an_unconnected_split_yields_zeros() {
+        // From the registry, not `Node::new`: the record follows the node's
+        // declared outputs, so a bare node with none would split into nothing.
+        let reg = registry();
         let out = VectorSplitProcessor::new(VectorArity::Vec2)
             .process(
-                &Node::new(NodeId::new(1), VECTOR_SPLIT_VEC2),
+                &node_of(&reg, VECTOR_SPLIT_VEC2, 1, &[]),
                 &ctx(),
                 &[None],
                 &ResolvedParams::default(),
@@ -771,6 +812,75 @@ mod tests {
         assert_eq!(edges.len(), 1, "only the `z` edge is dropped");
         assert_eq!(edges[0].id, EdgeId::new(1));
         assert_eq!(edges[0].source_port, OutputPortIndex(0));
+    }
+
+    /// Removing a port from the **middle** re-indexes the ports after it, so
+    /// the record the processor returns has to follow the node's declared
+    /// outputs. Laying it out by arity instead would hand the `z` edge — now
+    /// at index 1 — the value of the `y` it replaced.
+    ///
+    /// The previous test only removes the last port, where the two layouts
+    /// agree, and never evaluates. Both are needed: that one pins the edge
+    /// bookkeeping, this one pins the values that come out of it.
+    #[test]
+    fn narrowing_a_split_keeps_each_surviving_output_on_its_own_component() {
+        let reg = registry();
+        let split = node_of(&reg, VECTOR_SPLIT_VEC3, 1, &[]);
+        let source = node_of(
+            &reg,
+            VECTOR_CONSTRUCT_VEC3,
+            2,
+            &[
+                ("x", ParameterValue::Float(1.0)),
+                ("y", ParameterValue::Float(2.0)),
+                ("z", ParameterValue::Float(3.0)),
+            ],
+        );
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(split)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(1),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            // Drop `y`, so the surviving ports are `[x, z]` and `z` moves from
+            // output index 2 to index 1.
+            .remove_output_port(NodeId::new(1), OutputPortIndex(1))
+            .unwrap();
+
+        let outputs = &graph.node(NodeId::new(1)).unwrap().outputs;
+        assert_eq!(
+            outputs.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["x", "z"],
+        );
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(2),
+            Arc::new(VectorConstructProcessor::new(VectorArity::Vec3)),
+        );
+        ev.register(
+            NodeId::new(1),
+            Arc::new(VectorSplitProcessor::new(VectorArity::Vec3)),
+        );
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+        let record = out.downcast_ref::<PortRecord>().unwrap();
+        assert_eq!(record.0.len(), 2, "one port per surviving output");
+        let value = |port: usize| {
+            PortRecord::extract(&out, record.0.len(), OutputPortIndex(port as u32))
+                .unwrap()
+                .downcast_ref::<Scalar>()
+                .unwrap()
+                .0
+        };
+        assert_eq!(value(0), 1.0, "output 0 is still `x`");
+        assert_eq!(value(1), 3.0, "output 1 is now `z`, not `y`");
     }
 
     // -----------------------------------------------------------------
@@ -945,6 +1055,50 @@ mod tests {
     fn an_unconnected_length_is_zero() {
         let out = run(&VectorLengthProcessor, VECTOR_LENGTH, vec![None]).unwrap();
         assert_eq!(scalar_of(&out), 0.0);
+    }
+
+    /// Summing the raw squares overflows at `f32::MAX` and flushes to zero at
+    /// `f32::MIN_POSITIVE`, even though both lengths are exactly
+    /// representable. `normalize` divides by this, so both would collapse to
+    /// the zero vector — a silent wrong answer rather than an error.
+    #[test]
+    fn length_survives_components_at_the_edges_of_the_range() {
+        for (input, expected) in [
+            (Arc::new(Vec2(f32::MAX, 0.0)) as Arc<dyn NodeData>, f32::MAX),
+            (Arc::new(Vec2(f32::MIN_POSITIVE, 0.0)), f32::MIN_POSITIVE),
+            (Arc::new(Vec3(0.0, -f32::MAX, 0.0)), f32::MAX),
+        ] {
+            let out = run(&VectorLengthProcessor, VECTOR_LENGTH, vec![Some(input)]).unwrap();
+            assert_eq!(scalar_of(&out), expected);
+        }
+    }
+
+    /// The same edge cases through `normalize`: a unit vector out, not zero.
+    #[test]
+    fn normalize_survives_components_at_the_edges_of_the_range() {
+        for (arity, type_key, input, expected) in [
+            (
+                VectorArity::Vec2,
+                VECTOR_NORMALIZE_VEC2,
+                Arc::new(Vec2(f32::MAX, 0.0)) as Arc<dyn NodeData>,
+                [1.0, 0.0],
+            ),
+            (
+                VectorArity::Vec2,
+                VECTOR_NORMALIZE_VEC2,
+                Arc::new(Vec2(0.0, -f32::MIN_POSITIVE)),
+                [0.0, -1.0],
+            ),
+        ] {
+            let out = run(
+                &VectorNormalizeProcessor::new(arity),
+                type_key,
+                vec![Some(input)],
+            )
+            .unwrap();
+            let v = out.downcast_ref::<Vec2>().unwrap();
+            assert_eq!([v.0, v.1], expected);
+        }
     }
 
     #[test]

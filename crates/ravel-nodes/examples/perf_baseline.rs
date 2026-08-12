@@ -18,7 +18,9 @@
 use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::composition::compile::compile_composition;
 use ravel_core::composition::{BlendMode, Composition, Document, Layer as CompositionLayer};
-use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor, ProcessorRegistry as _};
+use ravel_core::eval::{
+    EvalContext, Evaluator, NodeProcessor, PathSegment, ProcessorRegistry as _,
+};
 use ravel_core::geometry::{AttributeArray, Domain, Geometry, TransferMode, attribute_transfer};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{
@@ -2097,6 +2099,26 @@ fn main() -> anyhow::Result<()> {
         });
         report(
             "(h2) mark_dirty at a leaf + re-pull, warm cache",
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
+        );
+
+        // The same pull one scope down. A nested scope is where the cache key
+        // used to carry a heap-allocated path — three clones of it per node
+        // visit — so this is the scenario the path interning shows up in;
+        // the root-scope runs above clone an empty `Vec`, which allocates
+        // nothing either way.
+        let scope = [PathSegment::Layer(CompId::new(9), LayerId::new(9))];
+        let mut evaluator = big_graph_evaluator(&graph);
+        evaluator.evaluate_at(&scope, &graph, root, &ctx).unwrap();
+        let before = transfer_stats();
+        let samples = run_scenario(200, |_| {
+            evaluator.mark_dirty_at(&graph, &scope, leaf);
+            evaluator.evaluate_at(&scope, &graph, root, &ctx).unwrap();
+        });
+        report(
+            "(h3) mark_dirty + re-pull inside a layer scope, warm cache",
             &wall_stats(&samples),
             timings.drain(),
             before.delta(&transfer_stats()),

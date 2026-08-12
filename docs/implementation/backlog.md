@@ -149,6 +149,18 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 `進行中` のままで、`MED-UI-02` / `MED-UI-05` も未解決に残っている
 （詳細は `roadmap.md` フェーズ C3 の `実施結果`）。
 
+### パネル可視性（フェーズ C3 の残り）
+
+`panel-visibility-plan.md`。裏のタブのパネルが払っている更新を止め、表に
+戻ったときに取り返す。**`VIS-4` がフェーズ C3 を閉じる。**
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| VIS-1 | 🟡 | `VisiblePanels` Global と `WindowHost` からの維持（挙動不変） | — |
+| VIS-2 | ⬜ | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | VIS-1 |
+| VIS-3 | ⬜ | Timeline / Outliner / MediaBin / NodeEditor への適用 | VIS-2 |
+| VIS-4 | ⬜ | 仕様・実装状況・測定手順の文書、フェーズ C3 を閉じる | VIS-3 |
+
 ### GPU 合成パイプライン（`issues/README.md` 第2段）
 
 | ID | 状態 | 単位 | 依存 |

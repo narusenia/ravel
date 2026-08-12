@@ -14,7 +14,7 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 30 | 1件1ファイル |
-| medium | 39 | 領域別5ファイル（`medium-*.md`） |
+| medium | 40 | 領域別5ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -61,15 +61,16 @@
 | [HIGH-32](HIGH-32-linear-ingest-powf-per-pixel.md) | 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる | #378 |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
-## medium（39件）
+## medium（40件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07`
-- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `03` `04` `06`
-  （`MED-UI-02` / `MED-UI-05` は**部分的に解決**で未解決のまま。
+- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `03` `04` `05` `06`
+  （`MED-UI-02` は**部分的に解決**で未解決のまま — 非表示スキップが
+  `panel-visibility-plan.md` の `VIS-*` 待ち。
   [`../medium/ui-rendering.md`](../medium/ui-rendering.md)）
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `07` / `MED-AUD-01` `02` `03`
 

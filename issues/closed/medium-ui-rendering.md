@@ -81,6 +81,54 @@
 
 ---
 
+## MED-UI-05 | perf | Outliner と MediaBin が ProjectState notify ごとに全行モデルを再構築する
+
+**該当**: `crates/ravel-app/src/panels/outliner.rs:97`, `:146-168`,
+`crates/ravel-app/src/panels/media_bin.rs:78`,
+`crates/ravel-ui/src/panels/outliner.rs:181-208`
+
+> **解決済み**: Outliner 側は `RESP3-10`（PR #397、フェーズ C3）、
+> MediaBin 側は PR #400（2026-08-13）。`MediaBinGpuiPanel` は行を作った時点の
+> `media_assets`（`MediaAssets` = 永続マップ）を保持し、次の notify で
+> `im::HashMap::ptr_eq` が真なら行の走査ごと飛ばす。レイヤーの追加・削除・
+> 移動・パラメータ編集は同じマップを共有するので、パラメータドラッグ
+> 10 move の `media_bin.rebuild_rows` は **10 → 0 回**になった。
+>
+> **`panel_rebuild_gate.rs` の既存テストから MediaBin を外した。**
+> 「ドキュメント編集ではすべてのミラーパネルが再構築する」という主張は
+> MediaBin には成り立たない — 映しているのは media 資産で、`add_layer` は
+> それを変えない。誤っていたのはスキップではなくテストの前提の方だった。
+> 抜けたカバレッジは `a_media_asset_change_rebuilds_media_bin_rows` が埋める
+> （インポートで 1 回、削除で 1 回の再構築を主張する）。
+
+`rebuild_rows` は全コンポジション・全レイヤー・全ネットワークノードを走査し、
+行ごとにラベル文字列を確保して notify する。
+ドキュメント変更ごと（ドラッグティックごと）に、さらに
+[CRIT-01](CRIT-01-eval-update-notifies-whole-workspace.md) 経由で
+再生中の評価結果ごとにも走る。
+
+**修正方針**: 再構築をドキュメントリビジョンチェックでゲート。
+評価更新経路からこれらのパネルへ notify しないようにする
+（CRIT-01 の修正で大部分は解消）。
+
+> **部分的に解決（`RESP3-10`、PR #397）**: **Outliner 側は解決した。**
+> `push_layer_rows` が `expandable` を決めるために折り畳まれたレイヤーまで
+> `network_rows` を走らせていたのを `network_has_rows` に置き換え、
+> 割り当てゼロ・走査 1 回にした。行が前回と同一なら `cx.notify()` もしない。
+>
+>
+> **MediaBin 側も解決（2026-08-13）**: 前回の未解決分を回収した。
+> `MediaBinGpuiPanel` は直前の `Document` と media-assets の persistent map を
+> 比較し、レイヤーの追加・削除・移動・パラメータ編集のように map を共有する
+> 変更では行モデルを作らずに返る。インポートや削除など map が変わる変更では
+> 行を再構築し、行またはサムネイル入力が変わったときだけ notify する。
+> `a_parameter_drag_sync_counts` の 10 move は `media_bin.rebuild_rows` が
+> 10 → 0、`a_media_asset_change_rebuilds_media_bin_rows` はインポートと削除が
+> それぞれ 1 回である。既存の 2 本の退行テストでは、MediaBin が映すのは
+> media 資産であり `add_layer` はそれを変えない理由を明記して対象から外した。
+
+---
+
 ## MED-UI-06 | perf | 同じ変更が2経路から届き、パネルが同じ再解決を2回走らせる
 
 **該当**: `crates/ravel-app/src/panels/properties.rs:552-573`（`SelectedPropertiesTarget`

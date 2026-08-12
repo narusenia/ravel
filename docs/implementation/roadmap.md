@@ -570,7 +570,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | クラスタ | 内容 | 結果 |
 |---|---|---|
 | 評価器のアルゴリズム（第3段） | `HIGH-01`（隣接インデックスが無く 1 pull が O(N·E)）、`HIGH-02`（編集ごとに全ネットワークを deep compare）、`MED-CORE-01`（`NodeKey` のパス clone が訪問ごとに 3〜4 回）、`MED-CORE-05`（`attribute_transfer` が O(source×target)） | ✅ #395（4 件すべて closed） |
-| パネル 1 回あたりのコスト | `MED-UI-01`〜`MED-UI-06`（毎編集の再コンパイル、Properties のフレーム 2 回再構築、Timeline の行仮想化なし・deep compare、Outliner / MediaBin の全行再構築、2 経路重複 sync） | #397（`MED-UI-01` / `03` / `04` / `06` は closed。**`MED-UI-02` / `MED-UI-05` は部分的に解決で未解決のまま**） |
+| パネル 1 回あたりのコスト | `MED-UI-01`〜`MED-UI-06`（毎編集の再コンパイル、Properties のフレーム 2 回再構築、Timeline の行仮想化なし・deep compare、Outliner / MediaBin の全行再構築、2 経路重複 sync） | #397 / #400（`MED-UI-01` / `03` / `04` / `05` / `06` は closed。**`MED-UI-02` だけ部分的に解決で未解決のまま**） |
 | GPU ディスパッチ | `MED-GPU-04`（CPU ラスタライズが全画面カバレッジを毎回確保）、`MED-GPU-05`（`ensure_gpu` が同一フレームを消費ノードごとに再アップロード） | ✅ #396（2 件とも closed） |
 | ~~メディアデコード~~ | ✅ `HIGH-17`（sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換）は closed | — |
 
@@ -624,16 +624,17 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 ものが何も無いときスキップ」で、静的ターゲットの再生は 30 → 1 回になったが、
 アニメーション有りのターゲットは 30 回のまま（削ると値が止まるので正しい）。
 
-**残った issue は 2 件**、どちらも部分的に解決した状態で `issues/medium/` に
-残っている。
+**残った issue は 1 件**、部分的に解決した状態で `issues/medium/` に残っている。
 
 - `MED-UI-02` — 上記の非表示スキップが未達
-- `MED-UI-05` — Outliner 側は解決（`network_has_rows` で折り畳まれたレイヤーの
-  走査が消えた）。**MediaBin のドラッグ 1 move ごとの再構築（10 回）が残る** —
-  早期 return すると `HIGH-07` の退行テスト 2 本が落ちる。両テストは
-  「ドキュメント編集ではすべてのミラーパネルが notify する」と主張しているが、
-  MediaBin についてはその前提の方が誤り（レイヤー編集は media 資産を変えない）。
-  **退行テストを緩める判断が要るので保留**
+
+`MED-UI-05` は **#400 で closed**（2026-08-13）。Outliner 側は #397 の
+`network_has_rows` で片付いており、残っていた MediaBin のドラッグ 1 move
+ごとの再構築（10 回）を、行を作った時点の `media_assets` を保持して
+`im::HashMap::ptr_eq` が真なら走査ごと飛ばす形で 0 回にした。保留の理由だった
+「`HIGH-07` の退行テストを緩める判断」は、テストの前提の方を直す形で決着した
+（MediaBin が映すのは media 資産で、`add_layer` はそれを変えない）。抜けた
+カバレッジは `a_media_asset_change_rebuilds_media_bin_rows` が埋めている。
 
 計画書（`responsiveness-stage3-plan.md`）は同じ理由で `done/` へ移していない。
 

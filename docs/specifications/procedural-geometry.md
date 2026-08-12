@@ -60,6 +60,9 @@ Geometry
 | `Cd` | Point/Instance | Color | 色 |
 | `alpha` | Point/Instance | F32 | 不透明度 |
 | `pscale` | Point | F32 | ポイント描画径 |
+| `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定 |
+| `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定 |
+| `stroke_color` | Primitive/Instance | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック |
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 |
 | `velocity` | Point | Vec2 | 速度（sim） |
 

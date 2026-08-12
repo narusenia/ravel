@@ -1154,12 +1154,21 @@ AttributeField::new(name).with_component("y").with_normalize(true)
     // normalize maps the column's own [min, max] onto [0, 1]. A missing,
     // non-numeric or wrong-length column warns and yields `default`.
 AddField/MultiplyField/MaxField { left, right }, BlendField { .., amount }
-FieldApply::new(Domain, target)              // + with_amount/combine/components/group
+FieldApply::new(Domain, target)              // + with_amount/combine/components/group/
+                                             // create_if_missing (on by default)
 CombineMode::{Set, Add, Multiply, Min, Max}  // result = lerp(existing, op, amount)
-ComponentMask::parse("xy" | "rgb" | "a")     // empty or unusable => every component
+ComponentMask::parse("xy" | "rgb" | "a")     // empty or unusable => UNSPECIFIED: the target
+                                             // type decides (rgb for Color/Vec4, so a scalar
+                                             // field does not move alpha; every component
+                                             // otherwise)
 apply_field(&geo, &FieldApply, &field, &ctx) -> Result<Geometry>
     // dimension-agnostic; a 3D geometry samples the planar built-in fields at
-    // the xy projection of P and P itself is only rewritten when it is target
+    // the xy projection of P and P itself is only rewritten when it is target.
+    // A target the domain does not carry is created first (unless
+    // create_if_missing is off, which restores the AttributeNotFound error):
+    // reserved names take their declared type and semantic default (Cd /
+    // stroke_color => opaque white, stroke_width => 0), anything else takes
+    // the sampled type, zeroed
 
 geometry::ops
 attribute_set / promote_attribute / attribute_transfer -> Result<Geometry>
@@ -1852,7 +1861,7 @@ Current keys:
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
-| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. |
+| `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Per-element style: `fill` (Bool), `stroke_width` (F32) and `stroke_color` (Color) on the Primitive domain override the node's parameters for one path; the same attributes on the Instance domain override them for everything that instance expands. An unset `stroke_color` strokes in the element's fill color. Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6). `field.expression` compiles its `expression` against `Scope::field_context()` when the node is built, never at sample time. It reads any attribute of the domain being sampled (`@P.x`, `@index`, `@N.y`, `@Cd.r`, a user column), bound once per `sample` call because which columns exist is not known while compiling. `@P` comes from the domain's own column at its real width, so `@P.z` is the height of a 3D point cloud, and falls back to the planar positions only when the domain carries no usable `P`. An unbindable reference (unknown name, `Str` column, wrong length, a component the column lacks) reads `0.0` and warns once per sample — except a position component the column lacks, which is zero silently because that is a planar position's actual third coordinate. Only the sampled domain is visible; there is no promotion between domains. **`sample` evaluates once per batch and broadcasts when the expression names no attribute, and once per element only when it does** — so `sin(time)` costs one evaluation for a million elements. The node reports `is_time_dependent()` when its source reads `frame`/`time`, which is what makes a field expression animate: a `FieldValue` is lazy, so without it the node — and every combinator and `field.apply` downstream — caches as `TimeKey::TIMELESS` |
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |

@@ -1047,8 +1047,9 @@ domain = "書き込むドメイン。"
 target = "書き込むアトリビュート。"
 amount = "適用の強さ（0 で元の値のまま、1 で完全に適用）。"
 combine = "既存値との合成方法: set / add / multiply / min / max。"
-components = "対象の成分（空で全成分。例: xy / rgb / a）。"
+components = "対象の成分（空なら型が決める。Color と Vec4 は rgb、それ以外は全成分。例: xy / rgb / a）。"
 group = "対象要素を絞る bool アトリビュート名（空で全要素）。"
+create_if_missing = "対象アトリビュートが無いとき、失敗せずに作成する。"
 
 [export]
 title = "書き出し"

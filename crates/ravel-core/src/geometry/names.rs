@@ -37,6 +37,17 @@ pub const CD: &str = "Cd";
 pub const ALPHA: &str = "alpha";
 /// Point draw radius (F32, Point).
 pub const PSCALE: &str = "pscale";
+/// Fill flag (Bool, Primitive/Instance). Absent means the `rasterize`
+/// node's `fill` parameter decides.
+pub const FILL: &str = "fill";
+/// Stroke width in composition pixels (F32, Primitive/Instance);
+/// 0 draws no stroke. Absent means the `rasterize` node's `stroke_width`
+/// parameter decides.
+pub const STROKE_WIDTH: &str = "stroke_width";
+/// Stroke color (Color, Primitive/Instance). Absent falls back to
+/// [`CD`], which is the fill color, so an unset stroke color draws the way it
+/// did before strokes had one.
+pub const STROKE_COLOR: &str = "stroke_color";
 /// Particle age in frames (F32, Point).
 pub const AGE: &str = "age";
 /// Particle lifetime in frames (F32, Point).
@@ -76,6 +87,9 @@ mod tests {
                 CD,
                 ALPHA,
                 PSCALE,
+                FILL,
+                STROKE_WIDTH,
+                STROKE_COLOR,
                 AGE,
                 LIFE,
                 VELOCITY,
@@ -96,6 +110,9 @@ mod tests {
                 "Cd",
                 "alpha",
                 "pscale",
+                "fill",
+                "stroke_width",
+                "stroke_color",
                 "age",
                 "life",
                 "velocity",

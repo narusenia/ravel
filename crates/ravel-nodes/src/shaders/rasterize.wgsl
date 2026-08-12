@@ -8,7 +8,10 @@ struct RasterParams {
 
 struct DrawItem {
     bounds: vec4<f32>,
+    // fill color (`Cd`, else the node's color)
     color: vec4<f32>,
+    // stroke color (`stroke_color`, else the fill color)
+    stroke_color: vec4<f32>,
     // kind, path vertex start / point center x, path vertex count / point
     // center y, closed flag / point radius
     data0: vec4<f32>,
@@ -60,7 +63,9 @@ fn segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return distance(p, a + t * ab);
 }
 
-fn path_coverage(item: DrawItem, p: vec2<f32>) -> f32 {
+/// Fill coverage in `x`, stroke coverage in `y`: the two carry different
+/// colors now, so they cannot be unioned here any more.
+fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
     let start = u32(item.data0.y);
     let count = u32(item.data0.z);
     let closed = item.data0.w > 0.5;
@@ -96,8 +101,7 @@ fn path_coverage(item: DrawItem, p: vec2<f32>) -> f32 {
     if stroke_width > 0.0 {
         stroke_coverage = clamp(stroke_width * 0.5 - min_distance + 0.5, 0.0, 1.0);
     }
-    // CPU draws the stroke over the fill with the same color.
-    return fill_coverage + stroke_coverage * (1.0 - fill_coverage);
+    return vec2<f32>(fill_coverage, stroke_coverage);
 }
 
 @fragment
@@ -106,16 +110,23 @@ fn raster_fragment(
     @location(0) @interpolate(flat) item_index: u32,
 ) -> @location(0) vec4<f32> {
     let item = draw_items[item_index];
-    var coverage = 0.0;
     if item.data0.x < 0.5 {
         let center = item.data0.yz;
         let radius = item.data0.w;
-        coverage = clamp(radius - distance(position.xy, center) + 0.5, 0.0, 1.0);
-    } else {
-        coverage = path_coverage(item, position.xy);
+        let coverage = clamp(radius - distance(position.xy, center) + 0.5, 0.0, 1.0);
+        let alpha = item.color.a * coverage;
+        return vec4<f32>(item.color.rgb * alpha, alpha);
     }
-    let alpha = item.color.a * coverage;
-    return vec4<f32>(item.color.rgb * alpha, alpha);
+    // The CPU path blends the fill first and the stroke over it
+    // (`raster_paths`); this is that composite in premultiplied form, which
+    // reduces to the old single-color union when the two colors are equal.
+    let coverage = path_coverage(item, position.xy);
+    let fill_alpha = item.color.a * coverage.x;
+    let stroke_alpha = item.stroke_color.a * coverage.y;
+    let alpha = stroke_alpha + fill_alpha * (1.0 - stroke_alpha);
+    let premultiplied = item.stroke_color.rgb * stroke_alpha
+        + item.color.rgb * fill_alpha * (1.0 - stroke_alpha);
+    return vec4<f32>(premultiplied, alpha);
 }
 
 // The unpremultiply pass is a separate pipeline with its own bind group

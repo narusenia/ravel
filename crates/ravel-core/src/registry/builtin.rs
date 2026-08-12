@@ -288,7 +288,20 @@ fn color_parameter(key: &str, rgba: [f32; 4]) -> Parameter {
 /// is absent on purpose: `rasterize` resolves `fill` / `stroke_width` /
 /// `stroke_color` per primitive and per instance, so a Detail column would be
 /// written and never read.
-pub const STYLE_DOMAINS: [&str; 3] = ["point", "primitive", "instance"];
+/// Domains `style.fill` / `style.stroke` can write to.
+///
+/// **`point` is deliberately absent.** `rasterize` reads a path's style from
+/// the Primitive domain and an instance's from the Instance domain; nothing
+/// reads `fill` or `stroke_width` from a point. Offering the domain anyway
+/// would put a third "succeeds and changes nothing" trap next to the two this
+/// codebase already paid for — the `stroke_align` attribute that unit 1 of
+/// `style-attributes-plan.md` declined to declare until it worked, and the
+/// `attribute.set(domain = "primitive")` that silently wrote to points.
+///
+/// Per-point colour is `attribute.set` / `field.apply` writing `Cd`, which
+/// loose points do render. Per-point styling *of a path* needs vertex
+/// interpolation in the rasterizer — `path-shading-plan.md`.
+pub const STYLE_DOMAINS: [&str; 2] = ["primitive", "instance"];
 
 /// Stroke end shapes `style.stroke` can select, ordered to match the `cap`
 /// attribute codes (`geometry::names::CAP_*`).

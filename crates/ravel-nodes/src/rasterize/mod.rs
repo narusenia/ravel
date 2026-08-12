@@ -1015,6 +1015,13 @@ fn base_color(params: &ResolvedParams) -> Color {
 /// A pattern with a token that is not a number is refused whole rather than
 /// filtered: dropping one entry swaps every following on for an off, which
 /// looks like a bug in the dash rather than a typo in the pattern.
+/// Upper bound on the runs a dash pattern may declare.
+///
+/// zeno walks the pattern for every stroked segment, so an unbounded list is
+/// unbounded work on the render thread. Real patterns are a handful of runs;
+/// anything past this is a paste accident.
+const MAX_DASH_RUNS: usize = 64;
+
 fn dash_pattern(detail: &AttributeSet, scale: f32) -> Vec<f32> {
     let Some(spec) = detail
         .get(names::DASH)
@@ -1033,7 +1040,31 @@ fn dash_pattern(detail: &AttributeSet, scale: f32) -> Vec<f32> {
             );
             return Vec::new();
         };
-        lengths.push(length.max(0.0) * scale);
+        // A negative or non-finite run has no drawing meaning, and clamping
+        // it to zero would silently turn `"-1,4"` into a *different* dash
+        // than the one written. The whole pattern is dropped for the same
+        // reason a non-numeric token drops it: a partly applied pattern
+        // inverts the on/off runs and reads as a rasterizer bug.
+        if !length.is_finite() || length < 0.0 {
+            tracing::warn!(
+                pattern = spec,
+                token,
+                "dash pattern has a run that is negative or not finite"
+            );
+            return Vec::new();
+        }
+        // A pattern long enough to matter is a mistake, not a design: zeno
+        // walks it per stroke segment, so an unbounded list is an unbounded
+        // cost on the render thread.
+        if lengths.len() >= MAX_DASH_RUNS {
+            tracing::warn!(
+                pattern = spec,
+                limit = MAX_DASH_RUNS,
+                "dash pattern has more runs than the rasterizer accepts"
+            );
+            return Vec::new();
+        }
+        lengths.push(length * scale);
     }
     // An all-zero pattern has no "on" run at all; zeno would draw nothing,
     // where the user plainly meant "no dash".
@@ -2630,8 +2661,34 @@ mod tests {
         assert_eq!(broken.as_f32(), solid.as_f32());
         // So is an all-zero pattern, which zeno would otherwise draw as
         // nothing at all.
-        let zeroed = run(false, 4.0, &with_dash(path, "0,0", 0.0), 40, 32);
+        let zeroed = run(false, 4.0, &with_dash(path.clone(), "0,0", 0.0), 40, 32);
         assert_eq!(zeroed.as_f32(), solid.as_f32());
+    }
+
+    /// A run that cannot be drawn drops the whole pattern rather than
+    /// becoming a different one.
+    ///
+    /// Clamping `-1` to `0` would turn `"-1,4"` into `"0,4"` — a pattern the
+    /// user did not write, drawn without a word. `NaN` and an infinity reach
+    /// zeno unexamined otherwise, and an unbounded run count is unbounded
+    /// work per stroked segment.
+    #[test]
+    fn a_dash_run_that_cannot_be_drawn_drops_the_whole_pattern() {
+        let path = horizontal_path(Vec2(4.0, 16.0), Vec2(36.0, 16.0));
+        let solid = run(false, 4.0, &path, 40, 32);
+        // `"-1,4"` clamped to `"0,4"` is a real dash: it would *not* equal
+        // the solid stroke, which is what makes this assertion bite.
+        let huge = std::iter::repeat_n("1", MAX_DASH_RUNS + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        for pattern in ["-1,4", "NaN,4", "inf,4", huge.as_str()] {
+            let drawn = run(false, 4.0, &with_dash(path.clone(), pattern, 0.0), 40, 32);
+            assert_eq!(
+                drawn.as_f32(),
+                solid.as_f32(),
+                "pattern {pattern:?} must not draw a different dash"
+            );
+        }
     }
 
     /// A stroke shape the fragment shader cannot express routes the whole

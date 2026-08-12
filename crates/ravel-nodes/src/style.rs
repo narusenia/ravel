@@ -10,7 +10,9 @@
 //! above all — therefore modulates the look like any other attribute.
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeValue, Domain, attribute_set, attribute_set_in_group, names};
+use ravel_core::geometry::{
+    AttributeValue, Domain, Geometry, attribute_set, attribute_set_in_group, names,
+};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData};
 use std::sync::Arc;
@@ -38,6 +40,37 @@ impl StyleFillProcessor {
     }
 }
 
+/// Refuses a group-restricted write that would **create** the column.
+///
+/// A style column is authoritative once it exists: `rasterize` reads the
+/// attribute if it is there and the node parameter only when it is not. So
+/// materializing `stroke_width` for a group also decides the value for every
+/// element outside it — and "no opinion" is not a value a dense column can
+/// hold. Seeding the outside with `UNSET_STROKE_WIDTH` turns
+/// `rasterize(stroke_width = 8)` into no stroke at all for the elements the
+/// user did not select, which is silent destruction of what they can see.
+///
+/// Erroring names the fix instead: style everything first (which creates the
+/// column with the values `rasterize` would have used), then style the group.
+/// Once the column exists the group write is exactly what it looks like —
+/// the outside keeps its current values.
+fn refuse_to_seed_a_group(
+    geometry: &Geometry,
+    domain: Domain,
+    name: &str,
+    group: &str,
+    node: &str,
+) -> anyhow::Result<()> {
+    if group.is_empty() || geometry.attribute_set(domain).get(name).is_some() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{node}: `{name}` does not exist yet, so restricting the write to \
+         group `{group}` would decide the value for every element outside it \
+         too. Apply the style without a group first, then style the group."
+    )
+}
+
 impl NodeProcessor for StyleFillProcessor {
     fn process(
         &self,
@@ -50,6 +83,8 @@ impl NodeProcessor for StyleFillProcessor {
         let geometry = geometry_input(inputs, 0, "style.fill")?;
         let domain = domain_param(params, "domain", Domain::Primitive);
         let group = params.str_or("group", "");
+        refuse_to_seed_a_group(geometry, domain, names::FILL, group, "style.fill")?;
+        refuse_to_seed_a_group(geometry, domain, names::CD, group, "style.fill")?;
         let with_flag = attribute_set_in_group(
             geometry,
             domain,
@@ -93,6 +128,8 @@ impl NodeProcessor for StyleStrokeProcessor {
         let geometry = geometry_input(inputs, 0, "style.stroke")?;
         let domain = domain_param(params, "domain", Domain::Primitive);
         let group = params.str_or("group", "");
+        refuse_to_seed_a_group(geometry, domain, names::STROKE_WIDTH, group, "style.stroke")?;
+        refuse_to_seed_a_group(geometry, domain, names::STROKE_COLOR, group, "style.stroke")?;
         let with_width = attribute_set_in_group(
             geometry,
             domain,
@@ -230,7 +267,23 @@ mod tests {
     /// Run a chain of style nodes (in order) over `geo` through a real
     /// evaluator, so the parameter names the processors read are the ones the
     /// nodes actually carry.
+    /// [`run`], but returns the evaluation error instead of unwrapping.
+    fn run_err(geo: Geometry, nodes: Vec<(&str, Vec<(&str, ParameterValue)>)>) -> String {
+        run_inner(geo, nodes)
+            .err()
+            .expect("expected the evaluation to fail")
+            .to_string()
+    }
+
     fn run(geo: Geometry, nodes: Vec<(&str, Vec<(&str, ParameterValue)>)>) -> Geometry {
+        let output = run_inner(geo, nodes).expect("the style chain evaluates");
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    fn run_inner(
+        geo: Geometry,
+        nodes: Vec<(&str, Vec<(&str, ParameterValue)>)>,
+    ) -> Result<Arc<dyn NodeData>, ravel_core::eval::EvalError> {
         let mut graph = Graph::new()
             .add_node(
                 Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
@@ -269,8 +322,7 @@ mod tests {
             last = id;
         }
         let ctx = EvalContext::new(0, FrameRate::new(30, 1), (100, 100));
-        let output = ev.evaluate(&graph, last, &ctx).unwrap();
-        output.downcast_ref::<Geometry>().unwrap().clone()
+        ev.evaluate(&graph, last, &ctx)
     }
 
     fn color(rgba: [f32; 4]) -> ParameterValue {
@@ -365,6 +417,13 @@ mod tests {
         geo.primitive_attrs_mut()
             .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![7.0, 7.0]))
             .unwrap();
+        // Both columns have to exist before a group write: a group write that
+        // *created* one would decide the value for the elements outside the
+        // group too, which is what `refuse_to_seed_a_group` rejects.
+        let blue = Color::new(0.0, 0.0, 1.0, 1.0);
+        geo.primitive_attrs_mut()
+            .insert(names::STROKE_COLOR, AttributeArray::Color(vec![blue, blue]))
+            .unwrap();
         let out = run(
             geo,
             vec![(
@@ -393,9 +452,38 @@ mod tests {
                 .unwrap()
                 .as_color(names::STROKE_COLOR)
                 .unwrap(),
-            &[UNSET_COLOR, Color::new(0.0, 1.0, 0.0, 1.0)],
-            "a new column seeds the elements outside the group with the unset colour"
+            &[blue, Color::new(0.0, 1.0, 0.0, 1.0)],
+            "the primitive outside the group keeps its own colour"
         );
+    }
+
+    /// A group write that would **create** the column is refused.
+    ///
+    /// The column is authoritative once it exists, so seeding it for a group
+    /// also decides the value outside the group — turning
+    /// `rasterize(stroke_width = 8)` into no stroke at all for elements the
+    /// user never selected. Erroring names the fix instead of silently
+    /// deleting what is on screen.
+    #[test]
+    fn a_group_write_that_would_create_the_column_is_refused() {
+        let mut geo = two_paths();
+        geo.primitive_attrs_mut()
+            .insert("mask", AttributeArray::Bool(vec![false, true]))
+            .unwrap();
+        let err = run_err(
+            geo,
+            vec![(
+                "style.stroke",
+                vec![
+                    ("width", ParameterValue::Float(2.0)),
+                    ("group", ParameterValue::String("mask".into())),
+                ],
+            )],
+        );
+        // The evaluator wraps the processor's message, so what this pins is
+        // "it refuses" rather than the wording. Writing the column anyway
+        // would seed the elements outside the group.
+        assert!(err.contains("node:2"), "{err}");
     }
 
     /// Styles do not accumulate: the second node's value is what reaches the
@@ -449,7 +537,7 @@ mod tests {
                     vec![
                         ("cap", ParameterValue::String("square".into())),
                         ("join", ParameterValue::String("bevel".into())),
-                        ("domain", ParameterValue::String("point".into())),
+                        ("domain", ParameterValue::String("primitive".into())),
                     ],
                 ),
                 (
@@ -491,8 +579,18 @@ mod tests {
                 .unwrap(),
             &[1.5]
         );
-        // The per-element columns still followed `domain`.
-        assert!(out.points().get(names::STROKE_WIDTH).is_some());
+        // The per-element columns still followed `domain`, and carry the
+        // value the node was given — `is_some()` alone would pass with the
+        // width written as zero.
+        assert_eq!(
+            out.primitive_attrs()
+                .get(names::STROKE_WIDTH)
+                .unwrap()
+                .as_f32(names::STROKE_WIDTH)
+                .unwrap(),
+            &[1.0, 1.0],
+            "the width parameter's default reached the primitive domain"
+        );
     }
 
     /// An unset cap or join is round — the shape the rasterizer drew before

@@ -9,24 +9,6 @@
 
 ---
 
-## MED-CORE-01 | perf | `NodeKey` のパス `Vec` を訪問ごとに複数回 clone する
-
-**該当**: `crates/ravel-core/src/eval.rs:848-851`（他 `:1127`, `:1319`, `:1336`）
-
-`eval_node` ごとに `NodeKey { path: self.path.clone(), node }` を構築し、
-さらに `visiting.insert` / `cache` 挿入 / `run.insert` 用に再 clone する
-→ ノード訪問1回あたり 3〜4 回のヒープ確保 + フルパスのハッシュ計算。
-`evaluate_sub` は加えてネストスコープ進入ごと（= レイヤーごと・フレームごと）に
-`scope_owners` / `scope_bindings` 用のパス clone を行う。
-
-浅いパスなら1回は小さいが、評価の最内ループに乗っている。
-
-**修正方針**: パスをインターンする。スコープ進入時に `Vec<PathSegment>` → `PathId`(u32) を1回だけ
-割り当て、`cache` / `dirty` / `run` / `visiting` を `(PathId, NodeId)` の `Copy` キーにする。
-O(1) ハッシュ、ノードごとの確保ゼロ。
-
----
-
 ## MED-CORE-04 | bug | 評価とサブネット再帰走査に深さ上限が無い — 深いグラフでスタックオーバーフロー
 
 **該当**: `crates/ravel-core/src/eval.rs:840-1178`
@@ -62,24 +44,6 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 **修正方針**: `eval_node` を明示的なワークスタックに変換する（または評価ワーカーを
 大きい固定スタックで spawn し、文書化された深さ上限を超えたら `EvalError` を返す）。
 サブネットのデシリアライズ・検証にネスト深さ上限を追加。
-
----
-
----
-
-## MED-CORE-05 | perf | `attribute_transfer` が O(source×target)、ターゲットごとに重み `Vec` を確保
-
-**該当**: `crates/ravel-core/src/geometry/ops.rs:120-133`（ヘルパー `:510-538`）
-
-`Nearest` モードはターゲット点ごとに `nearest_index`（全ソース点の線形走査）を呼ぶ。
-`DistanceWeighted` はターゲット点ごとに `normalized_weights` を呼び、
-長さ `source_count` の `Vec<f32>` を確保して**全**ソース点との重みを計算する。
-10k→10k の転送で 1億回の距離計算 + 1万回の Vec 確保 — 上流が動く限り毎フレーム。
-ジオメトリ ops には空間分割構造が一切無い。
-
-**修正方針**: `Nearest` は呼び出しごとにソース位置の一様グリッドまたは kd-tree を1回構築。
-`DistanceWeighted` は近傍を打ち切る（k 近傍または半径。Houdini と同様）。
-全域の逆距離重み付けは遅い上に視覚的には打ち切りカーネルと区別できない。
 
 ---
 

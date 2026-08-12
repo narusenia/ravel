@@ -7,6 +7,12 @@
 | 領域 | ravel-core / グラフ・コンポジション |
 | 該当 | `crates/ravel-core/src/graph.rs:1170-1182`, `crates/ravel-core/src/composition/mod.rs:926-952`, `crates/ravel-core/src/eval.rs:565-697` |
 
+> **解決済み**: `RESP3-2`（PR #395）。核だった 1 行
+> （`old_layer.network != layer.network`）が `Graph::ptr_eq` で短絡するように
+> なり、`Graph::eq` 自体も 3 段の短絡（マップ全体 → マップ → ノード `Arc`）を
+> 持つ。`set_document` の祖先チェーン再構築はレイヤーごとの O(L) `get_layer`
+> から親索引経由の O(1) ルックアップになった。
+
 > **一部進展（2026-08-03 確認）**: `Graph::ptr_eq`（`graph.rs:704`）と
 > comp 単位の短絡（`changed_network_paths` の
 > `Arc::ptr_eq(comp, old_comp)`、`composition/mod.rs:1039`）は**入っている**。
@@ -46,4 +52,4 @@
 
 ## 関連
 
-- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [HIGH-07](../closed/HIGH-07-document-changed-cascade-per-mouse-move.md)
+- [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md), [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md)

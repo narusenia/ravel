@@ -13,8 +13,8 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 28 | 1件1ファイル |
-| medium | 31 | 領域別4ファイル（`medium-*.md`） |
+| high | 30 | 1件1ファイル |
+| medium | 39 | 領域別5ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -26,10 +26,12 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（27件）
+## high（30件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
+| [HIGH-01](HIGH-01-evaluator-no-adjacency-index.md) | 評価器に隣接インデックスが無く 1 回の pull が O(N·E) | `RESP3-1`（#395） |
+| [HIGH-02](HIGH-02-graph-eq-no-ptr-eq-fastpath.md) | 編集ごとに全レイヤーネットワークを deep compare | `RESP3-2`（#395） |
 | [HIGH-03](HIGH-03-params-resolved-per-visit.md) | キャッシュヒット時もパラメータ全再解決 | `CACHE-2` |
 | [HIGH-04](HIGH-04-per-frame-blocking-readback.md) | 表示フレームごとにブロッキングリードバック（毎回ステージング確保 + デバイス全体待ち + 二重コピー） | `GPUBK-6` |
 | [HIGH-05](HIGH-05-shell-chain-cpu-per-pixel.md) | 殻の合成チェーンが CPU per-pixel | `GPUCOMP-2/3/5/6` |
@@ -59,13 +61,16 @@
 | [HIGH-32](HIGH-32-linear-ingest-powf-per-pixel.md) | 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる | #378 |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
-## medium（31件）
+## medium（39件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33`
-- [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-02` `03` `06` `07` `09`
+- [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
-- [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `07`
+- [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07`
+- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `03` `04` `06`
+  （`MED-UI-02` / `MED-UI-05` は**部分的に解決**で未解決のまま。
+  [`../medium/ui-rendering.md`](../medium/ui-rendering.md)）
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `07` / `MED-AUD-01` `02` `03`
 
 ## low（9件）

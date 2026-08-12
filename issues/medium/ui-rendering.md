@@ -6,22 +6,6 @@
 
 ---
 
-## MED-UI-01 | perf | 編集ごとに UI スレッドでコンポジションを再コンパイル（純粋なパラメータ変更でも）
-
-**該当**: `crates/ravel-app/src/project_state.rs:763`（`document_changed` 内の `self.compiled = None`）、
-`:860-877`（`compiled_root` → `compile_composition`）
-
-`document_changed` は `InvalidationHint::Params` でもコンパイル済みシェルチェーンを
-無条件に破棄する。次の `request_viewer_eval`（同じ UI スレッドの呼び出しスタック、
-スクラブティックごと）がアクティブコンポジションを再コンパイルする。
-コストはレイヤー数に比例し、任意のジェスチャー中はマウス移動ごとに走る。
-
-**修正方針**: ヒントが `Params` のときはコンパイル済みチェーンを保持する
-（構造は不変。コンパイラは既に決定的 ID を使っている）。
-`Structural` ヒントとコンポジション切替時のみ再構築。
-
----
-
 ## MED-UI-02 | perf | Properties パネルが再生中フレームあたり2回、全セクションを再構築する
 
 **該当**: `crates/ravel-app/src/panels/properties.rs:579-597`（project observer と
@@ -36,39 +20,14 @@ ProjectState observer（[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-w
 **修正方針**: 2つのトリガーを重複排除（フレームあたり最大1回）。
 アニメーションチャンネル由来のフィールドのみ再構築。パネル非表示時はスキップ。
 
----
-
-## MED-UI-03 | perf | Timeline に行の仮想化が無い — 全レイヤーのヘッダとレーンを毎フレーム構築・描画
-
-**該当**: `crates/ravel-app/src/panels/timeline.rs:3022-3057`（`build_layer_headers`）、
-`:2586-2723`（レイヤー領域の描画ループ）、`:2535-2549`（`total_layer_height`）
-
-`build_layer_headers` はスクロールビューポートに関係なく**全**レイヤーの div/button サブツリーを
-構築し、`keyframes::property_rows` を計算する。
-レイヤー領域のキャンバスループはレーン境界・バー・キーフレームを全レイヤー分描画する
-（バーは x 方向にカリングされるが、可視スクロール範囲に対する**垂直カリングは無い**）。
-レイヤー数に線形にスケールする。
-
-**修正方針**: ヘッダビルダーと キャンバス描画の両方で可視 y 範囲にカリングする
-（行レイアウトは既に算術的 — `row_at_content_y` にその計算がある）。
-またはヘッダを `uniform_list` に移す。
-
----
-
-## MED-UI-04 | perf | Timeline が Composition を deep compare し、レンダーごとにパネル状態を約5回 clone する
-
-**該当**: `crates/ravel-app/src/panels/timeline.rs:354-401`（`sync_from_project`）、
-`:2385`, `:2557`, `:2773`, `:2793`, `:3432`（状態 clone）
-
-`sync_from_project` は ProjectState notify ごとに走り、
-`self.state.composition() != comp.as_ref()` — 全レイヤー / 全ネットワークにわたる
-深い等価判定を実行し、**何も変わっていなくても** `cx.notify()` を呼ぶ。
-各レンダーは `self.state`（Composition を内包）をルーラー・レイヤー領域・カーブグリッド・
-カーブシェル・コンテキストメニュー用に clone する。
-`im` の構造共有で clone 自体は比較的安いが、notify ごとの比較 + 確定再レンダーは無駄。
-
-**修正方針**: deep equality ではなく ProjectState が既に持つ `revision` カウンタを比較。
-ミラーしたコンポジションまたは選択が実際に変化したときのみ notify。
+> **部分的に解決（`RESP3-7`、PR #397）**: 「プレイヘッドで再サンプルされるものが
+> 何も無いときスキップ」が入り、静的ターゲットの再生 1 秒あたりの
+> `refresh_values` は 30 → 1 回になった。アニメーション有りのターゲットは
+> 30 回のまま据え置きで、これは正しい（削ると値が止まる）。
+>
+> **残っているのは「パネル非表示のときスキップ」。** タブの可視性がパネルへ
+> 届く仕組みが無く（`ravel-dock` は `active: usize` を持つがパネルへ伝えない）、
+> 配線は設計ゲート規模になる。この 1 点が未達なので本項目は未解決のまま置く。
 
 ---
 
@@ -88,34 +47,18 @@ ProjectState observer（[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-w
 評価更新経路からこれらのパネルへ notify しないようにする
 （CRIT-01 の修正で大部分は解消）。
 
----
-
-## MED-UI-06 | perf | 同じ変更が2経路から届き、パネルが同じ再解決を2回走らせる
-
-**該当**: `crates/ravel-app/src/panels/properties.rs:552-573`（`SelectedPropertiesTarget`
-observer）と `:579-597`（project observer）、
-`crates/ravel-app/src/panels/timeline.rs:302-310` / `outliner.rs:107-118`
-（`ActiveComposition` observer）
-
-1つの変更が「グローバル書き込み」と「`ProjectState` notify」の両方として届く箇所がある。
-
-- ノードパラメータのドラッグ: NodeEditor の `refresh_from_document` が
-  `notify_properties_selection` を呼ぶ（選択が非空のとき）→ Properties の
-  target observer が `refresh_values_checked`。同じ move の project notify でも
-  もう一度 `refresh_values_checked`。**move ごとに全セクション2回再解決**
-- コンポジション切替: Timeline / Outliner は `ActiveComposition` observer で
-  sync し、同じ切替の project notify でもう一度 sync する（deep compare と
-  全行走査が2回）
-
-グローバル駆動の sync は生きたドキュメントから読み直すので、その epoch は
-既にカバーされている。[HIGH-07](../closed/HIGH-07-document-changed-cascade-per-mouse-move.md)
-の epoch ゲート（`panels::MirrorEpoch`）に「グローバル駆動の sync 後に
-現在の epoch を記録する」を足せば、対になる notify を吸収できる。
-
-**未着手の理由**: GPUI は1エフェクトサイクル内の `cx.notify()` を合流させるため、
-observer 数を数えるプローブでは削減も回帰も観測できない。sync 関数の呼び出し回数を
-数える計装（`tracing` span カウンタ等）を先に用意しないと、
-入れた・戻したの判断が測定に基づかない。ドラッグ経路の方が影響が大きい。
+> **部分的に解決（`RESP3-10`、PR #397）**: **Outliner 側は解決した。**
+> `push_layer_rows` が `expandable` を決めるために折り畳まれたレイヤーまで
+> `network_rows` を走らせていたのを `network_has_rows` に置き換え、
+> 割り当てゼロ・走査 1 回にした。行が前回と同一なら `cx.notify()` もしない。
+>
+> **残っているのは MediaBin** — ドラッグ 1 move ごとに 10 回再構築する。
+> 早期 return を入れると `HIGH-07` の既存退行テスト 2 本
+> （`a_completed_save_rebuilds_no_document_panel` /
+> `a_composition_switch_leaves_every_gate_open_for_the_next_edit`）が落ちる。
+> 両テストは「ドキュメント編集ではすべてのミラーパネルが notify する」と
+> 主張しているが、MediaBin についてはその前提の方が誤り（レイヤー編集は
+> media 資産を変えない）。**退行テストを緩める判断が要るので保留。**
 
 ---
 

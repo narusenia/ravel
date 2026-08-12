@@ -87,6 +87,65 @@ params → dispatch の経路上に検証が一切無い。
 
 ---
 
+## MED-GPU-04 | perf | CPU ラスタライズ経路がプリミティブごと・フレームごとに全画面カバレッジバッファを確保、しかもビューアがこれを使う
+
+**該当**: `crates/ravel-nodes/src/rasterize/mod.rs:677`, `:686-694`
+（呼び出し元: `crates/ravel-app/src/eval_hooks.rs:140` の `RasterizeProcessor::from_node`、
+合成ノードは `lib.rs:112-114`）
+
+> **解決済み**: `RESP3-12` / `RESP3-13`（PR #396）。`GpuEvalHooks::finalize` が
+> ビューアの Geometry 出力を GPU でラスタライズする（39.58 → 0.111 ms）。
+> 残る CPU 経路はカバレッジマスク 1 枚をジオメトリ全体で再利用し、
+> `blend_coverage` をプリミティブの bbox に限定した（39.58 → 2.28 ms）。
+> `shape_layer_golden` は保存画素の pin から **CPU / GPU 一致テスト**へ
+> 置き換えた（`RESP3-12`）。
+>
+> **票の「合成 `rasterize` ノードも CPU 経路に固定されている」は事実と違った。**
+> `processor_for_node` の synthetic 分岐は実質デッドで、シェルコンパイラは
+> `rasterize` の synthetic ノードを生成していない。ゴールデンが押さえていたのは
+> `finalize` 側の経路だけで、この分岐がゲートだったわけではない。
+
+`raster_paths` はプリミティブごとに fill 用 `vec![0u8; w*h]` と stroke 用の2枚目を確保し、
+`blend_coverage` は形状の bbox に関係なくプリミティブごとに全画面を走査する
+— O(プリミティブ数 × 解像度) の確保と走査。
+
+`GpuEvalHooks::finalize` は、自身が `GpuContext` とプールを保持し GPU ラスタライザも存在するのに、
+ビューアが表示する Geometry 出力すべてに対して CPU プロセッサ（`from_node` → `gpu: None`）を
+構築する。結果、シェイプ / スキャッターノードをプレビューしながらのスクラブは
+毎フレーム zeno の CPU ラスタライズを回す。
+合成 `rasterize` ノードも CPU 経路に固定されている（`lib.rs` コメント: ゴールデンテストで固定）。
+
+**修正方針**: `finalize` で GPU ラスタライザを使う（コンテキストとプールは既にスコープ内）。
+CPU 経路では再利用可能なカバレッジバッファを1枚確保し、
+`blend_coverage` をプリミティブの bbox に限定する。
+
+---
+
+## MED-GPU-05 | perf | `ensure_gpu` が同一 CPU フレームを消費 GPU ノードごとに再アップロードする
+
+**該当**: `crates/ravel-nodes/src/gpu_util.rs:59-78`
+
+> **解決済み**: `RESP3-14`（PR #396）。`TexturePool` がアップロードスコープを
+> 持ち、同一 CPU `FrameBuffer` を**評価 1 回につき 1 度だけ**アップロードする
+> （キーは画素アロケーションのアドレス + 幅・高さ・フォーマット）。
+> 4K RGBA32F の 3 消費ノードで **3 → 1 回、398 → 133 MB / 評価**。
+> スコープの境界は `finalize` — 対話ワーカーと書き出しワーカーの両方が
+> 評価 1 回につき 1 回呼ぶ唯一のフックなので、メモがフレームを跨がない。
+> 修正方針の前者（`GpuFrameBuffer` を評価器の値型にする）は採らず、
+> フレーム内メモ化で足りることを測ってから閉じた。
+
+N 個の GPU ノードに供給される CPU 常駐 `FrameBuffer`（デコード済みメディアフレームなど）は
+フレームあたり N 回アップロードされる。
+`ensure_gpu` は呼び出しごとにプールテクスチャを取得して `upload_texture` し、
+アップロード済みテクスチャはディスパッチ直後に解放され、元バッファと紐付けられない。
+4K RGBA32F では冗長アップロード1回あたり約 132MB の PCIe / ユニファイドメモリ帯域。
+
+**修正方針**: CPU→GPU 変換結果を値側にキャッシュする
+（最初の GPU 消費側で `GpuFrameBuffer` に変換して評価器キャッシュに格納）。
+またはフレーム内でソースバッファの `Arc` ポインタでメモ化する。
+
+---
+
 ## MED-GPU-07 | debt | wgpu が 2 本入っていて、デバイス共有が構造的に成立しない
 
 > **解決済み**: 2026-08-05。`Cargo.toml` の `wgpu` / `naga` を crates.io の

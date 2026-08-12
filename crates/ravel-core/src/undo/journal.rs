@@ -53,7 +53,10 @@ use thiserror::Error;
 /// versioned discard keeps mixed-version journals consistent.
 /// v7: `ParameterValue` gained the `Curve` variant (structural curve
 /// parameters) — same reasoning as v6.
-pub const JOURNAL_FORMAT_VERSION: u32 = 7;
+/// v8: `ParameterValue` gained the `Ramp` variant (colour ramps) — same
+/// reasoning as v6. Appending keeps *older* entries decodable, but an old
+/// binary meeting a `Ramp` entry is the case the version guards.
+pub const JOURNAL_FORMAT_VERSION: u32 = 8;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
@@ -508,6 +511,44 @@ mod tests {
                 .find(|p| p.key == "points")
                 .map(|p| &p.value),
             Some(&ParameterValue::Curve(curve))
+        );
+    }
+
+    /// The v8 layout change: `ParameterValue::Ramp` must round-trip through
+    /// the bincode journal codec, stop colours and interpolation mode
+    /// included.
+    #[test]
+    fn bincode_roundtrip_preserves_ramps() {
+        use crate::graph::ParameterValue;
+        use crate::param_ramp::{RampInterpolation, RampParam, RampStop};
+        use crate::types::Color;
+        let ramp = RampParam::new(
+            [
+                RampStop::new(0.0, Color::new(1.0, 0.0, 0.0, 1.0)),
+                RampStop::new(0.5, Color::new(0.0, 1.0, 0.0, 0.5)),
+                RampStop::new(1.0, Color::new(0.0, 0.0, 1.0, 1.0)),
+            ],
+            RampInterpolation::Smooth,
+        );
+        let entry = JournalEntry {
+            sequence: 9,
+            timestamp_secs: 1700000000,
+            mutation: GraphMutation::AddNode(
+                Node::new(NodeId::new(11), "field.ramp")
+                    .with_param("stops", ParameterValue::Ramp(ramp.clone())),
+            ),
+        };
+        let data = BincodeCodec.encode(&entry).unwrap();
+        let decoded = BincodeCodec.decode(&data).unwrap();
+        let GraphMutation::AddNode(node) = decoded.mutation else {
+            panic!("expected AddNode");
+        };
+        assert_eq!(
+            node.parameters
+                .iter()
+                .find(|p| p.key == "stops")
+                .map(|p| &p.value),
+            Some(&ParameterValue::Ramp(ramp))
         );
     }
 

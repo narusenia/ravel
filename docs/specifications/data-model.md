@@ -83,9 +83,10 @@ enum ParameterValue {
 ```
 
 `PathPoints` / `Curve` / `Ramp` は**必ず末尾に足す**。bincode は variant を
-位置で索引するので、途中に挿入すると既存 journal が読めなくなる。既存
-variant を動かす変更は `JOURNAL_FORMAT_VERSION` の更新で覆う（末尾追加は
-既存の索引を動かさないので不要）。
+位置で索引するので、途中に挿入すると既存 journal が読めなくなる。追加自体は
+`JOURNAL_FORMAT_VERSION` の更新で覆う — 末尾追加でも**旧ビルドが新しい
+variant を含む entry に出会う**側は壊れるので、版を上げて捨てさせる
+（`docs/dev/persistence.md` の規則が正）。
 
 - ネットワーク内の**任意のノードパラメータ**がチャネルを持てる（キーフレーム、
   ノード出力バインド、ブレンド。Expression / AudioReactive は placeholder）。

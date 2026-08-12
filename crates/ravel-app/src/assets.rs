@@ -157,6 +157,18 @@ pub enum RavelIcon {
     NodeVectorConstructVec3,
     /// Node header/menu: `vector.construct.vec4`.
     NodeVectorConstructVec4,
+    /// Node header/menu: `vector.split.*` (every arity).
+    NodeVectorSplit,
+    /// Node header/menu: `vector.swizzle.*` (every arity).
+    NodeVectorSwizzle,
+    /// Node header/menu: `vector.length`.
+    NodeVectorLength,
+    /// Node header/menu: `vector.normalize.*` (every arity).
+    NodeVectorNormalize,
+    /// Node header/menu: `vector.dot`.
+    NodeVectorDot,
+    /// Node header/menu: `vector.cross.*` (every arity).
+    NodeVectorCross,
     /// Node header/menu: `geometry.transform`.
     NodeGeometryTransform,
     /// Node header/menu: `geometry.merge`.
@@ -325,6 +337,20 @@ impl RavelIcon {
             "vector.construct.vec2" => Self::NodeVectorConstructVec2,
             "vector.construct.vec3" => Self::NodeVectorConstructVec3,
             "vector.construct.vec4" => Self::NodeVectorConstructVec4,
+            // One icon per family: the arity is in the label, and the node
+            // shape (output count) already reads as different.
+            "vector.split.vec2" | "vector.split.vec3" | "vector.split.vec4" => {
+                Self::NodeVectorSplit
+            }
+            "vector.swizzle.vec2" | "vector.swizzle.vec3" | "vector.swizzle.vec4" => {
+                Self::NodeVectorSwizzle
+            }
+            "vector.length" => Self::NodeVectorLength,
+            "vector.normalize.vec2" | "vector.normalize.vec3" | "vector.normalize.vec4" => {
+                Self::NodeVectorNormalize
+            }
+            "vector.dot" => Self::NodeVectorDot,
+            "vector.cross.vec2" | "vector.cross.vec3" => Self::NodeVectorCross,
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
             "geometry.connect" => Self::NodeGeometryConnect,
@@ -432,6 +458,12 @@ impl IconNamed for RavelIcon {
             Self::NodeVectorConstructVec2 => "icons/move.svg",
             Self::NodeVectorConstructVec3 => "icons/axis-3d.svg",
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",
+            Self::NodeVectorSplit => "icons/route.svg",
+            Self::NodeVectorSwizzle => "icons/replace.svg",
+            Self::NodeVectorLength => "icons/sigma.svg",
+            Self::NodeVectorNormalize => "icons/circle-dashed.svg",
+            Self::NodeVectorDot => "icons/circle-dot.svg",
+            Self::NodeVectorCross => "icons/orbit.svg",
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
             Self::NodeGeometryConnect => "icons/network.svg",

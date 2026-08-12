@@ -1,7 +1,8 @@
 # ベクタ場 実装計画
 
-> **Status**: In progress — 単位 7 の `vector.construct`（`VEC-7a`）と
-> 単位 5（`VEC-5`）が実装済み（2026-07-30）。他の単位は未着手
+> **Status**: In progress — 値ドメイン側（単位 5〜8 = `VEC-5` / `VEC-6` /
+> `VEC-7a` / `VEC-7b` / `VEC-8`）が実装済み。フィールド側（単位 1〜3）と
+> 結合検証（単位 4）は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -347,6 +348,25 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - `vector.swizzle`: Vec → Vec。`"xy"` / `"zyx"` / `"xxx"` のような
   文字列パラメータ。存在しない成分の指定はエラー
 
+**実装結果**（`VEC-7b`）
+
+- `vector.split.vec2` / `.vec3` / `.vec4`: 入力ポートはそのアリティ 1 つだけを
+  受け、出力は成分名（`x` / `y` / `z` / `w`）の SCALAR ポート。値は
+  `PortRecord`。**アリティごとに別 `type_key`** にした理由は `construct` より
+  強い — 出力ポートの**本数**がアリティで決まり、ポート一覧はノード
+  インスタンスに載る。未接続はゼロに分解する（評価エラーにしない）
+- `vector.swizzle.vec2` / `.vec3` / `.vec4`: **出力**アリティを `type_key` で
+  固定し、`pattern` 文字列がその長さと一致することを要求する。パターン長で
+  出力型を決めると出力ポートの再型付けが要り、それは
+  `network-interface-editing-plan.md` の担当になるため。**入力**は 3 アリティ
+  すべてを受ける（入力型はポート宣言が縛るものではない）ので、Vec3 → Vec2 の
+  絞り込みは `swizzle.vec2` に `"yx"` などで書ける。存在しない成分の指定・
+  `x`/`y`/`z`/`w` 以外の名前・長さ不一致はいずれも評価エラー。未接続入力は
+  ゼロ Vec4 として読むので、置いただけのノードは評価できる
+- アリティ変更は「型が違うノードへの置き換え」なので、`split` の絞り込みは
+  `Graph::remove_output_port`（単位 1 の再インデックス）で表現される —
+  消した成分のエッジだけが落ち、手前のポートの index は動かない
+
 **完了条件**
 
 - `construct` が宣言どおりの型を出力し、成分がパラメータポートで駆動できる
@@ -358,6 +378,18 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - アリティ変更（Vec3 → Vec2）でエッジがどう扱われるかのテスト
   （`network-interface-editing-plan.md` 単位 1 の再インデックスを使う）。
 
+すべて実装済み。所在（すべて `ravel-nodes` の `vector::tests`）:
+
+| 完了条件 | テスト |
+|---|---|
+| `construct` の型と成分駆動 | `vec2_combines_its_components` ほか、`components_are_drivable_through_exposed_param_ports` |
+| `construct` → `split` の往復一致 | `split_recovers_the_components_construct_combined` |
+| `PortRecord` と各出力の単独 pull | 同上（`PortRecord` の中身）、`each_split_output_pulls_on_its_own` |
+| `swizzle` の並べ替え | `swizzle_reorders_and_repeats_components`、`swizzle_narrows_a_vec3_to_a_vec2` |
+| 存在しない成分でエラー | `swizzle_rejects_a_component_the_input_lacks`（`swizzle_rejects_a_pattern_of_the_wrong_length` / `swizzle_rejects_a_name_that_is_not_a_component` も） |
+| アリティ変更とエッジ | `narrowing_a_split_drops_only_the_edge_of_the_removed_component` |
+| テンプレート宣言 | `ravel-core` `registry::builtin::vector_split_arities_declare_one_output_per_component`、`vector_swizzle_arities_seed_the_identity_pattern` |
+
 ### 単位 8: 値ドメインのベクタ演算（`vector.length` / `normalize` / `dot` / `cross`）
 
 - `length`: Vec → Scalar
@@ -366,12 +398,51 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - `cross`: Vec2 × Vec2 → Scalar（2D の外積はスカラー）、
   Vec3 × Vec3 → Vec3
 
+**実装結果**（`VEC-8`）
+
+- `vector.length`: 入力は 3 アリティすべてを受け、出力は SCALAR。
+  **アリティで `type_key` を分けない** — 出力型が入力アリティに従わないので、
+  ポート型をインスタンスに固定する必要が無い
+- `vector.normalize.vec2` / `.vec3` / `.vec4`: 出力アリティ = 入力アリティ
+  なので `type_key` を分け、入力ポートもそのアリティだけを宣言する。
+  **ゼロベクトルはゼロを返す**（長さで割ると NaN が下流へ静かに伝播する）。
+  長さが非有限のときも同じ枝を通る
+- `vector.dot`: 両入力とも 3 アリティすべてを受ける（出力は常に SCALAR）。
+  したがって Vec2 × Vec3 は**接続でき**、評価時にエラーになる。片側だけ
+  未接続の場合は他方のアリティのゼロベクトルとして読むので、配線途中の
+  ノードが偽のアリティ不一致を出さない
+- `vector.cross.vec2`（出力 SCALAR）/ `vector.cross.vec3`（出力 VEC3）:
+  **出力型がアリティで変わる**ので 2 テンプレートに分ける。4 成分の外積は
+  定義が無いので宣言しない
+- **型不一致の報告先**: `Graph::add_edge` は `accepted_types` を検査しない
+  （フィルタはノードエディタ側にある）ので、アリティ検査はプロセッサが持つ。
+  `cross` の入力ポートは自分のアリティだけを宣言するため UI からは繋げないが、
+  プロセッサも受け取った値のアリティを確認して `anyhow` エラーを返す
+
 **完了条件**
 
 - 各演算の値検証テスト。
 - `normalize` がゼロベクトルでゼロを返すテスト（NaN を出さない）。
 - `dot` / `cross` の型不一致（Vec2 × Vec3）がエラーになるテスト。
 - 単位 2 のフィールド版と値が一致するテスト（同じ入力に対して）。
+  → **単位 2（フィールド版の変換ノード）が未実装なので書けない。**
+  代わりに値ドメイン内での相互整合を固定した:
+  `normalize` が `length` の答えで割った結果と一致すること、
+  `a · a` が `length(a)²` と一致すること。単位 2 が入ったら、この 2 本と
+  同じ入力でフィールド版を突き合わせる
+
+すべて実装済み（フィールド版一致を除く）。所在（すべて `ravel-nodes` の
+`vector::tests`）:
+
+| 完了条件 | テスト |
+|---|---|
+| `length` の値検証 | `length_is_the_magnitude_at_every_arity`、`an_unconnected_length_is_zero` |
+| `normalize` の値検証 | `normalize_scales_to_unit_length` |
+| `dot` の値検証 | `dot_multiplies_componentwise_and_sums`、`a_half_wired_dot_is_zero` |
+| `cross` の値検証 | `cross_of_two_vec2_is_the_scalar_wedge`、`cross_of_two_vec3_is_perpendicular_to_both`、`cross_has_no_four_component_form` |
+| ゼロベクトルでゼロ（NaN を出さない） | `normalize_of_a_zero_vector_is_zero_not_nan`、`an_unconnected_normalize_is_zero` |
+| 型不一致がエラー | `dot_rejects_mismatched_arities`、`cross_rejects_a_mismatched_arity` |
+| 値ドメイン内の相互整合（フィールド版一致の代替） | `normalize_divides_by_the_length_node_s_answer`、`dot_with_itself_is_the_squared_length` |
 
 ### 単位 4: 結合検証と文書更新
 

@@ -1967,47 +1967,40 @@ impl Render for ViewerPanel {
                             tracing::warn!(
                                 "viewer GPU surface unavailable; falling back to the CPU frame"
                             );
-                            if let Some(project) = cx
-                                .try_global::<ProjectStateHandle>()
-                                .and_then(|handle| handle.0.upgrade())
-                            {
-                                #[cfg(any(
-                                    target_os = "linux",
-                                    target_os = "freebsd",
-                                    target_os = "windows"
-                                ))]
-                                let host_device_loss =
-                                    crate::workspace::host_device_loss_detected(window, cx);
-                                #[cfg(not(any(
-                                    target_os = "linux",
-                                    target_os = "freebsd",
-                                    target_os = "windows"
-                                )))]
-                                let host_device_loss = false;
-                                cx.defer(move |cx| {
-                                    project.update(cx, |project, cx| {
-                                        project.report_gpu_device_loss(host_device_loss, cx);
-                                        project.configure_viewer_surface(false, cx);
-                                    });
-                                });
-                            }
                         }
                         if self_owned_device_loss {
                             tracing::warn!("viewer GPU device loss detected");
                         }
-                        // A self-owned context reports loss through the shared
-                        // state. Keep this observation in the existing
-                        // deferred Viewer update path; the paint guard remains
-                        // a pure capability check and this unit does not yet
-                        // rebuild or replace the GPU pipeline.
-                        if self_owned_device_loss
+                        // A self-owned context reports its loss through the
+                        // shared state; the adopted host reports it through the
+                        // renderer's own flag. Both observations leave the paint
+                        // guard a pure capability check and reach the session
+                        // through the existing deferred update — this unit
+                        // announces the loss, it does not rebuild anything.
+                        if (!surface_available || self_owned_device_loss)
                             && let Some(project) = cx
                                 .try_global::<ProjectStateHandle>()
                                 .and_then(|handle| handle.0.upgrade())
                         {
+                            #[cfg(any(
+                                target_os = "linux",
+                                target_os = "freebsd",
+                                target_os = "windows"
+                            ))]
+                            let host_device_loss =
+                                crate::workspace::host_device_loss_detected(window, cx);
+                            #[cfg(not(any(
+                                target_os = "linux",
+                                target_os = "freebsd",
+                                target_os = "windows"
+                            )))]
+                            let host_device_loss = false;
                             cx.defer(move |cx| {
                                 project.update(cx, |project, cx| {
-                                    project.report_gpu_device_loss(true, cx);
+                                    project.report_gpu_device_loss(host_device_loss, cx);
+                                    if !surface_available {
+                                        project.configure_viewer_surface(false, cx);
+                                    }
                                 });
                             });
                         }

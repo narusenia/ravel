@@ -29,6 +29,7 @@
 //! [`interop::native_api`](crate::interop::native_api)).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{GpuError, GpuResult};
 
@@ -126,6 +127,127 @@ pub struct AdapterInfo {
     pub backend: GpuBackend,
 }
 
+/// A diagnostic classification for a device-loss callback.
+///
+/// This is deliberately Ravel's vocabulary rather than wgpu's public enum.
+/// `Destroyed` is an explicit teardown and therefore does not mark the
+/// device as requiring recovery; every other callback reason currently maps
+/// to `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuLossReason {
+    /// The backend reported a loss without a more specific Ravel diagnosis.
+    Unknown,
+    /// The device was explicitly destroyed by its owner.
+    Destroyed,
+}
+
+/// Shared device state observed by contexts and GPU-owned resources.
+///
+/// The state has exactly two values: `epoch`, identifying the device
+/// generation, and `lost`, identifying whether that generation is usable.
+/// This unit does not replace devices, so `epoch` remains zero here; later
+/// recovery work may advance it without adding an intermediate phase enum.
+#[derive(Clone)]
+pub struct GpuDeviceState {
+    inner: Arc<GpuDeviceStateInner>,
+}
+
+struct GpuDeviceStateInner {
+    epoch: AtomicU64,
+    lost: AtomicBool,
+}
+
+impl Default for GpuDeviceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GpuDeviceState {
+    /// Create a fresh state, primarily for headless hosts and tests that
+    /// inject a device-loss callback without requiring an adapter.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(GpuDeviceStateInner {
+                epoch: AtomicU64::new(0),
+                lost: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// The current device epoch.
+    #[inline]
+    pub fn epoch(&self) -> u64 {
+        self.inner.epoch.load(Ordering::Acquire)
+    }
+
+    /// Whether the current device epoch has been lost.
+    #[inline]
+    pub fn lost(&self) -> bool {
+        self.inner.lost.load(Ordering::Acquire)
+    }
+
+    /// Record a diagnostic loss notification.
+    ///
+    /// Returns `true` only for the first actual loss. Explicit destruction is
+    /// intentionally ignored, and repeated callbacks are coalesced.
+    pub fn record_loss(&self, reason: GpuLossReason) -> bool {
+        if reason == GpuLossReason::Destroyed {
+            return false;
+        }
+        !self.inner.lost.swap(true, Ordering::AcqRel)
+    }
+
+    /// Snapshot the two state values for diagnostics and tests.
+    #[inline]
+    pub fn snapshot(&self) -> GpuDeviceSnapshot {
+        GpuDeviceSnapshot {
+            epoch: self.epoch(),
+            lost: self.lost(),
+        }
+    }
+}
+
+/// A copyable observation of [`GpuDeviceState`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuDeviceSnapshot {
+    /// The device generation.
+    pub epoch: u64,
+    /// Whether that generation is lost.
+    pub lost: bool,
+}
+
+impl GpuDeviceSnapshot {
+    /// The device epoch.
+    #[inline]
+    pub fn epoch(self) -> u64 {
+        self.epoch
+    }
+
+    /// Whether the device is lost.
+    #[inline]
+    pub fn lost(self) -> bool {
+        self.lost
+    }
+}
+
+fn map_loss_reason(reason: wgpu::DeviceLostReason) -> GpuLossReason {
+    match reason {
+        wgpu::DeviceLostReason::Destroyed => GpuLossReason::Destroyed,
+        wgpu::DeviceLostReason::Unknown => GpuLossReason::Unknown,
+    }
+}
+
+fn handle_device_lost(state: &GpuDeviceState, reason: wgpu::DeviceLostReason) {
+    let _ = state.record_loss(map_loss_reason(reason));
+}
+
+fn register_device_lost_callback(device: &wgpu::Device, state: GpuDeviceState) {
+    device.set_device_lost_callback(move |reason, _message| {
+        handle_device_lost(&state, reason);
+    });
+}
+
 impl AdapterInfo {
     fn from_wgpu(info: &wgpu::AdapterInfo) -> Self {
         Self {
@@ -161,6 +283,7 @@ struct GpuContextInner {
     device: wgpu::Device,
     queue: wgpu::Queue,
     info: AdapterInfo,
+    state: GpuDeviceState,
     transfers: crate::transfer::stats::TransferCounters,
     dispatch: std::sync::Mutex<crate::dispatch::DispatchState>,
     staging: std::sync::Mutex<crate::staging::StagingPool>,
@@ -211,6 +334,8 @@ impl GpuContext {
             .await
             .map_err(|e| GpuError::DeviceRequest(e.to_string()))?;
 
+        let state = GpuDeviceState::new();
+        register_device_lost_callback(&device, state.clone());
         Ok(Self {
             inner: Arc::new(GpuContextInner {
                 instance,
@@ -218,6 +343,7 @@ impl GpuContext {
                 device,
                 queue,
                 info,
+                state,
                 transfers: Default::default(),
                 dispatch: Default::default(),
                 staging: Default::default(),
@@ -241,7 +367,9 @@ impl GpuContext {
     /// [`interop::context_from_wgpu`](crate::interop::context_from_wgpu):
     /// receiving a device someone else created is, by definition, naming the
     /// backend, so it belongs to the façade's documented hole rather than to
-    /// the abstract API (`GPUBK-4`; the contract itself is `GPUBK-9`).
+    /// the abstract API (`GPUBK-4`; the contract itself is `GPUBK-9`). Ravel
+    /// does not install a device-loss callback on this path: wgpu replaces
+    /// callbacks, and the host owns the callback that drives its recovery.
     pub(crate) fn from_handles(
         instance: wgpu::Instance,
         adapter: wgpu::Adapter,
@@ -256,6 +384,7 @@ impl GpuContext {
                 device,
                 queue,
                 info,
+                state: GpuDeviceState::new(),
                 transfers: Default::default(),
                 dispatch: Default::default(),
                 staging: Default::default(),
@@ -299,6 +428,34 @@ impl GpuContext {
     #[inline]
     pub fn adapter_info(&self) -> &AdapterInfo {
         &self.inner.info
+    }
+
+    /// The shared device state observed by this context and every resource
+    /// built from it.
+    #[inline]
+    pub fn device_state(&self) -> GpuDeviceState {
+        self.inner.state.clone()
+    }
+
+    /// The current device epoch.
+    #[inline]
+    pub fn epoch(&self) -> u64 {
+        self.inner.state.epoch()
+    }
+
+    /// Whether the current device epoch is lost.
+    #[inline]
+    pub fn lost(&self) -> bool {
+        self.inner.state.lost()
+    }
+
+    /// Inject a device-loss notification without requiring a live adapter.
+    ///
+    /// Production callbacks use the same state transition internally; this
+    /// entry point lets headless coordinators and tests exercise that path.
+    #[inline]
+    pub fn inject_device_loss(&self, reason: GpuLossReason) -> bool {
+        self.inner.state.record_loss(reason)
     }
 
     /// CPU↔GPU transfer counters for work submitted through this context.
@@ -518,6 +675,52 @@ impl std::fmt::Debug for GpuContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_loss_is_shared_and_coalesced() {
+        let state = GpuDeviceState::new();
+        let clone = state.clone();
+
+        assert_eq!(
+            state.snapshot(),
+            GpuDeviceSnapshot {
+                epoch: 0,
+                lost: false
+            }
+        );
+        assert!(state.record_loss(GpuLossReason::Unknown));
+        assert_eq!(
+            clone.snapshot(),
+            GpuDeviceSnapshot {
+                epoch: 0,
+                lost: true
+            }
+        );
+        assert!(!clone.record_loss(GpuLossReason::Unknown));
+        assert_eq!(state.epoch(), 0);
+    }
+
+    #[test]
+    fn destroyed_loss_is_ignored_but_real_loss_is_not() {
+        let state = GpuDeviceState::new();
+
+        assert!(!state.record_loss(GpuLossReason::Destroyed));
+        assert!(!state.lost());
+        assert!(state.record_loss(GpuLossReason::Unknown));
+        assert!(state.lost());
+    }
+
+    #[test]
+    fn wgpu_loss_reason_mapping_keeps_destroyed_out_of_recovery() {
+        let state = GpuDeviceState::new();
+
+        handle_device_lost(&state, wgpu::DeviceLostReason::Destroyed);
+        assert!(!state.lost());
+        handle_device_lost(&state, wgpu::DeviceLostReason::Unknown);
+        assert!(state.lost());
+        handle_device_lost(&state, wgpu::DeviceLostReason::Unknown);
+        assert_eq!(state.epoch(), 0);
+    }
 
     /// Returns a context if a GPU is available, otherwise `None` so the test
     /// can skip gracefully on headless CI runners.

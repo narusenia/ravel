@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, Weak};
 use ravel_core::id::DataTypeId;
 use ravel_core::types::{BufferData, FrameBuffer, NodeData, PixelFormat};
 
-use crate::device::GpuContext;
+use crate::device::{GpuContext, GpuDeviceState};
 use crate::error::{GpuError, GpuResult};
 use crate::texture_desc::{TextureFormat, TextureUsage};
 use crate::texture_pool::{PooledTexture, TexturePool};
@@ -151,6 +151,12 @@ impl GpuFrameBuffer {
     /// The context this frame's GPU work is submitted through.
     pub fn context(&self) -> &GpuContext {
         &self.ctx
+    }
+
+    /// The shared device state for the texture held by this frame.
+    #[inline]
+    pub fn device_state(&self) -> GpuDeviceState {
+        self.ctx.device_state()
     }
 
     /// Create a completion callback for an external renderer that samples the

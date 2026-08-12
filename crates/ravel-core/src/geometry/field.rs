@@ -1114,7 +1114,16 @@ impl Field for ComposeField {
         let value =
             |slot: usize, index: usize| columns.get(slot).map_or(0.0, |column| column[index]);
         // Only the three template arities are constructible; anything else
-        // falls back to Vec2 so the field stays total.
+        // falls back to Vec2 so the field stays total. `Field::sample` cannot
+        // report an error, so a caller that built this by hand with a length
+        // outside 2..=4 silently loses components — the assert names that in
+        // a debug build rather than leaving it to be discovered from a wrong
+        // picture.
+        debug_assert!(
+            (2..=4).contains(&self.sources.len()),
+            "field.compose takes 2, 3 or 4 sources, got {}",
+            self.sources.len()
+        );
         match self.sources.len() {
             3 => AttributeArray::Vec3(
                 (0..length)

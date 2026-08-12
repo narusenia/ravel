@@ -6,9 +6,9 @@
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
-    ComposeField, CurveRemapField, Domain, ExpressionField, FalloffField, FalloffShape, FieldApply,
-    FieldValue, Geometry, LengthField, MaxField, MultiplyField, NoiseField, RampField, apply_field,
-    component_index,
+    ComposeField, ConstantField, CurveRemapField, Domain, ExpressionField, FalloffField,
+    FalloffShape, FieldApply, FieldValue, Geometry, LengthField, MaxField, MultiplyField,
+    NoiseField, RampField, apply_field, component_index,
 };
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
@@ -343,7 +343,7 @@ impl NodeProcessor for ComposeFieldProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let sources = (0..self.components)
-            .map(|slot| field_input(inputs, slot, "field.compose"))
+            .map(|slot| optional_field_input(inputs, slot, "field.compose"))
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Arc::new(FieldValue::new(ComposeField::new(sources))))
     }
@@ -418,6 +418,32 @@ impl NodeProcessor for ApplyFieldProcessor {
     }
 }
 
+/// Reads field input `index`, treating an unconnected port as the constant
+/// zero field.
+///
+/// A `FIELD` port carries a sampler, so its typed zero has to be a sampler
+/// too — `ConstantField(0.0)`, exactly as that type's own documentation says.
+/// Erroring instead would make a half-wired `field.compose` fail rather than
+/// answer zero on the slot the user has not filled in yet, which is not how
+/// any other multi-input node in either domain behaves (`vector.construct`
+/// reads its component parameter, `vector.dot` reads the zero vector).
+///
+/// A port that *is* connected but carries something other than a field is
+/// still an error: that is a wiring mistake, not an empty slot.
+fn optional_field_input(
+    inputs: &[Option<Arc<dyn NodeData>>],
+    index: usize,
+    processor: &str,
+) -> anyhow::Result<FieldValue> {
+    match inputs.get(index).and_then(|input| input.as_ref()) {
+        None => Ok(FieldValue::new(ConstantField(0.0))),
+        Some(input) => input
+            .downcast_ref::<FieldValue>()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{processor}: input {index} is not a FieldValue")),
+    }
+}
+
 fn field_input(
     inputs: &[Option<Arc<dyn NodeData>>],
     index: usize,
@@ -476,6 +502,36 @@ mod tests {
 
     /// Evaluate `node` with `proc` in a fresh evaluator, wiring each value in
     /// `inputs` to the input slot of the same index via a stub source.
+    /// Like [`run`], but a `None` slot is left **unwired** rather than fed a
+    /// zero — the only way to exercise the unconnected-port path — and the
+    /// evaluation result is returned instead of unwrapped.
+    fn run_opt(
+        node: &Node,
+        proc: Arc<dyn NodeProcessor>,
+        inputs: &[Option<Arc<dyn NodeData>>],
+    ) -> Result<Arc<dyn NodeData>, ravel_core::eval::EvalError> {
+        let mut graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, proc);
+        for (i, value) in inputs.iter().enumerate() {
+            let Some(value) = value else { continue };
+            let src_id = NodeId::new(100 + i as u64);
+            graph = graph
+                .add_node(Node::new(src_id, "test.source").with_output("out", value.data_type_id()))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(i as u64 + 1),
+                    src_id,
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(i as u32),
+                )
+                .unwrap();
+            ev.register(src_id, Arc::new(StubSource(value.clone())));
+        }
+        ev.evaluate(&graph, node.id, &ctx())
+    }
+
     fn run(
         node: &Node,
         proc: Arc<dyn NodeProcessor>,
@@ -1238,7 +1294,8 @@ mod tests {
     use ravel_core::geometry::Field;
     use ravel_core::registry::builtin::{
         FIELD_COMPONENTS, FIELD_COMPOSE_VEC2, FIELD_COMPOSE_VEC3, FIELD_COMPOSE_VEC4,
-        VECTOR_CONSTRUCT_VEC3, VECTOR_LENGTH, VECTOR_SPLIT_VEC3,
+        VECTOR_CONSTRUCT_VEC3, VECTOR_LENGTH, VECTOR_SPLIT_VEC2, VECTOR_SPLIT_VEC3,
+        VECTOR_SPLIT_VEC4,
     };
     use ravel_core::types::{PortRecord, Scalar, Vec3, Vec4};
 
@@ -1444,15 +1501,40 @@ mod tests {
 
     /// An unconnected slot is the typed zero of a `FIELD` port, so a
     /// half-wired compose answers zeros there rather than failing.
+    ///
+    /// The slot is left as `None` — wiring a `ConstantField(0.0)` into it
+    /// instead would exercise the connected path and pass whether or not the
+    /// unconnected one works at all.
     #[test]
     fn an_unwired_compose_slot_is_zero() {
-        let composed = run(
+        let composed = run_opt(
             &compose_node(FIELD_COMPOSE_VEC2, 2),
             Arc::new(ComposeFieldProcessor::new(2)),
-            &[scalar_field(4.0), scalar_field(0.0)],
-        );
+            &[Some(scalar_field(4.0)), None],
+        )
+        .unwrap_or_else(|e| panic!("a half-wired compose evaluates: {e}"));
         assert_eq!(component_of(composed.clone(), "x"), 4.0);
         assert_eq!(component_of(composed, "y"), 0.0);
+    }
+
+    /// A slot that *is* wired but carries something other than a field is a
+    /// wiring mistake, not an empty slot: it still errors.
+    #[test]
+    fn a_compose_slot_wired_to_a_non_field_is_an_error() {
+        let err = run_opt(
+            &compose_node(FIELD_COMPOSE_VEC2, 2),
+            Arc::new(ComposeFieldProcessor::new(2)),
+            &[
+                Some(scalar_field(4.0)),
+                Some(Arc::new(Scalar(1.0)) as Arc<dyn NodeData>),
+            ],
+        )
+        .err()
+        .expect("a non-field on a field port is a wiring mistake");
+        // The evaluator wraps the processor's message, so the contract this
+        // pins is "it fails" — not the wording. Zero-filling here instead
+        // would turn a mis-wired port into a silent zero component.
+        assert!(err.to_string().contains("node:1"), "{err}");
     }
 
     /// `field.angle` is `atan2(y, x)`: the quarter turns land exactly, the
@@ -1568,28 +1650,63 @@ mod tests {
     /// the same vector.
     #[test]
     fn field_component_answers_what_vector_split_answers() {
-        let vector = Vec3(1.5, -2.5, 0.25);
+        use crate::vector::{VectorArity, VectorSplitProcessor};
         let mut registry = ravel_core::registry::NodeRegistry::new();
         ravel_core::registry::builtin::register_builtins(&mut registry);
-        let split = registry
-            .create_node(VECTOR_SPLIT_VEC3, NodeId::new(1))
-            .expect("vector.split.vec3 is registered");
-        let record = value_domain(
-            &crate::vector::VectorSplitProcessor::new(crate::vector::VectorArity::Vec3),
-            &split,
-            vec![Some(Arc::new(vector))],
-        );
-        let record = record
-            .downcast_ref::<PortRecord>()
-            .expect("vector.split answers a PortRecord");
 
-        for (slot, name) in FIELD_COMPONENTS[..3].iter().enumerate() {
-            let from_field = component_of(vector_field(AttributeArray::Vec3(vec![vector])), name);
-            let from_value = record.0[slot]
-                .downcast_ref::<Scalar>()
-                .expect("a split output is a Scalar")
-                .0;
-            assert_eq!(from_field.to_bits(), from_value.to_bits(), "{name}");
+        // Every arity, because `vector.split` is three separate `type_key`s
+        // on the value side and three separate column types on the field
+        // side: pinning one of them leaves the other two free to drift. The
+        // non-finite rows pin the "IEEE passes straight through" claim, which
+        // is where two independent implementations part company first.
+        let cases: Vec<(VectorArity, &str, AttributeArray, Arc<dyn NodeData>)> = vec![
+            (
+                VectorArity::Vec2,
+                VECTOR_SPLIT_VEC2,
+                AttributeArray::Vec2(vec![Vec2(1.5, -2.5)]),
+                Arc::new(Vec2(1.5, -2.5)),
+            ),
+            (
+                VectorArity::Vec2,
+                VECTOR_SPLIT_VEC2,
+                AttributeArray::Vec2(vec![Vec2(f32::INFINITY, f32::NAN)]),
+                Arc::new(Vec2(f32::INFINITY, f32::NAN)),
+            ),
+            (
+                VectorArity::Vec3,
+                VECTOR_SPLIT_VEC3,
+                AttributeArray::Vec3(vec![Vec3(1.5, -2.5, 0.25)]),
+                Arc::new(Vec3(1.5, -2.5, 0.25)),
+            ),
+            (
+                VectorArity::Vec4,
+                VECTOR_SPLIT_VEC4,
+                AttributeArray::Vec4(vec![Vec4(1.5, -2.5, 0.25, -0.75)]),
+                Arc::new(Vec4(1.5, -2.5, 0.25, -0.75)),
+            ),
+        ];
+
+        for (arity, type_key, column, value) in cases {
+            let node = registry
+                .create_node(type_key, NodeId::new(1))
+                .unwrap_or_else(|| panic!("{type_key} is registered"));
+            let record = value_domain(&VectorSplitProcessor::new(arity), &node, vec![Some(value)]);
+            let record = record
+                .downcast_ref::<PortRecord>()
+                .expect("vector.split answers a PortRecord");
+
+            for (slot, name) in FIELD_COMPONENTS[..arity.components()].iter().enumerate() {
+                let from_field = component_of(vector_field(column.clone()), name);
+                let from_value = record.0[slot]
+                    .downcast_ref::<Scalar>()
+                    .expect("a split output is a Scalar")
+                    .0;
+                assert_eq!(
+                    from_field.to_bits(),
+                    from_value.to_bits(),
+                    "{type_key} component {name}"
+                );
+            }
         }
     }
 

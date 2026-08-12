@@ -19,7 +19,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
 use ravel_core::color::ColorSpace;
-use ravel_core::composition::{AssetKind, MediaAssetEntry};
+use ravel_core::composition::{AssetKind, MediaAssetEntry, MediaAssets};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
@@ -48,6 +48,14 @@ pub struct MediaBinGpuiPanel {
     /// The filtered rows, rebuilt from the document whenever it or the
     /// filter/search state changes (never inside `render()`).
     rows: Vec<MediaBinRow>,
+    /// The persistent media-asset map the rows were built from. Layer edits
+    /// mint a new `Document` while sharing this map, so `ptr_eq` against it
+    /// skips the row walk altogether.
+    ///
+    /// The map rather than the whole `Document`: holding the document would
+    /// pin the previous snapshot's compositions and layer graphs alive for as
+    /// long as the panel is open, to answer a question about one field.
+    last_media_assets: Option<MediaAssets>,
     /// Unit-5 thumbnail cache. Requests are kicked from `rebuild_rows`;
     /// completion notifies, and the observer decodes what is ready.
     thumbnails: Entity<ThumbnailCache>,
@@ -90,7 +98,7 @@ impl MediaBinGpuiPanel {
                 if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
                     return;
                 }
-                this.rebuild_rows(cx);
+                this.rebuild_rows_if_media_changed(cx);
             })
         });
         let audio = cx
@@ -139,6 +147,7 @@ impl MediaBinGpuiPanel {
             project,
             audio,
             rows: Vec::new(),
+            last_media_assets: None,
             thumbnails,
             thumb_images: HashMap::new(),
             search,
@@ -162,20 +171,19 @@ impl MediaBinGpuiPanel {
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         super::sync_probe::record(super::sync_probe::PanelSync::MediaBinRows);
-        // NOTE (`MED-UI-05`, left open deliberately): the document epoch moves
-        // for every edit and almost none of them are media edits, so a layer
-        // drag rebuilds this identical list once per mouse move. Returning early
-        // on `self.rows == rows` removes the repaint and the thumbnail lookups —
-        // but it also makes `a_completed_save_rebuilds_no_document_panel` and
-        // `a_composition_switch_leaves_every_gate_open_for_the_next_edit` fail,
-        // because both assert that *every* document-mirroring panel notifies for
-        // a document edit. For this panel that premise is what is wrong, not the
-        // skip; relaxing a `HIGH-07` regression test is not a call to make while
-        // chasing a repaint.
-        self.rows = match &self.project {
-            Some(project) => self.state.rows(project.read(cx).document()),
-            None => Vec::new(),
-        };
+        let document = self
+            .project
+            .as_ref()
+            .map(|project| project.read(cx).document().clone());
+        let rows = document
+            .as_ref()
+            .map(|document| self.state.rows(document))
+            .unwrap_or_default();
+        let rows_changed = self.rows != rows;
+        self.rows = rows;
+        self.last_media_assets = document
+            .as_ref()
+            .map(|document| document.media_assets.clone());
         // Kick thumbnail generation for the visible rows here (not in
         // `render()`): `get_or_request` is a cheap in-memory lookup that
         // spawns background work on a miss.
@@ -183,14 +191,7 @@ impl MediaBinGpuiPanel {
             .rows
             .iter()
             .filter_map(|row| {
-                let entry = self
-                    .project
-                    .as_ref()?
-                    .read(cx)
-                    .document()
-                    .media_assets
-                    .get(&row.asset_id)?
-                    .clone();
+                let entry = document.as_ref()?.media_assets.get(&row.asset_id)?.clone();
                 Some((row.asset_id.clone(), entry))
             })
             .collect();
@@ -206,13 +207,33 @@ impl MediaBinGpuiPanel {
                 }
             }
         });
-        self.refresh_thumbnails(cx);
-        cx.notify();
+        let thumbnails_changed = self.refresh_thumbnails(cx);
+        if rows_changed || thumbnails_changed {
+            cx.notify();
+        }
+    }
+
+    /// The document observer only needs to rebuild when the persistent media
+    /// map changed. Layer edits share that map, so this check avoids building
+    /// the same row model on every drag tick.
+    fn rebuild_rows_if_media_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = &self.project else {
+            return;
+        };
+        let document = project.read(cx).document();
+        if self
+            .last_media_assets
+            .as_ref()
+            .is_some_and(|last| last.ptr_eq(&document.media_assets))
+        {
+            return;
+        }
+        self.rebuild_rows(cx);
     }
 
     /// Decode whatever the cache has ready into renderable images. Runs on
     /// cache notifications and rebuilds — never in `render()`.
-    fn refresh_thumbnails(&mut self, cx: &mut Context<Self>) {
+    fn refresh_thumbnails(&mut self, cx: &mut Context<Self>) -> bool {
         let entries: Vec<(String, ThumbnailIdentity)> = self
             .rows
             .iter()
@@ -241,7 +262,7 @@ impl MediaBinGpuiPanel {
             })
             .collect();
         if entries.is_empty() {
-            return;
+            return false;
         }
         let ready: Vec<(String, ThumbnailIdentity, Arc<[u8]>)> =
             self.thumbnails.update(cx, |cache, cx| {
@@ -262,9 +283,11 @@ impl MediaBinGpuiPanel {
                     })
                     .collect()
             });
+        let mut changed = false;
         for (id, identity, bytes) in ready {
             if let Some(image) = decode_thumbnail(&bytes) {
                 self.thumb_images.insert(id, (identity, image));
+                changed = true;
             }
         }
         // Assets can leave the document (delete, undo): drop their images so
@@ -272,9 +295,12 @@ impl MediaBinGpuiPanel {
         // path and regenerates, but the id mapping must not outlive the asset.
         if let Some(project) = &self.project {
             let document = project.read(cx).document();
+            let before = self.thumb_images.len();
             self.thumb_images
                 .retain(|id, _| document.media_assets.contains_key(id));
+            changed |= before != self.thumb_images.len();
         }
+        changed
     }
 
     // ----- row interaction --------------------------------------------------

@@ -9,8 +9,10 @@
 //! callback is the expensive half — a `Composition` or `Graph` deep compare, a
 //! full row walk, a section rebuild. `ProjectState` also notifies for state no
 //! panel mirrors, so each panel holds the epoch it last synced and returns
-//! early when it has not moved. This test drives a real notify of each kind
-//! through a live panel: the gate has to absorb one and pass the other.
+//! early when it has not moved. MediaBin adds a narrower media-assets check:
+//! layer-only document edits do not change the rows it displays. This test
+//! drives a real notify of each kind through live panels: each gate has to
+//! absorb irrelevant work and pass relevant work.
 //!
 //! Notification probes cannot answer the second question — GPUI coalesces the
 //! `cx.notify()` calls of one effect cycle, so one callback may stand for any
@@ -24,11 +26,13 @@ use gpui::{
     WindowHandle, px,
 };
 use gpui_component::Root;
+use ravel_app::media::import::ProbedAsset;
 use ravel_app::panels::{
     self, media_bin::MediaBinGpuiPanel, node_editor::NodeEditorPanel, outliner::OutlinerGpuiPanel,
     properties::PropertiesGpuiPanel, timeline::TimelineGpuiPanel,
 };
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
+use ravel_core::composition::{AssetKind, AssetMetadata};
 use ravel_core::runtime::InvalidationHint;
 
 const WINDOW_SIZE: Size<Pixels> = Size {
@@ -36,7 +40,7 @@ const WINDOW_SIZE: Size<Pixels> = Size {
     height: px(600.0),
 };
 
-/// All five panels that mirror the document, so a gate removed from any one of
+/// All five panels that observe the document, so a gate removed from any one of
 /// them fails a test.
 struct Panels {
     node_editor: Entity<NodeEditorPanel>,
@@ -75,6 +79,7 @@ struct Probe {
 struct Harness {
     _window: WindowHandle<Root>,
     project: Entity<ProjectState>,
+    media_bin: Entity<MediaBinGpuiPanel>,
     /// Notifications reaching `ProjectState` observers.
     project_probe: Entity<Probe>,
     /// One probe per document-mirroring panel, `(name, probe)`.
@@ -159,6 +164,7 @@ fn open_panels(cx: &mut TestAppContext) -> Harness {
     Harness {
         _window: window,
         project,
+        media_bin,
         project_probe,
         panel_probes,
         selection_probe,
@@ -219,6 +225,21 @@ fn add_layer(harness: &Harness, cx: &mut TestAppContext) -> ravel_core::id::Laye
     });
     cx.run_until_parked();
     layer
+}
+
+fn import_still(harness: &Harness, path: &str, cx: &mut TestAppContext) {
+    harness.project.update(cx, |project, cx| {
+        project.import_media(
+            vec![ProbedAsset {
+                path: path.into(),
+                kind: AssetKind::Still,
+                metadata: AssetMetadata::default(),
+            }],
+            vec![],
+            cx,
+        );
+    });
+    cx.run_until_parked();
 }
 
 // ---------------------------------------------------------------------------
@@ -359,13 +380,14 @@ fn a_parameter_drag_sync_counts(cx: &mut TestAppContext) {
     }
     let counts = sync_counts("node parameter drag, 10 moves");
 
-    // Exactly one sync per move, for every mirror. The document really does
-    // change on every move, so one is the floor; more than one is a second
-    // path asking for work the first already did (`MED-UI-06`). Properties is
-    // the one that used to answer twice — the editor republishes its target
-    // from `refresh_from_document` while the `ProjectState` notify of the same
-    // move asks for the same re-resolve.
+    // Exactly one sync per move for panels whose displayed model changes. The
+    // MediaBin shows media assets, not layers, so a parameter drag is a no-op
+    // for that panel and its persistent asset map stays shared.
     for (name, value) in &counts {
+        if *name == "media_bin.rebuild_rows" {
+            assert_eq!(*value, 0, "{name} must ignore layer parameter drags");
+            continue;
+        }
         assert_eq!(
             *value, MOVES,
             "{name} must resolve exactly once per move of the drag"
@@ -425,17 +447,18 @@ fn a_second_of_playback_sync_counts(cx: &mut TestAppContext) {
          so at most the first frame may resolve it ({} for {FRAMES} frames)",
         count_of(&counts, "properties.refresh_values")
     );
-    for name in [
-        "timeline.sync_from_project",
-        "outliner.rebuild_rows",
-        "media_bin.rebuild_rows",
-    ] {
+    for name in ["timeline.sync_from_project", "outliner.rebuild_rows"] {
         assert_eq!(
             count_of(&counts, name),
             0,
             "{name} mirrors the document, which playback does not change"
         );
     }
+    assert_eq!(
+        count_of(&counts, "media_bin.rebuild_rows"),
+        0,
+        "MediaBin shows media assets, so adding a layer changes nothing it displays"
+    );
 }
 
 /// The other half of the skip above, and the regression it could cause: a layer
@@ -814,11 +837,9 @@ fn the_timeline_syncs_on_a_document_change_and_not_otherwise(cx: &mut TestAppCon
     reset_syncs();
     add_layer(&harness, cx);
     let counts = sync_counts("one document edit");
-    for name in [
-        "timeline.sync_from_project",
-        "outliner.rebuild_rows",
-        "media_bin.rebuild_rows",
-    ] {
+    // MediaBin shows media assets, not layers; this layer-only edit must not
+    // make it rebuild. Its asset-change coverage is a separate test below.
+    for name in ["timeline.sync_from_project", "outliner.rebuild_rows"] {
         assert_eq!(
             count_of(&counts, name),
             1,
@@ -900,6 +921,12 @@ fn a_completed_save_rebuilds_no_document_panel(cx: &mut TestAppContext) {
         "the edit must notify project observers"
     );
     for ((name, before), (_, after)) in before.iter().zip(after_edit.iter()) {
+        // MediaBin shows media assets, not layers; adding a layer leaves its
+        // persistent asset map unchanged, so there is nothing to rebuild.
+        if *name == "media_bin" {
+            assert_eq!(after, before, "{name} must ignore a layer-only edit");
+            continue;
+        }
         assert!(
             after > before,
             "{name} must rebuild for a document edit ({before} -> {after})"
@@ -980,6 +1007,12 @@ fn a_composition_switch_leaves_every_gate_open_for_the_next_edit(cx: &mut TestAp
     add_layer(&harness, cx);
     for ((name, before), (_, after)) in before.iter().zip(panel_counts(&harness, cx).iter()) {
         // Properties has no target here, so it legitimately stays put.
+        // MediaBin shows media assets, not layers; add_layer does not change
+        // the asset map it displays.
+        if *name == "media_bin" {
+            assert_eq!(after, before, "{name} must ignore a layer-only edit");
+            continue;
+        }
         if *name == "properties" {
             continue;
         }
@@ -989,6 +1022,44 @@ fn a_composition_switch_leaves_every_gate_open_for_the_next_edit(cx: &mut TestAp
              ({before} -> {after})"
         );
     }
+}
+
+/// MediaBin is allowed to ignore layer-only document edits, but a media asset
+/// import or deletion changes the rows it displays and must rebuild exactly
+/// once for each document change.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_media_asset_change_rebuilds_media_bin_rows(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+
+    reset_syncs();
+    import_still(&harness, "/media/plate.png", cx);
+    let counts = sync_counts("media asset import");
+    assert_eq!(
+        count_of(&counts, "media_bin.rebuild_rows"),
+        1,
+        "importing an asset must rebuild the MediaBin"
+    );
+    harness
+        .media_bin
+        .read_with(cx, |panel, _| assert_eq!(panel.rows().len(), 1));
+
+    reset_syncs();
+    harness.project.update(cx, |project, cx| {
+        let mut document = project.document().clone();
+        assert!(document.media_assets.remove("plate").is_some());
+        project.commit_document(document, InvalidationHint::Structural, cx);
+    });
+    cx.run_until_parked();
+    let counts = sync_counts("media asset deletion");
+    assert_eq!(
+        count_of(&counts, "media_bin.rebuild_rows"),
+        1,
+        "deleting an asset must rebuild the MediaBin"
+    );
+    harness
+        .media_bin
+        .read_with(cx, |panel, _| assert!(panel.rows().is_empty()));
 }
 
 /// The second wave HIGH-07 describes: the Node Editor used to republish

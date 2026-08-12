@@ -14,10 +14,11 @@ pub mod triangulate;
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 pub use container::{Domain, Geometry, GeometrySummary, Positions, Primitive};
 pub use field::{
-    AddField, AttributeField, BlendField, CombineMode, ComponentMask, ConstantField,
-    CurveRemapField, ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError,
-    FieldExpressionError, FieldSample, FieldValue, ImageSamplerField, MaxField, MultiplyField,
-    NoiseField, RampField, apply_field,
+    AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
+    ComposeField, ConstantField, CurveRemapField, ExpressionField, FalloffField, FalloffShape,
+    Field, FieldApply, FieldError, FieldExpressionError, FieldSample, FieldValue,
+    ImageSamplerField, LengthField, MaxField, MultiplyField, NoiseField, RampField, apply_field,
+    component_index,
 };
 pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,

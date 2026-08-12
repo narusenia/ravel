@@ -168,6 +168,12 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_binary("field.multiply", "Field Multiply"));
     reg.register(field_binary("field.max", "Field Max"));
     reg.register(field_blend());
+    reg.register(field_length());
+    reg.register(field_angle());
+    reg.register(field_component());
+    reg.register(field_compose(FIELD_COMPOSE_VEC2, "Field Compose Vec2", 2));
+    reg.register(field_compose(FIELD_COMPOSE_VEC3, "Field Compose Vec3", 3));
+    reg.register(field_compose(FIELD_COMPOSE_VEC4, "Field Compose Vec4", 4));
     reg.register(field_attribute());
     reg.register(field_apply());
 }
@@ -504,8 +510,64 @@ fn field_blend() -> NodeTemplate {
         .with_param_range("amount", 0.0..=1.0, 0.0..=1.0)
 }
 
-/// Single-component selectors offered by `field.attribute`.
+/// Single-component selectors offered by `field.attribute` and
+/// `field.component`, which double as the input port names of
+/// `field.compose`.
 pub const FIELD_COMPONENTS: [&str; 4] = ["x", "y", "z", "w"];
+
+/// `type_key` of the 2-component `field.compose` template.
+pub const FIELD_COMPOSE_VEC2: &str = "field.compose.vec2";
+/// `type_key` of the 3-component `field.compose` template.
+pub const FIELD_COMPOSE_VEC3: &str = "field.compose.vec3";
+/// `type_key` of the 4-component `field.compose` template.
+pub const FIELD_COMPOSE_VEC4: &str = "field.compose.vec4";
+
+/// `field.length`: a vector field's magnitude, as a scalar field.
+///
+/// One `type_key` covers every arity. Unlike the value-domain
+/// `vector.normalize`, arity cannot be read off a port here — every field
+/// wire is `FIELD` whatever the field samples to — so the only reason to
+/// split would be the *number of ports*, and this node has one of each.
+fn field_length() -> NodeTemplate {
+    NodeTemplate::new("field.length", "Field Length", NodeCategory::Field)
+        .with_input(field_input("field"))
+        .with_output(field_output())
+}
+
+/// `field.angle`: the direction of a vector field as radians, `atan2(y, x)`.
+///
+/// The bridge from a direction field to `rot`, which is an F32 and cannot
+/// take a vector (`vector-field-plan.md`: no implicit conversion, an explicit
+/// node instead).
+fn field_angle() -> NodeTemplate {
+    NodeTemplate::new("field.angle", "Field Angle", NodeCategory::Field)
+        .with_input(field_input("field"))
+        .with_output(field_output())
+}
+
+/// `field.component`: one component of a vector field, as a scalar field.
+fn field_component() -> NodeTemplate {
+    NodeTemplate::new("field.component", "Field Component", NodeCategory::Field)
+        .with_input(field_input("field"))
+        .with_output(field_output())
+        .with_param(string_parameter("component", "x"))
+        .with_param_options("component", FIELD_COMPONENTS)
+}
+
+/// One arity of `field.compose`: scalar fields in, a vector field out.
+///
+/// Arity is a separate `type_key` because the **number of input ports**
+/// follows it and port lists live on the node instance — the same reason
+/// `vector.split` splits, only on the input side. The output port is `FIELD`
+/// either way, so nothing about the wire type forces the split.
+fn field_compose(type_key: &str, label: &str, components: usize) -> NodeTemplate {
+    let mut template =
+        NodeTemplate::new(type_key, label, NodeCategory::Field).with_output(field_output());
+    for key in &FIELD_COMPONENTS[..components] {
+        template = template.with_input(field_input(key));
+    }
+    template
+}
 
 fn field_attribute() -> NodeTemplate {
     NodeTemplate::new("field.attribute", "Attribute Field", NodeCategory::Field)
@@ -1579,7 +1641,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 65);
+        assert_eq!(reg.all_templates().count(), 71);
     }
 
     #[test]
@@ -1588,11 +1650,60 @@ mod tests {
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 19);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
-        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 11);
+        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 17);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 25);
+    }
+
+    /// Each `field.compose` arity declares one `FIELD` input per component,
+    /// named after it, and one `FIELD` output. The port *count* is what the
+    /// arity decides here — a Vec2 compose reading three inputs would build a
+    /// Vec2 out of two of them and silently drop the third.
+    #[test]
+    fn field_compose_arities_declare_one_input_per_component() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for (type_key, components) in [
+            (FIELD_COMPOSE_VEC2, 2),
+            (FIELD_COMPOSE_VEC3, 3),
+            (FIELD_COMPOSE_VEC4, 4),
+        ] {
+            let t = reg.get(type_key).unwrap_or_else(|| panic!("{type_key}"));
+            let names: Vec<&str> = t.inputs.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, FIELD_COMPONENTS[..components], "{type_key}");
+            for port in &t.inputs {
+                assert_eq!(port.accepted_types, [DataTypeId::FIELD], "{type_key}");
+            }
+            assert_eq!(t.outputs.len(), 1, "{type_key}");
+            assert_eq!(t.outputs[0].data_type, DataTypeId::FIELD, "{type_key}");
+        }
+    }
+
+    /// The scalar-answering transforms take one field and give one back, and
+    /// `field.component` offers a closed set of component names rather than a
+    /// free string.
+    #[test]
+    fn field_transforms_declare_one_field_in_and_one_out() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for type_key in ["field.length", "field.angle", "field.component"] {
+            let t = reg.get(type_key).unwrap_or_else(|| panic!("{type_key}"));
+            assert_eq!(t.inputs.len(), 1, "{type_key}");
+            assert_eq!(
+                t.inputs[0].accepted_types,
+                [DataTypeId::FIELD],
+                "{type_key}"
+            );
+            assert_eq!(t.outputs.len(), 1, "{type_key}");
+            assert_eq!(t.outputs[0].data_type, DataTypeId::FIELD, "{type_key}");
+        }
+        let component = reg.get("field.component").expect("field.component");
+        assert_eq!(
+            component.param_options.get("component").map(Vec::as_slice),
+            Some(&FIELD_COMPONENTS.map(String::from)[..]),
+        );
     }
 
     /// Each `vector.construct` arity outputs its own vector type and declares

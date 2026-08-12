@@ -750,12 +750,7 @@ impl AttributeField {
     /// Select a component by name (`"x"`, `"y"`, `"z"`, `"w"` or `"r"`, `"g"`,
     /// `"b"`, `"a"`). Anything else selects the first component.
     pub fn with_component(mut self, spec: &str) -> Self {
-        self.component = match spec.chars().next().map(|c| c.to_ascii_lowercase()) {
-            Some('y') | Some('g') => 1,
-            Some('z') | Some('b') => 2,
-            Some('w') | Some('a') => 3,
-            _ => 0,
-        };
+        self.component = component_index(spec);
         self
     }
 
@@ -906,6 +901,291 @@ fn normalize_in_place(values: &mut [f32]) -> bool {
         *value = (*value - min) / span;
     }
     true
+}
+
+/// Component index named by a selector such as `"x"` / `"z"` or `"r"` / `"b"`.
+///
+/// Positional, so both spellings of a slot agree with [`ComponentMask`].
+/// Anything else selects the first component — a half-typed selector in the
+/// node editor must not turn the graph red.
+pub fn component_index(spec: &str) -> usize {
+    match spec.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('y') | Some('g') => 1,
+        Some('z') | Some('b') => 2,
+        Some('w') | Some('a') => 3,
+        _ => 0,
+    }
+}
+
+/// How many components a field transform can read from a sampled column, or
+/// `None` when there is nothing to transform.
+///
+/// A column whose length does not match the batch, or whose type is not
+/// modulatable (`I32`, `Bool`, `Str`), has no vector in it. Both cases warn
+/// **once per sample** and let the caller read zero, exactly as
+/// [`combine_binary`] does: [`Field`] answers a column rather than a
+/// `Result`, so a half-built graph must not take the evaluation down, and a
+/// warning per element per frame is not something an author can act on.
+fn transform_arity(sampled: &AttributeArray, length: usize, node: &str) -> Option<usize> {
+    if sampled.len() != length {
+        tracing::warn!(
+            node,
+            expected = length,
+            actual = sampled.len(),
+            "field transform: the source column has the wrong length; reading zero"
+        );
+        return None;
+    }
+    let arity = component_arity(sampled.attr_type());
+    if arity.is_none() {
+        tracing::warn!(
+            node,
+            attr_type = ?sampled.attr_type(),
+            "field transform: the source is not a numeric field; reading zero"
+        );
+    }
+    arity
+}
+
+/// The four components of element `index`, zero past the source's own arity.
+///
+/// The clamp is what keeps a scalar source from *broadcasting*:
+/// [`sampled_component`] answers an `F32` column's value for every slot, which
+/// is the promotion rule binary combination wants and the opposite of what a
+/// transform wants — `field.angle` on a scalar field must read `y = 0`, not
+/// `y = x`.
+fn transform_components(sampled: &AttributeArray, arity: usize, index: usize) -> [f32; 4] {
+    std::array::from_fn(|slot| {
+        if slot < arity {
+            sampled_component(sampled, index, slot)
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Euclidean length of the first `arity` components of `c`.
+///
+/// Scaled by the largest component rather than summing the raw squares.
+/// `(f32::MAX, 0)` squares to an infinity and `(f32::MIN_POSITIVE, 0)` squares
+/// to zero, so the direct form answers `inf` and `0` for two vectors whose
+/// lengths are perfectly representable. Dividing through by the largest
+/// component first keeps every square inside `0..=1`.
+///
+/// The value-domain `vector.length` node computes the same thing over a wire
+/// value instead of a column. The two are separate because neither crate can
+/// call the other's — this is `ravel-core`, that is `ravel-nodes` — and
+/// `field_length_answers_what_vector_length_answers` pins them to the same
+/// answer, bit for bit.
+fn magnitude(arity: usize, c: [f32; 4]) -> f32 {
+    let comps = &c[..arity];
+    let scale = comps.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    // Scaling needs a finite, non-zero divisor. A zero vector, an infinity and
+    // a `NaN` all already have their answer in the raw sum — and `max` skips
+    // `NaN`, so that case has to come back here to stay a `NaN`.
+    if !scale.is_finite() || scale == 0.0 {
+        return comps.iter().map(|v| v * v).sum::<f32>().sqrt();
+    }
+    scale
+        * comps
+            .iter()
+            .map(|v| (v / scale).powi(2))
+            .sum::<f32>()
+            .sqrt()
+}
+
+/// `field.length`: the magnitude of a vector field, as a scalar field.
+///
+/// The zero vector answers `0`, which is its length and not a special case.
+/// A scalar source answers `|value|`.
+#[derive(Clone, Debug)]
+pub struct LengthField {
+    pub source: FieldValue,
+}
+
+impl LengthField {
+    pub fn new(source: FieldValue) -> Self {
+        Self { source }
+    }
+}
+
+impl Field for LengthField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.source.byte_size()
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let length = input.len();
+        let sampled = self.source.sample(input);
+        let Some(arity) = transform_arity(&sampled, length, "field.length") else {
+            return AttributeArray::F32(vec![0.0; length]);
+        };
+        AttributeArray::F32(
+            (0..length)
+                .map(|index| magnitude(arity, transform_components(&sampled, arity, index)))
+                .collect(),
+        )
+    }
+}
+
+/// `field.component`: one component of a vector field, as a scalar field.
+///
+/// A component the source does not carry reads `0.0` and warns once per
+/// sample, the way [`AttributeField`] reports a component its column lacks:
+/// asking a Vec2 field for `z` is a misconfiguration, not a value.
+#[derive(Clone, Debug)]
+pub struct ComponentField {
+    pub source: FieldValue,
+    /// Component index (`x`/`r` is 0).
+    pub component: usize,
+}
+
+impl ComponentField {
+    pub fn new(source: FieldValue, component: usize) -> Self {
+        Self { source, component }
+    }
+}
+
+impl Field for ComponentField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.source.byte_size()
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let length = input.len();
+        let sampled = self.source.sample(input);
+        let zero = || AttributeArray::F32(vec![0.0; length]);
+        let Some(arity) = transform_arity(&sampled, length, "field.component") else {
+            return zero();
+        };
+        if self.component >= arity {
+            tracing::warn!(
+                component = self.component,
+                attr_type = ?sampled.attr_type(),
+                "field.component: the source field has no such component; reading zero"
+            );
+            return zero();
+        }
+        AttributeArray::F32(
+            (0..length)
+                .map(|index| sampled_component(&sampled, index, self.component))
+                .collect(),
+        )
+    }
+}
+
+/// `field.compose`: two, three or four scalar fields into one vector field.
+///
+/// Each source contributes its own first component, so wiring a vector field
+/// into a slot takes its `x` rather than failing — the same reading
+/// [`AttributeField`] gives an unqualified column.
+#[derive(Clone, Debug)]
+pub struct ComposeField {
+    /// One source per component, in `x`, `y`, `z`, `w` order.
+    pub sources: Vec<FieldValue>,
+}
+
+impl ComposeField {
+    pub fn new(sources: Vec<FieldValue>) -> Self {
+        Self { sources }
+    }
+}
+
+impl Field for ComposeField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.sources.iter().map(FieldValue::byte_size).sum::<u64>()
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let length = input.len();
+        let columns: Vec<Vec<f32>> = self
+            .sources
+            .iter()
+            .map(|source| {
+                let sampled = source.sample(input);
+                match transform_arity(&sampled, length, "field.compose") {
+                    Some(_) => (0..length)
+                        .map(|index| sampled_component(&sampled, index, 0))
+                        .collect(),
+                    None => vec![0.0; length],
+                }
+            })
+            .collect();
+        let value =
+            |slot: usize, index: usize| columns.get(slot).map_or(0.0, |column| column[index]);
+        // Only the three template arities are constructible; anything else
+        // falls back to Vec2 so the field stays total. `Field::sample` cannot
+        // report an error, so a caller that built this by hand with a length
+        // outside 2..=4 silently loses components — the assert names that in
+        // a debug build rather than leaving it to be discovered from a wrong
+        // picture.
+        debug_assert!(
+            (2..=4).contains(&self.sources.len()),
+            "field.compose takes 2, 3 or 4 sources, got {}",
+            self.sources.len()
+        );
+        match self.sources.len() {
+            3 => AttributeArray::Vec3(
+                (0..length)
+                    .map(|i| Vec3(value(0, i), value(1, i), value(2, i)))
+                    .collect(),
+            ),
+            4 => AttributeArray::Vec4(
+                (0..length)
+                    .map(|i| Vec4(value(0, i), value(1, i), value(2, i), value(3, i)))
+                    .collect(),
+            ),
+            _ => AttributeArray::Vec2(
+                (0..length)
+                    .map(|i| Vec2(value(0, i), value(1, i)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// `field.angle`: the direction of a vector field, as a scalar field of
+/// radians in `-π..=π` (`atan2(y, x)`).
+///
+/// This is how a direction reaches `rot`, which is an F32 in radians and can
+/// take no vector: `field.direction_to → field.angle → field.apply(rot)`.
+///
+/// **The zero vector answers `0`.** It has no direction, and `atan2(0, 0)` is
+/// `0` in IEEE 754 — inventing an error for the point that happens to sit on
+/// the centre of a radial field would fail the common case. A source with a
+/// single component reads `y = 0`, so it answers `0` where the value is
+/// positive and `π` where it is negative.
+#[derive(Clone, Debug)]
+pub struct AngleField {
+    pub source: FieldValue,
+}
+
+impl AngleField {
+    pub fn new(source: FieldValue) -> Self {
+        Self { source }
+    }
+}
+
+impl Field for AngleField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.source.byte_size()
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let length = input.len();
+        let sampled = self.source.sample(input);
+        let Some(arity) = transform_arity(&sampled, length, "field.angle") else {
+            return AttributeArray::F32(vec![0.0; length]);
+        };
+        AttributeArray::F32(
+            (0..length)
+                .map(|index| {
+                    let c = transform_components(&sampled, arity, index);
+                    c[1].atan2(c[0])
+                })
+                .collect(),
+        )
+    }
 }
 
 /// Deferred image-sampling field marker.

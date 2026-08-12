@@ -5,9 +5,10 @@
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AddField, AttributeField, BlendField, CombineMode, ComponentMask, CurveRemapField, Domain,
-    ExpressionField, FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, MaxField,
-    MultiplyField, NoiseField, RampField, apply_field,
+    AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
+    ComposeField, ConstantField, CurveRemapField, Domain, ExpressionField, FalloffField,
+    FalloffShape, FieldApply, FieldValue, Geometry, LengthField, MaxField, MultiplyField,
+    NoiseField, RampField, apply_field, component_index,
 };
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
@@ -261,6 +262,93 @@ impl NodeProcessor for BlendFieldProcessor {
     }
 }
 
+/// `field.length`: wraps its input in a [`LengthField`].
+pub struct LengthFieldProcessor;
+
+impl NodeProcessor for LengthFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = field_input(inputs, 0, "field.length")?;
+        Ok(Arc::new(FieldValue::new(LengthField::new(source))))
+    }
+}
+
+/// `field.angle`: wraps its input in an [`AngleField`].
+pub struct AngleFieldProcessor;
+
+impl NodeProcessor for AngleFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = field_input(inputs, 0, "field.angle")?;
+        Ok(Arc::new(FieldValue::new(AngleField::new(source))))
+    }
+}
+
+/// `field.component`: wraps its input in a [`ComponentField`] selecting the
+/// component the `component` parameter names.
+pub struct ComponentFieldProcessor;
+
+impl NodeProcessor for ComponentFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = field_input(inputs, 0, "field.component")?;
+        Ok(Arc::new(FieldValue::new(ComponentField::new(
+            source,
+            component_index(params.str_or("component", "x")),
+        ))))
+    }
+}
+
+/// `field.compose.vec2` / `vec3` / `vec4`: one scalar field per component in,
+/// a vector field out.
+///
+/// The arity is the processor's, not the wiring's: an unconnected `FIELD`
+/// port evaluates to the typed zero (`ConstantField(0.0)`), so a half-wired
+/// compose answers zeros in the slots nothing drives instead of failing.
+pub struct ComposeFieldProcessor {
+    components: usize,
+}
+
+impl ComposeFieldProcessor {
+    pub const fn new(components: usize) -> Self {
+        Self { components }
+    }
+}
+
+impl NodeProcessor for ComposeFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let sources = (0..self.components)
+            .map(|slot| optional_field_input(inputs, slot, "field.compose"))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Arc::new(FieldValue::new(ComposeField::new(sources))))
+    }
+}
+
 pub struct AttributeFieldProcessor;
 
 impl AttributeFieldProcessor {
@@ -330,6 +418,32 @@ impl NodeProcessor for ApplyFieldProcessor {
     }
 }
 
+/// Reads field input `index`, treating an unconnected port as the constant
+/// zero field.
+///
+/// A `FIELD` port carries a sampler, so its typed zero has to be a sampler
+/// too — `ConstantField(0.0)`, exactly as that type's own documentation says.
+/// Erroring instead would make a half-wired `field.compose` fail rather than
+/// answer zero on the slot the user has not filled in yet, which is not how
+/// any other multi-input node in either domain behaves (`vector.construct`
+/// reads its component parameter, `vector.dot` reads the zero vector).
+///
+/// A port that *is* connected but carries something other than a field is
+/// still an error: that is a wiring mistake, not an empty slot.
+fn optional_field_input(
+    inputs: &[Option<Arc<dyn NodeData>>],
+    index: usize,
+    processor: &str,
+) -> anyhow::Result<FieldValue> {
+    match inputs.get(index).and_then(|input| input.as_ref()) {
+        None => Ok(FieldValue::new(ConstantField(0.0))),
+        Some(input) => input
+            .downcast_ref::<FieldValue>()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{processor}: input {index} is not a FieldValue")),
+    }
+}
+
 fn field_input(
     inputs: &[Option<Arc<dyn NodeData>>],
     index: usize,
@@ -347,7 +461,9 @@ fn field_input(
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::{AttributeArray, AttributeSet, ConstantField, FieldSample, names};
+    use ravel_core::geometry::{
+        AttributeArray, AttributeSet, AttributeType, ConstantField, FieldSample, names,
+    };
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::param_curve::CurveParam;
@@ -386,6 +502,36 @@ mod tests {
 
     /// Evaluate `node` with `proc` in a fresh evaluator, wiring each value in
     /// `inputs` to the input slot of the same index via a stub source.
+    /// Like [`run`], but a `None` slot is left **unwired** rather than fed a
+    /// zero — the only way to exercise the unconnected-port path — and the
+    /// evaluation result is returned instead of unwrapped.
+    fn run_opt(
+        node: &Node,
+        proc: Arc<dyn NodeProcessor>,
+        inputs: &[Option<Arc<dyn NodeData>>],
+    ) -> Result<Arc<dyn NodeData>, ravel_core::eval::EvalError> {
+        let mut graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(node.id, proc);
+        for (i, value) in inputs.iter().enumerate() {
+            let Some(value) = value else { continue };
+            let src_id = NodeId::new(100 + i as u64);
+            graph = graph
+                .add_node(Node::new(src_id, "test.source").with_output("out", value.data_type_id()))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(i as u64 + 1),
+                    src_id,
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(i as u32),
+                )
+                .unwrap();
+            ev.register(src_id, Arc::new(StubSource(value.clone())));
+        }
+        ev.evaluate(&graph, node.id, &ctx())
+    }
+
     fn run(
         node: &Node,
         proc: Arc<dyn NodeProcessor>,
@@ -1141,5 +1287,474 @@ mod tests {
                 .unwrap(),
             &[4.0]
         );
+    }
+
+    // ---- field transforms: length / component / compose / angle -----------
+
+    use ravel_core::geometry::Field;
+    use ravel_core::registry::builtin::{
+        FIELD_COMPONENTS, FIELD_COMPOSE_VEC2, FIELD_COMPOSE_VEC3, FIELD_COMPOSE_VEC4,
+        VECTOR_CONSTRUCT_VEC3, VECTOR_LENGTH, VECTOR_SPLIT_VEC2, VECTOR_SPLIT_VEC3,
+        VECTOR_SPLIT_VEC4,
+    };
+    use ravel_core::types::{PortRecord, Scalar, Vec3, Vec4};
+
+    /// A field answering a fixed column, so a test can hand a transform a
+    /// source of any attribute type.
+    struct ConstantArrayField(AttributeArray);
+
+    impl Field for ConstantArrayField {
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64
+        }
+
+        fn sample(&self, _input: &FieldSample<'_>) -> AttributeArray {
+            self.0.clone()
+        }
+    }
+
+    fn vector_field(column: AttributeArray) -> Arc<dyn NodeData> {
+        Arc::new(FieldValue::new(ConstantArrayField(column)))
+    }
+
+    fn scalar_field(value: f32) -> Arc<dyn NodeData> {
+        Arc::new(FieldValue::new(ConstantField(value)))
+    }
+
+    /// One of the single-input transforms, with its parameters set.
+    fn transform_node(type_key: &str, params: &[(&str, ParameterValue)]) -> Node {
+        let mut node = Node::new(NodeId::new(1), type_key)
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        node
+    }
+
+    /// A `field.compose` node of `components` arity, one `FIELD` input per
+    /// component in `x`, `y`, `z`, `w` order.
+    fn compose_node(type_key: &str, components: usize) -> Node {
+        let mut node = Node::new(NodeId::new(1), type_key).with_output("field", DataTypeId::FIELD);
+        for key in &FIELD_COMPONENTS[..components] {
+            node = node.with_input(*key, &[DataTypeId::FIELD]);
+        }
+        node
+    }
+
+    /// The whole column a field answers, not just its scalar reading.
+    fn typed_sample(value: &dyn NodeData) -> AttributeArray {
+        value
+            .downcast_ref::<FieldValue>()
+            .unwrap()
+            .sample(&FieldSample::positions_only(&[Vec2(0.25, 0.75)], &ctx()))
+    }
+
+    /// `field.length` of a one-element column.
+    fn length_of(column: AttributeArray) -> f32 {
+        sample(
+            run(
+                &transform_node("field.length", &[]),
+                Arc::new(LengthFieldProcessor),
+                &[vector_field(column)],
+            )
+            .as_ref(),
+        )[0]
+    }
+
+    /// `field.angle` of a one-element column.
+    fn angle_of(column: AttributeArray) -> f32 {
+        sample(
+            run(
+                &transform_node("field.angle", &[]),
+                Arc::new(AngleFieldProcessor),
+                &[vector_field(column)],
+            )
+            .as_ref(),
+        )[0]
+    }
+
+    /// `field.component` of a field value, selecting the component `spec`
+    /// names.
+    fn component_of(source: Arc<dyn NodeData>, spec: &str) -> f32 {
+        sample(
+            run(
+                &transform_node(
+                    "field.component",
+                    &[("component", ParameterValue::String(spec.into()))],
+                ),
+                Arc::new(ComponentFieldProcessor),
+                &[source],
+            )
+            .as_ref(),
+        )[0]
+    }
+
+    #[test]
+    fn length_is_the_magnitude_of_a_vector_field() {
+        for (column, expected) in [
+            (AttributeArray::Vec2(vec![Vec2(3.0, 4.0)]), 5.0),
+            (AttributeArray::Vec3(vec![Vec3(2.0, -3.0, 6.0)]), 7.0),
+            (AttributeArray::Vec4(vec![Vec4(1.0, 1.0, 1.0, 1.0)]), 2.0),
+            // A scalar field is one component wide, so its length is |value|.
+            (AttributeArray::F32(vec![-4.0]), 4.0),
+        ] {
+            let got = length_of(column);
+            assert!((got - expected).abs() < 1e-6, "{got} is not {expected}");
+        }
+    }
+
+    /// Summing the raw squares overflows at `f32::MAX` and flushes to zero at
+    /// `f32::MIN_POSITIVE`, even though both lengths are exactly
+    /// representable. The value-domain `vector.length` scales by the largest
+    /// component to avoid it; the field version has to do the same, or the
+    /// two nodes disagree on the inputs where it matters most.
+    #[test]
+    fn length_survives_components_at_the_edges_of_the_range() {
+        for (column, expected) in [
+            (AttributeArray::Vec2(vec![Vec2(f32::MAX, 0.0)]), f32::MAX),
+            (
+                AttributeArray::Vec2(vec![Vec2(f32::MIN_POSITIVE, 0.0)]),
+                f32::MIN_POSITIVE,
+            ),
+            (
+                AttributeArray::Vec3(vec![Vec3(0.0, -f32::MAX, 0.0)]),
+                f32::MAX,
+            ),
+        ] {
+            assert_eq!(length_of(column), expected);
+        }
+    }
+
+    /// The zero vector has no length and no direction. Both answer `0` rather
+    /// than a NaN — a NaN here travels silently into every attribute the
+    /// field is applied to.
+    #[test]
+    fn the_zero_vector_has_length_zero_and_angle_zero() {
+        let zero = || AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]);
+        assert_eq!(length_of(zero()), 0.0);
+        assert_eq!(angle_of(zero()), 0.0);
+        assert!(angle_of(zero()).is_finite(), "atan2(0, 0) must not be NaN");
+    }
+
+    #[test]
+    fn component_reads_the_component_its_parameter_names() {
+        let source = || vector_field(AttributeArray::Vec3(vec![Vec3(1.0, 2.0, 3.0)]));
+        for (spec, expected) in [("x", 1.0), ("y", 2.0), ("z", 3.0)] {
+            assert_eq!(component_of(source(), spec), expected, "{spec}");
+        }
+    }
+
+    /// A component the source does not carry reads zero. The guard matters
+    /// because the shared component reader *broadcasts* an `F32` column
+    /// across every slot — that is the promotion rule binary combination
+    /// wants, and here it would make `y` answer the `x` value.
+    #[test]
+    fn a_component_the_source_lacks_is_zero() {
+        assert_eq!(
+            component_of(
+                vector_field(AttributeArray::Vec2(vec![Vec2(1.0, 2.0)])),
+                "z"
+            ),
+            0.0
+        );
+        assert_eq!(
+            component_of(vector_field(AttributeArray::F32(vec![5.0])), "y"),
+            0.0
+        );
+    }
+
+    /// `compose` then `component` returns each scalar unchanged, at every
+    /// arity — and the composed column really is the vector type its
+    /// `type_key` promises.
+    #[test]
+    fn compose_and_component_round_trip() {
+        for (type_key, components, expected_type) in [
+            (FIELD_COMPOSE_VEC2, 2, AttributeType::Vec2),
+            (FIELD_COMPOSE_VEC3, 3, AttributeType::Vec3),
+            (FIELD_COMPOSE_VEC4, 4, AttributeType::Vec4),
+        ] {
+            let values = [1.5f32, -2.5, 0.25, -7.0];
+            let sources: Vec<Arc<dyn NodeData>> = values[..components]
+                .iter()
+                .map(|value| scalar_field(*value))
+                .collect();
+            let composed = run(
+                &compose_node(type_key, components),
+                Arc::new(ComposeFieldProcessor::new(components)),
+                &sources,
+            );
+            assert_eq!(
+                typed_sample(composed.as_ref()).attr_type(),
+                expected_type,
+                "{type_key}"
+            );
+            for (slot, expected) in values[..components].iter().enumerate() {
+                assert_eq!(
+                    component_of(composed.clone(), FIELD_COMPONENTS[slot]),
+                    *expected,
+                    "{type_key} component {slot}"
+                );
+            }
+        }
+    }
+
+    /// An unconnected slot is the typed zero of a `FIELD` port, so a
+    /// half-wired compose answers zeros there rather than failing.
+    ///
+    /// The slot is left as `None` — wiring a `ConstantField(0.0)` into it
+    /// instead would exercise the connected path and pass whether or not the
+    /// unconnected one works at all.
+    #[test]
+    fn an_unwired_compose_slot_is_zero() {
+        let composed = run_opt(
+            &compose_node(FIELD_COMPOSE_VEC2, 2),
+            Arc::new(ComposeFieldProcessor::new(2)),
+            &[Some(scalar_field(4.0)), None],
+        )
+        .unwrap_or_else(|e| panic!("a half-wired compose evaluates: {e}"));
+        assert_eq!(component_of(composed.clone(), "x"), 4.0);
+        assert_eq!(component_of(composed, "y"), 0.0);
+    }
+
+    /// A slot that *is* wired but carries something other than a field is a
+    /// wiring mistake, not an empty slot: it still errors.
+    #[test]
+    fn a_compose_slot_wired_to_a_non_field_is_an_error() {
+        let err = run_opt(
+            &compose_node(FIELD_COMPOSE_VEC2, 2),
+            Arc::new(ComposeFieldProcessor::new(2)),
+            &[
+                Some(scalar_field(4.0)),
+                Some(Arc::new(Scalar(1.0)) as Arc<dyn NodeData>),
+            ],
+        )
+        .err()
+        .expect("a non-field on a field port is a wiring mistake");
+        // The evaluator wraps the processor's message, so the contract this
+        // pins is "it fails" — not the wording. Zero-filling here instead
+        // would turn a mis-wired port into a silent zero component.
+        assert!(err.to_string().contains("node:1"), "{err}");
+    }
+
+    /// `field.angle` is `atan2(y, x)`: the quarter turns land exactly, the
+    /// sign follows `y` across the negative x axis, and every answer is
+    /// inside `-π..=π`.
+    #[test]
+    fn angle_answers_atan2_within_minus_pi_to_pi() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        for (vector, expected) in [
+            (Vec2(1.0, 0.0), 0.0),
+            (Vec2(1.0, 1.0), FRAC_PI_4),
+            (Vec2(0.0, 1.0), FRAC_PI_2),
+            (Vec2(-1.0, 1.0), 3.0 * FRAC_PI_4),
+            (Vec2(-1.0, 0.0), PI),
+            (Vec2(-1.0, -0.0), -PI),
+            (Vec2(-1.0, -1.0), -3.0 * FRAC_PI_4),
+            (Vec2(0.0, -1.0), -FRAC_PI_2),
+        ] {
+            let got = angle_of(AttributeArray::Vec2(vec![vector]));
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "{vector:?}: {got} is not {expected}"
+            );
+            assert!(
+                (-PI..=PI).contains(&got),
+                "{vector:?}: {got} is outside atan2's range"
+            );
+        }
+    }
+
+    /// A scalar source has no `y`, and the shared component reader
+    /// *broadcasts* an `F32` column into every slot. Unclamped, `atan2(x, x)`
+    /// would answer π/4 for every positive value — a plausible-looking wrong
+    /// answer rather than an obvious one — so the arity clamp is pinned here.
+    #[test]
+    fn angle_of_a_scalar_field_reads_y_as_zero() {
+        use std::f32::consts::PI;
+        assert_eq!(angle_of(AttributeArray::F32(vec![2.0])), 0.0);
+        let negative = angle_of(AttributeArray::F32(vec![-2.0]));
+        assert!((negative - PI).abs() < 1e-6, "{negative} is not pi");
+    }
+
+    // ---- agreement with the value-domain `vector.*` nodes -----------------
+    //
+    // `vector-field-plan.md` unit 8 could not pin these when it landed,
+    // because the field side did not exist yet. The two implementations are
+    // separate — one transforms a column in `ravel-core`, the other a wire
+    // value in `ravel-nodes` — so nothing but a test keeps them answering the
+    // same thing.
+
+    /// Runs a value-domain processor with no parameters.
+    fn value_domain(
+        processor: &dyn NodeProcessor,
+        node: &Node,
+        inputs: Vec<Option<Arc<dyn NodeData>>>,
+    ) -> Arc<dyn NodeData> {
+        processor
+            .process(
+                node,
+                &ctx(),
+                &inputs,
+                &ResolvedParams::default(),
+                &mut Evaluator::new(),
+            )
+            .unwrap()
+    }
+
+    /// `field.length` and `vector.length` agree bit for bit, including the
+    /// edge-of-range inputs that separate the scaled magnitude from a naive
+    /// sum of squares.
+    #[test]
+    fn field_length_answers_what_vector_length_answers() {
+        for (column, value) in [
+            (
+                AttributeArray::Vec2(vec![Vec2(3.0, 4.0)]),
+                Arc::new(Vec2(3.0, 4.0)) as Arc<dyn NodeData>,
+            ),
+            (
+                AttributeArray::Vec3(vec![Vec3(2.0, -3.0, 6.0)]),
+                Arc::new(Vec3(2.0, -3.0, 6.0)),
+            ),
+            (
+                AttributeArray::Vec4(vec![Vec4(1.0, -2.0, 3.0, -4.0)]),
+                Arc::new(Vec4(1.0, -2.0, 3.0, -4.0)),
+            ),
+            (
+                AttributeArray::Vec2(vec![Vec2(f32::MAX, 0.0)]),
+                Arc::new(Vec2(f32::MAX, 0.0)),
+            ),
+            (
+                AttributeArray::Vec2(vec![Vec2(0.0, f32::MIN_POSITIVE)]),
+                Arc::new(Vec2(0.0, f32::MIN_POSITIVE)),
+            ),
+        ] {
+            let from_field = length_of(column);
+            let from_value = value_domain(
+                &crate::vector::VectorLengthProcessor,
+                &Node::new(NodeId::new(1), VECTOR_LENGTH),
+                vec![Some(value)],
+            )
+            .downcast_ref::<Scalar>()
+            .expect("vector.length answers a Scalar")
+            .0;
+            assert_eq!(
+                from_field.to_bits(),
+                from_value.to_bits(),
+                "field.length said {from_field}, vector.length said {from_value}"
+            );
+        }
+    }
+
+    /// `field.component` and `vector.split` take the same components out of
+    /// the same vector.
+    #[test]
+    fn field_component_answers_what_vector_split_answers() {
+        use crate::vector::{VectorArity, VectorSplitProcessor};
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+
+        // Every arity, because `vector.split` is three separate `type_key`s
+        // on the value side and three separate column types on the field
+        // side: pinning one of them leaves the other two free to drift. The
+        // non-finite rows pin the "IEEE passes straight through" claim, which
+        // is where two independent implementations part company first.
+        let cases: Vec<(VectorArity, &str, AttributeArray, Arc<dyn NodeData>)> = vec![
+            (
+                VectorArity::Vec2,
+                VECTOR_SPLIT_VEC2,
+                AttributeArray::Vec2(vec![Vec2(1.5, -2.5)]),
+                Arc::new(Vec2(1.5, -2.5)),
+            ),
+            (
+                VectorArity::Vec2,
+                VECTOR_SPLIT_VEC2,
+                AttributeArray::Vec2(vec![Vec2(f32::INFINITY, f32::NAN)]),
+                Arc::new(Vec2(f32::INFINITY, f32::NAN)),
+            ),
+            (
+                VectorArity::Vec3,
+                VECTOR_SPLIT_VEC3,
+                AttributeArray::Vec3(vec![Vec3(1.5, -2.5, 0.25)]),
+                Arc::new(Vec3(1.5, -2.5, 0.25)),
+            ),
+            (
+                VectorArity::Vec4,
+                VECTOR_SPLIT_VEC4,
+                AttributeArray::Vec4(vec![Vec4(1.5, -2.5, 0.25, -0.75)]),
+                Arc::new(Vec4(1.5, -2.5, 0.25, -0.75)),
+            ),
+        ];
+
+        for (arity, type_key, column, value) in cases {
+            let node = registry
+                .create_node(type_key, NodeId::new(1))
+                .unwrap_or_else(|| panic!("{type_key} is registered"));
+            let record = value_domain(&VectorSplitProcessor::new(arity), &node, vec![Some(value)]);
+            let record = record
+                .downcast_ref::<PortRecord>()
+                .expect("vector.split answers a PortRecord");
+
+            for (slot, name) in FIELD_COMPONENTS[..arity.components()].iter().enumerate() {
+                let from_field = component_of(vector_field(column.clone()), name);
+                let from_value = record.0[slot]
+                    .downcast_ref::<Scalar>()
+                    .expect("a split output is a Scalar")
+                    .0;
+                assert_eq!(
+                    from_field.to_bits(),
+                    from_value.to_bits(),
+                    "{type_key} component {name}"
+                );
+            }
+        }
+    }
+
+    /// `field.compose` and `vector.construct` build the same vector out of
+    /// the same components.
+    #[test]
+    fn field_compose_answers_what_vector_construct_answers() {
+        let values = [1.5f32, -2.5, 0.25];
+        let sources: Vec<Arc<dyn NodeData>> =
+            values.iter().map(|value| scalar_field(*value)).collect();
+        let composed = run(
+            &compose_node(FIELD_COMPOSE_VEC3, 3),
+            Arc::new(ComposeFieldProcessor::new(3)),
+            &sources,
+        );
+        let AttributeArray::Vec3(column) = typed_sample(composed.as_ref()) else {
+            panic!("field.compose.vec3 answers a Vec3 column");
+        };
+
+        // Through the evaluator, so the component parameters are resolved the
+        // way `vector.construct` reads them.
+        let mut construct = Node::new(NodeId::new(1), VECTOR_CONSTRUCT_VEC3)
+            .with_output("vector", DataTypeId::VEC3);
+        for (key, value) in FIELD_COMPONENTS[..3].iter().zip(values) {
+            construct = construct.with_param(*key, ParameterValue::Float(value));
+        }
+        let graph = Graph::new().add_node(construct).unwrap();
+        let mut evaluator = Evaluator::new();
+        evaluator.register(
+            NodeId::new(1),
+            Arc::new(crate::vector::VectorConstructProcessor::new(
+                crate::vector::VectorArity::Vec3,
+            )),
+        );
+        let constructed = *evaluator
+            .evaluate(&graph, NodeId::new(1), &ctx())
+            .unwrap()
+            .downcast_ref::<Vec3>()
+            .expect("vector.construct.vec3 answers a Vec3");
+
+        assert_eq!(column[0], constructed);
+    }
+
+    #[test]
+    fn the_field_transforms_are_not_time_dependent() {
+        assert!(!LengthFieldProcessor.is_time_dependent());
+        assert!(!AngleFieldProcessor.is_time_dependent());
+        assert!(!ComponentFieldProcessor.is_time_dependent());
+        assert!(!ComposeFieldProcessor::new(2).is_time_dependent());
     }
 }

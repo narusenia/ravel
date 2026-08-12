@@ -48,6 +48,34 @@ pub const STROKE_WIDTH: &str = "stroke_width";
 /// [`CD`], which is the fill color, so an unset stroke color draws the way it
 /// did before strokes had one.
 pub const STROKE_COLOR: &str = "stroke_color";
+/// Dash pattern (Str, Detail): alternating on/off run lengths in composition
+/// pixels, `"4,2"` style. Empty (or absent) draws a solid stroke. Detail
+/// rather than per element: a dash costs the rasterizer an arc-length walk,
+/// and one pattern for the geometry is what the GPU path can still decide on.
+pub const DASH: &str = "dash";
+/// Where the dash pattern starts, in composition pixels (F32, Detail).
+pub const DASH_OFFSET: &str = "dash_offset";
+/// Stroke end shape (I32, Detail): [`CAP_BUTT`] / [`CAP_ROUND`] /
+/// [`CAP_SQUARE`]. Absent means round, which is what the rasterizer drew
+/// before the attribute existed.
+pub const CAP: &str = "cap";
+/// Stroke corner shape (I32, Detail): [`JOIN_MITER`] / [`JOIN_ROUND`] /
+/// [`JOIN_BEVEL`]. Absent means round, as for [`CAP`].
+pub const JOIN: &str = "join";
+
+/// Flat cap, ending the stroke at the end point ([`CAP`]).
+pub const CAP_BUTT: i32 = 0;
+/// Rounded cap of radius half the stroke width ([`CAP`]). The default.
+pub const CAP_ROUND: i32 = 1;
+/// Square cap extending half the stroke width past the end point ([`CAP`]).
+pub const CAP_SQUARE: i32 = 2;
+/// Corners extended to their natural intersection ([`JOIN`]).
+pub const JOIN_MITER: i32 = 0;
+/// Arc between the segments ([`JOIN`]). The default.
+pub const JOIN_ROUND: i32 = 1;
+/// Straight line between the segments ([`JOIN`]).
+pub const JOIN_BEVEL: i32 = 2;
+
 /// Particle age in frames (F32, Point).
 pub const AGE: &str = "age";
 /// Particle lifetime in frames (F32, Point).
@@ -95,6 +123,10 @@ mod tests {
                 FILL,
                 STROKE_WIDTH,
                 STROKE_COLOR,
+                DASH,
+                DASH_OFFSET,
+                CAP,
+                JOIN,
                 AGE,
                 LIFE,
                 VELOCITY,
@@ -119,6 +151,10 @@ mod tests {
                 "fill",
                 "stroke_width",
                 "stroke_color",
+                "dash",
+                "dash_offset",
+                "cap",
+                "join",
                 "age",
                 "life",
                 "velocity",
@@ -127,6 +163,15 @@ mod tests {
                 "out_tan",
             ]
         );
+    }
+
+    /// The cap and join codes travel inside a project's geometry the same way
+    /// the names do: a renumbering would silently restyle every stroke that
+    /// stored the old value.
+    #[test]
+    fn cap_and_join_codes_keep_their_numbering() {
+        assert_eq!([CAP_BUTT, CAP_ROUND, CAP_SQUARE], [0, 1, 2]);
+        assert_eq!([JOIN_MITER, JOIN_ROUND, JOIN_BEVEL], [0, 1, 2]);
     }
 
     /// The 3D additions are separate names, not replacements: the 2D path

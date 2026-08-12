@@ -95,6 +95,9 @@ pub struct OutlinerGpuiPanel {
     project_sub: Option<Subscription>,
     /// Gate for the observer above (see [`super::MirrorEpoch`]).
     mirror_epoch: super::MirrorEpoch,
+    /// The composition this tree last opened for, so the `ActiveComposition`
+    /// observer can tell a real switch from a rewrite of the same value.
+    active_comp: Option<ravel_core::id::CompId>,
     #[allow(dead_code)]
     active_comp_sub: Subscription,
     #[allow(dead_code)]
@@ -129,10 +132,24 @@ impl OutlinerGpuiPanel {
         // A composition switch changes which rows are interactive, and the
         // newly active composition opens so its layers are reachable.
         let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
-            if let Some(comp) = super::active_composition(cx) {
+            // Same pair as in the Timeline (`MED-UI-06`): one switch arrives as
+            // this global write and again as a `ProjectState` notify. Comparing
+            // the composition this tree last opened for collapses them to one
+            // walk in either order, and — unlike an epoch check — still runs for
+            // a global write that carried no notify.
+            let active = super::active_composition(cx);
+            if active == this.active_comp {
+                return;
+            }
+            this.active_comp = active;
+            if let Some(comp) = active {
                 this.state.set_expanded(OutlinerKey::Comp(comp), true);
             }
             this.rebuild_rows(cx);
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
         });
         // Selection highlighting only: the rows themselves do not change.
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| cx.notify());
@@ -157,6 +174,9 @@ impl OutlinerGpuiPanel {
             focus_subscriptions,
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
+            // The panel is built from whatever composition is already active, so
+            // the first switch it sees is a real one.
+            active_comp: super::active_composition(cx),
             active_comp_sub,
             selection_sub,
             canvas_selection_sub,

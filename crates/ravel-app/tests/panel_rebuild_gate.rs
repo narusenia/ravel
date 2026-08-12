@@ -344,6 +344,14 @@ fn a_parameter_drag_sync_counts(cx: &mut TestAppContext) {
     let layer = add_layer(&harness, cx);
     let (path, node) = open_layer_network(&harness, layer, cx);
 
+    // Two moves before the measurement: the Properties target arrives through
+    // the editor's republish, and the branch that adopts a *new* target rebuilds
+    // its widgets in `render` instead of resolving values here. Those first
+    // moves are the target settling, not the drag's steady cost, and this
+    // headless harness never paints.
+    drag_tick(&harness, &path, node, -2.0, cx);
+    drag_tick(&harness, &path, node, -1.0, cx);
+
     const MOVES: u64 = 10;
     reset_syncs();
     for step in 0..MOVES {
@@ -351,30 +359,18 @@ fn a_parameter_drag_sync_counts(cx: &mut TestAppContext) {
     }
     let counts = sync_counts("node parameter drag, 10 moves");
 
+    // Exactly one sync per move, for every mirror. The document really does
+    // change on every move, so one is the floor; more than one is a second
+    // path asking for work the first already did (`MED-UI-06`). Properties is
+    // the one that used to answer twice — the editor republishes its target
+    // from `refresh_from_document` while the `ProjectState` notify of the same
+    // move asks for the same re-resolve.
     for (name, value) in &counts {
-        assert!(
-            *value >= MOVES,
-            "{name} must follow every move of the drag ({value} for {MOVES} moves)"
-        );
-    }
-    for name in [
-        "timeline.sync_from_project",
-        "outliner.rebuild_rows",
-        "media_bin.rebuild_rows",
-    ] {
         assert_eq!(
-            count_of(&counts, name),
-            MOVES,
-            "{name} must not sync more than once per move"
+            *value, MOVES,
+            "{name} must resolve exactly once per move of the drag"
         );
     }
-    // MED-UI-06, still open: the node editor republishes the Properties target
-    // from `refresh_from_document` on every move, and the `ProjectState` notify
-    // of the same move resolves the sections a second time. Measured baseline.
-    assert!(
-        count_of(&counts, "properties.refresh_values") > MOVES,
-        "the doubled re-resolve MED-UI-06 describes should still be visible here"
-    );
 }
 
 /// Advance the playhead over `frames` frames at 30 fps, the way the transport
@@ -543,14 +539,62 @@ fn a_composition_switch_sync_counts(cx: &mut TestAppContext) {
         Some(root),
         "the switch must have taken effect"
     );
-    // MED-UI-06, still open: each panel syncs once from the `ActiveComposition`
-    // observer and once more from the `ProjectState` notify of the same switch.
-    // Measured baseline.
+    // One switch, one sync each. The switch arrives twice — as the
+    // `ActiveComposition` write and as the `ProjectState` notify that follows it
+    // — and whichever observer runs first absorbs the other (`MED-UI-06`).
     for name in ["timeline.sync_from_project", "outliner.rebuild_rows"] {
         assert_eq!(
             count_of(&counts, name),
-            2,
-            "{name} should still sync twice for one composition switch"
+            1,
+            "{name} must sync once for one composition switch"
+        );
+    }
+}
+
+/// The hazard the composition-switch dedup introduces if it is keyed on the
+/// document epoch instead of on the composition: a write to the
+/// `ActiveComposition` global that carries no `ProjectState` notify must still
+/// move the mirror. `panels::set_active_composition` is that write — the
+/// `ProjectState` method wraps it, and this test calls the wrapped one directly.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_bare_composition_global_write_still_moves_the_mirrors(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    add_layer(&harness, cx);
+    let other = harness.project.update(cx, |project, cx| {
+        project.create_composition(
+            ravel_ui::document::CompositionSettings::fallback("Other"),
+            cx,
+        )
+    });
+    let root = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| panels::active_composition(cx)),
+        Some(other),
+        "creating a composition opens it"
+    );
+
+    // No document change, no notify: only the global moves.
+    let project_before = project_count(&harness, cx);
+    reset_syncs();
+    cx.update(|cx| panels::set_active_composition_for_tests(Some(root), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        project_count(&harness, cx),
+        project_before,
+        "this path must not notify `ProjectState`, or it proves nothing"
+    );
+    let counts = sync_counts("bare ActiveComposition write");
+
+    for name in ["timeline.sync_from_project", "outliner.rebuild_rows"] {
+        assert_eq!(
+            count_of(&counts, name),
+            1,
+            "{name} must follow a composition switch that no notify accompanies"
         );
     }
 }

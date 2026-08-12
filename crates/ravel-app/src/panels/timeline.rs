@@ -679,7 +679,25 @@ impl TimelineGpuiPanel {
         // selection global is written by the Outliner as well as by this
         // panel, so the row highlighting has to repaint from it.
         let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
+            // The global wakes its observers on every write, identical values
+            // included, and one switch arrives here *and* as a `ProjectState`
+            // notify — `MED-UI-06`. Comparing the mirror's own composition is
+            // what makes the pair collapse to one sync whichever of the two
+            // observers runs first: this one syncs and records the epoch so the
+            // notify is absorbed, or the notify got there first and this one
+            // finds the mirror already on the new composition.
+            //
+            // Deliberately not gated on the epoch: a write to the global that
+            // did not bump it would then be skipped, and the panel would keep
+            // showing the previous composition.
+            if super::active_composition(cx) == this.state.comp_id() {
+                return;
+            }
             this.sync_from_project(cx);
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
         });
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| {
             cx.notify();

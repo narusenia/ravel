@@ -1790,7 +1790,24 @@ impl PropertiesGpuiPanel {
                 // unless the field shape changed (a parameter became
                 // driven or editable again), where stale widget bindings
                 // would edit through a read-only row.
-                this.refresh_values_checked(cx);
+                //
+                // Gated on the document epoch, which is what makes a node
+                // parameter drag cost one re-resolve per mouse move instead of
+                // two (`MED-UI-06`): the node editor republishes this identical
+                // target from `refresh_from_document` on every move, and the
+                // `ProjectState` notify of the same move asks for the same work.
+                // Whichever arrives first resolves the sections and records the
+                // epoch; the other finds it recorded and returns. A republish
+                // with no document change behind it cannot have new values —
+                // the playhead has its own observer below.
+                let epoch = this
+                    .project
+                    .as_ref()
+                    .map(|project| project.read(cx).mirror_epoch());
+                match epoch {
+                    Some(epoch) if !this.mirror_epoch.advanced(epoch) => {}
+                    _ => this.refresh_values_checked(cx),
+                }
             } else {
                 // An in-flight gesture belongs to the target being left and
                 // its live value is already in the document: end it here,

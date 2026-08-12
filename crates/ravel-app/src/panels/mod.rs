@@ -547,6 +547,16 @@ pub(crate) fn set_active_composition(comp: Option<CompId>, cx: &mut App) {
     drop_stale_layer_properties_target(cx);
 }
 
+/// [`set_active_composition`] reached from an integration test, so a test can
+/// drive the one path that writes the global *without* a `ProjectState` notify
+/// behind it. Application code has no reason to call it — use
+/// [`crate::project_state::ProjectState::set_active_composition`], which is what
+/// keeps the compiled root and the viewer in step.
+#[cfg(debug_assertions)]
+pub fn set_active_composition_for_tests(comp: Option<CompId>, cx: &mut App) {
+    set_active_composition(comp, cx);
+}
+
 /// The current layer selection.
 pub fn layer_selection(cx: &App) -> LayerSelection {
     cx.try_global::<LayerSelection>()

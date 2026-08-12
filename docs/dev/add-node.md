@@ -66,12 +66,14 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   **成分ごとの `Int` 対は畳まない**（`Channel2` は float チャネルの対なので
   型の意味が変わる）
 - **構造的な値を文字列に押し込まない。** カーブは
-  `ParameterValue::Curve(CurveParam)`（`ravel_core::param_curve`）、パスは
-  `PathPoints` を使う。文字列にすると Properties が手打ちのテキスト欄になり、
+  `ParameterValue::Curve(CurveParam)`（`ravel_core::param_curve`）、カラー
+  ランプは `ParameterValue::Ramp(RampParam)`（`ravel_core::param_ramp`）、
+  パスは `PathPoints` を使う。文字列にすると Properties が手打ちのテキスト欄になり、
   後から型を変えるのに `.ravprj` の移行が要る（`field.curve_remap` の
   `points` が実際にそうなった。format v6）。読み出しは
-  `params.curve(key)` / `params.path_points(key)`。この 2 種は wire 型を
-  持たない（`port_data_type()` が `None`）のでパラメータポートに露出できない
+  `params.curve(key)` / `params.ramp(key)` / `params.path_points(key)`。
+  この 3 種は wire 型を持たない（`port_data_type()` が `None`）のでパラメータ
+  ポートに露出できない
 - **あるパラメータが別のパラメータの型を決めるなら**、その対応を
   `registry::builtin::dependent_param_updates` に足し、書き込み経路が
   `Graph::set_params` を通るようにする（`attribute.set` の `value` が `type` に
@@ -214,11 +216,11 @@ Properties のパラメータ行には**公開トグル（□ / ■）**があ�
 | `Channel2` / `Channel3` | `vec2` / `vec3` |
 | `Channel4` | `color`（Properties が色として描くもの） |
 | `media` ノードの `asset_id` | `media`（素材差し替え） |
-| `PathPoints` / `Curve` | **対象外**（トグルを出さない） |
+| `PathPoints` / `Curve` / `Ramp` | **対象外**（トグルを出さない） |
 
 対応は `ravel-core::exposed::apply::seed_value` の 1 箇所だけが持つ。
 **UI 側で種別判定を書き足さないこと** — 2 つ目の対応表ができた瞬間、
-`apply` が書き戻せない宣言を作れるようになる。`PathPoints` / `Curve` が
-外れているのは内部表現を外部契約に露出させないため
+`apply` が書き戻せない宣言を作れるようになる。`PathPoints` / `Curve` /
+`Ramp` が外れているのは内部表現を外部契約に露出させないため
 （[`../specifications/data-model.md`](../specifications/data-model.md) の
 公開パラメータ宣言モデル）。

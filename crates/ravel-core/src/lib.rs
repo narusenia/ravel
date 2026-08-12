@@ -17,6 +17,7 @@ pub mod logging;
 pub mod media;
 pub mod network;
 pub mod param_curve;
+pub mod param_ramp;
 pub mod registry;
 pub mod runtime;
 pub mod scene;

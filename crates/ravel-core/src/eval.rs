@@ -650,6 +650,9 @@ pub enum ResolvedValue {
     /// A scalar transfer curve passes through unresolved: the curve's own
     /// shape is not animatable in v1, and no wire type carries one.
     Curve(crate::param_curve::CurveParam),
+    /// A colour ramp passes through unresolved, for the same reasons a curve
+    /// does.
+    Ramp(crate::param_ramp::RampParam),
 }
 
 /// Per-frame parameter values passed to [`NodeProcessor::process`].
@@ -728,6 +731,14 @@ impl ResolvedParams {
     pub fn curve(&self, key: &str) -> Option<&crate::param_curve::CurveParam> {
         match self.get(key) {
             Some(ResolvedValue::Curve(curve)) => Some(curve),
+            _ => None,
+        }
+    }
+
+    /// Colour ramp parameter, if present and a ramp.
+    pub fn ramp(&self, key: &str) -> Option<&crate::param_ramp::RampParam> {
+        match self.get(key) {
+            Some(ResolvedValue::Ramp(ramp)) => Some(ramp),
             _ => None,
         }
     }
@@ -2986,7 +2997,8 @@ impl Evaluator {
                 | ParameterValue::Bool(_)
                 | ParameterValue::String(_)
                 | ParameterValue::PathPoints(_)
-                | ParameterValue::Curve(_) => continue,
+                | ParameterValue::Curve(_)
+                | ParameterValue::Ramp(_) => continue,
                 ParameterValue::Channel(ch) => {
                     let (v, fresh) =
                         self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
@@ -3064,6 +3076,7 @@ impl Evaluator {
                     ParameterValue::String(v) => ResolvedValue::Str(v.clone()),
                     ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
                     ParameterValue::Curve(curve) => ResolvedValue::Curve(curve.clone()),
+                    ParameterValue::Ramp(ramp) => ResolvedValue::Ramp(ramp.clone()),
                     // A channel that resolve_channel_params skipped is
                     // impossible: both walk the same parameters with the same
                     // `skip`. Falling back keeps the shape total.
@@ -3298,9 +3311,10 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
                 data.downcast_ref::<Vec4>()
                     .map(|v| ResolvedValue::Vec4([v.0, v.1, v.2, v.3]))
             }),
-        ParameterValue::String(_) | ParameterValue::PathPoints(_) | ParameterValue::Curve(_) => {
-            None
-        }
+        ParameterValue::String(_)
+        | ParameterValue::PathPoints(_)
+        | ParameterValue::Curve(_)
+        | ParameterValue::Ramp(_) => None,
     }
 }
 

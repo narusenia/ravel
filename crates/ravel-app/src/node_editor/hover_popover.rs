@@ -252,6 +252,7 @@ fn param_value_display(value: &ParameterValue, frame: u64, eval: &EvalContext) -
             format!("{} {}", points.len(), t!("node_graph.popover.points"))
         }
         ParameterValue::Curve(_) => t!("node_graph.popover.curve"),
+        ParameterValue::Ramp(_) => t!("node_graph.popover.ramp"),
     }
 }
 

@@ -271,7 +271,11 @@ pub struct FieldSample<'a> {
 - ビルトイン: ノイズ（simplex/fbm）、フォールオフ（球/線形/パス距離）、
   属性読み出し（`field.attribute`。`index` 等を駆動値にする。列の
   `[min, max]` を `[0, 1]` へ写す `normalize` 付き）、
-  カーブリマップ、画像サンプラ（FrameBuffer を UV 参照）、Lua 式、
+  カーブリマップ、カラーランプ（`field.ramp`。スカラーを `in_min` /
+  `in_max` で正規化しストップ列で色を引く。**数値から色を作れる唯一の
+  フィールド**で、スカラーフィールドではグレースケールにしかならない
+  `Cd` / `stroke_color` の変調に色相を与える）、
+  画像サンプラ（FrameBuffer を UV 参照）、Lua 式、
   オーディオ由来スカラー（REQ-MEDIA-003 と接続）。
 - 合成: Add / Multiply / Max / Blend ノードで `Field` 同士を結合。
 - 消費地点: 属性変調ノード（`attr = field(P)`）、パーティクルフォース、

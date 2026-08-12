@@ -7,6 +7,7 @@ use crate::animation::channel::AnimationChannel;
 use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
+use crate::param_ramp::RampParam;
 use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
 use crate::scene::camera;
 
@@ -94,6 +95,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_noise());
     reg.register(field_falloff());
     reg.register(field_curve_remap());
+    reg.register(field_ramp());
     reg.register(field_expression());
     reg.register(field_binary("field.add", "Field Add"));
     reg.register(field_binary("field.multiply", "Field Multiply"));
@@ -149,6 +151,15 @@ fn curve_parameter(key: &str, value: CurveParam) -> Parameter {
     Parameter {
         key: key.into(),
         value: ParameterValue::Curve(value),
+    }
+}
+
+/// A structural colour-ramp parameter. Edited through the gradient editor,
+/// never as text, for the same reason a curve is not a string.
+fn ramp_parameter(key: &str, value: RampParam) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::Ramp(value),
     }
 }
 
@@ -387,6 +398,22 @@ fn field_curve_remap() -> NodeTemplate {
     // The control points were a comma-separated string until `.ravprj` v6;
     // `Document::upgrade_curve_params` converts stored ones on load.
     .with_param(curve_parameter("points", CurveParam::identity()))
+}
+
+/// `field.ramp`: a scalar field read through a colour ramp.
+///
+/// The only field that turns a number into a hue: `in_min` / `in_max`
+/// normalize the input onto the ramp's `0..=1` domain, and the result drops
+/// straight into `field.apply`'s Color targets (`Cd`, `stroke_color`).
+fn field_ramp() -> NodeTemplate {
+    NodeTemplate::new("field.ramp", "Ramp Field", NodeCategory::Field)
+        .with_input(field_input("field"))
+        .with_output(field_output())
+        .with_param(ramp_parameter("stops", RampParam::default()))
+        .with_param(float_parameter("in_min", 0.0))
+        .with_param(float_parameter("in_max", 1.0))
+        .with_param_range("in_min", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
 }
 
 fn field_expression() -> NodeTemplate {
@@ -1314,7 +1341,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 51);
+        assert_eq!(reg.all_templates().count(), 52);
     }
 
     #[test]
@@ -1323,7 +1350,7 @@ mod tests {
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 19);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
-        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
+        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 11);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);

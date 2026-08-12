@@ -215,6 +215,8 @@ pub enum RavelIcon {
     NodeFieldFalloff,
     /// Node header/menu: `field.curve_remap`.
     NodeFieldCurveRemap,
+    /// Node header/menu: `field.ramp`.
+    NodeFieldRamp,
     /// Node header/menu: `field.expression`.
     NodeFieldExpression,
     /// A parameter driven by an expression (Properties row badge). Shares the
@@ -352,6 +354,7 @@ impl RavelIcon {
             "field.noise" => Self::NodeFieldNoise,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
+            "field.ramp" => Self::NodeFieldRamp,
             "field.expression" => Self::NodeFieldExpression,
             "field.add" => Self::NodeFieldAdd,
             "field.multiply" => Self::NodeFieldMultiply,
@@ -460,6 +463,10 @@ impl IconNamed for RavelIcon {
             Self::NodeFieldNoise => "icons/waves.svg",
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",
+            // A ramp is the colour node of the field family; it shares the
+            // palette glyph with the Color category rather than vendoring a
+            // near-identical gradient icon.
+            Self::NodeFieldRamp => "icons/palette.svg",
             Self::NodeFieldExpression => "icons/sigma.svg",
             Self::Expression => "icons/sigma.svg",
             Self::NodeFieldAdd => "icons/plus.svg",

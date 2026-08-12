@@ -1664,7 +1664,8 @@ fn animated_parameter(value: &ParameterValue) -> bool {
         | ParameterValue::Bool(_)
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
-        | ParameterValue::Curve(_) => false,
+        | ParameterValue::Curve(_)
+        | ParameterValue::Ramp(_) => false,
     }
 }
 

@@ -243,10 +243,25 @@ F32 カーブ。つまり**「赤→青のグラデーションで塗る」が�
   （スカラーフィールドではグレースケールにしかならない現状との差分を pin する）。
 - パスに沿ったグラデーションの結合テスト:
   `shape.line → attribute.curveu → field.attribute("u") → field.ramp
-  → field.apply("Cd") → rasterize` で始点と終点の色が異なるゴールデンテスト。
+  → field.apply("Cd")` で始点と終点の色が異なるテスト。
   `attribute.curveu` は `geometry-ops-plan.md` 単位 13 が追加する
-- 同じ経路で `target = "stroke_color"` にしたとき、**線だけ**にグラデーションが
-  掛かるテスト（塗りは `Cd` のまま）。
+- 同じ経路で `target = "stroke_color"` にしたとき、`Cd` 列が作られないテスト
+  （塗りと線が別の列に乗ることの pin）。
+
+> **`rasterize` まで通したゴールデンにはできない**（2026-08-13 に実装時判明）。
+> `rasterize` はパスの色を**プリミティブ属性**から引く
+> （`element_colors(style, geo.primitive_attrs(), prim_index, …)`、
+> `crates/ravel-nodes/src/rasterize/mod.rs:503`）。点ごとの `Cd` が絵に出るのは
+> **どのプリミティブにも属さない点**（スプライト描画）だけで、
+> `path_vertex_mask`（同 `:607`）がパス頂点を除外する。`shape.line` は全点を
+> 覆う Path 1 本なので、`field.apply(domain = "point")` で書いた点ごとの色は
+> 1 画素も描かれない。
+>
+> これは**1 要素内のグラデーション塗り**であり、本計画の「非対象」に明記が
+> ある。画素まで通すには rasterize に頂点色補間が要り、CPU（zeno は被覆
+> マスクしか返さない）と GPU の両方の方式決定を伴う。**`stroke_align` を
+> 単位 3 へ繰り延べたのと同じ構図**なので、まとめて別計画で扱う。
+> → `issues/medium/gpu-nodes.md` の `MED-GPU-08`
 
 ## 非対象
 

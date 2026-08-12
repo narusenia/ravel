@@ -7,7 +7,7 @@ use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AddField, AttributeField, BlendField, CombineMode, ComponentMask, CurveRemapField, Domain,
     ExpressionField, FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, MaxField,
-    MultiplyField, NoiseField, apply_field,
+    MultiplyField, NoiseField, RampField, apply_field,
 };
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
@@ -101,6 +101,34 @@ impl NodeProcessor for CurveRemapFieldProcessor {
         Ok(Arc::new(FieldValue::new(CurveRemapField::new(
             source, curve,
         ))))
+    }
+}
+
+pub struct RampFieldProcessor;
+
+impl RampFieldProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for RampFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = field_input(inputs, 0, "field.ramp")?;
+        // A missing or wrongly typed `stops` falls back to the default ramp,
+        // which is what the template declares.
+        let ramp = params.ramp("stops").cloned().unwrap_or_default();
+        Ok(Arc::new(FieldValue::new(
+            RampField::new(source, ramp)
+                .with_range(params.f32_or("in_min", 0.0), params.f32_or("in_max", 1.0)),
+        )))
     }
 }
 
@@ -319,11 +347,12 @@ fn field_input(
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::{AttributeArray, AttributeSet, ConstantField, FieldSample};
+    use ravel_core::geometry::{AttributeArray, AttributeSet, ConstantField, FieldSample, names};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::param_curve::CurveParam;
-    use ravel_core::types::FrameRate;
+    use ravel_core::param_ramp::RampParam;
+    use ravel_core::types::{Color, FrameRate};
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
@@ -515,6 +544,214 @@ mod tests {
             &[source],
         );
         assert_eq!(sample(output.as_ref()), vec![0.25]);
+    }
+
+    // ---- field.ramp -------------------------------------------------------
+
+    const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
+    const BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
+
+    fn ramp_node(stops: RampParam, in_min: f32, in_max: f32) -> Node {
+        Node::new(NodeId::new(1), "field.ramp")
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("stops", ParameterValue::Ramp(stops))
+            .with_param("in_min", ParameterValue::Float(in_min))
+            .with_param("in_max", ParameterValue::Float(in_max))
+    }
+
+    fn sampled_color(value: &dyn NodeData) -> Color {
+        match value
+            .downcast_ref::<FieldValue>()
+            .unwrap()
+            .sample(&FieldSample::positions_only(&[Vec2(0.25, 0.75)], &ctx()))
+        {
+            AttributeArray::Color(colors) => colors[0],
+            other => panic!("field.ramp must answer Color, got {:?}", other.attr_type()),
+        }
+    }
+
+    /// The processor has to read all three parameters: the stops, and the
+    /// input range that maps the source field onto them.
+    #[test]
+    fn ramp_processor_reads_its_parameters() {
+        let node = ramp_node(RampParam::linear([(0.0, RED), (1.0, BLUE)]), 0.0, 8.0);
+        let source: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(4.0)));
+
+        let output = run(
+            &node,
+            Arc::new(RampFieldProcessor::from_node(&node)),
+            &[source],
+        );
+        let color = sampled_color(output.as_ref());
+        assert!(
+            (color.r - 0.5).abs() < 1e-6 && (color.b - 0.5).abs() < 1e-6,
+            "{color:?}"
+        );
+    }
+
+    /// A node whose `stops` is missing entirely (or is left over as some
+    /// other kind) falls back to the default ramp rather than failing.
+    #[test]
+    fn ramp_processor_without_stops_is_the_default_ramp() {
+        let node = Node::new(NodeId::new(1), "field.ramp")
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD);
+        let source: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(1.0)));
+
+        let output = run(
+            &node,
+            Arc::new(RampFieldProcessor::from_node(&node)),
+            &[source],
+        );
+        assert_eq!(sampled_color(output.as_ref()), Color::WHITE);
+    }
+
+    // ---- the gradient-along-a-path chain ----------------------------------
+
+    /// One node of each type in the chain, wired
+    /// `shape.line → attribute.curveu → field.apply(geometry)` and
+    /// `field.attribute("u") → field.ramp → field.apply(field)`.
+    ///
+    /// Nodes come from the real templates so the ports and parameter defaults
+    /// under test are the ones the application would place.
+    fn path_gradient_geometry(target: &str) -> Geometry {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let node = |type_key: &str, id: u64, params: &[(&str, ParameterValue)]| {
+            let mut node = registry
+                .create_node(type_key, NodeId::new(id))
+                .unwrap_or_else(|| panic!("{type_key} is not registered"));
+            for (key, value) in params {
+                let parameter = node
+                    .parameters
+                    .iter_mut()
+                    .find(|p| p.key == *key)
+                    .unwrap_or_else(|| panic!("{type_key} has no {key} parameter"));
+                parameter.value = value.clone();
+            }
+            node
+        };
+
+        let line = node(
+            "shape.line",
+            1,
+            &[
+                ("start", ParameterValue::vec2(0.0, 0.0)),
+                ("end", ParameterValue::vec2(100.0, 0.0)),
+                ("segments", ParameterValue::Int(4)),
+            ],
+        );
+        let curveu = node("attribute.curveu", 2, &[]);
+        let attribute = node(
+            "field.attribute",
+            3,
+            &[("name", ParameterValue::String("u".into()))],
+        );
+        let ramp = node(
+            "field.ramp",
+            4,
+            &[(
+                "stops",
+                ParameterValue::Ramp(RampParam::linear([(0.0, RED), (1.0, BLUE)])),
+            )],
+        );
+        let apply = node(
+            "field.apply",
+            5,
+            &[("target", ParameterValue::String(target.into()))],
+        );
+
+        let mut graph = Graph::new();
+        for n in [&line, &curveu, &attribute, &ramp, &apply] {
+            graph = graph.add_node(n.clone()).unwrap();
+        }
+        for (edge, from, to, port) in [
+            (1u64, 1u64, 2u64, 0u32),
+            (2, 3, 4, 0),
+            (3, 2, 5, 0),
+            (4, 4, 5, 1),
+        ] {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(edge),
+                    NodeId::new(from),
+                    OutputPortIndex(0),
+                    NodeId::new(to),
+                    InputPortIndex(port),
+                )
+                .unwrap();
+        }
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(crate::shape::LineProcessor));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(crate::attribute::CurveUProcessor::from_node(&curveu)),
+        );
+        ev.register(
+            NodeId::new(3),
+            Arc::new(AttributeFieldProcessor::from_node(&attribute)),
+        );
+        ev.register(
+            NodeId::new(4),
+            Arc::new(RampFieldProcessor::from_node(&ramp)),
+        );
+        ev.register(
+            NodeId::new(5),
+            Arc::new(ApplyFieldProcessor::from_node(&apply)),
+        );
+
+        ev.evaluate(&graph, NodeId::new(5), &ctx())
+            .unwrap()
+            .downcast_ref::<Geometry>()
+            .expect("Geometry")
+            .clone()
+    }
+
+    fn color_column(geometry: &Geometry, name: &str) -> Vec<Color> {
+        geometry
+            .points()
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} column"))
+            .as_color(name)
+            .unwrap_or_else(|_| panic!("{name} is a Color column"))
+            .to_vec()
+    }
+
+    /// The purpose of the unit, end to end: the path's own parameter drives a
+    /// colour ramp, so the two ends of the line come out different hues.
+    #[test]
+    fn a_ramp_paints_a_gradient_along_a_path() {
+        let geometry = path_gradient_geometry(names::CD);
+        let colors = color_column(&geometry, names::CD);
+
+        assert_eq!(colors.len(), 5, "shape.line(segments = 4) has five points");
+        assert_eq!(colors[0], RED, "u = 0 takes the first stop");
+        assert_eq!(colors[4], BLUE, "u = 1 takes the last stop");
+        assert!(
+            colors[0].r > colors[2].r && colors[2].r > colors[4].r,
+            "red falls monotonically along the path: {colors:?}"
+        );
+        assert!(
+            colors[0].b < colors[2].b && colors[2].b < colors[4].b,
+            "blue rises monotonically along the path: {colors:?}"
+        );
+    }
+
+    /// The same chain aimed at `stroke_color` touches the stroke only: the
+    /// fill colour is not written, not even created.
+    #[test]
+    fn the_same_ramp_aimed_at_stroke_color_leaves_the_fill_alone() {
+        let geometry = path_gradient_geometry(names::STROKE_COLOR);
+        let colors = color_column(&geometry, names::STROKE_COLOR);
+
+        assert_eq!(colors[0], RED);
+        assert_eq!(colors[4], BLUE);
+        assert!(
+            geometry.points().get(names::CD).is_none(),
+            "the fill colour must stay whatever it was"
+        );
     }
 
     #[test]

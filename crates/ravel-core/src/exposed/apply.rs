@@ -437,7 +437,9 @@ pub fn seed_value(
             b: at(&c[2]),
             a: at(&c[3]),
         }),
-        ParameterValue::PathPoints(_) | ParameterValue::Curve(_) => return None,
+        ParameterValue::PathPoints(_) | ParameterValue::Curve(_) | ParameterValue::Ramp(_) => {
+            return None;
+        }
     })
 }
 
@@ -927,6 +929,7 @@ fn parameter_kind(value: &ParameterValue) -> &'static str {
         ParameterValue::Channel4(_) => "channel4",
         ParameterValue::PathPoints(_) => "path points",
         ParameterValue::Curve(_) => "curve",
+        ParameterValue::Ramp(_) => "ramp",
     }
 }
 

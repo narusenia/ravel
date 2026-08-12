@@ -77,12 +77,16 @@ enum ParameterValue {
     // （カーブ自体のアニメーションは v1 非対象）。v6 より前は
     // `"0:0,1:1"` 文字列だった
     Curve(CurveParam),                      // CurvePoint { x, y, interpolation, tangents }
+    // カラーランプ（`field.ramp` のストップ列）。定数のみ
+    Ramp(RampParam),                        // RampStop { position, color } + 補間種別
 }
 ```
 
-`PathPoints` と `Curve` は**必ず末尾に足す**。bincode は variant を位置で
-索引するので、途中に挿入すると既存 journal が読めなくなる。追加自体は
-`JOURNAL_FORMAT_VERSION` の更新で覆う。
+`PathPoints` / `Curve` / `Ramp` は**必ず末尾に足す**。bincode は variant を
+位置で索引するので、途中に挿入すると既存 journal が読めなくなる。追加自体は
+`JOURNAL_FORMAT_VERSION` の更新で覆う — 末尾追加でも**旧ビルドが新しい
+variant を含む entry に出会う**側は壊れるので、版を上げて捨てさせる
+（`docs/dev/persistence.md` の規則が正）。
 
 - ネットワーク内の**任意のノードパラメータ**がチャネルを持てる（キーフレーム、
   ノード出力バインド、ブレンド。Expression / AudioReactive は placeholder）。
@@ -95,6 +99,11 @@ enum ParameterValue {
   （`evaluate(x) == x`）。制御点は**入力昇順・一意・有限**が不変条件で、
   デシリアライズもこれを維持する（非有限を落とし、並べ替え、重複入力は
   後の点を残す）。
+- `Ramp` も定数のみ。`RampParam` は `CurveParam` と同じ不変条件（位置の
+  昇順・一意・有限）を同じやり方で守るが、補間種別（linear / smooth /
+  constant）はストップごとではなく**ランプ全体の属性**で、かつ**空になれない**
+  — 空のカーブは恒等という答えを持つのに対し、空のランプは返す色を持たない
+  ため、空になる経路はすべて既定（黒→白）へ落ちる。
 - プロセッサは構築時にパラメータをキャプチャ**しない**。Evaluator が各
   `process()` 呼び出し時にフレーム解決した `ResolvedParams` を渡す
   （アニメーション中のプロセッサ再構築を防ぐ）。

@@ -154,6 +154,7 @@ bool_true = "はい"
 bool_false = "いいえ"
 points = "点"
 curve = "カーブ"
+ramp = "ランプ"
 
 [node_graph.popover.port_type]
 frame_buffer = "フレームバッファ"
@@ -1036,6 +1037,14 @@ label = "カーブリマップフィールド"
 description = "別のフィールドの値を変換カーブでリマップする。"
 [node."field.curve_remap".params]
 points = "変換カーブの制御点（入力→出力）。"
+
+[node."field.ramp"]
+label = "ランプフィールド"
+description = "別のフィールドのスカラー値をカラーランプで引く。明度ではなく色相を数値で駆動できる。"
+[node."field.ramp".params]
+stops = "ランプのカラーストップと、その間の補間種別。"
+in_min = "ランプの始端に対応する入力値。"
+in_max = "ランプの終端に対応する入力値。"
 
 [node."field.expression"]
 label = "エクスプレッションフィールド"

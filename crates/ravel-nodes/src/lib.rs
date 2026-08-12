@@ -204,6 +204,7 @@ pub fn processor_for_node(
         "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
         "field.falloff" => Some(Arc::new(field::FalloffFieldProcessor::from_node(node))),
         "field.curve_remap" => Some(Arc::new(field::CurveRemapFieldProcessor::from_node(node))),
+        "field.ramp" => Some(Arc::new(field::RampFieldProcessor::from_node(node))),
         "field.expression" => Some(Arc::new(field::ExpressionFieldProcessor::from_node(node))),
         "field.add" => Some(Arc::new(field::AddFieldProcessor)),
         "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),

@@ -702,6 +702,12 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 key,
                 curve: curve.clone(),
             },
+            // Read-only until the gradient editor lands, like the node
+            // Properties row.
+            ParameterValue::Ramp(ramp) => PropertyField::ReadOnly {
+                key,
+                value: format!("{} stops", ramp.len()),
+            },
         };
         fields.push(field);
     }

@@ -786,6 +786,7 @@ fn paint_single_node(
                 ParameterValue::Channel4(chs) => channels_display(chs),
                 ParameterValue::PathPoints(points) => format!("{} points", points.len()),
                 ParameterValue::Curve(curve) => format!("{} points", curve.len()),
+                ParameterValue::Ramp(ramp) => format!("{} stops", ramp.len()),
             };
             // The value is right-aligned against a fixed node width, so a long
             // one — a vec4, a long string — would otherwise run back over the

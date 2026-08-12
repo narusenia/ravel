@@ -31,3 +31,58 @@
 が `Tier::Vram` に対してやっているのと同じ形）。ロック順は
 プール → 予算を守る。`GPUBK-9`（デバイス共有の契約）が構築 API を触るので、
 そこに相乗りするのが安い。
+
+---
+
+## MED-GPU-08 | bug / debt | `rasterize` がパスの点ごとの色を一切描かない（Point ドメインの `Cd` が無音で捨てられる）
+
+**該当**: `crates/ravel-nodes/src/rasterize/mod.rs:503`（`element_colors`）、
+`:607`（`path_vertex_mask`）、`:753`、`:885`
+
+`rasterize` は描画要素の種類でドメインを決めて色を引く:
+
+| 描くもの | 読むドメイン |
+| --- | --- |
+| パス（`shape.rect` / `shape.line` の塗り・線） | **Primitive** |
+| どのプリミティブにも属さない点（スプライト） | Point |
+| インスタンス | Instance |
+
+`path_vertex_mask` が「プリミティブに覆われた点」をスプライト描画から外すので、
+**パスの頂点に書いた `Cd` は 1 画素も描かれない**。`attribute.set` の `domain`
+既定が `"point"`、`field.apply` の既定も点なので、**素直に組むと必ずここに落ちる**。
+エラーも警告も出ず、絵が変わらないだけ。
+
+**フェーズ D が掲げる完成形が画素まで届かない**:
+
+```
+shape.line → attribute.curveu → field.attribute("u") → field.ramp
+  → field.apply(target = "Cd") → rasterize
+```
+
+`field.apply` までは正しく点ごとの色が乗る（`style-attributes-plan.md` 単位 6 の
+テストが pin している）が、`rasterize` が読まない。
+
+**修正の障壁**（着手前に読むこと）:
+
+- **CPU と GPU の両方が要る。** `rasterize` は zeno（CPU）と WGSL（GPU）の
+  2 本立てで、`RESP3-12` 以降**ゴールデンが「CPU と GPU が許容誤差内で一致
+  すること」を検査する**（`crates/ravel-nodes/tests/shape_layer_golden.rs`）。
+  片方だけ直すと一致が壊れる
+- **zeno はカバレッジマスクしか返さない。** 現在の CPU 経路は
+  `Mask::render_into` で 0..255 の被覆を得て 1 色でブレンドする
+  （`Canvas::blend_coverage`）。頂点色の補間には「その画素がどの頂点の間にあるか」が
+  要り、被覆マスクだけでは出せない。**CPU 側の方式決定が最初の関門**
+- **`stroke_align` が同じ理由で `style-attributes-plan.md` 単位 3 へ繰り延べ
+  済み。** CPU に概念が無いものを近似すると CPU/GPU 一致が壊れる、という同じ構図。
+  **この 2 つは同じ判断の下にあるのでまとめて設計する価値がある**
+- 複数クレートに跨るので **AGENTS.md の設計ゲートに該当する。計画書が要る**
+
+**却下した案**（2026-08-13）:
+
+1. Point ドメインの `Cd` をエラーにする — 「効かないのに成功する」は消えるが、
+   やりたいこと（線に沿ったグラデーション）ができない
+2. Point → Primitive のフォールバック（先頭 or 平均） — 期待と違う絵が出る
+3. **頂点補間** — 採用方針。ただし上の障壁により計画書が要る
+
+**関連**: `style-attributes-plan.md` 単位 6 の注記（完了条件をこの制約に
+合わせて直してある）、同 単位 1 / 単位 3（`stroke_align`）

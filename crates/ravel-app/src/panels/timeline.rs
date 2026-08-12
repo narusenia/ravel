@@ -756,6 +756,7 @@ impl TimelineGpuiPanel {
     // ----- document sync -----------------------------------------------------
 
     fn sync_from_project(&mut self, cx: &mut Context<Self>) {
+        super::sync_probe::record(super::sync_probe::PanelSync::TimelineSync);
         let Some(project) = self.project.clone() else {
             return;
         };

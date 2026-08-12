@@ -3126,6 +3126,7 @@ impl PropertiesGpuiPanel {
     /// target without recreating widget entities, so an in-flight scrub
     /// keeps its state.
     fn refresh_values(&mut self, cx: &mut Context<Self>) {
+        super::sync_probe::record(super::sync_probe::PanelSync::PropertiesRefresh);
         self.sections = self.sections_for_target(cx);
         self.expressions = self.expression_rows(cx);
         let mut updates: Vec<(String, f32)> = Vec::new();

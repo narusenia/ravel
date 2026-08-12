@@ -12,6 +12,7 @@ pub mod viewer;
 
 pub mod properties;
 pub mod render_queue;
+pub mod sync_probe;
 
 use gpui::*;
 use gpui_component::{ActiveTheme, Icon};

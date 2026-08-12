@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The panel rebuild gate (RESP-2 of
-//! `docs/implementation/done/ui-responsiveness-plan.md`, issue HIGH-07).
+//! `docs/implementation/done/ui-responsiveness-plan.md`, issue HIGH-07) and the
+//! per-gesture sync cost measured through `panels::sync_probe`.
 //!
 //! Every panel that mirrors the document observes `ProjectState`, and the
 //! callback is the expensive half — a `Composition` or `Graph` deep compare, a
@@ -10,6 +11,13 @@
 //! panel mirrors, so each panel holds the epoch it last synced and returns
 //! early when it has not moved. This test drives a real notify of each kind
 //! through a live panel: the gate has to absorb one and pass the other.
+//!
+//! Notification probes cannot answer the second question — GPUI coalesces the
+//! `cx.notify()` calls of one effect cycle, so one callback may stand for any
+//! number of sync-function entries. The `sync_probe` counters do: the
+//! `*_sync_counts` tests below drive one gesture and assert how many times each
+//! sync function actually ran. `docs/implementation/perf-baseline.md` records
+//! how to run them and what the numbers were.
 
 use gpui::{
     AppContext as _, Entity, ParentElement as _, Pixels, Size, Styled as _, TestAppContext,
@@ -211,6 +219,259 @@ fn add_layer(harness: &Harness, cx: &mut TestAppContext) -> ravel_core::id::Laye
     });
     cx.run_until_parked();
     layer
+}
+
+// ---------------------------------------------------------------------------
+// Per-gesture sync cost
+// ---------------------------------------------------------------------------
+
+/// Executions of each mirrored sync function since the last [`reset_syncs`],
+/// as `(name, count)` — printed by every scenario below so the measurement
+/// procedure is `cargo test` plus `--nocapture`.
+#[cfg(debug_assertions)]
+fn sync_counts(scenario: &str) -> Vec<(&'static str, u64)> {
+    use panels::sync_probe::{PanelSync, count};
+    let counts = vec![
+        (
+            "properties.refresh_values",
+            count(PanelSync::PropertiesRefresh),
+        ),
+        ("timeline.sync_from_project", count(PanelSync::TimelineSync)),
+        ("outliner.rebuild_rows", count(PanelSync::OutlinerRows)),
+        ("media_bin.rebuild_rows", count(PanelSync::MediaBinRows)),
+    ];
+    println!("sync counts [{scenario}]:");
+    for (name, value) in &counts {
+        println!("  {name}: {value}");
+    }
+    counts
+}
+
+#[cfg(debug_assertions)]
+fn reset_syncs() {
+    panels::sync_probe::reset();
+}
+
+#[cfg(debug_assertions)]
+fn count_of(counts: &[(&'static str, u64)], name: &str) -> u64 {
+    counts
+        .iter()
+        .find(|(probe, _)| *probe == name)
+        .map(|(_, value)| *value)
+        .unwrap_or_else(|| panic!("no counter named {name}"))
+}
+
+/// Open `layer`'s network with one `constant` node and select the layer, the
+/// state a node parameter drag runs against. Returns the network path and the
+/// node the drag moves.
+#[cfg(debug_assertions)]
+fn open_layer_network(
+    harness: &Harness,
+    layer: ravel_core::id::LayerId,
+    cx: &mut TestAppContext,
+) -> (ravel_ui::document::NetworkPath, ravel_core::id::NodeId) {
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    let path = ravel_ui::document::NetworkPath::layer(comp, layer);
+    let node = ravel_core::id::NodeId::next();
+    harness.project.update(cx, |project, cx| {
+        let network = ravel_core::graph::Graph::new()
+            .add_node(
+                ravel_core::graph::Node::new(node, "constant")
+                    .with_param("value", ravel_core::graph::ParameterValue::Float(0.0)),
+            )
+            .unwrap();
+        let document =
+            ravel_ui::document::replace_network(project.document(), &path, network).unwrap();
+        project.commit_document(document, InvalidationHint::Structural, cx);
+    });
+    cx.update(|cx| panels::set_layer_selection(vec![layer], cx));
+    cx.run_until_parked();
+    // Select the node the way a click in the editor would: the editor
+    // republishes the Properties target from `refresh_from_document` only while
+    // its selection is non-empty, and that republish is the second of the two
+    // paths MED-UI-06 describes.
+    cx.update(|cx| {
+        cx.set_global(panels::CanvasSelection {
+            path: Some(path.clone()),
+            nodes: std::iter::once(node).collect(),
+        });
+    });
+    cx.run_until_parked();
+    (path, node)
+}
+
+/// One mouse move of a node parameter drag: a new value on an existing node,
+/// applied live with the `Params` hint (`apply_document`, no undo step) — the
+/// shape `NodeEditorPanel` and the Viewer gizmos both use.
+#[cfg(debug_assertions)]
+fn drag_tick(
+    harness: &Harness,
+    path: &ravel_ui::document::NetworkPath,
+    node: ravel_core::id::NodeId,
+    value: f32,
+    cx: &mut TestAppContext,
+) {
+    harness.project.update(cx, |project, cx| {
+        let network = ravel_ui::document::resolve_network(project.document(), path)
+            .expect("the layer network is open")
+            .clone()
+            .set_params(
+                node,
+                &[ravel_core::graph::Parameter {
+                    key: "value".into(),
+                    value: ravel_core::graph::ParameterValue::Float(value),
+                }],
+            )
+            .expect("the constant node has a value parameter");
+        let document =
+            ravel_ui::document::replace_network(project.document(), path, network).unwrap();
+        project.apply_document(document, InvalidationHint::Params(vec![node]), cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Ten mouse moves of a node parameter drag, with the dragged node selected —
+/// the gesture MED-UI-01/04/05/06 are all about. A drag changes the document on
+/// every move, so every mirror is entitled to one sync per move and to no more
+/// than one.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_parameter_drag_sync_counts(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let (path, node) = open_layer_network(&harness, layer, cx);
+
+    const MOVES: u64 = 10;
+    reset_syncs();
+    for step in 0..MOVES {
+        drag_tick(&harness, &path, node, step as f32, cx);
+    }
+    let counts = sync_counts("node parameter drag, 10 moves");
+
+    for (name, value) in &counts {
+        assert!(
+            *value >= MOVES,
+            "{name} must follow every move of the drag ({value} for {MOVES} moves)"
+        );
+    }
+    for name in [
+        "timeline.sync_from_project",
+        "outliner.rebuild_rows",
+        "media_bin.rebuild_rows",
+    ] {
+        assert_eq!(
+            count_of(&counts, name),
+            MOVES,
+            "{name} must not sync more than once per move"
+        );
+    }
+    // MED-UI-06, still open: the node editor republishes the Properties target
+    // from `refresh_from_document` on every move, and the `ProjectState` notify
+    // of the same move resolves the sections a second time. Measured baseline.
+    assert!(
+        count_of(&counts, "properties.refresh_values") > MOVES,
+        "the doubled re-resolve MED-UI-06 describes should still be visible here"
+    );
+}
+
+/// One second of playback at 30 fps. Nothing about the document changes, so the
+/// only panel entitled to sync is Properties, whose sections sample animated
+/// channels at the playhead.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_second_of_playback_sync_counts(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    cx.update(|cx| {
+        cx.set_global(panels::SelectedPropertiesTarget(
+            panels::PropertiesTarget::Layer {
+                comp_id: comp,
+                layer_id: layer,
+            },
+        ));
+    });
+    cx.run_until_parked();
+
+    const FRAMES: u64 = 30;
+    reset_syncs();
+    for frame in 0..FRAMES {
+        cx.update(|cx| {
+            cx.set_global(panels::PlaybackPosition {
+                frame,
+                fps: ravel_core::types::FrameRate::new(30, 1),
+            });
+        });
+        cx.run_until_parked();
+    }
+    let counts = sync_counts("playback, 30 frames");
+
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        FRAMES,
+        "Properties samples the playhead once per frame, not twice"
+    );
+    for name in [
+        "timeline.sync_from_project",
+        "outliner.rebuild_rows",
+        "media_bin.rebuild_rows",
+    ] {
+        assert_eq!(
+            count_of(&counts, name),
+            0,
+            "{name} mirrors the document, which playback does not change"
+        );
+    }
+}
+
+/// One composition switch. Timeline and Outliner sync from the
+/// `ActiveComposition` global, and `set_active_composition` also notifies
+/// `ProjectState` — the pair MED-UI-06 describes.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_composition_switch_sync_counts(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    add_layer(&harness, cx);
+    let root = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    harness.project.update(cx, |project, cx| {
+        project.create_composition(
+            ravel_ui::document::CompositionSettings::fallback("Other"),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    reset_syncs();
+    harness.project.update(cx, |project, cx| {
+        project.set_active_composition(Some(root), cx)
+    });
+    cx.run_until_parked();
+    let counts = sync_counts("composition switch");
+
+    assert_eq!(
+        cx.update(|cx| panels::active_composition(cx)),
+        Some(root),
+        "the switch must have taken effect"
+    );
+    // MED-UI-06, still open: each panel syncs once from the `ActiveComposition`
+    // observer and once more from the `ProjectState` notify of the same switch.
+    // Measured baseline.
+    for name in ["timeline.sync_from_project", "outliner.rebuild_rows"] {
+        assert_eq!(
+            count_of(&counts, name),
+            2,
+            "{name} should still sync twice for one composition switch"
+        );
+    }
 }
 
 #[gpui::test]

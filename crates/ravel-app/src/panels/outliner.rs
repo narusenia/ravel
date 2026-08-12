@@ -167,6 +167,7 @@ impl OutlinerGpuiPanel {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
+        super::sync_probe::record(super::sync_probe::PanelSync::OutlinerRows);
         self.rows = match &self.project {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),

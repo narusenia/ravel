@@ -37,14 +37,14 @@ pub const CD: &str = "Cd";
 pub const ALPHA: &str = "alpha";
 /// Point draw radius (F32, Point).
 pub const PSCALE: &str = "pscale";
-/// Fill flag (Bool, Point/Primitive/Instance). Absent means the `rasterize`
+/// Fill flag (Bool, Primitive/Instance). Absent means the `rasterize`
 /// node's `fill` parameter decides.
 pub const FILL: &str = "fill";
-/// Stroke width in composition pixels (F32, Point/Primitive/Instance);
+/// Stroke width in composition pixels (F32, Primitive/Instance);
 /// 0 draws no stroke. Absent means the `rasterize` node's `stroke_width`
 /// parameter decides.
 pub const STROKE_WIDTH: &str = "stroke_width";
-/// Stroke color (Color, Point/Primitive/Instance). Absent falls back to
+/// Stroke color (Color, Primitive/Instance). Absent falls back to
 /// [`CD`], which is the fill color, so an unset stroke color draws the way it
 /// did before strokes had one.
 pub const STROKE_COLOR: &str = "stroke_color";

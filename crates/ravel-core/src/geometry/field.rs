@@ -1108,6 +1108,13 @@ fn created_column(target: &str, sampled: AttributeType, length: usize) -> Attrib
     match target {
         names::CD | names::STROKE_COLOR => AttributeArray::Color(vec![Color::WHITE; length]),
         names::STROKE_WIDTH => AttributeArray::F32(vec![0.0; length]),
+        // `fill` is declared Bool, and a reserved attribute takes its declared
+        // type even when that makes the combine fail: `combine_arrays` then
+        // reports the same unsupported-type error a geometry that already had
+        // a `fill` column would produce. Inventing an F32 `fill` instead would
+        // let `field.apply` report success while `rasterize`, which reads the
+        // attribute as Bool, went on ignoring it.
+        names::FILL => AttributeArray::Bool(vec![false; length]),
         _ => match sampled {
             AttributeType::Vec2 => AttributeArray::Vec2(vec![Vec2(0.0, 0.0); length]),
             AttributeType::Vec3 => AttributeArray::Vec3(vec![Vec3(0.0, 0.0, 0.0); length]),
@@ -2768,6 +2775,38 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    /// `fill` is declared Bool, and creating it must not quietly widen that to
+    /// the field's own type. An invented F32 `fill` would let this call report
+    /// success while `rasterize` — which reads the attribute as Bool — went on
+    /// ignoring it: a modulation that does nothing and says nothing.
+    #[test]
+    fn creating_a_bool_reserved_target_reports_the_type_it_always_reported() {
+        let geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        let missing = apply_field(
+            &geometry,
+            &FieldApply::new(Domain::Point, names::FILL),
+            &XField,
+            &ctx(),
+        );
+
+        // The same error a geometry that already had a `fill` column gives.
+        let present = apply_field(
+            &two_points_with(names::FILL, AttributeArray::Bool(vec![false, false])),
+            &FieldApply::new(Domain::Point, names::FILL),
+            &XField,
+            &ctx(),
+        );
+        assert!(
+            missing.is_err() && present.is_err(),
+            "a Bool target is not modulatable whether or not it had to be created"
+        );
+        assert_eq!(
+            missing.unwrap_err().to_string(),
+            present.unwrap_err().to_string(),
+            "creating the column must not invent a second error for the same case"
+        );
     }
 
     /// Darkening a color must not also make it transparent. Alpha moves only

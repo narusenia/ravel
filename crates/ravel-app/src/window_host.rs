@@ -865,8 +865,8 @@ impl WindowHost {
         let opened_around = (role == WindowRole::Detached)
             .then(|| active_instance(&root))
             .flatten();
-        let dock_root = root.clone();
-        let dock = cx.new(|cx| DockRoot::new(dock_root, panes.clone(), cx));
+        // Cloned because the visible set is seeded from the same tree below.
+        let dock = cx.new(|cx| DockRoot::new(root.clone(), panes.clone(), cx));
         let dock_sub = cx.subscribe_in(
             &dock,
             window,
@@ -947,7 +947,11 @@ impl WindowHost {
             focus_sub,
             bounds_sub,
         };
-        host.show_tree(root, window, cx);
+        // The dock already renders this tree, so only the visible set needs
+        // seeding — running the whole of `show_tree` here would rewrite the OS
+        // title the constructor just set and push the layout into a dock that
+        // was built from it.
+        host.publish_visible_panels(&root, cx);
         host
     }
 
@@ -1061,8 +1065,15 @@ impl WindowHost {
         update_shell(cx, move |shell| apply_dock_event(shell, id, &event));
     }
 
-    /// Renders an updated tree for this window and keeps the OS title with it.
-    fn show_tree(&mut self, root: LayoutNode, window: &mut Window, cx: &mut Context<Self>) {
+    /// Replaces this window's share of [`panels::VisiblePanels`] with the
+    /// active tab of every area in `root`, and keeps the registry's copy of
+    /// that share in step so unregistering the window can remove exactly it.
+    ///
+    /// Separate from [`Self::show_tree`] because the constructor has to seed
+    /// the set for a window that has not rendered a second tree yet, and
+    /// `show_tree`'s other work — rewriting the OS title, replacing the dock's
+    /// layout, which cancels in-flight drags — must not run at that point.
+    fn publish_visible_panels(&mut self, root: &LayoutNode, cx: &mut App) {
         let other_visible = {
             let registry = cx.default_global::<WindowRegistry>();
             registry
@@ -1075,7 +1086,7 @@ impl WindowHost {
         replace_visible_panels(
             cx.default_global::<panels::VisiblePanels>(),
             &mut self.visible_panels,
-            visible_panel_ids(&root),
+            visible_panel_ids(root),
             &other_visible,
         );
         if let Some(open) = cx
@@ -1085,6 +1096,11 @@ impl WindowHost {
         {
             open.visible_panels.clone_from(&self.visible_panels);
         }
+    }
+
+    /// Renders an updated tree for this window and keeps the OS title with it.
+    fn show_tree(&mut self, root: LayoutNode, window: &mut Window, cx: &mut Context<Self>) {
+        self.publish_visible_panels(&root, cx);
         // The title follows the active tab, and the OS keeps whatever it was
         // given at open time until it is written again. The main window's OS
         // title names the project instead, and the session maintains it.
@@ -1095,9 +1111,7 @@ impl WindowHost {
                 window.set_window_title(&self.os_title);
             }
         }
-        if self.dock.read(cx).layout() != &root {
-            self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
-        }
+        self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
     }
 
     /// Window title bar: the shared component, with the slots this window's

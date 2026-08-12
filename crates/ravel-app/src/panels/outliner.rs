@@ -120,36 +120,23 @@ impl OutlinerGpuiPanel {
         let project_sub = project.as_ref().map(|project| {
             cx.observe(project, |this: &mut Self, project, cx| {
                 // Rebuilding walks every composition, layer, and node, so it
-                // only runs when what the tree shows actually moved — the
-                // composition-switch observer below has its own path.
+                // only runs when what the tree shows actually moved.
                 if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
                     return;
                 }
-                this.rebuild_rows(cx);
+                this.sync_tree(cx);
             })
         });
 
         // A composition switch changes which rows are interactive, and the
         // newly active composition opens so its layers are reachable.
         let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
-            // Same pair as in the Timeline (`MED-UI-06`): one switch arrives as
-            // this global write and again as a `ProjectState` notify. Comparing
-            // the composition this tree last opened for collapses them to one
-            // walk in either order, and — unlike an epoch check — still runs for
-            // a global write that carried no notify.
-            let active = super::active_composition(cx);
-            if active == this.active_comp {
+            // Unlike an epoch check, this still runs for a global write that
+            // carried no `ProjectState` notify.
+            if super::active_composition(cx) == this.active_comp {
                 return;
             }
-            this.active_comp = active;
-            if let Some(comp) = active {
-                this.state.set_expanded(OutlinerKey::Comp(comp), true);
-            }
-            this.rebuild_rows(cx);
-            if let Some(project) = this.project.clone() {
-                let epoch = project.read(cx).mirror_epoch();
-                this.mirror_epoch.advanced(epoch);
-            }
+            this.sync_tree(cx);
         });
         // Selection highlighting only: the rows themselves do not change.
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| cx.notify());
@@ -184,6 +171,32 @@ impl OutlinerGpuiPanel {
         };
         panel.rebuild_rows(cx);
         panel
+    }
+
+    /// Bring the tree in step with the document *and* with the active
+    /// composition, from whichever observer arrives first.
+    ///
+    /// One composition switch reaches this panel twice — as the
+    /// `ActiveComposition` write and as the `ProjectState` notify behind it
+    /// (`MED-UI-06`) — in an order this panel does not choose. Both arrivals do
+    /// the whole job here, which is what makes the second one a no-op: it adopts
+    /// the active composition (so the global observer's check matches) and
+    /// records the epoch (so the project observer's gate closes). Doing only
+    /// half of that in one of the two paths is what made the dedup depend on the
+    /// current notification order.
+    fn sync_tree(&mut self, cx: &mut Context<Self>) {
+        let active = super::active_composition(cx);
+        if active != self.active_comp {
+            self.active_comp = active;
+            if let Some(comp) = active {
+                self.state.set_expanded(OutlinerKey::Comp(comp), true);
+            }
+        }
+        self.rebuild_rows(cx);
+        if let Some(project) = self.project.clone() {
+            let epoch = project.read(cx).mirror_epoch();
+            self.mirror_epoch.advanced(epoch);
+        }
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
@@ -1279,6 +1292,56 @@ mod tests {
     fn layer_reorder_cursor_changes_only_during_drag() {
         assert_eq!(outliner_row_cursor(false), CursorStyle::PointingHand);
         assert_eq!(outliner_row_cursor(true), CursorStyle::ResizeUpDown);
+    }
+
+    /// One composition switch reaches this panel as an `ActiveComposition` write
+    /// *and* as the `ProjectState` notify behind it, and the dedup must not
+    /// depend on which lands first. Both observers call `sync_tree`, so what
+    /// makes the second arrival a no-op is that call doing the *whole* job:
+    /// adopting the active composition (which closes the global observer's
+    /// check) and recording the epoch (which closes the project observer's
+    /// gate). Half of it — the shape this replaced, where the project observer
+    /// only rebuilt rows — leaves the panel one switch behind and rebuilds twice
+    /// as soon as the notification order changes.
+    ///
+    /// Asserted on the helper rather than through the observers because gpui
+    /// queues the `set_global` effect before the `cx.notify()` that follows it:
+    /// only one of the two orders is reachable, so an end-to-end test passes
+    /// either way and pins nothing.
+    #[gpui::test]
+    fn syncing_the_tree_adopts_the_composition_and_the_epoch(cx: &mut TestAppContext) {
+        let fixture = setup(cx);
+        let epoch = fixture
+            .project
+            .read_with(cx, |project, _| project.mirror_epoch());
+
+        // Point the global at the other composition without letting the panel
+        // hear about it, so `sync_tree` has something to adopt.
+        cx.update(|cx| cx.set_global(super::super::ActiveComposition(Some(fixture.other))));
+
+        fixture
+            .window
+            .update(cx, |panel, _window, cx| {
+                panel.active_comp = Some(fixture.root);
+                panel.mirror_epoch = super::super::MirrorEpoch::default();
+                panel.sync_tree(cx);
+
+                assert_eq!(
+                    panel.active_comp,
+                    Some(fixture.other),
+                    "the sync must adopt the composition it synced for"
+                );
+                assert!(
+                    !panel.mirror_epoch.advanced(epoch),
+                    "the sync must record the epoch it read, so the paired \
+                     project notify is absorbed"
+                );
+                assert!(
+                    panel.state.is_expanded(OutlinerKey::Comp(fixture.other)),
+                    "the newly active composition opens"
+                );
+            })
+            .unwrap();
     }
 
     /// `net.out ← blur`: one node row per layer.

@@ -726,6 +726,73 @@ fn a_bare_composition_global_write_still_moves_the_mirrors(cx: &mut TestAppConte
     }
 }
 
+/// One sync per switch, over a sequence of switches of both kinds, with a plain
+/// document edit after them to prove no gate was left stuck shut.
+///
+/// This does **not** pin order-independence: gpui queues the `set_global` effect
+/// before the `cx.notify()` that follows it, so only one delivery order is
+/// reachable and this test passes whether or not the project-notify path does
+/// the whole job. The post-condition that makes the order irrelevant is asserted
+/// where it can be — on the helper both observers call, in
+/// `outliner::tests::syncing_the_tree_adopts_the_composition_and_the_epoch`.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn either_arrival_of_a_switch_leaves_the_other_with_nothing_to_do(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    add_layer(&harness, cx);
+    let other = harness.project.update(cx, |project, cx| {
+        project.create_composition(
+            ravel_ui::document::CompositionSettings::fallback("Other"),
+            cx,
+        )
+    });
+    let root = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    cx.run_until_parked();
+
+    // A full switch: the global write and the `ProjectState` notify of the same
+    // change, both delivered.
+    reset_syncs();
+    harness.project.update(cx, |project, cx| {
+        project.set_active_composition(Some(root), cx)
+    });
+    cx.run_until_parked();
+    let counts = sync_counts("switch, both arrivals");
+    assert_eq!(count_of(&counts, "outliner.rebuild_rows"), 1);
+    assert_eq!(count_of(&counts, "timeline.sync_from_project"), 1);
+
+    // The consequence of adoption: the previous composition is now a real
+    // change again, so a bare global write to it must be acted on.
+    reset_syncs();
+    cx.update(|cx| panels::set_active_composition_for_tests(Some(other), cx));
+    cx.run_until_parked();
+    let counts = sync_counts("bare write back to the previous composition");
+    for name in ["outliner.rebuild_rows", "timeline.sync_from_project"] {
+        assert_eq!(
+            count_of(&counts, name),
+            1,
+            "{name}: the syncing path must have adopted the composition it \
+             synced for, or this write looks like a no-op"
+        );
+    }
+    assert_eq!(
+        cx.update(|cx| panels::active_composition(cx)),
+        Some(other),
+        "the write must have taken effect"
+    );
+
+    // And a plain document edit still reaches the tree exactly once, so the
+    // epoch bookkeeping above did not leave a gate stuck shut.
+    reset_syncs();
+    add_layer(&harness, cx);
+    let counts = sync_counts("document edit after the switches");
+    for name in ["outliner.rebuild_rows", "timeline.sync_from_project"] {
+        assert_eq!(count_of(&counts, name), 1, "{name}");
+    }
+}
+
 /// `MED-UI-04`: `sync_from_project` no longer deep-compares the `Composition`
 /// to decide whether to run — the document epoch decides, before the call. Both
 /// directions have to hold, so both are asserted here: a notify that leaves the

@@ -170,7 +170,17 @@ impl RampParam {
             if !stop.is_finite() {
                 continue;
             }
-            match sorted.binary_search_by(|existing| existing.position.total_cmp(&stop.position)) {
+            // `partial_cmp`, not `total_cmp`: `evaluate` orders positions with
+            // `<` and `==`, which read `-0.0` and `0.0` as one position. A
+            // total order would keep both as separate stops here and then
+            // leave the second unreachable. Non-finite stops were dropped
+            // above, so the comparison always answers.
+            match sorted.binary_search_by(|existing| {
+                existing
+                    .position
+                    .partial_cmp(&stop.position)
+                    .expect("non-finite stops are dropped above")
+            }) {
                 Ok(i) => sorted[i] = stop,
                 Err(i) => sorted.insert(i, stop),
             }
@@ -250,6 +260,13 @@ impl RampParam {
         let span = right.position - left.position;
         // Unreachable through the public API (positions are unique), but a
         // hand-edited file could store a zero-width span; do not divide by it.
+        //
+        // Stops far enough apart that the subtraction overflows (`-f32::MAX`
+        // to `f32::MAX`) leave `span` infinite and every ratio zero, so the
+        // segment reads as its left colour. That is a defined answer for a
+        // span no position can sit meaningfully inside, and rescaling to
+        // recover a midpoint would trade it for a precision loss on the
+        // subnormal positions a real ramp actually uses.
         let t = if span > 0.0 {
             (position - left.position) / span
         } else {
@@ -263,12 +280,20 @@ impl RampParam {
     }
 }
 
+/// Blend two colours, weighting each end rather than adding a difference.
+///
+/// `a + (b - a) * t` is the shorter spelling, but `b - a` overflows to `inf`
+/// whenever the two ends sit at opposite extremes of `f32` — both stops pass
+/// [`RampStop::is_finite`], and the blend still poisons the colour. Weighting
+/// the ends keeps every intermediate term inside the range the inputs already
+/// occupy, and `t` is clamped to `0..=1` before it arrives.
 fn mix(a: Color, b: Color, t: f32) -> Color {
+    let inv = 1.0 - t;
     Color::new(
-        a.r + (b.r - a.r) * t,
-        a.g + (b.g - a.g) * t,
-        a.b + (b.b - a.b) * t,
-        a.a + (b.a - a.a) * t,
+        a.r * inv + b.r * t,
+        a.g * inv + b.g * t,
+        a.b * inv + b.b * t,
+        a.a * inv + b.a * t,
     )
 }
 
@@ -284,6 +309,41 @@ mod tests {
             && (a.g - b.g).abs() < 1e-6
             && (a.b - b.b).abs() < 1e-6
             && (a.a - b.a).abs() < 1e-6
+    }
+
+    /// Both stops pass `is_finite`, yet `b - a` between them overflows. The
+    /// weighted blend keeps every term inside the range the inputs occupy.
+    #[test]
+    fn opposite_extreme_channels_blend_without_overflowing() {
+        let ramp = RampParam::linear([
+            (0.0, Color::new(-f32::MAX, 0.0, 0.0, 1.0)),
+            (1.0, Color::new(f32::MAX, 0.0, 0.0, 1.0)),
+        ]);
+        let mid = ramp.evaluate(0.5);
+        assert!(
+            mid.r.is_finite(),
+            "expected a finite channel, got {}",
+            mid.r
+        );
+        assert!(
+            mid.r.abs() < 1.0,
+            "the midpoint of ±MAX is 0, got {}",
+            mid.r
+        );
+    }
+
+    /// `evaluate` orders positions with `<`, which reads `-0.0` and `0.0` as
+    /// one position. Construction must agree, or the second stop is stored
+    /// and then unreachable.
+    #[test]
+    fn signed_zero_positions_are_one_stop_not_two() {
+        let ramp = RampParam::linear([(-0.0, RED), (0.0, BLUE), (1.0, Color::WHITE)]);
+        assert_eq!(ramp.len(), 2, "-0.0 and 0.0 are the same position");
+        assert_eq!(
+            ramp.evaluate(0.0),
+            BLUE,
+            "duplicates collapse to the last one given"
+        );
     }
 
     #[test]

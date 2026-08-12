@@ -328,9 +328,16 @@ impl RampField {
     }
 
     /// Source value → ramp position.
+    ///
+    /// `in_min` / `in_max` are ordinary Float parameters, so a parameter port
+    /// can drive them from a computed value and hand this a `NaN` or an
+    /// infinity. A span that is not a finite positive width has no
+    /// normalization to perform, so it degenerates to the same hard step a
+    /// zero-width range takes rather than dividing into `NaN` and sampling the
+    /// ramp's last colour everywhere.
     fn normalized(&self, value: f32) -> f32 {
         let span = self.in_max - self.in_min;
-        if span == 0.0 {
+        if !span.is_finite() || span == 0.0 {
             return if value < self.in_min { 0.0 } else { 1.0 };
         }
         (value - self.in_min) / span
@@ -2565,6 +2572,36 @@ mod tests {
         );
     }
 
+    /// `in_min` / `in_max` are Float parameters, so a parameter port can hand
+    /// them a computed `NaN` or infinity. A span that is not a finite width
+    /// takes the same hard step at `in_min` a zero-width range takes; without
+    /// the guard the division yields a `NaN` position, which samples the last
+    /// colour everywhere and looks like a working ramp stuck on one stop.
+    #[test]
+    fn a_non_finite_input_range_is_a_step_not_a_nan_position() {
+        let ramp = || RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]);
+        let samples = [-1.0, 0.0, 0.5, 1.0];
+        // Everything below `in_min` reads the first stop, everything at or
+        // above it the last. `NaN` compares false against both, so an
+        // unorderable `in_min` puts every sample on the last stop.
+        for (in_min, in_max, expected) in [
+            // Guarded here but unchanged in answer: `value < NaN` is false.
+            (f32::NAN, 1.0, [RAMP_BLUE; 4]),
+            // Was `NaN` positions (all blue); now steps at 0.
+            (0.0, f32::NAN, [RAMP_RED, RAMP_BLUE, RAMP_BLUE, RAMP_BLUE]),
+            (f32::NEG_INFINITY, f32::INFINITY, [RAMP_BLUE; 4]),
+            // Was a ratio collapsed to 0 (all red); now steps at `-f32::MAX`.
+            (-f32::MAX, f32::MAX, [RAMP_BLUE; 4]),
+        ] {
+            let field = RampField::new(FieldValue::new(XField), ramp()).with_range(in_min, in_max);
+            assert_eq!(
+                ramp_colors(&field, &samples),
+                expected.to_vec(),
+                "range ({in_min}, {in_max})"
+            );
+        }
+    }
+
     /// The point of the whole unit. A scalar field can only ever move `Cd`
     /// along the grey axis, because one number broadcasts to r, g and b; a
     /// ramp field writes three different numbers, so the hue moves.
@@ -2578,19 +2615,25 @@ mod tests {
         let spec = FieldApply::new(Domain::Point, names::CD);
 
         let greyscale = apply_field(&geometry, &spec, &XField, &ctx()).unwrap();
-        for color in greyscale
-            .points()
-            .get(names::CD)
-            .unwrap()
-            .as_color(names::CD)
-            .unwrap()
-        {
-            assert_eq!(
-                (color.r, color.g),
-                (color.r, color.r),
-                "a scalar field broadcasts, so it can only produce grey"
-            );
-        }
+        // `XField` samples the point's x, so the two points read 0 and 1, and
+        // the scalar broadcasts that one number across r, g and b. Naming the
+        // values rather than comparing the colour to itself is what makes the
+        // assertion fail if the scalar path stops writing, writes white, or
+        // reaches only one channel.
+        assert_eq!(
+            greyscale
+                .points()
+                .get(names::CD)
+                .unwrap()
+                .as_color(names::CD)
+                .unwrap()
+                .to_vec(),
+            vec![
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ],
+            "a scalar field broadcasts, so it can only produce grey"
+        );
 
         let ramp = RampField::new(
             FieldValue::new(XField),

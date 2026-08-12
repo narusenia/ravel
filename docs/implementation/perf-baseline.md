@@ -1689,3 +1689,137 @@ decoder が 1 フレームしか生きないので、scaler cache の恩恵を�
 ゼロコピー経路を有効化しないので CPU 経路を測っており、しかも直前の
 release ビルドで loadavg が 14 まで上がっていた（`ZC-1` 時は 2.5 前後）。
 **ゼロコピー後の時間を測るには、その経路を通すハーネスを別に書く必要がある。**
+
+## パネル sync 関数の実行回数（`RESP3-5` の計装）
+
+計画: `ui-responsiveness-plan.md` 第 3 段クラスタ B。記録日: 2026-08-12。
+対象 issue: `MED-UI-01`〜`MED-UI-06`。
+
+### なぜ回数で、なぜ notify では測れないか
+
+GPUI は 1 エフェクトサイクル内の `cx.notify()` を合流させる。observer の
+呼び出し回数を数えるプローブでは、パネルが 1 回再構築したのか 5 回再構築したのか
+区別できない（`MED-UI-06` が「未着手の理由」に挙げていたのがこれ）。
+コストを持つのは observer ではなく **sync 関数そのもの**（`Composition` の
+deep compare、全行走査、全セクション再構築）なので、そこを数える。
+
+計装: `crates/ravel-app/src/panels/sync_probe.rs`。
+`record()` は各 sync 関数の先頭 1 行のみ。**`debug_assertions` が無い
+ビルドでは空の `#[inline(always)]` 関数**になり、カウンタも thread-local の
+参照も残らない。`count()` / `reset()` は debug ビルドにしか存在しないので、
+release でカウンタを読むテストは「黙って 0 を assert する」のではなく
+コンパイルエラーになる。
+
+カウンタは global な atomic ではなく **thread-local**。パネルの sync は
+UI スレッドで走り、`#[gpui::test]` ではそれがテスト自身のスレッドなので、
+並列実行中のテストが互いのカウントを見ることがない。
+
+| 定数 | 数える関数 |
+|---|---|
+| `PanelSync::PropertiesRefresh` | `PropertiesGpuiPanel::refresh_values` |
+| `PanelSync::TimelineSync` | `TimelineGpuiPanel::sync_from_project` |
+| `PanelSync::OutlinerRows` | `OutlinerGpuiPanel::rebuild_rows` |
+| `PanelSync::MediaBinRows` | `MediaBinGpuiPanel::rebuild_rows` |
+
+### 測り方
+
+```bash
+cargo test -p ravel-app --test panel_rebuild_gate -- --nocapture
+```
+
+`crates/ravel-app/tests/panel_rebuild_gate.rs` の `*_sync_counts` 3 本が、
+5 パネルを実際に開いた 1 ウィンドウに対して 1 ジェスチャーを流し、
+`sync counts [シナリオ名]:` の見出しで 4 つのカウンタを印字したうえで
+assert する。数字を変える変更は、印字を読んで assert を更新すること。
+
+| シナリオ | テスト | 内容 |
+|---|---|---|
+| ドラッグ 1 回 | `a_parameter_drag_sync_counts` | ノードパラメータのドラッグ 10 move（`apply_document` + `Params` ヒント、対象ノードを選択した状態） |
+| 再生 1 秒 | `a_second_of_playback_sync_counts` | `PlaybackPosition` を 30 fps で 30 回発行 |
+| コンポジション切替 | `a_composition_switch_sync_counts` | `set_active_composition` 1 回 |
+
+### 現状値（クラスタ B 着手前 = before）
+
+| シナリオ | Properties | Timeline | Outliner | MediaBin |
+|---|---|---|---|---|
+| ドラッグ 10 move | **16** | 10 | 10 | 10 |
+| 再生 30 フレーム | 30 | 0 | 0 | 0 |
+| コンポジション切替 1 回 | 0 | **2** | **2** | 1 |
+
+読み方:
+
+- **ドラッグは move あたり 1 回が下限**（ドキュメントが実際に毎 move 変わる）。
+  Timeline / Outliner / MediaBin は既にその下限にいる — `HIGH-07` の
+  epoch ゲートが効いている。Properties だけが 10 move で 16 回、つまり
+  `MED-UI-06` の二重再解決が残っている（NodeEditor の
+  `refresh_from_document` がターゲットを再発行する経路と、同じ move の
+  project notify）。合流の都合で 20 ではなく 16。
+- **再生は Properties の 1 フレーム 1 回まで既に落ちている。**
+  `MED-UI-02` は「フレームあたり 2 回」と書いているが、これは `CRIT-01`
+  以前の値である。`on_eval_update` が `ProjectState` observer を起こさなく
+  なったので、再生中に走るのは `PlaybackPosition` observer の 1 本だけ。
+  Timeline / Outliner / MediaBin は再生中 **0 回**で、`MED-UI-05` が言う
+  「評価更新経路からの notify」はもう残っていない。
+- **コンポジション切替は Timeline / Outliner が 2 回**（`ActiveComposition`
+  observer と、同じ切替の project notify）。`MED-UI-06` の後半。
+
+### クラスタ B 適用後（after）
+
+同じ 3 シナリオを同じテストで測り直した値。シナリオ定義は 1 つ変えた —
+再生は「静的なレイヤーを選択」と「不透明度をキーフレーム化したレイヤーを選択」の
+2 本に分けた。前者が削減対象、後者が**削ってはいけない**方である。
+
+| シナリオ | Properties | Timeline | Outliner | MediaBin |
+|---|---|---|---|---|
+| ドラッグ 10 move | 16 → **10** | 10 | 10 | 10 |
+| 再生 30 フレーム（静的レイヤー） | 30 → **1** | 0 | 0 | 0 |
+| 再生 30 フレーム（アニメーション有り） | 30（据え置き） | 0 | 0 | 0 |
+| コンポジション切替 1 回 | 0 | 2 → **1** | 2 → **1** | 1 |
+
+- ドラッグは **move あたりちょうど 1 回**。ドキュメントは毎 move 実際に変わるので
+  1 が下限であり、Properties の 16 は `MED-UI-06` の二重再解決だった。
+  グローバル駆動の sync が epoch を記録し、対になる project notify が
+  それを見て飛ばす（`RESP3-11`）。
+  なお計測は**ドラッグ 2 move 分のウォームアップ後**に取る。ターゲットが
+  Empty から切り替わる最初の 2 move は「新しいターゲットを採用する」分岐で、
+  値の解決を `render` の `rebuild_widgets` に任せる（ヘッドレスのテストは
+  描画しないので 0 と数えられる）。定常状態が測りたいものである。
+- 再生は、表示中のものが**どれもプレイヘッドで再サンプルされない**とき
+  1 回で止まる（最初の 1 フレームで判定して以後スキップ）。
+  キーフレームや式や被駆動パラメータがあれば 30 回のまま — こちらを削ると
+  再生中に値が止まって見える。
+- コンポジション切替は 1 回。epoch ではなく**そのパネル自身が今どの
+  コンポジションを映しているか**で判定しているので、project notify を
+  伴わないグローバル書き込みでも鏡は追従する
+  （`a_bare_composition_global_write_still_moves_the_mirrors`）。
+
+### 測っただけで、まだ削っていないもの
+
+- **MediaBin はドラッグ 1 move ごとに同じ行を作り直す**（上表の 10）。
+  レイヤー編集は media 資産を変えないので、行が同一なら早期 return できる。
+  ただしそうすると `HIGH-07` の既存テスト 2 本
+  （`a_completed_save_rebuilds_no_document_panel` /
+  `a_composition_switch_leaves_every_gate_open_for_the_next_edit`）が落ちる。
+  両者は「ドキュメント編集では**すべての**ミラーパネルが notify する」と
+  主張しており、このパネルに関してはその前提の方が誤りだが、`HIGH-07` の
+  退行テストを緩めるのは性能作業のついでに決めることではない。
+- **Timeline の行レイアウト走査は全レイヤー分残っている（意図的）。**
+  カリングが届くのはヘッダのウィジェットサブツリーと painter の描画である。
+  「可視行がどこから始まるか」は手前の行の高さの合計なので、
+  `layer_blocks()` の走査自体は全レイヤーを回る必要がある。
+  ただし `visible_property_rows()` は**展開チェックの内側**にあるので、
+  折り畳まれたレイヤー 1 枚のコストは展開状態の HashSet 参照 1 回と
+  16 バイトの push 1 回で、行モデルの構築もアロケーションも無い。
+  **100 レイヤーが全部折り畳まれていれば行モデルの構築は 0 回**
+  （`the_row_layout_walk_builds_row_models_only_for_expanded_layers` が固定）。
+  残るコストはスタックの深さではなく**展開済みレイヤー数**に比例し、
+  展開はレイヤー 1 枚ずつの明示操作である。
+  レイヤーごとの高さをキャッシュすれば消せるが、無効化条件
+  （ドキュメント epoch・レイヤー展開・プロパティ展開・チャンネル数）を
+  1 つ外すと、古い高さより下の行が**全部ずれた位置に描かれる**。
+  性能のために表示位置の正しさを賭ける取引になるので採らなかった。
+- **`MED-UI-05` の評価更新経路は既に無い。** 再生 30 フレームで
+  Timeline / Outliner / MediaBin はいずれも 0 回。`CRIT-01` が
+  `on_eval_update` から `ProjectState` observer への notify を外した時点で
+  解消しており、個票の記述（「再生中の評価結果ごとにも走る」）は
+  その修正前の状態を指している。

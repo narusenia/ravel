@@ -282,6 +282,18 @@ fn graph_pointer_hint(hit: Option<CurveHit>) -> PointerHint {
     }
 }
 
+/// Where one layer's rows sit in the layer area, in content-space pixels:
+/// its bar row plus the property and channel rows it shows while expanded.
+/// Produced by [`TimelineGpuiPanel::layer_blocks`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LayerBlock {
+    id: LayerId,
+    /// Distance from the top of the layer area to this block's first row.
+    y: f32,
+    /// Height of every row this layer currently shows.
+    height: f32,
+}
+
 /// The layer-area row under a content-space y position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowHit {
@@ -573,6 +585,11 @@ pub struct TimelineGpuiPanel {
     /// Origin of the layer bar area, captured during prepaint for
     /// bar hit-testing in panel coordinates.
     area_origin: Rc<Cell<(f32, f32)>>,
+    /// Vertical scroll of the layer stack. Read during render to build and
+    /// paint only the rows on screen ([`TimelineGpuiPanel::visible_content_y`]);
+    /// gpui wakes this view whenever the offset moves, so the value is never a
+    /// frame behind what the next paint uses.
+    layer_scroll: ScrollHandle,
     /// Last context-menu invocation in layer-area coordinates. Header
     /// clicks have a negative x but share the layer area's content y.
     last_right_click: Rc<Cell<(f32, f32)>>,
@@ -662,7 +679,25 @@ impl TimelineGpuiPanel {
         // selection global is written by the Outliner as well as by this
         // panel, so the row highlighting has to repaint from it.
         let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
+            // The global wakes its observers on every write, identical values
+            // included, and one switch arrives here *and* as a `ProjectState`
+            // notify — `MED-UI-06`. Comparing the mirror's own composition is
+            // what makes the pair collapse to one sync whichever of the two
+            // observers runs first: this one syncs and records the epoch so the
+            // notify is absorbed, or the notify got there first and this one
+            // finds the mirror already on the new composition.
+            //
+            // Deliberately not gated on the epoch: a write to the global that
+            // did not bump it would then be skipped, and the panel would keep
+            // showing the previous composition.
+            if super::active_composition(cx) == this.state.comp_id() {
+                return;
+            }
             this.sync_from_project(cx);
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
         });
         let selection_sub = cx.observe_global::<super::LayerSelection>(|_this, cx| {
             cx.notify();
@@ -732,6 +767,7 @@ impl TimelineGpuiPanel {
             ruler_width: Rc::new(Cell::new(0.0)),
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
+            layer_scroll: ScrollHandle::new(),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             timecode_input: None,
             timecode_input_sub: None,
@@ -756,6 +792,7 @@ impl TimelineGpuiPanel {
     // ----- document sync -----------------------------------------------------
 
     fn sync_from_project(&mut self, cx: &mut Context<Self>) {
+        super::sync_probe::record(super::sync_probe::PanelSync::TimelineSync);
         let Some(project) = self.project.clone() else {
             return;
         };
@@ -764,42 +801,44 @@ impl TimelineGpuiPanel {
         // have) empties the panel instead of leaving a stale composition on
         // screen.
         let comp = super::active_composition_in(project.read(cx).document(), cx).cloned();
-        if self.state.composition() != comp.as_ref() {
-            let old_comp_id = self.state.comp_id();
-            let new_comp_id = comp.as_ref().map(|comp| comp.id);
-            self.state.set_composition(comp);
-            // Drop a keyframe selection whose diamond disappeared (undo or
-            // an external edit) — a stale selection would hijack Delete.
-            self.selected_keyframes.retain(|keyframe| {
-                self.state.layer(keyframe.layer).is_some_and(|layer| {
-                    keyframes::has_keyframe_at(
-                        layer,
-                        &keyframe.row,
-                        keyframe.component,
-                        keyframe.frame,
-                    )
-                })
-            });
-            // Deselect a deleted layer. A changed composition id also
-            // clears: a same-numbered LayerId in the new composition is an
-            // unrelated layer. Clearing the selection drops a Properties
-            // target that pointed at it (`set_layer_selection`); a node
-            // target is never stolen. Value freshness itself needs no
-            // republish — the Properties panel resolves from the document.
-            //
-            // The node editor needs no push here: it observes
-            // `LayerSelection`, and both a composition switch and the clear
-            // below write it (a switch closes the network even with nothing
-            // selected, so the Viewer tools and `CanvasSelection` cannot stay
-            // pointed at a composition the UI no longer shows).
-            // Layers that vanished from the document leave the selection in
-            // `ProjectState::document_changed` (it owns that for every
-            // workspace); what is left here is the composition switch, where a
-            // same-numbered `LayerId` in the new composition is an unrelated
-            // layer.
-            if !super::layer_selection(cx).is_empty() && new_comp_id != old_comp_id {
-                super::clear_layer_selection(cx);
-            }
+        // No deep compare. This used to ask `self.state.composition() != comp`,
+        // which walks every layer and every layer network of both sides on
+        // every `ProjectState` notify — and then repainted anyway
+        // (`MED-UI-04`). Whether anything changed is already decided before the
+        // call: the `ProjectState` observer passes only when
+        // `ProjectState::mirror_epoch` moved, and that epoch is defined as the
+        // generation of what the document-mirroring panels display. The
+        // composition-switch observer is the other caller, and a switch is by
+        // definition a change.
+        let old_comp_id = self.state.comp_id();
+        let new_comp_id = comp.as_ref().map(|comp| comp.id);
+        self.state.set_composition(comp);
+        // Drop a keyframe selection whose diamond disappeared (undo or
+        // an external edit) — a stale selection would hijack Delete.
+        self.selected_keyframes.retain(|keyframe| {
+            self.state.layer(keyframe.layer).is_some_and(|layer| {
+                keyframes::has_keyframe_at(layer, &keyframe.row, keyframe.component, keyframe.frame)
+            })
+        });
+        // Deselect a deleted layer. A changed composition id also
+        // clears: a same-numbered LayerId in the new composition is an
+        // unrelated layer. Clearing the selection drops a Properties
+        // target that pointed at it (`set_layer_selection`); a node
+        // target is never stolen. Value freshness itself needs no
+        // republish — the Properties panel resolves from the document.
+        //
+        // The node editor needs no push here: it observes
+        // `LayerSelection`, and both a composition switch and the clear
+        // below write it (a switch closes the network even with nothing
+        // selected, so the Viewer tools and `CanvasSelection` cannot stay
+        // pointed at a composition the UI no longer shows).
+        // Layers that vanished from the document leave the selection in
+        // `ProjectState::document_changed` (it owns that for every
+        // workspace); what is left here is the composition switch, where a
+        // same-numbered `LayerId` in the new composition is an unrelated
+        // layer.
+        if !super::layer_selection(cx).is_empty() && new_comp_id != old_comp_id {
+            super::clear_layer_selection(cx);
         }
         // Every document change reaches here (edit, undo, redo, composition
         // switch), so this is where the inline value scrubs follow the values
@@ -3857,25 +3896,30 @@ impl TimelineGpuiPanel {
     }
 
     fn row_at_content_y_in(state: &TimelinePanel, content_y: f32) -> Option<RowHit> {
-        let mut y = 0.0f32;
-        for layer in state.layers().rev() {
-            if content_y >= y && content_y < y + LAYER_ROW_HEIGHT {
-                return Some(RowHit::LayerBar(layer.id));
-            }
-            y += LAYER_ROW_HEIGHT;
-            if state.is_layer_expanded(layer.id) {
-                for row in state.visible_property_rows(layer) {
-                    if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
-                        return Some(RowHit::PropertyGroup(layer.id, row.id));
-                    }
-                    y += PROPERTY_ROW_HEIGHT;
-                    if state.is_property_expanded(layer.id, &row.id) {
-                        for component in 0..row.channel_names.len() {
-                            if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
-                                return Some(RowHit::Channel(layer.id, row.id, component));
-                            }
-                            y += PROPERTY_ROW_HEIGHT;
+        // Which layer owns this y comes from the shared layout; only the walk
+        // *inside* the owning block happens here.
+        let blocks = Self::layer_blocks(state);
+        let block = blocks
+            .iter()
+            .find(|block| content_y >= block.y && content_y < block.y + block.height)?;
+        let mut y = block.y;
+        if content_y < y + LAYER_ROW_HEIGHT {
+            return Some(RowHit::LayerBar(block.id));
+        }
+        y += LAYER_ROW_HEIGHT;
+        let layer = state.layer(block.id)?;
+        if state.is_layer_expanded(block.id) {
+            for row in state.visible_property_rows(layer) {
+                if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
+                    return Some(RowHit::PropertyGroup(block.id, row.id));
+                }
+                y += PROPERTY_ROW_HEIGHT;
+                if state.is_property_expanded(block.id, &row.id) {
+                    for component in 0..row.channel_names.len() {
+                        if content_y >= y && content_y < y + PROPERTY_ROW_HEIGHT {
+                            return Some(RowHit::Channel(block.id, row.id, component));
                         }
+                        y += PROPERTY_ROW_HEIGHT;
                     }
                 }
             }
@@ -3918,20 +3962,90 @@ impl TimelineGpuiPanel {
         cx.notify();
     }
 
-    fn total_layer_height(&self) -> f32 {
-        let mut h = 0.0f32;
-        for layer in self.state.layers() {
-            h += LAYER_ROW_HEIGHT;
-            if self.state.is_layer_expanded(layer.id) {
-                for row in self.state.visible_property_rows(layer) {
-                    h += PROPERTY_ROW_HEIGHT;
-                    if self.state.is_property_expanded(layer.id, &row.id) {
-                        h += row.channel_names.len() as f32 * PROPERTY_ROW_HEIGHT;
+    /// Content-space placement of every layer's block in the layer area, top
+    /// layer first: the bar row plus the property and channel rows the layer
+    /// shows while expanded.
+    ///
+    /// The one place row heights are added up. The header column, the canvas
+    /// painter, the total content height and the hit test all read the layout
+    /// from here, so a row height that moves cannot move in one of them only.
+    ///
+    /// **This walk is not culled, and cannot be**: finding where the visible rows
+    /// start means summing the heights before them. What the culling reaches is
+    /// the expensive half — the header column's widget subtree and the painter's
+    /// draw calls (see [`Self::visible_blocks`]).
+    ///
+    /// The walk stays cheap because `visible_property_rows` sits behind the
+    /// expansion check: a collapsed layer costs one expansion lookup and one
+    /// 16-byte push, with no row model and no allocation. So the cost tracks the
+    /// number of *expanded* layers rather than the depth of the stack — a
+    /// hundred collapsed layers build no row models at all
+    /// (`the_row_layout_walk_builds_row_models_only_for_expanded_layers`).
+    /// Caching per-layer heights would remove the remainder, at the price of an
+    /// invalidation condition (document epoch, layer expansion, property
+    /// expansion, channel counts) whose failure mode is every row below a stale
+    /// entry drawn in the wrong place.
+    fn layer_blocks(state: &TimelinePanel) -> Vec<LayerBlock> {
+        let mut blocks = Vec::new();
+        let mut y = 0.0f32;
+        for layer in state.layers().rev() {
+            let mut height = LAYER_ROW_HEIGHT;
+            if state.is_layer_expanded(layer.id) {
+                for row in state.visible_property_rows(layer) {
+                    height += PROPERTY_ROW_HEIGHT;
+                    if state.is_property_expanded(layer.id, &row.id) {
+                        height += row.channel_names.len() as f32 * PROPERTY_ROW_HEIGHT;
                     }
                 }
             }
+            blocks.push(LayerBlock {
+                id: layer.id,
+                y,
+                height,
+            });
+            y += height;
         }
-        h
+        blocks
+    }
+
+    /// The content-space y window the layer area is scrolled to, or `None`
+    /// before the first layout has given the scroll container a size.
+    ///
+    /// `None` means "do not cull": culling against a zero-height viewport would
+    /// build nothing and blank the panel for a frame, and the first render of a
+    /// panel is exactly when there is no measurement yet. Scrolling notifies the
+    /// view (gpui updates the offset and wakes the current view), so every later
+    /// render sees the offset the next paint will use.
+    fn visible_content_y(&self) -> Option<(f32, f32)> {
+        let viewport: f32 = self.layer_scroll.bounds().size.height.into();
+        if viewport <= 0.0 {
+            return None;
+        }
+        let top = (-f32::from(self.layer_scroll.offset().y)).max(0.0);
+        Some((top, top + viewport))
+    }
+
+    /// The slice of `blocks` overlapping the visible y window — every block
+    /// with a pixel on screen, and no other. `None` keeps all of them.
+    ///
+    /// A block that starts above the window or ends below it is kept whole:
+    /// partial visibility is still visibility, and the boundary rows are
+    /// exactly the ones a scroll is about to reveal.
+    fn visible_blocks(blocks: &[LayerBlock], window: Option<(f32, f32)>) -> &[LayerBlock] {
+        let Some((top, bottom)) = window else {
+            return blocks;
+        };
+        // `blocks` is laid out top to bottom, so both edges are partition
+        // points rather than scans.
+        let first = blocks.partition_point(|block| block.y + block.height <= top);
+        let end = blocks.partition_point(|block| block.y < bottom);
+        &blocks[first..end.max(first)]
+    }
+
+    fn total_layer_height(&self) -> f32 {
+        Self::layer_blocks(&self.state)
+            .last()
+            .map_or(0.0, |block| block.y + block.height)
     }
 
     fn build_layer_area(
@@ -4001,8 +4115,20 @@ impl TimelineGpuiPanel {
                 window.paint_quad(fill(bounds, colors.background));
                 paint_beat_lines(&state, bpm, bounds, &colors, window);
 
-                let mut y = bounds.origin.y;
-                for layer in state.layers().rev() {
+                // Vertical culling, the counterpart of the horizontal culling
+                // the bars already do. The canvas is as tall as the whole
+                // stack, so its bounds say nothing about what is on screen; the
+                // content mask is the scroll container's clip rect, which is
+                // exactly the visible window and is re-read on every paint.
+                let clip = window.content_mask().bounds;
+                let visible_top: f32 = (clip.origin.y - bounds.origin.y).into();
+                let visible_bottom: f32 = visible_top + f32::from(clip.size.height);
+                let blocks = Self::layer_blocks(&state);
+                for block in Self::visible_blocks(&blocks, Some((visible_top, visible_bottom))) {
+                    let Some(layer) = state.layer(block.id) else {
+                        continue;
+                    };
+                    let mut y = bounds.origin.y + px(block.y);
                     // Layer bar row
                     let lane_border = Bounds::new(
                         point(bounds.origin.x, y + px(LAYER_ROW_HEIGHT) - px(1.0)),
@@ -4496,11 +4622,27 @@ impl TimelineGpuiPanel {
             .border_color(theme.colors.border)
             .bg(theme.colors.list);
 
+        // Only the rows on screen are built. A composition's header column is a
+        // div/button subtree and a `visible_property_rows` walk per layer, and
+        // paying that for layers scrolled out of view is what made the panel
+        // scale with the layer count rather than with the viewport
+        // (`MED-UI-03`). The rows above and below are replaced by two spacers,
+        // so the scroll extent and every row's position are unchanged.
+        let blocks = Self::layer_blocks(&self.state);
+        let total_height = blocks.last().map_or(0.0, |block| block.y + block.height);
+        let visible = Self::visible_blocks(&blocks, self.visible_content_y());
+        let lead = visible.first().map_or(0.0, |block| block.y);
+        let trail = visible
+            .last()
+            .map_or(0.0, |block| total_height - (block.y + block.height));
+        if lead > 0.0 {
+            headers = headers.child(div().h(px(lead)).flex_shrink_0());
+        }
+
         // Collect layer data to avoid borrow issues
-        let layers: Vec<_> = self
-            .state
-            .layers()
-            .rev()
+        let layers: Vec<_> = visible
+            .iter()
+            .filter_map(|block| self.state.layer(block.id))
             .map(|l| (l.id, l.name.clone(), l.solo, l.muted, l.locked))
             .collect();
         let expanded_layers: Vec<_> = layers
@@ -4865,6 +5007,9 @@ impl TimelineGpuiPanel {
             }
         }
 
+        if trail > 0.0 {
+            headers = headers.child(div().h(px(trail)).flex_shrink_0());
+        }
         headers
     }
 }
@@ -5118,6 +5263,7 @@ impl Render for TimelineGpuiPanel {
                     .id("layer-scroll-area")
                     .flex_grow()
                     .overflow_y_scroll()
+                    .track_scroll(&self.layer_scroll)
                     // A MediaBin asset dropped on the stack becomes a layer
                     // starting at the frame under the pointer (unit 10).
                     .drag_over::<DraggedAsset>(move |style, _drag, _window, _cx| {
@@ -6383,6 +6529,143 @@ mod tests {
         for ppf in [MIN_PPF, 0.5, 4.0, 12.0, MAX_PPF] {
             assert!((slider_to_ppf(ppf_to_slider(ppf)) - ppf).abs() < 1e-5);
         }
+    }
+
+    /// A composition with `count` collapsed layers, the shape `MED-UI-03` is
+    /// about: every row is one `LAYER_ROW_HEIGHT` tall.
+    fn stack_of(count: usize) -> TimelinePanel {
+        let mut composition = ravel_core::composition::Composition::new(
+            CompId::new(1),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            120,
+        );
+        for i in 0..count {
+            composition = composition.add_layer(
+                Layer::new(LayerId::new(i as u64 + 1), format!("L{i}"), stub_network())
+                    .with_time(0, 0, 100),
+            );
+        }
+        TimelinePanel::with_composition(composition)
+    }
+
+    /// `MED-UI-03`: the header column and the canvas painter both build from
+    /// the visible slice, so the work they do follows the viewport rather than
+    /// the layer count. 100 layers with ~11 rows on screen must yield ~11.
+    #[test]
+    fn a_deep_stack_builds_only_the_rows_in_the_viewport() {
+        let state = stack_of(100);
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        assert_eq!(blocks.len(), 100, "every layer has a block");
+        assert_eq!(blocks[0].y, 0.0);
+        assert_eq!(blocks[1].y, LAYER_ROW_HEIGHT);
+
+        let viewport = 300.0;
+        let expected = (viewport / LAYER_ROW_HEIGHT).ceil() as usize;
+        for top in [0.0, 14.0, 40.0 * LAYER_ROW_HEIGHT, 55.5 * LAYER_ROW_HEIGHT] {
+            let visible = TimelineGpuiPanel::visible_blocks(&blocks, Some((top, top + viewport)));
+            assert!(
+                visible.len() <= expected + 1,
+                "{top}: {} rows built for a {viewport}px viewport",
+                visible.len()
+            );
+            assert!(visible.len() >= expected, "{top}: {} rows", visible.len());
+        }
+    }
+
+    /// What the culling reaches, and what it does not (`MED-UI-03`).
+    ///
+    /// The row layout walk runs over every layer — it has to, to know where the
+    /// visible ones begin — but it only builds a row model for an *expanded*
+    /// layer, because `visible_property_rows` sits behind the expansion check.
+    /// A collapsed layer's height is the bare row height, which is what this
+    /// asserts: 100 collapsed layers, 0 row models.
+    #[test]
+    fn the_row_layout_walk_builds_row_models_only_for_expanded_layers() {
+        let mut state = stack_of(100);
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        assert_eq!(blocks.len(), 100);
+        assert!(
+            blocks.iter().all(|block| block.height == LAYER_ROW_HEIGHT),
+            "a collapsed layer's height comes from arithmetic, not from a row model"
+        );
+
+        // Expanding one layer is what buys one row-model build.
+        state.toggle_layer_expanded(LayerId::new(7));
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        let taller: Vec<LayerId> = blocks
+            .iter()
+            .filter(|block| block.height > LAYER_ROW_HEIGHT)
+            .map(|block| block.id)
+            .collect();
+        assert_eq!(
+            taller,
+            vec![LayerId::new(7)],
+            "only an expanded layer costs a row-model build"
+        );
+    }
+
+    /// The scroll-edge regression the culling could introduce: a row that is
+    /// only half on screen still has to be built, and no row may be built
+    /// twice or skipped. Every content y in the window must fall inside
+    /// exactly one built block, and the built blocks must stay contiguous.
+    #[test]
+    fn culling_leaves_no_gap_or_duplicate_at_the_scroll_edges() {
+        let state = stack_of(100);
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        let viewport = 300.0;
+
+        for step in 0..40 {
+            let top = step as f32 * 7.0;
+            let bottom = top + viewport;
+            let visible = TimelineGpuiPanel::visible_blocks(&blocks, Some((top, bottom)));
+            let first = visible.first().expect("the window is over the stack");
+            let last = visible.last().expect("the window is over the stack");
+            assert!(
+                first.y <= top,
+                "{top}: a partially visible first row was culled"
+            );
+            assert!(
+                last.y + last.height >= bottom,
+                "{top}: a partially visible last row was culled"
+            );
+            for pair in visible.windows(2) {
+                assert_eq!(
+                    pair[0].y + pair[0].height,
+                    pair[1].y,
+                    "{top}: built rows must stay contiguous"
+                );
+            }
+        }
+
+        // No measurement yet (the panel's first render): cull nothing rather
+        // than blank the stack for a frame.
+        assert_eq!(
+            TimelineGpuiPanel::visible_blocks(&blocks, None).len(),
+            blocks.len()
+        );
+    }
+
+    /// The layout the culling reads must stay the layout the hit test and the
+    /// scroll extent use — one walk, not three that can drift apart.
+    #[test]
+    fn the_shared_row_layout_agrees_with_the_hit_test() {
+        let mut state = stack_of(4);
+        state.toggle_layer_expanded(LayerId::new(4));
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        for block in &blocks {
+            assert_eq!(
+                TimelineGpuiPanel::row_at_content_y_in(&state, block.y + 1.0),
+                Some(RowHit::LayerBar(block.id)),
+                "the first row of each block is its layer bar"
+            );
+        }
+        let total = blocks.last().map_or(0.0, |b| b.y + b.height);
+        assert!(
+            TimelineGpuiPanel::row_at_content_y_in(&state, total).is_none(),
+            "nothing is laid out past the end of the stack"
+        );
     }
 
     #[test]

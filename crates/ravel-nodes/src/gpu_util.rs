@@ -47,6 +47,14 @@ pub enum GpuImage<'a> {
         width: u32,
         height: u32,
     },
+    /// Input was a CPU frame this evaluation had already uploaded: the
+    /// texture belongs to the [upload scope](begin_upload_scope), which
+    /// returns it to the pool when the evaluation ends.
+    Memoized {
+        texture: Arc<PooledTexture>,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl GpuImage<'_> {
@@ -56,26 +64,50 @@ impl GpuImage<'_> {
         match self {
             GpuImage::Resident(frame) => frame.binding(),
             GpuImage::Uploaded { texture, .. } => texture.binding(),
+            GpuImage::Memoized { texture, .. } => texture.binding(),
         }
     }
 
     pub fn size(&self) -> (u32, u32) {
         match self {
             GpuImage::Resident(frame) => (frame.width(), frame.height()),
-            GpuImage::Uploaded { width, height, .. } => (*width, *height),
+            GpuImage::Uploaded { width, height, .. } | GpuImage::Memoized { width, height, .. } => {
+                (*width, *height)
+            }
         }
     }
 
-    /// Return an uploaded temporary to the pool (no-op for resident inputs,
-    /// whose textures are owned by their `GpuFrameBuffer`). Safe to call
-    /// right after recording the dispatch: the pool refuses to hand the
-    /// texture to a new owner until the batched commands that read it are
-    /// flushed, so the queued reads stay valid.
+    /// Return an uploaded temporary to the pool. A no-op for resident inputs,
+    /// whose textures are owned by their `GpuFrameBuffer`, and for memoized
+    /// ones, whose lease the upload scope holds until the evaluation ends —
+    /// releasing there would hand a texture back to the pool while later
+    /// nodes of the same evaluation still expect to bind it.
+    ///
+    /// Safe to call right after recording the dispatch: the pool refuses to
+    /// hand the texture to a new owner until the batched commands that read
+    /// it are flushed, so the queued reads stay valid.
     pub fn release(self, pool: &Arc<Mutex<TexturePool>>) {
         if let GpuImage::Uploaded { texture, .. } = self {
             pool.lock().unwrap().release(texture);
         }
     }
+}
+
+/// Open the upload scope for the evaluation about to run (issue MED-GPU-05).
+///
+/// A CPU-resident frame — a decoded media frame, most of the time — feeding
+/// N GPU nodes used to be uploaded N times, because [`ensure_gpu`] acquired a
+/// pool texture per call and released it again as soon as the dispatch was
+/// recorded. Inside a scope the first upload is kept and the other N-1 calls
+/// bind it.
+///
+/// The memo lives in the pool, which owns the leases and is dropped on a
+/// normal path, rather than beside it: see
+/// [`TexturePool::begin_upload_scope`] for what a scope guarantees.
+pub fn begin_upload_scope(pool: &Arc<Mutex<TexturePool>>) {
+    pool.lock()
+        .expect("texture pool poisoned")
+        .begin_upload_scope();
 }
 
 /// Adapt a frame input (CPU or GPU representation) into a bindable texture.
@@ -90,18 +122,36 @@ pub fn ensure_gpu<'a>(
     let fb = input
         .downcast_ref::<FrameBuffer>()
         .context("expected FrameBuffer input")?;
+    if let Some(texture) = pool.lock().unwrap().memoized_upload(fb) {
+        return Ok(GpuImage::Memoized {
+            texture,
+            width: fb.width,
+            height: fb.height,
+        });
+    }
     // The pool texture is `Rgba32Float`, so the upload needs four f32
     // channels per pixel whatever the buffer stores. `as_rgba_f32` borrows an
     // `RgbaF32` buffer (the common case, so this stays a zero-copy upload),
     // widens a reduced one, and refuses a shape that would upload garbage.
     let samples = fb.as_rgba_f32()?;
-    let key = tex_key_rw(fb.width, fb.height);
-    let pooled = pool.lock().unwrap().acquire(key);
+    let pooled = pool
+        .lock()
+        .unwrap()
+        .acquire(tex_key_rw(fb.width, fb.height));
+    // Outside the lock, as the upload always has been: `write_texture` may
+    // flush the dispatch batch, and the pool is not held while it does.
     ravel_gpu::upload_texture(ctx, &pooled, bytemuck::cast_slice(samples.as_ref()));
-    Ok(GpuImage::Uploaded {
-        texture: pooled,
-        width: fb.width,
-        height: fb.height,
+    Ok(match pool.lock().unwrap().memoize_upload(fb, pooled) {
+        Ok(texture) => GpuImage::Memoized {
+            texture,
+            width: fb.width,
+            height: fb.height,
+        },
+        Err(texture) => GpuImage::Uploaded {
+            texture,
+            width: fb.width,
+            height: fb.height,
+        },
     })
 }
 

@@ -176,6 +176,10 @@ impl EvalWorkerHooks for GpuEvalHooks {
         document: Option<&Document>,
         hint: &InvalidationHint,
     ) {
+        // The worker calls this before every request, whatever the hint, so
+        // it is the one place that reliably marks "a new evaluation starts
+        // here". The upload memo lives exactly that long (MED-GPU-05).
+        crate::gpu_util::begin_upload_scope(&self.pool);
         match hint {
             InvalidationHint::None => {}
             InvalidationHint::Params(ids) => {

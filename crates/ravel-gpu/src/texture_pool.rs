@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ravel_core::cache_budget::{SharedCacheBudget, Tier};
+use ravel_core::types::{FrameBuffer, PixelFormat};
 
 use crate::device::{GpuContext, GpuDeviceState};
 use crate::texture_desc::{TextureFormat, TextureUsage};
@@ -272,6 +273,47 @@ pub struct TexturePool {
     budget: Option<SharedCacheBudget>,
     /// Running count of textures created by this pool (for diagnostics).
     total_created: u64,
+    /// The CPU frames uploaded during the current upload scope, if one is
+    /// open ([`TexturePool::begin_upload_scope`]).
+    uploads: Option<UploadMemo>,
+}
+
+/// Identity of a CPU pixel buffer for the upload memo.
+///
+/// Keyed by the *pixel allocation*, not by the frame value: clones of one
+/// decoded frame share their `Arc<[u8]>`, so comparing addresses costs
+/// nothing where comparing pixels would cost the very transfer the memo
+/// exists to avoid. Format and dimensions belong to the key because the
+/// uploaded samples are derived from them, so two views of one allocation do
+/// not necessarily produce the same texture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct UploadKey {
+    data: usize,
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+}
+
+impl UploadKey {
+    fn of(fb: &FrameBuffer) -> Self {
+        Self {
+            data: Arc::as_ptr(&fb.data) as *const u8 as usize,
+            width: fb.width,
+            height: fb.height,
+            format: fb.format,
+        }
+    }
+}
+
+/// What one upload scope is holding.
+#[derive(Default)]
+struct UploadMemo {
+    /// Key, the pixel allocation kept alive so nothing else can be allocated
+    /// at the address the key holds, and the texture the upload produced.
+    ///
+    /// A linear scan: one evaluation feeds a handful of distinct CPU frames
+    /// to its GPU nodes. Make it a map if that stops being true.
+    entries: Vec<(UploadKey, Arc<[u8]>, Arc<PooledTexture>)>,
 }
 
 impl TexturePool {
@@ -288,6 +330,7 @@ impl TexturePool {
             lru: LruBudget::new(budget_bytes),
             budget: None,
             total_created: 0,
+            uploads: None,
         }
     }
 
@@ -308,6 +351,7 @@ impl TexturePool {
             lru: LruBudget::new(headroom),
             budget: Some(budget),
             total_created: 0,
+            uploads: None,
         }
     }
 
@@ -333,6 +377,61 @@ impl TexturePool {
     #[inline]
     pub fn device_state(&self) -> GpuDeviceState {
         self.ctx.device_state()
+    }
+
+    /// Open an upload scope, closing any previous one.
+    ///
+    /// Inside a scope the pool remembers which texture a CPU frame was
+    /// uploaded into, so a frame feeding N GPU nodes is transferred once
+    /// rather than N times ([`Self::memoized_upload`]). The textures it
+    /// remembers stay leased for the whole scope — a later node still expects
+    /// to bind them — and are released when the scope closes.
+    ///
+    /// **The scope is one evaluation.** `GpuEvalHooks::sync` opens it, and
+    /// the evaluation worker runs `sync` before every request, so a memo
+    /// never spans two evaluations: a frame that re-decodes into a fresh
+    /// buffer at a recycled address cannot be served the previous frame's
+    /// texture. A pool nobody opens a scope on memoizes nothing and uploads
+    /// exactly as it did before.
+    pub fn begin_upload_scope(&mut self) {
+        let previous = self.uploads.replace(UploadMemo::default());
+        for (_, _, texture) in previous.into_iter().flat_map(|memo| memo.entries) {
+            // A texture some caller still holds is dropped rather than
+            // pooled: the pool accounts only for the idle set, so losing the
+            // chance to reuse one costs an allocation, never bookkeeping.
+            if let Some(texture) = Arc::into_inner(texture) {
+                self.release(texture);
+            }
+        }
+    }
+
+    /// The texture `fb` was already uploaded into during the current scope.
+    pub fn memoized_upload(&self, fb: &FrameBuffer) -> Option<Arc<PooledTexture>> {
+        let key = UploadKey::of(fb);
+        self.uploads
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|(entry, ..)| *entry == key)
+            .map(|(_, _, texture)| texture.clone())
+    }
+
+    /// Record `texture` as the upload of `fb` and share it with the caller.
+    ///
+    /// Returns the texture back as `Err` when no scope is open, leaving the
+    /// caller owning the lease exactly as it did before the memo existed.
+    pub fn memoize_upload(
+        &mut self,
+        fb: &FrameBuffer,
+        texture: PooledTexture,
+    ) -> Result<Arc<PooledTexture>, PooledTexture> {
+        let Some(memo) = self.uploads.as_mut() else {
+            return Err(texture);
+        };
+        let texture = Arc::new(texture);
+        memo.entries
+            .push((UploadKey::of(fb), fb.data.clone(), texture.clone()));
+        Ok(texture)
     }
 
     /// Acquire a texture matching `key`, reusing an idle one when possible.

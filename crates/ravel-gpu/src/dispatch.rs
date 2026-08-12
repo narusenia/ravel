@@ -91,6 +91,16 @@ pub struct TextureBinding {
     pub(crate) view: wgpu::TextureView,
 }
 
+impl TextureBinding {
+    /// Identity of the pooled texture behind this binding: unique, never
+    /// reused, and the only way to ask "are these two bindings the same
+    /// texture?" without naming the backend's type.
+    #[inline]
+    pub fn texture_id(&self) -> u64 {
+        self.id
+    }
+}
+
 /// One declaratively-described compute dispatch.
 ///
 /// Binding order is the contract: `inputs[0..N]` bind at `@binding(0..N)`,

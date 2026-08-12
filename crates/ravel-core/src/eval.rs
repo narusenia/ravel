@@ -394,10 +394,126 @@ pub enum PathSegment {
     TimeShift(NodeId, u64),
 }
 
+/// An ownership path interned by a single [`Evaluator`].
+///
+/// Stands in for a `Vec<PathSegment>` everywhere the evaluator keys something
+/// by scope. A `PathId` is only meaningful against the interner that issued
+/// it, which is why it is **private to this module and never leaves the
+/// evaluator**: the lifetime of the interner is the whole argument for the id
+/// being a valid name for a path, and handing one out would leave that
+/// argument behind.
+///
+/// `PathId(0)` is always the root path (see [`PathInterner::default`]), so the
+/// derived `Default` of both this and [`Evaluator`] start at the root scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct PathId(u32);
+
+/// The root (empty) path, interned by construction.
+const ROOT_PATH: PathId = PathId(0);
+
+/// `Vec<PathSegment>` ⇆ [`PathId`], one table per evaluator.
+///
+/// Node visits used to key the cache, the dirty set, the in-flight run map
+/// and the visiting set by a full `Vec<PathSegment>`, so each visit paid
+/// three or four heap allocations and hashed the whole path every time.
+/// Interning moves that cost to scope entry — once per network, not once per
+/// node — and leaves the hot keys `Copy`.
+///
+/// # Growth
+///
+/// Ids are never reused: a path stays interned even after its scope's caches
+/// are dropped, because a live `NodeKey` elsewhere may still name it. The
+/// table is therefore bounded by the number of *distinct* scopes an evaluator
+/// has entered, which the document's structure bounds in turn — layers and
+/// subnets are finite, and `Iteration` is bounded by the iteration count.
+/// [`Evaluator::invalidate_all`] resets it. The one segment that could grow
+/// without bound is `PathSegment::TimeShift`, which carries a frame number;
+/// it is reserved and unused today, and wiring it up means giving this table
+/// an eviction story.
+struct PathInterner {
+    /// [`PathId`] → the segments it names, indexed by `PathId.0`.
+    paths: Vec<Vec<PathSegment>>,
+    /// The reverse direction, so re-entering a scope reuses its id.
+    ids: HashMap<Vec<PathSegment>, PathId>,
+}
+
+impl Default for PathInterner {
+    /// Seeded with the root path, so [`ROOT_PATH`] is valid immediately.
+    fn default() -> Self {
+        let mut ids = HashMap::new();
+        ids.insert(Vec::new(), ROOT_PATH);
+        Self {
+            paths: vec![Vec::new()],
+            ids,
+        }
+    }
+}
+
+impl PathInterner {
+    /// The id of `path`, assigning one if this is the first time it is seen.
+    ///
+    /// The only place a path is cloned; every later use of the same scope is
+    /// a hash of the path and nothing more.
+    fn intern(&mut self, path: &[PathSegment]) -> PathId {
+        if let Some(id) = self.ids.get(path) {
+            return *id;
+        }
+        let id = PathId(u32::try_from(self.paths.len()).expect("path count fits in u32"));
+        self.paths.push(path.to_vec());
+        self.ids.insert(path.to_vec(), id);
+        id
+    }
+
+    /// The segments `id` names.
+    ///
+    /// Panics on an id this interner did not issue, which is unreachable:
+    /// ids never leave the evaluator, and the table only grows.
+    fn path(&self, id: PathId) -> &[PathSegment] {
+        &self.paths[id.0 as usize]
+    }
+
+    /// The id `path` already has, if it has one. Never assigns.
+    ///
+    /// Lets a read-only caller ask about a path without interning it as a
+    /// side effect.
+    #[cfg(test)]
+    fn id_of(&self, path: &[PathSegment]) -> Option<PathId> {
+        self.ids.get(path).copied()
+    }
+
+    /// Every interned path, with its id.
+    fn iter(&self) -> impl Iterator<Item = (PathId, &[PathSegment])> {
+        self.paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (PathId(index as u32), path.as_slice()))
+    }
+
+    /// The ids of every interned path that starts with `prefix`.
+    ///
+    /// Scope-wide invalidation is expressed as a path prefix, and the keys it
+    /// has to match are ids — so the prefix is resolved to a set of ids once
+    /// and the predicate over the cache stays a lookup.
+    fn ids_under(&self, prefix: &[PathSegment]) -> HashSet<PathId> {
+        self.iter()
+            .filter(|(_, path)| path.starts_with(prefix))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Forget every path, keeping only the root.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Cache/dirty key: a node id qualified by its ownership path.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Copy`, and two `u32`-sized fields wide, because it is constructed and
+/// hashed several times per node visit — see [`PathId`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct NodeKey {
-    path: Vec<PathSegment>,
+    path: PathId,
     node: NodeId,
 }
 
@@ -449,22 +565,45 @@ fn binding_delta(
 fn binding_change_affects(
     scope: &[PathSegment],
     affected: &HashSet<NodeId>,
-    key: &NodeKey,
-) -> bool {
-    if !key.path.starts_with(scope) {
-        return false;
+    path: &[PathSegment],
+) -> PathVerdict {
+    if !path.starts_with(scope) {
+        return PathVerdict::Keep;
     }
-    match key.path.get(scope.len()) {
-        None => affected.contains(&key.node),
+    match path.get(scope.len()) {
+        None => PathVerdict::ByNode,
         Some(segment) => match scope_owner_node(segment) {
-            Some(owner) => affected.contains(&owner),
+            Some(owner) => {
+                if affected.contains(&owner) {
+                    PathVerdict::Drop
+                } else {
+                    PathVerdict::Keep
+                }
+            }
             // A layer or composition segment names no node of this graph, so
             // there is nothing to compare it against. A `layer.ref` inside a
             // network opens exactly such a scope, so this arm is reachable —
             // drop conservatively rather than guess.
-            None => true,
+            None => PathVerdict::Drop,
         },
     }
+}
+
+/// What a binding change does to every key sharing one path.
+///
+/// The decision splits cleanly in two: for most paths it depends only on the
+/// path (the whole nested scope goes, or none of it does), and for keys
+/// *directly* in the changed scope it depends on the node. Classifying paths
+/// once and consulting the node only where it matters is what lets the cache
+/// predicate stay a pair of set lookups.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathVerdict {
+    /// Nothing under this path is affected.
+    Keep,
+    /// Everything under this path is affected.
+    Drop,
+    /// Affected exactly when the key's node is in the `affected` set.
+    ByNode,
 }
 
 /// The node of the enclosing graph that owns the scope `segment` opens, if
@@ -1017,7 +1156,7 @@ impl CacheMiss {
 /// the fields are private to `cache_store` and every mutation goes through
 /// the handful of methods below (MED-CORE-07).
 mod cache_store {
-    use super::{CacheEntry, CacheIdentity, NodeKey, PathSegment};
+    use super::{CacheEntry, CacheIdentity, NodeKey, PathId};
     use crate::cache_budget::{CacheKind, Evicted, ReservationId, SharedCacheBudget, Tier};
     use crate::id::NodeId;
     use crate::types::NodeData;
@@ -1052,7 +1191,7 @@ mod cache_store {
         /// Exists so [`Self::forget_node`] — reached from `register()` on
         /// every parameter tick — costs the node's own paths instead of a
         /// walk over the whole cache (MED-CORE-07).
-        by_node: HashMap<NodeId, HashMap<Vec<PathSegment>, Presence>>,
+        by_node: HashMap<NodeId, HashMap<PathId, Presence>>,
         /// Reservation → the key that owns it, so an eviction list can be
         /// turned back into cache keys.
         by_reservation: HashMap<ReservationId, NodeKey>,
@@ -1196,7 +1335,7 @@ mod cache_store {
                 None => (None, Vec::new()),
             };
             if let Some(reservation) = &reservation {
-                self.by_reservation.insert(reservation.id(), key.clone());
+                self.by_reservation.insert(reservation.id(), key);
             }
             self.used[tier_index(tier)] += bytes;
             self.index_mut(&key).cached = true;
@@ -1281,17 +1420,14 @@ mod cache_store {
         /// invalidation. **O(paths of `node`)**, not O(cache): this is the
         /// call `register()` makes on every parameter tick, and walking the
         /// cache here was MED-CORE-07's second half.
-        pub(super) fn forget_node(&mut self, node: NodeId) -> Vec<Vec<PathSegment>> {
+        pub(super) fn forget_node(&mut self, node: NodeId) -> Vec<PathId> {
             let Some(paths) = self.by_node.remove(&node) else {
                 return Vec::new();
             };
-            let paths: Vec<Vec<PathSegment>> = paths.into_keys().collect();
+            let paths: Vec<PathId> = paths.into_keys().collect();
             self.examine(paths.len());
             for path in &paths {
-                let key = NodeKey {
-                    path: path.clone(),
-                    node,
-                };
+                let key = NodeKey { path: *path, node };
                 self.drop_value(&key);
                 self.dirty.remove(&key);
             }
@@ -1312,7 +1448,7 @@ mod cache_store {
                 .entries
                 .keys()
                 .filter(|key| !keep(key))
-                .cloned()
+                .copied()
                 .collect();
             for key in dropped {
                 self.drop_value(&key);
@@ -1322,7 +1458,7 @@ mod cache_store {
                 .dirty
                 .iter()
                 .filter(|key| !keep(key))
-                .cloned()
+                .copied()
                 .collect();
             for key in undirtied {
                 self.dirty.remove(&key);
@@ -1370,7 +1506,7 @@ mod cache_store {
             self.by_node
                 .entry(key.node)
                 .or_default()
-                .entry(key.path.clone())
+                .entry(key.path)
                 .or_default()
         }
 
@@ -1398,12 +1534,12 @@ mod cache_store {
         /// failure mode that direct field access would have produced.
         #[cfg(test)]
         pub(super) fn index_is_consistent(&self) -> bool {
-            let mut expected: HashMap<NodeId, HashMap<Vec<PathSegment>, Presence>> = HashMap::new();
+            let mut expected: HashMap<NodeId, HashMap<PathId, Presence>> = HashMap::new();
             for key in self.entries.keys() {
                 expected
                     .entry(key.node)
                     .or_default()
-                    .entry(key.path.clone())
+                    .entry(key.path)
                     .or_default()
                     .cached = true;
             }
@@ -1411,7 +1547,7 @@ mod cache_store {
                 expected
                     .entry(key.node)
                     .or_default()
-                    .entry(key.path.clone())
+                    .entry(key.path)
                     .or_default()
                     .dirty = true;
             }
@@ -1436,6 +1572,74 @@ mod cache_store {
 }
 
 use cache_store::CacheStore;
+
+// ===========================================================================
+// Graph index
+// ===========================================================================
+
+/// Wire adjacency of one graph, derived once and reused while the graph is
+/// the same object.
+///
+/// `Graph` stores edges as an `im::HashMap<EdgeId, Edge>` and nothing else, so
+/// asking "what feeds this node" costs a scan of every edge in the graph. Both
+/// hot loops asked it per node — [`Evaluator::eval_node`] once per visit and
+/// [`Evaluator::mark_dirty_at`] once per dirtied node — which made a single
+/// pull O(N·E). Indexing both directions in one pass makes each question a
+/// lookup, and the index survives as long as the graph is untouched.
+///
+/// The index is cached **per scope path**: subnet recursion evaluates a
+/// different graph at each level, and one shared slot would answer for the
+/// wrong one. Validity is [`Graph::ptr_eq`] — `true` proves the persistent
+/// maps are the same root, so the derived adjacency still describes them; a
+/// `false` negative only costs a rebuild.
+///
+/// This deliberately covers **wire edges only**, not the `NodeOutput`
+/// parameter bindings [`Graph::downstream_adjacency`] also spans. The two
+/// callers here are the wire-level ones (`eval_node` pulls connected inputs,
+/// `mark_dirty_at` floods `outputs_of`), and folding parameter bindings in
+/// would silently widen the dirty set. [`ScopeReach`] keeps using
+/// `downstream_adjacency` for the binding-level question it asks.
+struct GraphIndex {
+    /// The graph the maps were derived from, compared by pointer identity.
+    graph: Graph,
+    /// Target node → its incoming edges as `(target_port, source,
+    /// source_port)`, in the graph's own edge iteration order.
+    in_edges: HashMap<NodeId, Vec<(InputPortIndex, NodeId, OutputPortIndex)>>,
+    /// Source node → the nodes its wires feed, in the same order.
+    out_nodes: HashMap<NodeId, Vec<NodeId>>,
+}
+
+impl GraphIndex {
+    /// Index both directions in one pass over the edges.
+    fn of(graph: &Graph) -> Self {
+        let mut in_edges: HashMap<NodeId, Vec<(InputPortIndex, NodeId, OutputPortIndex)>> =
+            HashMap::new();
+        let mut out_nodes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for edge in graph.edges() {
+            in_edges.entry(edge.target).or_default().push((
+                edge.target_port,
+                edge.source,
+                edge.source_port,
+            ));
+            out_nodes.entry(edge.source).or_default().push(edge.target);
+        }
+        Self {
+            graph: graph.clone(),
+            in_edges,
+            out_nodes,
+        }
+    }
+
+    /// Incoming edges of `node`; empty when nothing feeds it.
+    fn in_edges(&self, node: NodeId) -> &[(InputPortIndex, NodeId, OutputPortIndex)] {
+        self.in_edges.get(&node).map_or(&[], Vec::as_slice)
+    }
+
+    /// Nodes `node` feeds; empty when it feeds nothing.
+    fn out_nodes(&self, node: NodeId) -> &[NodeId] {
+        self.out_nodes.get(&node).map_or(&[], Vec::as_slice)
+    }
+}
 
 // ===========================================================================
 // Scope reach
@@ -1550,6 +1754,12 @@ pub struct Evaluator {
     /// is waiting for.
     read_ahead: Option<CancelCheck>,
     path: Vec<PathSegment>,
+    /// `self.path`, interned. Kept in step with it so a node visit never
+    /// has to hash or clone the path itself (see [`PathId`]).
+    path_id: PathId,
+    /// Every scope path this evaluator has entered, so the hot keys can be
+    /// `Copy`.
+    paths: PathInterner,
     active_scopes: Vec<PathSegment>,
     bindings_stack: Vec<Bindings>,
     /// Node currently being processed and its branch-wide recursion depth,
@@ -1559,14 +1769,20 @@ pub struct Evaluator {
     /// Nested scope path → the node whose `process` opened it. Scoped
     /// invalidation uses this to drop the owner's cached value too, so a
     /// network edit propagates to the shell chain automatically.
-    scope_owners: HashMap<Vec<PathSegment>, NodeKey>,
+    scope_owners: HashMap<PathId, NodeKey>,
     /// Bindings last used per nested scope. A scope re-entered with
     /// different bindings (e.g. an adjustment layer's changing lower stack)
     /// has the cached values those bindings reach dropped before evaluation.
-    scope_bindings: HashMap<Vec<PathSegment>, Bindings>,
+    scope_bindings: HashMap<PathId, Bindings>,
     /// What each nested scope's bindings reach, per scope path. Rebuilt only
     /// when the scope's graph is a different object (see [`ScopeReach`]).
-    scope_reach: HashMap<Vec<PathSegment>, ScopeReach>,
+    scope_reach: HashMap<PathId, ScopeReach>,
+    /// Wire adjacency of each scope's graph, per scope path. Rebuilt only
+    /// when the scope's graph is a different object (see [`GraphIndex`]).
+    ///
+    /// Held behind an `Arc` so a caller can keep reading the adjacency while
+    /// it recurses through `&mut self`.
+    graph_index: HashMap<PathId, Arc<GraphIndex>>,
     /// Binding names that changed on entry to each active scope, parallel to
     /// `bindings_stack`. Read by [`Self::eval_node`] to decide which of an
     /// interface node's output ports carry a new value.
@@ -1770,8 +1986,12 @@ impl Evaluator {
 
     /// Whether a value is currently cached for `key`.
     #[cfg(test)]
-    fn cache_contains(&self, key: &NodeKey) -> bool {
-        self.store.contains(key)
+    fn cache_contains(&self, path: &[PathSegment], node: NodeId) -> bool {
+        // A path this evaluator never interned cannot be in the cache, so
+        // asking must not create an id for it.
+        self.paths
+            .id_of(path)
+            .is_some_and(|path| self.store.contains(&NodeKey { path, node }))
     }
 
     /// Put a value straight into the result cache.
@@ -1779,8 +1999,15 @@ impl Evaluator {
     /// Only for tests that need a warm cache without running an evaluation
     /// (document-diff invalidation, for instance, which has no graph).
     #[cfg(test)]
-    fn seed_cache(&mut self, key: NodeKey, identity: CacheIdentity, value: Arc<dyn NodeData>) {
-        self.store.insert(key, identity, value);
+    fn seed_cache(
+        &mut self,
+        path: &[PathSegment],
+        node: NodeId,
+        identity: CacheIdentity,
+        value: Arc<dyn NodeData>,
+    ) {
+        let path = self.paths.intern(path);
+        self.store.insert(NodeKey { path, node }, identity, value);
     }
 
     /// Drop the cached values `evicted` names, **parking** the ids this
@@ -1838,10 +2065,10 @@ impl Evaluator {
         // therefore this) runs for every changed node on every parameter tick
         // during a scrub (MED-CORE-07).
         for path in self.store.forget_node(node) {
-            self.drop_scope_owner_caches(&path);
+            self.drop_scope_owner_caches(path);
         }
         self.store.mark_dirty(NodeKey {
-            path: Vec::new(),
+            path: ROOT_PATH,
             node,
         });
     }
@@ -1849,7 +2076,7 @@ impl Evaluator {
     /// Whether `node` (at the root scope) is currently marked dirty.
     pub fn is_dirty(&self, node: NodeId) -> bool {
         self.store.is_dirty(&NodeKey {
-            path: Vec::new(),
+            path: ROOT_PATH,
             node,
         })
     }
@@ -1905,10 +2132,20 @@ impl Evaluator {
                     if Arc::ptr_eq(comp, old_comp) {
                         continue;
                     }
+                    // Indexed once per composition. Everything below asks
+                    // "where is layer X" per layer — and `Composition`
+                    // answers that with a linear scan, so the ancestor walk
+                    // alone was O(L²·depth) on every document swap.
+                    let old_by_id: HashMap<LayerId, &Layer> =
+                        old_comp.layers.iter().map(|l| (l.id, l)).collect();
+                    let new_parents: HashMap<LayerId, Option<LayerId>> =
+                        comp.layers.iter().map(|l| (l.id, l.parent)).collect();
+                    let old_parents: HashMap<LayerId, Option<LayerId>> =
+                        old_by_id.iter().map(|(id, l)| (*id, l.parent)).collect();
+
                     let mut shell_changed: HashSet<LayerId> = HashSet::new();
                     for layer in &comp.layers {
-                        let Some(old_layer) = old_comp.layers.iter().find(|l| l.id == layer.id)
-                        else {
+                        let Some(old_layer) = old_by_id.get(&layer.id) else {
                             continue;
                         };
                         if layer_shell_changed(layer, old_layer) {
@@ -1932,11 +2169,10 @@ impl Evaluator {
                     // and `world_matrix` then stops at the missing ancestor —
                     // a changed matrix that nothing else would invalidate.
                     for layer in &comp.layers {
-                        let chain: Vec<LayerId> =
-                            comp.ancestors(layer).iter().map(|l| l.id).collect();
-                        let old_chain: Option<Vec<LayerId>> = old_comp
-                            .get_layer(layer.id)
-                            .map(|old| old_comp.ancestors(old).iter().map(|l| l.id).collect());
+                        let chain = ancestor_chain(&new_parents, layer.id);
+                        let old_chain: Option<Vec<LayerId>> = old_by_id
+                            .contains_key(&layer.id)
+                            .then(|| ancestor_chain(&old_parents, layer.id));
                         let stale = shell_changed.contains(&layer.id)
                             || chain.iter().any(|id| shell_changed.contains(id))
                             || old_chain.is_some_and(|old_chain| {
@@ -1954,7 +2190,7 @@ impl Evaluator {
                         ] {
                             let id = deterministic_node_id(*comp_id, layer.id, role);
                             self.store.remove(&NodeKey {
-                                path: Vec::new(),
+                                path: ROOT_PATH,
                                 node: id,
                             });
                         }
@@ -2013,19 +2249,21 @@ impl Evaluator {
     /// owners), so the next same-frame pull re-enters the dirtied network
     /// instead of serving the boundary's stale cache.
     pub fn mark_dirty_at(&mut self, graph: &Graph, path: &[PathSegment], node: NodeId) {
+        // One indexed pass instead of a full edge scan (and a fresh `Vec`) per
+        // dirtied node.
+        let path_id = self.paths.intern(path);
+        let index = self.graph_index(graph, path_id);
         let mut stack = vec![node];
         while let Some(current) = stack.pop() {
             let key = NodeKey {
-                path: path.to_vec(),
+                path: path_id,
                 node: current,
             };
             if self.store.mark_dirty(key) {
-                for downstream in graph.outputs_of(current) {
-                    stack.push(downstream);
-                }
+                stack.extend_from_slice(index.out_nodes(current));
             }
         }
-        self.drop_scope_owner_caches(path);
+        self.drop_scope_owner_caches(path_id);
     }
 
     /// Drop every cached value and clear the dirty set (forces a full recompute
@@ -2040,6 +2278,19 @@ impl Evaluator {
         self.scope_owners.clear();
         self.scope_bindings.clear();
         self.scope_reach.clear();
+        self.graph_index.clear();
+        // Nothing keyed by a `PathId` survives the lines above, so the
+        // interner can start over — the one point where it gives ids back.
+        // The current scope is re-interned so `path_id` keeps naming the
+        // same path it did.
+        //
+        // Reissuing ids is only safe because no evaluation is in flight: a
+        // pull's `run` and `visiting` maps hold `PathId`s that would silently
+        // start naming *different* paths. `EvalScope` — the whole of what a
+        // processor can reach — exposes no invalidation, so this cannot run
+        // underneath one.
+        self.paths.clear();
+        self.path_id = self.paths.intern(&self.path);
     }
 
     /// Drop cached values and dirty flags for every node whose path starts
@@ -2050,12 +2301,16 @@ impl Evaluator {
     /// scope — are dropped as well: their recompute marks them fresh, which
     /// cascades to their downstream in the parent graph on the next pull.
     pub fn invalidate_scope(&mut self, prefix: &[PathSegment]) {
-        self.store.retain(|k| !k.path.starts_with(prefix));
+        // The prefix names a set of interned paths; resolving it once keeps
+        // the per-entry predicate a lookup.
+        let under = self.paths.ids_under(prefix);
+        self.store.retain(|k| !under.contains(&k.path));
         // Before the prune: the owner of the scope named by `prefix` is
         // itself recorded under `prefix`, and dropping the record first would
         // leave its cached value behind.
-        self.drop_scope_owner_caches(prefix);
-        self.prune_scope_state(prefix);
+        let prefix_id = self.paths.intern(prefix);
+        self.drop_scope_owner_caches(prefix_id);
+        self.prune_scope_state(&under);
     }
 
     /// Forget the per-scope state of every scope under `prefix`.
@@ -2065,24 +2320,25 @@ impl Evaluator {
     /// holds a `Graph` clone. Neither was ever pruned, so deleting layers
     /// through a long session leaked one of each per removed scope
     /// (MED-CORE-07).
-    fn prune_scope_state(&mut self, prefix: &[PathSegment]) {
-        self.scope_owners
-            .retain(|scope, _| !scope.starts_with(prefix));
+    fn prune_scope_state(&mut self, under: &HashSet<PathId>) {
+        self.scope_owners.retain(|scope, _| !under.contains(scope));
         self.scope_bindings
-            .retain(|scope, _| !scope.starts_with(prefix));
-        self.scope_reach
-            .retain(|scope, _| !scope.starts_with(prefix));
+            .retain(|scope, _| !under.contains(scope));
+        self.scope_reach.retain(|scope, _| !under.contains(scope));
+        // Holds a `Graph` clone too, for the same reason.
+        self.graph_index.retain(|scope, _| !under.contains(scope));
     }
 
     /// Drop cached/dirty entries for the owners of `scope` and of every
     /// ancestor scope (e.g. for `[layer, subnet]`: the subnet node *and* the
     /// layer boundary).
-    fn drop_scope_owner_caches(&mut self, scope: &[PathSegment]) {
+    fn drop_scope_owner_caches(&mut self, scope: PathId) {
+        let segments = self.paths.path(scope);
         let owners: Vec<NodeKey> = self
             .scope_owners
             .iter()
-            .filter(|(owned, _)| scope.starts_with(owned.as_slice()))
-            .map(|(_, owner)| owner.clone())
+            .filter(|(owned, _)| segments.starts_with(self.paths.path(**owned)))
+            .map(|(_, owner)| *owner)
             .collect();
         for owner in owners {
             self.store.remove(&owner);
@@ -2101,10 +2357,10 @@ impl Evaluator {
     /// reachable keys is what closes that window — the point of the unit is
     /// that "reachable" is no longer "the whole scope".
     fn invalidate_changed_bindings(&mut self, graph: &Graph, changed: &[String]) {
-        let scope = self.path.clone();
-        self.refresh_scope_reach(graph, &scope);
+        let scope_id = self.path_id;
+        self.refresh_scope_reach(graph, scope_id);
         // SAFETY of index: `refresh_scope_reach` just inserted the entry.
-        let reach = &self.scope_reach[&scope];
+        let reach = &self.scope_reach[&scope_id];
         let mut affected: HashSet<NodeId> = HashSet::new();
         let mut traceable = true;
         for name in changed {
@@ -2121,13 +2377,15 @@ impl Evaluator {
             }
         }
 
+        let scope = self.paths.path(scope_id);
         if !traceable {
             tracing::debug!(
                 scope_depth = scope.len(),
                 "scope re-entered with a binding no interface port claims; \
                  dropping every scoped cache"
             );
-            self.store.retain(|k| !k.path.starts_with(&scope));
+            let under = self.paths.ids_under(scope);
+            self.store.retain(|k| !under.contains(&k.path));
             return;
         }
         if affected.is_empty() {
@@ -2138,21 +2396,58 @@ impl Evaluator {
             affected = affected.len(),
             "scope re-entered with changed bindings; dropping what they reach"
         );
-        self.store
-            .retain(|k| !binding_change_affects(&scope, &affected, k));
+        // Classify each interned path once, then let the per-entry predicate
+        // be two set lookups (see [`PathVerdict`]).
+        let mut drop_paths: HashSet<PathId> = HashSet::new();
+        let mut by_node_paths: HashSet<PathId> = HashSet::new();
+        for (id, path) in self.paths.iter() {
+            match binding_change_affects(scope, &affected, path) {
+                PathVerdict::Keep => {}
+                PathVerdict::Drop => {
+                    drop_paths.insert(id);
+                }
+                PathVerdict::ByNode => {
+                    by_node_paths.insert(id);
+                }
+            }
+        }
+        self.store.retain(|k| {
+            !(drop_paths.contains(&k.path)
+                || (by_node_paths.contains(&k.path) && affected.contains(&k.node)))
+        });
     }
 
     /// Make `self.scope_reach[scope]` describe `graph`, rebuilding it only
     /// when the scope's graph is a different object than last time.
-    fn refresh_scope_reach(&mut self, graph: &Graph, scope: &[PathSegment]) {
+    fn refresh_scope_reach(&mut self, graph: &Graph, scope: PathId) {
         let current = self
             .scope_reach
-            .get(scope)
+            .get(&scope)
             .is_some_and(|reach| reach.graph.ptr_eq(graph));
         if !current {
-            self.scope_reach
-                .insert(scope.to_vec(), ScopeReach::of(graph));
+            self.scope_reach.insert(scope, ScopeReach::of(graph));
         }
+    }
+
+    /// The wire adjacency of `graph` as seen from `scope`, rebuilding it only
+    /// when that scope's graph is a different object than last time.
+    ///
+    /// Keyed by scope so subnet recursion — which evaluates a *different*
+    /// graph one level down — cannot be served the parent's adjacency.
+    fn graph_index(&mut self, graph: &Graph, scope: PathId) -> Arc<GraphIndex> {
+        if let Some(index) = self.graph_index.get(&scope)
+            && index.graph.ptr_eq(graph)
+        {
+            return index.clone();
+        }
+        let index = Arc::new(GraphIndex::of(graph));
+        self.graph_index.insert(scope, index.clone());
+        index
+    }
+
+    /// [`Self::graph_index`] for the scope currently being evaluated.
+    fn current_graph_index(&mut self, graph: &Graph) -> Arc<GraphIndex> {
+        self.graph_index(graph, self.path_id)
     }
 
     // ----- evaluation ------------------------------------------------------
@@ -2183,7 +2478,11 @@ impl Evaluator {
         output: NodeId,
         ctx: &EvalContext,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
+        // `path_id` must name `path` before anything builds a cache key:
+        // the two are one value in two forms, and a stale id here would give
+        // this pull another scope's cached results.
         self.path = path.to_vec();
+        self.path_id = self.paths.intern(path);
         self.active_scopes = path.to_vec();
         self.bindings_stack.clear();
         self.bindings_stack.push(Vec::new());
@@ -2247,7 +2546,7 @@ impl Evaluator {
             });
         }
         let key = NodeKey {
-            path: self.path.clone(),
+            path: self.path_id,
             node,
         };
 
@@ -2256,7 +2555,7 @@ impl Evaluator {
             return Ok(cached.clone());
         }
         // Re-entering a node still on the recursion stack means a cycle.
-        if !visiting.insert(key.clone()) {
+        if !visiting.insert(key) {
             return Err(EvalError::CycleDetected(node));
         }
 
@@ -2266,11 +2565,10 @@ impl Evaluator {
             .ok_or(EvalError::NodeNotFound(node))?;
 
         // Incoming edges (endpoint metadata only — nothing is pulled yet).
-        let in_edges: Vec<(InputPortIndex, NodeId, OutputPortIndex)> = graph
-            .edges()
-            .filter(|e| e.target == node)
-            .map(|e| (e.target_port, e.source, e.source_port))
-            .collect();
+        // Read from the scope's adjacency index rather than scanning every
+        // edge in the graph once per visited node.
+        let index = self.current_graph_index(graph);
+        let in_edges = index.in_edges(node);
 
         // A bypassed node first derives its pass-through plan from the
         // declared port types: per output port, the single input port whose
@@ -2282,7 +2580,7 @@ impl Evaluator {
         // processing below.
         let bypassed = node_ref.metadata.bypassed;
         let bypass_plan = if bypassed {
-            bypass_passthrough_plan(&node_ref, &in_edges)
+            bypass_passthrough_plan(&node_ref, in_edges)
         } else {
             None
         };
@@ -2341,7 +2639,7 @@ impl Evaluator {
                     let value = self.store.get_used(&key).expect("cache hit has a value");
                     (value, false)
                 } else {
-                    self.store.insert(key.clone(), identity, passed.clone());
+                    self.store.insert(key, identity, passed.clone());
                     (passed, true)
                 };
                 visiting.remove(&key);
@@ -2356,7 +2654,7 @@ impl Evaluator {
 
         // Evaluate upstream inputs into per-port slots (port order). Slots
         // a failed bypass attempt already pulled are skipped.
-        for (target_port, source, source_port) in &in_edges {
+        for (target_port, source, source_port) in in_edges {
             self.pull_input(
                 graph,
                 node,
@@ -2543,7 +2841,7 @@ impl Evaluator {
                 type_key = %node_ref.type_key
             );
             let _guard = span.enter();
-            self.processing.push((key.clone(), depth));
+            self.processing.push((key, depth));
             let started = std::time::Instant::now();
             let produced = processor
                 .process(&node_ref, ctx, &input_values, &params, self)
@@ -2551,7 +2849,7 @@ impl Evaluator {
             self.timings.push((node, started.elapsed()));
             self.processing.pop();
             let value = produced?;
-            self.store.insert(key.clone(), identity, value.clone());
+            self.store.insert(key, identity, value.clone());
             (value, true)
         };
 
@@ -2568,7 +2866,7 @@ impl Evaluator {
                     let ports = (0..node_ref.outputs.len())
                         .map(|index| rebound.contains(&index))
                         .collect();
-                    self.fresh_output_ports.insert(key.clone(), ports);
+                    self.fresh_output_ports.insert(key, ports);
                 }
                 _ => {
                     self.fresh_output_ports.remove(&key);
@@ -2592,7 +2890,7 @@ impl Evaluator {
             return true;
         }
         let key = NodeKey {
-            path: self.path.clone(),
+            path: self.path_id,
             node: source,
         };
         match self.fresh_output_ports.get(&key) {
@@ -2867,27 +3165,33 @@ impl EvalScope for Evaluator {
         }
         self.active_scopes.push(segment);
         self.path.push(segment);
+        // The one place a scope path is interned: everything below — the
+        // owner record, the bindings record, and every node key evaluated
+        // inside this network — is keyed by the id from here on, so entering
+        // a scope costs one hash and leaves the per-node keys `Copy`.
+        let outer_path_id = self.path_id;
+        self.path_id = self.paths.intern(&self.path);
         let depth = self
             .processing
             .last()
             .map_or(0, |(_owner, depth)| depth + 1);
-        if let Some((owner, _depth)) = self.processing.last().cloned() {
-            self.scope_owners.insert(self.path.clone(), owner);
+        if let Some((owner, _depth)) = self.processing.last() {
+            let owner = *owner;
+            self.scope_owners.insert(self.path_id, owner);
         }
         // A scope re-entered with different bindings (e.g. an adjustment
         // layer's lower stack) may not reuse the cached values those
         // bindings feed. Everything else in the scope survives — that is
         // what makes an adjustment layer's static generators cacheable
         // across frames (MED-CORE-02).
-        let changed = match self.scope_bindings.get(&self.path) {
+        let changed = match self.scope_bindings.get(&self.path_id) {
             Some(old) => binding_delta(old, &bindings),
             None => binding_delta(&[], &bindings),
         };
         if !changed.is_empty() {
             self.invalidate_changed_bindings(graph, &changed);
         }
-        self.scope_bindings
-            .insert(self.path.clone(), bindings.clone());
+        self.scope_bindings.insert(self.path_id, bindings.clone());
         self.binding_changes.push(changed);
         self.bindings_stack.push(bindings);
 
@@ -2896,6 +3200,7 @@ impl EvalScope for Evaluator {
         self.bindings_stack.pop();
         self.binding_changes.pop();
         self.path.pop();
+        self.path_id = outer_path_id;
         self.active_scopes.pop();
         result
     }
@@ -2919,6 +3224,34 @@ impl EvalScope for Evaluator {
 // ===========================================================================
 // Animated-parameter detection
 // ===========================================================================
+
+/// A layer's ancestor chain, nearest ancestor first, resolved through a
+/// prebuilt `layer id → parent id` map.
+///
+/// Behaviourally identical to [`Composition::ancestors`](crate::composition::Composition::ancestors),
+/// including both of its stopping conditions: a parent that is not in the
+/// composition ends the chain, and a repeated id ends it too, so a corrupt
+/// parent cycle terminates instead of looping. The difference is only that
+/// each hop is a lookup rather than a scan of the layer vector — which is
+/// what makes [`Evaluator::set_document`] linear in the layer count instead
+/// of quadratic.
+fn ancestor_chain(parents: &HashMap<LayerId, Option<LayerId>>, layer: LayerId) -> Vec<LayerId> {
+    let mut chain = Vec::new();
+    let mut seen = vec![layer];
+    let mut current = parents.get(&layer).copied().flatten();
+    while let Some(parent_id) = current {
+        if seen.contains(&parent_id) {
+            break;
+        }
+        let Some(grandparent) = parents.get(&parent_id) else {
+            break;
+        };
+        seen.push(parent_id);
+        chain.push(parent_id);
+        current = *grandparent;
+    }
+    chain
+}
 
 /// Whether evaluation-relevant shell fields changed between two versions of
 /// a layer (used by [`Evaluator::set_document`] cache invalidation).
@@ -4976,6 +5309,80 @@ mod tests {
         assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
     }
 
+    /// Subnet recursion looks at a *different* graph one level down, so the
+    /// adjacency index has to be kept per scope. One shared index would serve
+    /// the outer graph's adjacency inside the network and hide the inner
+    /// node's input edge entirely.
+    #[test]
+    fn graph_index_is_kept_per_scope_across_subnet_recursion() {
+        // Inner: const(21) = 5 wired into sum(20). `CountingSum` adds 1, so a
+        // node that sees its edge returns 6 — and one served the outer
+        // graph's (edgeless) adjacency returns 1.
+        let inner = Graph::new()
+            .add_node(scalar_node(20))
+            .unwrap()
+            .add_node(scalar_node(21))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(21),
+                OutputPortIndex(0),
+                NodeId::new(20),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        // Outer: the boundary node on its own, with no edges at all.
+        let outer_node = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let outer = Graph::new().add_node(outer_node).unwrap();
+
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingScopedSource {
+                inner: inner.clone(),
+                inner_output: NodeId::new(20),
+                segment,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(20),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(21),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let out = ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        let inner_value = out
+            .downcast_ref::<ScopeWrap>()
+            .unwrap()
+            .0
+            .downcast_ref::<Scalar>()
+            .unwrap()
+            .0;
+        assert!(
+            (inner_value - 6.0).abs() < f32::EPSILON,
+            "inner node was evaluated against the wrong graph's adjacency: {inner_value}"
+        );
+
+        // And the two scopes really do hold their own index.
+        let root: Vec<PathSegment> = Vec::new();
+        let index_of = |path: &[PathSegment]| {
+            ev.graph_index[&ev.paths.id_of(path).expect("scope was entered")].clone()
+        };
+        assert!(index_of(&root).graph.ptr_eq(&outer));
+        assert!(index_of(&[segment]).graph.ptr_eq(&inner));
+    }
+
     #[test]
     fn recursive_scope_reentry_is_a_cycle() {
         struct Reentrant;
@@ -5438,6 +5845,62 @@ mod tests {
         assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
     }
 
+    /// One node id, two scopes, two different values — each scope must keep
+    /// its own.
+    ///
+    /// Cache keys name a scope by an interned [`PathId`], so this is what
+    /// fails first if an id ever stops distinguishing the scope it was issued
+    /// for: the second scope's value would land on the first scope's entry
+    /// and be served back to it.
+    #[test]
+    fn the_same_node_caches_separately_in_two_scopes() {
+        let node = NodeId::new(7);
+        let graph = Graph::new().add_node(scalar_node(node.raw())).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            node,
+            Arc::new(FrameSource {
+                calls: calls.clone(),
+            }),
+        );
+
+        let scope_a = [PathSegment::Layer(CompId::new(1), LayerId::new(1))];
+        let scope_b = [PathSegment::Layer(CompId::new(1), LayerId::new(2))];
+        let value_at = |ev: &mut Evaluator, scope: &[PathSegment], frame: u64| {
+            ev.evaluate_at(scope, &graph, node, &ctx_at(frame))
+                .unwrap()
+                .downcast_ref::<Scalar>()
+                .unwrap()
+                .0
+        };
+
+        // `FrameSource` is time-dependent, so the two scopes hold genuinely
+        // different values.
+        assert_eq!(value_at(&mut ev, &scope_a, 0), 0.0);
+        assert_eq!(value_at(&mut ev, &scope_b, 5), 5.0);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        // Re-asking each scope for what it already computed: the values must
+        // still be its own, and neither may have been recomputed.
+        assert_eq!(
+            value_at(&mut ev, &scope_a, 0),
+            0.0,
+            "scope A was served scope B's value"
+        );
+        assert_eq!(
+            value_at(&mut ev, &scope_b, 5),
+            5.0,
+            "scope B was served scope A's value"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "a scope's cached value was evicted by the other scope"
+        );
+        assert!(ev.store.index_is_consistent());
+    }
+
     #[test]
     fn iteration_and_time_shift_paths_keep_distinct_cache_entries() {
         let node = NodeId::new(7);
@@ -5468,10 +5931,7 @@ mod tests {
             ev.evaluate_at(path, &graph, node, &ctx_at(0)).unwrap();
         }
         assert_eq!(calls.load(Ordering::Relaxed), 4);
-        assert!(paths.iter().all(|path| ev.cache_contains(&NodeKey {
-            path: path.clone(),
-            node,
-        })));
+        assert!(paths.iter().all(|path| ev.cache_contains(path, node)));
     }
 
     #[test]
@@ -5511,22 +5971,10 @@ mod tests {
         ev.invalidate_scope(&[PathSegment::Iteration(NodeId::new(10), 0)]);
         ev.invalidate_scope(&[PathSegment::TimeShift(NodeId::new(20), 10)]);
 
-        assert!(!ev.cache_contains(&NodeKey {
-            path: iteration_zero,
-            node,
-        }));
-        assert!(ev.cache_contains(&NodeKey {
-            path: iteration_one,
-            node,
-        }));
-        assert!(!ev.cache_contains(&NodeKey {
-            path: shift_ten,
-            node,
-        }));
-        assert!(ev.cache_contains(&NodeKey {
-            path: shift_twenty,
-            node,
-        }));
+        assert!(!ev.cache_contains(&iteration_zero, node));
+        assert!(ev.cache_contains(&iteration_one, node));
+        assert!(!ev.cache_contains(&shift_ten, node));
+        assert!(ev.cache_contains(&shift_twenty, node));
     }
 
     // ---- regression: hidden/stale dependency fixes -------------------------
@@ -5750,13 +6198,11 @@ mod tests {
             )
         };
 
-        let cached = |layer: LayerId| NodeKey {
-            path: Vec::new(),
-            node: deterministic_node_id(comp_id, layer, NodeRole::Transform),
-        };
+        let cached = |layer: LayerId| deterministic_node_id(comp_id, layer, NodeRole::Transform);
         let seed = |ev: &mut Evaluator| {
             for layer in [child_id, sibling_id] {
                 ev.seed_cache(
+                    &[],
                     cached(layer),
                     CacheIdentity::of(&ctx_at(0), true, false, 0),
                     Arc::new(Scalar(1.0)),
@@ -5769,22 +6215,22 @@ mod tests {
 
         ev.set_document(document(50.0));
         assert!(
-            !ev.cache_contains(&cached(child_id)),
+            !ev.cache_contains(&[], cached(child_id)),
             "the child inherits the moved parent's transform"
         );
         assert!(
-            ev.cache_contains(&cached(sibling_id)),
+            ev.cache_contains(&[], cached(sibling_id)),
             "an unrelated layer keeps its cached frame"
         );
 
         seed(&mut ev);
         ev.set_document(without_parent());
         assert!(
-            !ev.cache_contains(&cached(child_id)),
+            !ev.cache_contains(&[], cached(child_id)),
             "the child's chain lost an ancestor"
         );
         assert!(
-            ev.cache_contains(&cached(sibling_id)),
+            ev.cache_contains(&[], cached(sibling_id)),
             "an unrelated layer keeps its cached frame"
         );
     }
@@ -7129,14 +7575,8 @@ mod tests {
         );
         assert!(stats.entries < 16, "nothing was evicted");
         // Oldest first: the earliest nodes are gone, the newest are kept.
-        assert!(!ev.cache_contains(&NodeKey {
-            path: Vec::new(),
-            node: NodeId::new(100),
-        }));
-        assert!(ev.cache_contains(&NodeKey {
-            path: Vec::new(),
-            node: NodeId::new(115),
-        }));
+        assert!(!ev.cache_contains(&[], NodeId::new(100)));
+        assert!(ev.cache_contains(&[], NodeId::new(115)));
         assert!(ev.store.index_is_consistent());
     }
 
@@ -7174,10 +7614,7 @@ mod tests {
         let entry_bytes = 64u64 * 64 * 16;
         let mut ev = Evaluator::with_budget(budget_of(entry_bytes * 2 + 4 * 1024));
         let graph = frame_source_graph(&mut ev, 3, 64);
-        let key = |index: u64| NodeKey {
-            path: Vec::new(),
-            node: NodeId::new(100 + index),
-        };
+        let key = |index: u64| NodeId::new(100 + index);
 
         ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
         ev.set_read_ahead(Some(Arc::new(|| false)));
@@ -7186,11 +7623,11 @@ mod tests {
         ev.evaluate(&graph, NodeId::new(102), &ctx_at(0)).unwrap();
 
         assert!(
-            ev.cache_contains(&key(0)),
+            ev.cache_contains(&[], key(0)),
             "the interactive result went before the speculative one"
         );
         assert!(
-            !ev.cache_contains(&key(1)),
+            !ev.cache_contains(&[], key(1)),
             "the speculative result survived the pressure"
         );
     }
@@ -7200,10 +7637,7 @@ mod tests {
         let entry_bytes = 64u64 * 64 * 16;
         let mut ev = Evaluator::with_budget(budget_of(entry_bytes * 2 + 4 * 1024));
         let graph = frame_source_graph(&mut ev, 3, 64);
-        let key = |index: u64| NodeKey {
-            path: Vec::new(),
-            node: NodeId::new(100 + index),
-        };
+        let key = |index: u64| NodeId::new(100 + index);
 
         ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
         ev.evaluate(&graph, NodeId::new(101), &ctx_at(0)).unwrap();
@@ -7211,8 +7645,11 @@ mod tests {
         ev.evaluate(&graph, NodeId::new(100), &ctx_at(0)).unwrap();
         ev.evaluate(&graph, NodeId::new(102), &ctx_at(0)).unwrap();
 
-        assert!(ev.cache_contains(&key(0)), "the re-read entry was evicted");
-        assert!(!ev.cache_contains(&key(1)), "the idle entry survived");
+        assert!(
+            ev.cache_contains(&[], key(0)),
+            "the re-read entry was evicted"
+        );
+        assert!(!ev.cache_contains(&[], key(1)), "the idle entry survived");
     }
 
     #[test]
@@ -7281,23 +7718,24 @@ mod tests {
             vec![(network::PORT_SOURCE.to_string(), source)],
         )
         .unwrap();
-        assert!(ev.scope_bindings.contains_key(&vec![segment]));
-        assert!(ev.scope_reach.contains_key(&vec![segment]));
+        let scope = ev.paths.id_of(&[segment]).expect("the scope was entered");
+        assert!(ev.scope_bindings.contains_key(&scope));
+        assert!(ev.scope_reach.contains_key(&scope));
 
         // What `set_document` does for a layer present only in the old
         // snapshot.
         ev.invalidate_scope(&[segment]);
 
         assert!(
-            !ev.scope_bindings.contains_key(&vec![segment]),
+            !ev.scope_bindings.contains_key(&scope),
             "the deleted layer's bindings still hold its source frame"
         );
         assert!(
-            !ev.scope_reach.contains_key(&vec![segment]),
+            !ev.scope_reach.contains_key(&scope),
             "the deleted layer's reach still holds a Graph clone"
         );
         assert!(
-            !ev.scope_owners.contains_key(&vec![segment]),
+            !ev.scope_owners.contains_key(&scope),
             "the deleted layer's owner record survived"
         );
     }

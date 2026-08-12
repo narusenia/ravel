@@ -1234,7 +1234,15 @@ impl Document {
                             .layers
                             .iter()
                             .find(|l| l.id == layer.id)
-                            .map(|old_layer| old_layer.network != layer.network)
+                            // `ptr_eq` first: an edit to one layer leaves
+                            // every other layer's network sharing the same
+                            // map root, and proving that is O(1) where the
+                            // deep compare that follows is proportional to
+                            // the whole network's nodes and keyframes.
+                            .map(|old_layer| {
+                                !old_layer.network.ptr_eq(&layer.network)
+                                    && old_layer.network != layer.network
+                            })
                             .unwrap_or(true);
                         if layer_changed {
                             changed.push(vec![PathSegment::Layer(*comp_id, layer.id)]);
@@ -2271,6 +2279,89 @@ mod tests {
         assert_eq!(
             paths,
             vec![vec![PathSegment::Layer(CompId::new(1), LayerId::new(2))]]
+        );
+    }
+
+    /// A structural-sharing edit must report the edited layer and nothing
+    /// else — and "nothing else" has to survive both ways of getting it
+    /// wrong: reporting untouched layers whose networks are pointer-shared,
+    /// and reporting a layer whose network was rebuilt into fresh
+    /// allocations but holds identical content.
+    #[test]
+    fn changed_network_paths_reports_only_the_edited_layer() {
+        use crate::id::{DataTypeId, NodeId};
+
+        let populated = |seed: u64| {
+            Graph::new()
+                .add_node(
+                    crate::graph::Node::new(NodeId::new(seed), "constant")
+                        .with_output("value", DataTypeId::SCALAR),
+                )
+                .unwrap()
+        };
+
+        // Eight layers, each with its own non-empty network.
+        let base_layers: Vec<Layer> = (1..=8)
+            .map(|i| {
+                let mut layer = empty_layer(i);
+                layer.network = populated(100 + i);
+                layer
+            })
+            .collect();
+        let comp = base_layers
+            .iter()
+            .cloned()
+            .fold(test_comp(), |c, l| c.add_layer(l));
+        let doc1 = Document::default().with_composition(comp.clone());
+
+        // Edit layer 5 only, cloning the rest — every other layer keeps the
+        // very same `Graph` allocation.
+        let edited: im::Vector<Layer> = comp
+            .layers
+            .iter()
+            .map(|l| {
+                if l.id == LayerId::new(5) {
+                    let mut l = l.clone();
+                    l.network = populated(999);
+                    l
+                } else {
+                    l.clone()
+                }
+            })
+            .collect();
+        let doc2 = Document::default().with_composition(Composition {
+            layers: edited,
+            ..comp.clone()
+        });
+        assert_eq!(
+            doc2.changed_network_paths(&doc1),
+            vec![vec![PathSegment::Layer(CompId::new(1), LayerId::new(5))]],
+            "only the edited layer's network changed"
+        );
+
+        // Rebuild layer 3's network from scratch with identical content: a
+        // different allocation, so `ptr_eq` says nothing, and the deep
+        // compare behind it has to say "equal".
+        let rebuilt: im::Vector<Layer> = comp
+            .layers
+            .iter()
+            .map(|l| {
+                if l.id == LayerId::new(3) {
+                    let mut l = l.clone();
+                    l.network = populated(103);
+                    l
+                } else {
+                    l.clone()
+                }
+            })
+            .collect();
+        let doc3 = Document::default().with_composition(Composition {
+            layers: rebuilt,
+            ..comp
+        });
+        assert!(
+            doc3.changed_network_paths(&doc1).is_empty(),
+            "an equal network rebuilt into a fresh allocation is not a change"
         );
     }
 

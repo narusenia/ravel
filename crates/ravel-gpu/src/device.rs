@@ -217,20 +217,6 @@ pub struct GpuDeviceSnapshot {
     pub lost: bool,
 }
 
-impl GpuDeviceSnapshot {
-    /// The device epoch.
-    #[inline]
-    pub fn epoch(self) -> u64 {
-        self.epoch
-    }
-
-    /// Whether the device is lost.
-    #[inline]
-    pub fn lost(self) -> bool {
-        self.lost
-    }
-}
-
 fn map_loss_reason(reason: wgpu::DeviceLostReason) -> GpuLossReason {
     match reason {
         wgpu::DeviceLostReason::Destroyed => GpuLossReason::Destroyed,

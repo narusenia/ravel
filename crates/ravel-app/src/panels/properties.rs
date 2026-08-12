@@ -52,7 +52,7 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::color::ColorSpace;
-use ravel_core::composition::{AssetMetadata, Layer};
+use ravel_core::composition::{AssetMetadata, Document, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
@@ -1572,6 +1572,61 @@ fn rgba_from_hsla(hsla: Hsla) -> [f32; 4] {
 /// What kind of target the current widgets were built for. Same-identity
 /// target updates (undo refresh, live document sync) update values in place
 /// so an in-flight scrub gesture keeps its widget entities.
+/// Whether any of `layer_ids` shows a value sampled at the playhead. A layer
+/// the document does not have answers "yes": the panel is about to resolve
+/// something else, and guessing "no" there would freeze whatever replaces it.
+fn animated_layer(
+    document: &Document,
+    comp_id: ravel_core::id::CompId,
+    layer_ids: &[ravel_core::id::LayerId],
+) -> bool {
+    let Some(comp) = document.get_composition(comp_id) else {
+        return true;
+    };
+    layer_ids.iter().any(|layer_id| {
+        let Some(layer) = comp.get_layer(*layer_id) else {
+            return true;
+        };
+        // The same enumeration the Timeline animates: every shell group plus
+        // the layer network's exposed parameter rows.
+        ravel_ui::keyframes::property_rows(layer).iter().any(|row| {
+            ravel_ui::keyframes::row_channels(layer, &row.id)
+                .unwrap_or_default()
+                .iter()
+                .any(|channel| animated_channel(channel))
+        })
+    })
+}
+
+/// Whether this channel's value can differ from one frame to the next.
+///
+/// Only a plain constant cannot. Keyframes, expressions, node outputs,
+/// audio-reactive sources and blends of any of them all resolve against the
+/// evaluation frame.
+fn animated_channel(channel: &ravel_core::animation::channel::AnimationChannel) -> bool {
+    !matches!(
+        channel.source,
+        ravel_core::animation::channel::ChannelSource::Constant(_)
+    )
+}
+
+/// The same question for a node parameter: its channel components, if it has
+/// any.
+fn animated_parameter(value: &ParameterValue) -> bool {
+    match value {
+        ParameterValue::Channel(channel) => animated_channel(channel),
+        ParameterValue::Channel2(channels) => channels.iter().any(animated_channel),
+        ParameterValue::Channel3(channels) => channels.iter().any(animated_channel),
+        ParameterValue::Channel4(channels) => channels.iter().any(animated_channel),
+        ParameterValue::Float(_)
+        | ParameterValue::Int(_)
+        | ParameterValue::Bool(_)
+        | ParameterValue::String(_)
+        | ParameterValue::PathPoints(_)
+        | ParameterValue::Curve(_) => false,
+    }
+}
+
 fn same_target(current: &PropertiesTarget, next: &PropertiesTarget) -> bool {
     !matches!(current, PropertiesTarget::Empty) && current == next
 }
@@ -1698,6 +1753,16 @@ pub struct PropertiesGpuiPanel {
     project_sub: Option<Subscription>,
     /// Gate for the observer above (see [`super::MirrorEpoch`]).
     mirror_epoch: super::MirrorEpoch,
+    /// Whether anything the panel currently shows is sampled at the playhead
+    /// frame — an animated channel, an expression, a driven parameter.
+    ///
+    /// Recomputed by every [`Self::refresh_values`], so it describes the target
+    /// and document the sections were last built from. When it is false the
+    /// playhead observer has nothing to do: re-resolving the target and
+    /// rebuilding every section string 30–60 times a second would produce the
+    /// identical panel (`MED-UI-02`). It starts true so a panel that has not
+    /// resolved anything yet still follows the playhead.
+    playhead_sensitive: bool,
     #[allow(dead_code)]
     playback_sub: Subscription,
 }
@@ -1747,6 +1812,14 @@ impl PropertiesGpuiPanel {
                 this.curve_heights.clear();
                 this.curve_resize = None;
                 this.needs_rebuild = true;
+                // This branch rebuilds the widgets in `render` rather than
+                // calling `refresh_values`, so nothing here recomputes the
+                // playhead gate. Reopening it is what keeps a switch from a
+                // static target to an animated one from inheriting "nothing
+                // follows the playhead" and freezing the new target's values:
+                // the next playhead move refreshes once and settles the flag on
+                // what is actually on screen.
+                this.playhead_sensitive = true;
             }
             cx.notify();
         });
@@ -1776,10 +1849,18 @@ impl PropertiesGpuiPanel {
         // frame; follow it so displayed values and the ◆/◇ state track
         // playback — for node and layer targets alike.
         let playback_sub = cx.observe_global::<super::PlaybackPosition>(|this: &mut Self, cx| {
-            if !matches!(this.target, PropertiesTarget::Empty) {
-                this.refresh_values(cx);
-                cx.notify();
+            if matches!(this.target, PropertiesTarget::Empty) {
+                return;
             }
+            // Nothing on display is sampled at the playhead, so moving it
+            // cannot change a value, a ◆/◇ state or a string. Re-resolving the
+            // target here is what made a paused-looking panel cost a full
+            // section rebuild on every playback frame (`MED-UI-02`).
+            if !this.playhead_sensitive {
+                return;
+            }
+            this.refresh_values(cx);
+            cx.notify();
         });
 
         let focus_handle = cx.focus_handle();
@@ -1834,6 +1915,7 @@ impl PropertiesGpuiPanel {
             selection_sub,
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
+            playhead_sensitive: true,
             playback_sub,
         }
     }
@@ -3125,8 +3207,56 @@ impl PropertiesGpuiPanel {
     /// Update section values (and idle scrub widgets) from the current
     /// target without recreating widget entities, so an in-flight scrub
     /// keeps its state.
+    /// Whether anything this target shows is sampled at the playhead frame.
+    ///
+    /// Conservative by construction: only a channel that is a plain constant
+    /// is frame-independent, and a node with any incoming edge is treated as
+    /// following the playhead because a driven value follows whatever feeds
+    /// it. Anything unresolvable answers "yes" — a panel that refreshes when
+    /// it did not need to is a wasted rebuild, one that skips when it should
+    /// not have is a frozen value on screen.
+    fn target_follows_the_playhead(&self, cx: &App) -> bool {
+        let Some(project) = &self.project else {
+            return true;
+        };
+        let document = project.read(cx).document();
+        match &self.target {
+            PropertiesTarget::Empty => false,
+            PropertiesTarget::Layer { comp_id, layer_id } => {
+                animated_layer(document, *comp_id, std::slice::from_ref(layer_id))
+            }
+            PropertiesTarget::Layers { comp_id, layer_ids } => {
+                animated_layer(document, *comp_id, layer_ids)
+            }
+            PropertiesTarget::Nodes { network, ids } => {
+                let Some(graph) = ravel_ui::document::resolve_network(document, network) else {
+                    return true;
+                };
+                ids.iter().any(|id| {
+                    let Some(node) = graph.node(*id) else {
+                        return true;
+                    };
+                    // A driven parameter shows whatever its upstream produces,
+                    // which the playhead can move.
+                    if graph.edges().any(|edge| edge.target == *id) {
+                        return true;
+                    }
+                    node.parameters
+                        .iter()
+                        .any(|param| animated_parameter(&param.value))
+                })
+            }
+            // Composition settings, a media asset's metadata and the project's
+            // exposed parameter declarations are all frame-independent.
+            PropertiesTarget::Composition { .. }
+            | PropertiesTarget::MediaAsset { .. }
+            | PropertiesTarget::Project => false,
+        }
+    }
+
     fn refresh_values(&mut self, cx: &mut Context<Self>) {
         super::sync_probe::record(super::sync_probe::PanelSync::PropertiesRefresh);
+        self.playhead_sensitive = self.target_follows_the_playhead(cx);
         self.sections = self.sections_for_target(cx);
         self.expressions = self.expression_rows(cx);
         let mut updates: Vec<(String, f32)> = Vec::new();

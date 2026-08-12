@@ -377,9 +377,24 @@ fn a_parameter_drag_sync_counts(cx: &mut TestAppContext) {
     );
 }
 
-/// One second of playback at 30 fps. Nothing about the document changes, so the
-/// only panel entitled to sync is Properties, whose sections sample animated
-/// channels at the playhead.
+/// Advance the playhead over `frames` frames at 30 fps, the way the transport
+/// publishes it.
+#[cfg(debug_assertions)]
+fn play(frames: u64, cx: &mut TestAppContext) {
+    for frame in 0..frames {
+        cx.update(|cx| {
+            cx.set_global(panels::PlaybackPosition {
+                frame,
+                fps: ravel_core::types::FrameRate::new(30, 1),
+            });
+        });
+        cx.run_until_parked();
+    }
+}
+
+/// One second of playback at 30 fps with a *static* layer selected. Nothing
+/// about the document changes and nothing on display is sampled at the
+/// playhead, so no panel has anything to rebuild (`MED-UI-02`).
 #[gpui::test]
 #[cfg(debug_assertions)]
 fn a_second_of_playback_sync_counts(cx: &mut TestAppContext) {
@@ -401,21 +416,18 @@ fn a_second_of_playback_sync_counts(cx: &mut TestAppContext) {
 
     const FRAMES: u64 = 30;
     reset_syncs();
-    for frame in 0..FRAMES {
-        cx.update(|cx| {
-            cx.set_global(panels::PlaybackPosition {
-                frame,
-                fps: ravel_core::types::FrameRate::new(30, 1),
-            });
-        });
-        cx.run_until_parked();
-    }
-    let counts = sync_counts("playback, 30 frames");
+    play(FRAMES, cx);
+    let counts = sync_counts("playback, 30 frames, static layer");
 
-    assert_eq!(
-        count_of(&counts, "properties.refresh_values"),
-        FRAMES,
-        "Properties samples the playhead once per frame, not twice"
+    // At most one: selecting a target does not itself resolve values (that
+    // branch rebuilds the widgets in `render`), so the gate reopens on the
+    // switch and the first playhead move is what closes it again. Every frame
+    // after that costs nothing.
+    assert!(
+        count_of(&counts, "properties.refresh_values") <= 1,
+        "a layer with no animated channel shows the same values at every frame, \
+         so at most the first frame may resolve it ({} for {FRAMES} frames)",
+        count_of(&counts, "properties.refresh_values")
     );
     for name in [
         "timeline.sync_from_project",
@@ -428,6 +440,75 @@ fn a_second_of_playback_sync_counts(cx: &mut TestAppContext) {
             "{name} mirrors the document, which playback does not change"
         );
     }
+}
+
+/// The other half of the skip above, and the regression it could cause: a layer
+/// whose opacity is keyframed shows a different value at every frame, so
+/// Properties must still resolve it once per frame. A value that visibly stops
+/// moving during playback or a scrub is the failure this pins.
+///
+/// The static layer is selected *first* on purpose. That closes the gate, so
+/// the animated layer is reached from the worst starting state — a panel that
+/// has just concluded nothing follows the playhead.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn an_animated_layer_still_follows_the_playhead(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let static_layer = add_layer(&harness, cx);
+    let layer = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    cx.update(|cx| {
+        cx.set_global(panels::SelectedPropertiesTarget(
+            panels::PropertiesTarget::Layer {
+                comp_id: comp,
+                layer_id: static_layer,
+            },
+        ));
+    });
+    cx.run_until_parked();
+    play(2, cx);
+
+    harness.project.update(cx, |project, cx| {
+        let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
+        curve.insert(
+            0,
+            0.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        curve.insert(
+            30,
+            1.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        let document = ravel_ui::document::update_layer(project.document(), comp, layer, |layer| {
+            layer.opacity = ravel_core::animation::channel::AnimationChannel::keyframes(curve);
+        })
+        .unwrap();
+        project.commit_document(document, InvalidationHint::None, cx);
+    });
+    cx.update(|cx| {
+        cx.set_global(panels::SelectedPropertiesTarget(
+            panels::PropertiesTarget::Layer {
+                comp_id: comp,
+                layer_id: layer,
+            },
+        ));
+    });
+    cx.run_until_parked();
+
+    const FRAMES: u64 = 30;
+    reset_syncs();
+    play(FRAMES, cx);
+    let counts = sync_counts("playback, 30 frames, animated layer");
+
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        FRAMES,
+        "an animated value must be re-sampled at every frame"
+    );
 }
 
 /// One composition switch. Timeline and Outliner sync from the

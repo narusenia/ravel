@@ -429,6 +429,13 @@ fn field_apply() -> NodeTemplate {
         .with_param(string_parameter("components", ""))
         // Empty affects every element; otherwise the name of a Bool attribute.
         .with_param(string_parameter("group", ""))
+        // On by default: a target the geometry does not carry yet is created
+        // with the reserved attribute's declared type and default rather than
+        // failing (`stroke_color` / `stroke_width` start out absent).
+        .with_param(Parameter {
+            key: "create_if_missing".into(),
+            value: ParameterValue::Bool(true),
+        })
 }
 
 fn rasterize() -> NodeTemplate {

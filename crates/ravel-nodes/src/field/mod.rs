@@ -291,7 +291,8 @@ impl NodeProcessor for ApplyFieldProcessor {
             .with_amount(params.f32_or("amount", 1.0))
             .with_combine(CombineMode::parse(params.str_or("combine", "set")))
             .with_components(ComponentMask::parse(params.str_or("components", "")))
-            .with_group(params.str_or("group", ""));
+            .with_group(params.str_or("group", ""))
+            .with_create_if_missing(params.bool_or("create_if_missing", true));
         Ok(Arc::new(apply_field(
             geometry,
             &spec,

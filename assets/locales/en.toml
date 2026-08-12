@@ -1055,8 +1055,9 @@ domain = "Domain to write on."
 target = "Attribute to write."
 amount = "Strength of the application (0 leaves the old value, 1 applies fully)."
 combine = "How the sampled value combines with the existing one: set, add, multiply, min, max."
-components = "Components to affect (empty for all; for example xy, rgb, a)."
+components = "Components to affect (empty lets the type decide: rgb for a color, every component otherwise; for example xy, rgb, a)."
 group = "Name of a bool attribute limiting the affected elements (empty for all)."
+create_if_missing = "Create the attribute when the geometry does not have it yet, instead of failing."
 
 [export]
 title = "Export"

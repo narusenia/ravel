@@ -1154,12 +1154,21 @@ AttributeField::new(name).with_component("y").with_normalize(true)
     // normalize maps the column's own [min, max] onto [0, 1]. A missing,
     // non-numeric or wrong-length column warns and yields `default`.
 AddField/MultiplyField/MaxField { left, right }, BlendField { .., amount }
-FieldApply::new(Domain, target)              // + with_amount/combine/components/group
+FieldApply::new(Domain, target)              // + with_amount/combine/components/group/
+                                             // create_if_missing (on by default)
 CombineMode::{Set, Add, Multiply, Min, Max}  // result = lerp(existing, op, amount)
-ComponentMask::parse("xy" | "rgb" | "a")     // empty or unusable => every component
+ComponentMask::parse("xy" | "rgb" | "a")     // empty or unusable => UNSPECIFIED: the target
+                                             // type decides (rgb for Color/Vec4, so a scalar
+                                             // field does not move alpha; every component
+                                             // otherwise)
 apply_field(&geo, &FieldApply, &field, &ctx) -> Result<Geometry>
     // dimension-agnostic; a 3D geometry samples the planar built-in fields at
-    // the xy projection of P and P itself is only rewritten when it is target
+    // the xy projection of P and P itself is only rewritten when it is target.
+    // A target the domain does not carry is created first (unless
+    // create_if_missing is off, which restores the AttributeNotFound error):
+    // reserved names take their declared type and semantic default (Cd /
+    // stroke_color => opaque white, stroke_width => 0), anything else takes
+    // the sampled type, zeroed
 
 geometry::ops
 attribute_set / promote_attribute / attribute_transfer -> Result<Geometry>

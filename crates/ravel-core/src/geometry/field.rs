@@ -952,7 +952,7 @@ pub struct ComponentMask(u8);
 
 impl Default for ComponentMask {
     fn default() -> Self {
-        Self::ALL
+        Self::UNSPECIFIED
     }
 }
 
@@ -960,11 +960,20 @@ impl ComponentMask {
     /// Every component.
     pub const ALL: Self = Self(0b1111);
 
+    /// "The target type decides": every component, except that a Color or
+    /// Vec4 target keeps its alpha (`rgb`).
+    ///
+    /// A scalar field broadcasts into every selected component, so writing
+    /// alpha too means darkening a color also makes it transparent — which is
+    /// a side effect of brightness modulation, not a request for it. Say `a`
+    /// (or `rgba`) to move alpha on purpose.
+    pub const UNSPECIFIED: Self = Self(0);
+
     /// Parse a component specification such as `"xy"`, `"rgb"` or `"a"`.
     ///
     /// Unknown characters are ignored; a specification that selects nothing
-    /// falls back to [`ComponentMask::ALL`] so a typo cannot silently turn the
-    /// node into a no-op.
+    /// yields [`ComponentMask::UNSPECIFIED`] so a typo cannot silently turn
+    /// the node into a no-op.
     pub fn parse(spec: &str) -> Self {
         let mut bits = 0u8;
         for character in spec.chars() {
@@ -977,7 +986,7 @@ impl ComponentMask {
             };
             bits |= 1 << slot;
         }
-        if bits == 0 { Self::ALL } else { Self(bits) }
+        Self(bits)
     }
 
     /// Whether component `index` is selected.
@@ -993,6 +1002,10 @@ impl ComponentMask {
     /// name: warn and fall back to every component.
     fn resolved_for(self, arity: usize, target: &str) -> Self {
         let available = Self((1u8 << arity.min(4)) - 1);
+        if self == Self::UNSPECIFIED {
+            // Arity 4 is Color or Vec4; see [`ComponentMask::UNSPECIFIED`].
+            return if arity == 4 { Self(0b0111) } else { available };
+        }
         let narrowed = Self(self.0 & available.0);
         if narrowed.0 == 0 {
             tracing::warn!(
@@ -1036,6 +1049,12 @@ pub struct FieldApply<'a> {
     /// Name of a Bool attribute restricting the affected elements. Empty
     /// selects every element (REQ-CORE-013 element-scope convention).
     pub group: &'a str,
+    /// Create the target column when the geometry does not have it, instead
+    /// of failing with `AttributeNotFound`. On by default: `stroke_color` and
+    /// `stroke_width` are attributes nothing writes until a user modulates
+    /// them, so requiring an `attribute.set` in front of every `field.apply`
+    /// would be a ceremony with no decision in it.
+    pub create_if_missing: bool,
 }
 
 impl<'a> FieldApply<'a> {
@@ -1046,8 +1065,9 @@ impl<'a> FieldApply<'a> {
             target,
             amount: 1.0,
             combine: CombineMode::Set,
-            components: ComponentMask::ALL,
+            components: ComponentMask::UNSPECIFIED,
             group: "",
+            create_if_missing: true,
         }
     }
 
@@ -1069,6 +1089,38 @@ impl<'a> FieldApply<'a> {
     pub fn with_group(mut self, group: &'a str) -> Self {
         self.group = group;
         self
+    }
+
+    pub fn with_create_if_missing(mut self, create_if_missing: bool) -> Self {
+        self.create_if_missing = create_if_missing;
+        self
+    }
+}
+
+/// The column [`apply_field`] invents for a target the geometry does not have.
+///
+/// A reserved standard attribute is created with the type and the semantic
+/// default the geometry spec declares for it — an invented `Cd` has to be
+/// white, not transparent black, or `combine = multiply` would blank the
+/// geometry the first time anybody modulated it. Anything else takes the
+/// field's own sampled type, zeroed.
+fn created_column(target: &str, sampled: AttributeType, length: usize) -> AttributeArray {
+    match target {
+        names::CD | names::STROKE_COLOR => AttributeArray::Color(vec![Color::WHITE; length]),
+        names::STROKE_WIDTH => AttributeArray::F32(vec![0.0; length]),
+        _ => match sampled {
+            AttributeType::Vec2 => AttributeArray::Vec2(vec![Vec2(0.0, 0.0); length]),
+            AttributeType::Vec3 => AttributeArray::Vec3(vec![Vec3(0.0, 0.0, 0.0); length]),
+            AttributeType::Vec4 => AttributeArray::Vec4(vec![Vec4(0.0, 0.0, 0.0, 0.0); length]),
+            AttributeType::Color => AttributeArray::Color(vec![Color::TRANSPARENT; length]),
+            // `I32` / `Bool` / `Str` are not modulatable: created here so
+            // `combine_arrays` reports the type it always reported, rather
+            // than this function inventing a second error for the same case.
+            AttributeType::I32 => AttributeArray::I32(vec![0; length]),
+            AttributeType::Bool => AttributeArray::Bool(vec![false; length]),
+            AttributeType::Str => AttributeArray::Str(vec![String::new(); length]),
+            AttributeType::F32 => AttributeArray::F32(vec![0.0; length]),
+        },
     }
 }
 
@@ -1101,13 +1153,10 @@ pub fn apply_field(
         })??
         .projected();
     let positions = sample_positions.as_ref();
-    let existing = attributes
-        .get(spec.target)
-        .ok_or_else(|| GeometryError::AttributeNotFound {
-            name: spec.target.into(),
-        })?;
     // The field sees the whole domain, not just `P`, so `field.attribute` can
-    // drive modulation from `index` or any other column.
+    // drive modulation from `index` or any other column. Sampled before the
+    // target column is resolved, because an invented column's type can come
+    // from what the field returned.
     let sampled = field.sample(&FieldSample::new(positions, attributes, ctx));
     if sampled.len() != positions.len() {
         return Err(GeometryError::LengthMismatch {
@@ -1117,6 +1166,20 @@ pub fn apply_field(
         }
         .into());
     }
+    let created;
+    let existing = match attributes.get(spec.target) {
+        Some(column) => &**column,
+        None if spec.create_if_missing => {
+            created = created_column(spec.target, sampled.attr_type(), positions.len());
+            &created
+        }
+        None => {
+            return Err(GeometryError::AttributeNotFound {
+                name: spec.target.into(),
+            }
+            .into());
+        }
+    };
     // A scalar field promotes into any numeric target; otherwise the sampled
     // type has to match the column exactly.
     if sampled.attr_type() != AttributeType::F32 && sampled.attr_type() != existing.attr_type() {
@@ -2629,14 +2692,123 @@ mod tests {
 
     #[test]
     fn component_mask_parsing_accepts_both_spellings() {
-        assert!(ComponentMask::parse("").contains(3));
+        assert!(ComponentMask::parse("rgba").contains(3));
         assert!(ComponentMask::parse("xy").contains(0));
         assert!(ComponentMask::parse("xy").contains(1));
         assert!(!ComponentMask::parse("xy").contains(2));
         // `r`/`g`/`b`/`a` address the same slots as `x`/`y`/`z`/`w`.
         assert_eq!(ComponentMask::parse("rgb"), ComponentMask::parse("xyz"));
-        // A specification that selects nothing falls back to every component.
-        assert_eq!(ComponentMask::parse("!?"), ComponentMask::ALL);
+        // A specification that names nothing does not select nothing — it
+        // hands the choice to the target type, which is `rgb` for a Color and
+        // every component for anything else.
+        assert_eq!(ComponentMask::parse(""), ComponentMask::UNSPECIFIED);
+        assert_eq!(ComponentMask::parse("!?"), ComponentMask::UNSPECIFIED);
+    }
+
+    /// `stroke_color` and `stroke_width` are attributes nothing writes until
+    /// somebody modulates them, so the modulation node has to be able to
+    /// start them.
+    #[test]
+    fn a_missing_target_is_created_before_it_is_modulated() {
+        let geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        let spec = FieldApply::new(Domain::Point, names::CD);
+
+        let result = applied(&geometry, &spec);
+        let colors = result
+            .points()
+            .get(names::CD)
+            .unwrap()
+            .as_color(names::CD)
+            .unwrap();
+
+        // Created opaque white, then `Set` writes the sample into rgb only.
+        assert_eq!(
+            colors,
+            &[
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                Color::new(2.0, 2.0, 2.0, 1.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn create_if_missing_disabled_still_reports_the_missing_attribute() {
+        let geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        let spec = FieldApply::new(Domain::Point, names::CD).with_create_if_missing(false);
+
+        let error = apply_field(&geometry, &spec, &XField, &ctx()).unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                FieldError::Geometry(GeometryError::AttributeNotFound { name }) if name == names::CD
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A created column carries the type the geometry spec declares for the
+    /// reserved name, not whatever the field happened to sample: a scalar
+    /// field driving `Cd` still creates a Color.
+    #[test]
+    fn a_created_reserved_attribute_takes_its_declared_type() {
+        let geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+
+        for (target, expected) in [
+            (names::CD, AttributeType::Color),
+            (names::STROKE_COLOR, AttributeType::Color),
+            (names::STROKE_WIDTH, AttributeType::F32),
+            // Not reserved: the scalar field's own type.
+            ("heat", AttributeType::F32),
+        ] {
+            let result = applied(&geometry, &FieldApply::new(Domain::Point, target));
+            assert_eq!(
+                result.points().get(target).unwrap().attr_type(),
+                expected,
+                "{target}"
+            );
+        }
+    }
+
+    /// Darkening a color must not also make it transparent. Alpha moves only
+    /// when the component specification says so.
+    #[test]
+    fn a_scalar_field_leaves_alpha_alone_unless_it_is_named() {
+        let opaque = Color::new(0.2, 0.4, 0.6, 0.8);
+        let geometry = two_points_with(names::CD, AttributeArray::Color(vec![opaque, opaque]));
+
+        let pinned = applied(&geometry, &FieldApply::new(Domain::Point, names::CD));
+        let colors = pinned
+            .points()
+            .get(names::CD)
+            .unwrap()
+            .as_color(names::CD)
+            .unwrap();
+        assert_eq!(
+            colors,
+            &[
+                Color::new(0.0, 0.0, 0.0, 0.8),
+                Color::new(2.0, 2.0, 2.0, 0.8)
+            ]
+        );
+
+        let named = applied(
+            &geometry,
+            &FieldApply::new(Domain::Point, names::CD).with_components(ComponentMask::parse("a")),
+        );
+        let colors = named
+            .points()
+            .get(names::CD)
+            .unwrap()
+            .as_color(names::CD)
+            .unwrap();
+        assert_eq!(
+            colors,
+            &[
+                Color::new(0.2, 0.4, 0.6, 0.0),
+                Color::new(0.2, 0.4, 0.6, 2.0)
+            ]
+        );
     }
 
     #[test]

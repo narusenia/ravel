@@ -365,3 +365,42 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
 
 ---
+
+## MED-APP-30 | bug | Timeline のキーフレーム行の成分名が arity だけで決まる
+
+**該当**: `crates/ravel-ui/src/keyframes.rs:869-874`
+
+```rust
+let names = match components.len() {
+    1 => vec![CHANNEL_VALUE],
+    2 => vec!["X", "Y"],
+    3 => vec!["R", "G", "B"],      // ← Vec3 でも RGB
+    _ => vec!["R", "G", "B", "A"], // ← Vec4 でも RGBA
+};
+```
+
+2 成分だけ X / Y で、**3 成分以上は無条件に色扱い**。Vec3 パラメータに
+キーフレームを打つと、Timeline の子行が `R` / `G` / `B` と表示される。
+
+**再現**: `constant.vec3`（`vector-field-plan.md` 単位 6、#402）の値に
+キーフレームを打つ。
+
+**既存の票は覆っていない**:
+
+| 票 | 覆っている範囲 |
+| --- | --- |
+| `MED-APP-19` | Properties の描画。`Channel4` が `PropertyField::Color` 決め打ち（**4 成分の話で 3 成分に触れていない**） |
+| `MED-APP-20` | Properties の Vector 行に成分ラベルが**無い**（**間違っている**話ではない） |
+| 本票 | Timeline のキーフレーム行の成分名 |
+
+**修正方針**: 根は 3 票とも同じで、「このパラメータは色か、ベクタか」が
+テンプレート側で宣言されていないこと。`MED-APP-19` が挙げている方針
+（`viewer-overlay-manipulator-plan.md` の `ParamRole` と同じ層に `Color` の
+区別を置く）に相乗りさせ、宣言が無い 3 / 4 成分は `X` / `Y` / `Z` / `W` に
+する。**3 票まとめて片付ける**のが素直。
+
+**検証**: 色として宣言されていない `Channel3` のキーフレーム行が
+`X` / `Y` / `Z` になるテスト。`constant.color` が従来どおり `R` / `G` / `B` /
+`A` のままであるテスト。
+
+---

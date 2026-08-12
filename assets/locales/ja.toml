@@ -755,6 +755,18 @@ out_min = "出力範囲の開始。"
 out_max = "出力範囲の終了。"
 clamp = "結果を出力範囲にクランプする。"
 
+[node."math.curve"]
+label = "カーブ"
+description = "スカラーの変換カーブで値をリマップする。"
+[node."math.curve".params]
+value = "リマップする値。"
+in_min = "入力範囲の開始。"
+in_max = "入力範囲の終了。"
+out_min = "出力範囲の開始。"
+out_max = "出力範囲の終了。"
+extrapolation = "入力範囲外の扱い: clamp / repeat / 端点の接線を延長。"
+curve = "スカラーの変換カーブ。"
+
 [node."vector.construct.vec2"]
 label = "Vec2 構築"
 description = "スカラー成分から 2 成分ベクトルを組み立てる。"

@@ -46,6 +46,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(merge());
     reg.register(math_scalar());
     reg.register(math_remap());
+    reg.register(math_curve());
     reg.register(vector_construct(
         VECTOR_CONSTRUCT_VEC2,
         "Construct Vec2",
@@ -698,6 +699,27 @@ fn math_remap() -> NodeTemplate {
         .with_param_range("out_max", -1e9..=1e9, -10.0..=10.0)
 }
 
+fn math_curve() -> NodeTemplate {
+    NodeTemplate::new("math.curve", "Curve", NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::SCALAR,
+        })
+        .with_param(float_parameter("value", 0.0))
+        .with_param(float_parameter("in_min", 0.0))
+        .with_param(float_parameter("in_max", 1.0))
+        .with_param(float_parameter("out_min", 0.0))
+        .with_param(float_parameter("out_max", 1.0))
+        .with_param(string_parameter("extrapolation", "clamp"))
+        .with_param_options("extrapolation", ["clamp", "repeat", "extend"])
+        .with_param(curve_parameter("curve", CurveParam::identity()))
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_min", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("out_min", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("out_max", -1e9..=1e9, -10.0..=10.0)
+}
+
 fn geometry_transform() -> NodeTemplate {
     NodeTemplate::new(
         "geometry.transform",
@@ -1203,7 +1225,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 46);
+        assert_eq!(reg.all_templates().count(), 47);
     }
 
     #[test]
@@ -1216,7 +1238,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 11);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 12);
     }
 
     /// Each `vector.construct` arity outputs its own vector type and declares
@@ -1292,6 +1314,25 @@ mod tests {
         assert_eq!(merge_ops, ["over", "add", "multiply"]);
         // Numeric parameters carry no option set.
         assert!(reg.param_options("math.scalar", "a").is_none());
+    }
+
+    #[test]
+    fn math_curve_declares_its_curve_and_extrapolation_options() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let template = reg.get("math.curve").unwrap();
+        assert!(matches!(
+            template
+                .default_params
+                .iter()
+                .find(|parameter| parameter.key == "curve")
+                .map(|parameter| &parameter.value),
+            Some(ParameterValue::Curve(_))
+        ));
+        assert_eq!(
+            reg.param_options("math.curve", "extrapolation").unwrap(),
+            ["clamp", "repeat", "extend"]
+        );
     }
 
     #[test]

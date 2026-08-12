@@ -480,6 +480,23 @@ mod tests {
     }
 
     #[test]
+    fn the_math_curve_template_produces_the_same_curve_row() {
+        let registry = registry();
+        let node = registry
+            .create_node("math.curve", NodeId::new(1))
+            .expect("math.curve is registered");
+        let section = node_params_section(&node, &registry, 0, &eval(), &[]);
+        assert!(
+            section
+                .fields
+                .iter()
+                .any(|field| matches!(field, PropertyField::Curve { key, .. } if key == "curve")),
+            "math.curve must offer the same editable curve row: {:?}",
+            section.fields
+        );
+    }
+
+    #[test]
     fn driven_params_render_read_only_with_source() {
         let node = Node::new(NodeId::new(1), "blur")
             .with_param("radius", ParameterValue::Float(5.0))

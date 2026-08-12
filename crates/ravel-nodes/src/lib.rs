@@ -146,6 +146,7 @@ pub fn processor_for_node(
         ))),
         "math.scalar" => Some(Arc::new(math::MathScalarProcessor::from_node(node))),
         "math.remap" => Some(Arc::new(math::MathRemapProcessor::from_node(node))),
+        "math.curve" => Some(Arc::new(math::MathCurveProcessor::from_node(node))),
         builtin::VECTOR_CONSTRUCT_VEC2 => Some(Arc::new(vector::VectorConstructProcessor::new(
             vector::VectorArity::Vec2,
         ))),

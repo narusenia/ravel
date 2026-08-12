@@ -1,15 +1,17 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Scalar math nodes (CPU-only): `math.scalar` and `math.remap`.
+//! Scalar math nodes (CPU-only): `math.scalar`, `math.remap`, and `math.curve`.
 //!
-//! Both nodes have no fixed input ports — every operand is a Float
-//! parameter, so it is editable in the Properties panel when unconnected
+//! These nodes have no fixed input ports — their scalar operands are Float
+//! parameters, so they are editable in the Properties panel when unconnected
 //! and drivable through an exposed parameter port (e.g. `net.in`'s `t` or
-//! `f`) when connected.
+//! `f`) when connected. Curve parameters remain structural Properties rows.
 
+use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
+use ravel_core::param_curve::{CurveParam, CurvePoint};
 use ravel_core::types::{NodeData, Scalar};
 use std::sync::Arc;
 
@@ -107,6 +109,114 @@ impl NodeProcessor for MathRemapProcessor {
     }
 }
 
+/// `math.curve`: maps a scalar through a normalized transfer curve.
+///
+/// `value` is first mapped to a normalized input coordinate, then the shared
+/// [`CurveParam::evaluate`] implementation supplies the curve value, and that
+/// value is mapped to the output range. The curve itself retains its existing
+/// clamping behavior; the node chooses how values outside the normalized
+/// `[0, 1]` range reach it.
+pub struct MathCurveProcessor;
+
+impl MathCurveProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for MathCurveProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let value = params.f32_or("value", 0.0);
+        let in_min = params.f32_or("in_min", 0.0);
+        let in_max = params.f32_or("in_max", 1.0);
+        let out_min = params.f32_or("out_min", 0.0);
+        let out_max = params.f32_or("out_max", 1.0);
+        let extrapolation = params.str_or("extrapolation", "clamp");
+        let curve = params.curve("curve").cloned().unwrap_or_default();
+
+        let input_span = in_max - in_min;
+        let normalized = if input_span == 0.0 {
+            0.0
+        } else {
+            (value - in_min) / input_span
+        };
+        let curve_value = match extrapolation {
+            "repeat" if !(0.0..=1.0).contains(&normalized) => {
+                curve.evaluate(normalized.rem_euclid(1.0))
+            }
+            "extend" if !(0.0..=1.0).contains(&normalized) => {
+                extend_curve_value(&curve, normalized)
+            }
+            _ => curve.evaluate(normalized.clamp(0.0, 1.0)),
+        };
+        Ok(Arc::new(Scalar(
+            out_min + curve_value * (out_max - out_min),
+        )))
+    }
+}
+
+/// Extend a curve past its normalized domain using the tangent at the nearest
+/// endpoint. Linear and step segments use their exact endpoint slope; Bezier
+/// segments use the endpoint handle's slope. A vertical or unavailable handle
+/// falls back to the adjacent secant so the result remains a scalar function.
+fn extend_curve_value(curve: &CurveParam, normalized: f32) -> f32 {
+    let points = curve.points();
+    if points.is_empty() {
+        return normalized;
+    }
+    if points.len() < 2 || (0.0..=1.0).contains(&normalized) {
+        return curve.evaluate(normalized.clamp(0.0, 1.0));
+    }
+
+    if normalized < 0.0 {
+        let first = points[0];
+        let next = points[1];
+        let slope = endpoint_slope(first, next, true);
+        first.y + slope * (normalized - first.x)
+    } else {
+        let previous = points[points.len() - 2];
+        let last = points[points.len() - 1];
+        let slope = endpoint_slope(previous, last, false);
+        last.y + slope * (normalized - last.x)
+    }
+}
+
+fn endpoint_slope(previous: CurvePoint, endpoint: CurvePoint, at_start: bool) -> f32 {
+    let slope = match previous.interpolation {
+        Interpolation::Step => 0.0,
+        Interpolation::Linear => secant_slope(previous, endpoint),
+        Interpolation::Bezier => {
+            let tangent = if at_start {
+                previous.tangent_out
+            } else {
+                endpoint.tangent_in
+            };
+            if tangent.0 != 0.0 {
+                tangent.1 / tangent.0
+            } else {
+                secant_slope(previous, endpoint)
+            }
+        }
+    };
+    if slope.is_finite() { slope } else { 0.0 }
+}
+
+fn secant_slope(previous: CurvePoint, endpoint: CurvePoint) -> f32 {
+    let width = endpoint.x - previous.x;
+    if width == 0.0 {
+        0.0
+    } else {
+        (endpoint.y - previous.y) / width
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +295,96 @@ mod tests {
     fn is_not_time_dependent() {
         assert!(!MathScalarProcessor.is_time_dependent());
         assert!(!MathRemapProcessor.is_time_dependent());
+        assert!(!MathCurveProcessor.is_time_dependent());
+    }
+
+    fn eval_curve(value: f32, extrapolation: &str, curve: CurveParam) -> f32 {
+        let node = Node::new(NodeId::new(1), "math.curve")
+            .with_output("output", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(value))
+            .with_param("in_min", ParameterValue::Float(0.0))
+            .with_param("in_max", ParameterValue::Float(1.0))
+            .with_param("out_min", ParameterValue::Float(0.0))
+            .with_param("out_max", ParameterValue::Float(1.0))
+            .with_param(
+                "extrapolation",
+                ParameterValue::String(extrapolation.into()),
+            )
+            .with_param("curve", ParameterValue::Curve(curve));
+        let graph = Graph::new().add_node(node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(MathCurveProcessor));
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+        out.downcast_ref::<Scalar>().unwrap().0
+    }
+
+    #[test]
+    fn curve_identity_maps_input_to_output() {
+        let curve = CurveParam::identity();
+        assert_eq!(eval_curve(0.0, "clamp", curve.clone()), 0.0);
+        assert_eq!(eval_curve(0.25, "clamp", curve.clone()), 0.25);
+        assert_eq!(eval_curve(1.0, "clamp", curve), 1.0);
+
+        let node = Node::new(NodeId::new(1), "math.curve")
+            .with_output("output", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(5.0))
+            .with_param("in_min", ParameterValue::Float(0.0))
+            .with_param("in_max", ParameterValue::Float(10.0))
+            .with_param("out_min", ParameterValue::Float(-2.0))
+            .with_param("out_max", ParameterValue::Float(2.0))
+            .with_param("curve", ParameterValue::Curve(CurveParam::identity()));
+        let graph = Graph::new().add_node(node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(MathCurveProcessor));
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+        assert_eq!(out.downcast_ref::<Scalar>().unwrap().0, 0.0);
+    }
+
+    #[test]
+    fn curve_extend_uses_bezier_endpoint_tangents() {
+        let curve = CurveParam::from_points([
+            CurvePoint::new(0.0, 0.0, Interpolation::Bezier).with_tangents(
+                ravel_core::types::Vec2(0.0, 0.0),
+                ravel_core::types::Vec2(0.25, 1.0),
+            ),
+            CurvePoint::new(1.0, 1.0, Interpolation::Bezier).with_tangents(
+                ravel_core::types::Vec2(-0.25, -0.5),
+                ravel_core::types::Vec2(0.0, 0.0),
+            ),
+        ]);
+        assert_eq!(eval_curve(-0.25, "extend", curve.clone()), -1.0);
+        assert_eq!(eval_curve(1.25, "extend", curve), 1.5);
+    }
+
+    #[test]
+    fn curve_out_of_range_modes_are_distinct_and_defined() {
+        let curve = CurveParam::linear([(0.0, 0.0), (0.5, 1.0), (1.0, 0.0)]);
+
+        assert_eq!(eval_curve(-0.25, "clamp", curve.clone()), 0.0);
+        assert_eq!(eval_curve(1.25, "clamp", curve.clone()), 0.0);
+        assert_eq!(eval_curve(-0.25, "repeat", curve.clone()), 0.5);
+        assert_eq!(eval_curve(1.25, "repeat", curve.clone()), 0.5);
+        assert_eq!(eval_curve(-0.25, "extend", curve.clone()), -0.5);
+        assert_eq!(eval_curve(1.25, "extend", curve), -0.5);
+    }
+
+    #[test]
+    fn curve_matches_field_curve_remap_for_the_same_control_points() {
+        use ravel_core::geometry::{
+            ConstantField, CurveRemapField, Field, FieldSample, FieldValue,
+        };
+        use ravel_core::types::Vec2;
+
+        let curve = CurveParam::linear([(0.0, 0.0), (0.25, 0.8), (1.0, 0.2)]);
+        let input = 0.5;
+        let field = CurveRemapField::new(FieldValue::new(ConstantField(input)), curve.clone());
+        let field_value = field
+            .sample(&FieldSample::positions_only(&[Vec2(0.0, 0.0)], &ctx()))
+            .as_f32("sample")
+            .unwrap()[0];
+
+        let math_value = eval_curve(input, "clamp", curve);
+        assert_eq!(math_value.to_bits(), field_value.to_bits());
     }
 
     fn eval_remap(value: f32, clamp: bool) -> f32 {

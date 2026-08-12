@@ -1,7 +1,7 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Lazy, batch-evaluated scalar fields and geometry attribute modulation.
+//! Lazy, batch-evaluated fields and geometry attribute modulation.
 
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -850,20 +850,17 @@ macro_rules! binary_field {
             }
 
             fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
-                let positions = input.positions;
-                let left = scalar_values(self.left.sample(input), positions.len());
-                let right = scalar_values(self.right.sample(input), positions.len());
-                AttributeArray::F32(left.into_iter().zip(right).map($operation).collect())
+                combine_binary(&self.left, &self.right, input, $operation)
             }
         }
     };
 }
 
-binary_field!(AddField, |(left, right)| left + right);
-binary_field!(MultiplyField, |(left, right)| left * right);
-binary_field!(MaxField, |(left, right)| left.max(right));
+binary_field!(AddField, |left, right| left + right);
+binary_field!(MultiplyField, |left, right| left * right);
+binary_field!(MaxField, |left, right| left.max(right));
 
-/// Linear interpolation between two scalar fields.
+/// Linear interpolation between two fields.
 #[derive(Clone, Debug)]
 pub struct BlendField {
     pub left: FieldValue,
@@ -877,26 +874,128 @@ impl Field for BlendField {
     }
 
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
-        let positions = input.positions;
-        let left = scalar_values(self.left.sample(input), positions.len());
-        let right = scalar_values(self.right.sample(input), positions.len());
         let amount = self.amount.clamp(0.0, 1.0);
-        AttributeArray::F32(
-            left.into_iter()
-                .zip(right)
-                .map(|(left, right)| left + (right - left) * amount)
-                .collect(),
-        )
+        combine_binary(&self.left, &self.right, input, move |left, right| {
+            left + (right - left) * amount
+        })
     }
 }
 
-/// Errors produced by [`apply_field`].
+/// Sample both operands and combine them element-wise.
+///
+/// A pair with no resolvable type reads zero rather than failing: [`Field`]
+/// answers a column, not a `Result`, and a half-built graph must not take the
+/// evaluation down. The warning is raised once per sample, not once per
+/// element, so a mistyped pair is visible without flooding a playback log.
+fn combine_binary(
+    left: &FieldValue,
+    right: &FieldValue,
+    input: &FieldSample<'_>,
+    operation: impl Fn(f32, f32) -> f32,
+) -> AttributeArray {
+    let length = input.positions.len();
+    let left = left.sample(input);
+    let right = right.sample(input);
+    combine_samples(&left, &right, length, operation).unwrap_or_else(|error| {
+        tracing::warn!(%error, "field operands do not combine; reading zero");
+        AttributeArray::F32(vec![0.0; length])
+    })
+}
+
+/// Type a binary combination answers, or why the operands do not combine.
+///
+/// Two operands of one type combine component-wise, and a scalar broadcasts
+/// into the other operand's type. Nothing else resolves: `Vec4` and `Color`
+/// carry four components each but are not the same type, and pairing them
+/// would be exactly the implicit conversion this model refuses (see
+/// `vector-field-plan.md`).
+fn binary_result_type(
+    left: AttributeType,
+    right: AttributeType,
+) -> Result<AttributeType, FieldError> {
+    let modulatable = |attr_type| component_arity(attr_type).is_some();
+    match (left, right) {
+        (left, right) if left == right && modulatable(left) => Ok(left),
+        (AttributeType::F32, other) | (other, AttributeType::F32) if modulatable(other) => {
+            Ok(other)
+        }
+        _ => Err(FieldError::IncompatibleOperands { left, right }),
+    }
+}
+
+/// Combine two sampled columns element-wise and component-wise.
+fn combine_samples(
+    left: &AttributeArray,
+    right: &AttributeArray,
+    length: usize,
+    operation: impl Fn(f32, f32) -> f32,
+) -> Result<AttributeArray, FieldError> {
+    let result_type = binary_result_type(left.attr_type(), right.attr_type())?;
+    // An operand whose length does not match the batch reads zero, the way the
+    // scalar-only path answered before a combination could carry a type.
+    let component = |array: &AttributeArray, index: usize, slot: usize| {
+        if array.len() == length {
+            sampled_component(array, index, slot)
+        } else {
+            0.0
+        }
+    };
+    // `sampled_component` broadcasts an `F32` operand across every slot, which
+    // is the scalar-times-vector rule; a same-typed pair reads slot for slot.
+    let value = |index: usize, slot: usize| {
+        operation(component(left, index, slot), component(right, index, slot))
+    };
+    Ok(match result_type {
+        AttributeType::F32 => AttributeArray::F32((0..length).map(|i| value(i, 0)).collect()),
+        AttributeType::Vec2 => AttributeArray::Vec2(
+            (0..length)
+                .map(|i| Vec2(value(i, 0), value(i, 1)))
+                .collect(),
+        ),
+        AttributeType::Vec3 => AttributeArray::Vec3(
+            (0..length)
+                .map(|i| Vec3(value(i, 0), value(i, 1), value(i, 2)))
+                .collect(),
+        ),
+        AttributeType::Vec4 => AttributeArray::Vec4(
+            (0..length)
+                .map(|i| Vec4(value(i, 0), value(i, 1), value(i, 2), value(i, 3)))
+                .collect(),
+        ),
+        AttributeType::Color => AttributeArray::Color(
+            (0..length)
+                .map(|i| Color {
+                    r: value(i, 0),
+                    g: value(i, 1),
+                    b: value(i, 2),
+                    a: value(i, 3),
+                })
+                .collect(),
+        ),
+        // `binary_result_type` only answers modulatable types.
+        AttributeType::I32 | AttributeType::Bool | AttributeType::Str => {
+            return Err(FieldError::IncompatibleOperands {
+                left: left.attr_type(),
+                right: right.attr_type(),
+            });
+        }
+    })
+}
+
+/// Errors produced by [`apply_field`] and by combining two fields.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FieldError {
     #[error(transparent)]
     Geometry(#[from] GeometryError),
     #[error("field modulation does not support {0} attributes")]
     UnsupportedAttributeType(AttributeType),
+    /// The two operands of a binary field are neither the same type nor a
+    /// scalar to broadcast into the other.
+    #[error("a {left} field does not combine with a {right} field")]
+    IncompatibleOperands {
+        left: AttributeType,
+        right: AttributeType,
+    },
 }
 
 /// How a sampled value is combined with the attribute's existing value.
@@ -1482,6 +1581,28 @@ mod tests {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
     }
 
+    /// A field answering a fixed column, so a test can give a combinator an
+    /// operand of any type.
+    struct ConstantArrayField(AttributeArray);
+
+    impl Field for ConstantArrayField {
+        fn byte_size(&self) -> u64 {
+            size_of::<Self>() as u64
+        }
+
+        fn sample(&self, _input: &FieldSample<'_>) -> AttributeArray {
+            self.0.clone()
+        }
+    }
+
+    fn constant_array(array: AttributeArray) -> FieldValue {
+        FieldValue::new(ConstantArrayField(array))
+    }
+
+    fn typed_sample(field: &dyn Field, positions: &[Vec2]) -> AttributeArray {
+        field.sample(&FieldSample::positions_only(positions, &ctx()))
+    }
+
     fn scalar_sample(field: &dyn Field, positions: &[Vec2]) -> Vec<f32> {
         field
             .sample(&FieldSample::positions_only(positions, &ctx()))
@@ -2041,6 +2162,240 @@ mod tests {
                 &positions,
             ),
             vec![2.5, 2.5]
+        );
+    }
+
+    #[test]
+    fn vector_operands_combine_component_wise() {
+        let positions = [Vec2(0.0, 0.0); 2];
+        let left = constant_array(AttributeArray::Vec2(vec![Vec2(1.0, 2.0), Vec2(3.0, 4.0)]));
+        let right = constant_array(AttributeArray::Vec2(vec![
+            Vec2(10.0, 20.0),
+            Vec2(-30.0, 40.0),
+        ]));
+
+        assert_eq!(
+            typed_sample(
+                &AddField {
+                    left: left.clone(),
+                    right: right.clone(),
+                },
+                &positions,
+            ),
+            AttributeArray::Vec2(vec![Vec2(11.0, 22.0), Vec2(-27.0, 44.0)])
+        );
+        assert_eq!(
+            typed_sample(
+                &MultiplyField {
+                    left: left.clone(),
+                    right: right.clone(),
+                },
+                &positions,
+            ),
+            AttributeArray::Vec2(vec![Vec2(10.0, 40.0), Vec2(-90.0, 160.0)])
+        );
+        assert_eq!(
+            typed_sample(
+                &MaxField {
+                    left: left.clone(),
+                    right: right.clone(),
+                },
+                &positions,
+            ),
+            AttributeArray::Vec2(vec![Vec2(10.0, 20.0), Vec2(3.0, 40.0)])
+        );
+        assert_eq!(
+            typed_sample(
+                &BlendField {
+                    left,
+                    right,
+                    amount: 0.5,
+                },
+                &positions,
+            ),
+            AttributeArray::Vec2(vec![Vec2(5.5, 11.0), Vec2(-13.5, 22.0)])
+        );
+    }
+
+    #[test]
+    fn vec4_operands_combine_component_wise() {
+        let left = AttributeArray::Vec4(vec![Vec4(1.0, 2.0, 3.0, 4.0)]);
+        let right = AttributeArray::Vec4(vec![Vec4(10.0, 20.0, 30.0, 40.0)]);
+
+        assert_eq!(
+            combine_samples(&left, &right, 1, |left, right| left + right),
+            Ok(AttributeArray::Vec4(vec![Vec4(11.0, 22.0, 33.0, 44.0)]))
+        );
+    }
+
+    #[test]
+    fn a_scalar_operand_broadcasts_across_a_vector_one() {
+        // Scaling a vector field by an intensity is the case this unit exists
+        // for, and it has to read the same whichever side the scalar is on.
+        let positions = [Vec2(0.0, 0.0); 2];
+        let vectors = constant_array(AttributeArray::Vec2(vec![Vec2(1.0, 2.0), Vec2(3.0, 4.0)]));
+        let half = FieldValue::new(ConstantField(0.5));
+        let scaled = AttributeArray::Vec2(vec![Vec2(0.5, 1.0), Vec2(1.5, 2.0)]);
+
+        assert_eq!(
+            typed_sample(
+                &MultiplyField {
+                    left: vectors.clone(),
+                    right: half.clone(),
+                },
+                &positions,
+            ),
+            scaled
+        );
+        assert_eq!(
+            typed_sample(
+                &MultiplyField {
+                    left: half.clone(),
+                    right: vectors.clone(),
+                },
+                &positions,
+            ),
+            scaled
+        );
+        assert_eq!(
+            typed_sample(
+                &AddField {
+                    left: half,
+                    right: vectors,
+                },
+                &positions,
+            ),
+            AttributeArray::Vec2(vec![Vec2(1.5, 2.5), Vec2(3.5, 4.5)])
+        );
+    }
+
+    #[test]
+    fn color_operands_combine_component_wise() {
+        let positions = [Vec2(0.0, 0.0)];
+        let left = constant_array(AttributeArray::Color(vec![Color {
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+            a: 1.0,
+        }]));
+        let right = constant_array(AttributeArray::Color(vec![Color {
+            r: 0.75,
+            g: 0.25,
+            b: 0.25,
+            a: 0.5,
+        }]));
+
+        assert_eq!(
+            typed_sample(
+                &MaxField {
+                    left: left.clone(),
+                    right: right.clone(),
+                },
+                &positions,
+            ),
+            AttributeArray::Color(vec![Color {
+                r: 0.75,
+                g: 0.5,
+                b: 0.75,
+                a: 1.0,
+            }])
+        );
+        assert_eq!(
+            typed_sample(
+                &BlendField {
+                    left,
+                    right,
+                    amount: 0.5,
+                },
+                &positions,
+            ),
+            AttributeArray::Color(vec![Color {
+                r: 0.5,
+                g: 0.375,
+                b: 0.5,
+                a: 0.75,
+            }])
+        );
+    }
+
+    #[test]
+    fn a_scalar_operand_broadcasts_across_a_color_one() {
+        let positions = [Vec2(0.0, 0.0)];
+        let color = constant_array(AttributeArray::Color(vec![Color {
+            r: 0.2,
+            g: 0.4,
+            b: 0.6,
+            a: 0.8,
+        }]));
+
+        assert_eq!(
+            typed_sample(
+                &MultiplyField {
+                    left: FieldValue::new(ConstantField(0.5)),
+                    right: color,
+                },
+                &positions,
+            ),
+            AttributeArray::Color(vec![Color {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 0.4,
+            }])
+        );
+    }
+
+    #[test]
+    fn operands_of_unrelated_types_do_not_combine() {
+        // `Vec4` and `Color` are four components each, and pairing them anyway
+        // is the implicit conversion the model refuses.
+        let pairs = [
+            (
+                AttributeArray::Vec2(vec![Vec2(1.0, 2.0)]),
+                AttributeArray::Vec3(vec![Vec3(1.0, 2.0, 3.0)]),
+            ),
+            (
+                AttributeArray::Vec4(vec![Vec4(1.0, 2.0, 3.0, 4.0)]),
+                AttributeArray::Color(vec![Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }]),
+            ),
+            (
+                AttributeArray::F32(vec![1.0]),
+                AttributeArray::Bool(vec![true]),
+            ),
+        ];
+
+        for (left, right) in pairs {
+            assert_eq!(
+                combine_samples(&left, &right, 1, |left, right| left + right),
+                Err(FieldError::IncompatibleOperands {
+                    left: left.attr_type(),
+                    right: right.attr_type(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_over_unrelated_operands_reads_zero() {
+        // The typed error cannot leave `Field::sample`, so the combinator
+        // answers a zero scalar column instead of taking evaluation down.
+        let positions = [Vec2(0.0, 0.0); 2];
+        let field = AddField {
+            left: constant_array(AttributeArray::Vec2(vec![Vec2(1.0, 2.0), Vec2(3.0, 4.0)])),
+            right: constant_array(AttributeArray::Vec3(vec![
+                Vec3(1.0, 2.0, 3.0),
+                Vec3(4.0, 5.0, 6.0),
+            ])),
+        };
+
+        assert_eq!(
+            typed_sample(&field, &positions),
+            AttributeArray::F32(vec![0.0, 0.0])
         );
     }
 

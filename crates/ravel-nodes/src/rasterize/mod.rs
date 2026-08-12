@@ -158,14 +158,22 @@ impl NodeProcessor for RasterizeProcessor {
         );
         let _guard = span.enter();
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
+        // One mask for the whole geometry, instances included. Allocating it
+        // per primitive — twice per primitive, once more for the stroke — is
+        // what made this path cost O(primitives x resolution) in allocation
+        // alone (issue MED-GPU-04).
+        let mut coverage = vec![0u8; width as usize * height as usize];
 
         raster_geometry(
             geo,
             Placement::for_context(ctx),
             0,
-            &mut pixels,
-            width,
-            height,
+            &mut Canvas {
+                pixels: &mut pixels,
+                coverage: &mut coverage,
+                width,
+                height,
+            },
             style,
         );
 
@@ -605,13 +613,77 @@ fn color_array(color: Color) -> [f32; 4] {
     [color.r, color.g, color.b, color.a]
 }
 
+/// The frame being drawn into, plus the single coverage mask every primitive
+/// of one `process` call shares.
+struct Canvas<'a> {
+    pixels: &'a mut [f32],
+    /// **Zero on entry to every draw and zero again afterwards.** zeno writes
+    /// only the spans a shape covers and never clears the rest, so a mask
+    /// handed over dirty would stamp the previous primitive's silhouette;
+    /// [`Canvas::blend_coverage`] restores the invariant as it reads.
+    coverage: &'a mut [u8],
+    width: u32,
+    height: u32,
+}
+
+/// A half-open pixel rectangle, clamped to the canvas.
+#[derive(Clone, Copy)]
+struct Rect {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Canvas<'_> {
+    /// Composite the mask zeno just rendered — restricted to `rect`, the only
+    /// pixels it can have written — and zero those pixels again.
+    ///
+    /// The restriction is what keeps a primitive's cost proportional to its
+    /// own size instead of the frame's: a scatter of a hundred small shapes
+    /// used to walk the whole canvas a hundred times.
+    fn blend_coverage(&mut self, rect: Rect, color: Color) {
+        for y in rect.y0..rect.y1 {
+            let row = (y * self.width) as usize;
+            for i in row + rect.x0 as usize..row + rect.x1 as usize {
+                let cov = std::mem::take(&mut self.coverage[i]);
+                if cov != 0 {
+                    blend_pixel(
+                        &mut self.pixels[i * 4..i * 4 + 4],
+                        color,
+                        cov as f32 / 255.0,
+                    );
+                }
+            }
+        }
+        // The rectangle has to bound what zeno wrote, or the leftovers become
+        // the next primitive's phantom coverage. Checked on every CPU
+        // rasterize the test suite runs rather than argued about in a comment.
+        debug_assert!(
+            self.coverage.iter().all(|&c| c == 0),
+            "coverage outside the primitive's bounds was not clean"
+        );
+    }
+}
+
+/// The pixels a mask over `bounds` can write: the path's device-space extent
+/// grown by `margin` (the antialiasing feather, plus half the stroke width
+/// when stroking) and clamped to the canvas.
+fn coverage_rect(bounds: (Vec2, Vec2), margin: f32, width: u32, height: u32) -> Rect {
+    let (min, max) = bounds;
+    Rect {
+        x0: (min.0 - margin).floor().clamp(0.0, width as f32) as u32,
+        y0: (min.1 - margin).floor().clamp(0.0, height as f32) as u32,
+        x1: (max.0 + margin).ceil().clamp(0.0, width as f32) as u32,
+        y1: (max.1 + margin).ceil().clamp(0.0, height as f32) as u32,
+    }
+}
+
 fn raster_geometry(
     geo: &Geometry,
     placement: Placement,
     depth: u32,
-    pixels: &mut [f32],
-    width: u32,
-    height: u32,
+    canvas: &mut Canvas<'_>,
     style: Style,
 ) {
     let positions = geo
@@ -620,20 +692,19 @@ fn raster_geometry(
         .and_then(|c| c.as_vec2(names::P).ok().map(<[Vec2]>::to_vec))
         .unwrap_or_default();
 
-    raster_paths(geo, &positions, placement, pixels, width, height, style);
-    raster_points(geo, &positions, placement, pixels, width, height, style);
-    raster_instances(geo, placement, depth, pixels, width, height, style);
+    raster_paths(geo, &positions, placement, canvas, style);
+    raster_points(geo, &positions, placement, canvas, style);
+    raster_instances(geo, placement, depth, canvas, style);
 }
 
 fn raster_paths(
     geo: &Geometry,
     positions: &[Vec2],
     placement: Placement,
-    pixels: &mut [f32],
-    width: u32,
-    height: u32,
+    canvas: &mut Canvas<'_>,
     style: Style,
 ) {
+    let (width, height) = (canvas.width, canvas.height);
     for (prim_index, prim) in geo.primitives().iter().enumerate() {
         // Unreachable for meshes: see the twin walk in `flatten_geometry`.
         let Primitive::Path { verts, closed } = prim else {
@@ -645,8 +716,12 @@ fn raster_paths(
 
         let polyline = path_polyline(geo, positions, verts, *closed);
         let mut commands = Vec::with_capacity(polyline.len() + 1);
+        let mut min = Vec2(f32::INFINITY, f32::INFINITY);
+        let mut max = Vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
         for (i, p) in polyline.iter().enumerate() {
             let v = placement.apply(*p);
+            min = Vec2(min.0.min(v.0), min.1.min(v.1));
+            max = Vec2(max.0.max(v.0), max.1.max(v.1));
             let v = Vector::new(v.0, v.1);
             commands.push(if i == 0 {
                 Command::MoveTo(v)
@@ -664,25 +739,31 @@ fn raster_paths(
             placement.tint,
         );
 
-        let mut coverage = vec![0u8; width as usize * height as usize];
         if style.fill && *closed {
             Mask::new(commands.as_slice())
                 .size(width, height)
                 .style(Fill::NonZero)
-                .render_into(&mut coverage, None);
-            blend_coverage(pixels, &coverage, color);
+                .render_into(canvas.coverage, None);
+            // One pixel of margin: the fill is antialiased, so the outermost
+            // covered pixel is the one the boundary passes through.
+            canvas.blend_coverage(coverage_rect((min, max), 1.0, width, height), color);
         }
         if style.stroke_width > 0.0 {
-            let mut stroke_cov = vec![0u8; width as usize * height as usize];
             // Round caps/joins match the GPU stroke, which is an unsigned
             // distance to the polyline (inherently round at caps and joins).
-            let mut stroke = Stroke::new(style.stroke_width * placement.uniform_scale());
+            let stroke_width = style.stroke_width * placement.uniform_scale();
+            let mut stroke = Stroke::new(stroke_width);
             stroke.cap(Cap::Round).join(Join::Round);
             Mask::new(commands.as_slice())
                 .size(width, height)
                 .style(stroke)
-                .render_into(&mut stroke_cov, None);
-            blend_coverage(pixels, &stroke_cov, color);
+                .render_into(canvas.coverage, None);
+            // The stroke straddles the path: half its width on each side,
+            // and the round cap extends the same distance past an end point.
+            canvas.blend_coverage(
+                coverage_rect((min, max), stroke_width * 0.5 + 1.0, width, height),
+                color,
+            );
         }
     }
 }
@@ -691,9 +772,7 @@ fn raster_instances(
     geo: &Geometry,
     placement: Placement,
     depth: u32,
-    pixels: &mut [f32],
-    width: u32,
-    height: u32,
+    canvas: &mut Canvas<'_>,
     style: Style,
 ) {
     if depth >= MAX_INSTANCE_DEPTH {
@@ -733,7 +812,7 @@ fn raster_instances(
         };
         let combined = compose(placement, local);
         let source = select_instance_source(sources, source_indices, i);
-        raster_geometry(source, combined, depth + 1, pixels, width, height, style);
+        raster_geometry(source, combined, depth + 1, canvas, style);
     }
 }
 
@@ -765,11 +844,10 @@ fn raster_points(
     geo: &Geometry,
     positions: &[Vec2],
     placement: Placement,
-    pixels: &mut [f32],
-    width: u32,
-    height: u32,
+    canvas: &mut Canvas<'_>,
     style: Style,
 ) {
+    let (width, height) = (canvas.width, canvas.height);
     let points = geo.points();
     let radii = float_column(points, names::PSCALE);
     let sprite_mask = path_vertex_mask(geo, positions.len());
@@ -804,7 +882,7 @@ fn raster_points(
                 let cov = (radius - dist + 0.5).clamp(0.0, 1.0);
                 if cov > 0.0 {
                     let idx = ((y * width + x) * 4) as usize;
-                    blend_pixel(&mut pixels[idx..idx + 4], color, cov);
+                    blend_pixel(&mut canvas.pixels[idx..idx + 4], color, cov);
                 }
             }
         }
@@ -857,16 +935,6 @@ fn tinted(color: Color, alpha: f32, tint: Color) -> Color {
         color.b * tint.b,
         color.a * alpha * tint.a,
     )
-}
-
-fn blend_coverage(pixels: &mut [f32], coverage: &[u8], color: Color) {
-    for (i, cov) in coverage.iter().enumerate() {
-        if *cov == 0 {
-            continue;
-        }
-        let idx = i * 4;
-        blend_pixel(&mut pixels[idx..idx + 4], color, *cov as f32 / 255.0);
-    }
 }
 
 /// Straight-alpha Porter-Duff src-over, matching the merge node convention.
@@ -1169,6 +1237,58 @@ mod tests {
 
         let outside = pixel(&fb, 1, 1);
         assert!(outside[3] < 1e-6, "exterior stays transparent");
+    }
+
+    /// The CPU path reuses one coverage mask for every primitive, so a
+    /// primitive that leaves the mask dirty would stamp its own silhouette,
+    /// in the *next* primitive's colour, wherever the next one does not
+    /// reach. Two disjoint squares of different colours catch exactly that:
+    /// each keeps its own colour and the gap between them stays empty.
+    #[test]
+    fn a_reused_coverage_mask_does_not_leak_between_primitives() {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(2.0, 2.0),
+            Vec2(6.0, 2.0),
+            Vec2(6.0, 6.0),
+            Vec2(2.0, 6.0),
+            Vec2(10.0, 10.0),
+            Vec2(14.0, 10.0),
+            Vec2(14.0, 14.0),
+            Vec2(10.0, 14.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geo.push_primitive(Primitive::Path {
+            verts: 4..8,
+            closed: true,
+        });
+        geo.primitive_attrs_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(1.0, 0.0, 0.0, 1.0),
+                    Color::new(0.0, 0.0, 1.0, 1.0),
+                ]),
+            )
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        let red = pixel(&fb, 4, 4);
+        assert!(
+            red[0] > 0.9 && red[2] < 0.1,
+            "the first square keeps its own colour: {red:?}"
+        );
+        let blue = pixel(&fb, 12, 12);
+        assert!(
+            blue[2] > 0.9 && blue[0] < 0.1,
+            "the second square keeps its own colour: {blue:?}"
+        );
+        for (x, y) in [(4, 12), (12, 4), (8, 8)] {
+            let gap = pixel(&fb, x, y);
+            assert!(gap[3] < 1e-6, "nothing is drawn at ({x},{y}): {gap:?}");
+        }
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub struct GpuEvalHooks {
     /// registers shares it (`CACHE-8`). Built here for the same reason the
     /// texture pool is: the processors are constructed from these hooks.
     media_frames: MediaFrameCache,
+    /// The rasterizer [`Self::finalize`] draws `Geometry` outputs with, built
+    /// on first use and kept: it owns a compiled shader and a render pipeline,
+    /// which is not work to redo per frame of a scrub.
+    viewer_rasterize: Option<crate::rasterize::RasterizeProcessor>,
 }
 
 impl GpuEvalHooks {
@@ -60,6 +64,7 @@ impl GpuEvalHooks {
             pool,
             display: None,
             media_frames: MediaFrameCache::standalone(),
+            viewer_rasterize: None,
         }
     }
 
@@ -77,6 +82,7 @@ impl GpuEvalHooks {
             pool,
             display: None,
             media_frames: MediaFrameCache::new(budget),
+            viewer_rasterize: None,
         }
     }
 
@@ -267,6 +273,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 pool,
                 display,
                 media_frames: _,
+                viewer_rasterize: _,
             } = self;
             let display = display.as_mut().expect("checked above");
             return match display.run(gpu, shaders, pool, value.as_ref()) {
@@ -296,21 +303,49 @@ impl GpuEvalHooks {
     /// Rasterize a `Geometry` output so the viewer has something to draw.
     /// Any other value passes through untouched; a failed rasterization is
     /// `None`, which keeps it out of the frame cache.
+    ///
+    /// On the GPU, with the context and pool these hooks already hold: a
+    /// shape or scatter node previewed while scrubbing used to run the zeno
+    /// CPU rasterizer once per frame, and its result then had to be uploaded
+    /// again by the display transform (issue MED-GPU-04). The resident frame
+    /// this produces feeds the transform directly.
     fn rasterize_geometry(
-        &self,
+        &mut self,
         value: &Arc<dyn NodeData>,
         ctx: &EvalContext,
     ) -> Option<Arc<dyn NodeData>> {
         if value.downcast_ref::<Geometry>().is_none() {
             return Some(value.clone());
         }
+        // Ad-hoc parameters: the processor reads fill and stroke width from
+        // the resolved parameters below, not from this node, so the node
+        // exists only to satisfy the signature.
         let rast_node = ravel_core::graph::Node::new(NodeId::new(u64::MAX), "rasterize")
             .with_param("fill", ravel_core::graph::ParameterValue::Bool(true))
             .with_param(
                 "stroke_width",
                 ravel_core::graph::ParameterValue::Float(0.0),
             );
-        let proc = crate::rasterize::RasterizeProcessor::from_node(&rast_node);
+        // Split borrows: building the rasterizer compiles through the shader
+        // manager while the slot it lands in is borrowed mutably. Every field
+        // is named for the reason `finalize` names them — a field added later
+        // has to be considered here too.
+        let Self {
+            gpu,
+            shaders,
+            pool,
+            display: _,
+            media_frames: _,
+            viewer_rasterize,
+        } = self;
+        let proc = viewer_rasterize.get_or_insert_with(|| {
+            crate::rasterize::RasterizeProcessor::new(
+                gpu.clone(),
+                shaders,
+                pool.clone(),
+                &rast_node,
+            )
+        });
         let inputs: Vec<Option<Arc<dyn NodeData>>> = vec![Some(value.clone())];
         let mut scope = ravel_core::eval::Evaluator::new();
         match proc.process(
@@ -341,10 +376,14 @@ mod tests {
         EvalContext::new(0, FrameRate::new(30, 1), (32, 32))
     }
 
+    /// The viewer boundary rasterizes on the GPU (issue MED-GPU-04): the
+    /// recorded pass count has to move, or the zeno CPU path ran instead —
+    /// which is invisible in the output, since a viewer without a display
+    /// transform reads the frame back either way.
     #[test]
-    fn finalize_rasterizes_geometry_output() {
+    fn finalize_rasterizes_geometry_output_on_the_gpu() {
         let gpu = GpuContext::new_blocking().expect("GPU required");
-        let mut hooks = GpuEvalHooks::new(gpu);
+        let mut hooks = GpuEvalHooks::new(gpu.clone());
 
         let geo = Geometry::from_points(vec![
             ravel_core::types::Vec2(0.0, 0.0),
@@ -352,8 +391,14 @@ mod tests {
             ravel_core::types::Vec2(10.0, 10.0),
         ]);
         let value: Arc<dyn NodeData> = Arc::new(geo);
+        let before = gpu.dispatch_stats();
         let out = hooks.finalize(&value, &ctx()).expect("rasterize succeeded");
+        let recorded = before.delta(&gpu.dispatch_stats()).dispatches;
         assert!(out.downcast_ref::<FrameBuffer>().is_some());
+        assert!(
+            recorded >= 2,
+            "the draw and the unpremultiply pass must both be recorded, got {recorded}"
+        );
     }
 
     #[test]

@@ -291,7 +291,12 @@ fn gap_between(lower: Option<f32>, upper: Option<f32>) -> f32 {
 
 /// `x` clamped strictly inside `(lower, upper)`, or `None` when the two are
 /// so close that no `f32` between them survives the rounding.
-fn clamp_between(x: f32, lower: Option<f32>, upper: Option<f32>) -> Option<f32> {
+///
+/// Shared with [`super::param_ramp_editor`]: a ramp identifies its stops by
+/// position exactly as a curve identifies its points by input value, so both
+/// need a dragged element to stay strictly between its neighbours or one of
+/// them is silently overwritten.
+pub(super) fn clamp_between(x: f32, lower: Option<f32>, upper: Option<f32>) -> Option<f32> {
     let gap = gap_between(lower, upper);
     if !gap.is_finite() || gap <= 0.0 {
         return None;
@@ -709,6 +714,28 @@ impl ParamCurveEditorState {
     /// gesture).
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// Whether **any** edit gesture this widget owns is in flight.
+    ///
+    /// The toolbar's six numeric fields are gestures too, and they live inside
+    /// this widget rather than in the panel's `scrubs` table — so a scrub on
+    /// one is invisible to `PropertiesPanel::gesture_in_flight` unless it is
+    /// reported here. A gesture the panel cannot see is one it will not end
+    /// before it repoints at another row, and the commit then lands on the
+    /// wrong target (the failure `caf929a` fixed for the row-level scrubs).
+    pub fn gesture_in_flight(&self, cx: &App) -> bool {
+        self.is_dragging()
+            || [
+                &self.inputs.point_x,
+                &self.inputs.point_y,
+                &self.inputs.input_min,
+                &self.inputs.input_max,
+                &self.inputs.output_min,
+                &self.inputs.output_max,
+            ]
+            .iter()
+            .any(|input| input.read(cx).is_dragging())
     }
 
     /// Replace the displayed curve from the document. Ignored mid-gesture:

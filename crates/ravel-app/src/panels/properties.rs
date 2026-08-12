@@ -82,8 +82,9 @@ use std::sync::Arc;
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 use crate::widgets::{
-    ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, ScrubEvent, ScrubInput,
-    ScrubInputState, curve_thumbnail,
+    ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, ParamRampEditor,
+    ParamRampEditorState, ParamRampEvent, ScrubEvent, ScrubInput, ScrubInputState, curve_thumbnail,
+    ramp_thumbnail,
 };
 
 use super::{PropertiesTarget, SelectedPropertiesTarget, port_error_message};
@@ -653,30 +654,30 @@ fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
         .collect()
 }
 
-/// Default height of an expanded curve editor, and the bounds the resize
-/// drag keeps it between. The minimum leaves room for the editor's own
-/// toolbar (the selected point, the interpolation buttons, the view range)
-/// plus a usable graph above it.
-const CURVE_EDITOR_HEIGHT: f32 = 200.0;
-const CURVE_EDITOR_MIN_HEIGHT: f32 = 120.0;
-const CURVE_EDITOR_MAX_HEIGHT: f32 = 560.0;
-/// Height of the grab strip under an expanded curve editor.
-const CURVE_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
+/// Default height of an expanded inline editor (curve or ramp), and the
+/// bounds the resize drag keeps it between. The minimum leaves room for the
+/// editor's own toolbar (the selected point or stop, the interpolation
+/// buttons, the view range) plus a usable graph or band above it.
+const INLINE_EDITOR_HEIGHT: f32 = 200.0;
+const INLINE_EDITOR_MIN_HEIGHT: f32 = 120.0;
+const INLINE_EDITOR_MAX_HEIGHT: f32 = 560.0;
+/// Height of the grab strip under an expanded inline editor.
+const INLINE_RESIZE_HANDLE_HEIGHT: f32 = 6.0;
 
-/// Drag payload for a curve editor's height handle, identified by the row's
+/// Drag payload for an inline editor's height handle, identified by the row's
 /// field key.
 #[derive(Clone)]
-struct DragCurveHeight(SharedString);
+struct DragRowHeight(SharedString);
 
-impl Render for DragCurveHeight {
+impl Render for DragRowHeight {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
 }
 
-/// An in-flight curve-editor height drag: the row being resized, the pointer
+/// An in-flight inline-editor height drag: the row being resized, the pointer
 /// y it started at, and the height it had then.
-struct CurveResize {
+struct RowResize {
     key: String,
     start_y: f32,
     start_height: f32,
@@ -729,7 +730,63 @@ fn curve_row(
             .on_click(move |_event, _window, cx| {
                 editor
                     .update(cx, |this, cx| {
-                        this.toggle_curve_expanded(&field_key, cx);
+                        this.toggle_row_expanded(&field_key, cx);
+                    })
+                    .ok();
+            }),
+    )
+}
+
+/// The collapsed ramp row: label plus a gradient band of the ramp. Clicking
+/// anywhere on the row toggles the inline editor underneath it — the same
+/// panel view state a curve row toggles, so a ramp and a curve can be open at
+/// once and neither closes the other.
+fn ramp_row(
+    key: &str,
+    ramp: &ravel_core::param_ramp::RampParam,
+    expanded: bool,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Div {
+    let editor = editor.clone();
+    let field_key = key.to_string();
+    let icon = if expanded {
+        gpui_component::IconName::ChevronDown
+    } else {
+        gpui_component::IconName::ChevronRight
+    };
+    div().child(
+        div()
+            .id(SharedString::from(format!("ramp-row-{key}")))
+            .flex()
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .py(px(1.0))
+            .cursor_pointer()
+            .child(field_label_cell(field_label(key), muted))
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w(px(48.0))
+                            .h(px(14.0))
+                            .rounded(px(2.0))
+                            .overflow_hidden()
+                            .child(ramp_thumbnail(ramp.clone())),
+                    )
+                    .child(Icon::new(icon).size_3().text_color(muted)),
+            )
+            .tooltip(|window, cx| Tooltip::new(t!("properties.ramp.expand")).build(window, cx))
+            .on_click(move |_event, _window, cx| {
+                editor
+                    .update(cx, |this, cx| {
+                        this.toggle_row_expanded(&field_key, cx);
                     })
                     .ok();
             }),
@@ -744,11 +801,6 @@ fn curve_editor_body(
     editor: &WeakEntity<PropertiesGpuiPanel>,
     muted: Hsla,
 ) -> Div {
-    let handle_key = SharedString::from(key.to_string());
-    let begin = editor.clone();
-    let moving = editor.clone();
-    let ending = editor.clone();
-    let drag_key = handle_key.clone();
     div()
         .flex()
         .flex_col()
@@ -760,46 +812,112 @@ fn curve_editor_body(
                 .w_full()
                 .child(ParamCurveEditor::new(state)),
         )
+        .child(row_resize_strip(key, editor, muted))
+}
+
+/// The expanded ramp editor: the band and its toolbar, the colour picker for
+/// the selected stop, and the same height strip a curve row has.
+///
+/// The picker sits in the panel rather than in the widget because
+/// `ColorPickerState` needs a `Window` to be created and refreshed — the same
+/// reason every other picker in this panel lives here.
+fn ramp_editor_body(
+    key: &str,
+    state: &Entity<ParamRampEditorState>,
+    picker: &Entity<ColorPickerState>,
+    height: f32,
+    has_selection: bool,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Div {
+    let mut swatch_row = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_1()
+        .py(px(1.0))
+        .text_xs()
+        .text_color(muted)
         .child(
             div()
-                .id(SharedString::from(format!("curve-resize-{key}")))
-                .h(px(CURVE_RESIZE_HANDLE_HEIGHT))
+                .flex_shrink_0()
+                .child(SharedString::from(t!("properties.ramp.color"))),
+        );
+    swatch_row = if has_selection {
+        swatch_row.child(ColorPicker::new(picker).small())
+    } else {
+        // No stop selected: the picker would edit nothing, so the row says so
+        // rather than offering a control whose changes are dropped.
+        swatch_row.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(t!("properties.ramp.no_selection"))),
+        )
+    };
+    div()
+        .flex()
+        .flex_col()
+        .px_1()
+        .pb(px(2.0))
+        .child(
+            div()
+                .h(px(height))
                 .w_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor(CursorStyle::ResizeUpDown)
-                .child(div().w(px(24.0)).h(px(2.0)).rounded(px(1.0)).bg(muted))
-                .on_mouse_down(MouseButton::Left, {
-                    let key = handle_key.clone();
-                    move |event: &MouseDownEvent, _window, cx| {
-                        let key = key.to_string();
-                        let y: f32 = event.position.y.into();
-                        begin
-                            .update(cx, |this, _cx| this.begin_curve_resize(key, y))
-                            .ok();
-                    }
-                })
-                .on_drag(DragCurveHeight(drag_key.clone()), |drag, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.new(|_| drag.clone())
-                })
-                .on_drag_move(move |event: &DragMoveEvent<DragCurveHeight>, _window, cx| {
-                    let DragCurveHeight(dragged) = event.drag(cx);
-                    if dragged != &drag_key {
-                        return;
-                    }
-                    let y: f32 = event.event.position.y.into();
-                    moving
-                        .update(cx, |this, cx| this.curve_resize_to(y, cx))
-                        .ok();
-                })
-                .on_mouse_up(
-                    MouseButton::Left,
-                    move |_event: &MouseUpEvent, _window, cx| {
-                        ending.update(cx, |this, _cx| this.end_curve_resize()).ok();
-                    },
-                ),
+                .child(ParamRampEditor::new(state)),
+        )
+        .child(swatch_row)
+        .child(row_resize_strip(key, editor, muted))
+}
+
+/// The grab strip under an expanded inline editor, shared by curve and ramp
+/// rows so both resize identically.
+fn row_resize_strip(
+    key: &str,
+    editor: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Stateful<Div> {
+    let handle_key = SharedString::from(key.to_string());
+    let begin = editor.clone();
+    let moving = editor.clone();
+    let ending = editor.clone();
+    let drag_key = handle_key.clone();
+    div()
+        .id(SharedString::from(format!("row-resize-{key}")))
+        .h(px(INLINE_RESIZE_HANDLE_HEIGHT))
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::ResizeUpDown)
+        .child(div().w(px(24.0)).h(px(2.0)).rounded(px(1.0)).bg(muted))
+        .on_mouse_down(MouseButton::Left, {
+            let key = handle_key.clone();
+            move |event: &MouseDownEvent, _window, cx| {
+                let key = key.to_string();
+                let y: f32 = event.position.y.into();
+                begin
+                    .update(cx, |this, _cx| this.begin_row_resize(key, y))
+                    .ok();
+            }
+        })
+        .on_drag(DragRowHeight(drag_key.clone()), |drag, _, _, cx| {
+            cx.stop_propagation();
+            cx.new(|_| drag.clone())
+        })
+        .on_drag_move(move |event: &DragMoveEvent<DragRowHeight>, _window, cx| {
+            let DragRowHeight(dragged) = event.drag(cx);
+            if dragged != &drag_key {
+                return;
+            }
+            let y: f32 = event.event.position.y.into();
+            moving.update(cx, |this, cx| this.row_resize_to(y, cx)).ok();
+        })
+        .on_mouse_up(
+            MouseButton::Left,
+            move |_event: &MouseUpEvent, _window, cx| {
+                ending.update(cx, |this, _cx| this.end_row_resize()).ok();
+            },
         )
 }
 
@@ -810,7 +928,7 @@ fn build_field_row(
     strings: &[(String, Entity<InputState>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     colors: &[(String, Entity<ColorPickerState>)],
-    expanded_curves: &std::collections::HashSet<String>,
+    expanded_rows: &std::collections::HashSet<String>,
     ports: &PortWidgets,
     declarations: &ExposedWidgets,
     editor: &WeakEntity<PropertiesGpuiPanel>,
@@ -821,7 +939,11 @@ fn build_field_row(
 ) -> Div {
     match field {
         PropertyField::Curve { key, curve } => {
-            curve_row(key, curve, expanded_curves.contains(key), editor, muted, fg)
+            curve_row(key, curve, expanded_rows.contains(key), editor, muted, fg)
+        }
+
+        PropertyField::Ramp { key, ramp } => {
+            ramp_row(key, ramp, expanded_rows.contains(key), editor, muted)
         }
 
         PropertyField::ReadOnly { key, value } => {
@@ -1491,6 +1613,17 @@ struct CurveBinding {
     sub: Subscription,
 }
 
+/// A ramp row's widgets: the inline editor and the colour picker that edits
+/// its selected stop. The picker is here rather than inside the editor because
+/// `ColorPickerState` needs a `Window` — the constraint that puts every other
+/// picker in this panel too.
+struct RampBinding {
+    state: Entity<ParamRampEditorState>,
+    picker: Entity<ColorPickerState>,
+    #[allow(dead_code)]
+    subs: [Subscription; 2],
+}
+
 /// The trailing "add a port" row of the Ports section: a name to type and the
 /// type the new port gets. It is not bound to any port, so it lives beside
 /// the per-row bindings rather than in them.
@@ -1695,6 +1828,7 @@ pub struct PropertiesGpuiPanel {
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
     curves: Vec<(String, CurveBinding)>,
+    ramps: Vec<(String, RampBinding)>,
     /// Expression state of the selected node's parameters, keyed by field key.
     ///
     /// Derived from the document on every refresh rather than held as edit
@@ -1773,9 +1907,9 @@ pub struct PropertiesGpuiPanel {
     /// dropped when the panel's target changes — a bare key like `points`
     /// says nothing about the node it came from, so carrying an expansion
     /// across targets would open an unrelated row.
-    expanded_curves: std::collections::HashSet<String>,
-    curve_heights: std::collections::HashMap<String, f32>,
-    curve_resize: Option<CurveResize>,
+    expanded_rows: std::collections::HashSet<String>,
+    row_heights: std::collections::HashMap<String, f32>,
+    row_resize: Option<RowResize>,
     /// Uncommitted color edit awaiting its debounced undo commit — the key,
     /// the value and the nodes it addresses — with the generation guard that
     /// cancels superseded commits.
@@ -1867,9 +2001,9 @@ impl PropertiesGpuiPanel {
                 // Curve expansion is per-target view state (see the field
                 // docs): a new target starts with every curve row collapsed,
                 // so returning to a node shows it collapsed again.
-                this.expanded_curves.clear();
-                this.curve_heights.clear();
-                this.curve_resize = None;
+                this.expanded_rows.clear();
+                this.row_heights.clear();
+                this.row_resize = None;
                 this.needs_rebuild = true;
                 // This branch rebuilds the widgets in `render` rather than
                 // calling `refresh_values`, so nothing here recomputes the
@@ -1948,6 +2082,7 @@ impl PropertiesGpuiPanel {
             selects: Vec::new(),
             colors: Vec::new(),
             curves: Vec::new(),
+            ramps: Vec::new(),
             port_names: Vec::new(),
             port_types: Vec::new(),
             port_add: None,
@@ -1958,9 +2093,9 @@ impl PropertiesGpuiPanel {
             exposed_descriptions: Vec::new(),
             exposed_error: None,
             committed_exposed_rename: None,
-            expanded_curves: std::collections::HashSet::new(),
-            curve_heights: std::collections::HashMap::new(),
-            curve_resize: None,
+            expanded_rows: std::collections::HashSet::new(),
+            row_heights: std::collections::HashMap::new(),
+            row_resize: None,
             pending_color_commit: None,
             color_commit_generation: 0,
             expressions: Vec::new(),
@@ -2019,7 +2154,11 @@ impl PropertiesGpuiPanel {
             || self
                 .curves
                 .iter()
-                .any(|(_, binding)| binding.state.read(cx).is_dragging())
+                .any(|(_, binding)| binding.state.read(cx).gesture_in_flight(cx))
+            || self
+                .ramps
+                .iter()
+                .any(|(_, binding)| binding.state.read(cx).gesture_in_flight(cx))
     }
 
     /// End every in-flight edit gesture, taking the undo step it owes, before
@@ -2054,6 +2193,12 @@ impl PropertiesGpuiPanel {
                 moved |= binding.state.update(cx, |state, cx| state.end_drag(cx));
             }
         }
+        for (_, binding) in &self.ramps {
+            if binding.state.read(cx).is_dragging() {
+                ended = true;
+                moved |= binding.state.update(cx, |state, cx| state.end_drag(cx));
+            }
+        }
         if !ended {
             return;
         }
@@ -2062,6 +2207,7 @@ impl PropertiesGpuiPanel {
         // keeps either from reaching the target being switched to.
         self.scrubs.clear();
         self.curves.clear();
+        self.ramps.clear();
         // The color flush already recorded a step over the same live document.
         if !moved || flushed {
             return;
@@ -2417,48 +2563,48 @@ impl PropertiesGpuiPanel {
     /// Expansion is view state only: nothing here touches the document, so
     /// the toggle records no undo step and rows stay independent (opening
     /// one never closes another).
-    fn toggle_curve_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
-        if !self.expanded_curves.remove(key) {
-            self.expanded_curves.insert(key.to_string());
+    fn toggle_row_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.expanded_rows.remove(key) {
+            self.expanded_rows.insert(key.to_string());
         }
         cx.notify();
     }
 
     /// Whether the curve row `key` is currently expanded.
     #[cfg(test)]
-    fn is_curve_expanded(&self, key: &str) -> bool {
-        self.expanded_curves.contains(key)
+    fn is_row_expanded(&self, key: &str) -> bool {
+        self.expanded_rows.contains(key)
     }
 
     /// Height of the row `key`'s expanded editor.
-    fn curve_height(&self, key: &str) -> f32 {
-        self.curve_heights
+    fn row_height(&self, key: &str) -> f32 {
+        self.row_heights
             .get(key)
             .copied()
-            .unwrap_or(CURVE_EDITOR_HEIGHT)
+            .unwrap_or(INLINE_EDITOR_HEIGHT)
     }
 
-    fn begin_curve_resize(&mut self, key: String, pointer_y: f32) {
-        let start_height = self.curve_height(&key);
-        self.curve_resize = Some(CurveResize {
+    fn begin_row_resize(&mut self, key: String, pointer_y: f32) {
+        let start_height = self.row_height(&key);
+        self.row_resize = Some(RowResize {
             key,
             start_y: pointer_y,
             start_height,
         });
     }
 
-    fn curve_resize_to(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
-        let Some(resize) = &self.curve_resize else {
+    fn row_resize_to(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
+        let Some(resize) = &self.row_resize else {
             return;
         };
         let height = (resize.start_height + (pointer_y - resize.start_y))
-            .clamp(CURVE_EDITOR_MIN_HEIGHT, CURVE_EDITOR_MAX_HEIGHT);
-        self.curve_heights.insert(resize.key.clone(), height);
+            .clamp(INLINE_EDITOR_MIN_HEIGHT, INLINE_EDITOR_MAX_HEIGHT);
+        self.row_heights.insert(resize.key.clone(), height);
         cx.notify();
     }
 
-    fn end_curve_resize(&mut self) {
-        self.curve_resize = None;
+    fn end_row_resize(&mut self) {
+        self.row_resize = None;
     }
 
     /// Run `f` against the live node editor after this panel's current update.
@@ -3080,6 +3226,27 @@ impl PropertiesGpuiPanel {
                 }
             }
         }
+        // A ramp row's picker shows the *selected stop*, which lives in the
+        // editor's view state rather than in the field, so it is synced from
+        // there — but for the same reasons and on the same render-time terms.
+        for (_, binding) in &self.ramps {
+            let Some(stop) = binding.state.read(cx).selected_stop() else {
+                continue;
+            };
+            let differs = binding.picker.read(cx).value().is_none_or(|current| {
+                let current = rgba_from_hsla(current);
+                (current[0] - stop.color.r).abs() > 1e-3
+                    || (current[1] - stop.color.g).abs() > 1e-3
+                    || (current[2] - stop.color.b).abs() > 1e-3
+                    || (current[3] - stop.color.a).abs() > 1e-3
+            });
+            if differs {
+                updates.push((
+                    binding.picker.clone(),
+                    hsla_from_rgba(stop.color.r, stop.color.g, stop.color.b, stop.color.a),
+                ));
+            }
+        }
         for (state, value) in updates {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
@@ -3189,6 +3356,9 @@ impl PropertiesGpuiPanel {
                     }
                     (PropertyField::Curve { curve, .. }, PropertyValue::Curve(new)) => {
                         curve.clone_from(new);
+                    }
+                    (PropertyField::Ramp { ramp, .. }, PropertyValue::Ramp(new)) => {
+                        ramp.clone_from(new);
                     }
                     _ => {}
                 }
@@ -3374,6 +3544,27 @@ impl PropertiesGpuiPanel {
                 });
             }
         }
+
+        // Ramp editors follow the document on exactly the same terms.
+        let ramps: Vec<(String, ravel_core::param_ramp::RampParam)> = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.fields)
+            .filter_map(|field| match field {
+                PropertyField::Ramp { key, ramp } => Some((key.clone(), ramp.clone())),
+                _ => None,
+            })
+            .collect();
+        for (key, ramp) in ramps {
+            if let Some((_, binding)) = self.ramps.iter().find(|(k, _)| k == &key) {
+                binding.state.update(cx, |state, cx| {
+                    if state.ramp() != &ramp {
+                        state.set_ramp_synced(ramp, cx);
+                        cx.notify();
+                    }
+                });
+            }
+        }
     }
 
     fn rebuild_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3386,6 +3577,7 @@ impl PropertiesGpuiPanel {
         self.selects.clear();
         self.colors.clear();
         self.curves.clear();
+        self.ramps.clear();
         self.port_names.clear();
         self.port_types.clear();
         self.port_add = None;
@@ -3586,6 +3778,73 @@ impl PropertiesGpuiPanel {
                         });
                     self.curves
                         .push((key.clone(), CurveBinding { state: entity, sub }));
+                }
+
+                if let PropertyField::Ramp { key, ramp } = field {
+                    let state = cx.new(|cx| ParamRampEditorState::new(ramp.clone(), cx));
+                    // Nothing is selected yet, so the picker opens on the
+                    // ramp's first stop rather than on an arbitrary colour;
+                    // `sync_color_widgets` takes it over from the selection.
+                    let seed = ramp.stops().first().map(|stop| {
+                        hsla_from_rgba(stop.color.r, stop.color.g, stop.color.b, stop.color.a)
+                    });
+                    let picker = cx.new(|cx| {
+                        let picker = ColorPickerState::new(window, cx);
+                        match seed {
+                            Some(value) => picker.default_value(value),
+                            None => picker,
+                        }
+                    });
+                    let field_key = key.clone();
+                    let ids = node_ids.clone();
+                    let state_sub =
+                        cx.subscribe(&state, move |this, _state, event: &ParamRampEvent, cx| {
+                            // Same gesture granularity as a curve: live stop
+                            // moves apply without undo, the gesture's Commit
+                            // records one Document undo step.
+                            let (ramp, commit) = match event {
+                                ParamRampEvent::Change(ramp) => (ramp.clone(), false),
+                                ParamRampEvent::Commit(ramp) => (ramp.clone(), true),
+                            };
+                            let value = PropertyValue::Ramp(ramp);
+                            this.update_field_value(&field_key, &value);
+                            this.route_change(&field_key, value, commit, &ids, cx);
+                        });
+                    let field_key = key.clone();
+                    let ids = node_ids.clone();
+                    let edited = state.clone();
+                    let picker_sub = cx.subscribe(
+                        &picker,
+                        move |this, _picker, event: &ColorPickerEvent, cx| {
+                            let ColorPickerEvent::Change(Some(hsla)) = event else {
+                                return;
+                            };
+                            let rgba = rgba_from_hsla(*hsla);
+                            let color =
+                                ravel_core::types::Color::new(rgba[0], rgba[1], rgba[2], rgba[3]);
+                            // No stop selected — or one that just went away —
+                            // means there is nothing to recolour.
+                            let Some(ramp) =
+                                edited.update(cx, |state, cx| state.set_selected_color(color, cx))
+                            else {
+                                return;
+                            };
+                            let value = PropertyValue::Ramp(ramp);
+                            this.update_field_value(&field_key, &value);
+                            // The picker emits a change per slider tick with
+                            // no gesture-end event, so the undo step is
+                            // debounced exactly as a Color row's is.
+                            this.apply_color_change(&field_key, value, &ids, cx);
+                        },
+                    );
+                    self.ramps.push((
+                        key.clone(),
+                        RampBinding {
+                            state,
+                            picker,
+                            subs: [state_sub, picker_sub],
+                        },
+                    ));
                 }
 
                 if let PropertyField::Enum {
@@ -4045,9 +4304,32 @@ impl Render for PropertiesGpuiPanel {
             let curve_entities: Vec<(String, Entity<ParamCurveEditorState>, f32)> = self
                 .curves
                 .iter()
-                .map(|(k, b)| (k.clone(), b.state.clone(), self.curve_height(k)))
+                .map(|(k, b)| (k.clone(), b.state.clone(), self.row_height(k)))
                 .collect();
-            let expanded_curves = self.expanded_curves.clone();
+            // Ramp rows: the editor entity, its picker, the height it was
+            // dragged to, and whether a stop is selected (the picker is only
+            // offered when there is something for it to edit).
+            type RampRowWidgets = (
+                String,
+                Entity<ParamRampEditorState>,
+                Entity<ColorPickerState>,
+                f32,
+                bool,
+            );
+            let ramp_entities: Vec<RampRowWidgets> = self
+                .ramps
+                .iter()
+                .map(|(k, b)| {
+                    (
+                        k.clone(),
+                        b.state.clone(),
+                        b.picker.clone(),
+                        self.row_height(k),
+                        b.state.read(cx).selected_stop().is_some(),
+                    )
+                })
+                .collect();
+            let expanded_rows = self.expanded_rows.clone();
             let expression_entities: Vec<(String, usize, Entity<InputState>)> = self
                 .expression_inputs
                 .iter()
@@ -4211,7 +4493,8 @@ impl Render for PropertiesGpuiPanel {
                 let selects = select_entities.clone();
                 let colors = color_entities.clone();
                 let curves = curve_entities.clone();
-                let expanded_curves = expanded_curves.clone();
+                let ramps = ramp_entities.clone();
+                let expanded_rows = expanded_rows.clone();
                 let ports = port_widgets.clone();
                 let declarations = exposed_widgets.clone();
                 let editor = editor.clone();
@@ -4234,7 +4517,7 @@ impl Render for PropertiesGpuiPanel {
                             &strings,
                             &selects,
                             &colors,
-                            &expanded_curves,
+                            &expanded_rows,
                             &ports,
                             &declarations,
                             &editor,
@@ -4247,13 +4530,23 @@ impl Render for PropertiesGpuiPanel {
                         // row, so several open editors stay readable and each
                         // one stays next to the parameter it edits.
                         let curve_body = match field {
-                            PropertyField::Curve { key, .. } if expanded_curves.contains(key) => {
+                            PropertyField::Curve { key, .. } if expanded_rows.contains(key) => {
                                 curves.iter().find(|(k, _, _)| k == key).map(
                                     |(key, state, height)| {
                                         curve_editor_body(key, state, *height, &editor, muted)
                                     },
                                 )
                             }
+                            // A ramp row expands the same way, into the same
+                            // slot, from the same shared expansion state.
+                            PropertyField::Ramp { key, .. } if expanded_rows.contains(key) => ramps
+                                .iter()
+                                .find(|(k, ..)| k == key)
+                                .map(|(key, state, picker, height, selected)| {
+                                    ramp_editor_body(
+                                        key, state, picker, *height, *selected, &editor, muted,
+                                    )
+                                }),
                             _ => None,
                         };
                         let key_button = match (&key_target, key_states.get(field.key())) {
@@ -6001,18 +6294,18 @@ mod tests {
                 assert_eq!(keys, vec!["points", "shape"]);
                 assert_eq!(panel.curves.len(), 2, "one editor per curve row");
 
-                assert!(!panel.is_curve_expanded("points"));
-                panel.toggle_curve_expanded("points", cx);
-                panel.toggle_curve_expanded("shape", cx);
-                assert!(panel.is_curve_expanded("points"));
+                assert!(!panel.is_row_expanded("points"));
+                panel.toggle_row_expanded("points", cx);
+                panel.toggle_row_expanded("shape", cx);
+                assert!(panel.is_row_expanded("points"));
                 assert!(
-                    panel.is_curve_expanded("shape"),
+                    panel.is_row_expanded("shape"),
                     "expanding one row must not collapse the other"
                 );
 
-                panel.toggle_curve_expanded("points", cx);
-                assert!(!panel.is_curve_expanded("points"));
-                assert!(panel.is_curve_expanded("shape"));
+                panel.toggle_row_expanded("points", cx);
+                assert!(!panel.is_row_expanded("points"));
+                assert!(panel.is_row_expanded("shape"));
             })
             .unwrap();
     }
@@ -6027,9 +6320,9 @@ mod tests {
 
         window
             .update(cx, |panel, _window, cx| {
-                panel.toggle_curve_expanded("points", cx);
-                panel.toggle_curve_expanded("shape", cx);
-                panel.toggle_curve_expanded("shape", cx);
+                panel.toggle_row_expanded("points", cx);
+                panel.toggle_row_expanded("shape", cx);
+                panel.toggle_row_expanded("shape", cx);
             })
             .unwrap();
         cx.run_until_parked();
@@ -6055,7 +6348,7 @@ mod tests {
         let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
         window
             .update(cx, |panel, _window, cx| {
-                panel.toggle_curve_expanded("points", cx)
+                panel.toggle_row_expanded("points", cx)
             })
             .unwrap();
 
@@ -6100,7 +6393,7 @@ mod tests {
         // gesture was made in is still open.
         window
             .update(cx, |panel, _window, _cx| {
-                assert!(panel.is_curve_expanded("points"));
+                assert!(panel.is_row_expanded("points"));
             })
             .unwrap();
         project.update(cx, |project, cx| assert!(project.redo(cx)));
@@ -6123,7 +6416,7 @@ mod tests {
         let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
         window
             .update(cx, |panel, _window, cx| {
-                panel.toggle_curve_expanded("points", cx)
+                panel.toggle_row_expanded("points", cx)
             })
             .unwrap();
 
@@ -6297,8 +6590,8 @@ mod tests {
         cx.update(|cx| cx.set_global(SelectedPropertiesTarget(target.clone())));
         window
             .update(cx, |panel, _window, cx| {
-                panel.toggle_curve_expanded("points", cx);
-                assert!(panel.is_curve_expanded("points"));
+                panel.toggle_row_expanded("points", cx);
+                assert!(panel.is_row_expanded("points"));
             })
             .unwrap();
 
@@ -6306,7 +6599,7 @@ mod tests {
         cx.update(|cx| cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Empty)));
         window
             .update(cx, |panel, _window, _cx| {
-                assert!(!panel.is_curve_expanded("points"));
+                assert!(!panel.is_row_expanded("points"));
             })
             .unwrap();
         cx.update(|cx| cx.set_global(SelectedPropertiesTarget(target)));
@@ -6314,12 +6607,438 @@ mod tests {
             .update(cx, |panel, window, cx| {
                 panel.rebuild_widgets(window, cx);
                 assert!(
-                    !panel.is_curve_expanded("points"),
+                    !panel.is_row_expanded("points"),
                     "returning to the node shows the row collapsed"
                 );
                 assert_eq!(panel.curves.len(), 2, "the editors are rebuilt");
             })
             .unwrap();
+    }
+
+    // ----- inline gradient editor (properties parameter-editor plan, unit 4)
+
+    /// A node with a curve *and* a ramp, so the two row kinds can be shown to
+    /// share one expansion behaviour.
+    fn ramp_node() -> Node {
+        use ravel_core::param_ramp::RampParam;
+        Node::new(NodeId::next(), "test")
+            .with_param(
+                "points",
+                ParameterValue::Curve(CurveParam::linear([(0.0, 0.0), (1.0, 1.0)])),
+            )
+            .with_param(
+                "stops",
+                ParameterValue::Ramp(RampParam::linear([
+                    (0.0, ravel_core::types::Color::BLACK),
+                    (1.0, ravel_core::types::Color::WHITE),
+                ])),
+            )
+    }
+
+    /// Widget size the headless ramp gestures below are expressed in: 200 px
+    /// wide, so one ramp position unit is 200 px.
+    const RAMP_TEST_SIZE: (f32, f32) = (200.0, 60.0);
+
+    fn ramp_editor_state(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Entity<ParamRampEditorState> {
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel
+                    .ramps
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .unwrap_or_else(|| panic!("{key} has no ramp editor"))
+                    .1
+                    .state
+                    .clone()
+            })
+            .unwrap()
+    }
+
+    fn ramp_picker(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Entity<ColorPickerState> {
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel
+                    .ramps
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .expect("ramp binding")
+                    .1
+                    .picker
+                    .clone()
+            })
+            .unwrap()
+    }
+
+    /// The stored ramp of a node parameter, or `None` once the node is gone.
+    fn node_ramp(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Option<ravel_core::param_ramp::RampParam> {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .and_then(|graph| graph.node(node_id))
+                .and_then(|node| node.parameters.iter().find(|param| param.key == key))
+                .and_then(|param| match &param.value {
+                    ParameterValue::Ramp(ramp) => Some(ramp.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// A ramp parameter reaches the panel as a ramp row with an editor bound
+    /// to it, and it expands through the *same* state a curve row uses: both
+    /// can be open at once, and neither closes the other. This is the unit 4
+    /// completion criterion "the expansion behaviour matches unit 2" — they
+    /// match because there is one implementation, not two.
+    #[gpui::test]
+    fn ramp_rows_expand_through_the_same_state_as_curve_rows(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(cx, ramp_node());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let kinds: Vec<&str> = panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .filter_map(|field| match field {
+                        PropertyField::Curve { key, .. } | PropertyField::Ramp { key, .. } => {
+                            Some(key.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(kinds, vec!["points", "stops"]);
+                assert_eq!(panel.ramps.len(), 1, "one editor per ramp row");
+
+                assert!(!panel.is_row_expanded("stops"));
+                panel.toggle_row_expanded("stops", cx);
+                panel.toggle_row_expanded("points", cx);
+                assert!(panel.is_row_expanded("stops"));
+                assert!(
+                    panel.is_row_expanded("points"),
+                    "expanding a ramp must not collapse a curve"
+                );
+
+                // The height drag is the same state too.
+                assert_eq!(panel.row_height("stops"), INLINE_EDITOR_HEIGHT);
+                panel.begin_row_resize("stops".to_string(), 0.0);
+                panel.row_resize_to(40.0, cx);
+                panel.end_row_resize();
+                assert_eq!(panel.row_height("stops"), INLINE_EDITOR_HEIGHT + 40.0);
+                assert_eq!(
+                    panel.row_height("points"),
+                    INLINE_EDITOR_HEIGHT,
+                    "each row keeps its own height"
+                );
+
+                panel.toggle_row_expanded("stops", cx);
+                assert!(!panel.is_row_expanded("stops"));
+                assert!(panel.is_row_expanded("points"));
+            })
+            .unwrap();
+    }
+
+    /// Expanding and collapsing a ramp row is view state: it changes no value
+    /// and pushes nothing onto the undo stack.
+    #[gpui::test]
+    fn expanding_a_ramp_row_changes_no_value_and_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let before = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp parameter");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_row_expanded("stops", cx);
+                panel.toggle_row_expanded("stops", cx);
+                panel.toggle_row_expanded("stops", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx).as_ref(),
+            Some(&before),
+            "expansion must not touch the value"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            node_ramp(&project, &path, node_id, "stops", cx).is_none(),
+            "the first undo reached the node's own commit, so no expansion \
+             step was pushed in between"
+        );
+    }
+
+    /// Dragging a stop applies live and commits once: one gesture, one
+    /// Document undo step — and the stop never leaves the `0..=1` band.
+    #[gpui::test]
+    fn dragging_a_ramp_stop_commits_one_undo_step(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let original = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_row_expanded("stops", cx)
+            })
+            .unwrap();
+
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), RAMP_TEST_SIZE)
+        });
+
+        // Grab the stop at 0 and drag it right, then far past the band's end.
+        state.update(cx, |state, cx| {
+            state.pointer_down(0.0, 1, cx);
+            state.drag_to(40.0, cx);
+        });
+        cx.run_until_parked();
+        let live = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert!(
+            (live.stops()[0].position - 0.2).abs() < 1e-3,
+            "the live drag applies to the document: {live:?}"
+        );
+
+        state.update(cx, |state, cx| {
+            state.drag_to(10_000.0, cx);
+            state.end_drag(cx);
+        });
+        cx.run_until_parked();
+        let committed = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert_eq!(committed.len(), 2, "no stop was merged away");
+        assert!(
+            committed
+                .stops()
+                .iter()
+                .all(|stop| (0.0..=1.0).contains(&stop.position)),
+            "a stop cannot leave the band: {committed:?}"
+        );
+
+        // One undo for the whole gesture, and it really committed (only a
+        // committed step can be redone).
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx).as_ref(),
+            Some(&original)
+        );
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.is_row_expanded("stops"), "undo left the view alone");
+            })
+            .unwrap();
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+    }
+
+    /// A ramp drag is an edit gesture like any other: the target switch ends
+    /// it on the row it started on rather than dropping its undo step.
+    #[gpui::test]
+    fn a_ramp_drag_commits_on_the_target_it_started_on(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let original = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), RAMP_TEST_SIZE)
+        });
+        state.update(cx, |state, cx| {
+            state.pointer_down(0.0, 1, cx);
+            state.drag_to(60.0, cx);
+        });
+        cx.run_until_parked();
+        window
+            .read_with(cx, |panel, cx| assert!(panel.gesture_in_flight(cx)))
+            .unwrap();
+
+        cx.update(|cx| {
+            cx.set_global(SelectedPropertiesTarget(PropertiesTarget::Composition {
+                comp_id: path.comp,
+            }));
+        });
+        cx.run_until_parked();
+
+        let moved = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert!((moved.stops()[0].position - 0.3).abs() < 1e-3, "{moved:?}");
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx).as_ref(),
+            Some(&original)
+        );
+        // Only a committed step can be redone.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+    }
+
+    /// Adding and removing a stop each reach the document as their own undo
+    /// step, and the last stop is never removed.
+    #[gpui::test]
+    fn adding_and_removing_ramp_stops_reach_the_document(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), RAMP_TEST_SIZE)
+        });
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx)
+                .expect("ramp")
+                .len(),
+            2
+        );
+
+        // A double-click on empty band adds a stop where the pointer is.
+        state.update(cx, |state, cx| state.pointer_down(100.0, 2, cx));
+        cx.run_until_parked();
+        let added = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert_eq!(added.len(), 3);
+        assert!((added.stops()[1].position - 0.5).abs() < 1e-3, "{added:?}");
+
+        // A double-click on that stop removes it again.
+        state.update(cx, |state, cx| state.pointer_down(100.0, 2, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx)
+                .expect("ramp")
+                .len(),
+            2
+        );
+
+        // Two edits, two undo steps.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx)
+                .expect("ramp")
+                .len(),
+            3
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx)
+                .expect("ramp")
+                .len(),
+            2
+        );
+    }
+
+    /// The floor is one stop, not two: a one-stop ramp is a legitimate flat
+    /// colour, but a ramp with none has no colour to evaluate.
+    #[gpui::test]
+    fn the_last_ramp_stop_cannot_be_removed(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), RAMP_TEST_SIZE)
+        });
+
+        state.update(cx, |state, cx| state.pointer_down(0.0, 2, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx)
+                .expect("ramp")
+                .len(),
+            1
+        );
+
+        state.update(cx, |state, cx| state.pointer_down(200.0, 2, cx));
+        cx.run_until_parked();
+        let ramp = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert_eq!(ramp.len(), 1, "the last stop stays: {ramp:?}");
+        assert_eq!(
+            ramp.evaluate(0.5),
+            ravel_core::types::Color::WHITE,
+            "and it still answers everywhere"
+        );
+    }
+
+    /// The picker beside the editor recolours the *selected* stop and reaches
+    /// the document through the same debounced commit a Color row uses: one
+    /// gesture, one undo step.
+    #[gpui::test]
+    fn recolouring_the_selected_stop_reaches_the_document_once(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let original = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), RAMP_TEST_SIZE)
+        });
+        let picker = ramp_picker(&window, "stops", cx);
+
+        // Nothing is selected yet, so a picker change edits nothing.
+        picker.update(cx, |_, cx| {
+            cx.emit(ColorPickerEvent::Change(Some(gpui::red())));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx).as_ref(),
+            Some(&original),
+            "a picker with no selected stop edits nothing"
+        );
+
+        // Select the stop at 1.0 (white) and drive the picker.
+        state.update(cx, |state, cx| {
+            state.pointer_down(200.0, 1, cx);
+            state.end_drag(cx);
+        });
+        // Mid grey, not a primary: `r > b` holds for pure red whether or not
+        // the display encoding is undone, so a primary cannot tell a working
+        // conversion from a missing one. Half-way in display light is about
+        // 0.21 linear, and the stored stop is linear (`CM-2`).
+        let picked: Hsla = gpui::rgb(0x808080).into();
+        let rgba = Rgba::from(picked);
+        let expected = ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b])[0];
+        for _ in 0..3 {
+            picker.update(cx, |_, cx| {
+                cx.emit(ColorPickerEvent::Change(Some(picked)));
+            });
+        }
+        cx.run_until_parked();
+        let live = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert!(
+            (live.evaluate(1.0).r - expected).abs() < 1e-3,
+            "the live change applied in linear light: {live:?} vs {expected}"
+        );
+        assert_eq!(live.evaluate(0.0), original.evaluate(0.0), "only one stop");
+
+        cx.executor().advance_clock(COLOR_COMMIT_QUIET * 2);
+        cx.run_until_parked();
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx).as_ref(),
+            Some(&original),
+            "the whole picker gesture is one undo step"
+        );
+        project.update(cx, |project, cx| {
+            assert!(project.redo(cx));
+            assert!(!project.redo(cx), "there is no second step behind it");
+        });
+    }
+
+    /// Switching the interpolation is one click, one undo step, and it keeps
+    /// the stops it was switched over.
+    #[gpui::test]
+    fn switching_the_ramp_interpolation_reaches_the_document(cx: &mut TestAppContext) {
+        use ravel_core::param_ramp::RampInterpolation;
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.update(cx, |state, cx| {
+            state.set_interpolation(RampInterpolation::Constant, cx)
+        });
+        cx.run_until_parked();
+        let edited = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
+        assert_eq!(edited.interpolation(), RampInterpolation::Constant);
+        assert_eq!(edited.len(), 2);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_ramp(&project, &path, node_id, "stops", cx)
+                .expect("ramp")
+                .interpolation(),
+            RampInterpolation::Linear
+        );
     }
 
     /// Selecting the In node shows its whole interface, the shell's ports

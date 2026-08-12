@@ -1,7 +1,8 @@
 # Properties の複合パラメータエディタ 実装計画
 
 > **Status**: In progress — 単位 1（`PARAM-1`）・単位 2（`PARAM-2`）・
-> 単位 5（`PARAM-5`）が実装済み（2026-07-31）。他の単位は未着手
+> 単位 4（`PARAM-4`）・単位 5（`PARAM-5`）が実装済み。単位 3（`PARAM-3`）は
+> `style-attributes-plan.md` 単位 6 が値の側を入れた。他の単位は未着手
 
 対象: カーブとカラーランプを Properties パネルで直接編集できるようにする。
 関連要件: REQ-UI-002、REQ-UI-012、REQ-CORE-012、REQ-MOGRAPH-001。
@@ -307,7 +308,10 @@ bezier_at}` を通る = `KeyframeCurve::sample` と同じ関数）に委ねる�
 - 非有限値の数値入力が適用されず、入力が直前の値に戻るテスト ✅
 - 表示範囲の変更が undo に積まれないテスト ✅
 
-### 単位 3: `ParameterValue::Ramp` と `field.ramp`
+### 単位 3: `ParameterValue::Ramp` と `field.ramp` ✅
+
+`style-attributes-plan.md` 単位 6 が実装した（値の側のみ。CRUD は単位 4 が
+足した）。
 
 - `RampParam`（位置 + 色のストップ列 + 補間種別）
 - `field.ramp` ノード: スカラー入力（または `P` からの座標）→ Color
@@ -324,22 +328,74 @@ bezier_at}` を通る = `KeyframeCurve::sample` と同じ関数）に委ねる�
 - `field.apply(target = "Cd")` で色相が変化するテスト（スカラーフィールドでは
   グレースケールにしかならない現状との差分を pin する）
 
-### 単位 4: グラデーションエディタのインライン展開
+### 単位 4: グラデーションエディタのインライン展開 ✅
 
-- `PropertyField::Ramp` バリアントと、行のグラデーション帯プレビュー
-- 展開部: 帯の上のストップをドラッグで移動、ダブルクリックで追加、
-  ストップ選択で色を編集（既存の `ColorPicker` を使う。
-  `crates/ravel-app/src/panels/properties.rs:262`）
-- 補間種別（linear / smooth / constant）の切り替え
-- 展開の挙動は単位 2 と共有する（高さのドラッグ、複数同時展開、
-  ビュー状態は undo 対象外）
+実装済み。
+
+- `PropertyField::Ramp` / `PropertyValue::Ramp` と、行のグラデーション帯
+  プレビュー ✅
+- 展開部: 帯の上のストップをドラッグで移動、空所のダブルクリックで追加、
+  マーカーのダブルクリックで削除、クリックで選択 ✅
+- ストップ選択で色を編集（既存の `ColorPicker`）✅
+- 補間種別（linear / smooth / constant）の切り替え ✅
+- 選択ストップの位置の数値編集（`ScrubInput`）✅
+- 編集は 1 ジェスチャ 1 undo（ドラッグは `Change` …… `Commit`、色は
+  Color 行と同じデバウンス commit）✅
+
+**エディタは `widgets/param_ramp_editor.rs`**。単位 2 のカーブエディタとは
+別のウィジェットで、共有するのは 3 つ:
+
+- **`RampParam` の評価関数**（帯もサムネイルも `RampParam::evaluate` を通る。
+  第 2 の評価器は無い）
+- **ドラッグのクランプ規則**（`param_curve_editor::clamp_between`）。ランプの
+  ストップも位置で同定されるので、隣接要素を追い越すと片方が黙って消える
+- **展開の仕組みそのもの**。展開集合と行ごとの高さはパネルが持つ 1 組の
+  状態（`expanded_rows` / `row_heights`）で、カーブ行とランプ行が同じものを
+  使う。「単位 2 と一致する」のは実装が 1 つしかないため
+
+共有**しない**もの: 表示範囲（`widgets/curve_view.rs` の `CurveValueRange`）。
+ランプには出力軸が無く、位置軸は帯そのものの `0..=1` に固定なので、
+Fit もズームも意味を持たない。
+
+**色は `ColorPicker` がパネル側にある。** `ColorPickerState` の生成と
+`set_value` が `Window` を要求するため、他のすべての `ColorPicker` と同じく
+`panels/properties.rs` が持ち、ウィジェットは選択ストップと
+`set_selected_color` だけを公開する。ピッカーはジェスチャ終端イベントを
+持たないので、undo は Color 行と同じ `apply_color_change` のデバウンスに
+乗せた。
+
+**位置は `0..=1` にクランプする。** `RampParam` 自体は任意の位置を許すが、
+`field.ramp` が `in_min` / `in_max` で入力を `0..=1` に正規化して渡すので、
+エディタの帯は `0..=1` そのもの。既存のランプが範囲外のストップを持つ場合、
+描画は帯の端にピン留めし、ドラッグしたストップは `0..=1` に入る。
 
 **完了条件**
 
-- ストップの追加・移動・削除・色変更が Document に反映されるテスト
-- ストップが 1 個以下にならないことのテスト
-- 位置が範囲外にならないことのテスト
-- 展開の挙動が単位 2 と一致するテスト
+- ストップの追加・移動・削除・色変更が Document に反映されるテスト ✅
+  （`adding_and_removing_ramp_stops_reach_the_document` /
+  `dragging_a_ramp_stop_commits_one_undo_step` /
+  `recolouring_the_selected_stop_reaches_the_document_once`）
+- ストップが 1 個以下にならないことのテスト ⚠️ **実装は「最低 1 個」**。
+  `RampParam` の不変条件は「**空にならない**」で、単位 3 は
+  「ストップが 1 個のとき全域が単色になる」を正当な状態として固定している
+  （`a_single_stop_is_one_colour_everywhere`）。したがって floor は
+  カーブの 2 点ではなく 1 個で、エディタは最後の 1 個を削除できない
+  （`the_last_ramp_stop_cannot_be_removed`、
+  `RampParam::remove_stop` が `None` を返す）
+- 位置が範囲外にならないことのテスト ✅
+  （`a_dragged_stop_stays_inside_the_band` /
+  `the_end_stops_clamp_to_the_band_edges` /
+  `the_position_field_moves_the_selected_stop_within_the_band`）
+- 展開の挙動が単位 2 と一致するテスト ✅
+  （`ramp_rows_expand_through_the_same_state_as_curve_rows`）
+
+**この単位で入れていないもの**
+
+- **Escape でのドラッグ取り消し**。ウィジェットにフォーカスハンドルが無く、
+  キーイベントが届かない。単位 2 のカーブエディタも同じ状態なので、
+  入れるなら両方まとめて（フォーカス所有権の規則に触れる変更になる）
+- **アルファのチェッカーボード背景**。半透明のストップはパネル背景の上に
+  そのまま合成される
 
 ### 単位 7: `math.curve`（値ドメインのカーブ remap）
 

@@ -140,6 +140,12 @@ pub(super) fn edited_param_value(
             ParameterValue::Curve(_) => Some(ParameterValue::Curve(curve.clone())),
             _ => None,
         },
+        // A ramp edit replaces the whole stop set, on the same terms and for
+        // the same reason: a stale binding must never retype a parameter.
+        PropertyValue::Ramp(ramp) => match existing {
+            ParameterValue::Ramp(_) => Some(ParameterValue::Ramp(ramp.clone())),
+            _ => None,
+        },
         PropertyValue::Color { r, g, b, a } => match existing {
             ParameterValue::Channel4(channels) => Some(ParameterValue::Channel4([
                 edited_channel(&channels[0], *r, local_frame),
@@ -238,6 +244,33 @@ mod tests {
             edited_param_value(
                 &ParameterValue::Float(1.0),
                 &PropertyValue::Curve(edited),
+                None,
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    /// A ramp edit writes the edited stops and refuses to retype a parameter
+    /// that is not already a ramp.
+    #[test]
+    fn ramp_edits_replace_the_stops_of_a_ramp_parameter() {
+        use ravel_core::param_ramp::RampParam;
+        use ravel_core::types::Color;
+        let edited = RampParam::linear([(0.0, Color::WHITE), (0.5, Color::BLACK)]);
+        assert_eq!(
+            edited_param_value(
+                &ParameterValue::Ramp(RampParam::default()),
+                &PropertyValue::Ramp(edited.clone()),
+                None,
+                Some(7),
+            ),
+            Some(ParameterValue::Ramp(edited.clone()))
+        );
+        assert!(
+            edited_param_value(
+                &ParameterValue::Float(1.0),
+                &PropertyValue::Ramp(edited),
                 None,
                 None,
             )

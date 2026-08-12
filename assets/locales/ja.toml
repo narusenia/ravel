@@ -447,6 +447,17 @@ input_range = "入力範囲"
 output_range = "出力範囲"
 pinned_input = "両端は入力が固定 — 編集できるのは出力のみ。定義域を広げるにはこの端より外側に点を追加、狭めるにはこの端を削除（3 点以上のとき）"
 
+[properties.ramp]
+expand = "グラデーションエディタを開く — ダブルクリックでストップを追加・削除、ドラッグで移動、クリックで選択"
+no_selection = "ストップが未選択"
+position = "位置"
+color = "ストップの色"
+
+[properties.ramp.interpolation]
+linear = "ストップ間を直線的に補間"
+smooth = "ストップ間をなめらかに補間（smoothstep）"
+constant = "次のストップまで色を保持（段状）"
+
 [properties.field]
 selected_count = "選択数"
 name = "名前"

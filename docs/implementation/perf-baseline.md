@@ -1738,6 +1738,14 @@ assert する。数字を変える変更は、印字を読んで assert を更�
 | 再生 1 秒 | `a_second_of_playback_sync_counts` | `PlaybackPosition` を 30 fps で 30 回発行 |
 | コンポジション切替 | `a_composition_switch_sync_counts` | `set_active_composition` 1 回 |
 
+同じファイルの次の 2 本は**削減してはいけない側**を測る。名前が `*_sync_counts`
+ではないので、上の 3 本だけを追うと下の after 表の該当行を再現できない。
+
+| シナリオ | テスト | 内容 |
+|---|---|---|
+| 再生 1 秒・アニメーション有り | `an_animated_layer_still_follows_the_playhead` | 不透明度をキーフレーム化したレイヤーを選択して 30 回発行 |
+| 再生 1 秒・キーフレーム無しの駆動 | `a_non_keyframed_driven_parameter_still_follows_the_playhead` | Expression / NodeOutput / AudioReactive / Blend で駆動された custom parameter（キーフレームは 1 つも置かない）で 10 回発行 |
+
 ### 現状値（クラスタ B 着手前 = before）
 
 | シナリオ | Properties | Timeline | Outliner | MediaBin |

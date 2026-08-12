@@ -9,8 +9,8 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 5 | 28 | [high/](high/) — 1件1ファイル |
-| medium | 36 | 31 | [medium/](medium/) — 領域別5ファイル |
+| high | 3 | 30 | [high/](high/) — 1件1ファイル |
+| medium | 28 | 39 | [medium/](medium/) — 領域別5ファイル |
 | low | 32 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -34,7 +34,7 @@
 | NodeEditor 固有の再描画 + 操作の即効修正 | 完了（フェーズ A） |
 | もっさり 第1段（評価・レンダー回数） | 完了（`done/ui-responsiveness-plan.md`） |
 | もっさり 第2段（描画1回あたり） | フェーズ H（`gpu-compositing-plan.md`。`HIGH-05` は済） |
-| もっさり 第3段（評価器のアルゴリズム）+ パネル1回あたり | フェーズ C3「応答性の残り」 |
+| もっさり 第3段（評価器のアルゴリズム）+ パネル1回あたり | フェーズ C3「応答性の残り」（進行中 — 残りは `MED-UI-02` / `MED-UI-05`） |
 | もっさり 第4段（メディア・スクラブ） | フェーズ C2（`cache-plan.md`）と C3 |
 | 設定が効かない / キーバインド上書き | フェーズ C（`settings-screen-plan.md`） |
 | 操作の正しさ（Timeline / NodeEditor / 選択） | フェーズ E |
@@ -92,10 +92,17 @@
 
 ### 第3段: 評価器のアルゴリズム的コスト
 
-8. **[HIGH-01](high/HIGH-01-evaluator-no-adjacency-index.md)**
+**解決済み**（フェーズ C3、`RESP3-1`〜`RESP3-4`）。設計と実装単位は
+`docs/implementation/responsiveness-stage3-plan.md`。
+
+8. **[HIGH-01](closed/HIGH-01-evaluator-no-adjacency-index.md)** — 解決済み（2026-08-13、#395）
    隣接インデックスが無く、ノード訪問ごとに全エッジ走査（1回の pull が O(N·E)）。
-9. **[HIGH-02](high/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)**
+   `Evaluator` が `Graph::ptr_eq` をキーにスコープ単位の隣接インデックスを持つ形にして、
+   1,000 ノード / 1,497 エッジでコールドプル 18.7 → 0.8 ms、dirty 再プル 18.8 → 0.27 ms。
+9. **[HIGH-02](closed/HIGH-02-graph-eq-no-ptr-eq-fastpath.md)** — 解決済み（2026-08-13、#395）
    編集ごとに全レイヤーネットワークを deep compare（`Arc::ptr_eq` の高速路が無い）。
+   `changed_network_paths` が `Graph::ptr_eq` で短絡し、`Graph::eq` も 3 段の短絡を持ち、
+   祖先チェーンは親索引経由の O(1) ルックアップになった。
 10. **[HIGH-03](closed/HIGH-03-params-resolved-per-visit.md)** — 解決済み（2026-07-31）
    キャッシュヒット時でもパラメータ全再解決、`PathPoints` を毎フレーム clone。
    → `docs/implementation/cache-plan.md` の CACHE-2 が回収した。
@@ -138,10 +145,14 @@
 
 ### 補足
 
-パネル側の1回あたりコスト（Timeline の行仮想化欠如、Properties のフレーム2回再構築、
-Outliner の全走査、コンポジションの毎編集再コンパイル、
-同じ変更が2経路から届く重複 sync）は
-[medium/ui-rendering.md](medium/ui-rendering.md) にまとめてある。
+パネル側の1回あたりコストは
+[medium/ui-rendering.md](medium/ui-rendering.md)（未解決分）と
+[closed/medium-ui-rendering.md](closed/medium-ui-rendering.md)（解決済み）に分かれている。
+フェーズ C3 で解決したのは `MED-UI-01`（毎編集の再コンパイル）、
+`MED-UI-03`（Timeline の垂直カリング）、`MED-UI-04`（Timeline の revision ゲート）、
+`MED-UI-06`（2 経路の重複 sync）。**残っているのは `MED-UI-02` の
+「パネル非表示のときスキップ」と `MED-UI-05` の MediaBin 側**で、どちらも
+部分的に解決済み（詳細は各項目の追記）。
 第1段を直すと呼ばれる回数は減るが、レイヤー数が増えるとこれらが再び効いてくる。
 
 ---

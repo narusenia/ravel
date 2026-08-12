@@ -7,6 +7,13 @@
 | 領域 | ravel-core / 評価器・グラフ |
 | 該当 | `crates/ravel-core/src/eval.rs:868`, `:726`, `crates/ravel-core/src/graph.rs:532-548` |
 
+> **解決済み**: `RESP3-1`（PR #395）。`Evaluator` が `Graph::ptr_eq` をキーに
+> スコープ単位の隣接インデックス（target→入力エッジ、source→出力ノード）を
+> 持ち、`eval_node` と `mark_dirty_at` がそれを経由する。グラフが差し替わった
+> ときだけ作り直すので、構築コストはグラフのバージョンあたり 1 回。
+> 1,000 ノード / 1,497 エッジで**コールドプル 18.7 → 0.8 ms、dirty 再プル
+> 18.8 → 0.27 ms**。`Graph::inputs_of` / `outputs_of` は公開 API として残した。
+
 ## 現状
 
 `Graph` はエッジを `im::HashMap<EdgeId, Edge>` としてのみ保持し、隣接情報を持たない。
@@ -37,5 +44,5 @@
 
 ## 関連
 
-- [HIGH-02](HIGH-02-graph-eq-no-ptr-eq-fastpath.md), [HIGH-03](../closed/HIGH-03-params-resolved-per-visit.md)
+- [HIGH-02](HIGH-02-graph-eq-no-ptr-eq-fastpath.md), [HIGH-03](HIGH-03-params-resolved-per-visit.md)
 - [medium/core-evaluator.md](../medium/core-evaluator.md)

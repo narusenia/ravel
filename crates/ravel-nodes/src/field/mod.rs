@@ -467,6 +467,38 @@ mod tests {
         assert_eq!(sample(output.as_ref()), vec![2.5]);
     }
 
+    #[test]
+    fn curve_processor_matches_math_curve_for_the_same_control_points() {
+        let curve = CurveParam::linear([(0.0, 0.0), (0.25, 0.8), (1.0, 0.2)]);
+        let input = 0.5;
+        let field_node = Node::new(NodeId::new(1), "field.curve_remap")
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("points", ParameterValue::Curve(curve.clone()));
+        let field_source: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(input)));
+        let field_output = run(
+            &field_node,
+            Arc::new(CurveRemapFieldProcessor::from_node(&field_node)),
+            &[field_source],
+        );
+        let field_value = sample(field_output.as_ref())[0];
+
+        let math_node = Node::new(NodeId::new(2), "math.curve")
+            .with_output("output", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(input))
+            .with_param("curve", ParameterValue::Curve(curve));
+        let graph = Graph::new().add_node(math_node).unwrap();
+        let mut evaluator = Evaluator::new();
+        evaluator.register(NodeId::new(2), Arc::new(crate::math::MathCurveProcessor));
+        let math_output = evaluator.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        let math_value = math_output
+            .downcast_ref::<ravel_core::types::Scalar>()
+            .unwrap()
+            .0;
+
+        assert_eq!(field_value.to_bits(), math_value.to_bits());
+    }
+
     /// A node whose `points` is missing entirely (or is left over as some
     /// other kind) falls back to the identity curve rather than failing.
     #[test]

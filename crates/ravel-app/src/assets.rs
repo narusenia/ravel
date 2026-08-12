@@ -149,6 +149,8 @@ pub enum RavelIcon {
     NodeMathScalar,
     /// Node header/menu: `math.remap`.
     NodeMathRemap,
+    /// Node header/menu: `math.curve`.
+    NodeMathCurve,
     /// Node header/menu: `vector.construct.vec2`.
     NodeVectorConstructVec2,
     /// Node header/menu: `vector.construct.vec3`.
@@ -309,6 +311,7 @@ impl RavelIcon {
             "merge" => Self::NodeMerge,
             "math.scalar" => Self::NodeMathScalar,
             "math.remap" => Self::NodeMathRemap,
+            "math.curve" => Self::NodeMathCurve,
             "vector.construct.vec2" => Self::NodeVectorConstructVec2,
             "vector.construct.vec3" => Self::NodeVectorConstructVec3,
             "vector.construct.vec4" => Self::NodeVectorConstructVec4,
@@ -410,6 +413,7 @@ impl IconNamed for RavelIcon {
             Self::NodeMerge => "icons/merge.svg",
             Self::NodeMathScalar => "icons/calculator.svg",
             Self::NodeMathRemap => "icons/arrow-right-left.svg",
+            Self::NodeMathCurve => "icons/spline.svg",
             Self::NodeVectorConstructVec2 => "icons/move.svg",
             Self::NodeVectorConstructVec3 => "icons/axis-3d.svg",
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",

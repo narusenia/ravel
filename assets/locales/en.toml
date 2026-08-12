@@ -763,6 +763,18 @@ out_min = "Start of the output range."
 out_max = "End of the output range."
 clamp = "Clamp the result to the output range."
 
+[node."math.curve"]
+label = "Curve"
+description = "Remaps a value through a scalar transfer curve."
+[node."math.curve".params]
+value = "The value to remap."
+in_min = "Start of the input range."
+in_max = "End of the input range."
+out_min = "Start of the output range."
+out_max = "End of the output range."
+extrapolation = "How values outside the input range are handled: clamp, repeat, or extend the endpoint tangent."
+curve = "The scalar transfer curve."
+
 [node."vector.construct.vec2"]
 label = "Construct Vec2"
 description = "Builds a 2-component vector from scalar components."

@@ -168,13 +168,22 @@ impl OutlinerGpuiPanel {
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         super::sync_probe::record(super::sync_probe::PanelSync::OutlinerRows);
-        self.rows = match &self.project {
+        let rows = match &self.project {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),
         };
+        // The document epoch says "something a mirroring panel shows moved",
+        // which is not the same as "a row moved": a node parameter drag changes
+        // the document on every mouse move while every label, depth and arrow in
+        // this tree stays put. Comparing the rows we just built is cheaper than
+        // the repaint it saves, and the things that are *not* rows (selection
+        // highlighting) repaint from their own observers.
+        let unchanged = self.rows == rows;
+        self.rows = rows;
         // An inline rename whose layer is gone (deleted, undone) has no row to
         // render into: drop it instead of keeping an invisible editor whose
         // blur would try to name a layer that no longer exists.
+        let mut dropped_rename = false;
         if let Some(rename) = &self.rename {
             let (comp, layer) = (rename.comp, rename.layer);
             let alive = self.project.as_ref().is_some_and(|project| {
@@ -186,7 +195,13 @@ impl OutlinerGpuiPanel {
             });
             if !alive {
                 self.rename = None;
+                dropped_rename = true;
             }
+        }
+        // A withdrawn rename editor has to disappear even when the rows around
+        // it did not move.
+        if unchanged && !dropped_rename {
+            return;
         }
         cx.notify();
     }

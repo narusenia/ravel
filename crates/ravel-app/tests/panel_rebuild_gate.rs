@@ -576,11 +576,17 @@ fn the_timeline_syncs_on_a_document_change_and_not_otherwise(cx: &mut TestAppCon
     reset_syncs();
     add_layer(&harness, cx);
     let counts = sync_counts("one document edit");
-    assert_eq!(
-        count_of(&counts, "timeline.sync_from_project"),
-        1,
-        "a document change must reach the mirror exactly once"
-    );
+    for name in [
+        "timeline.sync_from_project",
+        "outliner.rebuild_rows",
+        "media_bin.rebuild_rows",
+    ] {
+        assert_eq!(
+            count_of(&counts, name),
+            1,
+            "{name}: a document change must reach the mirror exactly once"
+        );
+    }
 
     let project_before = project_count(&harness, cx);
     reset_syncs();
@@ -599,11 +605,18 @@ fn the_timeline_syncs_on_a_document_change_and_not_otherwise(cx: &mut TestAppCon
         "the completed save must notify project observers (window title)"
     );
     let counts = sync_counts("completed save");
-    assert_eq!(
-        count_of(&counts, "timeline.sync_from_project"),
-        0,
-        "a notify that left the document alone must not reach the mirror"
-    );
+    for name in [
+        "timeline.sync_from_project",
+        "outliner.rebuild_rows",
+        "media_bin.rebuild_rows",
+    ] {
+        assert_eq!(
+            count_of(&counts, name),
+            0,
+            "{name}: a notify that left the document alone must not reach the \
+             mirror, so no row label is allocated"
+        );
+    }
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));

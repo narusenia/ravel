@@ -162,6 +162,16 @@ impl MediaBinGpuiPanel {
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         super::sync_probe::record(super::sync_probe::PanelSync::MediaBinRows);
+        // NOTE (`MED-UI-05`, left open deliberately): the document epoch moves
+        // for every edit and almost none of them are media edits, so a layer
+        // drag rebuilds this identical list once per mouse move. Returning early
+        // on `self.rows == rows` removes the repaint and the thumbnail lookups —
+        // but it also makes `a_completed_save_rebuilds_no_document_panel` and
+        // `a_composition_switch_leaves_every_gate_open_for_the_next_edit` fail,
+        // because both assert that *every* document-mirroring panel notifies for
+        // a document edit. For this panel that premise is what is wrong, not the
+        // skip; relaxing a `HIGH-07` regression test is not a call to make while
+        // chasing a repaint.
         self.rows = match &self.project {
             Some(project) => self.state.rows(project.read(cx).document()),
             None => Vec::new(),

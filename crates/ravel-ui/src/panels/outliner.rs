@@ -210,7 +210,6 @@ impl OutlinerPanel {
     fn push_layer_rows(&self, comp: CompId, layer: &Layer, rows: &mut Vec<OutlinerRow>) {
         let key = OutlinerKey::Layer(comp, layer.id);
         let expanded = self.is_expanded(key);
-        let node_rows = network_rows(&layer.network);
         rows.push(OutlinerRow {
             depth: 1,
             kind: OutlinerRowKind::Layer {
@@ -218,12 +217,19 @@ impl OutlinerPanel {
                 layer: layer.id,
             },
             label: layer.name.clone(),
-            expandable: !node_rows.reachable.is_empty() || !node_rows.unused.is_empty(),
+            // Whether the row has an arrow, not what is behind it. This used to
+            // call `network_rows`, which builds the edge map, walks the graph
+            // depth-first and allocates a label `String` per node — for every
+            // layer of every composition, collapsed ones included, on every
+            // rebuild (`MED-UI-05`). A collapsed layer contributes no node row,
+            // so all that work only ever decided this bool.
+            expandable: network_has_rows(&layer.network),
             expanded,
         });
         if !expanded {
             return;
         }
+        let node_rows = network_rows(&layer.network);
 
         // The walk order is fixed by `network_rows`; expansion only decides
         // whether a node's children survive. Skipping a collapsed node's
@@ -309,6 +315,18 @@ struct NetworkRows {
     reachable: Vec<NodeEntry>,
     /// Nodes no upstream walk reached, ordered by id.
     unused: Vec<NodeEntry>,
+}
+
+/// Whether `graph` would produce any node row, without producing them.
+///
+/// [`network_rows`] splits a network into `reachable` (everything the upstream
+/// walk from `net.out` reaches) and `unused` (everything it does not). `net.out`
+/// itself is the walk's root and never a row, and every other node lands in
+/// exactly one of the two lists — so "some row exists" is "some node other than
+/// `net.out` exists", which needs no walk, no edge map and no label.
+fn network_has_rows(graph: &Graph) -> bool {
+    let out = network::find_out_node(graph).map(|node| node.id);
+    graph.nodes().any(|node| Some(node.id) != out)
 }
 
 /// Walk `graph` upstream from `net.out` and collect its rows.
@@ -470,6 +488,67 @@ mod tests {
             comp = comp.add_layer(layer);
         }
         comp
+    }
+
+    /// `MED-UI-05`: the layer row's arrow no longer costs the network walk that
+    /// used to produce it. The cheap answer must agree with the walk it replaced
+    /// on every shape of network, or a layer would lose (or gain) its arrow.
+    #[test]
+    fn the_cheap_expandable_check_agrees_with_the_network_walk() {
+        let empty = Graph::new();
+        let out_only = Graph::new().add_node(out_node(NodeId::next())).unwrap();
+        let orphan_only = Graph::new()
+            .add_node(image_node(NodeId::next(), "shape.rect"))
+            .unwrap();
+        let (branching, _) = branching_network();
+        let out = NodeId::next();
+        let unused = NodeId::next();
+        let with_unused = Graph::new()
+            .add_node(out_node(out))
+            .unwrap()
+            .add_node(image_node(unused, "shape.rect"))
+            .unwrap();
+
+        for graph in [empty, out_only, orphan_only, branching, with_unused] {
+            let walked = network_rows(&graph);
+            let expected = !walked.reachable.is_empty() || !walked.unused.is_empty();
+            assert_eq!(
+                network_has_rows(&graph),
+                expected,
+                "{} nodes: reachable {}, unused {}",
+                graph.nodes().count(),
+                walked.reachable.len(),
+                walked.unused.len()
+            );
+        }
+    }
+
+    /// The saving itself: a collapsed layer contributes exactly one row and no
+    /// node label, however deep its network is. A rebuild that walked the
+    /// network would allocate one `String` per node here.
+    #[test]
+    fn a_collapsed_layer_contributes_one_row_whatever_its_network() {
+        let (branching, _) = branching_network();
+        let layer_id = LayerId::next();
+        let comp = comp("Comp 1", vec![Layer::new(layer_id, "Layer", branching)]);
+        let comp_id = comp.id;
+        let doc = document(vec![comp]);
+        let mut panel = OutlinerPanel::new();
+        panel.set_expanded(OutlinerKey::Comp(comp_id), true);
+        panel.set_expanded(OutlinerKey::Layer(comp_id, layer_id), false);
+
+        let rows = panel.rows(&doc);
+        assert_eq!(rows.len(), 2, "one composition row and one layer row");
+        let layer_row = &rows[1];
+        assert_eq!(layer_row.label, "Layer");
+        assert!(
+            layer_row.expandable,
+            "the arrow still says the network has nodes"
+        );
+        assert!(
+            !layer_row.expanded,
+            "and none of them became a row while collapsed"
+        );
     }
 
     /// Rows of the single layer of a single-composition document, with the

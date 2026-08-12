@@ -13,6 +13,7 @@ use crate::eval::EvalContext;
 use crate::expression::{self, Component, ExpressionError, Program, Scope};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
+use crate::param_ramp::RampParam;
 use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
 
 /// Everything a [`Field`] may read when it is evaluated.
@@ -278,6 +279,77 @@ impl Field for CurveRemapField {
             .map(|value| self.curve.evaluate(value))
             .collect();
         AttributeArray::F32(values)
+    }
+}
+
+/// Colour lookup: another field's scalar, normalized, through a [`RampParam`].
+///
+/// The only field that produces a **colour from a number**. Everything else
+/// that can answer `Color` (`field.attribute`) merely reads a colour column
+/// that already existed, so without this a graph can darken `Cd` but cannot
+/// change its hue.
+///
+/// `in_min` / `in_max` map the source field's own range onto the ramp's
+/// `0..=1` domain before the lookup; the ramp itself clamps outside its end
+/// stops.
+#[derive(Clone, Debug)]
+pub struct RampField {
+    pub source: FieldValue,
+    /// The colour ramp. `Arc`-shared so cloning the field stays cheap.
+    pub ramp: Arc<RampParam>,
+    /// Source value that maps to ramp position `0`.
+    pub in_min: f32,
+    /// Source value that maps to ramp position `1`.
+    pub in_max: f32,
+}
+
+impl RampField {
+    pub fn new(source: FieldValue, ramp: RampParam) -> Self {
+        Self {
+            source,
+            ramp: Arc::new(ramp),
+            in_min: 0.0,
+            in_max: 1.0,
+        }
+    }
+
+    /// Builder: set the input range normalized onto the ramp's domain.
+    ///
+    /// `in_max < in_min` is legal and reverses the ramp. `in_max == in_min`
+    /// is the degenerate case: the normalization has no width, so the field
+    /// becomes a hard step at that value — everything below reads the first
+    /// stop, everything at or above the last. That mirrors what
+    /// [`smooth_falloff`] does with a zero-width radius band rather than
+    /// dividing by zero and sampling `NaN`.
+    pub fn with_range(mut self, in_min: f32, in_max: f32) -> Self {
+        self.in_min = in_min;
+        self.in_max = in_max;
+        self
+    }
+
+    /// Source value → ramp position.
+    fn normalized(&self, value: f32) -> f32 {
+        let span = self.in_max - self.in_min;
+        if span == 0.0 {
+            return if value < self.in_min { 0.0 } else { 1.0 };
+        }
+        (value - self.in_min) / span
+    }
+}
+
+impl Field for RampField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+            + self.source.byte_size()
+            + (size_of::<RampParam>() + std::mem::size_of_val(self.ramp.stops())) as u64
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let colors = scalar_values(self.source.sample(input), input.len())
+            .into_iter()
+            .map(|value| self.ramp.evaluate(self.normalized(value)))
+            .collect();
+        AttributeArray::Color(colors)
     }
 }
 
@@ -2408,6 +2480,201 @@ mod tests {
         let values = scalar_sample(&field, &[Vec2(-1.0, 0.0), Vec2(0.25, 0.0), Vec2(2.0, 0.0)]);
 
         assert_eq!(values, vec![0.0, 1.0, 10.0]);
+    }
+
+    // ---- RampField --------------------------------------------------------
+
+    const RAMP_RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
+    const RAMP_BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
+
+    /// `XField` reads back the x of each position, so the sample positions
+    /// below double as the ramp's input values.
+    fn ramp_colors(field: &RampField, inputs: &[f32]) -> Vec<Color> {
+        let positions: Vec<Vec2> = inputs.iter().map(|x| Vec2(*x, 0.0)).collect();
+        match typed_sample(field, &positions) {
+            AttributeArray::Color(colors) => colors,
+            other => panic!(
+                "a ramp field must answer Color, got {:?}",
+                other.attr_type()
+            ),
+        }
+    }
+
+    #[test]
+    fn ramp_reads_the_expected_colour_for_a_known_input() {
+        let field = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]),
+        );
+        let colors = ramp_colors(&field, &[0.0, 0.5, 1.0]);
+        assert_eq!(colors[0], RAMP_RED);
+        assert!((colors[1].r - 0.5).abs() < 1e-6 && (colors[1].b - 0.5).abs() < 1e-6);
+        assert_eq!(colors[2], RAMP_BLUE);
+    }
+
+    #[test]
+    fn a_single_stop_ramp_is_one_colour_over_the_whole_field() {
+        let field = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.5, RAMP_RED)]),
+        );
+        assert!(
+            ramp_colors(&field, &[-5.0, 0.0, 0.5, 1.0, 9.0])
+                .iter()
+                .all(|color| *color == RAMP_RED)
+        );
+    }
+
+    #[test]
+    fn ramp_inputs_outside_the_range_clamp_to_the_end_colours() {
+        let field = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]),
+        );
+        let colors = ramp_colors(&field, &[-4.0, 4.0]);
+        assert_eq!(colors, vec![RAMP_RED, RAMP_BLUE]);
+    }
+
+    /// `in_min` / `in_max` rescale the source field before the lookup, which
+    /// is what lets a ramp authored over `0..=1` read an attribute in pixels.
+    #[test]
+    fn the_input_range_rescales_before_the_lookup() {
+        let field = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]),
+        )
+        .with_range(100.0, 200.0);
+        let colors = ramp_colors(&field, &[100.0, 150.0, 200.0]);
+        assert_eq!(colors[0], RAMP_RED);
+        assert!((colors[1].b - 0.5).abs() < 1e-6);
+        assert_eq!(colors[2], RAMP_BLUE);
+    }
+
+    /// A zero-width input range has no normalization to do. It becomes a hard
+    /// step at that value rather than dividing by zero and sampling `NaN`.
+    #[test]
+    fn a_zero_width_input_range_is_a_step_not_a_division_by_zero() {
+        let field = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]),
+        )
+        .with_range(2.0, 2.0);
+        assert_eq!(
+            ramp_colors(&field, &[1.9, 2.0, 2.1]),
+            vec![RAMP_RED, RAMP_BLUE, RAMP_BLUE]
+        );
+    }
+
+    /// The point of the whole unit. A scalar field can only ever move `Cd`
+    /// along the grey axis, because one number broadcasts to r, g and b; a
+    /// ramp field writes three different numbers, so the hue moves.
+    #[test]
+    fn a_ramp_field_changes_the_hue_of_cd_where_a_scalar_field_cannot() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![Color::WHITE; 2]))
+            .unwrap();
+        let spec = FieldApply::new(Domain::Point, names::CD);
+
+        let greyscale = apply_field(&geometry, &spec, &XField, &ctx()).unwrap();
+        for color in greyscale
+            .points()
+            .get(names::CD)
+            .unwrap()
+            .as_color(names::CD)
+            .unwrap()
+        {
+            assert_eq!(
+                (color.r, color.g),
+                (color.r, color.r),
+                "a scalar field broadcasts, so it can only produce grey"
+            );
+        }
+
+        let ramp = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]),
+        );
+        let colored = apply_field(&geometry, &spec, &ramp, &ctx()).unwrap();
+        let colors = colored
+            .points()
+            .get(names::CD)
+            .unwrap()
+            .as_color(names::CD)
+            .unwrap();
+        assert_eq!(colors[0], RAMP_RED);
+        assert_eq!(colors[1], RAMP_BLUE);
+    }
+
+    /// The Color target's default component mask is `rgb`, so a ramp carrying
+    /// an alpha does not silently punch holes in the geometry.
+    #[test]
+    fn a_ramp_does_not_write_alpha_unless_the_mask_asks_for_it() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![Color::WHITE]))
+            .unwrap();
+        let ramp = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, Color::new(1.0, 0.0, 0.0, 0.0))]),
+        );
+
+        let spec = FieldApply::new(Domain::Point, names::CD);
+        let masked = apply_field(&geometry, &spec, &ramp, &ctx()).unwrap();
+        assert_eq!(
+            masked
+                .points()
+                .get(names::CD)
+                .unwrap()
+                .as_color(names::CD)
+                .unwrap()[0]
+                .a,
+            1.0
+        );
+
+        let spec = spec.with_components(ComponentMask::parse("rgba"));
+        let full = apply_field(&geometry, &spec, &ramp, &ctx()).unwrap();
+        assert_eq!(
+            full.points()
+                .get(names::CD)
+                .unwrap()
+                .as_color(names::CD)
+                .unwrap()[0]
+                .a,
+            0.0
+        );
+    }
+
+    /// A geometry with no `Cd` gets one made for it (`create_if_missing`), and
+    /// the ramp's colours land in it — no `attribute.set` ceremony in front.
+    #[test]
+    fn a_ramp_creates_the_colour_column_it_writes() {
+        let geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]);
+        let ramp = RampField::new(
+            FieldValue::new(XField),
+            RampParam::linear([(0.0, RAMP_RED), (1.0, RAMP_BLUE)]),
+        );
+        let result = apply_field(
+            &geometry,
+            &FieldApply::new(Domain::Point, names::STROKE_COLOR),
+            &ramp,
+            &ctx(),
+        )
+        .unwrap();
+        let colors = result
+            .points()
+            .get(names::STROKE_COLOR)
+            .unwrap()
+            .as_color(names::STROKE_COLOR)
+            .unwrap();
+        assert_eq!(colors[0], RAMP_RED);
+        assert_eq!(colors[1], RAMP_BLUE);
+        assert!(
+            result.points().get(names::CD).is_none(),
+            "modulating stroke_color must leave the fill colour alone"
+        );
     }
 
     #[test]

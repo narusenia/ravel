@@ -1046,6 +1046,14 @@ description = "Remaps another field's values through a transfer curve."
 [node."field.curve_remap".params]
 points = "Control points of the transfer curve (input to output)."
 
+[node."field.ramp"]
+label = "Ramp Field"
+description = "Reads another field's scalar through a colour ramp, so a number drives a hue rather than a brightness."
+[node."field.ramp".params]
+stops = "Colour stops of the ramp, with the interpolation between them."
+in_min = "Input value that maps to the start of the ramp."
+in_max = "Input value that maps to the end of the ramp."
+
 [node."field.expression"]
 label = "Expression Field"
 description = "A field defined by a text expression, evaluated at every sample position."

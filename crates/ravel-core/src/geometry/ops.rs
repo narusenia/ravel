@@ -205,6 +205,95 @@ pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, Geo
     })
 }
 
+/// How [`curve_u`] spaces the path parameter along a primitive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveUMode {
+    /// Fraction of the primitive's arc length — uneven point spacing shows up
+    /// in the values.
+    ArcLength,
+    /// Fraction of the vertex count — every point is one equal step.
+    VertexOrder,
+}
+
+/// Writes the path parameter `u` (Houdini's `curveu`) on every point.
+///
+/// Each path primitive is normalised **on its own**, so a geometry with two
+/// paths carries two independent `0..1` ramps rather than one running count.
+/// A closed path spends part of its length on the closing segment, so its
+/// last point sits just short of 1 rather than on it — the point where `u`
+/// wraps back to 0 is the start point, not a duplicate of it.
+///
+/// Points no path primitive references — loose points, and every point of a
+/// degenerate (zero-length or single-vertex) path — get `0.0`.
+///
+/// Arc length is measured with the same accumulation [`path_sample`] uses, so
+/// the two nodes agree on where the halfway point of a path is. It carries
+/// the same restrictions for the same reasons: 3D arc length is undefined and
+/// a mesh has none at all, so both are explicit errors.
+pub fn curve_u(geometry: &Geometry, mode: CurveUMode) -> Result<Geometry, GeometryOpError> {
+    let points = positions(geometry, Domain::Point)?.require_planar("attribute.curveu")?;
+    geometry.require_paths("attribute.curveu")?;
+    let mut column = vec![0.0f32; points.len()];
+    for primitive in geometry.primitives() {
+        let Primitive::Path { verts, closed } = primitive else {
+            // `require_paths` rejected every mesh above.
+            continue;
+        };
+        let path = points
+            .get(verts.clone())
+            .ok_or(GeometryOpError::InvalidPath)?;
+        for (slot, u) in column[verts.clone()]
+            .iter_mut()
+            .zip(path_parameters(path, *closed, mode))
+        {
+            *slot = u;
+        }
+    }
+    let mut result = geometry.clone();
+    result
+        .points_mut()
+        .insert(names::U, AttributeArray::F32(column))?;
+    result.validate()?;
+    Ok(result)
+}
+
+/// `u` for each vertex of one polyline.
+///
+/// The closing segment of a closed path counts towards the total in both
+/// modes, which is what keeps `by_vertex_order` a usable stand-in for
+/// `by_arc_length` on evenly spaced points: a closed regular polygon reports
+/// the same `(n - 1) / n` for its last vertex either way.
+fn path_parameters(path: &[Vec2], closed: bool, mode: CurveUMode) -> Vec<f32> {
+    let steps = if closed { path.len() } else { path.len() - 1 };
+    if path.len() < 2 {
+        return vec![0.0; path.len()];
+    }
+    if mode == CurveUMode::VertexOrder {
+        return (0..path.len())
+            .map(|index| index as f32 / steps as f32)
+            .collect();
+    }
+    // Shares `push_segment` with `path_sample`: the same cumulative lengths,
+    // and the same rule that a zero-length segment does not advance them (a
+    // duplicated point therefore repeats its predecessor's `u`).
+    let mut segments = Vec::with_capacity(path.len());
+    let mut at_vertex = Vec::with_capacity(path.len());
+    for (index, point) in path.iter().enumerate() {
+        at_vertex.push(segments.last().map_or(0.0, |segment: &Segment| segment.2));
+        if let Some(next) = path.get(index + 1) {
+            push_segment(&mut segments, *point, *next);
+        }
+    }
+    if closed && let (Some(last), Some(first)) = (path.last(), path.first()) {
+        push_segment(&mut segments, *last, *first);
+    }
+    let total = segments.last().map_or(0.0, |segment| segment.2);
+    if total <= f32::EPSILON {
+        return vec![0.0; path.len()];
+    }
+    at_vertex.iter().map(|length| length / total).collect()
+}
+
 /// Bounding-box center of point positions, falling back to instance positions
 /// for instance-only geometry. Returns `None` when both are empty.
 ///
@@ -893,7 +982,10 @@ fn planar_distance_squared(left: Vec2, right: Vec2) -> f32 {
     x * x + y * y
 }
 
-fn push_segment(segments: &mut Vec<(Vec2, Vec2, f32, f32)>, start: Vec2, end: Vec2) {
+/// One polyline segment: `(start, end, cumulative length at `end`, length)`.
+type Segment = (Vec2, Vec2, f32, f32);
+
+fn push_segment(segments: &mut Vec<Segment>, start: Vec2, end: Vec2) {
     let length = planar_distance_squared(start, end).sqrt();
     if length > f32::EPSILON {
         let previous = segments.last().map_or(0.0, |segment| segment.2);
@@ -1095,6 +1187,126 @@ mod tests {
         assert_eq!(sample.position, Vec2(3.0, 2.0));
         assert_eq!(sample.tangent, Vec2(0.0, 1.0));
         assert_eq!(sample.normal, Vec2(-1.0, 0.0));
+    }
+
+    fn u_of(geometry: &Geometry, mode: CurveUMode) -> Vec<f32> {
+        curve_u(geometry, mode)
+            .unwrap()
+            .points()
+            .get(names::U)
+            .unwrap()
+            .as_f32(names::U)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn path_of(points: Vec<Vec2>, closed: bool) -> Geometry {
+        let count = points.len();
+        let mut geometry = Geometry::from_points(points);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..count,
+            closed,
+        });
+        geometry
+    }
+
+    #[test]
+    fn curve_u_runs_from_zero_to_one_along_an_open_path() {
+        let geometry = path_of(
+            vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(20.0, 0.0)],
+            false,
+        );
+        assert_eq!(u_of(&geometry, CurveUMode::ArcLength), [0.0, 0.5, 1.0]);
+    }
+
+    /// The two modes are the same ramp only when the points are evenly
+    /// spaced. Uneven spacing is exactly what `by_arc_length` exists for.
+    #[test]
+    fn curve_u_modes_disagree_on_unevenly_spaced_points() {
+        let geometry = path_of(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(10.0, 0.0)], false);
+        let arc = u_of(&geometry, CurveUMode::ArcLength);
+        let vertex = u_of(&geometry, CurveUMode::VertexOrder);
+        assert_eq!(arc, [0.0, 0.1, 1.0]);
+        assert_eq!(vertex, [0.0, 0.5, 1.0]);
+        assert_ne!(arc, vertex);
+    }
+
+    /// Each primitive is its own `0..1`: a second path must not continue the
+    /// first one's count.
+    #[test]
+    fn curve_u_normalises_each_primitive_independently() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(0.0, 5.0),
+            Vec2(2.0, 5.0),
+            Vec2(8.0, 5.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geometry.push_primitive(Primitive::Path {
+            verts: 2..5,
+            closed: false,
+        });
+        assert_eq!(
+            u_of(&geometry, CurveUMode::ArcLength),
+            [0.0, 1.0, 0.0, 0.25, 1.0]
+        );
+    }
+
+    /// A closed path spends part of its length getting back to the start, so
+    /// the last point stops short of 1 — the wrap point is the start itself.
+    #[test]
+    fn curve_u_reserves_the_closing_segment_of_a_closed_path() {
+        let geometry = path_of(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(10.0, 0.0),
+                Vec2(10.0, 10.0),
+                Vec2(0.0, 10.0),
+            ],
+            true,
+        );
+        assert_eq!(
+            u_of(&geometry, CurveUMode::ArcLength),
+            [0.0, 0.25, 0.5, 0.75]
+        );
+        assert_eq!(
+            u_of(&geometry, CurveUMode::VertexOrder),
+            [0.0, 0.25, 0.5, 0.75]
+        );
+    }
+
+    /// A zero-length path has no parameter to report, and a loose point
+    /// belongs to no path at all. Neither is an error.
+    #[test]
+    fn curve_u_reports_zero_where_there_is_no_length() {
+        let degenerate = path_of(vec![Vec2(4.0, 4.0); 3], false);
+        assert_eq!(u_of(&degenerate, CurveUMode::ArcLength), [0.0, 0.0, 0.0]);
+
+        let mut loose =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(100.0, 100.0)]);
+        loose.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        assert_eq!(u_of(&loose, CurveUMode::ArcLength), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn curve_u_rejects_three_dimensional_positions_and_meshes() {
+        let mut spatial = Geometry::from_points3(vec![Vec3(0.0, 0.0, 0.0), Vec3(3.0, 0.0, 4.0)]);
+        spatial.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        assert!(curve_u(&spatial, CurveUMode::ArcLength).is_err());
+
+        let mut mesh = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        mesh.push_mesh(0..3, &[0, 1, 2]);
+        assert!(curve_u(&mesh, CurveUMode::ArcLength).is_err());
     }
 
     /// Arc length is planar-only for now: a 3D path has to say so rather than

@@ -998,6 +998,12 @@ description = "パスに沿った距離の位置と接線をサンプルする�
 [node."attribute.path_sample".params]
 distance = "パスに沿った距離（ピクセル）。"
 
+[node."attribute.curveu"]
+label = "カーブ U"
+description = "各点にパスパラメータ u（0〜1）を書き込む。パスプリミティブごとに正規化する。"
+[node."attribute.curveu".params]
+mode = "u の刻み方。弧長基準か頂点順か。"
+
 [node."field.noise"]
 label = "ノイズフィールド"
 description = "位置に対して 2D シンプレックスノイズを返す場を生成する。fBm オクターブを重ねられる。"

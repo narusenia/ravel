@@ -65,6 +65,7 @@ Geometry
 | `stroke_color` | Primitive/Instance | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック |
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 |
 | `velocity` | Point | Vec2 | 速度（sim） |
+| `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） |
 
 ### 位置の次元（REQ-3D-003）
 

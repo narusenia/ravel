@@ -205,6 +205,8 @@ pub enum RavelIcon {
     NodeAttributeTransfer,
     /// Node header/menu: `attribute.path_sample`.
     NodeAttributePathSample,
+    /// Node header/menu: `attribute.curveu`.
+    NodeAttributeCurveU,
     /// Node header/menu: `field.noise`.
     NodeFieldNoise,
     /// Node header/menu: `field.falloff`.
@@ -343,6 +345,7 @@ impl RavelIcon {
             "attribute.promote" => Self::NodeAttributePromote,
             "attribute.transfer" => Self::NodeAttributeTransfer,
             "attribute.path_sample" => Self::NodeAttributePathSample,
+            "attribute.curveu" => Self::NodeAttributeCurveU,
             "field.noise" => Self::NodeFieldNoise,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
@@ -449,6 +452,7 @@ impl IconNamed for RavelIcon {
             Self::NodeAttributePromote => "icons/chevrons-up.svg",
             Self::NodeAttributeTransfer => "icons/replace.svg",
             Self::NodeAttributePathSample => "icons/route.svg",
+            Self::NodeAttributeCurveU => "icons/interpolation-bezier.svg",
             Self::NodeFieldNoise => "icons/waves.svg",
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",

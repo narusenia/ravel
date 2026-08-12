@@ -133,6 +133,7 @@ pub fn processor_for_node(
             node,
         ))),
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
+        "attribute.curveu" => Some(Arc::new(attribute::CurveUProcessor::from_node(node))),
         "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
         "constant.color" => Some(Arc::new(constant::ColorConstantProcessor::from_node(node))),
         builtin::CONSTANT_VEC2 => Some(Arc::new(constant::VectorConstantProcessor::new(

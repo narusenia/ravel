@@ -1006,6 +1006,12 @@ description = "Samples a position and tangent at a distance along a path."
 [node."attribute.path_sample".params]
 distance = "Distance along the path in pixels."
 
+[node."attribute.curveu"]
+label = "Curve U"
+description = "Writes the path parameter u (0 to 1) on every point, normalized per path primitive."
+[node."attribute.curveu".params]
+mode = "Spacing of u: by arc length, or by vertex order."
+
 [node."field.noise"]
 label = "Noise Field"
 description = "Generates a 2D simplex noise field over position, with optional fBm octaves."

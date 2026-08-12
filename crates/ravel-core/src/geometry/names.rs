@@ -54,6 +54,11 @@ pub const AGE: &str = "age";
 pub const LIFE: &str = "life";
 /// Velocity (Vec2, Point, sim).
 pub const VELOCITY: &str = "velocity";
+/// Path parameter (F32, Point): where a point sits along its own path
+/// primitive, `0..1`. Houdini's `curveu`. Written by `attribute.curveu`, and
+/// read like any other column — `field.attribute("u")` is what turns it into
+/// a gradient along a line.
+pub const U: &str = "u";
 /// Incoming bezier tangent offset (Vec2, Point). The control point of the
 /// segment arriving at a point is `P + in_tan`; zero = corner (straight
 /// segment). Reserved for pen-drawn paths (REQ-UI-011).
@@ -93,6 +98,7 @@ mod tests {
                 AGE,
                 LIFE,
                 VELOCITY,
+                U,
                 IN_TAN,
                 OUT_TAN,
             ],
@@ -116,6 +122,7 @@ mod tests {
                 "age",
                 "life",
                 "velocity",
+                "u",
                 "in_tan",
                 "out_tan",
             ]

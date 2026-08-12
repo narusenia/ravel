@@ -89,6 +89,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(attribute_promote());
     reg.register(attribute_transfer());
     reg.register(attribute_path_sample());
+    reg.register(attribute_curveu());
     reg.register(field_noise());
     reg.register(field_falloff());
     reg.register(field_curve_remap());
@@ -334,6 +335,19 @@ fn attribute_path_sample() -> NodeTemplate {
     .with_output(geometry_output())
     .with_param(float_parameter("distance", 0.0))
     .with_param_range("distance", 0.0..=1e6, 0.0..=1000.0)
+}
+
+/// `attribute.curveu`: write the path parameter `u` on every point.
+///
+/// The companion of `attribute.path_sample`, which reads *one* place on a
+/// path; this one labels every point with where it sits, which is what
+/// `field.attribute("u")` needs to drive anything along the path.
+fn attribute_curveu() -> NodeTemplate {
+    NodeTemplate::new("attribute.curveu", "Curve U", NodeCategory::Geometry)
+        .with_input(geometry_input("path"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("mode", "by_arc_length"))
+        .with_param_options("mode", ["by_arc_length", "by_vertex_order"])
 }
 
 fn field_noise() -> NodeTemplate {
@@ -1285,7 +1299,7 @@ mod tests {
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 17);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 18);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

@@ -793,8 +793,11 @@ layer.has_frame_output() -> bool   // false = frameless layer (Null or Audio)
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
 Document::{with_composition, get_composition, changed_network_paths(&old)}
 Document::{with_media_asset(id, path), get_media_asset(&str)}
-    // media_assets: im::HashMap<String, MediaAssetEntry> — the
-    // evaluation-time asset table indexed by the media node's asset_id
+    // media_assets: MediaAssets (= im::HashMap<String, MediaAssetEntry>) —
+    // the evaluation-time asset table indexed by the media node's asset_id.
+    // The alias exists so a crate that cannot spell `im::HashMap` can hold
+    // the map on its own and answer "did the asset list change?" with
+    // `ptr_eq`, instead of retaining a whole Document snapshot for it.
 Document::with_exposed_parameters(ExposedParameters)
     // exposed_parameters: the project's external contract (`exposed` above);
     // #[serde(default)], so a pre-v7 document reads as zero declarations

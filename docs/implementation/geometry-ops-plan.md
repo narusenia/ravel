@@ -279,6 +279,10 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
 - `shape.grid`: 行数 × 列数 に対する primitive 数が定義どおりであるテスト。
 - 両ノードが `ParamRole`（`viewer-overlay-manipulator-plan.md` 単位 5）を
   宣言していることのテスト。
+  **この条件は `OVL-5` が `ParamRole` を入れるまで満たせない。** 型そのものが
+  まだ存在せず（`registry/builtin.rs` の doc コメントに名前が出るだけ）、
+  `OVL-5` は未着手。**回収は `OVL-5` 側で行う**ので、この単位は残りの条件で
+  完了とし、宣言とそのテストは `OVL-5` の完了条件に持たせる。
 
 ### 単位 12: `geometry.connect`（要素を結ぶ）
 

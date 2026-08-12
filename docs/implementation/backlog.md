@@ -45,7 +45,6 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -74,8 +73,6 @@
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
-| NGR-1 | 自動整列の計算（ヘッドレス） | `node-graph-readability-plan.md` |
-| NGR-3 | `node_editor` 設定節と `edge_style` の永続化 | `node-graph-readability-plan.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
 | NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
 | NGR-7 | エッジへのドロップでノードを挟む | `node-graph-readability-plan.md` |
@@ -86,9 +83,6 @@
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
-| EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
-| EXPO-3 | 宣言の機械可読な列挙（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
-| ZC-1 | 往復の内訳を測り直す（ゼロコピー表示の判断ゲート） | `zero-copy-viewer-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
@@ -96,6 +90,7 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
+| IMG-2 | `InstanceSource` への一般化（フェーズ C4 完了で順序ゲートが解けた） | `image-instancing-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -146,8 +141,9 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 **14 単位すべてマージ済みだが `RESP3-7` は完了条件を満たしていない** —
 「パネル非表示のとき `refresh_values` を走らせない」が未達（タブの可視性が
 パネルへ届かず、`ravel-dock` の配線が要る）。同じ理由でフェーズ C3 は
-`進行中` のままで、`MED-UI-02` / `MED-UI-05` も未解決に残っている
-（詳細は `roadmap.md` フェーズ C3 の `実施結果`）。
+`進行中` のままで、`MED-UI-02` も未解決に残っている
+（詳細は `roadmap.md` フェーズ C3 の `実施結果`）。`MED-UI-05` は
+MediaBin 側を #400 で片付けて closed になった。
 
 ### パネル可視性（フェーズ C3 の残り）
 
@@ -1121,7 +1117,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | IMG-1 | ✅ | `SceneContent::Image` の退場（挙動不変。REQ-3D-001 本文の修正を含む）（#309） | — |
-| IMG-2 | ⬜ | `InstanceSource` への一般化（`ravel-core`、挙動不変） | フェーズ C4 の完了（順序） |
+| IMG-2 | 🟡 | `InstanceSource` への一般化（`ravel-core`、挙動不変） | — |
 | IMG-3 | ⬜ | `geometry.from_image` ノード（FrameBuffer → Geometry） | IMG-2 |
 | IMG-4 | ⬜ | `rasterize` のテクスチャ経路（CPU 参照） | IMG-2, IMG-3 |
 | IMG-5 | ⬜ | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
@@ -1132,10 +1128,12 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 今なら挙動不変で畳める。`3D-4` / `3D-5` / `3D-7` が両方の上に積んでから
 消すと跳ね上がる（`roadmap.md` の基準 3）。
 
-**`IMG-2` 以降はフェーズ C4 の後**（決定 9）。`IMG-2` に `IMG-1` への技術的な
-依存は無く、`IMG-1` が済んだ今も**着手可能にはならない** — ゲートは
-「書き出しが開くまで他の投資が回収されない」という基準 0 の判断であって、
-先行単位の完了ではない。依存列にはそのゲートを書いてある。
+**`IMG-2` 以降はフェーズ C4 の後**（決定 9）だった。ゲートは「書き出しが
+開くまで他の投資が回収されない」という基準 0 の判断であって、先行単位の
+完了ではない（`IMG-2` に `IMG-1` への技術的な依存は無い）。
+**フェーズ C4 が完了した（2026-08-13）のでこの順序ゲートは解け、`IMG-2` は
+着手可能になった。** `IMG-3` 以降は `IMG-2` への技術的な依存が残るので
+依存待ちのまま。
 
 `GPU-5` は「`instance_sources` は CPU 側メタデータのまま」を前提にしており、
 テクスチャハンドルはその前提に収まらない。`CACHE-3` は画像を抱えた

@@ -1335,7 +1335,24 @@ impl ProjectState {
     }
 
     fn document_changed(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
-        self.compiled = None;
+        // The compiled chain is topology, not values. Every shell processor
+        // resolves its layer from the `Document` the request carries and reads
+        // transform, opacity, timing, parenting and the layer network from it
+        // at process time, so a parameter edit reaches the viewer through the
+        // document without the chain being rebuilt. What the chain *does* bake
+        // in is the shape: which layers are active (solo/mute), their order,
+        // the parent edges, the blend mode (it picks the merge node's type key)
+        // and the adjustment flag (it picks a different merge and drops the
+        // opacity node). Every edit that moves one of those passes
+        // `Structural` — `apply_layer_change` and `toggle_layer_flag` both
+        // spell that list out — so `Structural` is the exact gate here.
+        //
+        // Dropping it unconditionally made every mouse move of a scrub
+        // recompile the active composition on the UI thread, at a cost linear
+        // in the layer count (`MED-UI-01`).
+        if matches!(hint, InvalidationHint::Structural) {
+            self.compiled = None;
+        }
         self.mirror_epoch += 1;
         // The band goes now, not when the next evaluation lands: the panel
         // repaints from the notify at the bottom of this function, and a band
@@ -2192,6 +2209,150 @@ mod tests {
                 .with_time(0, 0, 300)
                 .with_blend_mode(BlendMode::Screen)
         }
+    }
+
+    /// `MED-UI-01`: dropping the compiled shell chain on every document change
+    /// made a scrub recompile the active composition on the UI thread once per
+    /// mouse move, at a cost linear in the layer count. The chain is topology;
+    /// values live in the `Document` the request carries, and every shell
+    /// processor reads them from there at process time.
+    ///
+    /// Both halves matter, so both are asserted: the chain survives a value
+    /// edit (`None` for a layer shell field, `Params` for a node parameter —
+    /// the two hints the scrub paths actually send), *and* the edited value is
+    /// in the document the next request carries. A test that only checked
+    /// retention would pass just as well if the edit stopped reaching the
+    /// viewer entirely.
+    #[gpui::test]
+    fn a_value_edit_keeps_the_compiled_chain_and_still_reaches_the_viewer(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let layer = content_layer();
+            let layer_id = layer.id;
+            let node = layer
+                .network
+                .nodes()
+                .find(|node| node.type_key == net::NET_IN_TYPE_KEY)
+                .expect("the content layer has an In node")
+                .id;
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            project.build_viewer_request(0, cx).unwrap().unwrap();
+            // The synthetic nodes are `Arc`ed, and a recompile allocates new
+            // ones. Pointer identity is therefore the one thing that tells
+            // "kept" from "rebuilt to something equal" — the ids are
+            // deterministic, so structural equality cannot.
+            let merge_id = project
+                .compiled
+                .as_ref()
+                .expect("building a request should have compiled the chain")
+                .graph
+                .nodes()
+                .find(|node| node.type_key.starts_with("comp.merge."))
+                .expect("the compiled chain merges the layer over the background")
+                .id;
+            let compiled_merge = |project: &ProjectState| {
+                project
+                    .compiled
+                    .as_ref()
+                    .expect("the chain is compiled")
+                    .graph
+                    .node(merge_id)
+                    .expect("the layer's merge node")
+                    .clone()
+            };
+            let before = compiled_merge(project);
+
+            // A layer shell scrub (`apply_layer_change` sends `None` for every
+            // field that is not one of the merge-chain flags).
+            let document =
+                ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
+                    layer.opacity = AnimationChannel::constant(0.25);
+                })
+                .unwrap();
+            project.apply_document(document, InvalidationHint::None, cx);
+            assert!(
+                Arc::ptr_eq(&before, &compiled_merge(project)),
+                "a layer value edit must not discard the compiled chain"
+            );
+
+            // A node parameter scrub inside the layer network.
+            let path = ravel_ui::document::NetworkPath::layer(comp_id, layer_id);
+            let network = ravel_ui::document::resolve_network(project.document(), &path)
+                .unwrap()
+                .clone()
+                .set_params(
+                    node,
+                    &[ravel_core::graph::Parameter {
+                        key: "intensity".into(),
+                        value: ParameterValue::Channel(AnimationChannel::constant(0.5)),
+                    }],
+                )
+                .unwrap();
+            let document =
+                ravel_ui::document::replace_network(project.document(), &path, network).unwrap();
+            project.apply_document(document, InvalidationHint::Params(vec![node]), cx);
+            assert!(
+                Arc::ptr_eq(&before, &compiled_merge(project)),
+                "a node parameter edit must not discard the compiled chain"
+            );
+
+            // The retained chain does not strand the edits: the request carries
+            // the live document, which is where the shell processors read.
+            let request = project.build_viewer_request(0, cx).unwrap().unwrap();
+            let document = request.document.as_ref().expect("the request carries one");
+            let ctx = EvalContext::new(0, FrameRate::new(30, 1), (16, 16));
+            let layer = document
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer_id)
+                .unwrap();
+            assert_eq!(
+                layer.opacity.evaluate(0.0, &ctx),
+                0.25,
+                "the layer edit must be in the document the request carries"
+            );
+            let intensity = layer
+                .network
+                .node(node)
+                .unwrap()
+                .parameters
+                .iter()
+                .find(|param| param.key == "intensity")
+                .expect("the In node keeps its intensity parameter");
+            assert!(
+                matches!(
+                    &intensity.value,
+                    ParameterValue::Channel(channel) if channel.evaluate(0.0, &ctx) == 0.5
+                ),
+                "the node edit must be in the document the request carries"
+            );
+
+            // A structural edit still rebuilds, and it has to: the blend mode
+            // picks the merge node's type key, so it is one of the few values
+            // the chain bakes in rather than reads back from the document.
+            assert_eq!(before.type_key, "comp.merge.screen");
+            let document =
+                ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
+                    layer.blend_mode = BlendMode::Multiply;
+                })
+                .unwrap();
+            project.apply_document(document, InvalidationHint::Structural, cx);
+            let after = compiled_merge(project);
+            assert!(
+                !Arc::ptr_eq(&before, &after),
+                "a structural edit must rebuild the compiled chain"
+            );
+            assert_eq!(
+                after.type_key, "comp.merge.multiply",
+                "the rebuilt chain must carry the new blend mode"
+            );
+        });
     }
 
     /// Stand-in for one of the five panels that observe `ProjectState` to

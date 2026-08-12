@@ -92,6 +92,16 @@ impl GpuEvalHooks {
         self.gpu.device_state()
     }
 
+    /// The texture pool every processor this worker registers shares.
+    ///
+    /// Exposed so a caller can observe what the worker is holding —
+    /// `TexturePool::total_created` is how `tests/upload_memo.rs` catches
+    /// leases that pile up across frames instead of circulating.
+    #[inline]
+    pub fn texture_pool(&self) -> &Arc<Mutex<TexturePool>> {
+        &self.pool
+    }
+
     /// Finish frames for a screen rather than for a file: [`Self::finalize`]
     /// then yields a [`DisplayFrame`](crate::DisplayFrame) instead of a linear
     /// [`FrameBuffer`](ravel_core::types::FrameBuffer).
@@ -176,9 +186,9 @@ impl EvalWorkerHooks for GpuEvalHooks {
         document: Option<&Document>,
         hint: &InvalidationHint,
     ) {
-        // The worker calls this before every request, whatever the hint, so
-        // it is the one place that reliably marks "a new evaluation starts
-        // here". The upload memo lives exactly that long (MED-GPU-05).
+        // Opens the first upload scope of this worker's life. `finalize`
+        // rotates it per evaluation from then on — `sync` cannot, because a
+        // render job syncs once and then evaluates every frame of the range.
         crate::gpu_util::begin_upload_scope(&self.pool);
         match hint {
             InvalidationHint::None => {}
@@ -262,6 +272,16 @@ impl EvalWorkerHooks for GpuEvalHooks {
         value: &Arc<dyn NodeData>,
         ctx: &EvalContext,
     ) -> Option<Arc<dyn NodeData>> {
+        // One evaluation has just produced `value`, so its uploads are spent:
+        // close that scope and open the next one (MED-GPU-05). This is the
+        // boundary rather than `sync` because it is the only hook both
+        // workers run *per evaluation* — the interactive service syncs per
+        // request, but a render job syncs once and then walks a whole frame
+        // range, so a scope anchored to `sync` would hold every frame's
+        // source texture until the export finished. Rotating here, before
+        // anything below can upload, also keeps the display transform's own
+        // upload inside a scope.
+        crate::gpu_util::begin_upload_scope(&self.pool);
         let value = self.rasterize_geometry(value, ctx)?;
         // Frames only: a `Scalar` target has nothing to display and passes
         // straight through.

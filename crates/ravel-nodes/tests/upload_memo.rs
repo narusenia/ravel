@@ -9,10 +9,13 @@
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData};
 use ravel_gpu::{GpuContext, ShaderManager};
 use ravel_media::frame_cache::MediaFrameCache;
-use ravel_nodes::{begin_upload_scope, ensure_gpu, register_all_processors, shared_texture_pool};
+use ravel_nodes::{
+    GpuEvalHooks, begin_upload_scope, ensure_gpu, register_all_processors, shared_texture_pool,
+};
 use std::sync::Arc;
 
 const SRC: u64 = 1;
@@ -206,6 +209,90 @@ fn a_memoized_texture_is_not_reused_by_the_next_evaluation() {
         before.delta(&gpu.transfer_stats()).uploads,
         2,
         "the frame must be uploaded again for the second evaluation"
+    );
+}
+
+/// A fresh CPU frame per frame, the way a decode does: every call allocates
+/// its own `Arc<[u8]>`, so no two frames share an upload key. Declaring time
+/// dependence is what makes the evaluator ask again instead of serving the
+/// first frame's cached value.
+struct DecodedPerFrame;
+
+impl NodeProcessor for DecodedPerFrame {
+    fn is_time_dependent(&self) -> bool {
+        true
+    }
+
+    fn process(
+        &self,
+        _node: &Node,
+        ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ravel_core::eval::ResolvedParams,
+        _scope: &mut dyn ravel_core::eval::EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let mut fb = gradient_fb(32, 32);
+        // Distinguish the frames so nothing can collapse them into one value.
+        let mut pixels = fb.as_f32().to_vec();
+        pixels[0] = ctx.frame as f32;
+        fb = FrameBuffer::from_f32(fb.width, fb.height, pixels);
+        Ok(Arc::new(fb))
+    }
+}
+
+/// A render job is **one** `sync` followed by a frame loop of `evaluate` +
+/// `finalize` (`ravel_core::runtime::render::render_frames`), so a scope tied
+/// to `sync` alone stays open for the whole export: every frame's uploaded
+/// texture is remembered, none is ever released, and a 4K job holds gigabytes
+/// by the end. The scope has to close once per *evaluation*, which is what
+/// this drives — with no hand-rolled `begin_upload_scope` anywhere, because a
+/// test that opens the scope itself cannot see this hole.
+#[test]
+fn an_export_run_does_not_accumulate_leases_across_frames() {
+    let Ok(gpu) = GpuContext::new_blocking() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let graph = fan_out_graph();
+    let mut hooks = GpuEvalHooks::new(gpu.clone());
+    let mut evaluator = Evaluator::new();
+    hooks.sync(
+        &mut ProcessorSync::new(&mut evaluator),
+        &graph,
+        None,
+        &InvalidationHint::Structural,
+    );
+    evaluator.register(nid(SRC), Arc::new(DecodedPerFrame));
+
+    let render_frame = |evaluator: &mut Evaluator, hooks: &mut GpuEvalHooks, frame: u64| {
+        let ctx = EvalContext::new(frame, FrameRate::new(30, 1), (32, 32));
+        let value = evaluator
+            .evaluate(&graph, nid(OUT), &ctx)
+            .expect("evaluation succeeds");
+        hooks.finalize(&value, &ctx).expect("finalize succeeds");
+    };
+
+    // Two frames to reach the steady state, not one: a texture released
+    // while the batch that reads it is still unsubmitted cannot be handed
+    // out again, so the second frame legitimately allocates one more. From
+    // there the set circulates and the count must stop moving.
+    const WARMUP: u64 = 2;
+    const FRAMES: u64 = 16;
+    for frame in 0..WARMUP {
+        render_frame(&mut evaluator, &mut hooks, frame);
+    }
+    let warm = hooks.texture_pool().lock().unwrap().total_created();
+
+    for frame in WARMUP..WARMUP + FRAMES {
+        render_frame(&mut evaluator, &mut hooks, frame);
+    }
+    let created = hooks.texture_pool().lock().unwrap().total_created();
+    assert_eq!(
+        created,
+        warm,
+        "{FRAMES} more frames created {} more textures: a lease that is not \
+         released cannot be reused, so the count grows with the frame count",
+        created - warm,
     );
 }
 

@@ -1775,9 +1775,12 @@ GPU nodes exchange `ravel_gpu::GpuFrameBuffer` (VRAM-resident, shares
 the texture to the pool). Helpers re-exported from `ravel_nodes`:
 `ensure_gpu` / `ensure_cpu` / `clone_frame_value` (pass-throughs).
 `ensure_gpu` deduplicates uploads inside an **upload scope**: one CPU frame
-feeding N GPU nodes is transferred once, not N times. `GpuEvalHooks::sync`
-opens the scope with `ravel_nodes::begin_upload_scope(&pool)` before every
-evaluation, and the memo lives in the pool
+feeding N GPU nodes is transferred once, not N times. `GpuEvalHooks::finalize`
+rotates the scope with `ravel_nodes::begin_upload_scope(&pool)` once per
+evaluated output — the one hook *both* workers run per evaluation, where
+`sync` is per request for the interactive service but per **job** for a
+render, which would pin every frame's source texture for the whole export.
+The memo lives in the pool
 (`TexturePool::begin_upload_scope` / `memoized_upload` / `memoize_upload`),
 which holds the lease for as long as the scope does. Outside a scope
 nothing is remembered and every call uploads.

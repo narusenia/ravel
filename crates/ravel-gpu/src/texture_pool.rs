@@ -387,12 +387,13 @@ impl TexturePool {
     /// remembers stay leased for the whole scope — a later node still expects
     /// to bind them — and are released when the scope closes.
     ///
-    /// **The scope is one evaluation.** `GpuEvalHooks::sync` opens it, and
-    /// the evaluation worker runs `sync` before every request, so a memo
+    /// **The scope is one evaluation.** `GpuEvalHooks::finalize` rotates it,
+    /// and both workers run `finalize` once per evaluated output, so a memo
     /// never spans two evaluations: a frame that re-decodes into a fresh
     /// buffer at a recycled address cannot be served the previous frame's
-    /// texture. A pool nobody opens a scope on memoizes nothing and uploads
-    /// exactly as it did before.
+    /// texture, and an export does not hold every frame's source texture
+    /// until the range ends. A pool nobody opens a scope on memoizes nothing
+    /// and uploads exactly as it did before.
     pub fn begin_upload_scope(&mut self) {
         let previous = self.uploads.replace(UploadMemo::default());
         for (_, _, texture) in previous.into_iter().flat_map(|memo| memo.entries) {

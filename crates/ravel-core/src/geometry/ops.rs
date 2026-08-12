@@ -75,6 +75,95 @@ pub fn attribute_set(
     Ok(result)
 }
 
+/// Writes `value` into `name` on `domain`, restricted to the elements `group`
+/// flags.
+///
+/// `group` follows the element-scope convention (REQ-CORE-013): the empty
+/// string is every element, and a named `Bool` column restricts the write to
+/// the elements it flags. A name that is missing, not `Bool`, or the wrong
+/// length warns and affects every element rather than failing the evaluation.
+///
+/// Elements outside the group keep the column's current value. When the column
+/// does not exist yet there is no current value to keep, so they take `unset` —
+/// the value that means "nobody wrote this attribute" to whoever reads it
+/// (`rasterize`'s own parameter defaults, for the style attributes). `unset`
+/// has to have the same type as `value`.
+pub fn attribute_set_in_group(
+    geometry: &Geometry,
+    domain: Domain,
+    name: &str,
+    value: AttributeValue,
+    group: &str,
+    unset: AttributeValue,
+) -> Result<Geometry, GeometryOpError> {
+    let count = domain_count(geometry, domain);
+    if count == 0 {
+        return Err(GeometryOpError::EmptyDomain);
+    }
+    let attributes = geometry.attribute_set(domain);
+    let Some(selection) = super::field::group_selection(attributes, group, count) else {
+        return attribute_set(geometry, domain, name, value);
+    };
+    let mut column = broadcast_value(&value, count);
+    // A column of another type is not "the current value" of this attribute:
+    // the write replaces it wholesale, so the elements outside the group fall
+    // back to `unset` the same way they would for a missing column.
+    let outside = match attributes.get(name) {
+        Some(existing) if existing.attr_type() == column.attr_type() && existing.len() == count => {
+            existing.as_ref().clone()
+        }
+        _ => broadcast_value(&unset, count),
+    };
+    keep_unselected(&mut column, &outside, &selection, name)?;
+    let mut result = geometry.clone();
+    result.attribute_set_mut(domain).insert(name, column)?;
+    result.validate()?;
+    Ok(result)
+}
+
+/// Overwrite the elements `selection` does *not* flag with `outside`'s values.
+fn keep_unselected(
+    column: &mut AttributeArray,
+    outside: &AttributeArray,
+    selection: &[bool],
+    name: &str,
+) -> Result<(), GeometryOpError> {
+    macro_rules! keep {
+        ($target:expr, $source:expr) => {
+            for (index, inside) in selection.iter().enumerate() {
+                if !inside {
+                    $target[index] = $source[index];
+                }
+            }
+        };
+    }
+    match (column, outside) {
+        (AttributeArray::F32(target), AttributeArray::F32(source)) => keep!(target, source),
+        (AttributeArray::Vec2(target), AttributeArray::Vec2(source)) => keep!(target, source),
+        (AttributeArray::Vec3(target), AttributeArray::Vec3(source)) => keep!(target, source),
+        (AttributeArray::Vec4(target), AttributeArray::Vec4(source)) => keep!(target, source),
+        (AttributeArray::Color(target), AttributeArray::Color(source)) => keep!(target, source),
+        (AttributeArray::I32(target), AttributeArray::I32(source)) => keep!(target, source),
+        (AttributeArray::Bool(target), AttributeArray::Bool(source)) => keep!(target, source),
+        (AttributeArray::Str(target), AttributeArray::Str(source)) => {
+            for (index, inside) in selection.iter().enumerate() {
+                if !inside {
+                    target[index].clone_from(&source[index]);
+                }
+            }
+        }
+        (column, outside) => {
+            return Err(GeometryError::TypeMismatch {
+                name: name.into(),
+                expected: column.attr_type(),
+                actual: outside.attr_type(),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Cross-domain promotion reduces to one value and broadcasts it. Detail
 /// values are already scalar and are broadcast without applying `mode`.
 pub fn promote_attribute(
@@ -1288,6 +1377,98 @@ mod tests {
                 .unwrap(),
             &[0.75, 0.75]
         );
+    }
+
+    /// A group restricts the write to the elements it flags; the others keep
+    /// the exact value the column already held.
+    #[test]
+    fn group_restricted_set_keeps_the_other_elements() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 3]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![1.0, 2.0, 3.0]))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert("mask", AttributeArray::Bool(vec![false, true, false]))
+            .unwrap();
+
+        let result = attribute_set_in_group(
+            &geometry,
+            Domain::Point,
+            "weight",
+            AttributeValue::F32(9.0),
+            "mask",
+            AttributeValue::F32(0.0),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .points()
+                .get("weight")
+                .unwrap()
+                .as_f32("weight")
+                .unwrap(),
+            &[1.0, 9.0, 3.0]
+        );
+    }
+
+    /// Without a column to keep, the elements outside the group take the
+    /// `unset` value — the one that reads as "nobody wrote this attribute".
+    #[test]
+    fn group_restricted_set_seeds_a_new_column_with_the_unset_value() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 3]);
+        geometry
+            .points_mut()
+            .insert("mask", AttributeArray::Bool(vec![true, false, true]))
+            .unwrap();
+
+        let result = attribute_set_in_group(
+            &geometry,
+            Domain::Point,
+            "on",
+            AttributeValue::Bool(false),
+            "mask",
+            AttributeValue::Bool(true),
+        )
+        .unwrap();
+        assert_eq!(
+            result.points().get("on").unwrap().as_bool("on").unwrap(),
+            &[false, true, false]
+        );
+    }
+
+    /// An unusable group name must not fail the evaluation: a half-typed name
+    /// in the node editor falls back to every element, exactly as `field.apply`
+    /// resolves it (the two share the resolver).
+    #[test]
+    fn unusable_group_names_write_every_element() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 2]);
+        geometry
+            .points_mut()
+            .insert("not_bool", AttributeArray::F32(vec![1.0, 1.0]))
+            .unwrap();
+        for group in ["", "typo", "not_bool"] {
+            let result = attribute_set_in_group(
+                &geometry,
+                Domain::Point,
+                "weight",
+                AttributeValue::F32(4.0),
+                group,
+                AttributeValue::F32(0.0),
+            )
+            .unwrap();
+            assert_eq!(
+                result
+                    .points()
+                    .get("weight")
+                    .unwrap()
+                    .as_f32("weight")
+                    .unwrap(),
+                &[4.0, 4.0],
+                "group {group:?}"
+            );
+        }
     }
 
     #[test]

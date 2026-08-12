@@ -817,26 +817,45 @@ fn viewer_readback(value: &dyn NodeData) -> anyhow::Result<FrameBuffer> {
     Ok(frame.to_frame_buffer()?)
 }
 
-/// Mirrors the ad-hoc Geometry rasterize in `evaluate_for_viewer`.
-fn adhoc_rasterize(data: &dyn NodeData, ctx: &EvalContext) -> Option<FrameBuffer> {
+/// The node `GpuEvalHooks::finalize` builds for the viewer's ad-hoc
+/// Geometry rasterize. Its parameters are decorative — the processor reads
+/// fill and stroke width from the resolved parameters.
+fn adhoc_node() -> Node {
+    Node::new(NodeId::new(u64::MAX), "rasterize")
+        .with_param("fill", ParameterValue::Bool(true))
+        .with_param("stroke_width", ParameterValue::Float(0.0))
+}
+
+/// Mirrors the ad-hoc Geometry rasterize in `GpuEvalHooks::finalize`, on
+/// whichever rasterizer `proc` is. The frame is read back either way: a
+/// viewer without a display transform ends up with a CPU frame, so the two
+/// rasterizers are measured over the same amount of work.
+fn adhoc_rasterize(
+    proc: &RasterizeProcessor,
+    data: &dyn NodeData,
+    ctx: &EvalContext,
+) -> Option<FrameBuffer> {
     let geo = data
         .downcast_ref::<ravel_core::geometry::Geometry>()?
         .clone();
-    let rast_node = Node::new(NodeId::new(u64::MAX), "rasterize")
-        .with_param("fill", ParameterValue::Bool(true))
-        .with_param("stroke_width", ParameterValue::Float(0.0));
-    let proc = RasterizeProcessor::from_node(&rast_node);
+    let rast_node = adhoc_node();
     let input: Arc<dyn NodeData> = Arc::new(geo);
     let mut scope = ravel_core::eval::Evaluator::new();
-    proc.process(
-        &rast_node,
-        ctx,
-        &[Some(input)],
-        &ravel_core::eval::ResolvedParams::default(),
-        &mut scope,
-    )
-    .ok()
-    .and_then(|d| d.downcast_ref::<FrameBuffer>().cloned())
+    let out = proc
+        .process(
+            &rast_node,
+            ctx,
+            &[Some(input)],
+            &ravel_core::eval::ResolvedParams::default(),
+            &mut scope,
+        )
+        .ok()?;
+    if let Some(fb) = out.downcast_ref::<FrameBuffer>() {
+        return Some(fb.clone());
+    }
+    out.downcast_ref::<ravel_gpu::GpuFrameBuffer>()?
+        .to_frame_buffer()
+        .ok()
 }
 
 /// CPU-side replica of the Viewer's `paint_framebuffer` run-merge loop.
@@ -1541,25 +1560,38 @@ fn main() -> anyhow::Result<()> {
 
     // -- Scenario (c): scatter count=500 geometry chain ---------------------
     // Selecting the scatter output pulls the (warm) geometry chain and runs
-    // the Viewer's ad-hoc rasterize, which is never cached. The evaluator is
+    // the viewer's ad-hoc rasterize, which is never cached. The evaluator is
     // built once, as in the app (selection does not rebuild processors).
+    //
+    // Both rasterizers are measured. The CPU one is what the viewer used to
+    // do on every frame of a scrub over a shape or scatter node; the GPU one
+    // is what `GpuEvalHooks::finalize` keeps and reuses now (MED-GPU-04).
     {
         let graph = scatter_graph(&registry);
         let mut evaluator = build_evaluator(&graph, &gpu, &mut shaders, &pool, None);
-        timings.drain();
-        let before = transfer_stats();
+        let cpu_rast = RasterizeProcessor::from_node(&adhoc_node());
+        let gpu_rast =
+            RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &adhoc_node());
         let mut quads = 0usize;
-        let samples = run_scenario(10, |_| {
+        for (label, rasterizer) in [("CPU reference", &cpu_rast), ("GPU (viewer)", &gpu_rast)] {
+            // Warm-up outside the timed region: pipeline creation for the GPU
+            // rasterizer, first-touch allocation for the CPU one.
             let out = evaluator.evaluate(&graph, nid(GRID), &ctx).unwrap();
-            let fb = adhoc_rasterize(out.as_ref(), &ctx).expect("rasterize");
-            quads = count_paint_quads(&fb, (512.0, 512.0));
-        });
-        report(
-            "(c) scatter grid 500 instances → ad-hoc rasterize",
-            &wall_stats(&samples),
-            timings.drain(),
-            before.delta(&transfer_stats()),
-        );
+            adhoc_rasterize(rasterizer, out.as_ref(), &ctx).expect("rasterize");
+            timings.drain();
+            let before = transfer_stats();
+            let samples = run_scenario(10, |_| {
+                let out = evaluator.evaluate(&graph, nid(GRID), &ctx).unwrap();
+                let fb = adhoc_rasterize(rasterizer, out.as_ref(), &ctx).expect("rasterize");
+                quads = count_paint_quads(&fb, (512.0, 512.0));
+            });
+            report(
+                &format!("(c) scatter grid 500 instances → ad-hoc rasterize, {label}"),
+                &wall_stats(&samples),
+                timings.drain(),
+                before.delta(&transfer_stats()),
+            );
+        }
         println!("paint quads (run-merged): {quads}");
     }
 

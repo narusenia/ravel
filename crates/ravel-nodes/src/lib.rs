@@ -20,7 +20,7 @@ pub mod field;
 pub mod flatten;
 pub mod geometry;
 mod gpu_util;
-pub use gpu_util::{GpuImage, clone_frame_value, ensure_cpu, ensure_gpu};
+pub use gpu_util::{GpuImage, begin_upload_scope, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod layer_ref;
 pub mod math;
 pub mod media;
@@ -146,12 +146,10 @@ pub fn processor_for_node(
         builtin::VECTOR_CONSTRUCT_VEC4 => Some(Arc::new(vector::VectorConstructProcessor::new(
             vector::VectorArity::Vec4,
         ))),
-        // Keep Composition compiler synthetic nodes on the CPU reference path:
-        // shape_layer_golden intentionally pins their established pixels. User
-        // rasterize nodes use the resident GPU path.
-        "rasterize" if node.metadata.synthetic => {
-            Some(Arc::new(rasterize::RasterizeProcessor::from_node(node)))
-        }
+        // Every rasterize node takes the resident GPU path, synthetic or not.
+        // `shape_layer_golden` used to pin the synthetic ones to the CPU
+        // reference implementation; it now requires the two to agree instead,
+        // which is what that pin was standing in for.
         "rasterize" => Some(Arc::new(rasterize::RasterizeProcessor::new(
             ctx.clone(),
             shaders,
@@ -410,8 +408,13 @@ mod tests {
         assert!(ev.is_dirty(NodeId::new(1)));
     }
 
+    /// The shell compiler marks the nodes it inserts `synthetic`, and a
+    /// rasterize node that carries the flag used to be handed the CPU
+    /// reference implementation. Both kinds now stay resident, so a
+    /// composition previewed through the shell chain never reads a frame back
+    /// just to hand it to the next GPU node.
     #[test]
-    fn processor_factory_selects_gpu_for_user_rasterize_only() {
+    fn processor_factory_selects_gpu_for_every_rasterize_node() {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let pool = shared_texture_pool(&gpu);
         let frames = MediaFrameCache::standalone();
@@ -443,7 +446,7 @@ mod tests {
                 &mut scope,
             )
             .unwrap();
-        assert!(out.downcast_ref::<FrameBuffer>().is_some());
+        assert!(out.downcast_ref::<ravel_gpu::GpuFrameBuffer>().is_some());
     }
 
     #[test]

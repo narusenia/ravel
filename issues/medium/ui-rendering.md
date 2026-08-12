@@ -52,13 +52,16 @@ ProjectState observer（[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-w
 > `network_rows` を走らせていたのを `network_has_rows` に置き換え、
 > 割り当てゼロ・走査 1 回にした。行が前回と同一なら `cx.notify()` もしない。
 >
-> **残っているのは MediaBin** — ドラッグ 1 move ごとに 10 回再構築する。
-> 早期 return を入れると `HIGH-07` の既存退行テスト 2 本
-> （`a_completed_save_rebuilds_no_document_panel` /
-> `a_composition_switch_leaves_every_gate_open_for_the_next_edit`）が落ちる。
-> 両テストは「ドキュメント編集ではすべてのミラーパネルが notify する」と
-> 主張しているが、MediaBin についてはその前提の方が誤り（レイヤー編集は
-> media 資産を変えない）。**退行テストを緩める判断が要るので保留。**
+>
+> **MediaBin 側も解決（2026-08-13）**: 前回の未解決分を回収した。
+> `MediaBinGpuiPanel` は直前の `Document` と media-assets の persistent map を
+> 比較し、レイヤーの追加・削除・移動・パラメータ編集のように map を共有する
+> 変更では行モデルを作らずに返る。インポートや削除など map が変わる変更では
+> 行を再構築し、行またはサムネイル入力が変わったときだけ notify する。
+> `a_parameter_drag_sync_counts` の 10 move は `media_bin.rebuild_rows` が
+> 10 → 0、`a_media_asset_change_rebuilds_media_bin_rows` はインポートと削除が
+> それぞれ 1 回である。既存の 2 本の退行テストでは、MediaBin が映すのは
+> media 資産であり `add_layer` はそれを変えない理由を明記して対象から外した。
 
 ---
 

@@ -39,7 +39,14 @@ const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 const MAX_INSTANCE_DEPTH: u32 = 4;
 const DEFAULT_POINT_RADIUS: f32 = 2.0;
 
-/// Fill/stroke style resolved from the node's parameters for one process call.
+/// Fill/stroke style in effect for one element.
+///
+/// It starts as the node's parameters and is narrowed per element by the
+/// `fill` / `stroke_width` / `stroke_color` attributes
+/// ([`element_style`]): attribute > parameter > hard-coded default. An
+/// instance narrows it for everything it expands, so a `scatter` that
+/// modulates `stroke_width` on the Instance domain reaches the source
+/// geometry's paths.
 #[derive(Clone, Copy)]
 struct Style {
     fill: bool,
@@ -48,6 +55,10 @@ struct Style {
     /// input pin when connected, else the `color` parameter (REQ-LAYER-008;
     /// attribute > pin > parameter priority).
     color: Color,
+    /// Stroke color, when something set `stroke_color`. `None` strokes in the
+    /// element's own fill color (`Cd`, else `color`), which is what the
+    /// rasterizer did before the stroke had a color of its own.
+    stroke_color: Option<Color>,
 }
 
 /// Per-element placement accumulated while expanding instances.
@@ -142,6 +153,7 @@ impl NodeProcessor for RasterizeProcessor {
             fill: params.bool_or("fill", true),
             stroke_width: params.f32_or("stroke_width", 0.0),
             color: base_color(params),
+            stroke_color: None,
         };
 
         if let Some(gpu) = &self.gpu {
@@ -193,6 +205,7 @@ struct RasterParams {
 struct DrawItem {
     bounds: [f32; 4],
     color: [f32; 4],
+    stroke_color: [f32; 4],
     data0: [f32; 4],
     data1: [f32; 4],
 }
@@ -303,6 +316,7 @@ impl GpuRasterizer {
         let dummy_items = [DrawItem {
             bounds: [0.0; 4],
             color: [0.0; 4],
+            stroke_color: [0.0; 4],
             data0: [0.0; 4],
             data1: [0.0; 4],
         }];
@@ -456,6 +470,7 @@ fn flatten_geometry(
         let Primitive::Path { verts, closed } = prim else {
             continue;
         };
+        let style = element_style(style, geo.primitive_attrs(), prim_index);
         if verts.len() < 2
             || verts.end > positions.len()
             || (!style.fill && style.stroke_width <= 0.0)
@@ -485,14 +500,12 @@ fn flatten_geometry(
             1.0
         };
         expand_bounds(&mut bounds, padding);
-        let color = tinted(
-            element_color(geo.primitive_attrs(), prim_index, style.color),
-            element_alpha(geo.primitive_attrs(), prim_index),
-            placement.tint,
-        );
+        let (color, stroke_color) =
+            element_colors(style, geo.primitive_attrs(), prim_index, placement.tint);
         items.push(DrawItem {
             bounds,
             color: color_array(color),
+            stroke_color: color_array(stroke_color),
             data0: [
                 1.0,
                 start as f32,
@@ -528,6 +541,8 @@ fn flatten_geometry(
                 center.1 + radius + 1.0,
             ],
             color: color_array(color),
+            // Sprites do not stroke; the shader never reads this slot for them.
+            stroke_color: [0.0; 4],
             data0: [0.0, center.0, center.1, radius],
             data1: [0.0; 4],
         });
@@ -575,7 +590,7 @@ fn flatten_geometry(
             source,
             compose(placement, local),
             depth + 1,
-            style,
+            element_style(style, instances, index),
             vertices,
             items,
         );
@@ -733,11 +748,9 @@ fn raster_paths(
             commands.push(Command::Close);
         }
 
-        let color = tinted(
-            element_color(geo.primitive_attrs(), prim_index, style.color),
-            element_alpha(geo.primitive_attrs(), prim_index),
-            placement.tint,
-        );
+        let style = element_style(style, geo.primitive_attrs(), prim_index);
+        let (color, stroke_color) =
+            element_colors(style, geo.primitive_attrs(), prim_index, placement.tint);
 
         if style.fill && *closed {
             Mask::new(commands.as_slice())
@@ -762,7 +775,7 @@ fn raster_paths(
             // and the round cap extends the same distance past an end point.
             canvas.blend_coverage(
                 coverage_rect((min, max), stroke_width * 0.5 + 1.0, width, height),
-                color,
+                stroke_color,
             );
         }
     }
@@ -812,7 +825,13 @@ fn raster_instances(
         };
         let combined = compose(placement, local);
         let source = select_instance_source(sources, source_indices, i);
-        raster_geometry(source, combined, depth + 1, canvas, style);
+        raster_geometry(
+            source,
+            combined,
+            depth + 1,
+            canvas,
+            element_style(style, inst, i),
+        );
     }
 }
 
@@ -908,24 +927,48 @@ fn base_color(params: &ResolvedParams) -> Color {
     Color::new(r, g, b, a)
 }
 
+fn attr_f32(set: &AttributeSet, name: &str, index: usize) -> Option<f32> {
+    set.get(name)?.as_f32(name).ok()?.get(index).copied()
+}
+
+fn attr_color(set: &AttributeSet, name: &str, index: usize) -> Option<Color> {
+    set.get(name)?.as_color(name).ok()?.get(index).copied()
+}
+
+fn attr_bool(set: &AttributeSet, name: &str, index: usize) -> Option<bool> {
+    set.get(name)?.as_bool(name).ok()?.get(index).copied()
+}
+
 fn element_color(set: &AttributeSet, index: usize, fallback: Color) -> Color {
-    set.get(names::CD)
-        .and_then(|c| {
-            c.as_color(names::CD)
-                .ok()
-                .and_then(|v| v.get(index).copied())
-        })
-        .unwrap_or(fallback)
+    attr_color(set, names::CD, index).unwrap_or(fallback)
 }
 
 fn element_alpha(set: &AttributeSet, index: usize) -> f32 {
-    set.get(names::ALPHA)
-        .and_then(|c| {
-            c.as_f32(names::ALPHA)
-                .ok()
-                .and_then(|v| v.get(index).copied())
-        })
-        .unwrap_or(1.0)
+    attr_f32(set, names::ALPHA, index).unwrap_or(1.0)
+}
+
+/// The style one element draws with: its own `fill` / `stroke_width` /
+/// `stroke_color` attributes, falling back to the style it inherits (the
+/// node's parameters, or an enclosing instance's attributes).
+fn element_style(inherited: Style, set: &AttributeSet, index: usize) -> Style {
+    Style {
+        fill: attr_bool(set, names::FILL, index).unwrap_or(inherited.fill),
+        stroke_width: attr_f32(set, names::STROKE_WIDTH, index).unwrap_or(inherited.stroke_width),
+        color: inherited.color,
+        stroke_color: attr_color(set, names::STROKE_COLOR, index).or(inherited.stroke_color),
+    }
+}
+
+/// The two colors one element draws with: the fill color (`Cd` > the style's
+/// base color) and the stroke color (`stroke_color` > the fill color), both
+/// tinted by the element's `alpha` and the enclosing instances' tint.
+fn element_colors(style: Style, set: &AttributeSet, index: usize, tint: Color) -> (Color, Color) {
+    let alpha = element_alpha(set, index);
+    let fill = tinted(element_color(set, index, style.color), alpha, tint);
+    let stroke = style
+        .stroke_color
+        .map_or(fill, |color| tinted(color, alpha, tint));
+    (fill, stroke)
 }
 
 fn tinted(color: Color, alpha: f32, tint: Color) -> Color {
@@ -1354,6 +1397,147 @@ mod tests {
         assert!(inside[3] < 0.1, "interior not filled: {inside:?}");
     }
 
+    /// Two 8x8 squares side by side: primitive 0 spans (4,4)-(12,12),
+    /// primitive 1 spans (20,4)-(28,12). Per-primitive style attributes
+    /// address them independently.
+    fn two_squares() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(4.0, 4.0),
+            Vec2(12.0, 4.0),
+            Vec2(12.0, 12.0),
+            Vec2(4.0, 12.0),
+            Vec2(20.0, 4.0),
+            Vec2(28.0, 4.0),
+            Vec2(28.0, 12.0),
+            Vec2(20.0, 12.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geo.push_primitive(Primitive::Path {
+            verts: 4..8,
+            closed: true,
+        });
+        geo
+    }
+
+    /// The point of the whole unit: one `rasterize` node, two elements, two
+    /// stroke widths. The parameter is the fallback, not the width.
+    #[test]
+    fn per_element_stroke_width_overrides_the_parameter() {
+        let mut geo = two_squares();
+        geo.primitive_attrs_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![2.0, 6.0]))
+            .unwrap();
+
+        let fb = run(false, 2.0, &geo, 32, 16);
+        assert!(pixel(&fb, 4, 8)[3] > 0.9, "the 2px stroke covers its edge");
+        assert!(
+            pixel(&fb, 2, 8)[3] < 0.1,
+            "the 2px stroke stops 2px short of the edge"
+        );
+        assert!(
+            pixel(&fb, 18, 8)[3] > 0.9,
+            "the 6px stroke reaches 2px outside its edge"
+        );
+        assert!(
+            pixel(&fb, 16, 8)[3] < 0.1,
+            "and no further than half its width"
+        );
+    }
+
+    #[test]
+    fn per_element_fill_attribute_overrides_the_parameter() {
+        let mut geo = two_squares();
+        geo.primitive_attrs_mut()
+            .insert(names::FILL, AttributeArray::Bool(vec![true, false]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 32, 16);
+        assert!(pixel(&fb, 8, 8)[3] > 0.9, "the first square still fills");
+        assert!(
+            pixel(&fb, 24, 8)[3] < 1e-6,
+            "the second one is switched off by its attribute"
+        );
+    }
+
+    #[test]
+    fn fill_and_stroke_take_different_colors() {
+        let mut geo = square_geo(Color::new(1.0, 0.0, 0.0, 1.0));
+        geo.primitive_attrs_mut()
+            .insert(
+                names::STROKE_COLOR,
+                AttributeArray::Color(vec![Color::new(0.0, 0.0, 1.0, 1.0)]),
+            )
+            .unwrap();
+
+        let fb = run(true, 4.0, &geo, 16, 16);
+        let edge = pixel(&fb, 4, 8);
+        assert!(
+            edge[2] > 0.9 && edge[0] < 0.1,
+            "the outline takes stroke_color: {edge:?}"
+        );
+        let inside = pixel(&fb, 8, 8);
+        assert!(
+            inside[0] > 0.9 && inside[2] < 0.1,
+            "the interior keeps Cd: {inside:?}"
+        );
+    }
+
+    /// Without `stroke_color` the outline draws in `Cd`, which is what the
+    /// rasterizer did before the stroke had a color of its own.
+    #[test]
+    fn stroke_without_stroke_color_falls_back_to_cd() {
+        let geo = square_geo(Color::new(0.0, 1.0, 0.0, 1.0));
+
+        let fb = run(false, 4.0, &geo, 16, 16);
+        let edge = pixel(&fb, 4, 8);
+        assert!(
+            edge[1] > 0.9 && edge[0] < 0.1 && edge[2] < 0.1,
+            "the outline is Cd green: {edge:?}"
+        );
+    }
+
+    /// An instance narrows the style for everything it expands, so a
+    /// `scatter` that modulates `stroke_width` on the Instance domain reaches
+    /// the source geometry's paths.
+    #[test]
+    fn instance_style_attributes_reach_the_expanded_source() {
+        let mut source = Geometry::from_points(vec![
+            Vec2(-4.0, -4.0),
+            Vec2(4.0, -4.0),
+            Vec2(4.0, 4.0),
+            Vec2(-4.0, 4.0),
+        ]);
+        source.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+
+        let mut geo = Geometry::new();
+        geo.set_instance_source(Some(Arc::new(source)));
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(8.0, 8.0), Vec2(24.0, 8.0)]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![0.0, 6.0]))
+            .unwrap();
+
+        let fb = run(false, 0.0, &geo, 32, 16);
+        assert!(
+            pixel(&fb, 4, 8)[3] < 1e-6,
+            "the first instance keeps the parameter's zero width"
+        );
+        assert!(
+            pixel(&fb, 18, 8)[3] > 0.9,
+            "the second instance strokes with its own width"
+        );
+    }
+
     #[test]
     fn point_sprite_uses_pscale_cd_alpha() {
         let mut geo = Geometry::from_points(vec![Vec2(8.0, 8.0)]);
@@ -1705,6 +1889,46 @@ mod tests {
         let cpu = run_with_ctx(true, 0.0, &bowtie, &scaled_ctx);
         let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, &scaled_ctx);
         assert_equivalent(&cpu, &gpu_frame, "scaled composition coordinates");
+    }
+
+    /// Per-element style has to hold the CPU/GPU agreement the rest of the
+    /// rasterizer keeps: the two paths draw the fill and the stroke in
+    /// different orders (CPU blends twice, the shader composites once), so a
+    /// second color is exactly where they could drift apart.
+    #[test]
+    fn gpu_matches_cpu_for_per_element_style() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let mut geo = two_squares();
+        geo.primitive_attrs_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(0.9, 0.2, 0.1, 1.0),
+                    Color::new(0.1, 0.8, 0.3, 1.0),
+                ]),
+            )
+            .unwrap();
+        geo.primitive_attrs_mut()
+            .insert(
+                names::STROKE_COLOR,
+                AttributeArray::Color(vec![
+                    Color::new(0.1, 0.3, 1.0, 1.0),
+                    Color::new(1.0, 1.0, 0.2, 0.6),
+                ]),
+            )
+            .unwrap();
+        geo.primitive_attrs_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![2.0, 6.0]))
+            .unwrap();
+        geo.primitive_attrs_mut()
+            .insert(names::FILL, AttributeArray::Bool(vec![true, false]))
+            .unwrap();
+
+        let cpu = run(true, 1.0, &geo, 64, 32);
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 1.0, &ctx(64, 32));
+        assert_equivalent(&cpu, &gpu_frame, "per-element style");
     }
 
     /// A closed smooth blob (fill) plus an open mixed corner/smooth path

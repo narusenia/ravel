@@ -162,6 +162,21 @@ Illustrator 的な「stroke を 2 本重ねて縁取り」は属性 1 名 1 値�
 - `group` 指定で対象外要素が変わらないテスト。
 - 2 回適用で後勝ちになるテスト。
 
+> **`align` パラメータは宣言しなかった（実装時の判断）。** `stroke_align` は
+> 属性の宣言ごと `path-shading-plan.md` の `PSHADE-3` が引き取っており、
+> ここでパラメータだけ出すと単位 1 が避けた「あるのに効かない」状態を
+> 作り直すことになる。`PSHADE-3` が属性・CPU / GPU 実装と同じ単位で足す。
+>
+> **既定ドメインは `primitive`。** `rasterize` が `fill` / `stroke_width` /
+> `stroke_color` を引くのはプリミティブ属性とインスタンス属性で、Detail は
+> 読まない（`domain` の選択肢も `point` / `primitive` / `instance` の 3 つ）。
+>
+> **group 外の要素の扱い**は `attribute_set_in_group`（`geometry/ops.rs`）に
+> 集約した。列があればその値を保ち、無ければ `unset` — `rasterize` の
+> パラメータ既定（`fill` = true、`stroke_width` = 0、色は白）を置く。
+> 密な列に「未設定」は表現できないので、**未設定と同じ絵になる値**を
+> 選ぶのが規約（`procedural-geometry.md` の「要素スコープ（group）」）。
+
 ### 単位 3: ダッシュ・キャップ・ジョイン
 
 - `style.dash`: `pattern` / `offset`。

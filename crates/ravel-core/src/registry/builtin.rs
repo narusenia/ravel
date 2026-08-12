@@ -155,6 +155,8 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(scatter_path_array());
     reg.register(scatter_scatter());
     reg.register(attribute_set());
+    reg.register(style_fill());
+    reg.register(style_stroke());
     reg.register(attribute_promote());
     reg.register(attribute_transfer());
     reg.register(attribute_path_sample());
@@ -271,6 +273,22 @@ fn channel3_parameter(key: &str, x: f32, y: f32, z: f32) -> Parameter {
     }
 }
 
+/// A colour parameter. Declared `Channel4` so Properties draws a colour
+/// swatch and the `.ravprj` migration tells a colour from a `VEC4`
+/// (`docs/dev/add-node.md`).
+fn color_parameter(key: &str, rgba: [f32; 4]) -> Parameter {
+    Parameter {
+        key: key.into(),
+        value: ParameterValue::Channel4(rgba.map(AnimationChannel::constant)),
+    }
+}
+
+/// Domains the style nodes can write their per-element attributes on. Detail
+/// is absent on purpose: `rasterize` resolves `fill` / `stroke_width` /
+/// `stroke_color` per primitive and per instance, so a Detail column would be
+/// written and never read.
+pub const STYLE_DOMAINS: [&str; 3] = ["point", "primitive", "instance"];
+
 /// Attribute types `attribute.set` can write.
 pub const ATTRIBUTE_SET_TYPES: [&str; 8] = [
     "f32", "vec2", "vec3", "vec4", "color", "i32", "bool", "string",
@@ -379,6 +397,40 @@ fn attribute_set() -> NodeTemplate {
         .with_param(string_parameter("string_value", ""))
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("int_value", -1e9..=1e9, -100.0..=100.0)
+}
+
+/// Writes the fill attributes (`fill`, `Cd`) onto the chosen domain.
+///
+/// Style nodes do not rasterize: the picture is still made by `rasterize`
+/// alone, which resolves these attributes per element (attribute > its own
+/// parameter > default). That is what lets `field.apply` modulate the look
+/// between here and there.
+fn style_fill() -> NodeTemplate {
+    NodeTemplate::new("style.fill", "Style Fill", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(Parameter {
+            key: "enabled".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_param(string_parameter("domain", "primitive"))
+        .with_param_options("domain", STYLE_DOMAINS)
+        .with_param(string_parameter("group", ""))
+}
+
+/// Writes the stroke attributes (`stroke_width`, `stroke_color`) onto the
+/// chosen domain. See [`style_fill`] for why this does not draw anything.
+fn style_stroke() -> NodeTemplate {
+    NodeTemplate::new("style.stroke", "Style Stroke", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(float_parameter("width", 1.0))
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_param(string_parameter("domain", "primitive"))
+        .with_param_options("domain", STYLE_DOMAINS)
+        .with_param(string_parameter("group", ""))
+        .with_param_range("width", 0.0..=1000.0, 0.0..=20.0)
 }
 
 fn attribute_promote() -> NodeTemplate {
@@ -1641,14 +1693,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 71);
+        assert_eq!(reg.all_templates().count(), 73);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 19);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 21);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 17);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

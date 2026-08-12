@@ -57,12 +57,12 @@ Geometry
 | `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） |
 | `scale3` | Instance | Vec3 | スケール。**3D のみ** |
 | `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） |
-| `Cd` | Point/Instance | Color | 色 |
+| `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く） |
 | `alpha` | Point/Instance | F32 | 不透明度 |
 | `pscale` | Point | F32 | ポイント描画径 |
-| `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定 |
-| `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定 |
-| `stroke_color` | Primitive/Instance | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック |
+| `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定（`style.fill` が書く） |
+| `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定（`style.stroke` が書く） |
+| `stroke_color` | Primitive/Instance | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く） |
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 |
 | `velocity` | Point | Vec2 | 速度（sim） |
 | `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） |
@@ -367,6 +367,9 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 - 属性名 = その Bool 属性が true の要素のみに作用
 - 対象外の要素は入力の値をそのまま通す（削除しない）
 - 存在しない名前・Bool でない属性は全要素にフォールバックして警告
+- **列そのものが無いときは通す値も無い**ので、属性を書く op は「未設定と
+  同じ意味の値」を group 外へ置く（`style.fill` なら `fill` に `rasterize`
+  のパラメータ既定）。`attribute_set_in_group` の `unset` 引数がそれ
 
 フィールドの `amount` は soft な重み付け、`group` は hard な適用可否で、
 両者は直交する。両方指定した場合は「group 内の要素にのみ amount を適用」。

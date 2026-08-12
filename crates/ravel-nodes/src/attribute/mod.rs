@@ -193,7 +193,7 @@ impl NodeProcessor for CurveUProcessor {
     }
 }
 
-fn geometry_input<'a>(
+pub(crate) fn geometry_input<'a>(
     inputs: &'a [Option<Arc<dyn NodeData>>],
     index: usize,
     processor: &str,
@@ -205,9 +205,10 @@ fn geometry_input<'a>(
         .with_context(|| format!("{processor}: input {index} is not Geometry"))
 }
 
-fn domain_param(params: &ResolvedParams, key: &str, default: Domain) -> Domain {
+pub(crate) fn domain_param(params: &ResolvedParams, key: &str, default: Domain) -> Domain {
     match params.str_or(key, "") {
         "instance" => Domain::Instance,
+        "primitive" => Domain::Primitive,
         "detail" => Domain::Detail,
         "point" => Domain::Point,
         _ => default,

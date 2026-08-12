@@ -1,6 +1,6 @@
 # 実装ロードマップ
 
-> 最終更新: 2026-08-08
+> 最終更新: 2026-08-12
 
 `backlog.md` は全単位のフラットな一覧で、「何があるか」を引くためのもの。
 **この文書は「どの順でやるか、なぜその順か」を決める**。
@@ -917,6 +917,7 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 | `PLUG-1〜4` | `ProcessorRegistry` と WGSL シェーダプラグイン |
 | `GPUBK-5〜8` | ラスタライズ / リードバック / シェーダ変換 / interop |
 | `GPUBK-4`, `GPUBK-9` | 生ハンドルの公開停止（façade の仕上げ）とデバイス共有。`GPUBK-9` は済み（#296）— 契約と受け口を先に固定し、**GPUI 側の配線は `ZC-8` が入れた**（wgpu-backed な Linux / FreeBSD / Windows は起動時にレンダラの context を採用。macOS は wgpu ではなく Metal ネイティブなので `ZC-2` の native interop 側。`architecture.md` の「UI フレームワークのフォーク方針」）。**デバイス喪失からの復帰は未実装**（`HIGH-33`） |
+| `GPULOSS-1〜5` | デバイス喪失・GPUI の device 交換を epoch として評価 worker、TexturePool、Viewer、export、window lifecycle へ伝播する（`gpu-device-loss-recovery-plan.md`）。`GPULOSS-1` は `ZC-8` / `GPUBK-9` 後、以降は順序依存。**実機の device loss は自動テストで完了しない。macOS は GPUI Metal 側の喪失を検出せず、安全側の CPU fallback に留める** |
 | `MED-GPU-07` | wgpu の二重化を解消する。済み（#292）— `GPUBK-9` / `GPUBK-14` が開いた |
 | `GPUBK-14` | **wgpu 直叩きの取り分を測る判断ゲート**。済み（#295）— Metal で測り、`GPUBK-10` を**見送りと判定** |
 | `GPUBK-10` | Metal バックエンド。**❌ 見送り**（バックエンド固有の取り分が 60 fps 予算の 0.1% 未満） |
@@ -925,7 +926,8 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 | `PLUG-5` | WASM ジオメトリノード |
 | `OFX-0〜9` | OFX ホスト（`ofx-host-plan.md`）。`OFX-0` が Windows の GPU 経路を判定するゲート |
 
-**独立したフェーズにして他を止めない**のがこのフェーズの制約。`GPUBK-1〜9` は
+**独立したフェーズにして他を止めない**のがこのフェーズの制約。`GPUBK-1〜9` と
+`GPULOSS-1〜5` は
 バックエンドを 1 つも足さずに完結し、それぞれ単独でマージできる。
 
 `GPUBK-4` が `GPUBK-5〜8` の後に来るのは、生ハンドルを閉じられるのが

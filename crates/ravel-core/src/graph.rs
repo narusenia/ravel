@@ -2054,16 +2054,36 @@ impl<'de> Deserialize<'de> for Graph {
 }
 
 impl PartialEq for Graph {
+    /// Structural equality, short-circuited on pointer identity wherever the
+    /// persistent maps make that possible.
+    ///
+    /// Comparing two graphs the slow way is a full deep compare of every node
+    /// — ports, parameters, whole keyframe curves, `PathPoints` vectors,
+    /// recursive subnets. Structural sharing means an untouched graph (or an
+    /// untouched node inside an edited one) is literally the same allocation
+    /// as before, so three pointer checks stand in front of that work:
+    ///
+    /// 1. [`Graph::ptr_eq`] — the whole graph is the same map root.
+    /// 2. `im::HashMap::ptr_eq` per map, so an edit confined to the edges
+    ///    does not re-walk the nodes.
+    /// 3. `Arc::ptr_eq` per node, so an edit to one node deep-compares one
+    ///    node.
+    ///
+    /// Each is one-directional: `true` proves equality, `false` only means
+    /// "look closer". The result is unchanged, the cost is not.
     fn eq(&self, other: &Self) -> bool {
-        self.nodes.len() == other.nodes.len()
-            && self.edges.len() == other.edges.len()
-            && self.nodes.iter().all(|(k, v)| {
-                other
-                    .nodes
-                    .get(k)
-                    .is_some_and(|ov| v.as_ref() == ov.as_ref())
-            })
-            && self.edges == other.edges
+        if self.ptr_eq(other) {
+            return true;
+        }
+        let nodes_equal = self.nodes.ptr_eq(&other.nodes)
+            || (self.nodes.len() == other.nodes.len()
+                && self.nodes.iter().all(|(k, v)| {
+                    other
+                        .nodes
+                        .get(k)
+                        .is_some_and(|ov| Arc::ptr_eq(v, ov) || v.as_ref() == ov.as_ref())
+                }));
+        nodes_equal && (self.edges.ptr_eq(&other.edges) || self.edges == other.edges)
     }
 }
 

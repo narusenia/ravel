@@ -1979,10 +1979,20 @@ impl Evaluator {
                     if Arc::ptr_eq(comp, old_comp) {
                         continue;
                     }
+                    // Indexed once per composition. Everything below asks
+                    // "where is layer X" per layer — and `Composition`
+                    // answers that with a linear scan, so the ancestor walk
+                    // alone was O(L²·depth) on every document swap.
+                    let old_by_id: HashMap<LayerId, &Layer> =
+                        old_comp.layers.iter().map(|l| (l.id, l)).collect();
+                    let new_parents: HashMap<LayerId, Option<LayerId>> =
+                        comp.layers.iter().map(|l| (l.id, l.parent)).collect();
+                    let old_parents: HashMap<LayerId, Option<LayerId>> =
+                        old_by_id.iter().map(|(id, l)| (*id, l.parent)).collect();
+
                     let mut shell_changed: HashSet<LayerId> = HashSet::new();
                     for layer in &comp.layers {
-                        let Some(old_layer) = old_comp.layers.iter().find(|l| l.id == layer.id)
-                        else {
+                        let Some(old_layer) = old_by_id.get(&layer.id) else {
                             continue;
                         };
                         if layer_shell_changed(layer, old_layer) {
@@ -2006,11 +2016,10 @@ impl Evaluator {
                     // and `world_matrix` then stops at the missing ancestor —
                     // a changed matrix that nothing else would invalidate.
                     for layer in &comp.layers {
-                        let chain: Vec<LayerId> =
-                            comp.ancestors(layer).iter().map(|l| l.id).collect();
-                        let old_chain: Option<Vec<LayerId>> = old_comp
-                            .get_layer(layer.id)
-                            .map(|old| old_comp.ancestors(old).iter().map(|l| l.id).collect());
+                        let chain = ancestor_chain(&new_parents, layer.id);
+                        let old_chain: Option<Vec<LayerId>> = old_by_id
+                            .contains_key(&layer.id)
+                            .then(|| ancestor_chain(&old_parents, layer.id));
                         let stale = shell_changed.contains(&layer.id)
                             || chain.iter().any(|id| shell_changed.contains(id))
                             || old_chain.is_some_and(|old_chain| {
@@ -3025,6 +3034,34 @@ impl EvalScope for Evaluator {
 // ===========================================================================
 // Animated-parameter detection
 // ===========================================================================
+
+/// A layer's ancestor chain, nearest ancestor first, resolved through a
+/// prebuilt `layer id → parent id` map.
+///
+/// Behaviourally identical to [`Composition::ancestors`](crate::composition::Composition::ancestors),
+/// including both of its stopping conditions: a parent that is not in the
+/// composition ends the chain, and a repeated id ends it too, so a corrupt
+/// parent cycle terminates instead of looping. The difference is only that
+/// each hop is a lookup rather than a scan of the layer vector — which is
+/// what makes [`Evaluator::set_document`] linear in the layer count instead
+/// of quadratic.
+fn ancestor_chain(parents: &HashMap<LayerId, Option<LayerId>>, layer: LayerId) -> Vec<LayerId> {
+    let mut chain = Vec::new();
+    let mut seen = vec![layer];
+    let mut current = parents.get(&layer).copied().flatten();
+    while let Some(parent_id) = current {
+        if seen.contains(&parent_id) {
+            break;
+        }
+        let Some(grandparent) = parents.get(&parent_id) else {
+            break;
+        };
+        seen.push(parent_id);
+        chain.push(parent_id);
+        current = *grandparent;
+    }
+    chain
+}
 
 /// Whether evaluation-relevant shell fields changed between two versions of
 /// a layer (used by [`Evaluator::set_document`] cache invalidation).

@@ -174,10 +174,12 @@ Node::new(id, type_key)
 node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
 ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
     PathPoints(Vec<PathPoint>),   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
-    Curve(CurveParam)}            // scalar transfer curve (see `param_curve`)
-    // PathPoints and Curve are appended LAST on purpose: bincode indexes
-    // variants positionally, so a new one may only go at the end, and the
-    // layout change is covered by a JOURNAL_FORMAT_VERSION bump.
+    Curve(CurveParam),            // scalar transfer curve (see `param_curve`)
+    Ramp(RampParam)}              // colour ramp (see `param_ramp`)
+    // PathPoints, Curve and Ramp are appended LAST on purpose: bincode indexes
+    // variants positionally, so a new one may only go at the end. A layout
+    // change that moves an existing variant needs a JOURNAL_FORMAT_VERSION
+    // bump; appending does not, and `Ramp` appears in no stored value yet.
 ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // Geometric vectors are ONE Channel2/Channel3, never a `_x` / `_y` pair of
     // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
@@ -535,6 +537,35 @@ Consumed through `ParameterValue::Curve` (`field.curve_remap` today) and read
 in a processor with `params.curve(key)`. Properties renders it as a
 `PropertyField::Curve` row — a thumbnail that expands
 `widgets::param_curve_editor` inline.
+
+### `param_ramp` — colour ramps
+
+```rust
+RampParam::black_to_white()                 // 0 → black, 1 → white (the default)
+RampParam::linear([(position, Color), ..])  // linear stops, sorted on the way in
+RampParam::new([RampStop, ..], RampInterpolation)
+RampStop::new(position, Color)
+ramp.with_interpolation(RampInterpolation::{Linear, Smooth, Constant})
+ramp.evaluate(position: f32) -> Color
+ramp.stops() / .len() / .interpolation()
+```
+
+The same shape of type as `CurveParam`, and for the same reasons: stops are
+**sorted by position, unique, and finite**, enforced by every constructor and
+by a hand-written `Deserialize` that drops non-finite stops, sorts the rest and
+collapses a repeated position to the **last** one. Outside
+`[first.position, last.position]` the ramp **clamps** to the end colours.
+
+Two differences from a curve. Interpolation is a property of the **whole ramp**
+(a ramp has no tangents), and a ramp is **never empty**: an empty curve is the
+identity, which is a meaningful answer, but an empty ramp has no colour to
+give, so every path that would produce one falls back to `black_to_white()`.
+`Constant` holds the left stop's colour until the next stop, making the ramp a
+set of hard bands.
+
+Consumed through `ParameterValue::Ramp` (`field.ramp` today) and read in a
+processor with `params.ramp(key)`. Properties renders it read-only until the
+gradient editor lands.
 
 ### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
 
@@ -1862,6 +1893,7 @@ Current keys:
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
 | `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Per-element style: `fill` (Bool), `stroke_width` (F32) and `stroke_color` (Color) on the Primitive domain override the node's parameters for one path; the same attributes on the Instance domain override them for everything that instance expands. An unset `stroke_color` strokes in the element's fill color. Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. |
+| `field.ramp` | CPU | the only field that turns a **number into a hue**. Normalizes its source field through `[in_min,in_max]` and looks the result up in a `Ramp` parameter (`stops`), answering an `AttributeArray::Color` — so it drops straight into `field.apply`'s Color targets (`Cd`, `stroke_color`), where a scalar field could only ever produce grey. `in_max == in_min` is a hard step at that value rather than a division by zero; `in_max < in_min` reverses the ramp |
 | `field.noise` / `.falloff` / `.curve_remap` / `.expression` | CPU | emit `FieldValue`. `field.curve_remap`'s `points` is a `Curve` parameter (a `"0:0,1:1"` string before `.ravprj` v6). `field.expression` compiles its `expression` against `Scope::field_context()` when the node is built, never at sample time. It reads any attribute of the domain being sampled (`@P.x`, `@index`, `@N.y`, `@Cd.r`, a user column), bound once per `sample` call because which columns exist is not known while compiling. `@P` comes from the domain's own column at its real width, so `@P.z` is the height of a 3D point cloud, and falls back to the planar positions only when the domain carries no usable `P`. An unbindable reference (unknown name, `Str` column, wrong length, a component the column lacks) reads `0.0` and warns once per sample — except a position component the column lacks, which is zero silently because that is a planar position's actual third coordinate. Only the sampled domain is visible; there is no promotion between domains. **`sample` evaluates once per batch and broadcasts when the expression names no attribute, and once per element only when it does** — so `sin(time)` costs one evaluation for a million elements. The node reports `is_time_dependent()` when its source reads `frame`/`time`, which is what makes a field expression animate: a `FieldValue` is lazy, so without it the node — and every combinator and `field.apply` downstream — caches as `TimeKey::TIMELESS` |
 | `field.attribute` | CPU | emit `FieldValue` reading a column of the sampled domain (`name` / `component` / `normalize` / `default`) |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |

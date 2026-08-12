@@ -555,6 +555,61 @@ fn a_composition_switch_sync_counts(cx: &mut TestAppContext) {
     }
 }
 
+/// `MED-UI-04`: `sync_from_project` no longer deep-compares the `Composition`
+/// to decide whether to run — the document epoch decides, before the call. Both
+/// directions have to hold, so both are asserted here: a notify that leaves the
+/// epoch alone must not reach the sync, and one that moves it must.
+///
+/// A completed save is the notify of the first kind that actually happens (it
+/// moves the window title and nothing else); an added layer is the second.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn the_timeline_syncs_on_a_document_change_and_not_otherwise(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let dir = std::env::temp_dir().join(format!("ravel_rev_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("revision.ravprj");
+    let _ = std::fs::remove_file(&path);
+
+    add_layer(&harness, cx);
+
+    reset_syncs();
+    add_layer(&harness, cx);
+    let counts = sync_counts("one document edit");
+    assert_eq!(
+        count_of(&counts, "timeline.sync_from_project"),
+        1,
+        "a document change must reach the mirror exactly once"
+    );
+
+    let project_before = project_count(&harness, cx);
+    reset_syncs();
+    harness.project.update(cx, |project, cx| {
+        project.save_project_to(path.clone(), None, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        !harness
+            .project
+            .read_with(cx, |project, _| project.is_dirty()),
+        "the save must have completed"
+    );
+    assert!(
+        project_count(&harness, cx) > project_before,
+        "the completed save must notify project observers (window title)"
+    );
+    let counts = sync_counts("completed save");
+    assert_eq!(
+        count_of(&counts, "timeline.sync_from_project"),
+        0,
+        "a notify that left the document alone must not reach the mirror"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
+    let _ = std::fs::remove_dir(&dir);
+}
+
 #[gpui::test]
 fn a_completed_save_rebuilds_no_document_panel(cx: &mut TestAppContext) {
     let harness = open_panels(cx);

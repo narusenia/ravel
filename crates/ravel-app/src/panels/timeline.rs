@@ -783,42 +783,44 @@ impl TimelineGpuiPanel {
         // have) empties the panel instead of leaving a stale composition on
         // screen.
         let comp = super::active_composition_in(project.read(cx).document(), cx).cloned();
-        if self.state.composition() != comp.as_ref() {
-            let old_comp_id = self.state.comp_id();
-            let new_comp_id = comp.as_ref().map(|comp| comp.id);
-            self.state.set_composition(comp);
-            // Drop a keyframe selection whose diamond disappeared (undo or
-            // an external edit) — a stale selection would hijack Delete.
-            self.selected_keyframes.retain(|keyframe| {
-                self.state.layer(keyframe.layer).is_some_and(|layer| {
-                    keyframes::has_keyframe_at(
-                        layer,
-                        &keyframe.row,
-                        keyframe.component,
-                        keyframe.frame,
-                    )
-                })
-            });
-            // Deselect a deleted layer. A changed composition id also
-            // clears: a same-numbered LayerId in the new composition is an
-            // unrelated layer. Clearing the selection drops a Properties
-            // target that pointed at it (`set_layer_selection`); a node
-            // target is never stolen. Value freshness itself needs no
-            // republish — the Properties panel resolves from the document.
-            //
-            // The node editor needs no push here: it observes
-            // `LayerSelection`, and both a composition switch and the clear
-            // below write it (a switch closes the network even with nothing
-            // selected, so the Viewer tools and `CanvasSelection` cannot stay
-            // pointed at a composition the UI no longer shows).
-            // Layers that vanished from the document leave the selection in
-            // `ProjectState::document_changed` (it owns that for every
-            // workspace); what is left here is the composition switch, where a
-            // same-numbered `LayerId` in the new composition is an unrelated
-            // layer.
-            if !super::layer_selection(cx).is_empty() && new_comp_id != old_comp_id {
-                super::clear_layer_selection(cx);
-            }
+        // No deep compare. This used to ask `self.state.composition() != comp`,
+        // which walks every layer and every layer network of both sides on
+        // every `ProjectState` notify — and then repainted anyway
+        // (`MED-UI-04`). Whether anything changed is already decided before the
+        // call: the `ProjectState` observer passes only when
+        // `ProjectState::mirror_epoch` moved, and that epoch is defined as the
+        // generation of what the document-mirroring panels display. The
+        // composition-switch observer is the other caller, and a switch is by
+        // definition a change.
+        let old_comp_id = self.state.comp_id();
+        let new_comp_id = comp.as_ref().map(|comp| comp.id);
+        self.state.set_composition(comp);
+        // Drop a keyframe selection whose diamond disappeared (undo or
+        // an external edit) — a stale selection would hijack Delete.
+        self.selected_keyframes.retain(|keyframe| {
+            self.state.layer(keyframe.layer).is_some_and(|layer| {
+                keyframes::has_keyframe_at(layer, &keyframe.row, keyframe.component, keyframe.frame)
+            })
+        });
+        // Deselect a deleted layer. A changed composition id also
+        // clears: a same-numbered LayerId in the new composition is an
+        // unrelated layer. Clearing the selection drops a Properties
+        // target that pointed at it (`set_layer_selection`); a node
+        // target is never stolen. Value freshness itself needs no
+        // republish — the Properties panel resolves from the document.
+        //
+        // The node editor needs no push here: it observes
+        // `LayerSelection`, and both a composition switch and the clear
+        // below write it (a switch closes the network even with nothing
+        // selected, so the Viewer tools and `CanvasSelection` cannot stay
+        // pointed at a composition the UI no longer shows).
+        // Layers that vanished from the document leave the selection in
+        // `ProjectState::document_changed` (it owns that for every
+        // workspace); what is left here is the composition switch, where a
+        // same-numbered `LayerId` in the new composition is an unrelated
+        // layer.
+        if !super::layer_selection(cx).is_empty() && new_comp_id != old_comp_id {
+            super::clear_layer_selection(cx);
         }
         // Every document change reaches here (edit, undo, redo, composition
         // switch), so this is where the inline value scrubs follow the values

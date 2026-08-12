@@ -232,6 +232,42 @@ fn close_button_drops_the_window_from_shell_and_registry(cx: &mut TestAppContext
     assert!(!visible, "a closed detached window destroys its instances");
 }
 
+/// A detached host publishes its active panel, and closing it removes only
+/// that window's contribution from the shared visible set.
+#[gpui::test]
+fn visible_panels_follow_detached_window_lifecycle(cx: &mut TestAppContext) {
+    let main = open_workspace(cx);
+    let viewer = instance_of(PanelKind::Viewer, cx).expect("the Viewer is docked");
+    let visible_before = cx.update(|cx| cx.global::<panels::VisiblePanels>().0.clone());
+    assert!(visible_before.contains(&viewer));
+
+    let (_detached_id, detached) = detach_viewer(cx, main);
+    let visible_while_detached = cx.update(|cx| cx.global::<panels::VisiblePanels>().0.clone());
+    assert!(
+        visible_while_detached.contains(&viewer),
+        "the detached host must publish its active panel"
+    );
+    for id in visible_before.iter().copied().filter(|id| *id != viewer) {
+        assert!(
+            visible_while_detached.contains(&id),
+            "detaching one panel must preserve the other window's visible panels"
+        );
+    }
+
+    let mut detached_cx = VisualTestContext::from_window(detached, cx);
+    assert!(detached_cx.simulate_close());
+    cx.run_until_parked();
+
+    let visible_after_close = cx.update(|cx| cx.global::<panels::VisiblePanels>().0.clone());
+    assert!(!visible_after_close.contains(&viewer));
+    for id in visible_before.iter().copied().filter(|id| *id != viewer) {
+        assert!(
+            visible_after_close.contains(&id),
+            "closing one window must preserve the other window's visible panels"
+        );
+    }
+}
+
 /// A close the model already decided (reattach) must not double-apply: the
 /// handle is gone before the platform close, so the close handler is a no-op
 /// and the layout keeps the absorbed instances.

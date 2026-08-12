@@ -19,7 +19,7 @@ use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::composition::compile::compile_composition;
 use ravel_core::composition::{BlendMode, Composition, Document, Layer as CompositionLayer};
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor, ProcessorRegistry as _};
-use ravel_core::geometry::{AttributeArray, Geometry};
+use ravel_core::geometry::{AttributeArray, Domain, Geometry, TransferMode, attribute_transfer};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{
     CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
@@ -2101,6 +2101,63 @@ fn main() -> anyhow::Result<()> {
             timings.drain(),
             before.delta(&transfer_stats()),
         );
+    }
+
+    // -- Scenario (i): 10k -> 10k attribute transfer (MED-CORE-05) ---------
+    // Both transfer modes at the scale the issue names. Pure CPU geometry
+    // work: no GPU, no evaluator, just the op.
+    {
+        const SIDE: usize = 100;
+        let mut points = Vec::with_capacity(SIDE * SIDE);
+        let mut values = Vec::with_capacity(SIDE * SIDE);
+        for x in 0..SIDE {
+            for y in 0..SIDE {
+                points.push(Vec2(x as f32, y as f32));
+                values.push(x as f32 + y as f32);
+            }
+        }
+        let mut source = Geometry::from_points(points);
+        source
+            .points_mut()
+            .insert("value", AttributeArray::F32(values))?;
+        // Targets offset off the source lattice so nothing is an exact hit.
+        let targets: Vec<Vec2> = (0..SIDE * SIDE)
+            .map(|i| {
+                let x = (i % SIDE) as f32 + 0.37;
+                let y = (i / SIDE) as f32 + 0.61;
+                Vec2(x, y)
+            })
+            .collect();
+        let target = Geometry::from_points(targets);
+        println!(
+            "\n## (i) attribute transfer, {} source -> {} target points",
+            SIDE * SIDE,
+            SIDE * SIDE
+        );
+
+        for (label, mode) in [
+            ("nearest", TransferMode::Nearest),
+            ("distance_weighted", TransferMode::DistanceWeighted),
+        ] {
+            let before = transfer_stats();
+            let samples = run_scenario(5, |_| {
+                attribute_transfer(
+                    &target,
+                    Domain::Point,
+                    &source,
+                    Domain::Point,
+                    "value",
+                    mode,
+                )
+                .unwrap();
+            });
+            report(
+                &format!("(i) attribute transfer — {label}"),
+                &wall_stats(&samples),
+                timings.drain(),
+                before.delta(&transfer_stats()),
+            );
+        }
     }
 
     Ok(())

@@ -128,15 +128,20 @@ pub fn attribute_transfer(
     if source_positions.is_empty() || target_positions.is_empty() {
         return Err(GeometryOpError::EmptyDomain);
     }
+    // One grid for the whole call, or none at all when a linear scan is
+    // already cheaper than building one.
+    let grid = PointGrid::build(source_positions);
     let column = match mode {
         TransferMode::Nearest => {
-            let indices = target_positions
-                .iter()
-                .map(|target| nearest_index(source_positions, *target));
+            let indices = target_positions.iter().map(|target| match &grid {
+                Some(grid) => grid.nearest(source_positions, *target),
+                None => nearest_index(source_positions, *target),
+            });
             select_values(source_values, indices)
         }
         TransferMode::DistanceWeighted => {
-            transfer_weighted(source_values, source_positions, target_positions)?
+            let weights = SparseWeights::of(source_positions, target_positions, grid.as_ref());
+            transfer_weighted(source_values, &weights)?
         }
     };
     let mut result = target.clone();
@@ -413,89 +418,81 @@ fn reduce_components(
     output
 }
 
+/// Blend `source` into one value per target using precomputed weights.
+///
+/// Each arm folds over the target's own neighbour list rather than the whole
+/// source column, so the work is `target_count × stride` instead of
+/// `target_count × source_count`.
 fn transfer_weighted(
     source: &AttributeArray,
-    source_positions: &[Vec3],
-    target_positions: &[Vec3],
+    weights: &SparseWeights,
 ) -> Result<AttributeArray, GeometryOpError> {
-    let weights = || {
-        target_positions
-            .iter()
-            .map(|target| normalized_weights(source_positions, *target))
-    };
+    let targets = 0..weights.target_count();
+    /// Folds every target's neighbours into an accumulated value.
+    macro_rules! blend {
+        ($values:expr, $variant:ident, $zero:expr, $add:expr) => {
+            AttributeArray::$variant(
+                targets
+                    .map(|target| {
+                        weights
+                            .weights_of(target)
+                            .iter()
+                            .fold($zero, |sum, (index, weight)| {
+                                #[allow(clippy::redundant_closure_call)]
+                                $add(sum, *weight, &$values[*index])
+                            })
+                    })
+                    .collect(),
+            )
+        };
+    }
     Ok(match source {
-        AttributeArray::F32(values) => AttributeArray::F32(
-            weights()
-                .map(|weights| weights.iter().zip(values).map(|(w, v)| w * v).sum())
-                .collect(),
+        AttributeArray::F32(values) => {
+            blend!(values, F32, 0.0f32, |sum: f32, w: f32, v: &f32| sum + w * v)
+        }
+        AttributeArray::Vec2(values) => blend!(
+            values,
+            Vec2,
+            Vec2(0.0, 0.0),
+            |sum: Vec2, w: f32, v: &Vec2| Vec2(sum.0 + w * v.0, sum.1 + w * v.1)
         ),
-        AttributeArray::Vec2(values) => AttributeArray::Vec2(
-            weights()
-                .map(|weights| {
-                    weights
-                        .iter()
-                        .zip(values)
-                        .fold(Vec2(0.0, 0.0), |sum, (w, value)| {
-                            Vec2(sum.0 + w * value.0, sum.1 + w * value.1)
-                        })
-                })
-                .collect(),
+        AttributeArray::Vec3(values) => blend!(
+            values,
+            Vec3,
+            Vec3(0.0, 0.0, 0.0),
+            |sum: Vec3, w: f32, v: &Vec3| Vec3(sum.0 + w * v.0, sum.1 + w * v.1, sum.2 + w * v.2)
         ),
-        AttributeArray::Vec3(values) => AttributeArray::Vec3(
-            weights()
-                .map(|weights| {
-                    weights
-                        .iter()
-                        .zip(values)
-                        .fold(Vec3(0.0, 0.0, 0.0), |sum, (w, value)| {
-                            Vec3(
-                                sum.0 + w * value.0,
-                                sum.1 + w * value.1,
-                                sum.2 + w * value.2,
-                            )
-                        })
-                })
-                .collect(),
+        AttributeArray::Vec4(values) => blend!(
+            values,
+            Vec4,
+            Vec4(0.0, 0.0, 0.0, 0.0),
+            |sum: Vec4, w: f32, v: &Vec4| Vec4(
+                sum.0 + w * v.0,
+                sum.1 + w * v.1,
+                sum.2 + w * v.2,
+                sum.3 + w * v.3
+            )
         ),
-        AttributeArray::Vec4(values) => AttributeArray::Vec4(
-            weights()
-                .map(|weights| {
-                    weights
-                        .iter()
-                        .zip(values)
-                        .fold(Vec4(0.0, 0.0, 0.0, 0.0), |sum, (w, value)| {
-                            Vec4(
-                                sum.0 + w * value.0,
-                                sum.1 + w * value.1,
-                                sum.2 + w * value.2,
-                                sum.3 + w * value.3,
-                            )
-                        })
-                })
-                .collect(),
+        AttributeArray::Color(values) => blend!(
+            values,
+            Color,
+            Color::TRANSPARENT,
+            |sum: Color, w: f32, v: &Color| Color {
+                r: sum.r + w * v.r,
+                g: sum.g + w * v.g,
+                b: sum.b + w * v.b,
+                a: sum.a + w * v.a,
+            }
         ),
-        AttributeArray::Color(values) => AttributeArray::Color(
-            weights()
-                .map(|weights| {
-                    weights
-                        .iter()
-                        .zip(values)
-                        .fold(Color::TRANSPARENT, |sum, (w, value)| Color {
-                            r: sum.r + w * value.r,
-                            g: sum.g + w * value.g,
-                            b: sum.b + w * value.b,
-                            a: sum.a + w * value.a,
-                        })
-                })
-                .collect(),
-        ),
+        // Rounded once at the end, as before: accumulating in f32 and
+        // rounding per target is what the exhaustive version did.
         AttributeArray::I32(values) => AttributeArray::I32(
-            weights()
-                .map(|weights| {
+            targets
+                .map(|target| {
                     weights
+                        .weights_of(target)
                         .iter()
-                        .zip(values)
-                        .map(|(weight, value)| weight * *value as f32)
+                        .map(|(index, weight)| weight * values[*index] as f32)
                         .sum::<f32>()
                         .round() as i32
                 })
@@ -534,6 +531,321 @@ fn select_values(source: &AttributeArray, indices: impl Iterator<Item = usize>) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Spatial partition for attribute transfer (MED-CORE-05)
+// ---------------------------------------------------------------------------
+
+/// Source-point count below which a linear scan beats building a grid.
+///
+/// Small transfers are the common case in tests and simple graphs, and they
+/// keep the exact arithmetic they always had: below this the grid is never
+/// built and every code path here is the original one.
+const GRID_MIN_POINTS: usize = 64;
+
+/// How many nearest source points a [`TransferMode::DistanceWeighted`]
+/// transfer blends.
+///
+/// Inverse-distance weighting over *every* source point is O(source × target)
+/// and visually indistinguishable from a truncated kernel: the 1/d weights of
+/// distant points are tiny before normalisation and negligible after it.
+/// Houdini's attribute transfer truncates the same way.
+///
+/// **Not a parameter.** The `attribute.transfer` node exposes `mode` and
+/// nothing else (`crates/ravel-nodes/src/attribute/mod.rs`), so making the
+/// neighbour count adjustable is a node signature change and belongs with
+/// whoever adds the control. Until then the constant is the contract, and it
+/// is chosen so that it only ever engages on inputs big enough for the
+/// difference to be invisible: a transfer whose source has at most this many
+/// points blends **all** of them, exactly as before.
+const DISTANCE_WEIGHTED_NEIGHBOURS: usize = 8;
+
+/// A uniform grid over the source positions of one transfer.
+///
+/// Deliberately local to this file rather than a general `geometry` facility:
+/// attribute transfer is the only op that needs a spatial index today, and
+/// the right shape for a shared one is not yet knowable from a single caller.
+/// Promote it when a second op asks.
+///
+/// Queries are **exact** — the ring search below only stops once the grid
+/// geometry proves no unscanned cell can hold anything closer — so
+/// [`TransferMode::Nearest`] returns precisely what the linear scan returned,
+/// ties included.
+struct PointGrid {
+    min: Vec3,
+    /// Edge length of a cell, strictly positive.
+    cell: f32,
+    /// Cells along x, y, z.
+    dims: [usize; 3],
+    /// Cell index → the source point indices that fall in it.
+    cells: Vec<Vec<u32>>,
+}
+
+impl PointGrid {
+    /// Index `points`, or `None` when a linear scan is the better answer
+    /// (too few points, or an extent of zero on every axis).
+    fn build(points: &[Vec3]) -> Option<Self> {
+        if points.len() < GRID_MIN_POINTS {
+            return None;
+        }
+        let mut min = points[0];
+        let mut max = points[0];
+        for p in points {
+            min = Vec3(min.0.min(p.0), min.1.min(p.1), min.2.min(p.2));
+            max = Vec3(max.0.max(p.0), max.1.max(p.1), max.2.max(p.2));
+        }
+        let extent = [max.0 - min.0, max.1 - min.1, max.2 - min.2];
+        if !extent.iter().all(|e| e.is_finite()) {
+            return None;
+        }
+        // Size the cells off the *occupied* axes only: planar geometry (the
+        // usual case) would otherwise get a cube grid whose z dimension is
+        // one cell thick and whose x/y cells are far too coarse.
+        let spread = extent.iter().filter(|e| **e > 0.0).count();
+        if spread == 0 {
+            return None; // every point coincides
+        }
+        let per_axis = (points.len() as f64)
+            .powf(1.0 / spread as f64)
+            .ceil()
+            .max(1.0);
+        let longest = extent.iter().cloned().fold(0.0f32, f32::max);
+        let cell = (longest / per_axis as f32).max(f32::MIN_POSITIVE);
+        let dims = [0, 1, 2].map(|axis| {
+            if extent[axis] > 0.0 {
+                ((extent[axis] / cell).ceil() as usize + 1).max(1)
+            } else {
+                1
+            }
+        });
+        let total = dims[0].checked_mul(dims[1])?.checked_mul(dims[2])?;
+        // A grid far larger than the point count buys nothing and costs
+        // memory; fall back rather than allocate it.
+        if total > points.len().saturating_mul(4) + 64 {
+            return None;
+        }
+        let mut grid = Self {
+            min,
+            cell,
+            dims,
+            cells: vec![Vec::new(); total],
+        };
+        for (index, point) in points.iter().enumerate() {
+            let coord = grid.coord_of(*point);
+            let flat = grid.flatten(coord);
+            grid.cells[flat].push(index as u32);
+        }
+        Some(grid)
+    }
+
+    /// Grid coordinate holding `point`, clamped into the grid.
+    fn coord_of(&self, point: Vec3) -> [usize; 3] {
+        let raw = [
+            point.0 - self.min.0,
+            point.1 - self.min.1,
+            point.2 - self.min.2,
+        ];
+        [0, 1, 2].map(|axis| {
+            let index = (raw[axis] / self.cell).floor();
+            if index < 0.0 {
+                0
+            } else {
+                (index as usize).min(self.dims[axis] - 1)
+            }
+        })
+    }
+
+    fn flatten(&self, coord: [usize; 3]) -> usize {
+        (coord[2] * self.dims[1] + coord[1]) * self.dims[0] + coord[0]
+    }
+
+    /// The largest ring index that can still contain an unscanned cell.
+    fn max_ring(&self, centre: [usize; 3]) -> usize {
+        (0..3)
+            .map(|axis| centre[axis].max(self.dims[axis] - 1 - centre[axis]))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Visit every cell at Chebyshev ring exactly `ring` around `centre`.
+    fn for_each_in_ring(&self, centre: [usize; 3], ring: usize, mut visit: impl FnMut(&[u32])) {
+        let bounds = |axis: usize| {
+            let low = centre[axis].saturating_sub(ring);
+            let high = (centre[axis] + ring).min(self.dims[axis] - 1);
+            low..=high
+        };
+        for z in bounds(2) {
+            for y in bounds(1) {
+                for x in bounds(0) {
+                    // Only the shell: an interior cell was scanned already.
+                    let on_shell = [x, y, z]
+                        .iter()
+                        .enumerate()
+                        .any(|(axis, v)| v.abs_diff(centre[axis]) == ring);
+                    if !on_shell {
+                        continue;
+                    }
+                    visit(&self.cells[self.flatten([x, y, z])]);
+                }
+            }
+        }
+    }
+
+    /// Index of the point nearest `target`, matching the linear scan's tie
+    /// rule (lowest index wins).
+    fn nearest(&self, points: &[Vec3], target: Vec3) -> usize {
+        let centre = self.coord_of(target);
+        let max_ring = self.max_ring(centre);
+        let mut best: Option<(f32, usize)> = None;
+        for ring in 0..=max_ring {
+            self.for_each_in_ring(centre, ring, |bucket| {
+                for index in bucket {
+                    let index = *index as usize;
+                    let distance = distance_squared(points[index], target);
+                    let better = match best {
+                        None => true,
+                        Some((best_distance, best_index)) => {
+                            distance < best_distance
+                                || (distance == best_distance && index < best_index)
+                        }
+                    };
+                    if better {
+                        best = Some((distance, index));
+                    }
+                }
+            });
+            // Anything still unscanned sits at least `ring * cell` away, so a
+            // best already inside that radius cannot be beaten.
+            if let Some((best_distance, _)) = best {
+                let reach = ring as f32 * self.cell;
+                if best_distance <= reach * reach {
+                    break;
+                }
+            }
+        }
+        // SAFETY of expect: the grid holds every point and the caller
+        // guarantees at least one.
+        best.expect("a non-empty grid always yields a nearest point")
+            .1
+    }
+
+    /// The `k` nearest points to `target`, as `(index, squared distance)`
+    /// sorted by **index** so the weights that follow are summed in the same
+    /// order the exhaustive version used.
+    fn k_nearest(&self, points: &[Vec3], target: Vec3, k: usize, out: &mut Vec<(usize, f32)>) {
+        out.clear();
+        let centre = self.coord_of(target);
+        let max_ring = self.max_ring(centre);
+        // Kept sorted by distance while it fills, so the worst of the k is
+        // always last and the stopping test is a peek.
+        let mut best: Vec<(usize, f32)> = Vec::with_capacity(k + 1);
+        for ring in 0..=max_ring {
+            self.for_each_in_ring(centre, ring, |bucket| {
+                for index in bucket {
+                    let index = *index as usize;
+                    let distance = distance_squared(points[index], target);
+                    if best.len() == k
+                        && let Some((_, worst)) = best.last()
+                        && distance >= *worst
+                    {
+                        continue;
+                    }
+                    let at = best.partition_point(|(_, d)| *d <= distance);
+                    best.insert(at, (index, distance));
+                    best.truncate(k);
+                }
+            });
+            if best.len() == k
+                && let Some((_, worst)) = best.last()
+            {
+                let reach = ring as f32 * self.cell;
+                if *worst <= reach * reach {
+                    break;
+                }
+            }
+        }
+        best.sort_unstable_by_key(|(index, _)| *index);
+        out.extend_from_slice(&best);
+    }
+}
+
+/// Per-target blending weights, `stride` of them each, in one flat buffer.
+///
+/// The exhaustive version allocated a `Vec<f32>` of `source_count` per target
+/// point — ten thousand allocations for a 10k → 10k transfer, every frame the
+/// upstream moves. One buffer of `target_count × stride` replaces all of it.
+struct SparseWeights {
+    /// `(source index, normalised weight)`, `stride` entries per target.
+    entries: Vec<(usize, f32)>,
+    stride: usize,
+}
+
+impl SparseWeights {
+    /// Weight every target against its neighbourhood of source points.
+    ///
+    /// With no grid (small inputs) every source point is a neighbour and the
+    /// arithmetic is exactly the exhaustive one, index order included.
+    fn of(source: &[Vec3], targets: &[Vec3], grid: Option<&PointGrid>) -> Self {
+        let stride = match grid {
+            Some(_) => DISTANCE_WEIGHTED_NEIGHBOURS.min(source.len()),
+            None => source.len(),
+        };
+        let mut entries = Vec::with_capacity(targets.len() * stride);
+        let mut neighbours: Vec<(usize, f32)> = Vec::with_capacity(stride);
+        for target in targets {
+            match grid {
+                Some(grid) => grid.k_nearest(source, *target, stride, &mut neighbours),
+                None => {
+                    neighbours.clear();
+                    neighbours.extend(
+                        source
+                            .iter()
+                            .enumerate()
+                            .map(|(index, point)| (index, distance_squared(*point, *target))),
+                    );
+                }
+            }
+            normalize_into(&mut neighbours);
+            entries.extend_from_slice(&neighbours);
+        }
+        Self { entries, stride }
+    }
+
+    /// The weights blending into target `index`.
+    fn weights_of(&self, index: usize) -> &[(usize, f32)] {
+        &self.entries[index * self.stride..(index + 1) * self.stride]
+    }
+
+    fn target_count(&self) -> usize {
+        self.entries.len().checked_div(self.stride).unwrap_or(0)
+    }
+}
+
+/// Turn `(index, squared distance)` pairs into normalised inverse-distance
+/// weights, in place.
+///
+/// Mirrors the exhaustive `normalized_weights`: a point sitting on the target
+/// takes the whole weight (the first such point in index order), otherwise
+/// the weights are `1/d` scaled to sum to one — summed in the order given,
+/// which the callers keep as index order.
+fn normalize_into(neighbours: &mut [(usize, f32)]) {
+    if let Some(hit) = neighbours
+        .iter()
+        .position(|(_, distance)| *distance <= f32::EPSILON)
+    {
+        for (position, (_, weight)) in neighbours.iter_mut().enumerate() {
+            *weight = if position == hit { 1.0 } else { 0.0 };
+        }
+        return;
+    }
+    for (_, weight) in neighbours.iter_mut() {
+        *weight = 1.0 / weight.sqrt();
+    }
+    let total: f32 = neighbours.iter().map(|(_, weight)| *weight).sum();
+    for (_, weight) in neighbours.iter_mut() {
+        *weight /= total;
+    }
+}
+
 fn nearest_index(points: &[Vec3], target: Vec3) -> usize {
     points
         .iter()
@@ -542,26 +854,6 @@ fn nearest_index(points: &[Vec3], target: Vec3) -> usize {
             distance_squared(**left, target).total_cmp(&distance_squared(**right, target))
         })
         .map_or(0, |(index, _)| index)
-}
-
-fn normalized_weights(points: &[Vec3], target: Vec3) -> Vec<f32> {
-    if let Some(index) = points
-        .iter()
-        .position(|point| distance_squared(*point, target) <= f32::EPSILON)
-    {
-        let mut weights = vec![0.0; points.len()];
-        weights[index] = 1.0;
-        return weights;
-    }
-    let mut weights = points
-        .iter()
-        .map(|point| 1.0 / distance_squared(*point, target).sqrt())
-        .collect::<Vec<_>>();
-    let total = weights.iter().sum::<f32>();
-    for weight in &mut weights {
-        *weight /= total;
-    }
-    weights
 }
 
 /// Squared distance in three components. `z = 0` on both sides contributes an
@@ -929,6 +1221,122 @@ mod tests {
             nearest.points().get(names::P).unwrap().attr_type(),
             AttributeType::Vec3,
             "the target keeps its own dimension"
+        );
+    }
+
+    /// A field of source points large enough to build a grid, plus the
+    /// targets used to probe it. `20 x 20` clears [`GRID_MIN_POINTS`], and
+    /// the value is a smooth linear field so an interpolation error is
+    /// readable as a distance.
+    #[cfg(test)]
+    fn gridded_field() -> (Geometry, Geometry, Vec<Vec2>, Vec<f32>) {
+        let mut points = Vec::new();
+        let mut values = Vec::new();
+        for x in 0..20 {
+            for y in 0..20 {
+                points.push(Vec2(x as f32, y as f32));
+                values.push(x as f32 + y as f32);
+            }
+        }
+        let mut source = Geometry::from_points(points.clone());
+        source
+            .points_mut()
+            .insert("value", AttributeArray::F32(values.clone()))
+            .unwrap();
+        // Deterministic probe positions scattered across the field.
+        let probes: Vec<Vec2> = (0..50)
+            .map(|k| Vec2((k as f32 * 7.3) % 19.0, (k as f32 * 3.1) % 19.0))
+            .collect();
+        (
+            source,
+            Geometry::from_points(probes.clone()),
+            probes,
+            values,
+        )
+    }
+
+    /// The grid is an acceleration structure, not an approximation: on an
+    /// input big enough to build one, `Nearest` must return exactly what the
+    /// exhaustive scan returns — the same index, ties included.
+    #[test]
+    fn gridded_nearest_transfer_matches_the_exhaustive_scan() {
+        let (source, target, probes, values) = gridded_field();
+        assert!(
+            source.point_count() >= GRID_MIN_POINTS,
+            "this test is pointless unless a grid is actually built"
+        );
+        let got = attribute_transfer(
+            &target,
+            Domain::Point,
+            &source,
+            Domain::Point,
+            "value",
+            TransferMode::Nearest,
+        )
+        .unwrap();
+        let got = got.points().get("value").unwrap().as_f32("value").unwrap();
+
+        let source_points: Vec<Vec3> = positions(&source, Domain::Point).unwrap().iter3().collect();
+        for (probe, actual) in probes.iter().zip(got) {
+            let expected = values[nearest_index(&source_points, Vec3(probe.0, probe.1, 0.0))];
+            assert_eq!(*actual, expected, "grid disagreed with the linear scan");
+        }
+    }
+
+    /// What truncating the inverse-distance kernel costs, measured against
+    /// the field the transfer is sampling.
+    ///
+    /// Blending only the nearest [`DISTANCE_WEIGHTED_NEIGHBOURS`] source
+    /// points does not merely stay acceptable — it is *substantially more
+    /// faithful* than blending all 400. Weighting every point by `1/d` drags
+    /// each result toward the global mean, which on this linear field is an
+    /// error of nearly ten units; the truncated kernel tracks the field to
+    /// within half a unit of grid spacing.
+    #[test]
+    fn truncated_distance_weighting_tracks_the_field_better_than_blending_everything() {
+        let (source, target, probes, values) = gridded_field();
+        let got = attribute_transfer(
+            &target,
+            Domain::Point,
+            &source,
+            Domain::Point,
+            "value",
+            TransferMode::DistanceWeighted,
+        )
+        .unwrap();
+        let got = got.points().get("value").unwrap().as_f32("value").unwrap();
+
+        let source_points: Vec<Vec2> = positions(&source, Domain::Point)
+            .unwrap()
+            .iter3()
+            .map(|p| Vec2(p.0, p.1))
+            .collect();
+        let mut worst_truncated = 0.0f32;
+        let mut worst_exhaustive = 0.0f32;
+        for (probe, actual) in probes.iter().zip(got) {
+            // The pre-truncation reference: every source point, weighted 1/d.
+            let mut weights: Vec<f32> = source_points
+                .iter()
+                .map(|p| 1.0 / planar_distance_squared(*p, *probe).sqrt())
+                .collect();
+            let total: f32 = weights.iter().sum();
+            for weight in &mut weights {
+                *weight /= total;
+            }
+            let exhaustive: f32 = weights.iter().zip(&values).map(|(w, v)| w * v).sum();
+
+            let truth = probe.0 + probe.1;
+            worst_truncated = worst_truncated.max((actual - truth).abs());
+            worst_exhaustive = worst_exhaustive.max((exhaustive - truth).abs());
+        }
+        assert!(
+            worst_truncated < 0.5,
+            "truncated transfer drifted from the field by {worst_truncated}"
+        );
+        assert!(
+            worst_truncated < worst_exhaustive,
+            "truncation ({worst_truncated}) should beat blending everything \
+             ({worst_exhaustive})"
         );
     }
 }

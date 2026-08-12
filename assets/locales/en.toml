@@ -813,6 +813,15 @@ pivot = "Transform origin when use_centroid is off."
 label = "Geometry Merge"
 description = "Combines two geometries into one."
 
+[node."geometry.connect"]
+label = "Connect"
+description = "Runs a path through the points without adding any. The primitives of the input are replaced."
+[node."geometry.connect".params]
+mode = "Which points to connect and in what order: index order, a nearest-neighbour chain, or the members of a group."
+group = "Name of the boolean point attribute the group mode connects."
+interpolation = "Straight segments, or bezier tangents estimated from the neighbouring points."
+closed = "Close the path."
+
 [node."scene.add"]
 label = "Scene Add"
 description = "Places a geometry or another scene into a 3D scene with a transform."

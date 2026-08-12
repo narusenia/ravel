@@ -205,6 +205,248 @@ pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, Geo
     })
 }
 
+/// Which points [`connect`] runs a path through, and in what order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectMode<'a> {
+    /// Every point, in storage order — which is `index` order, since every
+    /// operation that moves points carries `index` along with them.
+    Order,
+    /// Every point, as a greedy nearest-neighbour chain starting at the first.
+    Nearest,
+    /// Only the points whose named `Bool` column is true, in storage order.
+    Group(&'a str),
+}
+
+/// Whether [`connect`] leaves the new path straight or curves it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectInterpolation {
+    /// Straight segments. The tangent columns are left exactly as they came
+    /// in — a path drawn with the pen tool keeps its own curvature.
+    Linear,
+    /// Catmull-Rom tangents written to `in_tan` / `out_tan`, which is what
+    /// `rasterize` flattens into a curve.
+    Bezier,
+}
+
+/// How many neighbours the grid is asked for before [`ConnectMode::Nearest`]
+/// falls back to a scan. Small: the chain only needs the closest *unvisited*
+/// point, and past the first few candidates a full scan is the honest answer.
+const NEAREST_CHAIN_NEIGHBOURS: usize = 8;
+
+/// Runs one path through the points, adding connectivity without adding
+/// points.
+///
+/// A path primitive spans a **contiguous** run of point indices, so the points
+/// are permuted into the order the path visits them (`ConnectMode::Order`
+/// permutes nothing). Every attribute column travels with its point, `index`
+/// included — a connected point keeps the `index` it was created with rather
+/// than being renumbered into its new slot.
+///
+/// The primitives the input carried are **replaced**, not added to: this is
+/// the node that decides the connectivity, and Houdini's Add SOP keeps the
+/// points and drops the geometry for the same reason. Instances, instance
+/// sources and detail attributes pass through untouched.
+///
+/// Fewer than two points to connect — an empty input, a single point, a group
+/// nobody is in — is a no-op that returns the input unchanged rather than an
+/// error, because it is a normal frame of an animated point count.
+pub fn connect(
+    geometry: &Geometry,
+    mode: ConnectMode<'_>,
+    interpolation: ConnectInterpolation,
+    closed: bool,
+) -> Result<Geometry, GeometryOpError> {
+    if geometry.point_count() < 2 {
+        return Ok(geometry.clone());
+    }
+    let points = positions(geometry, Domain::Point)?.require_planar("geometry.connect")?;
+    // Replacing the primitives would silently drop a mesh's triangles, and
+    // the tangents below are planar. Both are explicit errors instead.
+    geometry.require_paths("geometry.connect")?;
+    let (order, connected) = match mode {
+        ConnectMode::Order => ((0..points.len()).collect(), points.len()),
+        ConnectMode::Nearest => (nearest_chain(points), points.len()),
+        ConnectMode::Group(name) => group_first_order(geometry, name)?,
+    };
+    if connected < 2 {
+        return Ok(geometry.clone());
+    }
+
+    let mut result = reordered(geometry, &order)?;
+    if interpolation == ConnectInterpolation::Bezier {
+        let path: Vec<Vec2> = order[..connected]
+            .iter()
+            .map(|index| points[*index])
+            .collect();
+        let (mut in_tans, mut out_tans) = (
+            tangent_column(&result, names::IN_TAN, order.len()),
+            tangent_column(&result, names::OUT_TAN, order.len()),
+        );
+        for (vertex, (incoming, outgoing)) in
+            catmull_rom_tangents(&path, closed).into_iter().enumerate()
+        {
+            in_tans[vertex] = incoming;
+            out_tans[vertex] = outgoing;
+        }
+        result
+            .points_mut()
+            .insert(names::IN_TAN, AttributeArray::Vec2(in_tans))?;
+        result
+            .points_mut()
+            .insert(names::OUT_TAN, AttributeArray::Vec2(out_tans))?;
+    }
+    result.push_primitive(Primitive::Path {
+        verts: 0..connected,
+        closed,
+    });
+    result.validate()?;
+    Ok(result)
+}
+
+/// The same geometry with its points permuted by `order` and its primitives
+/// dropped. Every point column is selected through the same permutation, so
+/// values stay attached to the point they described.
+fn reordered(geometry: &Geometry, order: &[usize]) -> Result<Geometry, GeometryOpError> {
+    let mut result = Geometry::new();
+    for (name, column) in geometry.points().iter() {
+        result
+            .points_mut()
+            .insert(name.as_str(), select_values(column, order.iter().copied()))?;
+    }
+    for (name, column) in geometry.instances().iter() {
+        result
+            .instances_mut()
+            .insert(name.as_str(), column.as_ref().clone())?;
+    }
+    result.set_instance_sources(geometry.instance_sources().to_vec());
+    for (name, column) in geometry.detail().iter() {
+        result
+            .detail_mut()
+            .insert(name.as_str(), column.as_ref().clone())?;
+    }
+    Ok(result)
+}
+
+/// The existing tangent column of `geometry`, or zeros when it has none.
+fn tangent_column(geometry: &Geometry, name: &str, count: usize) -> Vec<Vec2> {
+    geometry
+        .points()
+        .get(name)
+        .and_then(|column| column.as_vec2(name).ok())
+        .filter(|values| values.len() == count)
+        .map_or_else(|| vec![Vec2(0.0, 0.0); count], <[Vec2]>::to_vec)
+}
+
+/// Group members first, in storage order, then everybody else — the members
+/// have to be contiguous for a path to span them.
+fn group_first_order(
+    geometry: &Geometry,
+    name: &str,
+) -> Result<(Vec<usize>, usize), GeometryOpError> {
+    let column = geometry
+        .points()
+        .get(name)
+        .ok_or_else(|| GeometryError::AttributeNotFound { name: name.into() })?;
+    let members = column.as_bool(name)?;
+    let mut order: Vec<usize> = (0..members.len()).filter(|index| members[*index]).collect();
+    let connected = order.len();
+    order.extend((0..members.len()).filter(|index| !members[*index]));
+    Ok((order, connected))
+}
+
+/// Visit order of a greedy nearest-neighbour chain from the first point.
+///
+/// Deterministic on every input: distance ties go to the lower index, in the
+/// grid and in the scan alike.
+fn nearest_chain(points: &[Vec2]) -> Vec<usize> {
+    let spatial: Vec<Vec3> = points.iter().map(|p| Vec3(p.0, p.1, 0.0)).collect();
+    let grid = PointGrid::build(&spatial);
+    let mut visited = vec![false; spatial.len()];
+    let mut order = Vec::with_capacity(spatial.len());
+    let mut current = 0;
+    visited[0] = true;
+    order.push(0);
+    let mut neighbours = Vec::new();
+    while order.len() < spatial.len() {
+        current = nearest_unvisited(&spatial, current, &visited, grid.as_ref(), &mut neighbours);
+        visited[current] = true;
+        order.push(current);
+    }
+    order
+}
+
+/// The unvisited point closest to `from`.
+///
+/// The grid answers while the chain is young; once its `k` closest candidates
+/// have all been visited there is nothing for a spatial index to prune and the
+/// scan takes over, which makes the tail of a long chain quadratic. That is
+/// the same shape of cost the chain itself has and nobody has asked for a
+/// longer one yet; a k-d tree with deletion is the upgrade if they do.
+fn nearest_unvisited(
+    points: &[Vec3],
+    from: usize,
+    visited: &[bool],
+    grid: Option<&PointGrid>,
+    neighbours: &mut Vec<(usize, f32)>,
+) -> usize {
+    if let Some(grid) = grid {
+        grid.k_nearest(points, points[from], NEAREST_CHAIN_NEIGHBOURS, neighbours);
+        let closest = neighbours
+            .iter()
+            .filter(|(index, _)| !visited[*index])
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        if let Some((index, _)) = closest {
+            return *index;
+        }
+    }
+    (0..points.len())
+        .filter(|index| !visited[*index])
+        .min_by(|a, b| {
+            distance_squared(points[*a], points[from])
+                .total_cmp(&distance_squared(points[*b], points[from]))
+                .then(a.cmp(b))
+        })
+        .expect("the caller only asks while a point is unvisited")
+}
+
+/// Catmull-Rom `(in_tan, out_tan)` for each vertex of one path.
+///
+/// The control point of the segment arriving at `P` is `P + in_tan` and the
+/// one leaving it is `P + out_tan` (`names::IN_TAN`), so the interior tangent
+/// is a sixth of the chord between the neighbours — the standard conversion
+/// that makes the cubic pass through the points. An open path's ends have one
+/// neighbour and one unused side: a third of the only segment there is, and
+/// zero for the side no segment reaches.
+fn catmull_rom_tangents(path: &[Vec2], closed: bool) -> Vec<(Vec2, Vec2)> {
+    let scaled = |from: Vec2, to: Vec2, divisor: f32| {
+        Vec2((to.0 - from.0) / divisor, (to.1 - from.1) / divisor)
+    };
+    (0..path.len())
+        .map(|vertex| {
+            let previous = match vertex {
+                0 if closed => path.last().copied(),
+                0 => None,
+                _ => Some(path[vertex - 1]),
+            };
+            let next = match path.get(vertex + 1) {
+                Some(point) => Some(*point),
+                None if closed => path.first().copied(),
+                None => None,
+            };
+            let zero = Vec2(0.0, 0.0);
+            match (previous, next) {
+                (Some(previous), Some(next)) => {
+                    let tangent = scaled(previous, next, 6.0);
+                    (Vec2(-tangent.0, -tangent.1), tangent)
+                }
+                (None, Some(next)) => (zero, scaled(path[vertex], next, 3.0)),
+                (Some(previous), None) => (scaled(path[vertex], previous, 3.0), zero),
+                (None, None) => (zero, zero),
+            }
+        })
+        .collect()
+}
+
 /// How [`curve_u`] spaces the path parameter along a primitive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CurveUMode {
@@ -1187,6 +1429,347 @@ mod tests {
         assert_eq!(sample.position, Vec2(3.0, 2.0));
         assert_eq!(sample.tangent, Vec2(0.0, 1.0));
         assert_eq!(sample.normal, Vec2(-1.0, 0.0));
+    }
+
+    fn point_order(geometry: &Geometry) -> Vec<Vec2> {
+        geometry
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn connected_path(geometry: &Geometry) -> (std::ops::Range<usize>, bool) {
+        match geometry.primitives() {
+            [Primitive::Path { verts, closed }] => (verts.clone(), *closed),
+            other => panic!("expected exactly one path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_order_makes_one_path_over_every_point_in_index_order() {
+        let cloud = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(10.0, 10.0),
+            Vec2(0.0, 10.0),
+        ]);
+        let wired = connect(
+            &cloud,
+            ConnectMode::Order,
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        assert_eq!(connected_path(&wired), (0..4, false));
+        assert_eq!(point_order(&wired), point_order(&cloud));
+        assert_eq!(
+            wired.points().get(names::INDEX).unwrap().as_i32("index"),
+            Ok(&[0, 1, 2, 3][..])
+        );
+        assert!(wired.validate().is_ok());
+    }
+
+    #[test]
+    fn connect_closes_the_path_when_asked() {
+        let cloud = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(5.0, 8.0)]);
+        let wired = connect(
+            &cloud,
+            ConnectMode::Order,
+            ConnectInterpolation::Linear,
+            true,
+        )
+        .unwrap();
+        assert_eq!(connected_path(&wired), (0..3, true));
+    }
+
+    /// A point cloud whose storage order zig-zags: the chain has to reorder
+    /// it, and has to reorder it the same way every time it is asked.
+    #[test]
+    fn connect_nearest_chains_by_proximity_and_is_deterministic() {
+        let cloud = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(30.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(20.0, 0.0),
+        ]);
+        let run = || {
+            connect(
+                &cloud,
+                ConnectMode::Nearest,
+                ConnectInterpolation::Linear,
+                false,
+            )
+            .unwrap()
+        };
+        let wired = run();
+        assert_eq!(connected_path(&wired), (0..4, false));
+        assert_eq!(
+            point_order(&wired),
+            [
+                Vec2(0.0, 0.0),
+                Vec2(10.0, 0.0),
+                Vec2(20.0, 0.0),
+                Vec2(30.0, 0.0)
+            ]
+        );
+        // Every attribute travels with its point, `index` included: the
+        // connected points keep the numbers they were created with.
+        assert_eq!(
+            wired.points().get(names::INDEX).unwrap().as_i32("index"),
+            Ok(&[0, 2, 3, 1][..])
+        );
+        assert_eq!(point_order(&run()), point_order(&wired));
+    }
+
+    /// Big enough for `PointGrid::build` to answer instead of the scan, so
+    /// the grid path is the one under test.
+    #[test]
+    fn connect_nearest_is_deterministic_through_the_spatial_grid() {
+        let points: Vec<Vec2> = (0..GRID_MIN_POINTS * 2)
+            .map(|index| {
+                let step = index as f32;
+                Vec2((step * 7.0) % 23.0, (step * 13.0) % 29.0)
+            })
+            .collect();
+        let cloud = Geometry::from_points(points);
+        let once = connect(
+            &cloud,
+            ConnectMode::Nearest,
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        let twice = connect(
+            &cloud,
+            ConnectMode::Nearest,
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        assert_eq!(point_order(&once), point_order(&twice));
+        assert_eq!(once.point_count(), cloud.point_count());
+    }
+
+    #[test]
+    fn connect_group_links_only_its_members_and_keeps_the_rest() {
+        let mut cloud = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(20.0, 0.0),
+            Vec2(30.0, 0.0),
+        ]);
+        cloud
+            .points_mut()
+            .insert("wire", AttributeArray::Bool(vec![true, false, true, true]))
+            .unwrap();
+        let wired = connect(
+            &cloud,
+            ConnectMode::Group("wire"),
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        assert_eq!(connected_path(&wired), (0..3, false));
+        assert_eq!(wired.point_count(), 4, "no point is dropped");
+        assert_eq!(
+            point_order(&wired),
+            [
+                Vec2(0.0, 0.0),
+                Vec2(20.0, 0.0),
+                Vec2(30.0, 0.0),
+                Vec2(10.0, 0.0)
+            ]
+        );
+    }
+
+    /// Connecting adds connectivity; it must not rewrite what the points say
+    /// about themselves.
+    #[test]
+    fn connect_carries_every_point_attribute_through_the_permutation() {
+        let mut cloud =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(30.0, 0.0), Vec2(10.0, 0.0)]);
+        cloud
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![1.0, 2.0, 3.0]))
+            .unwrap();
+        cloud
+            .points_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(1.0, 0.0, 0.0, 1.0),
+                    Color::new(0.0, 1.0, 0.0, 1.0),
+                    Color::new(0.0, 0.0, 1.0, 1.0),
+                ]),
+            )
+            .unwrap();
+        cloud
+            .detail_mut()
+            .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(5.0, 5.0)]))
+            .unwrap();
+        let wired = connect(
+            &cloud,
+            ConnectMode::Nearest,
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        // Chain order is 0, 2, 1; every column follows it.
+        assert_eq!(
+            wired.points().get(names::PSCALE).unwrap().as_f32("pscale"),
+            Ok(&[1.0, 3.0, 2.0][..])
+        );
+        assert_eq!(
+            wired.points().get(names::CD).unwrap().as_color("Cd"),
+            Ok(&[
+                Color::new(1.0, 0.0, 0.0, 1.0),
+                Color::new(0.0, 0.0, 1.0, 1.0),
+                Color::new(0.0, 1.0, 0.0, 1.0),
+            ][..])
+        );
+        assert_eq!(
+            wired.detail().get(names::ANCHOR).unwrap().as_vec2("anchor"),
+            Ok(&[Vec2(5.0, 5.0)][..])
+        );
+    }
+
+    #[test]
+    fn connect_writes_catmull_rom_tangents_only_in_bezier_mode() {
+        let cloud = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(10.0, 10.0)]);
+        let straight = connect(
+            &cloud,
+            ConnectMode::Order,
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        assert!(straight.points().get(names::IN_TAN).is_none());
+        assert!(straight.points().get(names::OUT_TAN).is_none());
+
+        let curved = connect(
+            &cloud,
+            ConnectMode::Order,
+            ConnectInterpolation::Bezier,
+            false,
+        )
+        .unwrap();
+        let column = |name: &str| {
+            curved
+                .points()
+                .get(name)
+                .unwrap()
+                .as_vec2(name)
+                .unwrap()
+                .to_vec()
+        };
+        // Interior tangent: a sixth of the chord between the neighbours.
+        // Ends: a third of their one segment, and zero on the unused side.
+        assert_eq!(
+            column(names::OUT_TAN),
+            [
+                Vec2(10.0 / 3.0, 0.0),
+                Vec2(10.0 / 6.0, 10.0 / 6.0),
+                Vec2(0.0, 0.0)
+            ]
+        );
+        assert_eq!(
+            column(names::IN_TAN),
+            [
+                Vec2(0.0, 0.0),
+                Vec2(-10.0 / 6.0, -10.0 / 6.0),
+                Vec2(0.0, -10.0 / 3.0)
+            ]
+        );
+    }
+
+    /// A count an animation can pass through: nothing to connect is a no-op,
+    /// not an error.
+    #[test]
+    fn connect_leaves_too_few_points_alone() {
+        for cloud in [Geometry::new(), Geometry::from_points(vec![Vec2(1.0, 2.0)])] {
+            let wired = connect(
+                &cloud,
+                ConnectMode::Order,
+                ConnectInterpolation::Bezier,
+                true,
+            )
+            .unwrap();
+            assert_eq!(wired.point_count(), cloud.point_count());
+            assert_eq!(wired.primitive_count(), 0);
+        }
+
+        let mut ungrouped = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]);
+        ungrouped
+            .points_mut()
+            .insert("wire", AttributeArray::Bool(vec![false, false]))
+            .unwrap();
+        let wired = connect(
+            &ungrouped,
+            ConnectMode::Group("wire"),
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        assert_eq!(wired.primitive_count(), 0);
+    }
+
+    /// The node decides the connectivity, so the primitives it was handed are
+    /// replaced rather than added to (Houdini's Add SOP keeps the points and
+    /// drops the geometry).
+    #[test]
+    fn connect_replaces_the_primitives_it_was_given() {
+        let mut shape = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(10.0, 10.0),
+            Vec2(0.0, 10.0),
+        ]);
+        shape.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        shape.push_primitive(Primitive::Path {
+            verts: 2..4,
+            closed: false,
+        });
+        let wired = connect(
+            &shape,
+            ConnectMode::Order,
+            ConnectInterpolation::Linear,
+            false,
+        )
+        .unwrap();
+        assert_eq!(wired.primitive_count(), 1);
+        assert_eq!(connected_path(&wired), (0..4, false));
+    }
+
+    #[test]
+    fn connect_rejects_meshes_and_three_dimensional_positions() {
+        let mut mesh = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        mesh.push_mesh(0..3, &[0, 1, 2]);
+        assert!(
+            connect(
+                &mesh,
+                ConnectMode::Order,
+                ConnectInterpolation::Linear,
+                false
+            )
+            .is_err()
+        );
+
+        let spatial = Geometry::from_points3(vec![Vec3(0.0, 0.0, 1.0), Vec3(1.0, 0.0, 2.0)]);
+        assert!(
+            connect(
+                &spatial,
+                ConnectMode::Order,
+                ConnectInterpolation::Linear,
+                false
+            )
+            .is_err()
+        );
     }
 
     fn u_of(geometry: &Geometry, mode: CurveUMode) -> Vec<f32> {

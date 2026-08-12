@@ -67,6 +67,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     ));
     reg.register(geometry_transform());
     reg.register(geometry_merge());
+    reg.register(geometry_connect());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -774,6 +775,27 @@ fn geometry_merge() -> NodeTemplate {
         .with_output(geometry_output())
 }
 
+/// `geometry.connect`: add connectivity to a point cloud without adding
+/// points.
+///
+/// `group` names the `Bool` column `mode = "group"` reads; the other modes
+/// ignore it, the same way `attribute.set`'s typed value parameters sit
+/// inert until their `type` selects them.
+fn geometry_connect() -> NodeTemplate {
+    NodeTemplate::new("geometry.connect", "Connect", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("mode", "order"))
+        .with_param_options("mode", ["order", "nearest", "group"])
+        .with_param(string_parameter("group", ""))
+        .with_param(string_parameter("interpolation", "linear"))
+        .with_param_options("interpolation", ["linear", "bezier"])
+        .with_param(Parameter {
+            key: "closed".into(),
+            value: ParameterValue::Bool(false),
+        })
+}
+
 fn scene_input(name: &str) -> InputPort {
     InputPort {
         name: name.into(),
@@ -1292,14 +1314,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 49);
+        assert_eq!(reg.all_templates().count(), 51);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 18);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 19);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

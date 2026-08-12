@@ -805,6 +805,15 @@ pivot = "use_centroid がオフのときの変換原点。"
 label = "ジオメトリマージ"
 description = "2 つのジオメトリを 1 つに結合する。"
 
+[node."geometry.connect"]
+label = "コネクト"
+description = "点を増やさずにパスで結ぶ。入力のプリミティブは置き換わる。"
+[node."geometry.connect".params]
+mode = "結ぶ点と順序。index 順・近傍チェーン・グループの要素のいずれか。"
+group = "グループモードが読む Bool 型のポイント属性名。"
+interpolation = "直線か、隣接点から推定したベジェ接線か。"
+closed = "パスを閉じる。"
+
 [node."scene.add"]
 label = "シーン追加"
 description = "ジオメトリ・別のシーンを変換付きで 3D シーンに配置する。"

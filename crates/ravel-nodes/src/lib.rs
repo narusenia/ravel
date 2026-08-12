@@ -195,6 +195,9 @@ pub fn processor_for_node(
             node,
         ))),
         "geometry.merge" => Some(Arc::new(geometry::GeometryMergeProcessor::from_node(node))),
+        "geometry.connect" => Some(Arc::new(geometry::GeometryConnectProcessor::from_node(
+            node,
+        ))),
         "scene.add" => Some(Arc::new(scene::SceneAddProcessor::from_node(node))),
         "scene.merge" => Some(Arc::new(scene::SceneMergeProcessor::from_node(node))),
         "scene.camera" => Some(Arc::new(scene::SceneCameraProcessor::from_node(node))),

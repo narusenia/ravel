@@ -19,7 +19,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
 use ravel_core::color::ColorSpace;
-use ravel_core::composition::{AssetKind, Document, MediaAssetEntry};
+use ravel_core::composition::{AssetKind, MediaAssetEntry, MediaAssets};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
@@ -48,10 +48,14 @@ pub struct MediaBinGpuiPanel {
     /// The filtered rows, rebuilt from the document whenever it or the
     /// filter/search state changes (never inside `render()`).
     rows: Vec<MediaBinRow>,
-    /// Snapshot used to compare the persistent media-asset map. Layer edits
-    /// create a new document while sharing this map, so they can skip the row
-    /// walk altogether.
-    last_document: Option<Document>,
+    /// The persistent media-asset map the rows were built from. Layer edits
+    /// mint a new `Document` while sharing this map, so `ptr_eq` against it
+    /// skips the row walk altogether.
+    ///
+    /// The map rather than the whole `Document`: holding the document would
+    /// pin the previous snapshot's compositions and layer graphs alive for as
+    /// long as the panel is open, to answer a question about one field.
+    last_media_assets: Option<MediaAssets>,
     /// Unit-5 thumbnail cache. Requests are kicked from `rebuild_rows`;
     /// completion notifies, and the observer decodes what is ready.
     thumbnails: Entity<ThumbnailCache>,
@@ -143,7 +147,7 @@ impl MediaBinGpuiPanel {
             project,
             audio,
             rows: Vec::new(),
-            last_document: None,
+            last_media_assets: None,
             thumbnails,
             thumb_images: HashMap::new(),
             search,
@@ -177,7 +181,9 @@ impl MediaBinGpuiPanel {
             .unwrap_or_default();
         let rows_changed = self.rows != rows;
         self.rows = rows;
-        self.last_document = document.clone();
+        self.last_media_assets = document
+            .as_ref()
+            .map(|document| document.media_assets.clone());
         // Kick thumbnail generation for the visible rows here (not in
         // `render()`): `get_or_request` is a cheap in-memory lookup that
         // spawns background work on a miss.
@@ -216,9 +222,9 @@ impl MediaBinGpuiPanel {
         };
         let document = project.read(cx).document();
         if self
-            .last_document
+            .last_media_assets
             .as_ref()
-            .is_some_and(|last| last.media_assets.ptr_eq(&document.media_assets))
+            .is_some_and(|last| last.ptr_eq(&document.media_assets))
         {
             return;
         }

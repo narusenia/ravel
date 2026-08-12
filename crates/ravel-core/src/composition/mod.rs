@@ -471,6 +471,15 @@ impl Composition {
 // Document
 // ===========================================================================
 
+/// The document's media assets, by id.
+///
+/// Named because it is a persistent map and callers hold it on its own to
+/// answer "did the asset list change?" with [`im::HashMap::ptr_eq`] — keeping
+/// the whole [`Document`] for that would pin a snapshot's compositions and
+/// layer graphs alive. Crates outside `ravel-core` cannot spell `im::HashMap`
+/// (it is not their dependency), so the alias is what makes that possible.
+pub type MediaAssets = im::HashMap<String, MediaAssetEntry>;
+
 /// Unified document snapshot containing the node graph and all compositions.
 ///
 /// This is the unit of undo: `UndoStack<Document>` captures both the DAG
@@ -487,7 +496,7 @@ pub struct Document {
     pub root_comp: Option<CompId>,
     /// Media assets by id, resolved for evaluation (REQ-LAYER-008).
     #[serde(with = "media_assets_serde")]
-    pub media_assets: im::HashMap<String, MediaAssetEntry>,
+    pub media_assets: MediaAssets,
     /// The project's external parameter contract (REQ-PROJ-006): the values a
     /// CLI render or a template instantiation may set, by name, without
     /// knowing the network behind them.

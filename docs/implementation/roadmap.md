@@ -559,7 +559,13 @@ REQ-MOGRAPH-001）。加えて `field.expression` が**登録済みで黙って�
 | 評価器のアルゴリズム（第3段） | `HIGH-01`（隣接インデックスが無く 1 pull が O(N·E)）、`HIGH-02`（編集ごとに全ネットワークを deep compare）、`MED-CORE-01`（`NodeKey` のパス clone が訪問ごとに 3〜4 回）、`MED-CORE-05`（`attribute_transfer` が O(source×target)） |
 | パネル 1 回あたりのコスト | `MED-UI-01`〜`MED-UI-06`（毎編集の再コンパイル、Properties のフレーム 2 回再構築、Timeline の行仮想化なし・deep compare、Outliner / MediaBin の全行再構築、2 経路重複 sync） |
 | GPU ディスパッチ | `MED-GPU-04`（CPU ラスタライズが全画面カバレッジを毎回確保）、`MED-GPU-05`（`ensure_gpu` が同一フレームを消費ノードごとに再アップロード） |
-| メディアデコード | `HIGH-17`（sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換） |
+| ~~メディアデコード~~ | ✅ `HIGH-17`（sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換）は closed |
+
+計画書は
+[`responsiveness-stage3-plan.md`](responsiveness-stage3-plan.md)（`RESP3-1`〜`RESP3-14`）。
+上の 3 クラスタがそのままクラスタ A / B / C に対応する。着手できない 2 件
+（`MED-UI-06` は測定不能、`MED-GPU-04` はゴールデンテストに固定）は、
+先行単位（`RESP3-5` の計装、`RESP3-12` の一致テスト化）を C3 の中に置いて解く。
 
 **キャッシュ（C2）の後に置く理由**: `MED-UI-01`（毎編集の再コンパイル）と
 `MED-CORE-01` はキャッシュの無効化経路と同じコードを触る。`CACHE-2〜4` が

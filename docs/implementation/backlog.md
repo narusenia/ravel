@@ -96,6 +96,14 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
+| RESP3-1 | 隣接インデックスと `ptr_eq` キャッシュ（HIGH-01） | `responsiveness-stage3-plan.md` |
+| RESP3-2 | レイヤー単位の `ptr_eq` 短絡と親インデックス（HIGH-02） | `responsiveness-stage3-plan.md` |
+| RESP3-4 | `attribute_transfer` の空間分割と近傍打ち切り（MED-CORE-05） | `responsiveness-stage3-plan.md` |
+| RESP3-5 | sync 呼び出し回数の計装（MED-UI-06 のゲート） | `responsiveness-stage3-plan.md` |
+| RESP3-6 | `Params` ヒントでコンパイル済みチェーンを保持（MED-UI-01） | `responsiveness-stage3-plan.md` |
+| RESP3-8 | Timeline の垂直カリング（MED-UI-03） | `responsiveness-stage3-plan.md` |
+| RESP3-12 | rasterize ゴールデンの GPU / CPU 一致テスト化（MED-GPU-04 のゲート） | `responsiveness-stage3-plan.md` |
+| RESP3-14 | `ensure_gpu` のフレーム内メモ化（MED-GPU-05） | `responsiveness-stage3-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -115,10 +123,33 @@ SCOPE-1（#186）が入ったので、SIM / FX-5 / グラフ内反復が共有�
 
 第1段は完了（`done/ui-responsiveness-plan.md`）。ただし**実測では体感の主因は
 第2段**だった — HIGH-05（シェル合成の CPU per-pixel）と HIGH-04（リードバック）。
-第2段は `gpu-compositing-plan.md` に降りている（下表）。第3段以降と、
-保留した MED-UI-06（同じ変更が2経路で届く重複 sync）は実装単位になっていないので
-この表には無く、**`roadmap.md` のフェーズ C3「応答性の残り」**がクラスタとして
-順序を決めている（個票は `issues/`）。
+第2段は `gpu-compositing-plan.md` に降りている（下表）。第3段は
+`responsiveness-stage3-plan.md` に降りた（下表 `RESP3-*`）。
+
+### 応答性 第3段（`roadmap.md` フェーズ C3）
+
+`responsiveness-stage3-plan.md`。3 クラスタ、14 単位。クラスタ内は依存順、
+クラスタ間は独立。
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| RESP3-1 | 🟡 | 隣接インデックスと `ptr_eq` キャッシュ（HIGH-01） | — |
+| RESP3-2 | 🟡 | レイヤー単位の `ptr_eq` 短絡と親インデックス（HIGH-02） | — |
+| RESP3-3 | ⬜ | パスのインターンと `Copy` な内部キー（MED-CORE-01） | RESP3-1 |
+| RESP3-4 | 🟡 | `attribute_transfer` の空間分割と近傍打ち切り（MED-CORE-05） | — |
+| RESP3-5 | 🟡 | sync 呼び出し回数の計装（MED-UI-06 のゲート） | — |
+| RESP3-6 | 🟡 | `Params` ヒントでコンパイル済みチェーンを保持（MED-UI-01） | — |
+| RESP3-7 | ⬜ | Properties の refresh 重複排除と非表示スキップ（MED-UI-02） | RESP3-5 |
+| RESP3-8 | 🟡 | Timeline の垂直カリング（MED-UI-03） | — |
+| RESP3-9 | ⬜ | Timeline の revision ゲート（MED-UI-04） | RESP3-5 |
+| RESP3-10 | ⬜ | Outliner / MediaBin の revision ゲート（MED-UI-05） | RESP3-5 |
+| RESP3-11 | ⬜ | グローバル駆動 sync の epoch 記録（MED-UI-06） | RESP3-9, RESP3-10 |
+| RESP3-12 | 🟡 | rasterize ゴールデンの GPU / CPU 一致テスト化（MED-GPU-04 のゲート） | — |
+| RESP3-13 | ⬜ | `finalize` の GPU ラスタライズと CPU 経路の bbox 限定（MED-GPU-04） | RESP3-12 |
+| RESP3-14 | 🟡 | `ensure_gpu` のフレーム内メモ化（MED-GPU-05） | — |
+
+`HIGH-17`（sws スケーラの毎フレーム再生成）は C3 のメディアデコード
+クラスタだったが closed 済みで、単位を持たない。
 
 ### GPU 合成パイプライン（`issues/README.md` 第2段）
 

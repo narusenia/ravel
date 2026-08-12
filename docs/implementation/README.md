@@ -80,6 +80,7 @@ several plans here wait on its later units rather than on each other.
 | `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | `gpu-backend-plan.md` (GPUBK-9), `done/zero-copy-viewer-plan.md` (ZC-8) | REQ-GPU-001 |
 | `ofx-host-plan.md` | The OpenFX host: an isolated C++ process, the suites, and the GPU interop — **OFX defines no D3D12 path, so Windows has no zero-copy route** | `gpu-backend-plan.md` (GPUBK-8, merged), `plugin-system-plan.md` (PLUG-1) | REQ-PLUGIN-001, REQ-PROJ-002 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
+| `responsiveness-stage3-plan.md` | Responsiveness stage 3 (roadmap phase C3): graph adjacency index, layer-level `ptr_eq`, path interning, panel revision gates, GPU rasterize and upload dedup — **cost per call at scale**, after stage 1 (call count) and stage 2 (cost per pixel) | `cache-plan.md` (CACHE-2–4, merged) | REQ-CORE-002/006/011, REQ-UI-002/003 |
 
 `panel-placement-plan.md` (#181) is **superseded** by
 `done/free-pane-docking-plan.md`: the view-toggle problem is solved by

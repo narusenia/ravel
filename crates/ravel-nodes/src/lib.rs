@@ -135,6 +135,15 @@ pub fn processor_for_node(
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
         "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
         "constant.color" => Some(Arc::new(constant::ColorConstantProcessor::from_node(node))),
+        builtin::CONSTANT_VEC2 => Some(Arc::new(constant::VectorConstantProcessor::new(
+            ravel_core::id::DataTypeId::VEC2,
+        ))),
+        builtin::CONSTANT_VEC3 => Some(Arc::new(constant::VectorConstantProcessor::new(
+            ravel_core::id::DataTypeId::VEC3,
+        ))),
+        builtin::CONSTANT_VEC4 => Some(Arc::new(constant::VectorConstantProcessor::new(
+            ravel_core::id::DataTypeId::VEC4,
+        ))),
         "math.scalar" => Some(Arc::new(math::MathScalarProcessor::from_node(node))),
         "math.remap" => Some(Arc::new(math::MathRemapProcessor::from_node(node))),
         builtin::VECTOR_CONSTRUCT_VEC2 => Some(Arc::new(vector::VectorConstructProcessor::new(

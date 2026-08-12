@@ -17,6 +17,29 @@ pub const MAX_BLUR_RADIUS: f32 = 64.0;
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
+    reg.register(constant_vector(
+        CONSTANT_VEC2,
+        "Constant Vec2",
+        DataTypeId::VEC2,
+        ParameterValue::vec2(0.0, 0.0),
+    ));
+    reg.register(constant_vector(
+        CONSTANT_VEC3,
+        "Constant Vec3",
+        DataTypeId::VEC3,
+        ParameterValue::vec3(0.0, 0.0, 0.0),
+    ));
+    reg.register(constant_vector(
+        CONSTANT_VEC4,
+        "Constant Vec4",
+        DataTypeId::VEC4,
+        ParameterValue::Channel4([
+            AnimationChannel::constant(0.0),
+            AnimationChannel::constant(0.0),
+            AnimationChannel::constant(0.0),
+            AnimationChannel::constant(0.0),
+        ]),
+    ));
     reg.register(media());
     reg.register(layer_ref());
     reg.register(subnet());
@@ -460,6 +483,33 @@ fn constant() -> NodeTemplate {
         .with_param(Parameter {
             key: "value".into(),
             value: ParameterValue::Float(0.0),
+        })
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+}
+
+/// `type_key` of the 2-component vector constant template.
+pub const CONSTANT_VEC2: &str = "constant.vec2";
+/// `type_key` of the 3-component vector constant template.
+pub const CONSTANT_VEC3: &str = "constant.vec3";
+/// `type_key` of the 4-component vector constant template.
+pub const CONSTANT_VEC4: &str = "constant.vec4";
+
+/// One animatable vector constant. The arity is part of the type key because
+/// the output port type is stored on each node instance.
+fn constant_vector(
+    type_key: &str,
+    label: &str,
+    data_type: DataTypeId,
+    value: ParameterValue,
+) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "value".into(),
+            data_type,
+        })
+        .with_param(Parameter {
+            key: "value".into(),
+            value,
         })
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
 }
@@ -1144,6 +1194,7 @@ mod tests {
             ParameterValue::Channel(ch) => vec![constant_of(ch)],
             ParameterValue::Channel2(chs) => chs.iter().map(constant_of).collect(),
             ParameterValue::Channel3(chs) => chs.iter().map(constant_of).collect(),
+            ParameterValue::Channel4(chs) => chs.iter().map(constant_of).collect(),
             _ => Vec::new(),
         }
     }
@@ -1152,7 +1203,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 43);
+        assert_eq!(reg.all_templates().count(), 46);
     }
 
     #[test]
@@ -1165,7 +1216,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 8);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 11);
     }
 
     /// Each `vector.construct` arity outputs its own vector type and declares
@@ -1250,6 +1301,29 @@ mod tests {
         let tmpl = reg.get("constant").unwrap();
         assert!(tmpl.inputs.is_empty());
         assert_eq!(tmpl.outputs.len(), 1);
+    }
+
+    #[test]
+    fn vector_constant_arities_declare_their_value_channels() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for (type_key, data_type, expected) in [
+            (CONSTANT_VEC2, DataTypeId::VEC2, vec![0.0, 0.0]),
+            (CONSTANT_VEC3, DataTypeId::VEC3, vec![0.0, 0.0, 0.0]),
+            (CONSTANT_VEC4, DataTypeId::VEC4, vec![0.0, 0.0, 0.0, 0.0]),
+        ] {
+            let template = reg.get(type_key).unwrap_or_else(|| panic!("{type_key}"));
+            assert!(template.inputs.is_empty(), "{type_key} declares no inputs");
+            assert_eq!(template.outputs.len(), 1, "{type_key}");
+            assert_eq!(template.outputs[0].data_type, data_type, "{type_key}");
+            assert_eq!(template.default_params.len(), 1, "{type_key}");
+            assert_eq!(template.default_params[0].key, "value");
+            assert_eq!(
+                default_components(&template.default_params[0].value),
+                expected
+            );
+            assert!(template.param_range("value").is_some(), "{type_key}.value");
+        }
     }
 
     #[test]

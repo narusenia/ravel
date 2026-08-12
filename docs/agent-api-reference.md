@@ -1843,6 +1843,7 @@ Current keys:
 |----------|-----------|-------|
 | `constant` | CPU | Scalar output |
 | `constant.color` | CPU | animatable `color` param (Channel4) → `Color` output |
+| `constant.vec2` / `.vec3` / `.vec4` | CPU | animatable `value` param (Channel2 / Channel3 / Channel4) → `Vec2` / `Vec3` / `Vec4` output. Arity is a separate `type_key`, like `vector.construct`, because the output port type is stored on each node instance |
 | `math.scalar` | CPU | `op` enum (add/subtract/multiply/divide/min/max/mod/pow + unary abs/negate/floor/ceil/round/sqrt/sin/cos); `a`/`b` are Float params (drive via exposed param ports; `a` ships already exposed as a port, removable like any other); div/mod-by-zero and sqrt(<0) → 0; mod is `rem_euclid`; radians |
 | `math.remap` | CPU | linear fit `value`: `[in_min,in_max]` → `[out_min,out_max]`, optional `clamp`; degenerate in-range → `out_min` |
 | `vector.construct.vec2` / `.vec3` / `.vec4` | CPU | Scalar components → `Vec2` / `Vec3` / `Vec4` output. `x`/`y`/`z`/`w` are Float params (drive via exposed param ports, like `math.scalar`); unset components are 0. Arity is a separate `type_key`, not a `type` param, because port types live on the node instance (`VECTOR_CONSTRUCT_VEC2` and friends in `registry::builtin`) |

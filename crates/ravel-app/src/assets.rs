@@ -131,6 +131,12 @@ pub enum RavelIcon {
     NodeConstant,
     /// Node header/menu: `constant.color`.
     NodeConstantColor,
+    /// Node header/menu: `constant.vec2`.
+    NodeConstantVec2,
+    /// Node header/menu: `constant.vec3`.
+    NodeConstantVec3,
+    /// Node header/menu: `constant.vec4`.
+    NodeConstantVec4,
     /// Node header/menu: `media`.
     NodeMedia,
     /// Node header/menu: `layer.ref`.
@@ -294,6 +300,9 @@ impl RavelIcon {
         match type_key {
             "constant" => Self::NodeConstant,
             "constant.color" => Self::NodeConstantColor,
+            "constant.vec2" => Self::NodeConstantVec2,
+            "constant.vec3" => Self::NodeConstantVec3,
+            "constant.vec4" => Self::NodeConstantVec4,
             "media" => Self::NodeMedia,
             "layer.ref" => Self::NodeLayerRef,
             "subnet" => Self::NodeSubnet,
@@ -392,6 +401,9 @@ impl IconNamed for RavelIcon {
             Self::AlwaysOnTop => "icons/pin.svg",
             Self::NodeConstant => "icons/equal.svg",
             Self::NodeConstantColor => "icons/palette.svg",
+            Self::NodeConstantVec2 => "icons/move.svg",
+            Self::NodeConstantVec3 => "icons/axis-3d.svg",
+            Self::NodeConstantVec4 => "icons/boxes.svg",
             Self::NodeMedia => "icons/film.svg",
             Self::NodeLayerRef => "icons/layers.svg",
             Self::NodeSubnet => "icons/network.svg",

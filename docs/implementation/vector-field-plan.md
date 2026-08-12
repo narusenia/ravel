@@ -1,8 +1,8 @@
 # ベクタ場 実装計画
 
 > **Status**: In progress — 値ドメイン側（単位 5〜8 = `VEC-5` / `VEC-6` /
-> `VEC-7a` / `VEC-7b` / `VEC-8`）が実装済み。フィールド側（単位 1〜3）と
-> 結合検証（単位 4）は未着手
+> `VEC-7a` / `VEC-7b` / `VEC-8`）とフィールド側の単位 1〜2 が実装済み。
+> 単位 3（ベクタ場ノード）と結合検証（単位 4）は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -110,12 +110,56 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
 
 ### 単位 2: 変換ノード（`length` / `component` / `compose` / `angle`）
 
+**実装結果**
+
+- フィールドは `crates/ravel-core/src/geometry/field.rs`（`LengthField` /
+  `ComponentField` / `ComposeField` / `AngleField`）、ノードは
+  `crates/ravel-nodes/src/field/mod.rs`。`field.ramp`（単位 STYLE-6）と
+  同じ 2 層の分け方
+- **`length` / `angle` / `component` は 1 テンプレート、`compose` は
+  アリティごと**（`field.compose.vec2` / `.vec3` / `.vec4`）。値ドメイン側の
+  判断基準（出力**ポート型**がアリティに従うなら分ける）はフィールドには
+  そのまま効かない — フィールドの wire 型は何をサンプルしても `FIELD` の
+  1 つだけで、アリティはポート宣言に現れない。分ける理由は `compose` の
+  **入力ポートの本数**がアリティで決まることで、これは `vector.split` が
+  出力側で分かれているのと同じ理由（ポート一覧はノードインスタンスに載る）
+- **ゼロベクトル**: `length` は 0、`angle` も 0（`atan2(0, 0)` の IEEE 値）。
+  放射状フィールドの中心にたまたま乗った点でエラーにすると常用ケースが
+  落ちるため、エラーにはしない
+- **スカラー場を入れたとき**: 1 成分として読む。`length` は `|value|`、
+  `angle` は y = 0 として `atan2(0, x)`。既存の `sampled_component` は F32 を
+  全成分へ**ブロードキャスト**する（二項合成の昇格規則）ので、変換側は
+  ソースのアリティで読みを打ち切っている。打ち切らないと `angle` の y が
+  x と同値になる
+- **非有限入力**: IEEE をそのまま通す（`vector.length` と同じ）。`length` は
+  最大成分でスケールしてから二乗和を取るので `f32::MAX` / `f32::MIN_POSITIVE`
+  が潰れない。**この式は値ドメイン版と重複している** — `ravel-core` から
+  `ravel-nodes` は呼べず、逆も単位 8 の実装を変えることになるため。
+  一致は下記のテストが固定する
+- 型が非数値（`I32` / `Bool` / `Str`）、列の長さがバッチと不一致、成分が
+  ソースに無い、のいずれもサンプルごとに 1 回警告してゼロを読む
+  （`combine_binary` と同じ扱い。`Field` は `Result` を返さない）
+
 **完了条件**
 
 - 各変換の値検証テスト。
 - `compose` → `component` の往復一致テスト。
 - `angle` が `atan2` の値域（-π..π）を返すテスト。
 - ゼロベクトルでの `length` / `angle` の定義を明示したテスト。
+
+すべて実装済み。所在（`ravel-nodes` の `field::tests`、テンプレート宣言のみ
+`ravel-core` の `registry::builtin`）:
+
+| 完了条件 | テスト |
+|---|---|
+| `length` の値検証 | `length_is_the_magnitude_of_a_vector_field`、`length_survives_components_at_the_edges_of_the_range` |
+| `component` の値検証 | `component_reads_the_component_its_parameter_names`、`a_component_the_source_lacks_is_zero` |
+| `compose` の値検証 | `compose_and_component_round_trip`（型も確認）、`an_unwired_compose_slot_is_zero` |
+| `angle` の値検証と値域 | `angle_answers_atan2_within_minus_pi_to_pi` |
+| `compose` → `component` の往復一致 | `compose_and_component_round_trip` |
+| ゼロベクトルの定義 | `the_zero_vector_has_length_zero_and_angle_zero` |
+| 値ドメイン版との一致（単位 8 の積み残し） | `field_length_answers_what_vector_length_answers`、`field_component_answers_what_vector_split_answers`、`field_compose_answers_what_vector_construct_answers` |
+| テンプレート宣言 | `registry::builtin::field_compose_arities_declare_one_input_per_component`、`field_transforms_declare_one_field_in_and_one_out` |
 
 ### 単位 3: ベクタ場ノード（`direction_to` / `curl_noise` / `gradient` / `radial`）
 
@@ -425,14 +469,15 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - `normalize` がゼロベクトルでゼロを返すテスト（NaN を出さない）。
 - `dot` / `cross` の型不一致（Vec2 × Vec3）がエラーになるテスト。
 - 単位 2 のフィールド版と値が一致するテスト（同じ入力に対して）。
-  → **単位 2（フィールド版の変換ノード）が未実装なので書けない。**
-  代わりに値ドメイン内での相互整合を固定した:
-  `normalize` が `length` の答えで割った結果と一致すること、
-  `a · a` が `length(a)²` と一致すること。単位 2 が入ったら、この 2 本と
-  同じ入力でフィールド版を突き合わせる
+  → 単位 8 の時点では単位 2 が未実装で書けず、値ドメイン内での相互整合
+  （`normalize` が `length` の答えで割った結果と一致、`a · a` が
+  `length(a)²` と一致）で代替していた。**単位 2 で本物に置き換え済み** —
+  `field.length` / `field.component` / `field.compose` が
+  `vector.length` / `vector.split` / `vector.construct` と同じ入力に対して
+  ビット単位で同じ答えを返すことを固定した（下表）
 
-すべて実装済み（フィールド版一致を除く）。所在（すべて `ravel-nodes` の
-`vector::tests`）:
+すべて実装済み。所在（すべて `ravel-nodes` の `vector::tests`。フィールド版
+一致だけは `field::tests`）:
 
 | 完了条件 | テスト |
 |---|---|
@@ -442,7 +487,8 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 | `cross` の値検証 | `cross_of_two_vec2_is_the_scalar_wedge`、`cross_of_two_vec3_is_perpendicular_to_both`、`cross_has_no_four_component_form` |
 | ゼロベクトルでゼロ（NaN を出さない） | `normalize_of_a_zero_vector_is_zero_not_nan`、`an_unconnected_normalize_is_zero` |
 | 型不一致がエラー | `dot_rejects_mismatched_arities`、`cross_rejects_a_mismatched_arity` |
-| 値ドメイン内の相互整合（フィールド版一致の代替） | `normalize_divides_by_the_length_node_s_answer`、`dot_with_itself_is_the_squared_length` |
+| 値ドメイン内の相互整合 | `normalize_divides_by_the_length_node_s_answer`、`dot_with_itself_is_the_squared_length` |
+| 単位 2 のフィールド版と値が一致 | `field::tests::field_length_answers_what_vector_length_answers`、`field_component_answers_what_vector_split_answers`、`field_compose_answers_what_vector_construct_answers` |
 
 ### 単位 4: 結合検証と文書更新
 

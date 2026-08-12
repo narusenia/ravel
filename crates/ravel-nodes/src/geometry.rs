@@ -11,7 +11,7 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    bounds_center, connect, names,
+    InstanceImage, InstanceSource, bounds_center, connect, names,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
@@ -450,6 +450,67 @@ impl NodeProcessor for GeometryConnectProcessor {
     }
 }
 
+/// `geometry.from_image`: wrap a frame buffer as one instance that stamps it.
+///
+/// The output is the smallest geometry that draws the picture once: a single
+/// instance at the origin whose only source is the image. Point and primitive
+/// domains stay empty — an image is not a shape, and giving it a placeholder
+/// rectangle of points would make every downstream operator act on vertices
+/// that mean nothing.
+///
+/// Feeding the result to `scatter.*` nests it one level deep and repeats the
+/// picture; that is the whole point (`REQ-MOGRAPH-001`, decision 3 of
+/// `docs/implementation/image-instancing-plan.md`).
+///
+/// The frame is wrapped in whichever representation it arrived in, CPU or
+/// GPU-resident: no conversion, and therefore no readback (decision 6). The
+/// rectangle is the source's own pixel resolution centred on the origin, so
+/// the aspect ratio holds by construction and **scaling a copy up makes it
+/// blurry** — the image is not re-evaluated at the copy's resolution
+/// (decisions 1 and 5).
+pub struct GeometryFromImageProcessor;
+
+impl GeometryFromImageProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for GeometryFromImageProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let frame = inputs
+            .first()
+            .and_then(|input| input.as_ref())
+            .context("geometry.from_image: input 0 is not connected")?;
+        let (width, height) = crate::gpu_util::frame_size(frame.as_ref()).with_context(|| {
+            format!(
+                "geometry.from_image: the input must be a frame buffer, but its data type is {}",
+                frame.data_type_id().raw()
+            )
+        })?;
+
+        let mut geo = Geometry::new();
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))?;
+        geo.instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0]))?;
+        geo.set_sources(vec![InstanceSource::Image(InstanceImage::new(
+            Arc::clone(frame),
+            width,
+            height,
+        )?)]);
+        geo.validate()?;
+        Ok(Arc::new(geo))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,7 +518,7 @@ mod tests {
     use ravel_core::geometry::Primitive;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-    use ravel_core::types::FrameRate;
+    use ravel_core::types::{FrameBuffer, FrameRate};
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (64, 64))
@@ -481,6 +542,184 @@ mod tests {
         ) -> anyhow::Result<Arc<dyn NodeData>> {
             Ok(self.0.clone())
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.from_image
+    // -----------------------------------------------------------------------
+
+    /// Run `geometry.from_image` on one already-evaluated frame value.
+    fn from_image(frame: Option<Arc<dyn NodeData>>) -> anyhow::Result<Arc<dyn NodeData>> {
+        let node = Node::new(NodeId::new(1), "geometry.from_image")
+            .with_input("image", &[DataTypeId::FRAME_BUFFER])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let mut scope = Evaluator::new();
+        GeometryFromImageProcessor.process(
+            &node,
+            &ctx(),
+            &[frame],
+            &ResolvedParams::default(),
+            &mut scope,
+        )
+    }
+
+    fn as_geometry(value: &Arc<dyn NodeData>) -> &Geometry {
+        value
+            .downcast_ref::<Geometry>()
+            .expect("output is Geometry")
+    }
+
+    /// The output shape: one instance at the origin whose only source is the
+    /// image, and nothing in the point or primitive domains.
+    #[test]
+    fn from_image_outputs_one_instance_stamping_the_image() {
+        let out = from_image(Some(Arc::new(FrameBuffer::new_zeroed(320, 180)))).unwrap();
+        let geo = as_geometry(&out);
+
+        assert_eq!(geo.instance_count(), 1);
+        assert_eq!(geo.point_count(), 0, "an image is not a shape");
+        assert_eq!(geo.primitive_count(), 0);
+        assert_eq!(geo.validate(), Ok(()), "the instance domain owes a P");
+
+        let positions = geo
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        assert_eq!(positions, &[Vec2(0.0, 0.0)]);
+        assert_eq!(
+            geo.instances()
+                .get(names::INDEX)
+                .unwrap()
+                .as_i32(names::INDEX),
+            Ok(&[0][..])
+        );
+
+        assert_eq!(geo.sources().len(), 1);
+        let image = geo.sources()[0].image().expect("the source is an image");
+        assert_eq!((image.width(), image.height()), (320, 180));
+        // The rectangle is the source's pixel size, centred on the origin.
+        let rect = image.rect();
+        assert_eq!((rect.x, rect.y), (-160.0, -90.0));
+        assert_eq!((rect.width, rect.height), (320.0, 180.0));
+    }
+
+    /// The frame arrives and leaves as the very same value: no copy, no
+    /// conversion, and therefore no readback whichever representation it is
+    /// in.
+    #[test]
+    fn from_image_wraps_a_cpu_frame_without_converting_it() {
+        let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(16, 8));
+        let out = from_image(Some(Arc::clone(&frame))).unwrap();
+        let held = as_geometry(&out).sources()[0]
+            .image()
+            .expect("the source is an image")
+            .frame()
+            .clone();
+        assert!(
+            Arc::ptr_eq(&held, &frame),
+            "the frame must be held as it arrived"
+        );
+        assert!(!as_geometry(&out).is_gpu_resident());
+    }
+
+    /// The GPU half of the same claim: a resident frame goes in, the identical
+    /// handle comes out, and no transfer is recorded. Skipped without an
+    /// adapter.
+    #[test]
+    fn from_image_wraps_a_gpu_frame_without_reading_it_back() {
+        let Ok(gpu) = ravel_gpu::GpuContext::new_blocking() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let pool = crate::shared_texture_pool(&gpu);
+        let resident = ravel_gpu::GpuFrameBuffer::from_frame_buffer(
+            gpu.clone(),
+            &pool,
+            &FrameBuffer::new_zeroed(16, 8),
+        )
+        .expect("upload");
+        let frame: Arc<dyn NodeData> = Arc::new(resident);
+
+        let before = gpu.transfer_stats();
+        let out = from_image(Some(Arc::clone(&frame))).unwrap();
+        let delta = before.delta(&gpu.transfer_stats());
+        assert_eq!(delta.readbacks, 0, "wrapping must not read back: {delta:?}");
+
+        let geo = as_geometry(&out);
+        let image = geo.sources()[0].image().expect("the source is an image");
+        assert_eq!((image.width(), image.height()), (16, 8));
+        assert!(
+            Arc::ptr_eq(image.frame(), &frame),
+            "the resident handle must be held as it arrived"
+        );
+        assert!(
+            geo.is_gpu_resident(),
+            "a geometry holding a resident frame is resident"
+        );
+    }
+
+    /// Feeding the output to a scatter puts the image two levels down, well
+    /// inside the rasterizer's nesting limit — which is what makes "repeat an
+    /// image" work with no new mechanism.
+    #[test]
+    fn a_scattered_image_geometry_nests_two_levels_deep() {
+        let image = from_image(Some(Arc::new(FrameBuffer::new_zeroed(32, 32)))).unwrap();
+        let node = Node::new(NodeId::new(2), "scatter.grid")
+            .with_input("instance_source", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let mut params = ResolvedParams::default();
+        params.set("count_x", ravel_core::eval::ResolvedValue::Int(3));
+        params.set("count_y", ravel_core::eval::ResolvedValue::Int(2));
+        let mut scope = Evaluator::new();
+        let out = crate::scatter::GridProcessor
+            .process(&node, &ctx(), &[Some(image)], &params, &mut scope)
+            .unwrap();
+
+        let scattered = as_geometry(&out);
+        assert_eq!(scattered.instance_count(), 6, "3 x 2 copies");
+
+        // Walk down to the image, counting the levels the rasterizer would
+        // recurse through.
+        let mut depth = 1;
+        let mut level = scattered.sources()[0]
+            .geometry()
+            .expect("the scatter stamps the from_image geometry")
+            .clone();
+        while let Some(inner) = level.sources().first().and_then(|s| s.geometry()) {
+            depth += 1;
+            level = inner.clone();
+        }
+        depth += 1;
+        assert!(
+            level.sources()[0].image().is_some(),
+            "the bottom of the nesting is the image"
+        );
+        assert_eq!(depth, 2, "from_image → scatter is two levels");
+        assert!(
+            depth < crate::rasterize::MAX_INSTANCE_DEPTH,
+            "two levels stay inside the rasterizer's limit"
+        );
+    }
+
+    #[test]
+    fn from_image_rejects_a_value_that_is_not_a_frame_buffer() {
+        let Err(error) = from_image(Some(Arc::new(source_geometry()))) else {
+            panic!("a geometry is not a frame buffer");
+        };
+        assert!(
+            format!("{error:#}").contains("must be a frame buffer"),
+            "unexpected error: {error:#}"
+        );
+
+        let Err(error) = from_image(None) else {
+            panic!("an unconnected input has no image");
+        };
+        assert!(
+            format!("{error:#}").contains("not connected"),
+            "unexpected error: {error:#}"
+        );
     }
 
     fn eval_connect(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Geometry {

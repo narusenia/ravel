@@ -175,6 +175,7 @@ pub enum RavelIcon {
     NodeGeometryMerge,
     /// Node header/menu: `geometry.connect`.
     NodeGeometryConnect,
+    NodeGeometryFromImage,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
     /// Node header/menu: `scene.merge`.
@@ -372,6 +373,7 @@ impl RavelIcon {
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
             "geometry.connect" => Self::NodeGeometryConnect,
+            "geometry.from_image" => Self::NodeGeometryFromImage,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
             "scene.camera" => Self::NodeSceneCamera,
@@ -497,6 +499,7 @@ impl IconNamed for RavelIcon {
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
             Self::NodeGeometryConnect => "icons/network.svg",
+            Self::NodeGeometryFromImage => "icons/image.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",
             Self::NodeSceneCamera => "icons/video.svg",

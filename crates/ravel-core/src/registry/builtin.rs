@@ -136,6 +136,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_transform());
     reg.register(geometry_merge());
     reg.register(geometry_connect());
+    reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -1196,6 +1197,29 @@ fn geometry_merge() -> NodeTemplate {
         .with_output(geometry_output())
 }
 
+/// `geometry.from_image`: a frame buffer as one instance stamping it.
+///
+/// The domain of the `type_key` is the **output** type, the way every other
+/// built-in spells it (`shape.*` / `scatter.*` / `geometry.*` produce a
+/// geometry, `comp.*` a frame buffer). No parameters: the rectangle is the
+/// source's own pixel resolution, centred on the origin, and everything that
+/// would move or resize it is an instance attribute that the geometry
+/// operators already write.
+fn geometry_from_image() -> NodeTemplate {
+    NodeTemplate::new(
+        "geometry.from_image",
+        "Image to Geometry",
+        NodeCategory::Geometry,
+    )
+    .with_input(InputPort {
+        name: "image".into(),
+        accepted_types: vec![DataTypeId::FRAME_BUFFER],
+        is_param: false,
+        is_variadic: false,
+    })
+    .with_output(geometry_output())
+}
+
 /// `geometry.connect`: add connectivity to a point cloud without adding
 /// points.
 ///
@@ -1735,14 +1759,18 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 74);
+        assert_eq!(reg.all_templates().count(), 75);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
+<<<<<<< HEAD
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 22);
+=======
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 20);
+>>>>>>> 92191d6 (feat: add geometry.from_image wrapping a frame buffer as an instance source)
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 17);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

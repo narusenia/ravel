@@ -36,7 +36,7 @@ const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 
 /// Instance nesting guard: instances-of-instances beyond this depth are
 /// skipped rather than recursed (spec limits stateful/sim nesting similarly).
-const MAX_INSTANCE_DEPTH: u32 = 4;
+pub(crate) const MAX_INSTANCE_DEPTH: u32 = 4;
 const DEFAULT_POINT_RADIUS: f32 = 2.0;
 
 /// Fill/stroke style in effect for one element.

@@ -892,6 +892,10 @@ group = "Name of the boolean point attribute the group mode connects."
 interpolation = "Straight segments, or bezier tangents estimated from the neighbouring points."
 closed = "Close the path."
 
+[node."geometry.from_image"]
+label = "Image to Geometry"
+description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."
+
 [node."scene.add"]
 label = "Scene Add"
 description = "Places a geometry or another scene into a 3D scene with a transform."

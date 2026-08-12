@@ -16,7 +16,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeSet, Domain, Geometry, Primitive, names};
+use ravel_core::geometry::{AttributeSet, Domain, Geometry, InstanceSource, Primitive, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
@@ -488,7 +488,9 @@ fn ensure_planar_paths(geo: &Geometry, depth: u32) -> anyhow::Result<()> {
     // Nesting past the limit is dropped by the draw walk with a warning, so
     // there is nothing below it left to validate.
     if depth < MAX_INSTANCE_DEPTH {
-        for source in geo.instance_sources() {
+        // An image source has no primitives and no `P`, so there is nothing
+        // here for it to fail; the guard stays on geometry sources.
+        for source in geo.sources().iter().filter_map(InstanceSource::geometry) {
             ensure_planar_paths(source, depth + 1)?;
         }
     }
@@ -618,12 +620,12 @@ fn flatten_geometry(
     }
 
     if depth >= MAX_INSTANCE_DEPTH {
-        if !geo.instance_sources().is_empty() {
+        if !geo.sources().is_empty() {
             log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
         }
         return;
     }
-    let sources = geo.instance_sources();
+    let sources = geo.sources();
     if sources.is_empty() {
         return;
     }
@@ -654,7 +656,9 @@ fn flatten_geometry(
                 Color::new(1.0, 1.0, 1.0, 1.0),
             ),
         };
-        let source = select_instance_source(sources, source_indices, index);
+        let Some(source) = select_instance_source(sources, source_indices, index) else {
+            continue;
+        };
         flatten_geometry(
             source,
             compose(placement, local),
@@ -874,7 +878,7 @@ fn raster_instances(
         log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
         return;
     }
-    let sources = geo.instance_sources();
+    let sources = geo.sources();
     if sources.is_empty() {
         return;
     }
@@ -906,7 +910,9 @@ fn raster_instances(
             ),
         };
         let combined = compose(placement, local);
-        let source = select_instance_source(sources, source_indices, i);
+        let Some(source) = select_instance_source(sources, source_indices, i) else {
+            continue;
+        };
         raster_geometry(
             source,
             combined,
@@ -917,13 +923,25 @@ fn raster_instances(
     }
 }
 
+/// The geometry an instance stamps, or `None` when the selected source is an
+/// image.
+///
+/// Drawing images is `IMG-4` / `IMG-5`; until then this rasterizer skips
+/// them rather than shifting the selection, so `source_index` keeps
+/// addressing the same source it will once they draw.
 fn select_instance_source<'a>(
-    sources: &'a [Arc<Geometry>],
+    sources: &'a [InstanceSource],
     source_indices: Option<&[i32]>,
     instance_index: usize,
-) -> &'a Geometry {
+) -> Option<&'a Geometry> {
     let source_index = source_indices.map_or(0, |indices| indices[instance_index].max(0) as usize);
-    sources[source_index.min(sources.len() - 1)].as_ref()
+    match &sources[source_index.min(sources.len() - 1)] {
+        InstanceSource::Geometry(geometry) => Some(geometry),
+        InstanceSource::Image(_) => {
+            log::warn!("rasterize: image instance sources are not drawn yet, skipping");
+            None
+        }
+    }
 }
 
 /// Composes an outer placement with an instance-local one (outer ∘ local).

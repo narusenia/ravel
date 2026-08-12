@@ -306,7 +306,9 @@ impl NodeProcessor for GeometryMergeProcessor {
             out.push_primitive(prim.shifted(point_offset, b_indices));
         }
 
-        match (a.instance_sources(), b.instance_sources()) {
+        // Sources are moved, never inspected: an image source merges by the
+        // same rule a geometry one does.
+        match (a.sources(), b.sources()) {
             (sources_a, sources_b)
                 if !sources_a.is_empty()
                     && !sources_b.is_empty()
@@ -314,14 +316,14 @@ impl NodeProcessor for GeometryMergeProcessor {
                         || sources_a
                             .iter()
                             .zip(sources_b)
-                            .any(|(source_a, source_b)| !Arc::ptr_eq(source_a, source_b))) =>
+                            .any(|(source_a, source_b)| !source_a.ptr_eq(source_b))) =>
             {
                 anyhow::bail!(
                     "geometry.merge: merging two distinct instance sources is unsupported"
                 )
             }
             (sources_a, sources_b) => {
-                out.set_instance_sources(if sources_a.is_empty() {
+                out.set_sources(if sources_a.is_empty() {
                     sources_b.to_vec()
                 } else {
                     sources_a.to_vec()

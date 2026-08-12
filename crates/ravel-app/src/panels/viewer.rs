@@ -1955,15 +1955,32 @@ impl Render for ViewerPanel {
                     {
                         tracing::error!(%err, "failed to paint viewer image");
                     }
+                    // Ask the renderer that lent Ravel its device whether that
+                    // device died — on **every** paint, not only when a GPU
+                    // frame is in hand. A dead device stops producing frames,
+                    // and the update that blanks the viewer takes the last one
+                    // with it; hanging the announcement off a frame still being
+                    // around is how a loss goes unreported for the rest of the
+                    // session.
+                    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+                    let host_device_loss = crate::workspace::host_device_loss_detected(window, cx);
+                    #[cfg(not(any(
+                        target_os = "linux",
+                        target_os = "freebsd",
+                        target_os = "windows"
+                    )))]
+                    let host_device_loss = false;
+                    let mut surface_lost = false;
+                    let mut self_owned_device_loss = false;
                     if let Some(frame) = gpu_frame.as_ref() {
-                        let self_owned_device_loss = frame.device_state().lost();
-                        let surface_available = paint_gpu_surface(frame, frame_bounds, window, cx);
-                        if !surface_available {
+                        self_owned_device_loss = frame.device_state().lost();
+                        if !paint_gpu_surface(frame, frame_bounds, window, cx) {
                             // This window cannot sample the worker's texture — a
                             // second window on another device, or a device that
                             // changed under us. Painting nothing would leave the
                             // viewer blank for good, so turn the path off and ask
                             // for a CPU frame; the next update repaints normally.
+                            surface_lost = true;
                             tracing::warn!(
                                 "viewer GPU surface unavailable; falling back to the CPU frame"
                             );
@@ -1971,39 +1988,26 @@ impl Render for ViewerPanel {
                         if self_owned_device_loss {
                             tracing::warn!("viewer GPU device loss detected");
                         }
-                        // A self-owned context reports its loss through the
-                        // shared state; the adopted host reports it through the
-                        // renderer's own flag. Both observations leave the paint
-                        // guard a pure capability check and reach the session
-                        // through the existing deferred update — this unit
-                        // announces the loss, it does not rebuild anything.
-                        if (!surface_available || self_owned_device_loss)
-                            && let Some(project) = cx
-                                .try_global::<ProjectStateHandle>()
-                                .and_then(|handle| handle.0.upgrade())
-                        {
-                            #[cfg(any(
-                                target_os = "linux",
-                                target_os = "freebsd",
-                                target_os = "windows"
-                            ))]
-                            let host_device_loss =
-                                crate::workspace::host_device_loss_detected(window, cx);
-                            #[cfg(not(any(
-                                target_os = "linux",
-                                target_os = "freebsd",
-                                target_os = "windows"
-                            )))]
-                            let host_device_loss = false;
-                            cx.defer(move |cx| {
-                                project.update(cx, |project, cx| {
-                                    project.report_gpu_device_loss(host_device_loss, cx);
-                                    if !surface_available {
-                                        project.configure_viewer_surface(false, cx);
-                                    }
-                                });
+                    }
+                    // A self-owned context reports its loss through the shared
+                    // state; the adopted host reports it through the renderer's
+                    // own flag. Both observations leave the paint guard a pure
+                    // capability check and reach the session through the
+                    // existing deferred update — this unit announces the loss,
+                    // it does not rebuild anything.
+                    if (surface_lost || self_owned_device_loss || host_device_loss)
+                        && let Some(project) = cx
+                            .try_global::<ProjectStateHandle>()
+                            .and_then(|handle| handle.0.upgrade())
+                    {
+                        cx.defer(move |cx| {
+                            project.update(cx, |project, cx| {
+                                project.report_gpu_device_loss(host_device_loss, cx);
+                                if surface_lost {
+                                    project.configure_viewer_surface(false, cx);
+                                }
                             });
-                        }
+                        });
                     }
                     let mut painter = OverlayPainter::new(frame_bounds, resolution);
                     overlays.paint(&overlay_context, &mut painter);

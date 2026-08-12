@@ -3969,6 +3969,22 @@ impl TimelineGpuiPanel {
     /// The one place row heights are added up. The header column, the canvas
     /// painter, the total content height and the hit test all read the layout
     /// from here, so a row height that moves cannot move in one of them only.
+    ///
+    /// **This walk is not culled, and cannot be**: finding where the visible rows
+    /// start means summing the heights before them. What the culling reaches is
+    /// the expensive half — the header column's widget subtree and the painter's
+    /// draw calls (see [`Self::visible_blocks`]).
+    ///
+    /// The walk stays cheap because `visible_property_rows` sits behind the
+    /// expansion check: a collapsed layer costs one expansion lookup and one
+    /// 16-byte push, with no row model and no allocation. So the cost tracks the
+    /// number of *expanded* layers rather than the depth of the stack — a
+    /// hundred collapsed layers build no row models at all
+    /// (`the_row_layout_walk_builds_row_models_only_for_expanded_layers`).
+    /// Caching per-layer heights would remove the remainder, at the price of an
+    /// invalidation condition (document epoch, layer expansion, property
+    /// expansion, channel counts) whose failure mode is every row below a stale
+    /// entry drawn in the wrong place.
     fn layer_blocks(state: &TimelinePanel) -> Vec<LayerBlock> {
         let mut blocks = Vec::new();
         let mut y = 0.0f32;
@@ -6556,6 +6572,38 @@ mod tests {
             );
             assert!(visible.len() >= expected, "{top}: {} rows", visible.len());
         }
+    }
+
+    /// What the culling reaches, and what it does not (`MED-UI-03`).
+    ///
+    /// The row layout walk runs over every layer — it has to, to know where the
+    /// visible ones begin — but it only builds a row model for an *expanded*
+    /// layer, because `visible_property_rows` sits behind the expansion check.
+    /// A collapsed layer's height is the bare row height, which is what this
+    /// asserts: 100 collapsed layers, 0 row models.
+    #[test]
+    fn the_row_layout_walk_builds_row_models_only_for_expanded_layers() {
+        let mut state = stack_of(100);
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        assert_eq!(blocks.len(), 100);
+        assert!(
+            blocks.iter().all(|block| block.height == LAYER_ROW_HEIGHT),
+            "a collapsed layer's height comes from arithmetic, not from a row model"
+        );
+
+        // Expanding one layer is what buys one row-model build.
+        state.toggle_layer_expanded(LayerId::new(7));
+        let blocks = TimelineGpuiPanel::layer_blocks(&state);
+        let taller: Vec<LayerId> = blocks
+            .iter()
+            .filter(|block| block.height > LAYER_ROW_HEIGHT)
+            .map(|block| block.id)
+            .collect();
+        assert_eq!(
+            taller,
+            vec![LayerId::new(7)],
+            "only an expanded layer costs a row-model build"
+        );
     }
 
     /// The scroll-edge regression the culling could introduce: a row that is

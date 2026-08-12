@@ -44,8 +44,11 @@
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
-| VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
+| STYLE-2 | `style.fill` / `style.stroke` ノード | `style-attributes-plan.md` |
+| STYLE-3 | ダッシュ・キャップ・ジョイン | `style-attributes-plan.md` |
+| VEC-2 | 変換ノード（length / component / compose / angle） | `vector-field-plan.md` |
+| PARAM-4 | グラデーションエディタのインライン展開（PARAM-3 完了で着手可能） | `properties-parameter-editors-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -54,16 +57,9 @@
 | OPS-6 | `geometry.group_index`（index で要素指定） | `geometry-ops-plan.md` |
 | OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
 | OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
-| STYLE-1 | 塗り・線のスタイル属性読み出し | `style-attributes-plan.md` |
-| STYLE-5 | `field.apply` の属性自動作成 + Color 既定マスク | `style-attributes-plan.md` |
-| OPS-11 | `shape.line` / `shape.grid` | `geometry-ops-plan.md` |
-| OPS-12 | `geometry.connect`（要素を結ぶ） | `geometry-ops-plan.md` |
-| OPS-13 | `attribute.curveu`（パスパラメータ） | `geometry-ops-plan.md` |
-| VEC-6 | `constant.vec2` / `vec3` / `vec4`（VEC-5 完了で着手可能） | `vector-field-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
 | OVL-5 | `ParamRole` とマニピュレータ | `viewer-overlay-manipulator-plan.md` |
 | OVL-7 | レイヤー殻のマニピュレータ + HUD + 親子リンク線 | `viewer-overlay-manipulator-plan.md` |
-| PARAM-7 | `math.curve`（値ドメインの curve remap） | `properties-parameter-editors-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
@@ -365,21 +361,21 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | OPS-7 | 🟡 | `geometry.repeat`（トランスフォームリピータ） | — |
 | OPS-8 | 🟡 | デフォーマ（bend / twist / taper） | — |
 | OPS-9 | ⬜ | `geometry.distribute`（要素サイズ考慮の分布） | OPS-4 |
-| OPS-11 | 🟡 | `shape.line` / `shape.grid`（表の「生成 ✅」は誤りだった） | — |
-| OPS-12 | 🟡 | `geometry.connect`（要素をベジエ/直線で結ぶ。Add SOP 相当） | — |
-| OPS-13 | 🟡 | `attribute.curveu`（パスパラメータ `u` の予約と書き込み） | — |
+| OPS-11 | ✅ | `shape.line` / `shape.grid`（表の「生成 ✅」は誤りだった）（#406） | — |
+| OPS-12 | ✅ | `geometry.connect`（要素をベジエ/直線で結ぶ。Add SOP 相当）（#406） | — |
+| OPS-13 | ✅ | `attribute.curveu`（パスパラメータ `u` の予約と書き込み）（#406） | — |
 | OPS-10 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜9, OPS-11〜13 |
 
 ### 塗り・線のスタイル属性化
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| STYLE-1 | 🟡 | スタイル属性の読み出し（CPU / GPU） | — |
-| STYLE-2 | ⬜ | `style.fill` / `style.stroke` ノード | STYLE-1 |
-| STYLE-3 | ⬜ | ダッシュ・キャップ・ジョイン | STYLE-1 |
+| STYLE-1 | ✅ | スタイル属性の読み出し（CPU / GPU）（#403） | — |
+| STYLE-2 | 🟡 | `style.fill` / `style.stroke` ノード | STYLE-1 |
+| STYLE-3 | 🟡 | ダッシュ・キャップ・ジョイン | STYLE-1 |
 | STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2, MOD-1 |
-| STYLE-5 | 🟡 | `field.apply` の属性自動作成 + Color 既定マスクを `rgb` へ | — |
-| STYLE-6 | ⬜ | `field.ramp`（位置 → 色のランプ） | STYLE-5, VEC-1 |
+| STYLE-5 | ✅ | `field.apply` の属性自動作成 + Color 既定マスクを `rgb` へ（#403） | — |
+| STYLE-6 | ✅ | `field.ramp`（位置 → 色のランプ）（#408） | STYLE-5, VEC-1 |
 
 STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現状スカラー
 フィールドは Color の全 4 成分に broadcast され、明度と同時にアルファも動く
@@ -389,12 +385,12 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| VEC-1 | 🟡 | 二項合成の多相化（**Color / Vec4 を含む**） | MOD-2 |
-| VEC-2 | ⬜ | 変換ノード（length / component / compose / angle） | VEC-1 |
+| VEC-1 | ✅ | 二項合成の多相化（**Color / Vec4 を含む**）（#405） | MOD-2 |
+| VEC-2 | 🟡 | 変換ノード（length / component / compose / angle） | VEC-1 |
 | VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
 | VEC-7a | ✅ | `vector.construct.vec2` / `vec3` / `vec4`（値ドメイン。VEC-5 の移行が挿入する） | — |
 | VEC-5 | ✅ | Vec パラメータの正規化（`_x`/`_y` → `Channel2` / `Channel3`、`Channel3`→VEC3 ポート、`attribute.set` の型駆動 `value` と再型付け、format v5 マイグレーション） | VEC-7a |
-| VEC-6 | 🟡 | `constant.vec2` / `vec3` / `vec4` | VEC-5 |
+| VEC-6 | ✅ | `constant.vec2` / `vec3` / `vec4`（#402） | VEC-5 |
 | VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
 | VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
 | VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
@@ -594,10 +590,10 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 |---|---|---|---|
 | PARAM-1 | ✅ | `ParameterValue::Curve` と文字列からのマイグレーション（format v6） | — |
 | PARAM-2 | ✅ | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
-| PARAM-3 | ⬜ | `ParameterValue::Ramp` と `field.ramp` | PARAM-1, STYLE-6 |
-| PARAM-4 | ⬜ | グラデーションエディタのインライン展開 | PARAM-3 |
+| PARAM-3 | ✅ | `ParameterValue::Ramp` と `field.ramp`（`STYLE-6` と同じ実装。#408 が `RampParam` と両方の完了条件を入れた） | PARAM-1, STYLE-6 |
+| PARAM-4 | 🟡 | グラデーションエディタのインライン展開 | PARAM-3 |
 | PARAM-5 | ✅ | カーブエディタの表示範囲を Timeline と共有（`widgets/curve_view.rs`。Timeline 側のホイール縦ズームは `MED-APP-17` に残る） | PARAM-2 |
-| PARAM-7 | 🟡 | `math.curve`（値ドメインの curve remap） | PARAM-2 |
+| PARAM-7 | ✅ | `math.curve`（値ドメインの curve remap）（#404） | PARAM-2 |
 | PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
 | PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
 

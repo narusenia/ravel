@@ -225,6 +225,8 @@ pub enum RavelIcon {
     NodeStyleFill,
     /// Node header/menu: `style.stroke`.
     NodeStyleStroke,
+    /// Node header/menu: `style.dash`.
+    NodeStyleDash,
     /// Node header/menu: `field.noise`.
     NodeFieldNoise,
     /// Node header/menu: `field.falloff`.
@@ -395,6 +397,7 @@ impl RavelIcon {
             "attribute.curveu" => Self::NodeAttributeCurveU,
             "style.fill" => Self::NodeStyleFill,
             "style.stroke" => Self::NodeStyleStroke,
+            "style.dash" => Self::NodeStyleDash,
             "field.noise" => Self::NodeFieldNoise,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
@@ -524,6 +527,7 @@ impl IconNamed for RavelIcon {
             // `shape.custom_path` (whose outline is what a stroke draws).
             Self::NodeStyleFill => "icons/paintbrush.svg",
             Self::NodeStyleStroke => "icons/pen-tool.svg",
+            Self::NodeStyleDash => "icons/circle-dashed.svg",
             Self::NodeFieldNoise => "icons/waves.svg",
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",

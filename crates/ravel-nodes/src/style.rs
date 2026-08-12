@@ -10,7 +10,7 @@
 //! above all — therefore modulates the look like any other attribute.
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeValue, Domain, attribute_set_in_group, names};
+use ravel_core::geometry::{AttributeValue, Domain, attribute_set, attribute_set_in_group, names};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData};
 use std::sync::Arc;
@@ -101,14 +101,80 @@ impl NodeProcessor for StyleStrokeProcessor {
             group,
             AttributeValue::F32(UNSET_STROKE_WIDTH),
         )?;
-        Ok(Arc::new(attribute_set_in_group(
+        let with_color = attribute_set_in_group(
             &with_width,
             domain,
             names::STROKE_COLOR,
             AttributeValue::Color(color_param(params)),
             group,
             AttributeValue::Color(UNSET_COLOR),
+        )?;
+        // Cap and join are Detail attributes: one shape for the whole
+        // geometry, so neither `domain` nor `group` applies to them.
+        let with_cap = attribute_set(
+            &with_color,
+            Domain::Detail,
+            names::CAP,
+            AttributeValue::I32(cap_param(params)),
+        )?;
+        Ok(Arc::new(attribute_set(
+            &with_cap,
+            Domain::Detail,
+            names::JOIN,
+            AttributeValue::I32(join_param(params)),
         )?))
+    }
+}
+
+pub struct StyleDashProcessor;
+
+impl StyleDashProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for StyleDashProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "style.dash")?;
+        // The pattern is written through as typed: `rasterize` owns the
+        // parsing (and the warning for a malformed one), so the node editor
+        // keeps showing what the user typed.
+        let with_pattern = attribute_set(
+            geometry,
+            Domain::Detail,
+            names::DASH,
+            AttributeValue::Str(params.str_or("pattern", "").to_owned()),
+        )?;
+        Ok(Arc::new(attribute_set(
+            &with_pattern,
+            Domain::Detail,
+            names::DASH_OFFSET,
+            AttributeValue::F32(params.f32_or("offset", 0.0)),
+        )?))
+    }
+}
+
+fn cap_param(params: &ResolvedParams) -> i32 {
+    match params.str_or("cap", "") {
+        "butt" => names::CAP_BUTT,
+        "square" => names::CAP_SQUARE,
+        _ => names::CAP_ROUND,
+    }
+}
+
+fn join_param(params: &ResolvedParams) -> i32 {
+    match params.str_or("join", "") {
+        "miter" => names::JOIN_MITER,
+        "bevel" => names::JOIN_BEVEL,
+        _ => names::JOIN_ROUND,
     }
 }
 
@@ -196,6 +262,7 @@ mod tests {
                 id,
                 match type_key {
                     "style.fill" => Arc::new(StyleFillProcessor) as Arc<dyn NodeProcessor>,
+                    "style.dash" => Arc::new(StyleDashProcessor),
                     _ => Arc::new(StyleStrokeProcessor),
                 },
             );
@@ -367,6 +434,88 @@ mod tests {
         assert_eq!(
             prims.get(names::CD).unwrap().as_color(names::CD).unwrap(),
             &[Color::new(0.0, 0.0, 1.0, 1.0); 2]
+        );
+    }
+
+    /// Cap, join and dash are Detail: one value for the geometry, whatever
+    /// `domain` says, and named by the code the rasterizer reads.
+    #[test]
+    fn cap_join_and_dash_land_on_the_detail_domain() {
+        let out = run(
+            two_paths(),
+            vec![
+                (
+                    "style.stroke",
+                    vec![
+                        ("cap", ParameterValue::String("square".into())),
+                        ("join", ParameterValue::String("bevel".into())),
+                        ("domain", ParameterValue::String("point".into())),
+                    ],
+                ),
+                (
+                    "style.dash",
+                    vec![
+                        ("pattern", ParameterValue::String("4,2".into())),
+                        ("offset", ParameterValue::Float(1.5)),
+                    ],
+                ),
+            ],
+        );
+
+        let detail = out.detail();
+        assert_eq!(
+            detail.get(names::CAP).unwrap().as_i32(names::CAP).unwrap(),
+            &[names::CAP_SQUARE]
+        );
+        assert_eq!(
+            detail
+                .get(names::JOIN)
+                .unwrap()
+                .as_i32(names::JOIN)
+                .unwrap(),
+            &[names::JOIN_BEVEL]
+        );
+        assert_eq!(
+            detail
+                .get(names::DASH)
+                .unwrap()
+                .as_str(names::DASH)
+                .unwrap(),
+            &["4,2".to_owned()]
+        );
+        assert_eq!(
+            detail
+                .get(names::DASH_OFFSET)
+                .unwrap()
+                .as_f32(names::DASH_OFFSET)
+                .unwrap(),
+            &[1.5]
+        );
+        // The per-element columns still followed `domain`.
+        assert!(out.points().get(names::STROKE_WIDTH).is_some());
+    }
+
+    /// An unset cap or join is round — the shape the rasterizer drew before
+    /// the attributes existed, so a default `style.stroke` cannot change an
+    /// existing picture.
+    #[test]
+    fn the_default_cap_and_join_are_round() {
+        let out = run(two_paths(), vec![("style.stroke", vec![])]);
+        assert_eq!(
+            out.detail()
+                .get(names::CAP)
+                .unwrap()
+                .as_i32(names::CAP)
+                .unwrap(),
+            &[names::CAP_ROUND]
+        );
+        assert_eq!(
+            out.detail()
+                .get(names::JOIN)
+                .unwrap()
+                .as_i32(names::JOIN)
+                .unwrap(),
+            &[names::JOIN_ROUND]
         );
     }
 

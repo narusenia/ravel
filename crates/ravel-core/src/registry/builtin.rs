@@ -157,6 +157,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(attribute_set());
     reg.register(style_fill());
     reg.register(style_stroke());
+    reg.register(style_dash());
     reg.register(attribute_promote());
     reg.register(attribute_transfer());
     reg.register(attribute_path_sample());
@@ -288,6 +289,14 @@ fn color_parameter(key: &str, rgba: [f32; 4]) -> Parameter {
 /// `stroke_color` per primitive and per instance, so a Detail column would be
 /// written and never read.
 pub const STYLE_DOMAINS: [&str; 3] = ["point", "primitive", "instance"];
+
+/// Stroke end shapes `style.stroke` can select, ordered to match the `cap`
+/// attribute codes (`geometry::names::CAP_*`).
+pub const STROKE_CAPS: [&str; 3] = ["butt", "round", "square"];
+
+/// Stroke corner shapes `style.stroke` can select, ordered to match the `join`
+/// attribute codes (`geometry::names::JOIN_*`).
+pub const STROKE_JOINS: [&str; 3] = ["miter", "round", "bevel"];
 
 /// Attribute types `attribute.set` can write.
 pub const ATTRIBUTE_SET_TYPES: [&str; 8] = [
@@ -430,7 +439,27 @@ fn style_stroke() -> NodeTemplate {
         .with_param(string_parameter("domain", "primitive"))
         .with_param_options("domain", STYLE_DOMAINS)
         .with_param(string_parameter("group", ""))
+        // Cap and join are Detail: one value for the whole geometry, because a
+        // per-element corner shape would grow the GPU instance buffer for a
+        // need nobody has. `group` and `domain` do not apply to them.
+        .with_param(string_parameter("cap", STROKE_CAPS[1]))
+        .with_param_options("cap", STROKE_CAPS)
+        .with_param(string_parameter("join", STROKE_JOINS[1]))
+        .with_param_options("join", STROKE_JOINS)
         .with_param_range("width", 0.0..=1000.0, 0.0..=20.0)
+}
+
+/// Writes the Detail dash attributes. Separate from `style.stroke` because a
+/// dash is the one stroke property that costs the rasterizer its GPU path
+/// (`style-attributes-plan.md` unit 3), so it should be visible in the graph
+/// that a dash was asked for.
+fn style_dash() -> NodeTemplate {
+    NodeTemplate::new("style.dash", "Style Dash", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("pattern", ""))
+        .with_param(float_parameter("offset", 0.0))
+        .with_param_range("offset", -1e6..=1e6, -100.0..=100.0)
 }
 
 fn attribute_promote() -> NodeTemplate {
@@ -1693,14 +1722,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 73);
+        assert_eq!(reg.all_templates().count(), 74);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 21);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 22);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 17);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

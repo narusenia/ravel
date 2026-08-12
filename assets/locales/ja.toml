@@ -280,6 +280,8 @@ discard = "保存しない"
 [project.notice]
 gpu_title = "GPU の初期化に失敗しました"
 gpu_message = "グラフィックスアダプターを初期化できませんでした。プレビューの描画は利用できません。"
+gpu_lost_title = "GPU デバイスが失われました"
+gpu_lost_message = "GPU デバイスが失われました。このセッションでは GPU 評価は復帰しません。Ravel を再起動してください。"
 save_title = "プロジェクトを保存できませんでした"
 save_message = "変更は未保存のままです。保存先とディスクの空き容量を確認して、もう一度保存してください。"
 settings_save_title = "設定を保存できませんでした"

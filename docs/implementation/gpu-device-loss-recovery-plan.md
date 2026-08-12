@@ -292,6 +292,8 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
 - adapter が無い headless 環境でも、callback/state と lease order のテストは skip せず
   通る。実 GPU が必要な context initialization test は既存方針どおり skip を許す。
 - 未確認の backend-specific recovery を抽象 API の保証として書かない。
+- デバイス喪失をユーザーへ 1 度だけ通知し、このセッションでは GPU 評価が復帰しないため
+  アプリの再起動を促す。
 
 ### GPULOSS-2
 

@@ -84,7 +84,6 @@
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
-| GPULOSS-1 | `ravel-gpu` の device state（epoch + lost）と自前 wgpu device の loss callback | `gpu-device-loss-recovery-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
@@ -840,7 +839,7 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| GPULOSS-1 | 🟡 | `ravel-gpu` の device state（epoch + lost）と自前 wgpu device の loss callback | ZC-8 ✅, GPUBK-9 ✅ |
+| GPULOSS-1 | ✅ | `ravel-gpu` の device state（epoch + lost）と自前 wgpu device の loss callback、喪失の一度だけのユーザー通知 | ZC-8 ✅, GPUBK-9 ✅ |
 | GPULOSS-2 | ⬜ | epoch-aware な評価 worker の停止・再生成と cache budget 維持 | GPULOSS-1 |
 | GPULOSS-3 | ⬜ | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows） | GPULOSS-1, GPULOSS-2 |
 | GPULOSS-4 | ⬜ | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | GPULOSS-1, GPULOSS-2 |

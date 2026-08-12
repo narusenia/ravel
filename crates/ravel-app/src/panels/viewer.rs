@@ -1955,24 +1955,59 @@ impl Render for ViewerPanel {
                     {
                         tracing::error!(%err, "failed to paint viewer image");
                     }
-                    if let Some(frame) = gpu_frame.as_ref()
-                        && !paint_gpu_surface(frame, frame_bounds, window, cx)
-                    {
-                        // This window cannot sample the worker's texture — a
-                        // second window on another device, or a device that
-                        // changed under us. Painting nothing would leave the
-                        // viewer blank for good, so turn the path off and ask
-                        // for a CPU frame; the next update repaints normally.
-                        tracing::warn!(
-                            "viewer GPU surface unavailable; falling back to the CPU frame"
-                        );
-                        if let Some(project) = cx
-                            .try_global::<ProjectStateHandle>()
-                            .and_then(|handle| handle.0.upgrade())
+                    if let Some(frame) = gpu_frame.as_ref() {
+                        let self_owned_device_loss = frame.device_state().lost();
+                        let surface_available = paint_gpu_surface(frame, frame_bounds, window, cx);
+                        if !surface_available {
+                            // This window cannot sample the worker's texture — a
+                            // second window on another device, or a device that
+                            // changed under us. Painting nothing would leave the
+                            // viewer blank for good, so turn the path off and ask
+                            // for a CPU frame; the next update repaints normally.
+                            tracing::warn!(
+                                "viewer GPU surface unavailable; falling back to the CPU frame"
+                            );
+                            if let Some(project) = cx
+                                .try_global::<ProjectStateHandle>()
+                                .and_then(|handle| handle.0.upgrade())
+                            {
+                                #[cfg(any(
+                                    target_os = "linux",
+                                    target_os = "freebsd",
+                                    target_os = "windows"
+                                ))]
+                                let host_device_loss =
+                                    crate::workspace::host_device_loss_detected(window, cx);
+                                #[cfg(not(any(
+                                    target_os = "linux",
+                                    target_os = "freebsd",
+                                    target_os = "windows"
+                                )))]
+                                let host_device_loss = false;
+                                cx.defer(move |cx| {
+                                    project.update(cx, |project, cx| {
+                                        project.report_gpu_device_loss(host_device_loss, cx);
+                                        project.configure_viewer_surface(false, cx);
+                                    });
+                                });
+                            }
+                        }
+                        if self_owned_device_loss {
+                            tracing::warn!("viewer GPU device loss detected");
+                        }
+                        // A self-owned context reports loss through the shared
+                        // state. Keep this observation in the existing
+                        // deferred Viewer update path; the paint guard remains
+                        // a pure capability check and this unit does not yet
+                        // rebuild or replace the GPU pipeline.
+                        if self_owned_device_loss
+                            && let Some(project) = cx
+                                .try_global::<ProjectStateHandle>()
+                                .and_then(|handle| handle.0.upgrade())
                         {
                             cx.defer(move |cx| {
                                 project.update(cx, |project, cx| {
-                                    project.configure_viewer_surface(false, cx);
+                                    project.report_gpu_device_loss(true, cx);
                                 });
                             });
                         }

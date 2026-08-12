@@ -87,6 +87,8 @@ pub enum ProjectEvent {
     GpuInitializationFailed {
         error: String,
     },
+    /// The live device can no longer produce GPU evaluation frames.
+    GpuDeviceLost,
     SaveFailed {
         path: PathBuf,
         error: String,
@@ -222,6 +224,11 @@ pub struct ProjectState {
     /// REQ-GPU-001 puts the whole pipeline on one device, and `GpuContext` is
     /// cheap to clone precisely so a second consumer shares it.
     gpu: Option<GpuContext>,
+    /// Whether the session has already announced its GPU device loss.
+    ///
+    /// Multiple frames can observe the same loss, but the workspace must show
+    /// one durable notification only.
+    gpu_loss_notified: bool,
     /// Host capability shared with the evaluation worker. It is false until
     /// the live GPUI window proves that both renderers use the same device;
     /// false also selects the worker-side CPU fallback on unsupported hosts.
@@ -543,6 +550,7 @@ impl ProjectState {
             registry,
             eval,
             gpu,
+            gpu_loss_notified: false,
             viewer_surface_enabled,
             cache_budget,
             startup_gpu_error,
@@ -576,10 +584,36 @@ impl ProjectState {
         self.gpu.as_ref()
     }
 
+    /// Report a device-loss observation from an existing update path.
+    ///
+    /// `detected` is used by the adopted-host path, where GPUI owns the loss
+    /// callback and Ravel detects the device identity change at the Viewer
+    /// surface guard. Self-owned contexts additionally consult their shared
+    /// [`GpuContext`] state. The event is emitted once per session.
+    pub fn report_gpu_device_loss(&mut self, detected: bool, cx: &mut Context<Self>) {
+        let self_owned_loss = self.gpu.as_ref().is_some_and(GpuContext::lost);
+        if (!detected && !self_owned_loss) || self.gpu_loss_notified {
+            return;
+        }
+        self.gpu_loss_notified = true;
+        cx.emit(ProjectEvent::GpuDeviceLost);
+    }
+
+    /// Inject a self-owned device loss for headless callers and tests.
+    #[cfg(test)]
+    fn inject_gpu_device_loss_for_tests(&mut self, cx: &mut Context<Self>) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        gpu.inject_device_loss(ravel_gpu::GpuLossReason::Unknown);
+        self.report_gpu_device_loss(false, cx);
+    }
+
     /// Configure whether the live GPUI host can sample the worker's output
     /// texture directly. A change requests one fresh viewer frame so an old
     /// CPU/GPU representation is not kept after a window/device transition.
     pub fn configure_viewer_surface(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.report_gpu_device_loss(false, cx);
         if self.viewer_surface_enabled.swap(enabled, Ordering::Release) == enabled {
             return;
         }
@@ -1371,6 +1405,7 @@ impl ProjectState {
     /// there, and hints that could not be posted at all are retained
     /// locally.
     pub fn request_viewer_eval(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
+        self.report_gpu_device_loss(false, cx);
         // Accumulate first: every early return below must retain the hint.
         let pending = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
         self.pending_hint = pending.merge(hint);
@@ -1983,6 +2018,31 @@ mod tests {
                     if failures == std::slice::from_ref(&skipped)
                 )
             }))
+        );
+    }
+
+    #[gpui::test]
+    fn gpu_device_loss_emits_one_session_event(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let recorder = record_events(&project, cx);
+
+        project.update(cx, |project, cx| {
+            project.inject_gpu_device_loss_for_tests(cx);
+            project.report_gpu_device_loss(true, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            recorder.read_with(cx, |recorder, _| {
+                recorder
+                    .0
+                    .iter()
+                    .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost))
+                    .count()
+            }),
+            1,
+            "a device loss is announced once per session"
         );
     }
 

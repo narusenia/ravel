@@ -390,6 +390,7 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | PSHADE-3 | ⬜ | `stroke_align`（`style-attributes-plan.md` 単位 1 からの繰り延べ） | PSHADE-1 |
 | PSHADE-4 | ⬜ | 塗りの頂点色（案 B か C。**案 A を採るなら単位ごと落とす**） | PSHADE-2 |
 | PSHADE-5 | ⬜ | ゴールデンの拡張と文書、`MED-GPU-08` を閉じる | PSHADE-2, PSHADE-3 |
+| PSHADE-6 | ⬜ | **要素ごとのグラデーション塗り**（位置由来。軸は Primitive の Vec2 属性、評価はジオメトリ空間） | FX-3, STYLE-2 |
 
 **`PSHADE-2` の前に塗りの方式（案 A / B / C）を決める必要がある。** 計画書の
 「CPU 側の方式 — 選択肢」を参照。推奨は案 A（線だけ。塗りはプリミティブ色の
@@ -409,8 +410,8 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | VEC-7a | ✅ | `vector.construct.vec2` / `vec3` / `vec4`（値ドメイン。VEC-5 の移行が挿入する） | — |
 | VEC-5 | ✅ | Vec パラメータの正規化（`_x`/`_y` → `Channel2` / `Channel3`、`Channel3`→VEC3 ポート、`attribute.set` の型駆動 `value` と再型付け、format v5 マイグレーション） | VEC-7a |
 | VEC-6 | ✅ | `constant.vec2` / `vec3` / `vec4`（#402） | VEC-5 |
-| VEC-7b | ⬜ | `vector.split` / `swizzle`（値ドメイン） | VEC-6, NETIF-1 |
-| VEC-8 | ⬜ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン） | VEC-6 |
+| VEC-7b | ✅ | `vector.split` / `swizzle`（値ドメイン）（#412） | VEC-6, NETIF-1 |
+| VEC-8 | ✅ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン）（#412） | VEC-6 |
 | VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
 
 **VEC-7a を VEC-5 より先に置いているのは循環を切るため**。VEC-5 の移行は

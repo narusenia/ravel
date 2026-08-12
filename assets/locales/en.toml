@@ -1137,6 +1137,32 @@ description = "Linearly interpolates between two fields."
 [node."field.blend".params]
 amount = "Blend factor: 0 is the left input, 1 is the right input."
 
+[node."field.length"]
+label = "Field Length"
+description = "The magnitude of a vector field, as a scalar field. The zero vector answers 0."
+
+[node."field.angle"]
+label = "Field Angle"
+description = "The direction of a vector field in radians (atan2 of y over x, -pi to pi), which is what a rotation attribute can take. The zero vector answers 0."
+
+[node."field.component"]
+label = "Field Component"
+description = "Reads one component of a vector field as a scalar field."
+[node."field.component".params]
+component = "Component to read (x, y, z, w). A component the field does not have reads 0."
+
+[node."field.compose.vec2"]
+label = "Field Compose Vec2"
+description = "Builds a 2-component vector field from two scalar fields."
+
+[node."field.compose.vec3"]
+label = "Field Compose Vec3"
+description = "Builds a 3-component vector field from three scalar fields."
+
+[node."field.compose.vec4"]
+label = "Field Compose Vec4"
+description = "Builds a 4-component vector field from four scalar fields."
+
 [node."field.attribute"]
 label = "Attribute Field"
 description = "Reads an attribute of the sampled geometry as a field."

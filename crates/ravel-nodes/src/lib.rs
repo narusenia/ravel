@@ -245,6 +245,12 @@ pub fn processor_for_node(
         "field.multiply" => Some(Arc::new(field::MultiplyFieldProcessor)),
         "field.max" => Some(Arc::new(field::MaxFieldProcessor)),
         "field.blend" => Some(Arc::new(field::BlendFieldProcessor::from_node(node))),
+        "field.length" => Some(Arc::new(field::LengthFieldProcessor)),
+        "field.angle" => Some(Arc::new(field::AngleFieldProcessor)),
+        "field.component" => Some(Arc::new(field::ComponentFieldProcessor)),
+        builtin::FIELD_COMPOSE_VEC2 => Some(Arc::new(field::ComposeFieldProcessor::new(2))),
+        builtin::FIELD_COMPOSE_VEC3 => Some(Arc::new(field::ComposeFieldProcessor::new(3))),
+        builtin::FIELD_COMPOSE_VEC4 => Some(Arc::new(field::ComposeFieldProcessor::new(4))),
         "field.attribute" => Some(Arc::new(field::AttributeFieldProcessor::from_node(node))),
         "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
         // Shape generators

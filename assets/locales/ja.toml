@@ -1129,6 +1129,32 @@ description = "2 つのフィールドを線形補間する。"
 [node."field.blend".params]
 amount = "混合比: 0 で左入力、1 で右入力。"
 
+[node."field.length"]
+label = "フィールド長さ"
+description = "ベクタ場の大きさをスカラー場として返す。ゼロベクトルは 0。"
+
+[node."field.angle"]
+label = "フィールド角度"
+description = "ベクタ場の向きをラジアン（atan2(y, x)、-π〜π）で返す。回転アトリビュートに繋げる形。ゼロベクトルは 0。"
+
+[node."field.component"]
+label = "フィールド成分"
+description = "ベクタ場の 1 成分をスカラー場として読む。"
+[node."field.component".params]
+component = "読む成分（x / y / z / w）。フィールドが持たない成分は 0。"
+
+[node."field.compose.vec2"]
+label = "フィールド合成 Vec2"
+description = "スカラー場 2 本から 2 成分のベクタ場を作る。"
+
+[node."field.compose.vec3"]
+label = "フィールド合成 Vec3"
+description = "スカラー場 3 本から 3 成分のベクタ場を作る。"
+
+[node."field.compose.vec4"]
+label = "フィールド合成 Vec4"
+description = "スカラー場 4 本から 4 成分のベクタ場を作る。"
+
 [node."field.attribute"]
 label = "アトリビュートフィールド"
 description = "サンプル対象ジオメトリのアトリビュートをフィールドとして読む。"

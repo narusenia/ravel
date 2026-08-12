@@ -242,6 +242,18 @@ pub enum RavelIcon {
     NodeFieldMax,
     /// Node header/menu: `field.blend`.
     NodeFieldBlend,
+    /// Node header/menu: `field.length`.
+    NodeFieldLength,
+    /// Node header/menu: `field.angle`.
+    NodeFieldAngle,
+    /// Node header/menu: `field.component`.
+    NodeFieldComponent,
+    /// Node header/menu: `field.compose.vec2`.
+    NodeFieldComposeVec2,
+    /// Node header/menu: `field.compose.vec3`.
+    NodeFieldComposeVec3,
+    /// Node header/menu: `field.compose.vec4`.
+    NodeFieldComposeVec4,
     /// Node header/menu: `field.attribute`.
     NodeFieldAttribute,
     /// Node header/menu: `field.apply`.
@@ -386,6 +398,15 @@ impl RavelIcon {
             "field.multiply" => Self::NodeFieldMultiply,
             "field.max" => Self::NodeFieldMax,
             "field.blend" => Self::NodeFieldBlend,
+            // The field transforms share the glyphs of their value-domain
+            // twins: `field.length` does to a column what `vector.length`
+            // does to a wire value, and so on down the family.
+            "field.length" => Self::NodeFieldLength,
+            "field.angle" => Self::NodeFieldAngle,
+            "field.component" => Self::NodeFieldComponent,
+            "field.compose.vec2" => Self::NodeFieldComposeVec2,
+            "field.compose.vec3" => Self::NodeFieldComposeVec3,
+            "field.compose.vec4" => Self::NodeFieldComposeVec4,
             "field.attribute" => Self::NodeFieldAttribute,
             "field.apply" => Self::NodeFieldApply,
             _ => category.map(Self::for_category).unwrap_or(Self::NodeGraph),
@@ -505,6 +526,14 @@ impl IconNamed for RavelIcon {
             Self::NodeFieldMultiply => "icons/x.svg",
             Self::NodeFieldMax => "icons/arrow-up-to-line.svg",
             Self::NodeFieldBlend => "icons/blend.svg",
+            Self::NodeFieldLength => "icons/sigma.svg",
+            // A sweep from a centre reads as an angle; the vendored set has
+            // no protractor.
+            Self::NodeFieldAngle => "icons/radar.svg",
+            Self::NodeFieldComponent => "icons/route.svg",
+            Self::NodeFieldComposeVec2 => "icons/move.svg",
+            Self::NodeFieldComposeVec3 => "icons/axis-3d.svg",
+            Self::NodeFieldComposeVec4 => "icons/boxes.svg",
             Self::NodeFieldAttribute => "icons/hash.svg",
             Self::NodeFieldApply => "icons/paintbrush.svg",
             Self::CategoryGeometry => "icons/shapes.svg",

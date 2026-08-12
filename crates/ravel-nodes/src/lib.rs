@@ -212,6 +212,8 @@ pub fn processor_for_node(
         "shape.ellipse" => Some(Arc::new(shape::EllipseProcessor::from_node(node))),
         "shape.polygon" => Some(Arc::new(shape::PolygonProcessor::from_node(node))),
         "shape.star" => Some(Arc::new(shape::StarProcessor::from_node(node))),
+        "shape.line" => Some(Arc::new(shape::LineProcessor::from_node(node))),
+        "shape.grid" => Some(Arc::new(shape::GridProcessor::from_node(node))),
         "shape.custom_path" => Some(Arc::new(shape::CustomPathProcessor::from_node(node))),
         // Scatter / instance duplication
         "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),

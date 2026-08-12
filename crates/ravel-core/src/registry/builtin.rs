@@ -78,6 +78,8 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(shape_ellipse());
     reg.register(shape_polygon());
     reg.register(shape_star());
+    reg.register(shape_line());
+    reg.register(shape_grid());
     reg.register(shape_custom_path());
     reg.register(scatter_grid());
     reg.register(scatter_circular());
@@ -1183,6 +1185,50 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
+/// `shape.line`: one open path from `start` to `end`.
+///
+/// `segments` is the number of edges, so the path carries `segments + 1`
+/// points and the intermediate ones sit at even parameter steps — they exist
+/// to give `field.apply` something to modulate along the line.
+fn shape_line() -> NodeTemplate {
+    NodeTemplate::new("shape.line", "Line", NodeCategory::Geometry)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(channel2_parameter("start", -50.0, 0.0))
+        .with_param(channel2_parameter("end", 50.0, 0.0))
+        .with_param(int_parameter("segments", 1))
+        .with_param_range("start", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("end", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("segments", 1.0..=1000.0, 1.0..=64.0)
+}
+
+/// `shape.grid`: a lattice of open paths — `rows` horizontal lines and
+/// `columns` vertical ones, so the geometry carries `rows + columns`
+/// primitives.
+///
+/// The lines are the point of the node: for a lattice of loose *points* use
+/// `scatter.grid`, which places instances instead of paths.
+///
+/// `rows` / `columns` stay separate `Int`s for the same reason
+/// `scatter.grid`'s counts do: `Channel2` is a pair of float channels.
+fn shape_grid() -> NodeTemplate {
+    NodeTemplate::new("shape.grid", "Grid Lines", NodeCategory::Geometry)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
+        .with_param(channel2_parameter("size", 100.0, 100.0))
+        .with_param(int_parameter("rows", 3))
+        .with_param(int_parameter("columns", 3))
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("size", 0.0..=1e5, 0.0..=1000.0)
+        .with_param_range("rows", 2.0..=1000.0, 2.0..=50.0)
+        .with_param_range("columns", 2.0..=1000.0, 2.0..=50.0)
+}
+
 fn shape_custom_path() -> NodeTemplate {
     NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Geometry)
         .with_output(OutputPort {
@@ -1232,14 +1278,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 47);
+        assert_eq!(reg.all_templates().count(), 49);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 17);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

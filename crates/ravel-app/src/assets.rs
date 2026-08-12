@@ -183,6 +183,10 @@ pub enum RavelIcon {
     NodeShapePolygon,
     /// Node header/menu: `shape.star`.
     NodeShapeStar,
+    /// Node header/menu: `shape.line`.
+    NodeShapeLine,
+    /// Node header/menu: `shape.grid`.
+    NodeShapeGrid,
     /// Node header/menu: `shape.custom_path`.
     NodeShapeCustomPath,
     /// Node header/menu: `scatter.grid`.
@@ -328,6 +332,8 @@ impl RavelIcon {
             "shape.ellipse" => Self::NodeShapeEllipse,
             "shape.polygon" => Self::NodeShapePolygon,
             "shape.star" => Self::NodeShapeStar,
+            "shape.line" => Self::NodeShapeLine,
+            "shape.grid" => Self::NodeShapeGrid,
             "shape.custom_path" => Self::NodeShapeCustomPath,
             "scatter.grid" => Self::NodeScatterGrid,
             "scatter.circular" => Self::NodeScatterCircular,
@@ -430,6 +436,10 @@ impl IconNamed for RavelIcon {
             Self::NodeShapeEllipse => "icons/circle.svg",
             Self::NodeShapePolygon => "icons/hexagon.svg",
             Self::NodeShapeStar => "icons/star.svg",
+            Self::NodeShapeLine => "icons/interpolation-linear.svg",
+            // Shares the lattice glyph with `scatter.grid`: both are grids,
+            // and the vendored set has no second one.
+            Self::NodeShapeGrid => "icons/grid-3x3.svg",
             Self::NodeShapeCustomPath => "icons/pen-tool.svg",
             Self::NodeScatterGrid => "icons/grid-3x3.svg",
             Self::NodeScatterCircular => "icons/circle-dashed.svg",

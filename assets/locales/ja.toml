@@ -893,6 +893,23 @@ outer_radius = "外側の頂点の半径（ピクセル）。"
 inner_radius = "内側の頂点の半径（ピクセル）。"
 points = "頂点の数。"
 
+[node."shape.line"]
+label = "直線"
+description = "2 点を結ぶ開いたパスを 1 本作成する。"
+[node."shape.line".params]
+start = "始点の位置（ピクセル）。"
+end = "終点の位置（ピクセル）。"
+segments = "分割数。2 以上で中間点を等間隔に追加する。"
+
+[node."shape.grid"]
+label = "グリッド線"
+description = "行と列の線からなる格子を作成する。各行・各列が 1 本のパスになる。点だけが必要なら散布のグリッドを使う。"
+[node."shape.grid".params]
+center = "中心位置（ピクセル）。"
+size = "全体の幅と高さ（ピクセル）。"
+rows = "水平線の本数。"
+columns = "垂直線の本数。"
+
 [node."shape.custom_path"]
 label = "カスタムパス"
 description = "ペンツールで作ったベジェパス。制御点はキャンバス上で編集し、プロパティでは読み取り専用。"

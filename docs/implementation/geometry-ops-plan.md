@@ -15,7 +15,7 @@
 
 | 分類 | Houdini の中核 SOP | Ravel の現状 |
 |---|---|---|
-| 生成 | Grid / Circle / Line / Box | `shape.*` 5 種（rect / ellipse / polygon / star / custom_path）。**Line / Grid は無し**（`scatter.grid` は点を配るだけで別物） |
+| 生成 | Grid / Circle / Line / Box | `shape.*` 7 種（rect / ellipse / polygon / star / line / grid / custom_path）✅（単位 11。`scatter.grid` は点を配るだけなので `shape.grid` とは別物） |
 | 複製 | Copy to Points | `scatter.*` 4 種 ✅ |
 | 変形 | Transform | `geometry.transform` ✅ |
 | 結合 | Merge | `geometry.merge` ✅ |

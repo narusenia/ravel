@@ -901,6 +901,23 @@ outer_radius = "Radius of the outer points in pixels."
 inner_radius = "Radius of the inner points in pixels."
 points = "Number of points."
 
+[node."shape.line"]
+label = "Line"
+description = "Creates one open path between two points."
+[node."shape.line".params]
+start = "Start position in pixels."
+end = "End position in pixels."
+segments = "Number of segments. Above one, evenly spaced intermediate points are added."
+
+[node."shape.grid"]
+label = "Grid Lines"
+description = "Creates a lattice of lines: one path per row and per column. Use Grid (scatter) instead when you only want the points."
+[node."shape.grid".params]
+center = "Center position in pixels."
+size = "Total width and height in pixels."
+rows = "Number of horizontal lines."
+columns = "Number of vertical lines."
+
 [node."shape.custom_path"]
 label = "Custom Path"
 description = "A bezier path authored with the pen tool. Its control points are edited on the canvas, not in Properties."

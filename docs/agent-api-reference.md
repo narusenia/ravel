@@ -548,6 +548,8 @@ RampStop::new(position, Color)
 ramp.with_interpolation(RampInterpolation::{Linear, Smooth, Constant})
 ramp.evaluate(position: f32) -> Color
 ramp.stops() / .len() / .interpolation()
+ramp.insert_stop(RampStop) / .remove_stop(position) / .move_stop(from, to)
+ramp.set_stop_color(position, Color) / .set_interpolation(RampInterpolation)
 ```
 
 The same shape of type as `CurveParam`, and for the same reasons: stops are
@@ -563,9 +565,16 @@ give, so every path that would produce one falls back to `black_to_white()`.
 `Constant` holds the left stop's colour until the next stop, making the ramp a
 set of hard bands.
 
+`remove_stop` is where "never empty" is enforced from the mutating side: it
+refuses the **last** stop and answers `None`, so a one-stop ramp (one flat
+colour) is the floor rather than an empty one. `insert_stop`, `move_stop` and
+`set_stop_color` refuse non-finite input for the same reason `Deserialize`
+drops it.
+
 Consumed through `ParameterValue::Ramp` (`field.ramp` today) and read in a
-processor with `params.ramp(key)`. Properties renders it read-only until the
-gradient editor lands.
+processor with `params.ramp(key)`. Properties renders it as a
+`PropertyField::Ramp` row — a gradient band that expands
+`widgets::param_ramp_editor` inline, the same shape a curve row has.
 
 ### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
 

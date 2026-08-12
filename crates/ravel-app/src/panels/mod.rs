@@ -74,6 +74,17 @@ pub struct FocusedPanelGlobal(pub Option<PanelInstanceId>);
 
 impl Global for FocusedPanelGlobal {}
 
+/// Panel instances whose tab is currently at the front of an area in any
+/// open window.
+///
+/// This is durable shared state, not a one-shot notification. The window host
+/// maintains it when it applies a layout tree; panels will start observing it
+/// in a later visibility-gating unit.
+#[derive(Default)]
+pub struct VisiblePanels(pub HashSet<PanelInstanceId>);
+
+impl Global for VisiblePanels {}
+
 /// Whether `instance` is the panel instance holding the focus.
 pub(crate) fn is_instance_focused(instance: PanelInstanceId, cx: &App) -> bool {
     cx.try_global::<FocusedPanelGlobal>().and_then(|g| g.0) == Some(instance)

@@ -21,7 +21,7 @@
 //! re-renders the tree the shell now holds for its window, and routes command
 //! actions back into it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -113,6 +113,7 @@ pub enum WindowRole {
 struct OpenWindow {
     handle: AnyWindowHandle,
     host: WeakEntity<WindowHost>,
+    visible_panels: HashSet<PanelInstanceId>,
 }
 
 /// Live GPUI handles for the workspace's logical windows.
@@ -190,18 +191,91 @@ impl WindowRegistry {
 
 /// Records a window's handle and host under its logical id.
 fn register(id: WindowId, handle: AnyWindowHandle, host: WeakEntity<WindowHost>, cx: &mut App) {
-    cx.default_global::<WindowRegistry>()
-        .windows
-        .insert(id, OpenWindow { handle, host });
+    let visible_panels = host
+        .read_with(cx, |host, _cx| host.visible_panels.clone())
+        .unwrap_or_default();
+    cx.default_global::<WindowRegistry>().windows.insert(
+        id,
+        OpenWindow {
+            handle,
+            host,
+            visible_panels,
+        },
+    );
+}
+
+/// Returns the active tab of every area in `root`.
+fn visible_panel_ids(root: &LayoutNode) -> HashSet<PanelInstanceId> {
+    let mut visible = HashSet::new();
+    collect_visible_panel_ids(root, &mut visible);
+    visible
+}
+
+fn collect_visible_panel_ids(root: &LayoutNode, visible: &mut HashSet<PanelInstanceId>) {
+    match root {
+        LayoutNode::Area { tabs, active } => {
+            if let Some(instance) = tabs.get(*active).or_else(|| tabs.first()) {
+                visible.insert(instance.id);
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            collect_visible_panel_ids(first, visible);
+            collect_visible_panel_ids(second, visible);
+        }
+    }
+}
+
+/// Replaces one window's contribution to the app-wide visible set.
+///
+/// During a cross-window move, sibling hosts can briefly have the old layout
+/// cached. Preserve an id another window still publishes until that host
+/// catches up with its own `show_tree` call.
+fn replace_visible_panels(
+    all_visible: &mut panels::VisiblePanels,
+    previous: &mut HashSet<PanelInstanceId>,
+    current: HashSet<PanelInstanceId>,
+    other_visible: &HashSet<PanelInstanceId>,
+) {
+    all_visible
+        .0
+        .retain(|instance| !previous.contains(instance) || other_visible.contains(instance));
+    all_visible.0.extend(current.iter().copied());
+    *previous = current;
+}
+
+/// Removes one window's contribution from the app-wide visible set, preserving
+/// ids still published by another open window.
+fn remove_visible_panels(
+    all_visible: &mut panels::VisiblePanels,
+    window_visible: &HashSet<PanelInstanceId>,
+    other_visible: &HashSet<PanelInstanceId>,
+) {
+    all_visible
+        .0
+        .retain(|instance| !window_visible.contains(instance) || other_visible.contains(instance));
 }
 
 /// Drops a window from the table, returning its handle if it was open.
 pub fn unregister(id: WindowId, cx: &mut App) -> Option<AnyWindowHandle> {
-    let registry = cx.default_global::<WindowRegistry>();
-    if registry.main == Some(id) {
-        registry.main = None;
-    }
-    registry.windows.remove(&id).map(|open| open.handle)
+    let (open, other_visible) = {
+        let registry = cx.default_global::<WindowRegistry>();
+        if registry.main == Some(id) {
+            registry.main = None;
+        }
+        let open = registry.windows.remove(&id)?;
+        let other_visible = registry
+            .windows
+            .values()
+            .flat_map(|open| open.visible_panels.iter().copied())
+            .collect();
+        (open, other_visible)
+    };
+    remove_visible_panels(
+        cx.default_global::<panels::VisiblePanels>(),
+        &open.visible_panels,
+        &other_visible,
+    );
+    Some(open.handle)
 }
 
 /// On-screen bounds of a logical window.
@@ -744,6 +818,10 @@ pub struct WindowHost {
     session: Option<Entity<RavelWorkspace>>,
     dock: Entity<DockRoot>,
     panes: std::rc::Rc<panels::PanelViews>,
+    /// The visible instances last published for this window. The registry
+    /// keeps a copy so unregistering the window can remove exactly its share
+    /// from the app-wide set.
+    visible_panels: HashSet<PanelInstanceId>,
     focus_handle: FocusHandle,
     /// Last title written to the OS window. The platform window list keeps the
     /// title it was opened with, so it has to be rewritten when the active tab
@@ -787,7 +865,8 @@ impl WindowHost {
         let opened_around = (role == WindowRole::Detached)
             .then(|| active_instance(&root))
             .flatten();
-        let dock = cx.new(|cx| DockRoot::new(root, panes.clone(), cx));
+        let dock_root = root.clone();
+        let dock = cx.new(|cx| DockRoot::new(dock_root, panes.clone(), cx));
         let dock_sub = cx.subscribe_in(
             &dock,
             window,
@@ -852,12 +931,13 @@ impl WindowHost {
         if always_on_top {
             window.set_always_on_top(true);
         }
-        Self {
+        let mut host = Self {
             id,
             role,
             session: owned_session,
             dock,
             panes,
+            visible_panels: HashSet::new(),
             focus_handle,
             os_title,
             project_name,
@@ -866,7 +946,9 @@ impl WindowHost {
             session_sub,
             focus_sub,
             bounds_sub,
-        }
+        };
+        host.show_tree(root, window, cx);
+        host
     }
 
     /// The logical window this host renders.
@@ -981,6 +1063,28 @@ impl WindowHost {
 
     /// Renders an updated tree for this window and keeps the OS title with it.
     fn show_tree(&mut self, root: LayoutNode, window: &mut Window, cx: &mut Context<Self>) {
+        let other_visible = {
+            let registry = cx.default_global::<WindowRegistry>();
+            registry
+                .windows
+                .iter()
+                .filter(|(id, _)| **id != self.id)
+                .flat_map(|(_, open)| open.visible_panels.iter().copied())
+                .collect()
+        };
+        replace_visible_panels(
+            cx.default_global::<panels::VisiblePanels>(),
+            &mut self.visible_panels,
+            visible_panel_ids(&root),
+            &other_visible,
+        );
+        if let Some(open) = cx
+            .default_global::<WindowRegistry>()
+            .windows
+            .get_mut(&self.id)
+        {
+            open.visible_panels.clone_from(&self.visible_panels);
+        }
         // The title follows the active tab, and the OS keeps whatever it was
         // given at open time until it is written again. The main window's OS
         // title names the project instead, and the session maintains it.
@@ -991,7 +1095,9 @@ impl WindowHost {
                 window.set_window_title(&self.os_title);
             }
         }
-        self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
+        if self.dock.read(cx).layout() != &root {
+            self.dock.update(cx, |dock, cx| dock.set_layout(root, cx));
+        }
     }
 
     /// Window title bar: the shared component, with the slots this window's
@@ -1144,7 +1250,9 @@ mod tests {
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
     // to the built-in one so `#[test]` resolves to the real one.
     use core::prelude::v1::test;
+    use std::collections::HashSet;
 
+    use crate::panels;
     use ravel_ui::layout::{LayoutNode, Orientation, PanelInstance, PanelInstanceId};
     use ravel_ui::panel::PanelKind;
 
@@ -1216,6 +1324,112 @@ mod tests {
             super::window_title_kind(&LayoutNode::area(Vec::new())),
             super::WindowTitle::App
         );
+    }
+
+    #[test]
+    fn visible_panels_replace_the_previous_active_tab() {
+        let mut visible = panels::VisiblePanels::default();
+        let mut previous = HashSet::new();
+        let first = LayoutNode::area(vec![
+            instance(0, PanelKind::Viewer),
+            instance(1, PanelKind::Timeline),
+        ]);
+        super::replace_visible_panels(
+            &mut visible,
+            &mut previous,
+            super::visible_panel_ids(&first),
+            &HashSet::new(),
+        );
+        assert_eq!(visible.0, HashSet::from([PanelInstanceId(0)]));
+
+        let second = LayoutNode::Area {
+            tabs: vec![
+                instance(0, PanelKind::Viewer),
+                instance(1, PanelKind::Timeline),
+            ],
+            active: 1,
+        };
+        super::replace_visible_panels(
+            &mut visible,
+            &mut previous,
+            super::visible_panel_ids(&second),
+            &HashSet::new(),
+        );
+        assert_eq!(visible.0, HashSet::from([PanelInstanceId(1)]));
+    }
+
+    #[test]
+    fn visible_panels_include_the_active_tab_of_each_split_area() {
+        let root = LayoutNode::split(
+            Orientation::Horizontal,
+            0.5,
+            LayoutNode::area(vec![
+                instance(0, PanelKind::Viewer),
+                instance(1, PanelKind::Timeline),
+            ]),
+            LayoutNode::area(vec![instance(2, PanelKind::Outliner)]),
+        );
+        assert_eq!(
+            super::visible_panel_ids(&root),
+            HashSet::from([PanelInstanceId(0), PanelInstanceId(2)])
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_removes_it_from_visible_panels() {
+        let mut visible = panels::VisiblePanels(HashSet::from([PanelInstanceId(0)]));
+        let mut previous = visible.0.clone();
+        let root = LayoutNode::area(vec![instance(1, PanelKind::Timeline)]);
+        super::replace_visible_panels(
+            &mut visible,
+            &mut previous,
+            super::visible_panel_ids(&root),
+            &HashSet::new(),
+        );
+        assert_eq!(visible.0, HashSet::from([PanelInstanceId(1)]));
+        assert!(!visible.0.contains(&PanelInstanceId(0)));
+    }
+
+    #[test]
+    fn a_detached_window_publishes_its_visible_panel() {
+        let mut visible = panels::VisiblePanels::default();
+        let mut previous = HashSet::new();
+        let root = LayoutNode::area(vec![instance(7, PanelKind::Properties)]);
+        super::replace_visible_panels(
+            &mut visible,
+            &mut previous,
+            super::visible_panel_ids(&root),
+            &HashSet::new(),
+        );
+        assert_eq!(visible.0, HashSet::from([PanelInstanceId(7)]));
+    }
+
+    #[test]
+    fn replacing_a_window_keeps_an_instance_visible_in_another_window() {
+        let mut visible =
+            panels::VisiblePanels(HashSet::from([PanelInstanceId(0), PanelInstanceId(5)]));
+        let mut previous = HashSet::from([PanelInstanceId(0)]);
+        let current = HashSet::from([PanelInstanceId(1)]);
+        let other = HashSet::from([PanelInstanceId(5)]);
+
+        super::replace_visible_panels(&mut visible, &mut previous, current, &other);
+
+        assert_eq!(
+            visible.0,
+            HashSet::from([PanelInstanceId(1), PanelInstanceId(5)])
+        );
+    }
+
+    #[test]
+    fn unregistering_a_window_removes_only_its_visible_panels() {
+        let first_window = HashSet::from([PanelInstanceId(0), PanelInstanceId(2)]);
+        let second_window = HashSet::from([PanelInstanceId(5)]);
+        let mut visible =
+            panels::VisiblePanels(first_window.union(&second_window).copied().collect());
+
+        super::remove_visible_panels(&mut visible, &first_window, &second_window);
+
+        assert_eq!(visible.0, second_window);
     }
 
     /// The multi-panel title has to read naturally in every locale, so the

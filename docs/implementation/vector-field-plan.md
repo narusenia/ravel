@@ -1,7 +1,8 @@
 # ベクタ場 実装計画
 
-> **Status**: In progress — 単位 7 の `vector.construct`（`VEC-7a`）と
-> 単位 5（`VEC-5`）が実装済み（2026-07-30）。他の単位は未着手
+> **Status**: In progress — 単位 5（`VEC-5`）、単位 6（`VEC-6`）、
+> 単位 7（`VEC-7a` / `VEC-7b`）が実装済み。値ドメイン側は残り単位 8。
+> フィールド側（単位 1〜3）と結合検証（単位 4）は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -347,6 +348,25 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - `vector.swizzle`: Vec → Vec。`"xy"` / `"zyx"` / `"xxx"` のような
   文字列パラメータ。存在しない成分の指定はエラー
 
+**実装結果**（`VEC-7b`）
+
+- `vector.split.vec2` / `.vec3` / `.vec4`: 入力ポートはそのアリティ 1 つだけを
+  受け、出力は成分名（`x` / `y` / `z` / `w`）の SCALAR ポート。値は
+  `PortRecord`。**アリティごとに別 `type_key`** にした理由は `construct` より
+  強い — 出力ポートの**本数**がアリティで決まり、ポート一覧はノード
+  インスタンスに載る。未接続はゼロに分解する（評価エラーにしない）
+- `vector.swizzle.vec2` / `.vec3` / `.vec4`: **出力**アリティを `type_key` で
+  固定し、`pattern` 文字列がその長さと一致することを要求する。パターン長で
+  出力型を決めると出力ポートの再型付けが要り、それは
+  `network-interface-editing-plan.md` の担当になるため。**入力**は 3 アリティ
+  すべてを受ける（入力型はポート宣言が縛るものではない）ので、Vec3 → Vec2 の
+  絞り込みは `swizzle.vec2` に `"yx"` などで書ける。存在しない成分の指定・
+  `x`/`y`/`z`/`w` 以外の名前・長さ不一致はいずれも評価エラー。未接続入力は
+  ゼロ Vec4 として読むので、置いただけのノードは評価できる
+- アリティ変更は「型が違うノードへの置き換え」なので、`split` の絞り込みは
+  `Graph::remove_output_port`（単位 1 の再インデックス）で表現される —
+  消した成分のエッジだけが落ち、手前のポートの index は動かない
+
 **完了条件**
 
 - `construct` が宣言どおりの型を出力し、成分がパラメータポートで駆動できる
@@ -357,6 +377,18 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - 存在しない成分（Vec2 に対する `"z"`）でエラーになるテスト。
 - アリティ変更（Vec3 → Vec2）でエッジがどう扱われるかのテスト
   （`network-interface-editing-plan.md` 単位 1 の再インデックスを使う）。
+
+すべて実装済み。所在（すべて `ravel-nodes` の `vector::tests`）:
+
+| 完了条件 | テスト |
+|---|---|
+| `construct` の型と成分駆動 | `vec2_combines_its_components` ほか、`components_are_drivable_through_exposed_param_ports` |
+| `construct` → `split` の往復一致 | `split_recovers_the_components_construct_combined` |
+| `PortRecord` と各出力の単独 pull | 同上（`PortRecord` の中身）、`each_split_output_pulls_on_its_own` |
+| `swizzle` の並べ替え | `swizzle_reorders_and_repeats_components`、`swizzle_narrows_a_vec3_to_a_vec2` |
+| 存在しない成分でエラー | `swizzle_rejects_a_component_the_input_lacks`（`swizzle_rejects_a_pattern_of_the_wrong_length` / `swizzle_rejects_a_name_that_is_not_a_component` も） |
+| アリティ変更とエッジ | `narrowing_a_split_drops_only_the_edge_of_the_removed_component` |
+| テンプレート宣言 | `ravel-core` `registry::builtin::vector_split_arities_declare_one_output_per_component`、`vector_swizzle_arities_seed_the_identity_pattern` |
 
 ### 単位 8: 値ドメインのベクタ演算（`vector.length` / `normalize` / `dot` / `cross`）
 

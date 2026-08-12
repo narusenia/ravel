@@ -800,6 +800,36 @@ y = "Y component."
 z = "Z component."
 w = "W component."
 
+[node."vector.split.vec2"]
+label = "Split Vec2"
+description = "Splits a 2-component vector into one scalar output per component."
+
+[node."vector.split.vec3"]
+label = "Split Vec3"
+description = "Splits a 3-component vector into one scalar output per component."
+
+[node."vector.split.vec4"]
+label = "Split Vec4"
+description = "Splits a 4-component vector into one scalar output per component."
+
+[node."vector.swizzle.vec2"]
+label = "Swizzle Vec2"
+description = "Reorders or repeats components of the input vector into a 2-component vector."
+[node."vector.swizzle.vec2".params]
+pattern = "Component names to read, one per output component (for example xy or yx)."
+
+[node."vector.swizzle.vec3"]
+label = "Swizzle Vec3"
+description = "Reorders or repeats components of the input vector into a 3-component vector."
+[node."vector.swizzle.vec3".params]
+pattern = "Component names to read, one per output component (for example xyz or zyx)."
+
+[node."vector.swizzle.vec4"]
+label = "Swizzle Vec4"
+description = "Reorders or repeats components of the input vector into a 4-component vector."
+[node."vector.swizzle.vec4".params]
+pattern = "Component names to read, one per output component (for example xyzw or xxxx)."
+
 [node."geometry.transform"]
 label = "Geometry Transform"
 description = "Translates, rotates, and scales geometry."

@@ -792,6 +792,36 @@ y = "Y 成分。"
 z = "Z 成分。"
 w = "W 成分。"
 
+[node."vector.split.vec2"]
+label = "Vec2 分解"
+description = "2 成分ベクトルを成分ごとのスカラー出力に分解する。"
+
+[node."vector.split.vec3"]
+label = "Vec3 分解"
+description = "3 成分ベクトルを成分ごとのスカラー出力に分解する。"
+
+[node."vector.split.vec4"]
+label = "Vec4 分解"
+description = "4 成分ベクトルを成分ごとのスカラー出力に分解する。"
+
+[node."vector.swizzle.vec2"]
+label = "Vec2 スウィズル"
+description = "入力ベクトルの成分を並べ替え・複製して 2 成分ベクトルにする。"
+[node."vector.swizzle.vec2".params]
+pattern = "出力成分ごとに読む成分名（例: xy、yx）。"
+
+[node."vector.swizzle.vec3"]
+label = "Vec3 スウィズル"
+description = "入力ベクトルの成分を並べ替え・複製して 3 成分ベクトルにする。"
+[node."vector.swizzle.vec3".params]
+pattern = "出力成分ごとに読む成分名（例: xyz、zyx）。"
+
+[node."vector.swizzle.vec4"]
+label = "Vec4 スウィズル"
+description = "入力ベクトルの成分を並べ替え・複製して 4 成分ベクトルにする。"
+[node."vector.swizzle.vec4".params]
+pattern = "出力成分ごとに読む成分名（例: xyzw、xxxx）。"
+
 [node."geometry.transform"]
 label = "ジオメトリ変換"
 description = "ジオメトリを平行移動・回転・拡大縮小する。"

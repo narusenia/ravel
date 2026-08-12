@@ -157,6 +157,10 @@ pub enum RavelIcon {
     NodeVectorConstructVec3,
     /// Node header/menu: `vector.construct.vec4`.
     NodeVectorConstructVec4,
+    /// Node header/menu: `vector.split.*` (every arity).
+    NodeVectorSplit,
+    /// Node header/menu: `vector.swizzle.*` (every arity).
+    NodeVectorSwizzle,
     /// Node header/menu: `geometry.transform`.
     NodeGeometryTransform,
     /// Node header/menu: `geometry.merge`.
@@ -325,6 +329,14 @@ impl RavelIcon {
             "vector.construct.vec2" => Self::NodeVectorConstructVec2,
             "vector.construct.vec3" => Self::NodeVectorConstructVec3,
             "vector.construct.vec4" => Self::NodeVectorConstructVec4,
+            // One icon per family: the arity is in the label, and the node
+            // shape (output count) already reads as different.
+            "vector.split.vec2" | "vector.split.vec3" | "vector.split.vec4" => {
+                Self::NodeVectorSplit
+            }
+            "vector.swizzle.vec2" | "vector.swizzle.vec3" | "vector.swizzle.vec4" => {
+                Self::NodeVectorSwizzle
+            }
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
             "geometry.connect" => Self::NodeGeometryConnect,
@@ -432,6 +444,8 @@ impl IconNamed for RavelIcon {
             Self::NodeVectorConstructVec2 => "icons/move.svg",
             Self::NodeVectorConstructVec3 => "icons/axis-3d.svg",
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",
+            Self::NodeVectorSplit => "icons/route.svg",
+            Self::NodeVectorSwizzle => "icons/replace.svg",
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
             Self::NodeGeometryConnect => "icons/network.svg",

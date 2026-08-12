@@ -66,6 +66,42 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
         DataTypeId::VEC4,
         4,
     ));
+    reg.register(vector_split(
+        VECTOR_SPLIT_VEC2,
+        "Split Vec2",
+        DataTypeId::VEC2,
+        2,
+    ));
+    reg.register(vector_split(
+        VECTOR_SPLIT_VEC3,
+        "Split Vec3",
+        DataTypeId::VEC3,
+        3,
+    ));
+    reg.register(vector_split(
+        VECTOR_SPLIT_VEC4,
+        "Split Vec4",
+        DataTypeId::VEC4,
+        4,
+    ));
+    reg.register(vector_swizzle(
+        VECTOR_SWIZZLE_VEC2,
+        "Swizzle Vec2",
+        DataTypeId::VEC2,
+        2,
+    ));
+    reg.register(vector_swizzle(
+        VECTOR_SWIZZLE_VEC3,
+        "Swizzle Vec3",
+        DataTypeId::VEC3,
+        3,
+    ));
+    reg.register(vector_swizzle(
+        VECTOR_SWIZZLE_VEC4,
+        "Swizzle Vec4",
+        DataTypeId::VEC4,
+        4,
+    ));
     reg.register(geometry_transform());
     reg.register(geometry_merge());
     reg.register(geometry_connect());
@@ -604,6 +640,99 @@ fn vector_construct(
             .with_param_range(*key, -1e9..=1e9, -10.0..=10.0);
     }
     template
+}
+
+/// `type_key` of the 2-component `vector.split` template.
+pub const VECTOR_SPLIT_VEC2: &str = "vector.split.vec2";
+/// `type_key` of the 3-component `vector.split` template.
+pub const VECTOR_SPLIT_VEC3: &str = "vector.split.vec3";
+/// `type_key` of the 4-component `vector.split` template.
+pub const VECTOR_SPLIT_VEC4: &str = "vector.split.vec4";
+
+/// An input port that accepts exactly one value-domain vector arity.
+fn vector_input(name: &str, data_type: DataTypeId) -> InputPort {
+    InputPort {
+        name: name.into(),
+        accepted_types: vec![data_type],
+        is_param: false,
+        is_variadic: false,
+    }
+}
+
+/// An input port that accepts any value-domain vector arity. Used where the
+/// output type does not depend on the input arity (`vector.length`) or where
+/// the node reports a mismatch itself (`vector.dot`, `vector.swizzle`).
+fn any_vector_input(name: &str) -> InputPort {
+    InputPort {
+        name: name.into(),
+        accepted_types: vec![DataTypeId::VEC2, DataTypeId::VEC3, DataTypeId::VEC4],
+        is_param: false,
+        is_variadic: false,
+    }
+}
+
+/// One arity of `vector.split`: one vector in, its components out as
+/// separate Scalar ports (a multi-output node, so its value is a
+/// [`crate::types::PortRecord`] in port order).
+///
+/// Arity is a separate `type_key` for the same reason as `vector.construct`,
+/// only more so: here the *number of output ports* follows the arity, and
+/// port lists live on the node instance. Changing arity in place would have
+/// to add or remove output ports and re-index the edges behind them
+/// (`Graph::insert_output_port` / `remove_output_port`), which is
+/// network-interface editing, not a parameter edit.
+fn vector_split(
+    type_key: &str,
+    label: &str,
+    data_type: DataTypeId,
+    components: usize,
+) -> NodeTemplate {
+    let mut template = NodeTemplate::new(type_key, label, NodeCategory::Utility)
+        .with_input(vector_input("vector", data_type));
+    for key in &VECTOR_COMPONENT_KEYS[..components] {
+        template = template.with_output(OutputPort {
+            name: (*key).into(),
+            data_type: DataTypeId::SCALAR,
+        });
+    }
+    template
+}
+
+/// `type_key` of the 2-component `vector.swizzle` template.
+pub const VECTOR_SWIZZLE_VEC2: &str = "vector.swizzle.vec2";
+/// `type_key` of the 3-component `vector.swizzle` template.
+pub const VECTOR_SWIZZLE_VEC3: &str = "vector.swizzle.vec3";
+/// `type_key` of the 4-component `vector.swizzle` template.
+pub const VECTOR_SWIZZLE_VEC4: &str = "vector.swizzle.vec4";
+
+/// Parameter key of the `vector.swizzle` component pattern.
+pub const VECTOR_SWIZZLE_PATTERN: &str = "pattern";
+
+/// One *output* arity of `vector.swizzle`: any vector in, a reordered vector
+/// of this template's arity out.
+///
+/// The pattern is a free string (`"xy"`, `"zyx"`, `"xxx"`), so its length
+/// would otherwise decide the output type — but the output port's type lives
+/// on the node instance, so the arity has to be fixed by the `type_key` and
+/// the pattern has to match it. The input accepts every arity because the
+/// *input* type is not what the port declaration pins down; a pattern naming
+/// a component the wired vector does not have is an evaluation error.
+fn vector_swizzle(
+    type_key: &str,
+    label: &str,
+    data_type: DataTypeId,
+    components: usize,
+) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Utility)
+        .with_input(any_vector_input("vector"))
+        .with_output(OutputPort {
+            name: "vector".into(),
+            data_type,
+        })
+        .with_param(string_parameter(
+            VECTOR_SWIZZLE_PATTERN,
+            &VECTOR_COMPONENT_KEYS[..components].concat(),
+        ))
 }
 
 fn media() -> NodeTemplate {
@@ -1341,7 +1470,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 52);
+        assert_eq!(reg.all_templates().count(), 58);
     }
 
     #[test]
@@ -1354,7 +1483,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 12);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 18);
     }
 
     /// Each `vector.construct` arity outputs its own vector type and declares
@@ -1390,6 +1519,64 @@ mod tests {
                     "{type_key} {key} has an editing range"
                 );
             }
+        }
+    }
+
+    /// Each `vector.split` arity takes exactly its own vector type and
+    /// declares one Scalar output per component, named for that component.
+    #[test]
+    fn vector_split_arities_declare_one_output_per_component() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for (type_key, data_type, components) in [
+            (VECTOR_SPLIT_VEC2, DataTypeId::VEC2, 2),
+            (VECTOR_SPLIT_VEC3, DataTypeId::VEC3, 3),
+            (VECTOR_SPLIT_VEC4, DataTypeId::VEC4, 4),
+        ] {
+            let t = reg.get(type_key).unwrap_or_else(|| panic!("{type_key}"));
+            assert_eq!(t.inputs.len(), 1, "{type_key}");
+            assert_eq!(t.inputs[0].accepted_types, [data_type], "{type_key}");
+            let names: Vec<&str> = t.outputs.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, VECTOR_COMPONENT_KEYS[..components], "{type_key}");
+            assert!(
+                t.outputs.iter().all(|p| p.data_type == DataTypeId::SCALAR),
+                "{type_key} splits into scalars"
+            );
+            assert!(t.default_params.is_empty(), "{type_key} has no parameters");
+        }
+    }
+
+    /// `vector.swizzle` fixes its *output* arity in the `type_key` and seeds
+    /// the pattern with the identity for that arity, so a freshly placed node
+    /// evaluates. The input accepts every arity.
+    #[test]
+    fn vector_swizzle_arities_seed_the_identity_pattern() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for (type_key, data_type, pattern) in [
+            (VECTOR_SWIZZLE_VEC2, DataTypeId::VEC2, "xy"),
+            (VECTOR_SWIZZLE_VEC3, DataTypeId::VEC3, "xyz"),
+            (VECTOR_SWIZZLE_VEC4, DataTypeId::VEC4, "xyzw"),
+        ] {
+            let t = reg.get(type_key).unwrap_or_else(|| panic!("{type_key}"));
+            assert_eq!(t.inputs.len(), 1, "{type_key}");
+            assert_eq!(
+                t.inputs[0].accepted_types,
+                [DataTypeId::VEC2, DataTypeId::VEC3, DataTypeId::VEC4],
+                "{type_key} takes any arity"
+            );
+            assert_eq!(t.outputs.len(), 1, "{type_key}");
+            assert_eq!(t.outputs[0].data_type, data_type, "{type_key}");
+            assert!(
+                matches!(
+                    t.default_params
+                        .iter()
+                        .find(|p| p.key == VECTOR_SWIZZLE_PATTERN)
+                        .map(|p| &p.value),
+                    Some(ParameterValue::String(p)) if p == pattern
+                ),
+                "{type_key} defaults to {pattern:?}"
+            );
         }
     }
 

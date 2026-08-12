@@ -195,9 +195,12 @@ merge, attribute, field, scatter, and rasterize processors form an evaluable
 motion-graphics pipeline. Scatter supports multiple instance sources through
 variadic ports, deterministic source selection, and anchor-aware placement.
 
-Every built-in field returns `AttributeArray::F32`, and binary composition
-coerces through `scalar_values()`, so fields are scalar-valued in practice —
-but this is an implementation limit, not an interface one. `apply_field` already
+Every built-in field returns `AttributeArray::F32`, so fields are scalar-valued
+in practice — but this is an implementation limit, not an interface one. Binary
+composition (`field.add` / `multiply` / `max` / `blend`) is no longer part of it:
+it combines two operands of one type component-wise, broadcasts a scalar operand
+into the other's type, and reports any other pairing as a type error.
+`apply_field` already
 promotes a scalar field into any numeric target by broadcasting to every
 selected component, so `scale`, `Cd`, and `P` do modulate; the consequence is
 that a scalar field can only move a colour along the grey axis (and drags alpha

@@ -63,6 +63,6 @@ TDR（ドライバのリセット）やサスペンド / レジュームで現�
    別途 `Device` の喪失検出が要る
 4. headless では再現できないので、実機での手動確認手順を残す
 
-`docs/implementation/zero-copy-viewer-plan.md` の `ZC-4` / `ZC-8` の完了条件
+`docs/implementation/done/zero-copy-viewer-plan.md` の `ZC-4` / `ZC-8` の完了条件
 「デバイス喪失・ウィンドウ再作成で破綻しない」は**この項目が閉じるまで
 満たされない**。

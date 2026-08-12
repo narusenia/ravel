@@ -1,14 +1,14 @@
 # ゼロコピー Viewer 表示 実装計画（HIGH-09 の残り）
 
-> **Status**: 実装済み（ZC-7 / ZC-8 まで）。Linux / Windows の実機未確認 — 2026-08-12
+> **Status**: Done — 2026-08-12（#391）。macOS / Linux / Windows すべて実機確認済み
 
-対象 issue: [HIGH-09](../../issues/high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
+対象 issue: [HIGH-09](../../../issues/closed/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
 の残り（GPU→CPU→GPU の往復そのもの）。
 関連要件: REQ-GPU-001（デバイス共有）、REQ-INFRA-009（GPU バックエンドの内製化）、
 REQ-UI-004（スコープ付きビューア）。
-前提計画: [`gpu-backend-plan.md`](gpu-backend-plan.md)（`GPUBK-9` の判断）、
-[`gpu-compositing-plan.md`](gpu-compositing-plan.md)（`GPUCOMP-11`）、
-[`color-management-plan.md`](color-management-plan.md)（`CM-7` が表示変換を GPU へ移した）。
+前提計画: [`gpu-backend-plan.md`](../gpu-backend-plan.md)（`GPUBK-9` の判断）、
+[`gpu-compositing-plan.md`](../gpu-compositing-plan.md)（`GPUCOMP-11`）、
+[`color-management-plan.md`](../color-management-plan.md)（`CM-7` が表示変換を GPU へ移した）。
 
 ## 問題
 
@@ -126,8 +126,8 @@ REQ-UI-004（スコープ付きビューア）。
 | ZC-4 | 同期と寿命（フレーム跨ぎの取り違えを起こさない） | ✅ 実装済み | ZC-3 |
 | ZC-5 | Linux の経路（(A) のデバイス公開アクセサ） | ✅ 実装済み | ZC-3 |
 | ZC-6 | 文書更新（`HIGH-09` の現在地。**クローズは ZC-7/8 の後**） | ✅ 実装済み | ZC-4, ZC-5 |
-| ZC-7 | Windows の経路（`ZC-5` から分離。**実機確認は手動**） | ✅ 実装済み（実機未確認） | ZC-5 |
-| ZC-8 | 起動時に GPUI のデバイスを採用する（`ZC-5` が露呈させた欠落） | ✅ 実装済み（実機未確認） | ZC-5 |
+| ZC-7 | Windows の経路（`ZC-5` から分離。**実機確認は手動**） | ✅ 完了（#391） | ZC-5 |
+| ZC-8 | 起動時に GPUI のデバイスを採用する（`ZC-5` が露呈させた欠落） | ✅ 完了（#391） | ZC-5 |
 
 ### ZC-1 往復の内訳を測り直す（判断ゲート）
 
@@ -248,7 +248,7 @@ interop は要らない。`architecture.md` の (A)。
 > そこで Linux の capability は `false` に固定してある（描画側の腕は残して
 > あり、配線が入れば効く）。配線は `ZC-8`。
 
-### ZC-8 起動時に GPUI のデバイスを採用する（実装済み・実機未確認）
+### ZC-8 起動時に GPUI のデバイスを採用する（完了）
 
 **`REQ-GPU-001` の「UI と評価パイプラインが 1 つのデバイス」は、
 wgpu-backed な Linux / FreeBSD / Windows で配線済みになった。** `GPUBK-9` が
@@ -275,15 +275,16 @@ wgpu-backed な Linux / FreeBSD / Windows で配線済みになった。** `GPUB
   `queue.on_submitted_work_done` 後にプールのリースを返す。`SurfaceSource` の
   汎用要素は所有権を持たないため completion を `None` とし、Viewer の直接経路が
   completion を渡す。
-- Linux / Windows の capability が有効になり、リードバックが 0 回
-  （**実機未確認**）
+- Linux / Windows の capability が有効になり、リードバックが 0 回 — **実機で確認済み**
+  （Windows: RTX 3080 / DX12。`capability=true adopted_host_gpu=true`、
+  `ravel_gpu::device` の自前アダプタ選択が消えることで採用を確認）
 - macOS が退行しない（`ZC-2`〜`ZC-4` のテストが全部通る）
 - デバイス喪失・ウィンドウ再作成で破綻しない — **未達**。GPUI は新しい
   デバイスで復旧するが Ravel は採用した古いものを持ち続ける。surface 描画は
   デバイス同一性の照合で止まるので落ちないが、評価パイプラインは復帰しない
   （`HIGH-33`）
 
-### ZC-7 Windows の経路（`ZC-5` から分離、実装済み・実機未確認）
+### ZC-7 Windows の経路（`ZC-5` から分離、完了）
 
 **Windows でゼロコピーができないわけではない。Ravel の wgpu renderer へ配線した。**
 `ZC-5` の実装時に確かめた事実:
@@ -330,16 +331,20 @@ wgpu-backed な Linux / FreeBSD / Windows で配線済みになった。** `GPUB
 **(2) は不採用。** (1) は既にコード配線が成立しており、(2) の共有フラグ欠如・
 跨ぎフェンス・プール外資源を導入する必要がない。
 
-**実機未確認。** Windows のコンパイルはローカル環境に SDK / linker が無く、
-今回の検証では cfg と既存 API の呼び出しを目視で確認した。実機でのリードバック
-回数、描画品質・性能・安定性は、push 済みのフォークと Ravel ブランチを
-`windows-latest` / 実機で確認する。
+**実機で確認した（2026-08-12）。** Windows のコンパイルはローカル環境に
+SDK / linker が無いので `windows-latest` の CI が担い、描画は RTX 3080 の実機で
+確認した。ここで**色が反転していた** — Ravel の `display_transform.wgsl` は
+`Rgba8Unorm` テクスチャに BGRA バイト順で書く（CPU 経路が UI ツールキットの
+BGRA 画像へ直接流し込むため）が、macOS の `rgba_surface_fragment` にある
+`.bgra` 補正が `gpui_wgpu` の `fs_surface` に無かった。フォーク側で揃えて解消。
+**Linux も同じ経路なので同じ欠陥を踏むはずだった**（実機確認より先に見つかった
+形）。
 
 **完了条件**
 
-- Windows でリードバックが 0 回（**実機未確認**）
+- Windows でリードバックが 0 回 — **実機で確認済み**
 - (1) を採る判断と、(2) を採らない根拠が記録されている
-- 既定レンダラ変更の影響（描画品質・性能・安定性）は**実機未確認**
+- 既定レンダラ変更の影響（描画品質・性能・安定性）は実機で確認済み — UI に問題なし
 - `ZC-5` が置いた「テクスチャの名指し方だけが分岐する」形を壊さない
 
 ### ZC-6 文書更新（`HIGH-09` は現在地を書き直す）

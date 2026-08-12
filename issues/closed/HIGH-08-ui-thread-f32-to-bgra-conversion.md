@@ -24,7 +24,7 @@
 > `the_display_conversion_runs_on_the_evaluation_worker` がスレッド名で固定する。
 >
 > 「変換をアトラスに載せる前に済ませる」以外の残件
-> （GPU→CPU→GPU の往復そのもの）は [HIGH-09](../high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
+> （GPU→CPU→GPU の往復そのもの）は [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
 > に残り、`GPUBK-9` / `GPUCOMP-11` の範囲。
 
 ## 現状
@@ -56,4 +56,4 @@ UI スレッドのレイテンシに直接ミリ秒単位で加算される。
 
 ## 関連
 
-- [HIGH-09](../high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md), [HIGH-04](../closed/HIGH-04-per-frame-blocking-readback.md)
+- [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md), [HIGH-04](../closed/HIGH-04-per-frame-blocking-readback.md)

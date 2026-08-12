@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 6 | 27 | [high/](high/) — 1件1ファイル |
+| high | 5 | 28 | [high/](high/) — 1件1ファイル |
 | medium | 36 | 31 | [medium/](medium/) — 領域別5ファイル |
 | low | 32 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -86,9 +86,9 @@
    UI スレッドでの全フレーム色変換。`GPUCOMP-9` が変換を評価ワーカーへ移し、
    `ViewerFrame` は BGRA の完成画像を運ぶ形になった。UI スレッド占有は
    1024×576 で 1.21 ms → 0、1080p で 4.33 ms → 0。
-7. **[HIGH-09](high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)**
-   GPU→CPU→GPU 往復 + アトラス churn。色変換の側は `HIGH-08` で解けたが、
-   **往復そのものは残る** — ゼロコピー表示は `GPUBK-9` / `GPUCOMP-11` の範囲。
+7. **[HIGH-09](closed/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)** — 解決済み（2026-08-12、#391）
+   GPU→CPU→GPU 往復 + アトラス churn。色変換の側は `HIGH-08` が解き、往復は
+   `zero-copy-viewer-plan.md` が macOS / Linux / Windows すべてで消した。
 
 ### 第3段: 評価器のアルゴリズム的コスト
 

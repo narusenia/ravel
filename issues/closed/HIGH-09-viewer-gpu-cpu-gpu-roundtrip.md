@@ -7,39 +7,41 @@
 | 領域 | ravel-gpu / frame, ravel-app / Viewer |
 | 該当 | `crates/ravel-gpu/src/frame.rs:134-143`, `crates/ravel-app/src/eval_hooks.rs:121-130`, `crates/ravel-ui/src/panels/viewer.rs`（`ViewerResolution`）, `crates/ravel-app/src/panels/viewer.rs:283-288`, `:1599-1604` |
 
-> **macOS では往復が消えた。Linux / Windows の配線も実装済みだが、実機未確認
-> （2026-08-12 時点）。**
+**解決済み**（2026-08-12、#391）。macOS / Linux / Windows のすべてで往復が
+消えた。macOS は `ZC-2`〜`ZC-4`（#382 / #384 / #386）、Linux / Windows は
+`ZC-7` / `ZC-8`（#391）。3 プラットフォームとも実機で描画を確認済み。
+
 > 個票が挙げた 4 つの症状のうち 3 つは以前から片付いており、4 つ目（往復）が
-> プラットフォームで状態が分かれる。**この個票が open なのは 4 つ目のため。**
+> 最後まで残っていた。
 >
 > | 症状 | 状態 |
 > |---|---|
 > | UI スレッドでの f32 → BGRA 変換 | ✅ `GPUCOMP-9`（#284）が評価ワーカーへ移した（`HIGH-08` 解決）。さらに #363 で **10.1× 高速化**（rayon + 境界表、`perf-baseline.md`） |
 > | リードバック実装そのもの | ✅ `GPUCOMP-8` を `GPUBK-6`（#282）が回収 |
 > | 解像度上限（`VIEWER_MAX_DIM`） | ✅ `VRES-1`（#300）が定数を撤去し係数モデルへ |
-> | **GPU→CPU→GPU の往復** | **macOS ✅ / Linux ✅（実機未確認） / Windows ✅（実機未確認）**（下記） |
+> | **GPU→CPU→GPU の往復** | ✅ **macOS / Linux / Windows すべて解決**（下記） |
 >
 > **往復のプラットフォーム別状態**
 >
 > | | 状態 | 引受先 |
 > |---|---|---|
-> | **macOS** | ✅ **解決**（#382 / #384 / #386） | — |
-> | **Linux** | ✅ 実装済み（実機未確認） | `ZC-8`（デバイス採用と完了通知） |
-> | **Windows** | ✅ 実装済み（実機未確認） | `ZC-7` / `ZC-8`（GPUI wgpu/DX12 renderer とデバイス採用） |
+> | **macOS** | ✅ 解決（#382 / #384 / #386） | — |
+> | **Linux** | ✅ 解決（#391） | `ZC-8`（デバイス採用と完了通知） |
+> | **Windows** | ✅ 解決（#391） | `ZC-7` / `ZC-8`（GPUI wgpu/DX12 renderer とデバイス採用） |
 >
 > 引受計画:
-> [`zero-copy-viewer-plan.md`](../../docs/implementation/zero-copy-viewer-plan.md)。
+> [`zero-copy-viewer-plan.md`](../../docs/implementation/done/zero-copy-viewer-plan.md)。
 > `ZC-1`（#373）が判断ゲートを開け、`ZC-2`（#382）が GPUI の Metal デバイスを
 > 取り込み、`ZC-3`（#384）が surface 経路を通し、`ZC-4`（#386）が寿命を閉じて
 > 既定を有効にした。`ZC-5`（#388）は Linux の描画側、`ZC-7` は Windows の
 > wgpu/DX12 surface 経路、`ZC-8` は Linux / Windows のデバイス採用と wgpu 完了
-> 通知を実装した。**Linux / Windows は実機未確認**である。
+> 通知を実装した（#391）。
 >
 > **`MED-GPU-07`（`Cargo.lock` に wgpu が 2 本）は前提ではない — 2026-08-05 に
 > 解決済み**（この個票が以前そう書いていたのは誤り）。
 >
-> **クローズは `ZC-7` / `ZC-8` の実機確認が済んでから。** 実装済みでも
-> Linux / Windows の確認が残っている間は open のままにする。
+> **残る欠落は `HIGH-33`**（GPU デバイス喪失から復帰できない）。往復とは
+> 別の問題なので個票を分けた。
 
 ## 現状
 

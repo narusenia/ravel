@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 27 | 1件1ファイル |
+| high | 28 | 1件1ファイル |
 | medium | 31 | 領域別4ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
@@ -36,6 +36,7 @@
 | [HIGH-06](HIGH-06-pipeline-recompiled-per-param-edit.md) | パラメータ編集ごとにパイプライン再コンパイル | 第1段 |
 | [HIGH-07](HIGH-07-document-changed-cascade-per-mouse-move.md) | マウス移動ごとに `document_changed` 全カスケード | 第1段 |
 | [HIGH-08](HIGH-08-ui-thread-f32-to-bgra-conversion.md) | UI スレッドで全フレーム f32→BGRA 変換 | `GPUCOMP-9` |
+| [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md) | ビューアが毎フレーム GPU→CPU→GPU 往復 | `ZC-1`〜`ZC-8`（#391） |
 | [HIGH-10](HIGH-10-audio-chunk-seek-wrong-time-base.md) | 音声チャンク seek の時間基準誤り | フェーズ A3 |
 | [HIGH-11](HIGH-11-audio-chunk-no-trim.md) | 音声チャンクが要求位置までトリムされない | フェーズ A3 |
 | [HIGH-12](HIGH-12-pause-does-not-stop-queued-audio.md) | Pause でキュー済み音声が止まらない | フェーズ A3（epoch） |

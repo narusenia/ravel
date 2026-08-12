@@ -57,5 +57,5 @@ CPU 実装は残すが、目的は**リファレンス経路**（`shape_layer_go
 
 ## 関連
 
-- [HIGH-04](HIGH-04-per-frame-blocking-readback.md), [HIGH-09](../high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
+- [HIGH-04](HIGH-04-per-frame-blocking-readback.md), [HIGH-09](HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
 - [medium/gpu-nodes.md](../medium/gpu-nodes.md) — 直線アルファのフィルタリングバグ（GPU 版実装時に併せて対処）

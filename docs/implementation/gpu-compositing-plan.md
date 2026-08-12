@@ -3,7 +3,7 @@
 対象 issue: [HIGH-05](../../issues/closed/HIGH-05-shell-chain-cpu-per-pixel.md),
 [HIGH-04](../../issues/closed/HIGH-04-per-frame-blocking-readback.md),
 [HIGH-08](../../issues/closed/HIGH-08-ui-thread-f32-to-bgra-conversion.md),
-[HIGH-09](../../issues/high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md),
+[HIGH-09](../../issues/closed/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md),
 [MED-GPU-02](../../issues/medium/gpu-nodes.md)
 
 第1段（`done/ui-responsiveness-plan.md`、RESP-1〜3 / PR #191 #192 #193 #195）は
@@ -203,7 +203,7 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | ✅ #284（`HIGH-08` 解決、`HIGH-09` は一部） |
 | GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ✅ `GPUBK-6`（#282）が回収 |
 | GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❌ `GPUBK-6` の測定で不要と判断 |
-| GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | 判断は `GPUBK-9`（#296）で完了。上限は `VRES-1`（#300）が撤去済み。**ゼロコピー表示は `zero-copy-viewer-plan.md` が引き受け、macOS は完了（#382 / #384 / #386）、Linux / Windows も `ZC-7` / `ZC-8` で実装済み（実機未確認）** |
+| GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | 判断は `GPUBK-9`（#296）で完了。上限は `VRES-1`（#300）が撤去済み。**ゼロコピー表示は `zero-copy-viewer-plan.md` が引き受け、macOS は完了（#382 / #384 / #386）、Linux / Windows も `ZC-7` / `ZC-8`（#391）で完了** |
 
 > **2026-08-03 改訂**: REQ-INFRA-009（GPU バックエンドの内製化）が決まったので、
 > 残り単位を**バックエンド依存性で振り分けた**。
@@ -478,7 +478,7 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
 **`VIEWER_MAX_DIM` という識別子はもうコードに無い。**
 
 **ゼロコピー表示 — macOS は完了。引受先は
-[`zero-copy-viewer-plan.md`](zero-copy-viewer-plan.md)（2026-08-10）。**
+[`zero-copy-viewer-plan.md`](done/zero-copy-viewer-plan.md)（2026-08-10）。**
 `GPUBK-9`（✅ #296）は判断の単位で、`gpu-backend-plan.md` の非対象節が
 「ゼロコピー表示の実装。`GPUBK-9` で判断し、必要なら別計画」と書いていた —
 その別計画がこれ。`ZC-1`（#373）が測定ゲートを開け（全 18 セルがしきい値を

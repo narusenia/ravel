@@ -45,7 +45,6 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | VEC-1 | 二項合成の多相化 | `vector-field-plan.md` |
-| SET-8 | キャッシュ設定 | `settings-screen-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
@@ -74,8 +73,6 @@
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
-| NGR-1 | 自動整列の計算（ヘッドレス） | `node-graph-readability-plan.md` |
-| NGR-3 | `node_editor` 設定節と `edge_style` の永続化 | `node-graph-readability-plan.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
 | NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
 | NGR-7 | エッジへのドロップでノードを挟む | `node-graph-readability-plan.md` |
@@ -86,9 +83,6 @@
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
-| EXPO-2 | 束縛の解決と適用（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
-| EXPO-3 | 宣言の機械可読な列挙（`EXPO-1` 完了で着手可能） | `exposed-parameters-plan.md` |
-| ZC-1 | 往復の内訳を測り直す（ゼロコピー表示の判断ゲート） | `zero-copy-viewer-plan.md` |
 | FX-1 | カラー調整とカラーグレーディング | `effects-library-plan.md` |
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |

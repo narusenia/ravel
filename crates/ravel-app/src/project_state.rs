@@ -599,16 +599,6 @@ impl ProjectState {
         cx.emit(ProjectEvent::GpuDeviceLost);
     }
 
-    /// Inject a self-owned device loss for headless callers and tests.
-    #[cfg(test)]
-    fn inject_gpu_device_loss_for_tests(&mut self, cx: &mut Context<Self>) {
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        gpu.inject_device_loss(ravel_gpu::GpuLossReason::Unknown);
-        self.report_gpu_device_loss(false, cx);
-    }
-
     /// Configure whether the live GPUI host can sample the worker's output
     /// texture directly. A change requests one fresh viewer frame so an old
     /// CPU/GPU representation is not kept after a window/device transition.
@@ -2028,8 +2018,11 @@ mod tests {
         let recorder = record_events(&project, cx);
 
         project.update(cx, |project, cx| {
-            project.inject_gpu_device_loss_for_tests(cx);
+            // Every paint that still holds the dead frame reports again; only
+            // the first one may reach the user.
             project.report_gpu_device_loss(true, cx);
+            project.report_gpu_device_loss(true, cx);
+            project.configure_viewer_surface(false, cx);
         });
         cx.run_until_parked();
 

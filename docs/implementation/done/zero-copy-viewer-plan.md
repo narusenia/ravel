@@ -1,14 +1,14 @@
 # ゼロコピー Viewer 表示 実装計画（HIGH-09 の残り）
 
-> **Status**: Planned — 2026-08-10
+> **Status**: Done — 2026-08-12（#391）。macOS / Linux / Windows すべて実機確認済み
 
-対象 issue: [HIGH-09](../../issues/high/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
+対象 issue: [HIGH-09](../../../issues/closed/HIGH-09-viewer-gpu-cpu-gpu-roundtrip.md)
 の残り（GPU→CPU→GPU の往復そのもの）。
 関連要件: REQ-GPU-001（デバイス共有）、REQ-INFRA-009（GPU バックエンドの内製化）、
 REQ-UI-004（スコープ付きビューア）。
-前提計画: [`gpu-backend-plan.md`](gpu-backend-plan.md)（`GPUBK-9` の判断）、
-[`gpu-compositing-plan.md`](gpu-compositing-plan.md)（`GPUCOMP-11`）、
-[`color-management-plan.md`](color-management-plan.md)（`CM-7` が表示変換を GPU へ移した）。
+前提計画: [`gpu-backend-plan.md`](../gpu-backend-plan.md)（`GPUBK-9` の判断）、
+[`gpu-compositing-plan.md`](../gpu-compositing-plan.md)（`GPUCOMP-11`）、
+[`color-management-plan.md`](../color-management-plan.md)（`CM-7` が表示変換を GPU へ移した）。
 
 ## 問題
 
@@ -118,16 +118,16 @@ REQ-UI-004（スコープ付きビューア）。
 
 ## 実装単位
 
-| ID | 単位 | 依存 |
-|---|---|---|
-| ZC-1 | 往復の内訳を `CM-7` 後の姿で測り直す（**判断ゲート**） | — |
-| ZC-2 | gpui-ce に Metal デバイス / キューの取得口を足す | ZC-1 |
-| ZC-3 | Ravel の出力テクスチャを GPUI のカスタム要素で描く | ZC-2 |
-| ZC-4 | 同期と寿命（フレーム跨ぎの取り違えを起こさない） | ZC-3 |
-| ZC-5 | Linux の経路（(A) のデバイス公開アクセサ） | ZC-3 |
-| ZC-6 | 文書更新（`HIGH-09` の現在地。**クローズは ZC-7/8 の後**） | ZC-4, ZC-5 |
-| ZC-7 | Windows の経路（`ZC-5` から分離。**実機確認は手動**） | ZC-5 |
-| ZC-8 | 起動時に GPUI のデバイスを採用する（`ZC-5` が露呈させた欠落） | ZC-5 |
+| ID | 単位 | 状態 | 依存 |
+|---|---|---|---|
+| ZC-1 | 往復の内訳を `CM-7` 後の姿で測り直す（**判断ゲート**） | ✅ 実装済み | — |
+| ZC-2 | gpui-ce に Metal デバイス / キューの取得口を足す | ✅ 実装済み | ZC-1 |
+| ZC-3 | Ravel の出力テクスチャを GPUI のカスタム要素で描く | ✅ 実装済み | ZC-2 |
+| ZC-4 | 同期と寿命（フレーム跨ぎの取り違えを起こさない） | ✅ 実装済み | ZC-3 |
+| ZC-5 | Linux の経路（(A) のデバイス公開アクセサ） | ✅ 実装済み | ZC-3 |
+| ZC-6 | 文書更新（`HIGH-09` の現在地。**クローズは ZC-7/8 の後**） | ✅ 実装済み | ZC-4, ZC-5 |
+| ZC-7 | Windows の経路（`ZC-5` から分離。**実機確認は手動**） | ✅ 完了（#391） | ZC-5 |
+| ZC-8 | 起動時に GPUI のデバイスを採用する（`ZC-5` が露呈させた欠落） | ✅ 完了（#391） | ZC-5 |
 
 ### ZC-1 往復の内訳を測り直す（判断ゲート）
 
@@ -198,7 +198,10 @@ REQ-UI-004（スコープ付きビューア）。
 
 - フレームを跨いだ取り違えが起きないことのテスト（連番の絵を流して順序を検査）
 - **テクスチャがプールへ返るのは GPUI が読み終わった後**であることのテスト
-- デバイス喪失・ウィンドウ再作成で破綻しない
+- デバイス喪失・ウィンドウ再作成で破綻しない — **未達**。GPUI は新しい
+  デバイスで復旧するが Ravel は採用した古いものを持ち続ける。surface 描画は
+  デバイス同一性の照合で止まるので落ちないが、評価パイプラインは復帰しない
+  （`HIGH-33`）
 
 ### ZC-5 Linux の経路
 
@@ -245,40 +248,45 @@ interop は要らない。`architecture.md` の (A)。
 > そこで Linux の capability は `false` に固定してある（描画側の腕は残して
 > あり、配線が入れば効く）。配線は `ZC-8`。
 
-### ZC-8 起動時に GPUI のデバイスを採用する
+### ZC-8 起動時に GPUI のデバイスを採用する（完了）
 
-**`REQ-GPU-001` が要求する「UI と評価パイプラインが 1 つのデバイス」は、
-macOS 以外では成立していない。** `GPUBK-9` が `interop::context_from_wgpu` を
-契約として固定し、`crates/ravel-gpu/tests/device_sharing.rs` が「他人の
-デバイスで抽象 API が最後まで動く」ことを機械的に確認しているが、
-**アプリがそれを呼んでいない**。
+**`REQ-GPU-001` の「UI と評価パイプラインが 1 つのデバイス」は、
+wgpu-backed な Linux / FreeBSD / Windows で配線済みになった。** `GPUBK-9` が
+`interop::context_from_wgpu` を契約として固定し、
+`crates/ravel-gpu/tests/device_sharing.rs` が「他人のデバイスで抽象 API が最後まで
+動く」ことを機械的に確認している。
 
-`ProjectState::new` が `GpuContext::new_blocking()` で自前のデバイスを作る
-現状を、ウィンドウの `gpu_context()` を採用する形へ変える。
+`RavelWorkspace::new` がウィンドウの `gpu_context_full()` を取得し、
+`ProjectState::new_on_host_gpu` へ渡して評価パイプラインをそのデバイス上に作る形へ
+変えた。`gpu_device_lost()` は復旧中の送信を止めるための capability / 描画側の
+ガードにも使う。
 
 - **評価パイプライン全体の生成方法が変わる**単位なので、`ZC-5` の射程外として
   分離した
-- macOS にも影響する（今はポインタ照合で「たまたま同じ」ことを確認している
-  だけで、採用しているわけではない）
-- ウィンドウより先に `ProjectState` が作られる現在の順序をどうするかが要点
+- macOS は従来どおり Metal の native interop、wgpu-backed な対象は起動時に
+  renderer の full context を採用する
+- ウィンドウを生成した後に `ProjectState` を作る既存の順序を利用する
 
 **完了条件**
 
 - `interop::context_from_wgpu` に本番の呼び出し元がある
-- **wgpu 経路にも完了通知がある。** フォークの
-  `SurfaceSource::Texture`（Linux 腕）には `completion` フィールドが無く、
-  `Arc<wgpu::Texture>` は**テクスチャは生かすがプールのリースは保持しない**。
-  `ZC-4` が macOS で塞いだ「読み取り中のテクスチャをプールが再利用する」
-  race が、そのままでは Linux に残る。**capability を `true` にする前に
-  ここを閉じること**（フォークの Linux 腕にも `completion` を足すのが素直）
-- Linux で capability が `true` になり、リードバックが 0 回
-  （**Linux 実機が要る**）
+- **wgpu 経路にも完了通知がある。** フォークの `Window::paint_surface`、
+  `PaintSurface`、`gpui_wgpu::draw_surfaces` が `SurfaceCompletion` を受け渡し、
+  `queue.on_submitted_work_done` 後にプールのリースを返す。`SurfaceSource` の
+  汎用要素は所有権を持たないため completion を `None` とし、Viewer の直接経路が
+  completion を渡す。
+- Linux / Windows の capability が有効になり、リードバックが 0 回 — **実機で確認済み**
+  （Windows: RTX 3080 / DX12。`capability=true adopted_host_gpu=true`、
+  `ravel_gpu::device` の自前アダプタ選択が消えることで採用を確認）
 - macOS が退行しない（`ZC-2`〜`ZC-4` のテストが全部通る）
-- デバイス喪失・ウィンドウ再作成で破綻しない
+- デバイス喪失・ウィンドウ再作成で破綻しない — **未達**。GPUI は新しい
+  デバイスで復旧するが Ravel は採用した古いものを持ち続ける。surface 描画は
+  デバイス同一性の照合で止まるので落ちないが、評価パイプラインは復帰しない
+  （`HIGH-33`）
 
-### ZC-7 Windows の経路（`ZC-5` から分離）
+### ZC-7 Windows の経路（`ZC-5` から分離、完了）
 
-**Windows でゼロコピーができないわけではない。配線が無いだけ。**
+**Windows でゼロコピーができないわけではない。Ravel の wgpu renderer へ配線した。**
 `ZC-5` の実装時に確かめた事実:
 
 - `gpui_windows` には `gpui_wgpu` レンダラが**ある**が、非既定の `wgpu`
@@ -288,8 +296,9 @@ macOS 以外では成立していない。** `GPUBK-9` が `interop::context_fro
 - **Ravel は Windows で D3D12 に乗る**（`wgpu::Backends::PRIMARY`）。
   `interop` の D3D12 対応（`NativeApi::Direct3D12`）は既にあるが、
   **相手が D3D11 なので直接は噛み合わない**
-- `PlatformWindow::gpu_context` は `#[cfg(any(linux, freebsd))]` で宣言されて
-  おり、**Windows には生えていない**
+- `PlatformWindow::gpu_context_full` は既に Windows 対応済みで、今回
+  `PlatformWindow::gpu_device_lost`、`Window::gpu_device_lost`、surface の Windows
+  cfg も揃えた
 - **`gpui_wgpu` は Windows では DX12 を選ぶ**
   （`wgpu_context.rs:213-215`: 非 Windows は `VULKAN | GL`、Windows は `DX12`）。
   Ravel も `Backends::PRIMARY`（`VULKAN | METAL | DX12 | BROWSER_WEBGPU`）から
@@ -299,13 +308,14 @@ macOS 以外では成立していない。** `GPUBK-9` が `interop::context_fro
   `metal` のみ）。したがって **Ravel 側に D3D11 の口を生やすことはできない** —
   取り出す先の実装が存在しない
 
-したがって道は 2 つ:
+したがって採用した道は (1):
 
-- **(1) `gpui_windows` の `wgpu` feature を使う。** `gpu_context` の `cfg` に
-  Windows を足して実装すれば `ZC-5` / `ZC-8` の経路にそのまま乗り、
-  **両者が同じ D3D12 デバイスになる**ので interop 自体が要らなくなる。
-  ただし**既定の D3D11 レンダラを捨てる**判断で、Windows の描画品質・性能・
-  安定性が gpui-ce の非既定パスに乗る。**最も筋が良いが、影響が最も大きい**
+- **(1) `gpui_windows` の `wgpu` feature を使う（採用）。** Ravel の
+  `gpui_platform` が Windows でこの feature を有効にし、フォークの
+  `gpu_context_full` / `gpu_device_lost` / surface 経路が `ZC-5` / `ZC-8` に
+  乗る。**両者が同じ D3D12 デバイスになる**ので interop 自体は要らない。
+  既定の D3D11 レンダラから切り替わるため、Windows の描画品質・性能・安定性は
+  実機で確認する
 - **(2) D3D12 → D3D11 の共有ハンドル。** 向きに注意 — Ravel（D3D12）が作った
   リソースを GPUI（D3D11）が開く形になる。逆は成立しない（上記のとおり
   Ravel に D3D11 は無い）。定石は
@@ -318,34 +328,37 @@ macOS 以外では成立していない。** `GPUBK-9` が `interop::context_fro
   **プールの外にテクスチャができる**ので `ZC-4` が解いた寿命問題を別系統で
   もう一度解くことになる
 
-**(1) を先に評価する。** (2) は (1) が使えないと分かった場合の退路で、
-**(1) より確実に重い**（wgpu の共有フラグ欠如 + 跨ぎフェンス + プール外資源）。
+**(2) は不採用。** (1) は既にコード配線が成立しており、(2) の共有フラグ欠如・
+跨ぎフェンス・プール外資源を導入する必要がない。
 
-**Windows 実機は利用可能**（このプロジェクトの開発者が保有）。ただし
-**CI では実行検証できない**（`windows-latest` ランナーに GPU が無い）ので、
-実機確認は**ブランチを push して手動で行う**運用にする。
+**実機で確認した（2026-08-12）。** Windows のコンパイルはローカル環境に
+SDK / linker が無いので `windows-latest` の CI が担い、描画は RTX 3080 の実機で
+確認した。ここで**色が反転していた** — Ravel の `display_transform.wgsl` は
+`Rgba8Unorm` テクスチャに BGRA バイト順で書く（CPU 経路が UI ツールキットの
+BGRA 画像へ直接流し込むため）が、macOS の `rgba_surface_fragment` にある
+`.bgra` 補正が `gpui_wgpu` の `fs_surface` に無かった。フォーク側で揃えて解消。
+**Linux も同じ経路なので同じ欠陥を踏むはずだった**（実機確認より先に見つかった
+形）。
 
 **完了条件**
 
-- Windows でリードバックが 0 回（**実機で確認**）
-- (1) / (2) のどちらを採るかの判断が根拠付きで記録されている
-- 既定レンダラを変更する場合、その影響（描画品質・性能・安定性）を
-  実機で確認した結果が残っている
+- Windows でリードバックが 0 回 — **実機で確認済み**
+- (1) を採る判断と、(2) を採らない根拠が記録されている
+- 既定レンダラ変更の影響（描画品質・性能・安定性）は実機で確認済み — UI に問題なし
 - `ZC-5` が置いた「テクスチャの名指し方だけが分岐する」形を壊さない
 
 ### ZC-6 文書更新（`HIGH-09` は現在地を書き直す）
 
 > **`HIGH-09` はこの単位では閉じない。** 個票の症状は「毎フレームの
-> GPU→CPU→GPU 往復」であり、**それが残っているプラットフォームがある** —
-> Linux は配線（`ZC-8`）が、Windows は経路そのもの（`ZC-7`）が未了。
+> GPU→CPU→GPU 往復」であり、Linux / Windows は配線と経路の実装が完了したが、
+> 実機確認が未了。
 > `issues/README.md` は open な findings の索引なので、**まだそこに居るのが
 > 正しい**。
 >
 > この単位がやるのは**現在地を正確に書くこと**で、閉じることではない。
-> 個票の冒頭に「macOS は `ZC-2`〜`ZC-4` で解決、Linux は `ZC-8`、Windows は
-> `ZC-7`」と**プラットフォーム別の状態表**を置き、「引受先の計画が無い」
-> という古い記述を落とす。**クローズは `ZC-7` / `ZC-8` が済んでから**、
-> どちらかの単位の一部として行う。
+> 個票の冒頭に「macOS は `ZC-2`〜`ZC-4` で解決、Linux / Windows は
+> `ZC-7` / `ZC-8` 実装済み・実機未確認」と**プラットフォーム別の状態表**を置く。
+> **クローズは実機確認が済んでから**行う。
 >
 > （当初この節は「`ZC-6` で閉じる、ただし Windows は残課題と明記」と書いて
 > いたが、**「症状がすべて解決してから閉じる」と両立しない**。矛盾したまま

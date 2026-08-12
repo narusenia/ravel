@@ -38,8 +38,8 @@ ravel-app = { path = "crates/ravel-app" }
 ravel-cli = { path = "crates/ravel-cli" }
 
 # UI framework (gpui-ce community edition)
-gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a99c0aee6a" }
-gpui_platform = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a99c0aee6a", features = ["font-kit"] }
+gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8" }
+gpui_platform = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/narusenia/gpui-component", rev = "94c9eadff5fc5063d74f69bfed8c1c7a6b8d59a4" }
 gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", rev = "94c9eadff5fc5063d74f69bfed8c1c7a6b8d59a4" }
 rust-embed = "8"
@@ -123,10 +123,10 @@ ctrlc = "3"
 dialoguer = { version = "0.12", default-features = false }
 
 [patch.crates-io]
-gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a99c0aee6a" }
+gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8" }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a99c0aee6a" }
+gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8" }
 
 # Keep `cargo run` (dev profile) interactive: at opt-level 0 the per-pixel
 # CPU passes (shell compositing in ravel-nodes, the viewer's frame

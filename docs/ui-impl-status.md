@@ -247,14 +247,14 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
-| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由。**macOS は GPU テクスチャを GPUI の surface としてそのまま描く**（`ZC-2`〜`ZC-4`）ので、フレームが CPU に降りてこない — リードバック 0 回。テクスチャは GPUI の描画完了通知でプールへ返る。macOS 以外、および共有デバイスが取れない場合（複数 GPU 機など）は従来どおり `RenderImage` を `img` 要素で描く CPU 経路にフォールバックする。どちらの経路でも表示バイト列は GPU で出来上がっている（`DisplayFrame`） |
+| FrameBuffer 表示 | ✅ | `ViewerFrame` Global 経由。**macOS は GPU テクスチャを GPUI の surface としてそのまま描き**（`ZC-2`〜`ZC-4`）、Linux / Windows も wgpu surface 経路（`ZC-7` / `ZC-8`）でフレームを CPU に降ろさず描く — いずれもリードバック 0 回。テクスチャは GPUI の描画完了通知でプールへ返る。共有デバイスが取れない場合（複数 GPU 機など）やデバイス喪失時は従来どおり `RenderImage` を `img` 要素で描く CPU 経路にフォールバックする。どちらの経路でも表示バイト列は GPU で出来上がっている（`DisplayFrame`） |
 | 表示変換（リニア → sRGB） | ✅ | 評価バッファはリニア光なので、リードバック前に GPU で 1 パス掛ける（`ravel_nodes::DisplayTransform`、`CM-7`）。**変換点はこの 1 箇所**で、CPU 側に画素ごとの色計算は無い。`scripts/lint-patterns.sh` の `raw-pixel-quantisation` が自前の量子化を禁じる。`quality` / `ViewerResolution` と直交。CPU の `to_display_rgba8` との一致基準は **8bit で ±1 コード**。ユーザー提供の `.cube` を差し込めるが**選ぶ UI は `CM-8`**、`.ocio` は `CM-9`（表示色空間は **sRGB 固定**）。変換が走らなかったフレームは Viewer のエラーオーバーレイになる（CPU 救済はしない）|
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
 | コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
 | 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。音声同期も実装済み: 音声トラックあり + デバイス稼働時は `SyncClock` が再生位置の正（`ClockSource::Audio`）、それ以外は従来の wall clock（`audio-plan.md` 単位 3） |
-| GPU テクスチャ共有（ゼロコピー） | ⚠️ | **macOS のみ実装**（`ZC-2`〜`ZC-4`）。GPUI の Metal デバイスを取り込み、出力テクスチャを surface としてそのまま描くのでリードバックは 0 回。**Linux は描画側だけがあり既定オフ**（デバイス採用の配線が `ZC-8`）、**Windows は未着手**（既定レンダラが D3D11、`ZC-7`）。共有できない場合は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）の従来経路へフォールバックする |
+| GPU テクスチャ共有（ゼロコピー） | ⚠️ | **macOS / Linux / Windows で実装済み**（`ZC-2`〜`ZC-5`、`ZC-7`、`ZC-8`）。macOS は Metal、Linux / Windows は wgpu の出力テクスチャを surface としてそのまま描き、完了通知の後にプールへ返す。Windows は Ravel が GPUI の wgpu/DX12 renderer feature を有効化する。Linux / Windows の実機確認は未了。共有できない場合や context を取得できない場合は評価ワーカーで 1 回読み戻し → `RenderImage`（BGRA u8）の従来経路へフォールバックする。**デバイス喪失は別扱い**: surface 描画は採用したデバイスとレンダラの現デバイスを毎回照合して止まるが、評価パイプラインは死んだデバイスに残るので復帰しない（`HIGH-33`） |
 | ツールバー（選択/ペン等） | ✅ | 選択 / ペン / 矩形 / 楕円 / ハンド / ズーム（`ToolState` Global、REQ-UI-011、`tool-system-plan.md`） |
 | 選択 bbox とハンドル | ⚠️ | **ハンドルは描画のみで動作を持たない** — スケール / 回転のジェスチャーはコード上に存在せず、動くのは bbox 内側からの移動だけ（担当は `viewer-overlay-manipulator-plan.md` の OVL-7）。ノード選択（`CanvasSelection`）はハンドル付き bbox。**レイヤー選択が 2 枚以上のときはレイヤー単位 bbox**（そのネットワークの shape ノードの bounds の和 → シェル変換、ハンドル無し。shape ノードを持たないレイヤーは出さない、REQ-UI-013 単位 6） |
 | 複数レイヤーの同時ドラッグ | ✅ | レイヤー bbox の内側からドラッグで選択レイヤー全体を移動。`center` ベクタ再構築方式（REQ-UI-011）を全 target 分 1 つの Document に適用 → 1 undo。シェル変換が単位行列でないレイヤーは対象外 |

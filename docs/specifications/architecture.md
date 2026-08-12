@@ -2,7 +2,7 @@
 
 ## 概要
 
-Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済み。**macOS はビューアが GPU テクスチャから直接描かれ、リードバックは 0 回**。Linux / Windows は未了 → 「UI フレームワークのフォーク方針」）。
+Ravelは「ノードグラフファースト」のアーキテクチャ。全てのデータフロー、エフェクト、合成処理がDAG（有向非巡回グラフ）上のノード接続として表現される。タイムラインはこのDAG上の糖衣表現（シーケンスノード）として実装。UI層と処理層は明確に分離され、GPUIによるUI描画とwgpuベースのGPU計算パイプラインがGPUコンテキストを共有する設計を採る（REQ-GPU-001。受け口は `ravel-gpu` 側に固定済み。**macOS はビューアが GPU テクスチャから直接描かれ、Linux / Windows も wgpu surface 経路を実装済み**。Linux / Windows の実機確認は未了）。
 
 ## レイヤー構成
 
@@ -571,8 +571,9 @@ lint（`gpu-device-sharing`）が呼び出し元を `ravel-gpu` と `ravel-app` 
    `gpu_specs()`（情報のみ）だけだった。`gpui_wgpu::WgpuContext` は
    instance / adapter / device / queue を `pub` フィールドで持つが、
    `gpui` からは辿れない。**フォークの `Window::native_gpu_handles()` が
-   macOS の口を開けた**（`ZC-2`）。Linux / Windows の `gpui_wgpu` 経路は
-   まだ `None` を返す
+   macOS の口を開けた**（`ZC-2`）。Linux / Windows は
+   `Window::gpu_context_full()` が instance / adapter / device / queue を返し、
+   Ravel が起動時にその context を採用する（`ZC-8`）。
 2. **macOS の gpui は wgpu ではない。** `gpui_wgpu` を使うのは Linux /
    Windows（feature）/ web で、macOS は `gpui_macos` の Metal ネイティブ
    レンダラ。つまり macOS には「共有すべき同じ `wgpu::Device`」が存在しない。
@@ -584,10 +585,11 @@ lint（`gpu-device-sharing`）が呼び出し元を `ravel-gpu` と `ravel-app` 
 
 したがってフォーク側の作業は 2 択だった:
 
-- **(A) デバイス公開アクセサを足す。** Linux では成立する（`gpu_context()`）。
-  macOS には効かない。**`ZC-5` が描画側を置いたが、`interop::context_from_wgpu`
-  に本番の呼び出し元が無いので既定オフのまま — 配線は `ZC-8`**。
-  Windows は既定レンダラが D3D11 なので同じ手が使えない（`ZC-7`）
+- **(A) デバイス公開アクセサを足す。** Linux / Windows で成立する
+  （`gpu_context_full()`）。macOS には効かない。**`ZC-5` が描画側を置き、
+  `ZC-8` が `interop::context_from_wgpu` の本番呼び出し元と起動時の採用を追加した**。
+  Ravel の Windows build は `gpui_windows` の wgpu feature を有効にするので、
+  既定の D3D11 renderer ではなく GPUI の DX12/wgpu renderer を使う（`ZC-7`）。
 - **(B) macOS のレンダラを wgpu へ寄せる、または Metal レベルで interop する。**
   ゼロコピー表示（GPUI カスタム要素にビューアのテクスチャを直接描かせる）は
   こちら側の話。**`ZC-2` が後者（Metal レベルの interop）を採り、

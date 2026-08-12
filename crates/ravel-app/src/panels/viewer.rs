@@ -1729,7 +1729,12 @@ fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<P
 /// path. The texture pointer is borrowed only for this call; `gpu_frame` stays
 /// in the panel until the scene has consumed it.
 #[cfg(target_os = "macos")]
-fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+fn paint_gpu_surface(
+    frame: &GpuFrameBuffer,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    _cx: &gpui::App,
+) -> bool {
     let Some(handles) = window.native_gpu_handles() else {
         return false;
     };
@@ -1755,19 +1760,25 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
 
 /// The wgpu-backed platforms need no interop at all: GPUI's renderer runs on
 /// the device Ravel was handed at startup, so the frame's own texture is
-/// already the host's. Only the way the texture is named differs from the
-/// Metal arm above — the bounds and the fallback are the same.
+/// already the host's. The completion callback is retained by GPUI's wgpu
+/// submission until the renderer has finished sampling the texture, keeping
+/// the pooled frame lease alive across the surface draw.
 ///
-/// **The lifetime rule is not yet the same, and that is why this path stays
-/// disabled.** The Metal arm hands GPUI a completion callback (`ZC-4`) so the
-/// pool cannot reclaim a texture the renderer is still sampling; the fork's
-/// wgpu `SurfaceSource::Texture` arm carries no such field, and the
-/// `Arc<wgpu::Texture>` here keeps the *texture* alive without keeping the
-/// *pool lease*. Enabling this before closing that gap would reintroduce
-/// exactly the race `ZC-4` fixed — so `ZC-8`, which turns the capability on,
-/// owns the completion signal for this arm too.
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+/// **The release is late, never early.** GPUI hands the callback to
+/// `wgpu::Queue::on_submitted_work_done`, and wgpu only runs such callbacks
+/// during a later `submit` / `poll` — which for GPUI means the next frame it
+/// draws. So a frame's lease returns to the pool one draw after the GPU
+/// actually finished with it. That errs on the safe side of the race `ZC-4`
+/// closed, and it cannot stall evaluation: `TexturePool::acquire` allocates
+/// when nothing idle matches rather than waiting. The cost is at most one
+/// extra pooled texture held while the window sits idle.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+fn paint_gpu_surface(
+    frame: &GpuFrameBuffer,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &gpui::App,
+) -> bool {
     // A lost device recovers on a later draw; sampling its textures meanwhile
     // is not safe, so this frame falls back instead. `None` means the backend
     // cannot say, which is not the same as "healthy" — treat the unknown as
@@ -1775,31 +1786,38 @@ fn paint_gpu_surface(frame: &GpuFrameBuffer, bounds: Bounds<Pixels>, window: &mu
     if window.gpu_device_lost().unwrap_or(true) {
         return false;
     }
+    // **The flag alone is not enough.** Recovery gives the renderer a brand new
+    // device and clears the flag, and this frame's texture still belongs to the
+    // dead one. Ask whether the renderer is on the device Ravel adopted rather
+    // than whether it is unhappy right now.
+    if !crate::workspace::host_device_unchanged(window, cx) {
+        return false;
+    }
     let texture = ravel_gpu::interop::surface_texture_wgpu(frame);
     let size = size(
         DevicePixels::from(frame.width() as i32),
         DevicePixels::from(frame.height() as i32),
     );
-    window.paint_surface(bounds, texture, size);
+    window.paint_surface(bounds, texture, size, Some(frame.completion_signal()));
     true
 }
 
-/// Windows keeps the CPU road for now — **wiring, not impossibility**.
+/// Targets without a wgpu-backed GPUI renderer keep the CPU road.
 ///
-/// `gpui_windows` does have a `gpui_wgpu` renderer, but only behind its
-/// non-default `wgpu` feature; the default build is DirectX-native, and
-/// `PlatformWindow::gpu_context` is declared `#[cfg(any(linux, freebsd))]`,
-/// so nothing reaches the device from here. Two routes exist when someone
-/// takes the unit: enable that feature (Windows then joins the arm above), or
-/// share at the D3D12 level the way macOS shares at the Metal level —
-/// `interop` already covers `ID3D12Device*` and `ID3D12Resource*` under
-/// [`NativeApi::Direct3D12`](ravel_gpu::interop::NativeApi). Both need a
-/// Windows machine to judge, which is why neither is done here.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
+/// Ravel enables GPUI's `wgpu` renderer on Windows, so Windows uses the
+/// wgpu-backed implementation above and shares the adopted DX12 device. The
+/// remaining targets have no compatible surface API and must fall back.
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "windows"
+)))]
 fn paint_gpu_surface(
     _frame: &GpuFrameBuffer,
     _bounds: Bounds<Pixels>,
     _window: &mut Window,
+    _cx: &gpui::App,
 ) -> bool {
     false
 }
@@ -1938,7 +1956,7 @@ impl Render for ViewerPanel {
                         tracing::error!(%err, "failed to paint viewer image");
                     }
                     if let Some(frame) = gpu_frame.as_ref()
-                        && !paint_gpu_surface(frame, frame_bounds, window)
+                        && !paint_gpu_surface(frame, frame_bounds, window, cx)
                     {
                         // This window cannot sample the worker's texture — a
                         // second window on another device, or a device that

@@ -44,6 +44,14 @@ sha2 = { workspace = true }
 smallvec = { workspace = true }
 tracing = { workspace = true }
 
+# Naming wgpu here is the device-sharing contract, not a leak: `ZC-8` adopts the
+# window renderer's `wgpu::Device` so the evaluation pipeline and the UI run on
+# one device (REQ-GPU-001). `.agents/rules/rust.md` allows exactly `ravel-gpu`
+# and `ravel-app` to name `interop::context_from_wgpu`, and that entry point
+# takes wgpu objects by definition — the host is the one that owns them.
+# Used only on the wgpu-backed platforms; macOS keeps its Metal path.
+wgpu = { workspace = true }
+
 # **Windows only: use GPUI's wgpu renderer instead of its default D3D11 one.**
 #
 # `ZC-7` step 1. Ravel's evaluation pipeline runs on wgpu, which picks DX12 on

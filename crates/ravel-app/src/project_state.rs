@@ -454,7 +454,27 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
 }
 
 impl ProjectState {
+    /// Build the session on a GPU device Ravel chooses for itself.
+    ///
+    /// Prefer [`Self::new_on_host_gpu`] from the application: a device the
+    /// window renderer already owns is the one REQ-GPU-001 asks for, and the
+    /// only one whose textures the viewer can hand back without a copy.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::new_on_host_gpu(None, cx)
+    }
+
+    /// Build the session on `host_gpu` when the window renderer supplied one.
+    ///
+    /// `None` falls back to Ravel's own adapter selection — the headless
+    /// tests, and any platform whose renderer is not wgpu-backed.
+    ///
+    /// **Adopting matters even where both sides would pick the same card.**
+    /// `Backends::PRIMARY` is ordered `VULKAN | METAL | DX12 | …`, so on a
+    /// Windows machine with an NVIDIA driver Ravel lands on Vulkan while
+    /// GPUI's renderer is on DX12 — one GPU, two devices, and a texture from
+    /// either is meaningless to the other. Taking the host's device removes
+    /// the choice instead of trying to make two choices agree.
+    pub fn new_on_host_gpu(host_gpu: Option<GpuContext>, cx: &mut Context<Self>) -> Self {
         // The one place a `CacheBudget` is created. The texture pool is built
         // inside `GpuEvalHooks`, before the worker thread that builds the
         // `Evaluator` exists, so both have to be handed the same budget from
@@ -473,7 +493,7 @@ impl ProjectState {
             if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
                 (None, None, None)
             } else {
-                match GpuContext::new_blocking() {
+                match host_gpu.map_or_else(GpuContext::new_blocking, Ok) {
                     Ok(gpu_ctx) => {
                         let (update_tx, mut update_rx) =
                             futures::channel::mpsc::unbounded::<ViewerUpdate>();

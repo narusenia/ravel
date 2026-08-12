@@ -2154,11 +2154,11 @@ impl PropertiesGpuiPanel {
             || self
                 .curves
                 .iter()
-                .any(|(_, binding)| binding.state.read(cx).is_dragging())
+                .any(|(_, binding)| binding.state.read(cx).gesture_in_flight(cx))
             || self
                 .ramps
                 .iter()
-                .any(|(_, binding)| binding.state.read(cx).is_dragging())
+                .any(|(_, binding)| binding.state.read(cx).gesture_in_flight(cx))
     }
 
     /// End every in-flight edit gesture, taking the undo step it owes, before
@@ -6983,16 +6983,23 @@ mod tests {
             state.pointer_down(200.0, 1, cx);
             state.end_drag(cx);
         });
+        // Mid grey, not a primary: `r > b` holds for pure red whether or not
+        // the display encoding is undone, so a primary cannot tell a working
+        // conversion from a missing one. Half-way in display light is about
+        // 0.21 linear, and the stored stop is linear (`CM-2`).
+        let picked: Hsla = gpui::rgb(0x808080).into();
+        let rgba = Rgba::from(picked);
+        let expected = ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b])[0];
         for _ in 0..3 {
             picker.update(cx, |_, cx| {
-                cx.emit(ColorPickerEvent::Change(Some(gpui::red())));
+                cx.emit(ColorPickerEvent::Change(Some(picked)));
             });
         }
         cx.run_until_parked();
         let live = node_ramp(&project, &path, node_id, "stops", cx).expect("ramp");
         assert!(
-            live.evaluate(1.0).r > live.evaluate(1.0).b,
-            "the live change applied: {live:?}"
+            (live.evaluate(1.0).r - expected).abs() < 1e-3,
+            "the live change applied in linear light: {live:?} vs {expected}"
         );
         assert_eq!(live.evaluate(0.0), original.evaluate(0.0), "only one stop");
 

@@ -161,10 +161,22 @@ impl ParamRampEditorState {
             .copied()
     }
 
-    /// Whether a drag is in progress (external refreshes must not fight the
-    /// gesture).
+    /// Whether a pointer drag on the band is in progress (external refreshes
+    /// must not fight the gesture).
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// Whether **any** edit gesture this widget owns is in flight.
+    ///
+    /// The toolbar's position field is a gesture too, and it lives inside this
+    /// widget rather than in the panel's `scrubs` table — so a scrub on it is
+    /// invisible to `PropertiesPanel::gesture_in_flight` unless it is reported
+    /// here. A gesture the panel cannot see is one it will not end before it
+    /// repoints at another row, and the commit then lands on the wrong target
+    /// (the failure `caf929a` fixed for the row-level scrubs).
+    pub fn gesture_in_flight(&self, cx: &App) -> bool {
+        self.is_dragging() || self.position.read(cx).is_dragging()
     }
 
     /// Replace the displayed ramp from the document. Ignored mid-gesture: the
@@ -374,11 +386,16 @@ impl ParamRampEditorState {
         committed
     }
 
-    /// Abandon the drag without committing, for the case where the pointer
-    /// arrives with the button already released (a button lost outside the
-    /// window). The live value stays where the last `Change` put it, which is
-    /// the same place `end_drag` would leave it.
-    pub(crate) fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+    /// End the drag when the pointer arrives with the button already released
+    /// (a button lost outside the window).
+    ///
+    /// This **commits** what the drag did, exactly as releasing inside the
+    /// window would. Discarding it instead would throw away an edit the user
+    /// watched happen — the live `Change`s already moved the stop — and leave
+    /// the document disagreeing with the band on screen. `end_drag` still
+    /// declines to commit a gesture that returned to where it started, so a
+    /// button lost after an accidental nudge records no undo step.
+    pub(crate) fn end_drag_without_pointer(&mut self, cx: &mut Context<Self>) {
         if self.drag.is_none() {
             return;
         }
@@ -406,6 +423,13 @@ impl ParamRampEditorState {
         let Some(position) = clamp_between(value.clamp(0.0, 1.0), lower, upper) else {
             return;
         };
+        // `move_stop` reports success for a move that lands where the stop
+        // already is, so the no-op has to be caught here: emitting `Commit`
+        // for it records an undo step that changes nothing, and `UndoStack`
+        // does not deduplicate (the `MED-APP-07` failure).
+        if position.total_cmp(&stop.position).is_eq() {
+            return;
+        }
         if !self.ramp.move_stop(stop.position, position) {
             return;
         }
@@ -697,7 +721,7 @@ impl RenderOnce for ParamRampEditor {
                     // the drag state has to go rather than follow a pointer
                     // that is no longer pressing anything.
                     if e.event.pressed_button != Some(MouseButton::Left) {
-                        state.cancel_drag(cx);
+                        state.end_drag_without_pointer(cx);
                         return;
                     }
                     let x = state.local_x(e.event.position);
@@ -896,8 +920,17 @@ mod tests {
                 Some(0.25),
                 "the new stop is the selected one"
             );
+            // Every channel, not just the two the endpoint colours differ in:
+            // a new stop that dropped `g` or `a` would still pass an `r`/`b`
+            // comparison while visibly changing the gradient.
             let after = state.ramp().evaluate(0.25);
-            assert!((after.r - before.r).abs() < 1e-6 && (after.b - before.b).abs() < 1e-6);
+            assert!(
+                (after.r - before.r).abs() < 1e-6
+                    && (after.g - before.g).abs() < 1e-6
+                    && (after.b - before.b).abs() < 1e-6
+                    && (after.a - before.a).abs() < 1e-6,
+                "{after:?} != {before:?}"
+            );
         });
     }
 
@@ -925,8 +958,16 @@ mod tests {
             state.set_selected_position(0.9, true, cx);
             let position = state.selected_stop().expect("selected").position;
             assert!(position > 0.5 && position < 1.0, "{position}");
+            // Out of band: clamped to the top of the band, then held off the
+            // neighbour. `<= 1.0` alone would pass with the move removed
+            // entirely, since the stop already sat below 1.
+            let before_clamp = state.selected_stop().expect("selected").position;
             state.set_selected_position(50.0, true, cx);
-            assert!(state.selected_stop().expect("selected").position <= 1.0);
+            let clamped = state.selected_stop().expect("selected").position;
+            assert!(
+                clamped > before_clamp && clamped < 1.0,
+                "{before_clamp} -> {clamped}"
+            );
             state.set_selected_position(f32::NAN, true, cx);
             assert!(
                 state
@@ -1021,6 +1062,60 @@ mod tests {
             log.borrow().iter().all(|(committed, _)| !committed),
             "a press that moved nothing is not an edit"
         );
+    }
+
+    /// Retyping the value a stop already has is not an edit. `move_stop`
+    /// reports success for a move that lands where the stop already is, so
+    /// without the guard the field commits a `RampParam` identical to the
+    /// stored one — and `UndoStack` does not deduplicate, so that no-op step
+    /// pushes real history out of the 200-entry window (`MED-APP-07`).
+    #[gpui::test]
+    fn retyping_the_same_position_commits_nothing(cx: &mut TestAppContext) {
+        let (state, log) =
+            state_with_log(cx, RampParam::linear([(0.0, RED), (0.5, RED), (1.0, BLUE)]));
+        state.update(cx, |state, cx| {
+            state.pointer_down(100.0, 1, cx);
+            state.end_drag(cx);
+            let position = state.selected_stop().expect("selected").position;
+            log.borrow_mut().clear();
+            state.set_selected_position(position, true, cx);
+        });
+        assert!(
+            log.borrow().is_empty(),
+            "the value did not change, so nothing was emitted: {:?}",
+            log.borrow().len()
+        );
+    }
+
+    /// The toolbar's position field is a gesture the panel has to see. It is
+    /// not in the panel's `scrubs` table, so only this widget can report it —
+    /// and a gesture the panel misses is one it does not end before repointing
+    /// at another row, which is how a commit lands on the wrong target.
+    #[gpui::test]
+    fn a_scrub_on_the_position_field_counts_as_a_gesture(cx: &mut TestAppContext) {
+        let state = state(cx, RampParam::linear([(0.0, RED), (0.5, RED), (1.0, BLUE)]));
+        state.update(cx, |state, cx| {
+            state.pointer_down(100.0, 1, cx);
+            state.end_drag(cx);
+        });
+        state.read_with(cx, |state, cx| {
+            assert!(!state.gesture_in_flight(cx), "nothing is being dragged yet");
+        });
+        state.update(cx, |state, cx| {
+            state
+                .position
+                .update(cx, |input, _cx| input.begin_drag(0.0));
+        });
+        state.read_with(cx, |state, cx| {
+            assert!(
+                state.gesture_in_flight(cx),
+                "a scrub inside the widget is still a gesture the panel owes an undo step for"
+            );
+            assert!(
+                !state.is_dragging(),
+                "but it is not a band drag: refreshes may still land"
+            );
+        });
     }
 
     /// Working-space linear light is encoded for display before it is painted,

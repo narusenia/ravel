@@ -716,6 +716,28 @@ impl ParamCurveEditorState {
         self.drag.is_some()
     }
 
+    /// Whether **any** edit gesture this widget owns is in flight.
+    ///
+    /// The toolbar's six numeric fields are gestures too, and they live inside
+    /// this widget rather than in the panel's `scrubs` table — so a scrub on
+    /// one is invisible to `PropertiesPanel::gesture_in_flight` unless it is
+    /// reported here. A gesture the panel cannot see is one it will not end
+    /// before it repoints at another row, and the commit then lands on the
+    /// wrong target (the failure `caf929a` fixed for the row-level scrubs).
+    pub fn gesture_in_flight(&self, cx: &App) -> bool {
+        self.is_dragging()
+            || [
+                &self.inputs.point_x,
+                &self.inputs.point_y,
+                &self.inputs.input_min,
+                &self.inputs.input_max,
+                &self.inputs.output_min,
+                &self.inputs.output_max,
+            ]
+            .iter()
+            .any(|input| input.read(cx).is_dragging())
+    }
+
     /// Replace the displayed curve from the document. Ignored mid-gesture:
     /// the drag is the source of truth until it ends.
     pub fn set_curve(&mut self, curve: CurveParam) {

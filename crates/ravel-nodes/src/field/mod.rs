@@ -1238,8 +1238,9 @@ mod tests {
     use ravel_core::geometry::Field;
     use ravel_core::registry::builtin::{
         FIELD_COMPONENTS, FIELD_COMPOSE_VEC2, FIELD_COMPOSE_VEC3, FIELD_COMPOSE_VEC4,
+        VECTOR_CONSTRUCT_VEC3, VECTOR_LENGTH, VECTOR_SPLIT_VEC3,
     };
-    use ravel_core::types::{Vec3, Vec4};
+    use ravel_core::types::{PortRecord, Scalar, Vec3, Vec4};
 
     /// A field answering a fixed column, so a test can hand a transform a
     /// source of any attribute type.
@@ -1492,6 +1493,144 @@ mod tests {
         assert_eq!(angle_of(AttributeArray::F32(vec![2.0])), 0.0);
         let negative = angle_of(AttributeArray::F32(vec![-2.0]));
         assert!((negative - PI).abs() < 1e-6, "{negative} is not pi");
+    }
+
+    // ---- agreement with the value-domain `vector.*` nodes -----------------
+    //
+    // `vector-field-plan.md` unit 8 could not pin these when it landed,
+    // because the field side did not exist yet. The two implementations are
+    // separate — one transforms a column in `ravel-core`, the other a wire
+    // value in `ravel-nodes` — so nothing but a test keeps them answering the
+    // same thing.
+
+    /// Runs a value-domain processor with no parameters.
+    fn value_domain(
+        processor: &dyn NodeProcessor,
+        node: &Node,
+        inputs: Vec<Option<Arc<dyn NodeData>>>,
+    ) -> Arc<dyn NodeData> {
+        processor
+            .process(
+                node,
+                &ctx(),
+                &inputs,
+                &ResolvedParams::default(),
+                &mut Evaluator::new(),
+            )
+            .unwrap()
+    }
+
+    /// `field.length` and `vector.length` agree bit for bit, including the
+    /// edge-of-range inputs that separate the scaled magnitude from a naive
+    /// sum of squares.
+    #[test]
+    fn field_length_answers_what_vector_length_answers() {
+        for (column, value) in [
+            (
+                AttributeArray::Vec2(vec![Vec2(3.0, 4.0)]),
+                Arc::new(Vec2(3.0, 4.0)) as Arc<dyn NodeData>,
+            ),
+            (
+                AttributeArray::Vec3(vec![Vec3(2.0, -3.0, 6.0)]),
+                Arc::new(Vec3(2.0, -3.0, 6.0)),
+            ),
+            (
+                AttributeArray::Vec4(vec![Vec4(1.0, -2.0, 3.0, -4.0)]),
+                Arc::new(Vec4(1.0, -2.0, 3.0, -4.0)),
+            ),
+            (
+                AttributeArray::Vec2(vec![Vec2(f32::MAX, 0.0)]),
+                Arc::new(Vec2(f32::MAX, 0.0)),
+            ),
+            (
+                AttributeArray::Vec2(vec![Vec2(0.0, f32::MIN_POSITIVE)]),
+                Arc::new(Vec2(0.0, f32::MIN_POSITIVE)),
+            ),
+        ] {
+            let from_field = length_of(column);
+            let from_value = value_domain(
+                &crate::vector::VectorLengthProcessor,
+                &Node::new(NodeId::new(1), VECTOR_LENGTH),
+                vec![Some(value)],
+            )
+            .downcast_ref::<Scalar>()
+            .expect("vector.length answers a Scalar")
+            .0;
+            assert_eq!(
+                from_field.to_bits(),
+                from_value.to_bits(),
+                "field.length said {from_field}, vector.length said {from_value}"
+            );
+        }
+    }
+
+    /// `field.component` and `vector.split` take the same components out of
+    /// the same vector.
+    #[test]
+    fn field_component_answers_what_vector_split_answers() {
+        let vector = Vec3(1.5, -2.5, 0.25);
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let split = registry
+            .create_node(VECTOR_SPLIT_VEC3, NodeId::new(1))
+            .expect("vector.split.vec3 is registered");
+        let record = value_domain(
+            &crate::vector::VectorSplitProcessor::new(crate::vector::VectorArity::Vec3),
+            &split,
+            vec![Some(Arc::new(vector))],
+        );
+        let record = record
+            .downcast_ref::<PortRecord>()
+            .expect("vector.split answers a PortRecord");
+
+        for (slot, name) in FIELD_COMPONENTS[..3].iter().enumerate() {
+            let from_field = component_of(vector_field(AttributeArray::Vec3(vec![vector])), name);
+            let from_value = record.0[slot]
+                .downcast_ref::<Scalar>()
+                .expect("a split output is a Scalar")
+                .0;
+            assert_eq!(from_field.to_bits(), from_value.to_bits(), "{name}");
+        }
+    }
+
+    /// `field.compose` and `vector.construct` build the same vector out of
+    /// the same components.
+    #[test]
+    fn field_compose_answers_what_vector_construct_answers() {
+        let values = [1.5f32, -2.5, 0.25];
+        let sources: Vec<Arc<dyn NodeData>> =
+            values.iter().map(|value| scalar_field(*value)).collect();
+        let composed = run(
+            &compose_node(FIELD_COMPOSE_VEC3, 3),
+            Arc::new(ComposeFieldProcessor::new(3)),
+            &sources,
+        );
+        let AttributeArray::Vec3(column) = typed_sample(composed.as_ref()) else {
+            panic!("field.compose.vec3 answers a Vec3 column");
+        };
+
+        // Through the evaluator, so the component parameters are resolved the
+        // way `vector.construct` reads them.
+        let mut construct = Node::new(NodeId::new(1), VECTOR_CONSTRUCT_VEC3)
+            .with_output("vector", DataTypeId::VEC3);
+        for (key, value) in FIELD_COMPONENTS[..3].iter().zip(values) {
+            construct = construct.with_param(*key, ParameterValue::Float(value));
+        }
+        let graph = Graph::new().add_node(construct).unwrap();
+        let mut evaluator = Evaluator::new();
+        evaluator.register(
+            NodeId::new(1),
+            Arc::new(crate::vector::VectorConstructProcessor::new(
+                crate::vector::VectorArity::Vec3,
+            )),
+        );
+        let constructed = *evaluator
+            .evaluate(&graph, NodeId::new(1), &ctx())
+            .unwrap()
+            .downcast_ref::<Vec3>()
+            .expect("vector.construct.vec3 answers a Vec3");
+
+        assert_eq!(column[0], constructed);
     }
 
     #[test]

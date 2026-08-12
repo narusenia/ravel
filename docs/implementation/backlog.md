@@ -46,6 +46,7 @@
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | STYLE-2 | `style.fill` / `style.stroke` ノード | `style-attributes-plan.md` |
+| PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | STYLE-3 | ダッシュ・キャップ・ジョイン | `style-attributes-plan.md` |
 | VEC-2 | 変換ノード（length / component / compose / angle） | `vector-field-plan.md` |
 | PARAM-4 | グラデーションエディタのインライン展開（PARAM-3 完了で着手可能） | `properties-parameter-editors-plan.md` |
@@ -148,8 +149,8 @@ MediaBin 側を #400 で片付けて closed になった。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| VIS-1 | 🟡 | `VisiblePanels` Global と `WindowHost` からの維持（挙動不変） | — |
-| VIS-2 | ⬜ | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | VIS-1 |
+| VIS-1 | ✅ | `VisiblePanels` Global と `WindowHost` からの維持（挙動不変。#409） | — |
+| VIS-2 | 🟡 | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | VIS-1 |
 | VIS-3 | ⬜ | Timeline / Outliner / MediaBin / NodeEditor への適用 | VIS-2 |
 | VIS-4 | ⬜ | 仕様・実装状況・測定手順の文書、フェーズ C3 を閉じる | VIS-3 |
 
@@ -376,6 +377,23 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2, MOD-1 |
 | STYLE-5 | ✅ | `field.apply` の属性自動作成 + Color 既定マスクを `rgb` へ（#403） | — |
 | STYLE-6 | ✅ | `field.ramp`（位置 → 色のランプ）（#408） | STYLE-5, VEC-1 |
+
+### パスのシェーディング（頂点色補間と `stroke_align`）
+
+`path-shading-plan.md`。CPU 経路が per-pixel の幾何情報を持たない
+（zeno が被覆マスクしか返さない）ことで止まっている 3 つを 1 本にまとめる。
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PSHADE-1 | 🟡 | `path_sample()`（CPU の per-pixel 評価器）と WGSL 側の情報追加（挙動不変） | — |
+| PSHADE-2 | ⬜ | 線の頂点色補間（CPU / GPU）。`MED-GPU-08` の本体 | PSHADE-1 + **塗りの方式決定** |
+| PSHADE-3 | ⬜ | `stroke_align`（`style-attributes-plan.md` 単位 1 からの繰り延べ） | PSHADE-1 |
+| PSHADE-4 | ⬜ | 塗りの頂点色（案 B か C。**案 A を採るなら単位ごと落とす**） | PSHADE-2 |
+| PSHADE-5 | ⬜ | ゴールデンの拡張と文書、`MED-GPU-08` を閉じる | PSHADE-2, PSHADE-3 |
+
+**`PSHADE-2` の前に塗りの方式（案 A / B / C）を決める必要がある。** 計画書の
+「CPU 側の方式 — 選択肢」を参照。推奨は案 A（線だけ。塗りはプリミティブ色の
+まま）で、ロードマップがフェーズ D の完成形として掲げているのは線の方。
 
 STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現状スカラー
 フィールドは Color の全 4 成分に broadcast され、明度と同時にアルファも動く

@@ -30,7 +30,7 @@ use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{
     EvalRequest, EvalService, EvalWorkerHooks, InvalidationHint, ProcessorSync,
 };
-use ravel_core::types::{FrameBuffer, FrameRate, NodeData, Vec2};
+use ravel_core::types::{FrameBuffer, FrameRate, NodeData, Scalar, Vec2};
 use ravel_gpu::{GpuContext, ShaderManager, TexturePool};
 use ravel_nodes::rasterize::RasterizeProcessor;
 use std::collections::BTreeMap;
@@ -195,6 +195,94 @@ impl NodeProcessor for FbSource {
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         Ok(Arc::new(self.0.clone()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Large-graph traversal scenario (HIGH-01)
+// ---------------------------------------------------------------------------
+
+/// Nodes in the graph-traversal scenario.
+const BIG_GRAPH_NODES: u64 = 1_000;
+
+/// Base node id of that graph, kept clear of the hand-numbered ids above.
+const BIG_GRAPH_BASE: u64 = 100_000;
+
+/// Adds its connected scalar inputs. Deliberately trivial: the scenario
+/// measures what the evaluator spends *around* `process()` — edge lookup,
+/// key construction, cache probing — so the processor itself must not
+/// dominate the sample.
+struct ScalarSum;
+
+impl NodeProcessor for ScalarSum {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ravel_core::eval::ResolvedParams,
+        _scope: &mut dyn ravel_core::eval::EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let mut sum = 1.0f32;
+        for input in inputs.iter().flatten() {
+            if let Some(s) = input.downcast_ref::<Scalar>() {
+                sum += s.0;
+            }
+        }
+        Ok(Arc::new(Scalar(sum)))
+    }
+}
+
+/// A ~1000-node / ~1500-edge DAG whose root reaches every node.
+///
+/// Node `i` pulls from `2i+1`, `2i+2` and `2i+3`: the first two are the
+/// binary-tree edges that make node 0 reach all 1000 nodes, the third adds
+/// the cross-links that take the edge count to roughly 1500. Every edge runs
+/// from a higher index to a lower one, so the graph is acyclic by
+/// construction, and the tree shape keeps recursion around depth 10 —
+/// far below `MAX_EVALUATION_DEPTH`, so the scenario measures traversal
+/// width rather than the recursion limit.
+fn big_graph() -> (Graph, NodeId) {
+    let id = |i: u64| NodeId::new(BIG_GRAPH_BASE + i);
+    let mut graph = Graph::new();
+    for i in 0..BIG_GRAPH_NODES {
+        graph = graph
+            .add_node(
+                Node::new(id(i), "bench.sum")
+                    .with_input("a", &[DataTypeId::SCALAR])
+                    .with_input("b", &[DataTypeId::SCALAR])
+                    .with_input("c", &[DataTypeId::SCALAR])
+                    .with_output("out", DataTypeId::SCALAR),
+            )
+            .expect("unique node id");
+    }
+    let mut edge = 0u64;
+    for i in 0..BIG_GRAPH_NODES {
+        for (port, source) in [(0u32, 2 * i + 1), (1, 2 * i + 2), (2, 2 * i + 3)] {
+            if source >= BIG_GRAPH_NODES {
+                continue;
+            }
+            edge += 1;
+            graph = graph
+                .add_edge(
+                    EdgeId::new(edge),
+                    id(source),
+                    OutputPortIndex(0),
+                    id(i),
+                    InputPortIndex(port),
+                )
+                .expect("acyclic by construction");
+        }
+    }
+    (graph, id(0))
+}
+
+/// An evaluator with `ScalarSum` registered for every node of [`big_graph`].
+fn big_graph_evaluator(graph: &Graph) -> Evaluator {
+    let mut evaluator = Evaluator::new();
+    for node in graph.nodes() {
+        evaluator.register(node.id, Arc::new(ScalarSum));
+    }
+    evaluator
 }
 
 fn gradient_fb(width: u32, height: u32) -> FrameBuffer {
@@ -1967,6 +2055,51 @@ fn main() -> anyhow::Result<()> {
         println!(
             "scan wall/iter: mean {:.2} ms (quads {quads}; GPUI paint_quad cost excluded)",
             ms(wall.mean)
+        );
+    }
+
+    // -- Scenario (h): 1000-node graph traversal (HIGH-01) ------------------
+    // Pure CPU: no GPU work, no parameters, a trivial processor. What is
+    // being measured is the evaluator's own per-node overhead on a graph big
+    // enough for a full edge scan per visit to show up — the cold pull walks
+    // every node, and the dirty-flood tick is what one parameter edit near a
+    // source costs before any recompute happens.
+    {
+        let (graph, root) = big_graph();
+        let edges = graph.edges().count();
+        println!(
+            "\n## (h) large graph traversal ({} nodes, {edges} edges)",
+            BIG_GRAPH_NODES
+        );
+
+        let mut evaluator = big_graph_evaluator(&graph);
+        let before = transfer_stats();
+        let samples = run_scenario(20, |_| {
+            // A cold pull: every node is visited and its inputs collected.
+            evaluator.invalidate_all();
+            evaluator.evaluate(&graph, root, &ctx).unwrap();
+        });
+        report(
+            "(h1) cold pull of the whole graph",
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
+        );
+
+        // Dirty flood from a leaf, then the pull that consumes it — the shape
+        // of a slider tick on a source parameter.
+        let leaf = NodeId::new(BIG_GRAPH_BASE + BIG_GRAPH_NODES - 1);
+        evaluator.evaluate(&graph, root, &ctx).unwrap();
+        let before = transfer_stats();
+        let samples = run_scenario(200, |_| {
+            evaluator.mark_dirty(&graph, leaf);
+            evaluator.evaluate(&graph, root, &ctx).unwrap();
+        });
+        report(
+            "(h2) mark_dirty at a leaf + re-pull, warm cache",
+            &wall_stats(&samples),
+            timings.drain(),
+            before.delta(&transfer_stats()),
         );
     }
 

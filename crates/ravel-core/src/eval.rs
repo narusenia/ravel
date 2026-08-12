@@ -1438,6 +1438,74 @@ mod cache_store {
 use cache_store::CacheStore;
 
 // ===========================================================================
+// Graph index
+// ===========================================================================
+
+/// Wire adjacency of one graph, derived once and reused while the graph is
+/// the same object.
+///
+/// `Graph` stores edges as an `im::HashMap<EdgeId, Edge>` and nothing else, so
+/// asking "what feeds this node" costs a scan of every edge in the graph. Both
+/// hot loops asked it per node — [`Evaluator::eval_node`] once per visit and
+/// [`Evaluator::mark_dirty_at`] once per dirtied node — which made a single
+/// pull O(N·E). Indexing both directions in one pass makes each question a
+/// lookup, and the index survives as long as the graph is untouched.
+///
+/// The index is cached **per scope path**: subnet recursion evaluates a
+/// different graph at each level, and one shared slot would answer for the
+/// wrong one. Validity is [`Graph::ptr_eq`] — `true` proves the persistent
+/// maps are the same root, so the derived adjacency still describes them; a
+/// `false` negative only costs a rebuild.
+///
+/// This deliberately covers **wire edges only**, not the `NodeOutput`
+/// parameter bindings [`Graph::downstream_adjacency`] also spans. The two
+/// callers here are the wire-level ones (`eval_node` pulls connected inputs,
+/// `mark_dirty_at` floods `outputs_of`), and folding parameter bindings in
+/// would silently widen the dirty set. [`ScopeReach`] keeps using
+/// `downstream_adjacency` for the binding-level question it asks.
+struct GraphIndex {
+    /// The graph the maps were derived from, compared by pointer identity.
+    graph: Graph,
+    /// Target node → its incoming edges as `(target_port, source,
+    /// source_port)`, in the graph's own edge iteration order.
+    in_edges: HashMap<NodeId, Vec<(InputPortIndex, NodeId, OutputPortIndex)>>,
+    /// Source node → the nodes its wires feed, in the same order.
+    out_nodes: HashMap<NodeId, Vec<NodeId>>,
+}
+
+impl GraphIndex {
+    /// Index both directions in one pass over the edges.
+    fn of(graph: &Graph) -> Self {
+        let mut in_edges: HashMap<NodeId, Vec<(InputPortIndex, NodeId, OutputPortIndex)>> =
+            HashMap::new();
+        let mut out_nodes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for edge in graph.edges() {
+            in_edges.entry(edge.target).or_default().push((
+                edge.target_port,
+                edge.source,
+                edge.source_port,
+            ));
+            out_nodes.entry(edge.source).or_default().push(edge.target);
+        }
+        Self {
+            graph: graph.clone(),
+            in_edges,
+            out_nodes,
+        }
+    }
+
+    /// Incoming edges of `node`; empty when nothing feeds it.
+    fn in_edges(&self, node: NodeId) -> &[(InputPortIndex, NodeId, OutputPortIndex)] {
+        self.in_edges.get(&node).map_or(&[], Vec::as_slice)
+    }
+
+    /// Nodes `node` feeds; empty when it feeds nothing.
+    fn out_nodes(&self, node: NodeId) -> &[NodeId] {
+        self.out_nodes.get(&node).map_or(&[], Vec::as_slice)
+    }
+}
+
+// ===========================================================================
 // Scope reach
 // ===========================================================================
 
@@ -1567,6 +1635,12 @@ pub struct Evaluator {
     /// What each nested scope's bindings reach, per scope path. Rebuilt only
     /// when the scope's graph is a different object (see [`ScopeReach`]).
     scope_reach: HashMap<Vec<PathSegment>, ScopeReach>,
+    /// Wire adjacency of each scope's graph, per scope path. Rebuilt only
+    /// when the scope's graph is a different object (see [`GraphIndex`]).
+    ///
+    /// Held behind an `Arc` so a caller can keep reading the adjacency while
+    /// it recurses through `&mut self`.
+    graph_index: HashMap<Vec<PathSegment>, Arc<GraphIndex>>,
     /// Binding names that changed on entry to each active scope, parallel to
     /// `bindings_stack`. Read by [`Self::eval_node`] to decide which of an
     /// interface node's output ports carry a new value.
@@ -2013,6 +2087,9 @@ impl Evaluator {
     /// owners), so the next same-frame pull re-enters the dirtied network
     /// instead of serving the boundary's stale cache.
     pub fn mark_dirty_at(&mut self, graph: &Graph, path: &[PathSegment], node: NodeId) {
+        // One indexed pass instead of a full edge scan (and a fresh `Vec`) per
+        // dirtied node.
+        let index = self.graph_index(graph, path);
         let mut stack = vec![node];
         while let Some(current) = stack.pop() {
             let key = NodeKey {
@@ -2020,9 +2097,7 @@ impl Evaluator {
                 node: current,
             };
             if self.store.mark_dirty(key) {
-                for downstream in graph.outputs_of(current) {
-                    stack.push(downstream);
-                }
+                stack.extend_from_slice(index.out_nodes(current));
             }
         }
         self.drop_scope_owner_caches(path);
@@ -2040,6 +2115,7 @@ impl Evaluator {
         self.scope_owners.clear();
         self.scope_bindings.clear();
         self.scope_reach.clear();
+        self.graph_index.clear();
     }
 
     /// Drop cached values and dirty flags for every node whose path starts
@@ -2071,6 +2147,9 @@ impl Evaluator {
         self.scope_bindings
             .retain(|scope, _| !scope.starts_with(prefix));
         self.scope_reach
+            .retain(|scope, _| !scope.starts_with(prefix));
+        // Holds a `Graph` clone too, for the same reason.
+        self.graph_index
             .retain(|scope, _| !scope.starts_with(prefix));
     }
 
@@ -2153,6 +2232,34 @@ impl Evaluator {
             self.scope_reach
                 .insert(scope.to_vec(), ScopeReach::of(graph));
         }
+    }
+
+    /// The wire adjacency of `graph` as seen from `scope`, rebuilding it only
+    /// when that scope's graph is a different object than last time.
+    ///
+    /// Keyed by scope so subnet recursion — which evaluates a *different*
+    /// graph one level down — cannot be served the parent's adjacency.
+    fn graph_index(&mut self, graph: &Graph, scope: &[PathSegment]) -> Arc<GraphIndex> {
+        if let Some(index) = self.graph_index.get(scope)
+            && index.graph.ptr_eq(graph)
+        {
+            return index.clone();
+        }
+        let index = Arc::new(GraphIndex::of(graph));
+        self.graph_index.insert(scope.to_vec(), index.clone());
+        index
+    }
+
+    /// [`Self::graph_index`] for the scope currently being evaluated.
+    ///
+    /// `self.path` is lent to the call and put back: taking it costs nothing
+    /// (the `Vec`'s buffer moves) and avoids cloning the path on every node
+    /// visit just to satisfy the borrow checker.
+    fn current_graph_index(&mut self, graph: &Graph) -> Arc<GraphIndex> {
+        let scope = std::mem::take(&mut self.path);
+        let index = self.graph_index(graph, &scope);
+        self.path = scope;
+        index
     }
 
     // ----- evaluation ------------------------------------------------------
@@ -2266,11 +2373,10 @@ impl Evaluator {
             .ok_or(EvalError::NodeNotFound(node))?;
 
         // Incoming edges (endpoint metadata only — nothing is pulled yet).
-        let in_edges: Vec<(InputPortIndex, NodeId, OutputPortIndex)> = graph
-            .edges()
-            .filter(|e| e.target == node)
-            .map(|e| (e.target_port, e.source, e.source_port))
-            .collect();
+        // Read from the scope's adjacency index rather than scanning every
+        // edge in the graph once per visited node.
+        let index = self.current_graph_index(graph);
+        let in_edges = index.in_edges(node);
 
         // A bypassed node first derives its pass-through plan from the
         // declared port types: per output port, the single input port whose
@@ -2282,7 +2388,7 @@ impl Evaluator {
         // processing below.
         let bypassed = node_ref.metadata.bypassed;
         let bypass_plan = if bypassed {
-            bypass_passthrough_plan(&node_ref, &in_edges)
+            bypass_passthrough_plan(&node_ref, in_edges)
         } else {
             None
         };
@@ -2356,7 +2462,7 @@ impl Evaluator {
 
         // Evaluate upstream inputs into per-port slots (port order). Slots
         // a failed bypass attempt already pulled are skipped.
-        for (target_port, source, source_port) in &in_edges {
+        for (target_port, source, source_port) in in_edges {
             self.pull_input(
                 graph,
                 node,
@@ -4974,6 +5080,77 @@ mod tests {
         let wrap = out.downcast_ref::<ScopeWrap>().unwrap();
         assert!((wrap.0.downcast_ref::<Scalar>().unwrap().0 - 101.0).abs() < f32::EPSILON);
         assert_eq!(inner_calls.load(Ordering::Relaxed), 2);
+    }
+
+    /// Subnet recursion looks at a *different* graph one level down, so the
+    /// adjacency index has to be kept per scope. One shared index would serve
+    /// the outer graph's adjacency inside the network and hide the inner
+    /// node's input edge entirely.
+    #[test]
+    fn graph_index_is_kept_per_scope_across_subnet_recursion() {
+        // Inner: const(21) = 5 wired into sum(20). `CountingSum` adds 1, so a
+        // node that sees its edge returns 6 — and one served the outer
+        // graph's (edgeless) adjacency returns 1.
+        let inner = Graph::new()
+            .add_node(scalar_node(20))
+            .unwrap()
+            .add_node(scalar_node(21))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(21),
+                OutputPortIndex(0),
+                NodeId::new(20),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        // Outer: the boundary node on its own, with no edges at all.
+        let outer_node = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let outer = Graph::new().add_node(outer_node).unwrap();
+
+        let segment = PathSegment::Layer(CompId::new(1), LayerId::new(2));
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingScopedSource {
+                inner: inner.clone(),
+                inner_output: NodeId::new(20),
+                segment,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(20),
+            Arc::new(CountingSum {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            NodeId::new(21),
+            Arc::new(CountingConst {
+                value: 5.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+
+        let out = ev.evaluate(&outer, NodeId::new(1), &ctx_at(0)).unwrap();
+        let inner_value = out
+            .downcast_ref::<ScopeWrap>()
+            .unwrap()
+            .0
+            .downcast_ref::<Scalar>()
+            .unwrap()
+            .0;
+        assert!(
+            (inner_value - 6.0).abs() < f32::EPSILON,
+            "inner node was evaluated against the wrong graph's adjacency: {inner_value}"
+        );
+
+        // And the two scopes really do hold their own index.
+        let root: Vec<PathSegment> = Vec::new();
+        assert!(ev.graph_index[&root].graph.ptr_eq(&outer));
+        assert!(ev.graph_index[&vec![segment]].graph.ptr_eq(&inner));
     }
 
     #[test]

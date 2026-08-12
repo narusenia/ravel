@@ -702,6 +702,24 @@ description = "Outputs a fixed RGBA color."
 [node."constant.color".params]
 color = "The color to output."
 
+[node."constant.vec2"]
+label = "Constant Vec2"
+description = "Outputs a fixed 2-component vector."
+[node."constant.vec2".params]
+value = "The vector value to output."
+
+[node."constant.vec3"]
+label = "Constant Vec3"
+description = "Outputs a fixed 3-component vector."
+[node."constant.vec3".params]
+value = "The vector value to output."
+
+[node."constant.vec4"]
+label = "Constant Vec4"
+description = "Outputs a fixed 4-component vector."
+[node."constant.vec4".params]
+value = "The vector value to output."
+
 [node."media"]
 label = "Media"
 description = "Outputs the frame of an imported media asset (image or video) at the current time."

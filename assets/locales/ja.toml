@@ -694,6 +694,24 @@ description = "固定の RGBA カラーを出力する。"
 [node."constant.color".params]
 color = "出力するカラー。"
 
+[node."constant.vec2"]
+label = "定数 Vec2"
+description = "固定の 2 成分ベクトルを出力する。"
+[node."constant.vec2".params]
+value = "出力するベクトル値。"
+
+[node."constant.vec3"]
+label = "定数 Vec3"
+description = "固定の 3 成分ベクトルを出力する。"
+[node."constant.vec3".params]
+value = "出力するベクトル値。"
+
+[node."constant.vec4"]
+label = "定数 Vec4"
+description = "固定の 4 成分ベクトルを出力する。"
+[node."constant.vec4".params]
+value = "出力するベクトル値。"
+
 [node."media"]
 label = "メディア"
 description = "読み込んだメディアアセット（画像・動画）の現在時刻のフレームを出力する。"

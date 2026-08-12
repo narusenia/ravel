@@ -782,12 +782,22 @@ struct SparseWeights {
 impl SparseWeights {
     /// Weight every target against its neighbourhood of source points.
     ///
-    /// With no grid (small inputs) every source point is a neighbour and the
+    /// Below [`GRID_MIN_POINTS`] every source point is a neighbour and the
     /// arithmetic is exactly the exhaustive one, index order included.
+    ///
+    /// A large source is truncated whether or not a grid was built. Without
+    /// that, the paths where [`PointGrid::build`] declines a *large* input —
+    /// every point coincident, a non-finite extent, or the sparsity fallback —
+    /// would hold `target_count × source_count` pairs at once, which for a
+    /// degenerate 10k → 10k transfer is 1.6 GB. The exhaustive version this
+    /// replaces peaked at one row (`source_count`) because it dropped each
+    /// target's weights immediately, so a full row per target would be a
+    /// regression rather than the saving the buffer exists for.
     fn of(source: &[Vec3], targets: &[Vec3], grid: Option<&PointGrid>) -> Self {
-        let stride = match grid {
-            Some(_) => DISTANCE_WEIGHTED_NEIGHBOURS.min(source.len()),
-            None => source.len(),
+        let stride = if grid.is_some() || source.len() >= GRID_MIN_POINTS {
+            DISTANCE_WEIGHTED_NEIGHBOURS.min(source.len())
+        } else {
+            source.len()
         };
         let mut entries = Vec::with_capacity(targets.len() * stride);
         let mut neighbours: Vec<(usize, f32)> = Vec::with_capacity(stride);
@@ -802,6 +812,18 @@ impl SparseWeights {
                             .enumerate()
                             .map(|(index, point)| (index, distance_squared(*point, *target))),
                     );
+                    if neighbours.len() > stride {
+                        // Nearest first, ties by index so a degenerate source
+                        // (every point in one place, which is exactly how a
+                        // large input reaches this branch) picks the same
+                        // points every frame. Back to index order afterwards,
+                        // because that is the order `normalize_into` sums in.
+                        neighbours.sort_unstable_by(|(left_index, left), (right_index, right)| {
+                            left.total_cmp(right).then(left_index.cmp(right_index))
+                        });
+                        neighbours.truncate(stride);
+                        neighbours.sort_unstable_by_key(|(index, _)| *index);
+                    }
                 }
             }
             normalize_into(&mut neighbours);
@@ -1315,15 +1337,30 @@ mod tests {
         let mut worst_exhaustive = 0.0f32;
         for (probe, actual) in probes.iter().zip(got) {
             // The pre-truncation reference: every source point, weighted 1/d.
-            let mut weights: Vec<f32> = source_points
+            let squared: Vec<f32> = source_points
                 .iter()
-                .map(|p| 1.0 / planar_distance_squared(*p, *probe).sqrt())
+                .map(|p| planar_distance_squared(*p, *probe))
                 .collect();
-            let total: f32 = weights.iter().sum();
-            for weight in &mut weights {
-                *weight /= total;
-            }
-            let exhaustive: f32 = weights.iter().zip(&values).map(|(w, v)| w * v).sum();
+            // A probe sitting on a source point takes that point's value
+            // whole, exactly as `normalize_into` does. Without this the
+            // reference is `inf / inf` = NaN for such a probe, and
+            // `f32::max` would drop it — leaving the probe out of the
+            // comparison this test exists to make.
+            let exhaustive: f32 = match squared.iter().position(|d| *d <= f32::EPSILON) {
+                Some(hit) => values[hit],
+                None => {
+                    let mut weights: Vec<f32> = squared.iter().map(|d| 1.0 / d.sqrt()).collect();
+                    let total: f32 = weights.iter().sum();
+                    for weight in &mut weights {
+                        *weight /= total;
+                    }
+                    weights.iter().zip(&values).map(|(w, v)| w * v).sum()
+                }
+            };
+            assert!(
+                exhaustive.is_finite(),
+                "the reference must stay finite, or `f32::max` discards the probe"
+            );
 
             let truth = probe.0 + probe.1;
             worst_truncated = worst_truncated.max((actual - truth).abs());
@@ -1337,6 +1374,47 @@ mod tests {
             worst_truncated < worst_exhaustive,
             "truncation ({worst_truncated}) should beat blending everything \
              ({worst_exhaustive})"
+        );
+    }
+
+    /// `PointGrid::build` declines a source whose points all coincide, so the
+    /// transfer falls back to scanning every source point. The weight buffer
+    /// must still be truncated there: a full row per target is
+    /// `target × source` pairs held at once, where the exhaustive version this
+    /// replaced peaked at one row.
+    #[test]
+    fn a_degenerate_source_does_not_get_a_full_weight_row_per_target() {
+        let coincident: Vec<Vec3> = (0..4 * GRID_MIN_POINTS)
+            .map(|_| Vec3(3.0, 4.0, 0.0))
+            .collect();
+        assert!(
+            PointGrid::build(&coincident).is_none(),
+            "a source with no extent has no grid to build"
+        );
+        let targets: Vec<Vec3> = (0..32).map(|i| Vec3(i as f32, 0.0, 0.0)).collect();
+
+        let weights = SparseWeights::of(&coincident, &targets, None);
+        assert_eq!(
+            weights.stride, DISTANCE_WEIGHTED_NEIGHBOURS,
+            "a large source is truncated with or without a grid"
+        );
+        assert_eq!(weights.target_count(), targets.len());
+        // Still a partition of unity, so the values it blends are unchanged in
+        // scale — truncation moves which points contribute, not the total.
+        for index in 0..targets.len() {
+            let total: f32 = weights.weights_of(index).iter().map(|(_, w)| w).sum();
+            assert!(
+                (total - 1.0).abs() < 1e-5,
+                "target {index} weights sum to {total}"
+            );
+        }
+
+        // Below the threshold the arithmetic stays exhaustive.
+        let small = &coincident[..GRID_MIN_POINTS - 1];
+        assert_eq!(
+            SparseWeights::of(small, &targets, None).stride,
+            small.len(),
+            "a small source still blends every point"
         );
     }
 }

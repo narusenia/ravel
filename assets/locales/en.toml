@@ -830,6 +830,34 @@ description = "Reorders or repeats components of the input vector into a 4-compo
 [node."vector.swizzle.vec4".params]
 pattern = "Component names to read, one per output component (for example xyzw or xxxx)."
 
+[node."vector.length"]
+label = "Vector Length"
+description = "Outputs the magnitude of the input vector."
+
+[node."vector.normalize.vec2"]
+label = "Normalize Vec2"
+description = "Scales a 2-component vector to unit length. A zero vector stays zero."
+
+[node."vector.normalize.vec3"]
+label = "Normalize Vec3"
+description = "Scales a 3-component vector to unit length. A zero vector stays zero."
+
+[node."vector.normalize.vec4"]
+label = "Normalize Vec4"
+description = "Scales a 4-component vector to unit length. A zero vector stays zero."
+
+[node."vector.dot"]
+label = "Vector Dot"
+description = "Outputs the dot product of two vectors of the same arity."
+
+[node."vector.cross.vec2"]
+label = "Cross Vec2"
+description = "Outputs the scalar 2D cross product of two 2-component vectors."
+
+[node."vector.cross.vec3"]
+label = "Cross Vec3"
+description = "Outputs the vector cross product of two 3-component vectors."
+
 [node."geometry.transform"]
 label = "Geometry Transform"
 description = "Translates, rotates, and scales geometry."

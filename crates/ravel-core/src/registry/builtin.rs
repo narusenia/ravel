@@ -102,6 +102,37 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
         DataTypeId::VEC4,
         4,
     ));
+    reg.register(vector_length());
+    reg.register(vector_normalize(
+        VECTOR_NORMALIZE_VEC2,
+        "Normalize Vec2",
+        DataTypeId::VEC2,
+    ));
+    reg.register(vector_normalize(
+        VECTOR_NORMALIZE_VEC3,
+        "Normalize Vec3",
+        DataTypeId::VEC3,
+    ));
+    reg.register(vector_normalize(
+        VECTOR_NORMALIZE_VEC4,
+        "Normalize Vec4",
+        DataTypeId::VEC4,
+    ));
+    reg.register(vector_dot());
+    reg.register(vector_cross(
+        VECTOR_CROSS_VEC2,
+        "Cross Vec2",
+        DataTypeId::VEC2,
+        "cross",
+        DataTypeId::SCALAR,
+    ));
+    reg.register(vector_cross(
+        VECTOR_CROSS_VEC3,
+        "Cross Vec3",
+        DataTypeId::VEC3,
+        "vector",
+        DataTypeId::VEC3,
+    ));
     reg.register(geometry_transform());
     reg.register(geometry_merge());
     reg.register(geometry_connect());
@@ -733,6 +764,84 @@ fn vector_swizzle(
             VECTOR_SWIZZLE_PATTERN,
             &VECTOR_COMPONENT_KEYS[..components].concat(),
         ))
+}
+
+/// `type_key` of the vector magnitude template.
+pub const VECTOR_LENGTH: &str = "vector.length";
+/// `type_key` of the 2-component `vector.normalize` template.
+pub const VECTOR_NORMALIZE_VEC2: &str = "vector.normalize.vec2";
+/// `type_key` of the 3-component `vector.normalize` template.
+pub const VECTOR_NORMALIZE_VEC3: &str = "vector.normalize.vec3";
+/// `type_key` of the 4-component `vector.normalize` template.
+pub const VECTOR_NORMALIZE_VEC4: &str = "vector.normalize.vec4";
+/// `type_key` of the dot-product template.
+pub const VECTOR_DOT: &str = "vector.dot";
+/// `type_key` of the 2D cross-product template (a scalar).
+pub const VECTOR_CROSS_VEC2: &str = "vector.cross.vec2";
+/// `type_key` of the 3D cross-product template (a vector).
+pub const VECTOR_CROSS_VEC3: &str = "vector.cross.vec3";
+
+/// `vector.length`: magnitude of a vector of any arity.
+///
+/// One `type_key` covers every arity because the output is a Scalar whatever
+/// goes in — the arity split the other vector nodes need exists only where
+/// the *output* port type follows the input.
+fn vector_length() -> NodeTemplate {
+    NodeTemplate::new(VECTOR_LENGTH, "Vector Length", NodeCategory::Utility)
+        .with_input(any_vector_input("vector"))
+        .with_output(OutputPort {
+            name: "length".into(),
+            data_type: DataTypeId::SCALAR,
+        })
+}
+
+/// One arity of `vector.normalize`: the input scaled to unit length.
+///
+/// The output arity is the input arity, so the port declares exactly one type
+/// and the node editor offers no mismatched connection. The processor still
+/// reports one, because `Graph::add_edge` itself does not type-check.
+fn vector_normalize(type_key: &str, label: &str, data_type: DataTypeId) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Utility)
+        .with_input(vector_input("vector", data_type))
+        .with_output(OutputPort {
+            name: "vector".into(),
+            data_type,
+        })
+}
+
+/// `vector.dot`: the dot product of two vectors of the same arity.
+///
+/// Both inputs accept every arity — the output is a Scalar regardless — so
+/// mixing arities is a connection the editor allows, and the processor
+/// reports it when the node evaluates.
+fn vector_dot() -> NodeTemplate {
+    NodeTemplate::new(VECTOR_DOT, "Vector Dot", NodeCategory::Utility)
+        .with_input(any_vector_input("a"))
+        .with_input(any_vector_input("b"))
+        .with_output(OutputPort {
+            name: "dot".into(),
+            data_type: DataTypeId::SCALAR,
+        })
+}
+
+/// One arity of `vector.cross`. The output type differs per arity — the 2D
+/// cross product is the scalar `ax·by - ay·bx`, the 3D one a vector — so the
+/// two are separate templates rather than one polymorphic node, and there is
+/// no 4-component cross product to declare.
+fn vector_cross(
+    type_key: &str,
+    label: &str,
+    data_type: DataTypeId,
+    output: &str,
+    output_type: DataTypeId,
+) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Utility)
+        .with_input(vector_input("a", data_type))
+        .with_input(vector_input("b", data_type))
+        .with_output(OutputPort {
+            name: output.into(),
+            data_type: output_type,
+        })
 }
 
 fn media() -> NodeTemplate {
@@ -1470,7 +1579,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 58);
+        assert_eq!(reg.all_templates().count(), 65);
     }
 
     #[test]
@@ -1483,7 +1592,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 18);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 25);
     }
 
     /// Each `vector.construct` arity outputs its own vector type and declares

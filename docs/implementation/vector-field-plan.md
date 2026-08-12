@@ -1,8 +1,8 @@
 # ベクタ場 実装計画
 
-> **Status**: In progress — 単位 5（`VEC-5`）、単位 6（`VEC-6`）、
-> 単位 7（`VEC-7a` / `VEC-7b`）が実装済み。値ドメイン側は残り単位 8。
-> フィールド側（単位 1〜3）と結合検証（単位 4）は未着手
+> **Status**: In progress — 値ドメイン側（単位 5〜8 = `VEC-5` / `VEC-6` /
+> `VEC-7a` / `VEC-7b` / `VEC-8`）が実装済み。フィールド側（単位 1〜3）と
+> 結合検証（単位 4）は未着手
 
 対象: フィールドをスカラー場に限定している制約を外し、look-at・フロー場・
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
@@ -398,12 +398,51 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - `cross`: Vec2 × Vec2 → Scalar（2D の外積はスカラー）、
   Vec3 × Vec3 → Vec3
 
+**実装結果**（`VEC-8`）
+
+- `vector.length`: 入力は 3 アリティすべてを受け、出力は SCALAR。
+  **アリティで `type_key` を分けない** — 出力型が入力アリティに従わないので、
+  ポート型をインスタンスに固定する必要が無い
+- `vector.normalize.vec2` / `.vec3` / `.vec4`: 出力アリティ = 入力アリティ
+  なので `type_key` を分け、入力ポートもそのアリティだけを宣言する。
+  **ゼロベクトルはゼロを返す**（長さで割ると NaN が下流へ静かに伝播する）。
+  長さが非有限のときも同じ枝を通る
+- `vector.dot`: 両入力とも 3 アリティすべてを受ける（出力は常に SCALAR）。
+  したがって Vec2 × Vec3 は**接続でき**、評価時にエラーになる。片側だけ
+  未接続の場合は他方のアリティのゼロベクトルとして読むので、配線途中の
+  ノードが偽のアリティ不一致を出さない
+- `vector.cross.vec2`（出力 SCALAR）/ `vector.cross.vec3`（出力 VEC3）:
+  **出力型がアリティで変わる**ので 2 テンプレートに分ける。4 成分の外積は
+  定義が無いので宣言しない
+- **型不一致の報告先**: `Graph::add_edge` は `accepted_types` を検査しない
+  （フィルタはノードエディタ側にある）ので、アリティ検査はプロセッサが持つ。
+  `cross` の入力ポートは自分のアリティだけを宣言するため UI からは繋げないが、
+  プロセッサも受け取った値のアリティを確認して `anyhow` エラーを返す
+
 **完了条件**
 
 - 各演算の値検証テスト。
 - `normalize` がゼロベクトルでゼロを返すテスト（NaN を出さない）。
 - `dot` / `cross` の型不一致（Vec2 × Vec3）がエラーになるテスト。
 - 単位 2 のフィールド版と値が一致するテスト（同じ入力に対して）。
+  → **単位 2（フィールド版の変換ノード）が未実装なので書けない。**
+  代わりに値ドメイン内での相互整合を固定した:
+  `normalize` が `length` の答えで割った結果と一致すること、
+  `a · a` が `length(a)²` と一致すること。単位 2 が入ったら、この 2 本と
+  同じ入力でフィールド版を突き合わせる
+
+すべて実装済み（フィールド版一致を除く）。所在（すべて `ravel-nodes` の
+`vector::tests`）:
+
+| 完了条件 | テスト |
+|---|---|
+| `length` の値検証 | `length_is_the_magnitude_at_every_arity`、`an_unconnected_length_is_zero` |
+| `normalize` の値検証 | `normalize_scales_to_unit_length` |
+| `dot` の値検証 | `dot_multiplies_componentwise_and_sums`、`a_half_wired_dot_is_zero` |
+| `cross` の値検証 | `cross_of_two_vec2_is_the_scalar_wedge`、`cross_of_two_vec3_is_perpendicular_to_both`、`cross_has_no_four_component_form` |
+| ゼロベクトルでゼロ（NaN を出さない） | `normalize_of_a_zero_vector_is_zero_not_nan`、`an_unconnected_normalize_is_zero` |
+| 型不一致がエラー | `dot_rejects_mismatched_arities`、`cross_rejects_a_mismatched_arity` |
+| 値ドメイン内の相互整合（フィールド版一致の代替） | `normalize_divides_by_the_length_node_s_answer`、`dot_with_itself_is_the_squared_length` |
 
 ### 単位 4: 結合検証と文書更新
 

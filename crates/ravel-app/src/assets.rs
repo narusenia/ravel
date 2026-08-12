@@ -161,6 +161,14 @@ pub enum RavelIcon {
     NodeVectorSplit,
     /// Node header/menu: `vector.swizzle.*` (every arity).
     NodeVectorSwizzle,
+    /// Node header/menu: `vector.length`.
+    NodeVectorLength,
+    /// Node header/menu: `vector.normalize.*` (every arity).
+    NodeVectorNormalize,
+    /// Node header/menu: `vector.dot`.
+    NodeVectorDot,
+    /// Node header/menu: `vector.cross.*` (every arity).
+    NodeVectorCross,
     /// Node header/menu: `geometry.transform`.
     NodeGeometryTransform,
     /// Node header/menu: `geometry.merge`.
@@ -337,6 +345,12 @@ impl RavelIcon {
             "vector.swizzle.vec2" | "vector.swizzle.vec3" | "vector.swizzle.vec4" => {
                 Self::NodeVectorSwizzle
             }
+            "vector.length" => Self::NodeVectorLength,
+            "vector.normalize.vec2" | "vector.normalize.vec3" | "vector.normalize.vec4" => {
+                Self::NodeVectorNormalize
+            }
+            "vector.dot" => Self::NodeVectorDot,
+            "vector.cross.vec2" | "vector.cross.vec3" => Self::NodeVectorCross,
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
             "geometry.connect" => Self::NodeGeometryConnect,
@@ -446,6 +460,10 @@ impl IconNamed for RavelIcon {
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",
             Self::NodeVectorSplit => "icons/route.svg",
             Self::NodeVectorSwizzle => "icons/replace.svg",
+            Self::NodeVectorLength => "icons/sigma.svg",
+            Self::NodeVectorNormalize => "icons/circle-dashed.svg",
+            Self::NodeVectorDot => "icons/circle-dot.svg",
+            Self::NodeVectorCross => "icons/orbit.svg",
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
             Self::NodeGeometryConnect => "icons/network.svg",

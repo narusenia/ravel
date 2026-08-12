@@ -822,6 +822,34 @@ description = "入力ベクトルの成分を並べ替え・複製して 4 成�
 [node."vector.swizzle.vec4".params]
 pattern = "出力成分ごとに読む成分名（例: xyzw、xxxx）。"
 
+[node."vector.length"]
+label = "ベクトル長"
+description = "入力ベクトルの大きさを出力する。"
+
+[node."vector.normalize.vec2"]
+label = "Vec2 正規化"
+description = "2 成分ベクトルを長さ 1 に正規化する。ゼロベクトルはゼロのまま。"
+
+[node."vector.normalize.vec3"]
+label = "Vec3 正規化"
+description = "3 成分ベクトルを長さ 1 に正規化する。ゼロベクトルはゼロのまま。"
+
+[node."vector.normalize.vec4"]
+label = "Vec4 正規化"
+description = "4 成分ベクトルを長さ 1 に正規化する。ゼロベクトルはゼロのまま。"
+
+[node."vector.dot"]
+label = "ベクトル内積"
+description = "同じアリティのベクトル 2 つの内積を出力する。"
+
+[node."vector.cross.vec2"]
+label = "Vec2 外積"
+description = "2 成分ベクトル 2 つの外積（スカラー）を出力する。"
+
+[node."vector.cross.vec3"]
+label = "Vec3 外積"
+description = "3 成分ベクトル 2 つの外積（ベクトル）を出力する。"
+
 [node."geometry.transform"]
 label = "ジオメトリ変換"
 description = "ジオメトリを平行移動・回転・拡大縮小する。"

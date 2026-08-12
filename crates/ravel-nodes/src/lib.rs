@@ -175,6 +175,23 @@ pub fn processor_for_node(
         builtin::VECTOR_SWIZZLE_VEC4 => Some(Arc::new(vector::VectorSwizzleProcessor::new(
             vector::VectorArity::Vec4,
         ))),
+        builtin::VECTOR_LENGTH => Some(Arc::new(vector::VectorLengthProcessor)),
+        builtin::VECTOR_NORMALIZE_VEC2 => Some(Arc::new(vector::VectorNormalizeProcessor::new(
+            vector::VectorArity::Vec2,
+        ))),
+        builtin::VECTOR_NORMALIZE_VEC3 => Some(Arc::new(vector::VectorNormalizeProcessor::new(
+            vector::VectorArity::Vec3,
+        ))),
+        builtin::VECTOR_NORMALIZE_VEC4 => Some(Arc::new(vector::VectorNormalizeProcessor::new(
+            vector::VectorArity::Vec4,
+        ))),
+        builtin::VECTOR_DOT => Some(Arc::new(vector::VectorDotProcessor)),
+        builtin::VECTOR_CROSS_VEC2 => Some(Arc::new(vector::VectorCrossProcessor::new(
+            vector::VectorArity::Vec2,
+        ))),
+        builtin::VECTOR_CROSS_VEC3 => Some(Arc::new(vector::VectorCrossProcessor::new(
+            vector::VectorArity::Vec3,
+        ))),
         // Every rasterize node takes the resident GPU path, synthetic or not.
         // `shape_layer_golden` used to pin the synthetic ones to the CPU
         // reference implementation; it now requires the two to agree instead,

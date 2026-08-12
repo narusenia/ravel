@@ -25,7 +25,7 @@ use ravel_core::graph::{Graph, Node};
 use ravel_core::id::NodeId;
 use ravel_core::runtime::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
 use ravel_core::types::NodeData;
-use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
+use ravel_gpu::{GpuContext, GpuDeviceState, GpuFrameBuffer, ShaderManager, TexturePool};
 
 use crate::display::DisplayTransform;
 use ravel_media::frame_cache::MediaFrameCache;
@@ -78,6 +78,12 @@ impl GpuEvalHooks {
             display: None,
             media_frames: MediaFrameCache::new(budget),
         }
+    }
+
+    /// The shared device state observed by this worker's GPU resources.
+    #[inline]
+    pub fn device_state(&self) -> GpuDeviceState {
+        self.gpu.device_state()
     }
 
     /// Finish frames for a screen rather than for a file: [`Self::finalize`]

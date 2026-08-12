@@ -49,7 +49,10 @@ pub mod translate;
 // `gpu-device-sharing`).
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
-pub use device::{AdapterInfo, DeviceType, GpuBackend, GpuContext};
+pub use device::{
+    AdapterInfo, DeviceType, GpuBackend, GpuContext, GpuDeviceSnapshot, GpuDeviceState,
+    GpuLossReason,
+};
 pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;

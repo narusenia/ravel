@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use ravel_core::cache_budget::{SharedCacheBudget, Tier};
 
-use crate::device::GpuContext;
+use crate::device::{GpuContext, GpuDeviceState};
 use crate::texture_desc::{TextureFormat, TextureUsage};
 
 /// Identifies textures that are interchangeable for pooling purposes.
@@ -327,6 +327,12 @@ impl TexturePool {
     #[inline]
     pub fn total_created(&self) -> u64 {
         self.total_created
+    }
+
+    /// The shared device state for textures allocated by this pool.
+    #[inline]
+    pub fn device_state(&self) -> GpuDeviceState {
+        self.ctx.device_state()
     }
 
     /// Acquire a texture matching `key`, reusing an idle one when possible.

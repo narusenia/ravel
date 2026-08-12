@@ -980,6 +980,24 @@ pub fn host_device_unchanged(window: &Window, cx: &gpui::App) -> bool {
     *parts.2 == adopted.0
 }
 
+/// Whether the renderer Ravel adopted its device from reports that device lost.
+///
+/// This is an observation helper for the existing Viewer surface fallback; it
+/// does not alter the pure paint guard.
+///
+/// **A device identity mismatch is deliberately not a loss here.** The surface
+/// guard treats it as one because painting across devices is unsafe either way,
+/// but a second window on another GPU mismatches from the start and its device
+/// never died — announcing a loss there would tell the user to restart over a
+/// perfectly healthy session. The renderer's own flag is the only signal that
+/// says "this device died", so a loss that flips and recovers between two
+/// paints goes unannounced rather than announced wrongly. `GPULOSS-3` replaces
+/// this with a real epoch once the adopted device can be re-adopted.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+pub fn host_device_loss_detected(window: &Window, cx: &gpui::App) -> bool {
+    cx.try_global::<AdoptedHostDevice>().is_some() && window.gpu_device_lost().unwrap_or(false)
+}
+
 /// macOS has no wgpu renderer to adopt from — `gpui_macos` is Metal-native, so
 /// Ravel picks its own device and `interop::context_from_native` checks the two
 /// landed on the same one (`ZC-2`).
@@ -2201,6 +2219,11 @@ fn show_project_event(
             NotificationType::Error,
             t!("project.notice.gpu_title"),
             format!("{}\n{error}", t!("project.notice.gpu_message")),
+        ),
+        ProjectEvent::GpuDeviceLost => (
+            NotificationType::Error,
+            t!("project.notice.gpu_lost_title"),
+            t!("project.notice.gpu_lost_message").to_string(),
         ),
         ProjectEvent::SaveFailed { path, error } => (
             NotificationType::Error,

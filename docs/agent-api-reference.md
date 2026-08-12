@@ -1727,6 +1727,16 @@ device_type: DeviceType, driver, driver_info, backend: GpuBackend }` is the
 crate's own descriptor — `GpuBackend` is "what is executing" (`Vulkan` /
 `Metal` / `Dx12` / `Gl` / `BrowserWebGpu` / `Noop`) and is not
 `interop::NativeApi`, which is the narrower "whose objects can be handed out".
+Device-loss observation is also expressed without backend types:
+`GpuContext::device_state() -> GpuDeviceState`, `GpuContext::epoch() -> u64`,
+`GpuContext::lost() -> bool`, and `GpuContext::inject_device_loss(GpuLossReason)
+-> bool` (the headless/test injection path). `GpuDeviceState` exposes the same
+`epoch()` / `lost()` pair and `snapshot() -> GpuDeviceSnapshot`; its
+`record_loss(GpuLossReason) -> bool` coalesces repeated callbacks and ignores
+`GpuLossReason::Destroyed`. `GpuEvalHooks::device_state()`,
+`TexturePool::device_state()`, and `GpuFrameBuffer::device_state()` observe the
+same `Arc`-backed state. A self-created context registers the wgpu callback;
+`interop::context_from_wgpu` deliberately does not replace the host callback.
 
 `ravel_gpu::interop` is the **only** place a backend-native handle leaves the
 crate, and exists for the OpenFX host (REQ-PLUGIN-001) and hardware decode

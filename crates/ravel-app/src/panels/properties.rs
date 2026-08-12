@@ -66,7 +66,8 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
-use ravel_ui::keyframes::layer_local_frame;
+use ravel_ui::keyframes::{PropertyRowId, layer_local_frame};
+use ravel_ui::panels::timeline::PropertyGroup;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
 use ravel_ui::properties::expression;
@@ -1587,14 +1588,54 @@ fn animated_layer(
         let Some(layer) = comp.get_layer(*layer_id) else {
             return true;
         };
-        // The same enumeration the Timeline animates: every shell group plus
-        // the layer network's exposed parameter rows.
-        ravel_ui::keyframes::property_rows(layer).iter().any(|row| {
-            ravel_ui::keyframes::row_channels(layer, &row.id)
-                .unwrap_or_default()
-                .iter()
-                .any(|channel| animated_channel(channel))
-        })
+        // The shell half. `property_rows` emits every `SHELL_GROUPS` entry
+        // unconditionally (plus audio gain when the layer has audio), which is
+        // exactly what the shell sections display, so asking `row_channels` for
+        // each group covers it.
+        let shell = ravel_ui::keyframes::SHELL_GROUPS
+            .iter()
+            .copied()
+            .chain(layer.audio.is_some().then_some(PropertyGroup::AudioGain))
+            .any(|group| {
+                ravel_ui::keyframes::row_channels(layer, &PropertyRowId::Shell(group))
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|channel| animated_channel(channel))
+            });
+        // The network half walks the parameters themselves, **not**
+        // `property_rows`. That row enumeration exists for the Timeline's
+        // keyframe tree, so `keyframed_channel_names` drops any parameter with
+        // no `Keyframes` component — an `Expression`, a `NodeOutput`, an
+        // `AudioReactive` source or a `Blend` of them gets no row at all. Those
+        // are still values Properties samples at the playhead
+        // (`custom_parameters_section` evaluates every `Channel*` at the
+        // layer-local frame), so keying the gate on the tree's rows froze them
+        // on screen. Same class of bug as inheriting a stale gate across a
+        // target switch: the predicate was conservative, the enumeration was not.
+        shell || animated_graph(&layer.network)
+    })
+}
+
+/// Whether `graph` holds a parameter whose displayed value is sampled at the
+/// frame, subnets included.
+///
+/// Wider than what a Layer target shows today — `custom_parameters_section`
+/// displays the root In node's custom parameters only — and deliberately so:
+/// evaluation recurses through the network boundary into subnets, this costs one
+/// allocation-free walk, and the failure it guards against is a value frozen on
+/// screen. Erring wide spends a rebuild; erring narrow shows a wrong number.
+///
+/// Incoming edges are *not* treated as animating, unlike the `Nodes` branch. A
+/// `Nodes` target renders a driven parameter's value, so what feeds it matters
+/// there; a Layer target reads `param.value` directly and never displays a
+/// value pulled through an edge. Counting edges here would mark every connected
+/// network animated and retire the gate altogether.
+fn animated_graph(graph: &ravel_core::graph::Graph) -> bool {
+    graph.nodes().any(|node| {
+        node.parameters
+            .iter()
+            .any(|parameter| animated_parameter(&parameter.value))
+            || node.subnet.as_deref().is_some_and(animated_graph)
     })
 }
 

@@ -507,6 +507,133 @@ fn an_animated_layer_still_follows_the_playhead(cx: &mut TestAppContext) {
     );
 }
 
+/// A layer network whose In node exposes one custom parameter driven by
+/// `source`, with **no keyframe anywhere** and every shell channel left
+/// constant. `custom_parameters_section` evaluates the parameter at the
+/// layer-local frame, so its displayed value moves with the playhead.
+#[cfg(debug_assertions)]
+fn layer_with_driven_custom_parameter(
+    source: ravel_core::animation::channel::ChannelSource,
+) -> ravel_core::composition::Layer {
+    use ravel_core::animation::channel::AnimationChannel;
+    use ravel_core::graph::{Graph, Node, ParameterValue};
+    use ravel_core::id::{DataTypeId, NodeId};
+    use ravel_core::network as net;
+
+    let network = Graph::new()
+        .add_node(
+            Node::new(NodeId::next(), net::NET_IN_TYPE_KEY)
+                .with_output("amount", DataTypeId::SCALAR)
+                .with_param(
+                    "amount",
+                    ParameterValue::Channel(AnimationChannel::new(source)),
+                ),
+        )
+        .unwrap()
+        .add_node(
+            Node::new(NodeId::next(), net::NET_OUT_TYPE_KEY)
+                .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+        )
+        .unwrap();
+    ravel_core::composition::Layer::new(ravel_core::id::LayerId::next(), "Driven", network)
+        .with_time(0, 0, 100)
+}
+
+/// The gate must follow *what Properties displays*, not what the Timeline's
+/// keyframe tree enumerates. `keyframes::keyframed_channel_names` drops any
+/// parameter with no `Keyframes` component — correct for a tree whose purpose is
+/// editing keyframes — so a parameter driven by an expression, another node's
+/// output, an audio-reactive source or a blend of them produces no row at all.
+/// Properties shows those values anyway, sampled at the layer-local frame.
+///
+/// Keying the gate on that row enumeration therefore froze them: shell channels
+/// all constant plus "no rows" read as "nothing follows the playhead". Not one
+/// keyframe is placed anywhere in this test on purpose — a single one would make
+/// the row appear and the old implementation would pass.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_non_keyframed_driven_parameter_still_follows_the_playhead(cx: &mut TestAppContext) {
+    use ravel_core::animation::channel::{
+        AudioReactivePlaceholder, ChannelSource, ParameterExpression,
+    };
+
+    let sources = [
+        (
+            "expression",
+            ChannelSource::Expression(ParameterExpression::new("frame")),
+        ),
+        (
+            "node output",
+            ChannelSource::NodeOutput(
+                ravel_core::id::NodeId::next(),
+                ravel_core::id::OutputPortIndex(0),
+            ),
+        ),
+        (
+            "audio reactive",
+            ChannelSource::AudioReactive(AudioReactivePlaceholder::new("music")),
+        ),
+        (
+            "blend",
+            ChannelSource::Blend(
+                Box::new(ChannelSource::Constant(0.0)),
+                Box::new(ChannelSource::Constant(1.0)),
+                ravel_core::animation::blend::BlendMode::Mix,
+                0.5,
+            ),
+        ),
+    ];
+
+    let harness = open_panels(cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    // Closing the gate first is what makes this a real test: a panel fresh from
+    // its constructor follows the playhead unconditionally.
+    let static_layer = add_layer(&harness, cx);
+
+    for (name, source) in sources {
+        let layer = layer_with_driven_custom_parameter(source);
+        let layer_id = layer.id;
+        harness.project.update(cx, |project, cx| {
+            let document = ravel_ui::document::add_layer(project.document(), comp, layer).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        cx.update(|cx| {
+            cx.set_global(panels::SelectedPropertiesTarget(
+                panels::PropertiesTarget::Layer {
+                    comp_id: comp,
+                    layer_id: static_layer,
+                },
+            ));
+        });
+        cx.run_until_parked();
+        play(2, cx);
+
+        cx.update(|cx| {
+            cx.set_global(panels::SelectedPropertiesTarget(
+                panels::PropertiesTarget::Layer {
+                    comp_id: comp,
+                    layer_id,
+                },
+            ));
+        });
+        cx.run_until_parked();
+
+        const FRAMES: u64 = 10;
+        reset_syncs();
+        play(FRAMES, cx);
+        let counts = sync_counts(&format!("playback, {name}-driven custom parameter"));
+        assert_eq!(
+            count_of(&counts, "properties.refresh_values"),
+            FRAMES,
+            "a {name}-driven parameter must be re-sampled at every frame, \
+             even with no keyframe to give it a Timeline row"
+        );
+    }
+}
+
 /// One composition switch. Timeline and Outliner sync from the
 /// `ActiveComposition` global, and `set_active_composition` also notifies
 /// `ProjectState` — the pair MED-UI-06 describes.

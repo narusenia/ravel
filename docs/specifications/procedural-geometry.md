@@ -63,6 +63,10 @@ Geometry
 | `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定（`style.fill` が書く） |
 | `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定（`style.stroke` が書く） |
 | `stroke_color` | Primitive/Instance | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く） |
+| `dash` | Detail | Str | 破線パターン（`"4,2"` 形式。空なら実線。`style.dash` が書く） |
+| `dash_offset` | Detail | F32 | 破線の開始位置（`style.dash` が書く） |
+| `cap` | Detail | I32 | 端点の形。0=butt / 1=round / 2=square。未設定は round（`style.stroke` が書く） |
+| `join` | Detail | I32 | 角の形。0=miter / 1=round / 2=bevel。未設定は round（`style.stroke` が書く） |
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 |
 | `velocity` | Point | Vec2 | 速度（sim） |
 | `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） |

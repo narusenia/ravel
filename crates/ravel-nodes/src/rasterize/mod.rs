@@ -48,7 +48,7 @@ const DEFAULT_POINT_RADIUS: f32 = 2.0;
 /// modulates `stroke_width` on the Instance domain reaches the source
 /// geometry's paths.
 #[derive(Clone, Copy)]
-struct Style {
+struct Style<'a> {
     fill: bool,
     stroke_width: f32,
     /// Base color for elements without `Cd`/`alpha` attributes: the `color`
@@ -59,7 +59,58 @@ struct Style {
     /// element's own fill color (`Cd`, else `color`), which is what the
     /// rasterizer did before the stroke had a color of its own.
     stroke_color: Option<Color>,
+    /// Cap, join and dash. Unlike the fields above these are Detail
+    /// attributes, so they are read once from the rasterized geometry and
+    /// apply to everything it draws, instance sources included.
+    shape: StrokeShape<'a>,
 }
+
+/// The outline shape of a stroke: the `cap` / `join` / `dash` / `dash_offset`
+/// Detail attributes, already resolved to what zeno wants and scaled to
+/// device pixels.
+#[derive(Clone, Copy)]
+struct StrokeShape<'a> {
+    cap: Cap,
+    join: Join,
+    /// Alternating on/off run lengths; empty draws a solid stroke.
+    dashes: &'a [f32],
+    dash_offset: f32,
+}
+
+impl StrokeShape<'_> {
+    /// Whether the GPU fragment shader can draw this stroke.
+    ///
+    /// It measures the unsigned distance to the polyline, which is round at
+    /// every cap and join and knows nothing of arc length — so a square cap, a
+    /// miter join or a dash is CPU-only. Approximating them in WGSL would
+    /// break the CPU/GPU agreement the equivalence tests hold to, which is why
+    /// `style-attributes-plan.md` unit 3 allows this fallback.
+    fn drawable_on_gpu(&self) -> bool {
+        self.cap == Cap::Round && self.join == Join::Round && self.dashes.is_empty()
+    }
+}
+
+/// How far past the path a stroke of `width` can reach, joins included: a
+/// miter spike runs out to `miter_limit` half-widths, and zeno writes those
+/// pixels into the shared coverage mask whether or not the blend rectangle
+/// covers them.
+fn stroke_margin(width: f32, join: Join) -> f32 {
+    let half_widths = if join == Join::Miter {
+        ZENO_MITER_LIMIT
+    } else {
+        1.0
+    };
+    width * 0.5 * half_widths + 1.0
+}
+
+/// zeno's default miter limit (`zeno::Stroke::default`), which the rasterizer
+/// does not change.
+///
+/// An upper bound on the reach, not the reach itself: zeno also bevels any
+/// turn sharper than a right angle, so a miter never actually exceeds √2
+/// half-widths. Sizing the blend rectangle by the declared limit costs a few
+/// pixels of scan and does not depend on that second rule staying true.
+const ZENO_MITER_LIMIT: f32 = 4.0;
 
 /// Per-element placement accumulated while expanding instances.
 #[derive(Clone, Copy)]
@@ -149,15 +200,33 @@ impl NodeProcessor for RasterizeProcessor {
             .context("rasterize expects a Geometry input")?;
         ensure_planar_paths(geo, 0)?;
 
+        // Dash lengths are authored in composition pixels like `stroke_width`,
+        // so they scale with the render resolution the same way.
+        let scale = Placement::for_context(ctx).uniform_scale();
+        let dashes = dash_pattern(geo.detail(), scale);
         let style = Style {
             fill: params.bool_or("fill", true),
             stroke_width: params.f32_or("stroke_width", 0.0),
             color: base_color(params),
             stroke_color: None,
+            shape: StrokeShape {
+                cap: detail_cap(geo.detail()),
+                join: detail_join(geo.detail()),
+                dashes: &dashes,
+                dash_offset: attr_f32(geo.detail(), names::DASH_OFFSET, 0).unwrap_or(0.0) * scale,
+            },
         };
 
         if let Some(gpu) = &self.gpu {
-            return gpu.rasterize(geo, style, ctx);
+            if style.shape.drawable_on_gpu() {
+                return gpu.rasterize(geo, style, ctx);
+            }
+            tracing::debug!(
+                cap = ?style.shape.cap,
+                join = ?style.shape.join,
+                dashed = !style.shape.dashes.is_empty(),
+                "rasterize: stroke shape has no GPU form, drawing on the CPU"
+            );
         }
 
         let (width, height) = ctx.resolution;
@@ -762,19 +831,32 @@ fn raster_paths(
             canvas.blend_coverage(coverage_rect((min, max), 1.0, width, height), color);
         }
         if style.stroke_width > 0.0 {
-            // Round caps/joins match the GPU stroke, which is an unsigned
-            // distance to the polyline (inherently round at caps and joins).
+            // Round caps/joins are the default because they match the GPU
+            // stroke, which is an unsigned distance to the polyline
+            // (inherently round at caps and joins). Anything else the `cap` /
+            // `join` / `dash` attributes ask for is drawn here, on the CPU
+            // path the node routes to for exactly that reason.
             let stroke_width = style.stroke_width * placement.uniform_scale();
             let mut stroke = Stroke::new(stroke_width);
-            stroke.cap(Cap::Round).join(Join::Round);
+            stroke.cap(style.shape.cap).join(style.shape.join);
+            if !style.shape.dashes.is_empty() {
+                stroke.dash(style.shape.dashes, style.shape.dash_offset);
+            }
             Mask::new(commands.as_slice())
                 .size(width, height)
                 .style(stroke)
                 .render_into(canvas.coverage, None);
-            // The stroke straddles the path: half its width on each side,
-            // and the round cap extends the same distance past an end point.
+            // The stroke straddles the path: half its width on each side, and
+            // a cap or a miter spike reaches further still. The rectangle has
+            // to bound every pixel zeno wrote, or the leftovers become the
+            // next primitive's coverage.
             canvas.blend_coverage(
-                coverage_rect((min, max), stroke_width * 0.5 + 1.0, width, height),
+                coverage_rect(
+                    (min, max),
+                    stroke_margin(stroke_width, style.shape.join),
+                    width,
+                    height,
+                ),
                 stroke_color,
             );
         }
@@ -927,6 +1009,60 @@ fn base_color(params: &ResolvedParams) -> Color {
     Color::new(r, g, b, a)
 }
 
+/// The `dash` Detail attribute as zeno's alternating on/off run lengths,
+/// scaled to device pixels. Empty means a solid stroke.
+///
+/// A pattern with a token that is not a number is refused whole rather than
+/// filtered: dropping one entry swaps every following on for an off, which
+/// looks like a bug in the dash rather than a typo in the pattern.
+fn dash_pattern(detail: &AttributeSet, scale: f32) -> Vec<f32> {
+    let Some(spec) = detail
+        .get(names::DASH)
+        .and_then(|column| column.as_str(names::DASH).ok())
+        .and_then(<[String]>::first)
+    else {
+        return Vec::new();
+    };
+    let mut lengths = Vec::new();
+    for token in spec.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        let Ok(length) = token.parse::<f32>() else {
+            tracing::warn!(
+                pattern = spec,
+                token,
+                "dash pattern is not a list of numbers"
+            );
+            return Vec::new();
+        };
+        lengths.push(length.max(0.0) * scale);
+    }
+    // An all-zero pattern has no "on" run at all; zeno would draw nothing,
+    // where the user plainly meant "no dash".
+    if lengths.iter().all(|length| *length <= 0.0) {
+        return Vec::new();
+    }
+    lengths
+}
+
+fn detail_cap(detail: &AttributeSet) -> Cap {
+    match attr_i32(detail, names::CAP, 0) {
+        Some(names::CAP_BUTT) => Cap::Butt,
+        Some(names::CAP_SQUARE) => Cap::Square,
+        _ => Cap::Round,
+    }
+}
+
+fn detail_join(detail: &AttributeSet) -> Join {
+    match attr_i32(detail, names::JOIN, 0) {
+        Some(names::JOIN_MITER) => Join::Miter,
+        Some(names::JOIN_BEVEL) => Join::Bevel,
+        _ => Join::Round,
+    }
+}
+
+fn attr_i32(set: &AttributeSet, name: &str, index: usize) -> Option<i32> {
+    set.get(name)?.as_i32(name).ok()?.get(index).copied()
+}
+
 fn attr_f32(set: &AttributeSet, name: &str, index: usize) -> Option<f32> {
     set.get(name)?.as_f32(name).ok()?.get(index).copied()
 }
@@ -950,12 +1086,14 @@ fn element_alpha(set: &AttributeSet, index: usize) -> f32 {
 /// The style one element draws with: its own `fill` / `stroke_width` /
 /// `stroke_color` attributes, falling back to the style it inherits (the
 /// node's parameters, or an enclosing instance's attributes).
-fn element_style(inherited: Style, set: &AttributeSet, index: usize) -> Style {
+fn element_style<'a>(inherited: Style<'a>, set: &AttributeSet, index: usize) -> Style<'a> {
     Style {
         fill: attr_bool(set, names::FILL, index).unwrap_or(inherited.fill),
         stroke_width: attr_f32(set, names::STROKE_WIDTH, index).unwrap_or(inherited.stroke_width),
         color: inherited.color,
         stroke_color: attr_color(set, names::STROKE_COLOR, index).or(inherited.stroke_color),
+        // Detail attributes: not narrowed per element, carried through.
+        shape: inherited.shape,
     }
 }
 
@@ -2313,5 +2451,232 @@ mod tests {
         register(&mut ev);
         ev.evaluate(&restored, node.id, &ctx(16, 16))
             .expect("restoring the source draws again");
+    }
+
+    // ---- cap / join / dash (Detail attributes) -----------------------------
+
+    /// A horizontal open path, so the caps sit at known pixels.
+    fn horizontal_path(from: Vec2, to: Vec2) -> Geometry {
+        let mut geo = Geometry::from_points(vec![from, to]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geo
+    }
+
+    fn with_detail_i32(mut geo: Geometry, name: &str, value: i32) -> Geometry {
+        geo.detail_mut()
+            .insert(name, AttributeArray::I32(vec![value]))
+            .unwrap();
+        geo
+    }
+
+    fn alpha(fb: &FrameBuffer, x: u32, y: u32) -> f32 {
+        pixel(fb, x, y)[3]
+    }
+
+    /// The three caps differ exactly where they are supposed to: past the end
+    /// point on the axis (butt stops, round and square reach) and off the axis
+    /// at the corner of the square (only the square covers it).
+    #[test]
+    fn each_cap_shapes_the_end_of_the_stroke() {
+        let path = horizontal_path(Vec2(10.0, 16.0), Vec2(30.0, 16.0));
+        let draw = |cap: i32| {
+            run(
+                false,
+                6.0,
+                &with_detail_i32(path.clone(), names::CAP, cap),
+                40,
+                32,
+            )
+        };
+
+        let butt = draw(names::CAP_BUTT);
+        let round = draw(names::CAP_ROUND);
+        let square = draw(names::CAP_SQUARE);
+
+        // On the axis, past the end point at (30, 16).
+        assert!(
+            alpha(&butt, 31, 16) < 0.01,
+            "a butt cap stops at the end point"
+        );
+        assert!(alpha(&round, 31, 16) > 0.9, "a round cap reaches past it");
+        assert!(alpha(&square, 31, 16) > 0.9, "so does a square cap");
+
+        // Off the axis, at the corner of the square: outside the cap radius.
+        assert!(alpha(&round, 32, 18) < 0.1, "the round cap has no corner");
+        assert!(alpha(&square, 32, 18) > 0.9, "the square cap does");
+
+        // All three draw the same body, so the difference really is the cap.
+        for x in [16, 20, 24] {
+            assert!(alpha(&butt, x, 16) > 0.9 && alpha(&round, x, 16) > 0.9);
+        }
+    }
+
+    /// The three joins differ at the outside of a right-angle corner: the
+    /// miter fills it to the point, the round arc cuts it back, and the bevel
+    /// cuts it back furthest.
+    #[test]
+    fn each_join_shapes_the_corner_of_the_stroke() {
+        let mut path =
+            Geometry::from_points(vec![Vec2(10.0, 26.0), Vec2(10.0, 10.0), Vec2(26.0, 10.0)]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        let draw = |join: i32| {
+            run(
+                false,
+                6.0,
+                &with_detail_i32(path.clone(), names::JOIN, join),
+                40,
+                40,
+            )
+        };
+
+        let miter = draw(names::JOIN_MITER);
+        let round = draw(names::JOIN_ROUND);
+        let bevel = draw(names::JOIN_BEVEL);
+
+        // The miter point of a 90° corner is at (7, 7); the arc of radius 3
+        // and the bevel chord both stop short of it.
+        assert!(alpha(&miter, 7, 7) > 0.9, "the miter reaches its point");
+        assert!(alpha(&round, 7, 7) < 0.1, "the arc does not");
+        assert!(alpha(&bevel, 7, 7) < 0.1, "nor does the bevel");
+
+        // Between the two that both cut the corner, the arc keeps more of it.
+        let corner_coverage = |fb: &FrameBuffer| {
+            (6..11)
+                .flat_map(|y| (6..11).map(move |x| (x, y)))
+                .map(|(x, y)| alpha(fb, x, y))
+                .sum::<f32>()
+        };
+        assert!(
+            corner_coverage(&round) > corner_coverage(&bevel) + 0.5,
+            "round {} vs bevel {}",
+            corner_coverage(&round),
+            corner_coverage(&bevel)
+        );
+    }
+
+    /// A miter reaches `half_width / sin(half_angle)` past its vertex — up to
+    /// √2 half-widths before zeno bevels the corner — while the path's own
+    /// bounds stop at the vertex. The CPU path blends a rectangle rather than
+    /// the whole canvas, so a rectangle sized for the half-width alone leaves
+    /// the tip of the spike in the shared coverage mask, where it becomes the
+    /// next primitive's phantom silhouette (`Canvas::blend_coverage` asserts
+    /// on exactly that).
+    #[test]
+    fn a_miter_spike_stays_inside_the_blended_rectangle() {
+        // A right-angle corner whose bisector points along +x: the spike runs
+        // 14px past a vertex the path bounds end at, against a 10px
+        // half-width.
+        let mut spike =
+            Geometry::from_points(vec![Vec2(16.0, 6.0), Vec2(30.0, 20.0), Vec2(16.0, 34.0)]);
+        spike.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        let fb = run(
+            false,
+            20.0,
+            &with_detail_i32(spike, names::JOIN, names::JOIN_MITER),
+            60,
+            40,
+        );
+        assert!(
+            alpha(&fb, 42, 20) > 0.9,
+            "the miter reaches past its vertex, or this test proves nothing"
+        );
+        assert!(alpha(&fb, 46, 20) < 0.01, "and it does end");
+    }
+
+    fn with_dash(mut geo: Geometry, pattern: &str, offset: f32) -> Geometry {
+        geo.detail_mut()
+            .insert(names::DASH, AttributeArray::Str(vec![pattern.to_owned()]))
+            .unwrap();
+        geo.detail_mut()
+            .insert(names::DASH_OFFSET, AttributeArray::F32(vec![offset]))
+            .unwrap();
+        geo
+    }
+
+    /// The dash pattern turns the stroke on and off along the path, and the
+    /// offset slides that rhythm.
+    #[test]
+    fn a_dash_pattern_breaks_the_stroke_into_runs() {
+        let path = horizontal_path(Vec2(4.0, 16.0), Vec2(36.0, 16.0));
+        let solid = run(false, 4.0, &path, 40, 32);
+        let dashed = run(false, 4.0, &with_dash(path.clone(), "8,8", 0.0), 40, 32);
+        let shifted = run(false, 4.0, &with_dash(path.clone(), "8,8", 8.0), 40, 32);
+
+        assert!(
+            alpha(&solid, 16, 16) > 0.9,
+            "the solid stroke covers it all"
+        );
+        assert!(alpha(&dashed, 8, 16) > 0.9, "the first run is on");
+        assert!(alpha(&dashed, 16, 16) < 0.01, "the second run is off");
+        assert!(alpha(&dashed, 24, 16) > 0.9, "the third run is on again");
+        assert_ne!(
+            dashed.as_f32(),
+            shifted.as_f32(),
+            "the dash offset has to move the pattern"
+        );
+
+        // A pattern that is not a list of numbers is refused whole: a typo
+        // draws the stroke it would have drawn, not a half-applied rhythm.
+        let broken = run(false, 4.0, &with_dash(path.clone(), "8,x", 0.0), 40, 32);
+        assert_eq!(broken.as_f32(), solid.as_f32());
+        // So is an all-zero pattern, which zeno would otherwise draw as
+        // nothing at all.
+        let zeroed = run(false, 4.0, &with_dash(path, "0,0", 0.0), 40, 32);
+        assert_eq!(zeroed.as_f32(), solid.as_f32());
+    }
+
+    /// A stroke shape the fragment shader cannot express routes the whole
+    /// draw to the CPU rather than drawing something else on the GPU. The
+    /// picture is therefore the CPU one, pixel for pixel.
+    #[test]
+    fn a_shape_the_shader_cannot_draw_falls_back_to_the_cpu() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 16 * 1024 * 1024)));
+        let path = horizontal_path(Vec2(4.0, 16.0), Vec2(36.0, 16.0));
+
+        for (label, geo) in [
+            ("dash", with_dash(path.clone(), "8,8", 0.0)),
+            (
+                "square cap",
+                with_detail_i32(path.clone(), names::CAP, names::CAP_SQUARE),
+            ),
+            (
+                "miter join",
+                with_detail_i32(path.clone(), names::JOIN, names::JOIN_MITER),
+            ),
+        ] {
+            let node = make_node(false, 4.0);
+            let mut shaders = ShaderManager::new(gpu.clone());
+            let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
+            let out = evaluate(&node, Arc::new(proc), &geo, &ctx(40, 32));
+            let fallback = out
+                .downcast_ref::<FrameBuffer>()
+                .unwrap_or_else(|| panic!("{label}: the GPU rasterizer had to fall back"));
+            assert_eq!(
+                fallback.as_f32(),
+                run(false, 4.0, &geo, 40, 32).as_f32(),
+                "{label}: the fallback is the CPU picture"
+            );
+        }
+
+        // A round stroke with no dash still takes the GPU path — the fallback
+        // is the exception, not the new normal.
+        let node = make_node(false, 4.0);
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
+        let out = evaluate(&node, Arc::new(proc), &path, &ctx(40, 32));
+        assert!(
+            out.downcast_ref::<GpuFrameBuffer>().is_some(),
+            "an unstyled stroke stays on the GPU"
+        );
     }
 }

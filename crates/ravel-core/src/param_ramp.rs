@@ -223,6 +223,109 @@ impl RampParam {
         self.interpolation
     }
 
+    // ----- CRUD ------------------------------------------------------------
+
+    /// Storage index of the stop exactly at `position`, if any.
+    ///
+    /// Ordered with `partial_cmp` like [`Self::new`] and [`Self::evaluate`],
+    /// so `-0.0` and `0.0` name the same stop everywhere in this type. A
+    /// non-finite position names no stop.
+    fn index_of(&self, position: f32) -> Option<usize> {
+        if !position.is_finite() {
+            return None;
+        }
+        self.stops
+            .binary_search_by(|existing| {
+                existing
+                    .position
+                    .partial_cmp(&position)
+                    .expect("stored positions are finite")
+            })
+            .ok()
+    }
+
+    /// Insert (or overwrite) a stop, keeping the ramp sorted.
+    ///
+    /// A stop at a position the ramp already carries replaces it, the rule
+    /// [`Self::new`] and the deserializer also apply. A non-finite stop is
+    /// **refused** — it cannot be ordered against the others, which is what
+    /// every binary search here relies on — and that is the only `false`.
+    pub fn insert_stop(&mut self, stop: RampStop) -> bool {
+        if !stop.is_finite() {
+            return false;
+        }
+        match self.stops.binary_search_by(|existing| {
+            existing
+                .position
+                .partial_cmp(&stop.position)
+                .expect("both positions are finite")
+        }) {
+            Ok(i) => self.stops[i] = stop,
+            Err(i) => self.stops.insert(i, stop),
+        }
+        true
+    }
+
+    /// Remove the stop exactly at `position`, returning it if it existed.
+    ///
+    /// **The last stop is never removed.** A ramp with no stops has no colour
+    /// to answer with — the invariant the whole type is built on — so a
+    /// one-stop ramp answers `None` instead of emptying. This is why the
+    /// editor's floor is one stop and not two: unlike a curve, a single-stop
+    /// ramp is a defined, useful state (one flat colour).
+    pub fn remove_stop(&mut self, position: f32) -> Option<RampStop> {
+        if self.stops.len() <= 1 {
+            return None;
+        }
+        self.index_of(position).map(|i| self.stops.remove(i))
+    }
+
+    /// Move the stop at `from` to `to`, keeping its colour. Returns `true` on
+    /// success.
+    ///
+    /// A stop already sitting at `to` is overwritten, exactly as
+    /// [`Self::insert_stop`] overwrites; moving a stop onto its own position
+    /// does nothing. A non-finite destination is refused.
+    pub fn move_stop(&mut self, from: f32, to: f32) -> bool {
+        if !to.is_finite() {
+            return false;
+        }
+        let Some(i) = self.index_of(from) else {
+            return false;
+        };
+        if self.stops[i].position == to {
+            return true;
+        }
+        let mut stop = self.stops.remove(i);
+        stop.position = to;
+        // The vector is non-empty again after this: `insert_stop` cannot fail
+        // for a stop whose position was just checked finite and whose colour
+        // came out of the ramp.
+        self.insert_stop(stop)
+    }
+
+    /// Replace the colour of the stop at `position`. A non-finite colour is
+    /// refused: it would poison every sample of the spans it touches.
+    pub fn set_stop_color(&mut self, position: f32, color: Color) -> bool {
+        if !(color.r.is_finite()
+            && color.g.is_finite()
+            && color.b.is_finite()
+            && color.a.is_finite())
+        {
+            return false;
+        }
+        let Some(i) = self.index_of(position) else {
+            return false;
+        };
+        self.stops[i].color = color;
+        true
+    }
+
+    /// Replace how the spans between stops are filled.
+    pub fn set_interpolation(&mut self, interpolation: RampInterpolation) {
+        self.interpolation = interpolation;
+    }
+
     /// The colour this ramp gives at `position`.
     ///
     /// * At or before the first stop → the first colour (clamp).
@@ -445,6 +548,103 @@ mod tests {
             RampInterpolation::Smooth,
             "the requested mode survives the fallback stops"
         );
+    }
+
+    // ----- CRUD ------------------------------------------------------------
+
+    #[test]
+    fn insert_overwrites_a_stop_at_the_same_position() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        assert!(ramp.insert_stop(RampStop::new(1.0, Color::WHITE)));
+        assert_eq!(ramp.len(), 2);
+        assert_eq!(ramp.evaluate(1.0), Color::WHITE);
+    }
+
+    #[test]
+    fn insert_keeps_the_stops_sorted() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        assert!(ramp.insert_stop(RampStop::new(0.5, Color::WHITE)));
+        let positions: Vec<f32> = ramp.stops().iter().map(|s| s.position).collect();
+        assert_eq!(positions, vec![0.0, 0.5, 1.0]);
+    }
+
+    /// A non-finite stop cannot be ordered against the others, so it never
+    /// enters the vector the binary searches walk.
+    #[test]
+    fn insert_refuses_a_non_finite_stop() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        assert!(!ramp.insert_stop(RampStop::new(f32::NAN, Color::WHITE)));
+        assert!(!ramp.insert_stop(RampStop::new(0.5, Color::new(f32::INFINITY, 0.0, 0.0, 1.0))));
+        assert_eq!(ramp.len(), 2);
+        assert!(ramp.stops().iter().all(RampStop::is_finite));
+    }
+
+    #[test]
+    fn remove_drops_the_stop_and_reshapes_the_ramp() {
+        let mut ramp = RampParam::linear([(0.0, RED), (0.5, Color::WHITE), (1.0, BLUE)]);
+        assert_eq!(ramp.evaluate(0.5), Color::WHITE);
+        assert!(ramp.remove_stop(0.5).is_some());
+        assert_eq!(ramp.len(), 2);
+        assert!(close(ramp.evaluate(0.5), Color::new(0.5, 0.0, 0.5, 1.0)));
+        assert!(ramp.remove_stop(0.5).is_none(), "it is gone already");
+    }
+
+    /// The invariant the type is built on: a ramp is never empty. Removal
+    /// stops at one stop, which is itself a valid ramp (one flat colour).
+    #[test]
+    fn the_last_stop_is_never_removed() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        assert!(ramp.remove_stop(0.0).is_some());
+        assert_eq!(ramp.len(), 1);
+        assert!(
+            ramp.remove_stop(1.0).is_none(),
+            "removing the only stop would leave no colour to evaluate"
+        );
+        assert_eq!(ramp.len(), 1);
+        assert!(!ramp.is_empty());
+        assert_eq!(ramp.evaluate(0.5), BLUE);
+    }
+
+    #[test]
+    fn move_stop_reorders_and_keeps_the_colour() {
+        let mut ramp = RampParam::linear([(0.0, RED), (0.5, Color::WHITE), (1.0, BLUE)]);
+        assert!(ramp.move_stop(0.0, 0.75));
+        let positions: Vec<f32> = ramp.stops().iter().map(|s| s.position).collect();
+        assert_eq!(positions, vec![0.5, 0.75, 1.0]);
+        assert_eq!(ramp.evaluate(0.75), RED, "the colour travelled with it");
+        assert!(!ramp.move_stop(9.0, 0.1), "no stop sits at 9.0");
+        assert!(!ramp.move_stop(0.75, f32::NAN), "a NaN cannot be ordered");
+    }
+
+    #[test]
+    fn move_stop_onto_itself_changes_nothing() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        assert!(ramp.move_stop(1.0, 1.0));
+        assert_eq!(ramp.len(), 2);
+        assert_eq!(ramp.evaluate(1.0), BLUE);
+    }
+
+    #[test]
+    fn setting_a_stop_colour_replaces_only_that_stop() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        assert!(ramp.set_stop_color(1.0, Color::WHITE));
+        assert_eq!(ramp.evaluate(0.0), RED);
+        assert_eq!(ramp.evaluate(1.0), Color::WHITE);
+        assert!(!ramp.set_stop_color(0.5, RED), "no stop sits at 0.5");
+        assert!(
+            !ramp.set_stop_color(1.0, Color::new(f32::NAN, 0.0, 0.0, 1.0)),
+            "a non-finite channel poisons every span it touches"
+        );
+        assert_eq!(ramp.evaluate(1.0), Color::WHITE);
+    }
+
+    #[test]
+    fn setting_the_interpolation_keeps_the_stops() {
+        let mut ramp = RampParam::linear([(0.0, RED), (1.0, BLUE)]);
+        ramp.set_interpolation(RampInterpolation::Constant);
+        assert_eq!(ramp.interpolation(), RampInterpolation::Constant);
+        assert_eq!(ramp.len(), 2);
+        assert_eq!(ramp.evaluate(0.9), RED, "constant holds the left stop");
     }
 
     /// A stand-in for whatever a damaged `.ravprj` might hold: the same wire

@@ -161,6 +161,8 @@ pub enum RavelIcon {
     NodeGeometryTransform,
     /// Node header/menu: `geometry.merge`.
     NodeGeometryMerge,
+    /// Node header/menu: `geometry.connect`.
+    NodeGeometryConnect,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
     /// Node header/menu: `scene.merge`.
@@ -183,6 +185,10 @@ pub enum RavelIcon {
     NodeShapePolygon,
     /// Node header/menu: `shape.star`.
     NodeShapeStar,
+    /// Node header/menu: `shape.line`.
+    NodeShapeLine,
+    /// Node header/menu: `shape.grid`.
+    NodeShapeGrid,
     /// Node header/menu: `shape.custom_path`.
     NodeShapeCustomPath,
     /// Node header/menu: `scatter.grid`.
@@ -201,6 +207,8 @@ pub enum RavelIcon {
     NodeAttributeTransfer,
     /// Node header/menu: `attribute.path_sample`.
     NodeAttributePathSample,
+    /// Node header/menu: `attribute.curveu`.
+    NodeAttributeCurveU,
     /// Node header/menu: `field.noise`.
     NodeFieldNoise,
     /// Node header/menu: `field.falloff`.
@@ -317,6 +325,7 @@ impl RavelIcon {
             "vector.construct.vec4" => Self::NodeVectorConstructVec4,
             "geometry.transform" => Self::NodeGeometryTransform,
             "geometry.merge" => Self::NodeGeometryMerge,
+            "geometry.connect" => Self::NodeGeometryConnect,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
             "scene.camera" => Self::NodeSceneCamera,
@@ -328,6 +337,8 @@ impl RavelIcon {
             "shape.ellipse" => Self::NodeShapeEllipse,
             "shape.polygon" => Self::NodeShapePolygon,
             "shape.star" => Self::NodeShapeStar,
+            "shape.line" => Self::NodeShapeLine,
+            "shape.grid" => Self::NodeShapeGrid,
             "shape.custom_path" => Self::NodeShapeCustomPath,
             "scatter.grid" => Self::NodeScatterGrid,
             "scatter.circular" => Self::NodeScatterCircular,
@@ -337,6 +348,7 @@ impl RavelIcon {
             "attribute.promote" => Self::NodeAttributePromote,
             "attribute.transfer" => Self::NodeAttributeTransfer,
             "attribute.path_sample" => Self::NodeAttributePathSample,
+            "attribute.curveu" => Self::NodeAttributeCurveU,
             "field.noise" => Self::NodeFieldNoise,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
@@ -419,6 +431,7 @@ impl IconNamed for RavelIcon {
             Self::NodeVectorConstructVec4 => "icons/boxes.svg",
             Self::NodeGeometryTransform => "icons/move-3d.svg",
             Self::NodeGeometryMerge => "icons/combine.svg",
+            Self::NodeGeometryConnect => "icons/network.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",
             Self::NodeSceneCamera => "icons/video.svg",
@@ -430,6 +443,10 @@ impl IconNamed for RavelIcon {
             Self::NodeShapeEllipse => "icons/circle.svg",
             Self::NodeShapePolygon => "icons/hexagon.svg",
             Self::NodeShapeStar => "icons/star.svg",
+            Self::NodeShapeLine => "icons/interpolation-linear.svg",
+            // Shares the lattice glyph with `scatter.grid`: both are grids,
+            // and the vendored set has no second one.
+            Self::NodeShapeGrid => "icons/grid-3x3.svg",
             Self::NodeShapeCustomPath => "icons/pen-tool.svg",
             Self::NodeScatterGrid => "icons/grid-3x3.svg",
             Self::NodeScatterCircular => "icons/circle-dashed.svg",
@@ -439,6 +456,7 @@ impl IconNamed for RavelIcon {
             Self::NodeAttributePromote => "icons/chevrons-up.svg",
             Self::NodeAttributeTransfer => "icons/replace.svg",
             Self::NodeAttributePathSample => "icons/route.svg",
+            Self::NodeAttributeCurveU => "icons/interpolation-bezier.svg",
             Self::NodeFieldNoise => "icons/waves.svg",
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",

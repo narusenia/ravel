@@ -133,6 +133,7 @@ pub fn processor_for_node(
             node,
         ))),
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
+        "attribute.curveu" => Some(Arc::new(attribute::CurveUProcessor::from_node(node))),
         "constant" => Some(Arc::new(constant::ConstantProcessor::from_node(node))),
         "constant.color" => Some(Arc::new(constant::ColorConstantProcessor::from_node(node))),
         builtin::CONSTANT_VEC2 => Some(Arc::new(constant::VectorConstantProcessor::new(
@@ -194,6 +195,9 @@ pub fn processor_for_node(
             node,
         ))),
         "geometry.merge" => Some(Arc::new(geometry::GeometryMergeProcessor::from_node(node))),
+        "geometry.connect" => Some(Arc::new(geometry::GeometryConnectProcessor::from_node(
+            node,
+        ))),
         "scene.add" => Some(Arc::new(scene::SceneAddProcessor::from_node(node))),
         "scene.merge" => Some(Arc::new(scene::SceneMergeProcessor::from_node(node))),
         "scene.camera" => Some(Arc::new(scene::SceneCameraProcessor::from_node(node))),
@@ -212,6 +216,8 @@ pub fn processor_for_node(
         "shape.ellipse" => Some(Arc::new(shape::EllipseProcessor::from_node(node))),
         "shape.polygon" => Some(Arc::new(shape::PolygonProcessor::from_node(node))),
         "shape.star" => Some(Arc::new(shape::StarProcessor::from_node(node))),
+        "shape.line" => Some(Arc::new(shape::LineProcessor::from_node(node))),
+        "shape.grid" => Some(Arc::new(shape::GridProcessor::from_node(node))),
         "shape.custom_path" => Some(Arc::new(shape::CustomPathProcessor::from_node(node))),
         // Scatter / instance duplication
         "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),

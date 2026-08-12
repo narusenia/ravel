@@ -805,6 +805,15 @@ pivot = "use_centroid がオフのときの変換原点。"
 label = "ジオメトリマージ"
 description = "2 つのジオメトリを 1 つに結合する。"
 
+[node."geometry.connect"]
+label = "コネクト"
+description = "点を増やさずにパスで結ぶ。入力のプリミティブは置き換わる。"
+[node."geometry.connect".params]
+mode = "結ぶ点と順序。index 順・近傍チェーン・グループの要素のいずれか。"
+group = "グループモードが読む Bool 型のポイント属性名。"
+interpolation = "直線か、隣接点から推定したベジェ接線か。"
+closed = "パスを閉じる。"
+
 [node."scene.add"]
 label = "シーン追加"
 description = "ジオメトリ・別のシーンを変換付きで 3D シーンに配置する。"
@@ -893,6 +902,23 @@ outer_radius = "外側の頂点の半径（ピクセル）。"
 inner_radius = "内側の頂点の半径（ピクセル）。"
 points = "頂点の数。"
 
+[node."shape.line"]
+label = "直線"
+description = "2 点を結ぶ開いたパスを 1 本作成する。"
+[node."shape.line".params]
+start = "始点の位置（ピクセル）。"
+end = "終点の位置（ピクセル）。"
+segments = "分割数。2 以上で中間点を等間隔に追加する。"
+
+[node."shape.grid"]
+label = "グリッド線"
+description = "行と列の線からなる格子を作成する。各行・各列が 1 本のパスになる。点だけが必要なら散布のグリッドを使う。"
+[node."shape.grid".params]
+center = "中心位置（ピクセル）。"
+size = "全体の幅と高さ（ピクセル）。"
+rows = "水平線の本数。"
+columns = "垂直線の本数。"
+
 [node."shape.custom_path"]
 label = "カスタムパス"
 description = "ペンツールで作ったベジェパス。制御点はキャンバス上で編集し、プロパティでは読み取り専用。"
@@ -980,6 +1006,12 @@ label = "パスサンプル"
 description = "パスに沿った距離の位置と接線をサンプルする。"
 [node."attribute.path_sample".params]
 distance = "パスに沿った距離（ピクセル）。"
+
+[node."attribute.curveu"]
+label = "カーブ U"
+description = "各点にパスパラメータ u（0〜1）を書き込む。パスプリミティブごとに正規化する。"
+[node."attribute.curveu".params]
+mode = "u の刻み方。弧長基準か頂点順か。"
 
 [node."field.noise"]
 label = "ノイズフィールド"

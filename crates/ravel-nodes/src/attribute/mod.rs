@@ -6,8 +6,8 @@
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AggregateMode, AttributeArray, AttributeValue, Domain, Geometry, TransferMode, attribute_set,
-    attribute_transfer, path_sample, promote_attribute,
+    AggregateMode, AttributeArray, AttributeValue, CurveUMode, Domain, Geometry, TransferMode,
+    attribute_set, attribute_transfer, curve_u, path_sample, promote_attribute,
 };
 use ravel_core::graph::Node;
 use ravel_core::registry::builtin::{ATTRIBUTE_SET_DEFAULT_TYPE, attribute_set_value_defaults};
@@ -164,6 +164,32 @@ impl NodeProcessor for PathSampleProcessor {
             .points_mut()
             .insert("normal", AttributeArray::Vec2(vec![sample.normal]))?;
         Ok(Arc::new(result))
+    }
+}
+
+pub struct CurveUProcessor;
+
+impl CurveUProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for CurveUProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let path = geometry_input(inputs, 0, "attribute.curveu")?;
+        let mode = match params.str_or("mode", "by_arc_length") {
+            "by_vertex_order" => CurveUMode::VertexOrder,
+            _ => CurveUMode::ArcLength,
+        };
+        Ok(Arc::new(curve_u(path, mode)?))
     }
 }
 
@@ -383,6 +409,45 @@ mod tests {
                 "{type_name}"
             );
         }
+    }
+
+    /// The first half of the "gradient along a line" chain
+    /// (`shape.line` → `attribute.curveu` → `field.attribute("u")`): the node
+    /// has to be reachable through the evaluator and label the generated
+    /// points, not just the hand-built geometry the core test uses.
+    #[test]
+    fn curveu_processor_labels_the_points_of_a_generated_line() {
+        let line = Node::new(NodeId::new(1), "shape.line")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("start", ParameterValue::vec2(0.0, 0.0))
+            .with_param("end", ParameterValue::vec2(20.0, 0.0))
+            .with_param("segments", ParameterValue::Int(2));
+        let curveu = Node::new(NodeId::new(2), "attribute.curveu")
+            .with_input("path", &[DataTypeId::GEOMETRY])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        let graph = Graph::new()
+            .add_node(line)
+            .unwrap()
+            .add_node(curveu)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(crate::shape::LineProcessor));
+        ev.register(NodeId::new(2), Arc::new(CurveUProcessor));
+
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        let output = output.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(
+            output.points().get("u").unwrap().as_f32("u").unwrap(),
+            &[0.0, 0.5, 1.0]
+        );
     }
 
     #[test]

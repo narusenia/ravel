@@ -20,7 +20,8 @@ pub use field::{
     NoiseField, apply_field,
 };
 pub use ops::{
-    AggregateMode, AttributeValue, GeometryOpError, PathSample, TransferMode, attribute_set,
-    attribute_transfer, bounds_center, path_sample, promote_attribute,
+    AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,
+    PathSample, TransferMode, attribute_set, attribute_transfer, bounds_center, connect, curve_u,
+    path_sample, promote_attribute,
 };
 pub use triangulate::Triangulator;

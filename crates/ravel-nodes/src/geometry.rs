@@ -9,7 +9,10 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeArray, AttributeSet, Domain, Geometry, bounds_center, names};
+use ravel_core::geometry::{
+    AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
+    bounds_center, connect, names,
+};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
 use std::sync::Arc;
@@ -403,6 +406,48 @@ fn concat_columns(
     }
 }
 
+/// `geometry.connect`: run one path through the points without adding any.
+///
+/// `mode` picks the points and their order (`order` / `nearest` / `group`),
+/// `interpolation` decides whether the path is straight or gets Catmull-Rom
+/// `in_tan` / `out_tan` written for `rasterize` to curve.
+pub struct GeometryConnectProcessor;
+
+impl GeometryConnectProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for GeometryConnectProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.connect")?;
+        let group = params.str_or("group", "");
+        let mode = match params.str_or("mode", "order") {
+            "nearest" => ConnectMode::Nearest,
+            "group" => ConnectMode::Group(group),
+            _ => ConnectMode::Order,
+        };
+        let interpolation = match params.str_or("interpolation", "linear") {
+            "bezier" => ConnectInterpolation::Bezier,
+            _ => ConnectInterpolation::Linear,
+        };
+        Ok(Arc::new(connect(
+            geometry,
+            mode,
+            interpolation,
+            params.bool_or("closed", false),
+        )?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +479,113 @@ mod tests {
         ) -> anyhow::Result<Arc<dyn NodeData>> {
             Ok(self.0.clone())
         }
+    }
+
+    fn eval_connect(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Geometry {
+        let source =
+            Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY);
+        let mut node = Node::new(NodeId::new(2), "geometry.connect")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(geo)));
+        ev.register(NodeId::new(2), Arc::new(GeometryConnectProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    /// `bezier` has to reach the renderer as a curve, not just as two extra
+    /// attribute columns: this flattens the result with
+    /// [`crate::flatten::flatten_path`], the one function both the CPU and
+    /// GPU rasterize paths consume (`rasterize::path_polyline`).
+    #[test]
+    fn connect_bezier_reaches_rasterize_as_a_curve() {
+        // An L: the straight version is exactly this control polygon, so any
+        // vertex off it comes from the tangents.
+        let corner = Arc::new(Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(10.0, 10.0),
+        ]));
+        let flattened = |geometry: &Geometry| {
+            let positions = geometry
+                .points()
+                .get(names::P)
+                .unwrap()
+                .as_vec2(names::P)
+                .unwrap()
+                .to_vec();
+            let column = |name: &str| {
+                geometry
+                    .points()
+                    .get(name)
+                    .map(|c| c.as_vec2(name).unwrap().to_vec())
+            };
+            crate::flatten::flatten_path(
+                &positions,
+                column(names::IN_TAN).as_deref(),
+                column(names::OUT_TAN).as_deref(),
+                false,
+            )
+        };
+
+        let straight = eval_connect(
+            &[("interpolation", ParameterValue::String("linear".into()))],
+            corner.clone(),
+        );
+        assert_eq!(
+            flattened(&straight),
+            [Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(10.0, 10.0)],
+            "linear stays on the control polygon"
+        );
+
+        let curved = eval_connect(
+            &[("interpolation", ParameterValue::String("bezier".into()))],
+            corner,
+        );
+        let polyline = flattened(&curved);
+        assert!(
+            polyline.len() > 3,
+            "a curved segment subdivides: {polyline:?}"
+        );
+        assert!(
+            polyline.iter().any(|point| point.1 < -0.1),
+            "the curve leaves the straight chord: {polyline:?}"
+        );
+    }
+
+    #[test]
+    fn connect_processor_defaults_to_one_open_path_in_index_order() {
+        let cloud = Arc::new(Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(5.0, 9.0),
+        ]));
+        let wired = eval_connect(&[], cloud);
+        assert_eq!(wired.primitive_count(), 1);
+        assert!(matches!(
+            wired.primitives()[0],
+            Primitive::Path {
+                verts: std::ops::Range { start: 0, end: 3 },
+                closed: false,
+            }
+        ));
     }
 
     fn eval_transform(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Arc<dyn NodeData> {

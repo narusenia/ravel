@@ -813,6 +813,15 @@ pivot = "Transform origin when use_centroid is off."
 label = "Geometry Merge"
 description = "Combines two geometries into one."
 
+[node."geometry.connect"]
+label = "Connect"
+description = "Runs a path through the points without adding any. The primitives of the input are replaced."
+[node."geometry.connect".params]
+mode = "Which points to connect and in what order: index order, a nearest-neighbour chain, or the members of a group."
+group = "Name of the boolean point attribute the group mode connects."
+interpolation = "Straight segments, or bezier tangents estimated from the neighbouring points."
+closed = "Close the path."
+
 [node."scene.add"]
 label = "Scene Add"
 description = "Places a geometry or another scene into a 3D scene with a transform."
@@ -901,6 +910,23 @@ outer_radius = "Radius of the outer points in pixels."
 inner_radius = "Radius of the inner points in pixels."
 points = "Number of points."
 
+[node."shape.line"]
+label = "Line"
+description = "Creates one open path between two points."
+[node."shape.line".params]
+start = "Start position in pixels."
+end = "End position in pixels."
+segments = "Number of segments. Above one, evenly spaced intermediate points are added."
+
+[node."shape.grid"]
+label = "Grid Lines"
+description = "Creates a lattice of lines: one path per row and per column. Use Grid (scatter) instead when you only want the points."
+[node."shape.grid".params]
+center = "Center position in pixels."
+size = "Total width and height in pixels."
+rows = "Number of horizontal lines."
+columns = "Number of vertical lines."
+
 [node."shape.custom_path"]
 label = "Custom Path"
 description = "A bezier path authored with the pen tool. Its control points are edited on the canvas, not in Properties."
@@ -988,6 +1014,12 @@ label = "Path Sample"
 description = "Samples a position and tangent at a distance along a path."
 [node."attribute.path_sample".params]
 distance = "Distance along the path in pixels."
+
+[node."attribute.curveu"]
+label = "Curve U"
+description = "Writes the path parameter u (0 to 1) on every point, normalized per path primitive."
+[node."attribute.curveu".params]
+mode = "Spacing of u: by arc length, or by vertex order."
 
 [node."field.noise"]
 label = "Noise Field"

@@ -224,6 +224,123 @@ impl NodeProcessor for StarProcessor {
 }
 
 // ---------------------------------------------------------------------------
+// Line
+// ---------------------------------------------------------------------------
+
+pub struct LineProcessor;
+
+impl LineProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for LineProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let [start_x, start_y] = params.vec2_or("start", [-50.0, 0.0]);
+        let [end_x, end_y] = params.vec2_or("end", [50.0, 0.0]);
+        // Edges, not points: `segments` edges carry `segments + 1` points.
+        let segments = params.i32_or("segments", 1).max(1) as usize;
+
+        let points = (0..=segments)
+            .map(|step| {
+                let t = step as f32 / segments as f32;
+                Vec2(
+                    start_x + (end_x - start_x) * t,
+                    start_y + (end_y - start_y) * t,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // A degenerate line (start == end) still emits its points and its
+        // primitive: collapsing it to nothing would make an animated endpoint
+        // pop in and out of existence at the crossing frame.
+        let count = points.len();
+        let mut geo = Geometry::from_points(points);
+        geo.detail_mut().insert(
+            names::ANCHOR,
+            AttributeArray::Vec2(vec![Vec2((start_x + end_x) * 0.5, (start_y + end_y) * 0.5)]),
+        )?;
+        geo.push_primitive(Primitive::Path {
+            verts: 0..count,
+            closed: false,
+        });
+        Ok(Arc::new(geo))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grid lines
+// ---------------------------------------------------------------------------
+
+pub struct GridProcessor;
+
+impl GridProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for GridProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
+        let [width, height] = params.vec2_or("size", [100.0, 100.0]);
+        // Two is the smallest lattice that has an interior: one row and one
+        // column would each be a single-point "line".
+        let rows = params.i32_or("rows", 3).max(2) as usize;
+        let columns = params.i32_or("columns", 3).max(2) as usize;
+
+        let x_at =
+            |column: usize| center_x - width * 0.5 + width * column as f32 / (columns - 1) as f32;
+        let y_at = |row: usize| center_y - height * 0.5 + height * row as f32 / (rows - 1) as f32;
+
+        // A path primitive spans a *contiguous* run of points, so the row and
+        // column lines cannot share the lattice intersections: each line owns
+        // its own points. `rows + columns` primitives, `2 * rows * columns`
+        // points.
+        let mut points = Vec::with_capacity(rows * columns * 2);
+        let mut primitives = Vec::with_capacity(rows + columns);
+        for row in 0..rows {
+            let start = points.len();
+            points.extend((0..columns).map(|column| Vec2(x_at(column), y_at(row))));
+            primitives.push(start..points.len());
+        }
+        for column in 0..columns {
+            let start = points.len();
+            points.extend((0..rows).map(|row| Vec2(x_at(column), y_at(row))));
+            primitives.push(start..points.len());
+        }
+
+        let mut geo = Geometry::from_points(points);
+        geo.detail_mut().insert(
+            names::ANCHOR,
+            AttributeArray::Vec2(vec![Vec2(center_x, center_y)]),
+        )?;
+        for verts in primitives {
+            geo.push_primitive(Primitive::Path {
+                verts,
+                closed: false,
+            });
+        }
+        Ok(Arc::new(geo))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Custom path (pen tool, REQ-UI-011)
 // ---------------------------------------------------------------------------
 
@@ -461,6 +578,134 @@ mod tests {
         assert!(w <= 120.0 + 1e-3 && h <= 120.0 + 1e-3);
     }
 
+    // -- Line ---------------------------------------------------------------
+
+    fn line(params: &[(&str, ParameterValue)]) -> Geometry {
+        let node = make_node("shape.line", params);
+        run(&node, Arc::new(LineProcessor::from_node(&node)))
+    }
+
+    /// `segments` counts edges: one segment is the two endpoints, `n`
+    /// segments add the `n - 1` intermediate points `field.apply` modulates.
+    #[test]
+    fn line_point_count_follows_segments() {
+        for (segments, expected) in [(1, 2), (2, 3), (5, 6)] {
+            let geo = line(&[("segments", ParameterValue::Int(segments))]);
+            assert_eq!(geo.point_count(), expected, "segments = {segments}");
+            assert_eq!(geo.primitive_count(), 1);
+            assert!(matches!(
+                geo.primitives()[0],
+                Primitive::Path { closed: false, .. }
+            ));
+            assert!(geo.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn line_spaces_intermediate_points_evenly() {
+        let geo = line(&[
+            ("start", ParameterValue::vec2(0.0, 0.0)),
+            ("end", ParameterValue::vec2(10.0, 20.0)),
+            ("segments", ParameterValue::Int(2)),
+        ]);
+        let positions = geo
+            .points()
+            .get(names::P)
+            .and_then(|c| c.as_vec2(names::P).ok())
+            .unwrap();
+        assert_eq!(
+            positions,
+            [Vec2(0.0, 0.0), Vec2(5.0, 10.0), Vec2(10.0, 20.0)]
+        );
+    }
+
+    /// A zero-length line is a valid frame of an animated endpoint, not an
+    /// error: it keeps its points and its primitive.
+    #[test]
+    fn line_accepts_a_degenerate_start_equal_to_end() {
+        let geo = line(&[
+            ("start", ParameterValue::vec2(7.0, -3.0)),
+            ("end", ParameterValue::vec2(7.0, -3.0)),
+            ("segments", ParameterValue::Int(3)),
+        ]);
+        assert_eq!(geo.point_count(), 4);
+        assert_eq!(geo.primitive_count(), 1);
+        assert!(geo.validate().is_ok());
+        let positions = geo
+            .points()
+            .get(names::P)
+            .and_then(|c| c.as_vec2(names::P).ok())
+            .unwrap();
+        assert!(positions.iter().all(|p| *p == Vec2(7.0, -3.0)));
+    }
+
+    #[test]
+    fn line_clamps_segments_below_one() {
+        let geo = line(&[("segments", ParameterValue::Int(0))]);
+        assert_eq!(geo.point_count(), 2);
+    }
+
+    // -- Grid lines ---------------------------------------------------------
+
+    fn grid(params: &[(&str, ParameterValue)]) -> Geometry {
+        let node = make_node("shape.grid", params);
+        run(&node, Arc::new(GridProcessor::from_node(&node)))
+    }
+
+    /// `rows` horizontal lines plus `columns` vertical ones. The lines cannot
+    /// share the lattice intersections (a path spans a contiguous vertex
+    /// run), so the point count is `2 * rows * columns`.
+    #[test]
+    fn grid_primitive_count_is_rows_plus_columns() {
+        for (rows, columns) in [(2, 2), (3, 4), (5, 2)] {
+            let geo = grid(&[
+                ("rows", ParameterValue::Int(rows)),
+                ("columns", ParameterValue::Int(columns)),
+            ]);
+            assert_eq!(
+                geo.primitive_count(),
+                (rows + columns) as usize,
+                "{rows}x{columns}"
+            );
+            assert_eq!(
+                geo.point_count(),
+                2 * (rows * columns) as usize,
+                "{rows}x{columns}"
+            );
+            assert!(
+                geo.primitives()
+                    .iter()
+                    .all(|primitive| matches!(primitive, Primitive::Path { closed: false, .. }))
+            );
+            assert!(geo.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn grid_spans_its_size_around_its_center() {
+        let geo = grid(&[
+            ("center", ParameterValue::vec2(10.0, 20.0)),
+            ("size", ParameterValue::vec2(40.0, 60.0)),
+            ("rows", ParameterValue::Int(3)),
+            ("columns", ParameterValue::Int(3)),
+        ]);
+        let (x, y, w, h) = bounds_of(&geo);
+        assert!((x + 10.0).abs() < 1e-5);
+        assert!((y + 10.0).abs() < 1e-5);
+        assert!((w - 40.0).abs() < 1e-5);
+        assert!((h - 60.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn grid_clamps_counts_below_two() {
+        let geo = grid(&[
+            ("rows", ParameterValue::Int(1)),
+            ("columns", ParameterValue::Int(0)),
+        ]);
+        assert_eq!(geo.primitive_count(), 4);
+        assert_eq!(geo.point_count(), 8);
+    }
+
     // -- Custom path --------------------------------------------------------
 
     use ravel_core::graph::PathPoint;
@@ -563,6 +808,7 @@ mod tests {
                 Arc::new(PolygonProcessor),
             ),
             (make_node("shape.star", &center), Arc::new(StarProcessor)),
+            (make_node("shape.grid", &center), Arc::new(GridProcessor)),
         ];
 
         for (node, processor) in &shapes {
@@ -586,6 +832,8 @@ mod tests {
             (make_node("shape.ellipse", &[]), Arc::new(EllipseProcessor)),
             (make_node("shape.polygon", &[]), Arc::new(PolygonProcessor)),
             (make_node("shape.star", &[]), Arc::new(StarProcessor)),
+            (make_node("shape.line", &[]), Arc::new(LineProcessor)),
+            (make_node("shape.grid", &[]), Arc::new(GridProcessor)),
         ];
 
         for (node, proc) in &shapes {

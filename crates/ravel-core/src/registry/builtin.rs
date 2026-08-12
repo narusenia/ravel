@@ -67,6 +67,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     ));
     reg.register(geometry_transform());
     reg.register(geometry_merge());
+    reg.register(geometry_connect());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -78,6 +79,8 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(shape_ellipse());
     reg.register(shape_polygon());
     reg.register(shape_star());
+    reg.register(shape_line());
+    reg.register(shape_grid());
     reg.register(shape_custom_path());
     reg.register(scatter_grid());
     reg.register(scatter_circular());
@@ -87,6 +90,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(attribute_promote());
     reg.register(attribute_transfer());
     reg.register(attribute_path_sample());
+    reg.register(attribute_curveu());
     reg.register(field_noise());
     reg.register(field_falloff());
     reg.register(field_curve_remap());
@@ -332,6 +336,19 @@ fn attribute_path_sample() -> NodeTemplate {
     .with_output(geometry_output())
     .with_param(float_parameter("distance", 0.0))
     .with_param_range("distance", 0.0..=1e6, 0.0..=1000.0)
+}
+
+/// `attribute.curveu`: write the path parameter `u` on every point.
+///
+/// The companion of `attribute.path_sample`, which reads *one* place on a
+/// path; this one labels every point with where it sits, which is what
+/// `field.attribute("u")` needs to drive anything along the path.
+fn attribute_curveu() -> NodeTemplate {
+    NodeTemplate::new("attribute.curveu", "Curve U", NodeCategory::Geometry)
+        .with_input(geometry_input("path"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("mode", "by_arc_length"))
+        .with_param_options("mode", ["by_arc_length", "by_vertex_order"])
 }
 
 fn field_noise() -> NodeTemplate {
@@ -756,6 +773,27 @@ fn geometry_merge() -> NodeTemplate {
         .with_input(geometry_input("A"))
         .with_input(geometry_input("B"))
         .with_output(geometry_output())
+}
+
+/// `geometry.connect`: add connectivity to a point cloud without adding
+/// points.
+///
+/// `group` names the `Bool` column `mode = "group"` reads; the other modes
+/// ignore it, the same way `attribute.set`'s typed value parameters sit
+/// inert until their `type` selects them.
+fn geometry_connect() -> NodeTemplate {
+    NodeTemplate::new("geometry.connect", "Connect", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("mode", "order"))
+        .with_param_options("mode", ["order", "nearest", "group"])
+        .with_param(string_parameter("group", ""))
+        .with_param(string_parameter("interpolation", "linear"))
+        .with_param_options("interpolation", ["linear", "bezier"])
+        .with_param(Parameter {
+            key: "closed".into(),
+            value: ParameterValue::Bool(false),
+        })
 }
 
 fn scene_input(name: &str) -> InputPort {
@@ -1183,6 +1221,50 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
 
+/// `shape.line`: one open path from `start` to `end`.
+///
+/// `segments` is the number of edges, so the path carries `segments + 1`
+/// points and the intermediate ones sit at even parameter steps — they exist
+/// to give `field.apply` something to modulate along the line.
+fn shape_line() -> NodeTemplate {
+    NodeTemplate::new("shape.line", "Line", NodeCategory::Geometry)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(channel2_parameter("start", -50.0, 0.0))
+        .with_param(channel2_parameter("end", 50.0, 0.0))
+        .with_param(int_parameter("segments", 1))
+        .with_param_range("start", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("end", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("segments", 1.0..=1000.0, 1.0..=64.0)
+}
+
+/// `shape.grid`: a lattice of open paths — `rows` horizontal lines and
+/// `columns` vertical ones, so the geometry carries `rows + columns`
+/// primitives.
+///
+/// The lines are the point of the node: for a lattice of loose *points* use
+/// `scatter.grid`, which places instances instead of paths.
+///
+/// `rows` / `columns` stay separate `Int`s for the same reason
+/// `scatter.grid`'s counts do: `Channel2` is a pair of float channels.
+fn shape_grid() -> NodeTemplate {
+    NodeTemplate::new("shape.grid", "Grid Lines", NodeCategory::Geometry)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(channel2_parameter("center", 0.0, 0.0))
+        .with_param(channel2_parameter("size", 100.0, 100.0))
+        .with_param(int_parameter("rows", 3))
+        .with_param(int_parameter("columns", 3))
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_range("size", 0.0..=1e5, 0.0..=1000.0)
+        .with_param_range("rows", 2.0..=1000.0, 2.0..=50.0)
+        .with_param_range("columns", 2.0..=1000.0, 2.0..=50.0)
+}
+
 fn shape_custom_path() -> NodeTemplate {
     NodeTemplate::new("shape.custom_path", "Custom Path", NodeCategory::Geometry)
         .with_output(OutputPort {
@@ -1232,14 +1314,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 47);
+        assert_eq!(reg.all_templates().count(), 51);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 19);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

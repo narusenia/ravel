@@ -291,7 +291,12 @@ fn gap_between(lower: Option<f32>, upper: Option<f32>) -> f32 {
 
 /// `x` clamped strictly inside `(lower, upper)`, or `None` when the two are
 /// so close that no `f32` between them survives the rounding.
-fn clamp_between(x: f32, lower: Option<f32>, upper: Option<f32>) -> Option<f32> {
+///
+/// Shared with [`super::param_ramp_editor`]: a ramp identifies its stops by
+/// position exactly as a curve identifies its points by input value, so both
+/// need a dragged element to stay strictly between its neighbours or one of
+/// them is silently overwritten.
+pub(super) fn clamp_between(x: f32, lower: Option<f32>, upper: Option<f32>) -> Option<f32> {
     let gap = gap_between(lower, upper);
     if !gap.is_finite() || gap <= 0.0 {
         return None;

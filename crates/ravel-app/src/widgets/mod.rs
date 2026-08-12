@@ -6,6 +6,7 @@
 pub mod curve_editor;
 pub mod curve_view;
 pub mod param_curve_editor;
+pub mod param_ramp_editor;
 pub mod scrub_input;
 
 pub use curve_editor::{
@@ -17,5 +18,8 @@ pub use curve_editor::{
 };
 pub use param_curve_editor::{
     ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, curve_thumbnail,
+};
+pub use param_ramp_editor::{
+    ParamRampEditor, ParamRampEditorState, ParamRampEvent, ramp_thumbnail,
 };
 pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};

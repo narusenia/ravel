@@ -158,7 +158,13 @@ impl RasterPipeline {
         &self.layout
     }
 
-    /// Record a clear followed by one six-vertex quad per instance.
+    /// Record a clear followed by one six-vertex quad per instance, in `runs`
+    /// order.
+    ///
+    /// The runs share the pass — and therefore the attachment's contents — so
+    /// blending stays in instance order across the split. That is what lets a
+    /// caller rebind between quads (a different texture, say) without giving
+    /// up painter's order.
     ///
     /// Crate-internal for the same reason as
     /// [`Self::bind_group_layout`]: callers describe the draw and the dispatch
@@ -166,9 +172,8 @@ impl RasterPipeline {
     pub(crate) fn draw_quads(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        bind_group: &wgpu::BindGroup,
         target: &wgpu::TextureView,
-        instance_count: u32,
+        runs: &[(wgpu::BindGroup, std::ops::Range<u32>)],
     ) {
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: target,
@@ -188,8 +193,10 @@ impl RasterPipeline {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, bind_group, &[]);
-        pass.draw(0..6, 0..instance_count);
+        for (bind_group, instances) in runs {
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..6, instances.clone());
+        }
     }
 }
 

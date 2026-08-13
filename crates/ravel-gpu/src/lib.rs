@@ -53,7 +53,7 @@ pub use device::{
     AdapterInfo, DeviceType, GpuBackend, GpuContext, GpuDeviceSnapshot, GpuDeviceState,
     GpuLossReason,
 };
-pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, TextureBinding};
+pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, QuadRun, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
 pub use raster::{BlendMode, ColorTarget, RasterPipeline};

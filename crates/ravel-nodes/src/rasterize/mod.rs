@@ -8,8 +8,10 @@
 //! circle sprites. Instances expand their source geometry
 //! with per-instance `P`/`rot`/`scale` and optional `Cd`/`alpha` tint.
 //! An instance whose source is an image stamps it as a textured rectangle
-//! sized by the image's own resolution — on the CPU path only, for now
-//! (`IMG-5` in `docs/implementation/image-instancing-plan.md`).
+//! sized by the image's own resolution, on either path. The GPU one splits the
+//! draw where the sampled source changes, which keeps painter's order without
+//! an atlas or a texture array
+//! (`docs/implementation/image-instancing-plan.md`, `IMG-5`).
 //! The GPU path flattens those attributes into instanced-quad draw records;
 //! its fragment shader evaluates non-zero winding and edge distance directly,
 //! so concave and self-intersecting paths do not require triangulation.
@@ -26,8 +28,8 @@ use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
     BindingDesc, BindingKind, BlendMode, ColorTarget, ComputeDispatch, ComputePipeline, GpuContext,
-    GpuFrameBuffer, QuadDraw, RasterPipeline, ShaderManager, ShaderVisibility, TextureFormat,
-    TextureKey, TexturePool, TextureUsage,
+    GpuFrameBuffer, PooledTexture, QuadDraw, QuadRun, RasterPipeline, ShaderManager,
+    ShaderVisibility, TextureBinding, TextureFormat, TextureKey, TexturePool, TextureUsage,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -47,6 +49,10 @@ const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 /// skipped rather than recursed (spec limits stateful/sim nesting similarly).
 pub(crate) const MAX_INSTANCE_DEPTH: u32 = 4;
 const DEFAULT_POINT_RADIUS: f32 = 2.0;
+
+/// The `data0[0]` discriminant an image quad carries, beside `1.0` for a path
+/// and `0.0` for a point sprite. Read by `raster_fragment`.
+const IMAGE_KIND: f32 = 2.0;
 
 /// Fill/stroke style in effect for one element.
 ///
@@ -379,6 +385,13 @@ struct GpuRasterizer {
     raster_pipeline: RasterPipeline,
     unpremultiply_pipeline: Arc<ComputePipeline>,
     pool: Arc<Mutex<TexturePool>>,
+    /// The texture a run of paths and sprites binds and never reads.
+    ///
+    /// Every run has to fill the layout's texture slot, and most draws sample
+    /// no picture at all. One pixel, acquired once and held for the
+    /// processor's life: returning it between draws would only make the pool's
+    /// idle set depend on what the last frame happened to draw.
+    placeholder: PooledTexture,
 }
 
 impl GpuRasterizer {
@@ -402,6 +415,10 @@ impl GpuRasterizer {
                 BindingKind::ReadOnlyStorageBuffer,
                 ShaderVisibility::VERTEX_FRAGMENT,
             ),
+            // The instance source a run of image quads samples. Rebound
+            // between runs, which is what keeps several pictures in one
+            // painter-ordered pass.
+            BindingDesc::new(3, BindingKind::InputTexture, ShaderVisibility::FRAGMENT),
         ];
         let raster_pipeline = RasterPipeline::new(
             &ctx,
@@ -429,11 +446,21 @@ impl GpuRasterizer {
                 gpu_util::WORKGROUP_SIZE,
             )
             .expect("rasterize.wgsl compilation failed");
+        let placeholder = pool
+            .lock()
+            .expect("texture pool poisoned")
+            .acquire(TextureKey::new(
+                1,
+                1,
+                TextureFormat::Rgba32Float,
+                TextureUsage::TEXTURE_BINDING,
+            ));
         Self {
             ctx,
             raster_pipeline,
             unpremultiply_pipeline,
             pool,
+            placeholder,
         }
     }
 
@@ -459,6 +486,7 @@ impl GpuRasterizer {
 
         let mut vertices = Vec::new();
         let mut items = Vec::new();
+        let mut image_items = Vec::new();
         {
             // Split out so the geometry-scaling baseline can attribute cost to
             // the CPU flatten separately from the upload and the submit
@@ -472,6 +500,7 @@ impl GpuRasterizer {
                 style,
                 &mut vertices,
                 &mut items,
+                &mut image_items,
             );
         }
 
@@ -499,6 +528,13 @@ impl GpuRasterizer {
             _pad: [0.0; 2],
         };
 
+        // One bindable texture per distinct source frame. A GPU-resident frame
+        // binds where it lies and a CPU one uploads: the production path never
+        // reads back (`image-instancing-plan.md`, decision 6).
+        let (sources, source_index) = image_sources(&self.ctx, &self.pool, &image_items)?;
+        let source_bindings: Vec<TextureBinding> =
+            sources.iter().map(gpu_util::GpuImage::binding).collect();
+
         let premul_key = TextureKey::new(
             width,
             height,
@@ -514,12 +550,21 @@ impl GpuRasterizer {
         };
         let premul_binding = premul_texture.binding();
         let output_binding = output_texture.binding();
+        let placeholder_binding = self.placeholder.binding();
+        let runs = draw_runs(
+            items.len(),
+            &image_items,
+            &source_index,
+            &source_bindings,
+            &placeholder_binding,
+        );
 
         {
             // Both passes are recorded into the frame's shared encoder; the
             // submit happens at the next flush point (the viewer readback in
             // the application), not here.
-            let submit = tracing::debug_span!("raster_submit", draws = items.len());
+            let submit =
+                tracing::debug_span!("raster_submit", draws = items.len(), runs = runs.len());
             let _submit_guard = submit.enter();
             self.ctx.draw_quads(&QuadDraw {
                 label: "rasterize draw data",
@@ -527,7 +572,7 @@ impl GpuRasterizer {
                 uniform: bytemuck::bytes_of(&params),
                 storage: &[vertex_bytes, item_bytes],
                 target: &premul_binding,
-                instance_count: items.len() as u32,
+                runs: &runs,
             });
             self.ctx.dispatch_compute(&ComputeDispatch {
                 label: "rasterize unpremultiply",
@@ -547,6 +592,9 @@ impl GpuRasterizer {
             .lock()
             .expect("texture pool poisoned")
             .release(premul_texture);
+        for source in sources {
+            source.release(&self.pool);
+        }
 
         Ok(Arc::new(GpuFrameBuffer::new(
             self.ctx.clone(),
@@ -616,13 +664,161 @@ fn path_polyline(
     flatten::flatten_path(&positions[verts.clone()], in_tans, out_tans, closed)
 }
 
-fn flatten_geometry(
-    geo: &Geometry,
+/// Where an image instance appears in the draw list: the index of its
+/// [`DrawItem`] and the source it samples.
+///
+/// Recorded as the flatten walk emits it, so the entries are ordered by draw
+/// index — which is what lets [`draw_runs`] cut the list into runs without
+/// sorting, and what keeps the split from reordering anything.
+type ImageItems<'a> = Vec<(usize, &'a InstanceImage)>;
+
+/// Adapt every distinct image instance source into a bindable texture, and
+/// map each frame's identity to its position in the returned list.
+///
+/// Distinct by the identity [`InstanceSource::ptr_eq`] compares, so a hundred
+/// copies of one picture bind — and, for a CPU frame, upload — once.
+fn image_sources<'a>(
+    ctx: &GpuContext,
+    pool: &Arc<Mutex<TexturePool>>,
+    image_items: &ImageItems<'a>,
+) -> anyhow::Result<(Vec<gpu_util::GpuImage<'a>>, HashMap<*const (), usize>)> {
+    let mut sources = Vec::new();
+    let mut by_frame = HashMap::new();
+    for (_, image) in image_items {
+        let Entry::Vacant(slot) = by_frame.entry(image_key(image)) else {
+            continue;
+        };
+        slot.insert(sources.len());
+        sources.push(
+            gpu_util::ensure_gpu(ctx, pool, image.frame().as_ref()).with_context(|| {
+                format!(
+                    "rasterize: binding a {}x{} image instance source",
+                    image.width(),
+                    image.height()
+                )
+            })?,
+        );
+    }
+    Ok((sources, by_frame))
+}
+
+/// Cut the draw list into runs that each bind one texture (option (c) of
+/// `image-instancing-plan.md`, `IMG-5`).
+///
+/// The runs partition `0..item_count` in order and are drawn in that order
+/// into one render pass, so painter's order (decision 7) survives the split
+/// structurally rather than by convention. Items that sample nothing — paths
+/// and point sprites — take `placeholder`; adjacent copies of one picture
+/// share a run.
+fn draw_runs<'a>(
+    item_count: usize,
+    image_items: &ImageItems<'_>,
+    source_index: &HashMap<*const (), usize>,
+    source_bindings: &'a [TextureBinding],
+    placeholder: &'a TextureBinding,
+) -> Vec<QuadRun<'a>> {
+    let mut runs: Vec<QuadRun<'a>> = Vec::new();
+    let mut cursor = 0usize;
+    for (index, image) in image_items {
+        if *index > cursor {
+            runs.push(QuadRun {
+                texture: placeholder,
+                instances: cursor as u32..*index as u32,
+            });
+        }
+        let texture = &source_bindings[source_index[&image_key(image)]];
+        match runs.last_mut() {
+            Some(last)
+                if last.texture.texture_id() == texture.texture_id()
+                    && last.instances.end == *index as u32 =>
+            {
+                last.instances.end = *index as u32 + 1;
+            }
+            _ => runs.push(QuadRun {
+                texture,
+                instances: *index as u32..*index as u32 + 1,
+            }),
+        }
+        cursor = index + 1;
+    }
+    if cursor < item_count {
+        runs.push(QuadRun {
+            texture: placeholder,
+            instances: cursor as u32..item_count as u32,
+        });
+    }
+    runs
+}
+
+/// Emit the textured rectangle one image instance stamps.
+///
+/// The mirror of [`raster_image`]: the same origin-centred rectangle sized by
+/// the image's own resolution, with the placement carried into the item so the
+/// fragment shader can invert it per pixel. The quad only has to *reach* every
+/// pixel the rectangle covers — which of them are inside is the fragment's
+/// decision, and it applies the same half-open rule the CPU path does.
+fn push_image_item<'a>(
+    image: &'a InstanceImage,
+    placement: Placement,
+    items: &mut Vec<DrawItem>,
+    image_items: &mut ImageItems<'a>,
+) {
+    // A collapsed or non-finite scale has no inverse and covers no area.
+    if !placement.scale.0.is_finite()
+        || !placement.scale.1.is_finite()
+        || placement.scale.0 == 0.0
+        || placement.scale.1 == 0.0
+    {
+        return;
+    }
+    let (half_w, half_h) = (image.width() as f32 * 0.5, image.height() as f32 * 0.5);
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for corner in [
+        Vec2(-half_w, -half_h),
+        Vec2(half_w, -half_h),
+        Vec2(half_w, half_h),
+        Vec2(-half_w, half_h),
+    ] {
+        let device = placement.apply(corner);
+        bounds[0] = bounds[0].min(device.0);
+        bounds[1] = bounds[1].min(device.1);
+        bounds[2] = bounds[2].max(device.0);
+        bounds[3] = bounds[3].max(device.1);
+    }
+    // A pixel whose centre is inside the rectangle must get a fragment, so the
+    // quad is grown past the corners rather than trusting a fill rule to agree
+    // with the CPU path's comparison at the boundary.
+    expand_bounds(&mut bounds, 1.0);
+    image_items.push((items.len(), image));
+    items.push(DrawItem {
+        bounds,
+        // `Cd` x `alpha` of the enclosing instances (decision 7).
+        color: color_array(placement.tint),
+        // Images do not stroke; the shader never reads this slot for them.
+        stroke_color: [0.0; 4],
+        data0: [
+            IMAGE_KIND,
+            placement.offset.0,
+            placement.offset.1,
+            placement.rot,
+        ],
+        data1: [placement.scale.0, placement.scale.1, half_w, half_h],
+    });
+}
+
+fn flatten_geometry<'a>(
+    geo: &'a Geometry,
     placement: Placement,
     depth: u32,
     style: Style,
     vertices: &mut Vec<[f32; 2]>,
     items: &mut Vec<DrawItem>,
+    image_items: &mut ImageItems<'a>,
 ) {
     let positions = geo
         .points()
@@ -751,21 +947,20 @@ fn flatten_geometry(
                 Color::new(1.0, 1.0, 1.0, 1.0),
             ),
         };
-        // Textured rectangles have no GPU form yet (`IMG-5`); the CPU
-        // reference path draws them. Skipping without shifting the selection
-        // keeps `source_index` addressing the same source on both paths.
-        let Some(source) = select_instance_source(sources, source_indices, index).geometry() else {
-            log::warn!("rasterize: image instance sources are not drawn on the GPU yet, skipping");
-            continue;
-        };
-        flatten_geometry(
-            source,
-            compose(placement, local),
-            depth + 1,
-            element_style(style, instances, index),
-            vertices,
-            items,
-        );
+        match select_instance_source(sources, source_indices, index) {
+            InstanceSource::Geometry(source) => flatten_geometry(
+                source,
+                compose(placement, local),
+                depth + 1,
+                element_style(style, instances, index),
+                vertices,
+                items,
+                image_items,
+            ),
+            InstanceSource::Image(image) => {
+                push_image_item(image, compose(placement, local), items, image_items)
+            }
+        }
     }
 }
 
@@ -2522,6 +2717,263 @@ mod tests {
         );
         let copy = pixel(&fb, 4, 4);
         assert!(copy[1] > 0.9, "and the picture actually drew: {copy:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Image instance sources on the GPU (`IMG-5`)
+    // -----------------------------------------------------------------------
+
+    /// A geometry that stamps one GPU-resident copy of `frame` per position,
+    /// without the frame ever touching CPU memory again.
+    fn resident_image_instances(
+        gpu: &GpuContext,
+        pool: &Arc<Mutex<TexturePool>>,
+        frame: &FrameBuffer,
+        positions: Vec<Vec2>,
+    ) -> Geometry {
+        let (width, height) = (frame.width, frame.height);
+        let resident: Arc<dyn NodeData> =
+            match gpu_util::ensure_gpu(gpu, pool, frame as &dyn NodeData).expect("upload") {
+                gpu_util::GpuImage::Uploaded { texture, .. } => Arc::new(GpuFrameBuffer::new(
+                    gpu.clone(),
+                    pool,
+                    texture,
+                    width,
+                    height,
+                )),
+                _ => panic!("a CPU frame uploads into a pool texture"),
+            };
+        let mut geo = Geometry::new();
+        geo.set_sources(vec![InstanceSource::Image(
+            InstanceImage::new(resident, width, height).expect("a non-empty frame"),
+        )]);
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(positions))
+            .unwrap();
+        geo
+    }
+
+    /// The `IMG-4` goldens, replayed on the GPU path. Same geometries, same
+    /// expectations, compared against the CPU reference frame by frame.
+    #[test]
+    fn gpu_matches_cpu_for_image_instances() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let source = test_image(8, 6);
+        let unscaled = image_instances(&[&source], vec![Vec2(4.0, 3.0)]);
+        assert_equivalent(
+            &run(true, 0.0, &unscaled, 8, 6),
+            &run_gpu(&gpu, &pool, &unscaled, true, 0.0, &ctx(8, 6)),
+            "an unscaled copy",
+        );
+
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let grid = image_instances(
+            &[&red],
+            vec![
+                Vec2(4.0, 4.0),
+                Vec2(12.0, 4.0),
+                Vec2(4.0, 12.0),
+                Vec2(12.0, 12.0),
+            ],
+        );
+        assert_equivalent(
+            &run(true, 0.0, &grid, 16, 16),
+            &run_gpu(&gpu, &pool, &grid, true, 0.0, &ctx(16, 16)),
+            "a grid of copies",
+        );
+
+        // Scale and rotation together: the fragment shader inverts exactly the
+        // placement `Placement::apply` built.
+        let mut placed = image_instances(&[&source], vec![Vec2(8.0, 8.0)]);
+        placed
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(1.5, 0.75)]))
+            .unwrap();
+        placed
+            .instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.6]))
+            .unwrap();
+        assert_equivalent(
+            &run(true, 0.0, &placed, 24, 24),
+            &run_gpu(&gpu, &pool, &placed, true, 0.0, &ctx(24, 24)),
+            "a scaled and rotated copy",
+        );
+
+        let white = solid_image(4, 4, [1.0, 1.0, 1.0, 1.0]);
+        let mut tinted = image_instances(&[&white], vec![Vec2(8.0, 8.0)]);
+        tinted
+            .instances_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![Color::new(1.0, 0.0, 0.0, 1.0)]),
+            )
+            .unwrap();
+        tinted
+            .instances_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.5]))
+            .unwrap();
+        assert_equivalent(
+            &run(true, 0.0, &tinted, 16, 16),
+            &run_gpu(&gpu, &pool, &tinted, true, 0.0, &ctx(16, 16)),
+            "a tinted copy",
+        );
+
+        // Magnified: decision 5's blur, and the premultiplied weighting that
+        // keeps a transparent texel from bleeding its colour.
+        let seam = FrameBuffer::from_f32(2, 1, vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]);
+        let mut magnified = image_instances(&[&seam], vec![Vec2(8.0, 8.0)]);
+        magnified
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(8.0, 8.0)]))
+            .unwrap();
+        assert_equivalent(
+            &run(true, 0.0, &magnified, 16, 16),
+            &run_gpu(&gpu, &pool, &magnified, true, 0.0, &ctx(16, 16)),
+            "a magnified copy",
+        );
+
+        // A picture beside a geometry source: the draw splits at the boundary
+        // and the two kinds still land in one frame.
+        let mut mixed = Geometry::new();
+        mixed.set_sources(vec![
+            image_source(&red),
+            InstanceSource::Geometry(Arc::new(square_geo(Color::new(0.0, 0.5, 1.0, 1.0)))),
+        ]);
+        mixed
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(6.0, 8.0), Vec2(0.0, 0.0), Vec2(24.0, 8.0)]),
+            )
+            .unwrap();
+        mixed
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1, 0]))
+            .unwrap();
+        assert_equivalent(
+            &run(true, 0.0, &mixed, 32, 16),
+            &run_gpu(&gpu, &pool, &mixed, true, 0.0, &ctx(32, 16)),
+            "pictures beside a geometry source",
+        );
+    }
+
+    /// Decision 7 across the split: three overlapping copies alternating
+    /// between two pictures, so grouping the draws by texture — the obvious
+    /// way to want fewer runs — reverses which copy is on top.
+    #[test]
+    fn gpu_draws_image_instances_in_index_order() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let blue = solid_image(4, 4, [0.0, 0.0, 1.0, 1.0]);
+        // Spans [4, 8), [6, 10) and [8, 12): each copy overlaps the last.
+        let mut geo = image_instances(
+            &[&red, &blue],
+            vec![Vec2(6.0, 8.0), Vec2(8.0, 8.0), Vec2(10.0, 8.0)],
+        );
+        geo.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1, 0]))
+            .unwrap();
+
+        let cpu = run(true, 0.0, &geo, 16, 16);
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 0.0, &ctx(16, 16));
+        assert_equivalent(&cpu, &gpu_frame, "alternating overlapping copies");
+
+        let over_first = pixel(&gpu_frame, 7, 8);
+        assert!(
+            over_first[2] > 0.9 && over_first[0] < 0.1,
+            "copy 1 covers copy 0: {over_first:?}"
+        );
+        let over_second = pixel(&gpu_frame, 9, 8);
+        assert!(
+            over_second[0] > 0.9 && over_second[2] < 0.1,
+            "copy 2 covers copy 1, so the runs were not grouped by texture: \
+             {over_second:?}"
+        );
+    }
+
+    /// The contact sheet on the GPU: several pictures in one frame, each copy
+    /// sampling the source its `source_index` selects.
+    #[test]
+    fn gpu_source_index_picks_between_two_images() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let blue = solid_image(4, 4, [0.0, 0.0, 1.0, 1.0]);
+        let mut geo = image_instances(
+            &[&red, &blue],
+            vec![Vec2(4.0, 8.0), Vec2(12.0, 8.0), Vec2(8.0, 3.0)],
+        );
+        geo.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![1, 0, 7]))
+            .unwrap();
+
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 0.0, &ctx(16, 16));
+        assert_equivalent(
+            &run(true, 0.0, &geo, 16, 16),
+            &gpu_frame,
+            "source_index across pictures",
+        );
+        assert!(
+            pixel(&gpu_frame, 4, 8)[2] > 0.9,
+            "index 1 is the blue picture"
+        );
+        assert!(
+            pixel(&gpu_frame, 12, 8)[0] > 0.9,
+            "index 0 is the red picture"
+        );
+        assert!(
+            pixel(&gpu_frame, 8, 3)[2] > 0.9,
+            "an index past the end clamps to the last source"
+        );
+    }
+
+    /// The asymmetry `IMG-4` documented, pinned from the other side: the
+    /// production GPU path binds a resident source where it lies and reads
+    /// nothing back (decision 6).
+    #[test]
+    fn the_gpu_path_draws_a_resident_image_source_without_reading_it_back() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let geo = resident_image_instances(
+            &gpu,
+            &pool,
+            &solid_image(8, 8, [0.0, 1.0, 0.0, 1.0]),
+            vec![
+                Vec2(4.0, 4.0),
+                Vec2(12.0, 4.0),
+                Vec2(4.0, 12.0),
+                Vec2(12.0, 12.0),
+            ],
+        );
+
+        let node = make_node(true, 0.0);
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
+        let before = gpu.transfer_stats();
+        let out = evaluate(&node, Arc::new(proc), &geo, &ctx(16, 16));
+        let resident = out
+            .downcast_ref::<GpuFrameBuffer>()
+            .expect("GPU rasterize output stays resident");
+        let delta = before.delta(&gpu.transfer_stats());
+        assert_eq!(
+            delta.readbacks, 0,
+            "drawing a resident picture must not read it back: {delta:?}"
+        );
+
+        // Only now, and only for the assertion, does anything leave the GPU.
+        let fb = resident.to_frame_buffer().expect("GPU readback");
+        for (x, y) in [(4, 4), (12, 4), (4, 12), (12, 12)] {
+            let copy = pixel(&fb, x, y);
+            assert!(
+                copy[1] > 0.9 && copy[3] > 0.9,
+                "the copy at ({x}, {y}) drew from the resident texture: {copy:?}"
+            );
+        }
     }
 
     #[test]

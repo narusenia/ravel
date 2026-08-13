@@ -130,14 +130,31 @@ pub struct ComputeDispatch<'a> {
     pub height: u32,
 }
 
+/// One contiguous group of quads that share a sampled texture.
+///
+/// Splitting a draw into runs is how a caller draws from more than one texture
+/// without leaving painter's order: the runs are recorded into a single render
+/// pass, in slice order, so quad `i + 1` still blends over quad `i` across a
+/// run boundary.
+pub struct QuadRun<'a> {
+    /// The texture bound at the layout's last slot for this run. Every run
+    /// needs one — the bind-group layout is fixed at pipeline creation — so a
+    /// run that samples nothing binds whatever placeholder the caller has.
+    pub texture: &'a TextureBinding,
+    /// The instance indices this run draws, into the same storage buffers the
+    /// whole draw shares.
+    pub instances: std::ops::Range<u32>,
+}
+
 /// One declaratively-described instanced quad draw.
 ///
 /// The graphics counterpart of [`ComputeDispatch`], and binding order is the
-/// contract in the same way: the uniform block binds at `@binding(0)` and
-/// `storage[0..N]` bind at `@binding(1..N + 1)`. The pass clears `target` to
-/// transparent and then draws `instance_count` quads of six vertices each,
-/// with no vertex buffers — the shader expands each quad from the vertex and
-/// instance indices.
+/// contract in the same way: the uniform block binds at `@binding(0)`,
+/// `storage[0..N]` bind at `@binding(1..N + 1)`, and the run's texture binds
+/// at `@binding(N + 1)`. The pass clears `target` to transparent and then
+/// draws each run's quads as six vertices per instance, with no vertex
+/// buffers — the shader expands each quad from the vertex and instance
+/// indices.
 pub struct QuadDraw<'a> {
     /// Debug label for the buffers, the bind group, and the pass.
     pub label: &'a str,
@@ -159,8 +176,9 @@ pub struct QuadDraw<'a> {
     /// The colour attachment. Its format must match the
     /// [`ColorTarget`](crate::ColorTarget) the pipeline was built with.
     pub target: &'a TextureBinding,
-    /// Quads to draw. Zero is legal and records a pass that only clears.
-    pub instance_count: u32,
+    /// The quads to draw, in painter's order. An empty slice is legal and
+    /// records a pass that only clears.
+    pub runs: &'a [QuadRun<'a>],
 }
 
 /// Point-in-time view of the dispatch batching counters.
@@ -183,8 +201,9 @@ pub struct DispatchSnapshot {
     pub dispatches: u64,
     /// Uniform buffers created (uniform cache misses).
     pub uniform_buffers_created: u64,
-    /// Bind groups created: cache misses, plus one per [`QuadDraw`], whose
-    /// group references buffers rebuilt for that draw and is never cached.
+    /// Bind groups created: cache misses, plus one per [`QuadRun`] of a
+    /// [`QuadDraw`], whose groups reference buffers rebuilt for that draw and
+    /// are never cached.
     pub bind_groups_created: u64,
 }
 
@@ -445,17 +464,9 @@ impl DispatchState {
             (uniform, storage)
         };
 
-        let mut entries = Vec::with_capacity(storage.len() + 1);
-        entries.push(wgpu::BindGroupEntry {
-            binding: 0,
-            resource: uniform.as_entire_binding(),
-        });
-        for (index, buffer) in storage.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry {
-                binding: index as u32 + 1,
-                resource: buffer.as_entire_binding(),
-            });
-        }
+        // One group per run: everything but the texture is shared, so the runs
+        // differ by one entry each.
+        //
         // Not cached: the storage buffers above are new, so an entry keyed by
         // what this group references could never be hit again.
         //
@@ -467,12 +478,34 @@ impl DispatchState {
         // does not free anything the pending encoder still needs. Do not
         // "fix" this by extending the caches: an entry keyed by these buffers
         // would never be reused and would pin their VRAM until eviction.
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(draw.label),
-            layout: draw.pipeline.bind_group_layout(),
-            entries: &entries,
-        });
-        self.bind_groups_created += 1;
+        let groups: Vec<(wgpu::BindGroup, std::ops::Range<u32>)> = draw
+            .runs
+            .iter()
+            .map(|run| {
+                let mut entries = Vec::with_capacity(storage.len() + 2);
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                });
+                for (index, buffer) in storage.iter().enumerate() {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: index as u32 + 1,
+                        resource: buffer.as_entire_binding(),
+                    });
+                }
+                entries.push(wgpu::BindGroupEntry {
+                    binding: storage.len() as u32 + 1,
+                    resource: wgpu::BindingResource::TextureView(&run.texture.view),
+                });
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(draw.label),
+                    layout: draw.pipeline.bind_group_layout(),
+                    entries: &entries,
+                });
+                self.bind_groups_created += 1;
+                (group, run.instances.clone())
+            })
+            .collect();
 
         let encoder = self.encoder.get_or_insert_with(|| {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -480,7 +513,10 @@ impl DispatchState {
             })
         });
         draw.pipeline
-            .draw_quads(encoder, &group, &draw.target.view, draw.instance_count);
+            .draw_quads(encoder, &draw.target.view, &groups);
+        for run in draw.runs {
+            self.used.insert(texture_ptr(&run.texture.texture));
+        }
         self.used.insert(texture_ptr(&draw.target.texture));
         self.written.insert(texture_ptr(&draw.target.texture));
         self.pending_dispatches += 1;

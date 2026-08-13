@@ -308,6 +308,17 @@ fn color_parameter(key: &str, rgba: [f32; 4]) -> Parameter {
 /// interpolation in the rasterizer — `path-shading-plan.md`.
 pub const STYLE_DOMAINS: [&str; 2] = ["primitive", "instance"];
 
+/// Attribute domains supported by the general-purpose attribute nodes. Unlike
+/// the style nodes, `attribute.set` writes ordinary attributes, so all four
+/// geometry domains are meaningful here.
+pub const ATTRIBUTE_DOMAINS: [&str; 4] = ["point", "primitive", "instance", "detail"];
+
+/// Aggregation modes supported by `attribute.promote`.
+pub const ATTRIBUTE_AGGREGATES: [&str; 3] = ["average", "max", "first"];
+
+/// Shapes supported by `field.falloff`.
+pub const FALLOFF_SHAPES: [&str; 2] = ["sphere", "linear"];
+
 /// Stroke end shapes `style.stroke` can select, ordered to match the `cap`
 /// attribute codes (`geometry::names::CAP_*`).
 pub const STROKE_CAPS: [&str; 3] = ["butt", "round", "square"];
@@ -409,6 +420,7 @@ fn attribute_set() -> NodeTemplate {
         .with_input(geometry_input("geometry"))
         .with_output(geometry_output())
         .with_param(string_parameter("domain", "point"))
+        .with_param_options("domain", ATTRIBUTE_DOMAINS)
         .with_param(string_parameter("name", "value"))
         .with_param(string_parameter("type", ATTRIBUTE_SET_DEFAULT_TYPE))
         .with_param_options("type", ATTRIBUTE_SET_TYPES)
@@ -492,6 +504,7 @@ fn attribute_promote() -> NodeTemplate {
     .with_param(string_parameter("target_domain", "detail"))
     .with_param(string_parameter("name", "value"))
     .with_param(string_parameter("aggregate", "average"))
+    .with_param_options("aggregate", ATTRIBUTE_AGGREGATES)
 }
 
 fn attribute_transfer() -> NodeTemplate {
@@ -504,7 +517,9 @@ fn attribute_transfer() -> NodeTemplate {
     .with_input(geometry_input("source"))
     .with_output(geometry_output())
     .with_param(string_parameter("target_domain", "point"))
+    .with_param_options("target_domain", ATTRIBUTE_DOMAINS)
     .with_param(string_parameter("source_domain", "point"))
+    .with_param_options("source_domain", ATTRIBUTE_DOMAINS)
     .with_param(string_parameter("name", "value"))
     .with_param(string_parameter("mode", "nearest"))
 }
@@ -591,6 +606,7 @@ fn field_falloff() -> NodeTemplate {
     NodeTemplate::new("field.falloff", "Falloff Field", NodeCategory::Field)
         .with_output(field_output())
         .with_param(string_parameter("shape", "sphere"))
+        .with_param_options("shape", FALLOFF_SHAPES)
         .with_param(channel3_parameter("center", 0.0, 0.0, 0.0))
         .with_param(float_parameter("inner_radius", 0.0))
         .with_param(float_parameter("outer_radius", 1.0))
@@ -2001,6 +2017,31 @@ mod tests {
         assert_eq!(merge_ops, ["over", "add", "multiply"]);
         // Numeric parameters carry no option set.
         assert!(reg.param_options("math.scalar", "a").is_none());
+    }
+
+    #[test]
+    fn closed_attribute_parameter_options_match_the_processor_contracts() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        assert_eq!(
+            reg.param_options("attribute.set", "domain").unwrap(),
+            ATTRIBUTE_DOMAINS
+        );
+        for key in ["source_domain", "target_domain"] {
+            assert_eq!(
+                reg.param_options("attribute.transfer", key).unwrap(),
+                ATTRIBUTE_DOMAINS,
+                "attribute.transfer.{key}"
+            );
+        }
+        assert_eq!(
+            reg.param_options("attribute.promote", "aggregate").unwrap(),
+            ATTRIBUTE_AGGREGATES
+        );
+        assert_eq!(
+            reg.param_options("field.falloff", "shape").unwrap(),
+            FALLOFF_SHAPES
+        );
     }
 
     #[test]

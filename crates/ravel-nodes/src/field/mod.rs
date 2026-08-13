@@ -3,7 +3,7 @@
 
 //! Node-graph adapters for the headless field implementations in `ravel-core`.
 
-use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
 use ravel_core::geometry::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
     ComposeField, ConstantField, CurlNoiseField, CurveRemapField, DirectionToField, Domain,
@@ -151,21 +151,43 @@ impl NodeProcessor for FalloffFieldProcessor {
         // the 2D sampler consumes X and Y.
         let [center_x, center_y, _center_z] = params.vec3_or("center", [0.0, 0.0, 0.0]);
         let center = Vec2(center_x, center_y);
-        let shape = match params.str_or("shape", "sphere") {
-            "linear" => {
-                let [dx, dy, _dz] = params.vec3_or("direction", [1.0, 0.0, 0.0]);
-                FalloffShape::Linear {
-                    direction: Vec2(dx, dy),
-                }
-            }
-            _ => FalloffShape::Sphere,
-        };
+        let shape = falloff_shape(params);
         Ok(Arc::new(FieldValue::new(FalloffField {
             center,
             inner_radius: params.f32_or("inner_radius", 0.0),
             outer_radius: params.f32_or("outer_radius", 1.0),
             shape,
         })))
+    }
+}
+
+fn falloff_shape(params: &ResolvedParams) -> FalloffShape {
+    let Some(value) = params.get("shape") else {
+        return FalloffShape::Sphere;
+    };
+    let ResolvedValue::Str(value) = value else {
+        tracing::warn!(
+            parameter = "shape",
+            "field.falloff parameter is not a string; using sphere"
+        );
+        return FalloffShape::Sphere;
+    };
+    match value.as_str() {
+        "linear" => {
+            let [dx, dy, _dz] = params.vec3_or("direction", [1.0, 0.0, 0.0]);
+            FalloffShape::Linear {
+                direction: Vec2(dx, dy),
+            }
+        }
+        "sphere" => FalloffShape::Sphere,
+        _ => {
+            tracing::warn!(
+                parameter = "shape",
+                value = %value,
+                "field.falloff has an unknown shape; using sphere"
+            );
+            FalloffShape::Sphere
+        }
     }
 }
 
@@ -649,6 +671,53 @@ mod tests {
         ev.evaluate(&graph, node.id, &ctx()).unwrap()
     }
 
+    fn registered_node(type_key: &str, id: u64) -> Node {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        registry
+            .create_node(type_key, NodeId::new(id))
+            .unwrap_or_else(|| panic!("{type_key} is not registered"))
+    }
+
+    fn set_string_param(node: &mut Node, key: &str, value: &str) {
+        node.parameters
+            .iter_mut()
+            .find(|parameter| parameter.key == key)
+            .unwrap_or_else(|| panic!("{} has no {key}", node.type_key))
+            .value = ParameterValue::String(value.into());
+    }
+
+    fn warnings_from(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Self;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+    }
+
     #[test]
     fn noise_processor_reads_node_parameters() {
         let node = Node::new(NodeId::new(1), "field.noise")
@@ -660,6 +729,71 @@ mod tests {
         let first = run(&node, Arc::new(NoiseFieldProcessor::from_node(&node)), &[]);
         let second = run(&node, Arc::new(NoiseFieldProcessor::from_node(&node)), &[]);
         assert_eq!(sample(first.as_ref()), sample(second.as_ref()));
+    }
+
+    /// The falloff shape is a string parameter in the real template. The
+    /// sample positions make the two implementations produce different
+    /// values, so a missing match arm or a default-only implementation fails.
+    #[test]
+    fn declared_falloff_shapes_reach_their_string_parameter_branches() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let options = registry
+            .param_options("field.falloff", "shape")
+            .unwrap()
+            .to_vec();
+        assert_eq!(options, ravel_core::registry::builtin::FALLOFF_SHAPES);
+
+        let mut values = Vec::new();
+        for shape in options {
+            let mut node = registered_node("field.falloff", 1);
+            set_string_param(&mut node, "shape", &shape);
+            let output = run(
+                &node,
+                Arc::new(FalloffFieldProcessor::from_node(&node)),
+                &[],
+            );
+            values.push((shape, sample(output.as_ref())[0]));
+        }
+        assert_ne!(values[0].1, values[1].1, "falloff branches must differ");
+    }
+
+    #[test]
+    fn unknown_falloff_shape_warns_and_uses_sphere() {
+        let mut unknown = registered_node("field.falloff", 1);
+        set_string_param(&mut unknown, "shape", "future_shape");
+        let mut sphere = registered_node("field.falloff", 2);
+        set_string_param(&mut sphere, "shape", "sphere");
+
+        let unknown_output = {
+            let output = run(
+                &unknown,
+                Arc::new(FalloffFieldProcessor::from_node(&unknown)),
+                &[],
+            );
+            sample(output.as_ref())
+        };
+        let sphere_output = {
+            let output = run(
+                &sphere,
+                Arc::new(FalloffFieldProcessor::from_node(&sphere)),
+                &[],
+            );
+            sample(output.as_ref())
+        };
+        let logged = warnings_from(|| {
+            let output = run(
+                &unknown,
+                Arc::new(FalloffFieldProcessor::from_node(&unknown)),
+                &[],
+            );
+            let _ = sample(output.as_ref());
+        });
+        assert_eq!(unknown_output, sphere_output);
+        assert!(
+            logged.contains("unknown shape"),
+            "missing warning: {logged:?}"
+        );
     }
 
     #[test]

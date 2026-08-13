@@ -765,8 +765,9 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 > `STYLE-6` の実装中に判明）。`rasterize` はパスの色を**プリミティブ属性**から
 > 引くので、`field.apply(domain = "point")` が書いた点ごとの色は 1 画素も
 > 描かれない（`crates/ravel-nodes/src/rasterize/mod.rs:503` と `:607`）。
-> 属性としては正しく乗る。画素まで通すには rasterize の頂点色補間が要り、
-> CPU（zeno は被覆マスクしか返さない）と GPU の両方の方式決定を伴う。
+> 属性としては正しく乗る。画素まで通すには rasterize の頂点色補間が要る。
+> CPU（zeno は被覆マスクしか返さない）と GPU の両方で線を補間する方式は、
+> `path-shading-plan.md` の案 A（塗りは従来どおりプリミティブ値 1 色）に確定した。
 > `stroke_align` を `style-attributes-plan.md` 単位 3 へ繰り延べたのと同じ構図で、
 > **まとめて別計画で扱う**。→ `issues/medium/gpu-nodes.md` の `MED-GPU-08`
 

@@ -38,7 +38,7 @@ use viewport::ViewerViewport;
 use super::param_edit::edited_vector_param;
 use overlay::{
     LabelPlacement, OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter,
-    OverlayRegistry,
+    OverlayRegistry, OverlayResults,
 };
 
 pub const KEY_CONTEXT: &str = "Viewer";
@@ -1084,6 +1084,13 @@ impl ViewerPanel {
                 path: cx.theme().colors.info,
                 error: cx.theme().colors.danger,
             },
+            // Written by `ProjectState` in the same update as `ViewerFrame`,
+            // which this panel already observes — so reading it here needs no
+            // observer of its own.
+            results: cx
+                .try_global::<OverlayResults>()
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 

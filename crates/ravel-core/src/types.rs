@@ -811,6 +811,14 @@ impl PortRecord {
             0 => None,
             // Single-output nodes yield their value directly (port 0 only).
             1 => (port.0 == 0).then(|| value.clone()),
+            // Multi-output nodes index the record — but only within the ports
+            // the node declares. A record longer than the declaration (a
+            // processor that pushed an extra value) must not make an
+            // out-of-range port readable: every caller reads `port` from
+            // something outside the evaluator, an edge or an overlay target,
+            // and a stale one would otherwise resolve to a neighbouring value
+            // instead of failing.
+            _ if (port.0 as usize) >= port_count => None,
             _ => value
                 .downcast_ref::<PortRecord>()
                 .and_then(|rec| rec.0.get(port.0 as usize).cloned()),
@@ -847,6 +855,32 @@ mod tests {
     #[should_panic(expected = "denominator must not be zero")]
     fn frame_rate_rejects_zero_denominator() {
         FrameRate::new(30, 0);
+    }
+
+    /// A record longer than the node's declaration must not make the extra
+    /// entries readable. `port` always comes from outside the evaluator — an
+    /// edge, or an overlay target — so a stale index has to fail rather than
+    /// resolve to whatever happens to sit at that offset.
+    #[test]
+    fn a_port_beyond_the_declared_count_has_no_value() {
+        let record: Arc<dyn NodeData> = Arc::new(PortRecord(vec![
+            Arc::new(Scalar(1.0)),
+            Arc::new(Scalar(2.0)),
+            Arc::new(Scalar(3.0)),
+        ]));
+        // Declared two outputs, but the record carries three.
+        let declared = 2;
+        for port in 0..declared {
+            assert!(
+                PortRecord::extract(&record, declared, crate::id::OutputPortIndex(port as u32))
+                    .is_some(),
+                "declared port {port} must resolve"
+            );
+        }
+        assert!(
+            PortRecord::extract(&record, declared, crate::id::OutputPortIndex(2)).is_none(),
+            "the third entry is not a declared port"
+        );
     }
 
     // ---- NodeData trait dispatch -------------------------------------------

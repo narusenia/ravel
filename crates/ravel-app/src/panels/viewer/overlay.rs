@@ -29,15 +29,18 @@
 //! [`OverlayLabel`]s that the panel renders as elements, because GPUI shapes
 //! text through elements rather than through the canvas painter.
 
-use gpui::{Bounds, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
+use gpui::{Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
 use ravel_core::composition::Document;
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::{NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
 
 use crate::panels::{CanvasSelection, LayerSelection, PlaybackPosition};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::{
     CompRect, PathHandleKind, ViewerPointerHint, edited_path_points, layer_selection_comp_rects,
@@ -70,7 +73,7 @@ pub mod priority {
 // ===========================================================================
 
 /// Colors an overlay may need that come from the active theme.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OverlayColors {
     /// Editable path stroke and handles.
     pub path: Hsla,
@@ -78,10 +81,38 @@ pub struct OverlayColors {
     pub error: Hsla,
 }
 
+/// The overlay-target results of the evaluation whose frame the viewer is
+/// currently showing.
+///
+/// Durable state, not an event: it is replaced wholesale, in the same update
+/// that publishes [`crate::panels::ViewerFrame`], so the values an overlay
+/// reads always belong to the image underneath them. A target that failed,
+/// was never requested, or has not been evaluated yet is simply absent —
+/// [`OverlayContext::eval_result`] then returns `None` and the overlay draws
+/// nothing rather than guessing.
+#[derive(Clone, Default)]
+pub struct OverlayResults {
+    pub(crate) values: HashMap<NodeId, Arc<dyn NodeData>>,
+}
+
+impl OverlayResults {
+    pub(crate) fn new(values: HashMap<NodeId, Arc<dyn NodeData>>) -> Self {
+        Self { values }
+    }
+}
+
+impl Global for OverlayResults {}
+
 /// Everything the overlays are allowed to see, snapshotted once per render or
 /// once per pointer event. Fields are optional exactly where the underlying
 /// global may be absent, so an overlay stays inactive instead of guessing.
-#[derive(Clone)]
+///
+/// `Default` is the "nothing is loaded" snapshot. It exists so the
+/// target-discovery context built while assembling an evaluation request
+/// (`ProjectState::overlay_context_for_request`) can name only the fields
+/// that decide `is_active` / `eval_target`, instead of inventing theme colors
+/// and panel toggles it has no access to.
+#[derive(Clone, Default)]
 pub struct OverlayContext {
     /// Resolution of the composition currently shown; `None` with no output.
     pub resolution: Option<(u32, u32)>,
@@ -95,12 +126,33 @@ pub struct OverlayContext {
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
     pub colors: OverlayColors,
+    /// Overlay-target results belonging to the frame currently shown.
+    pub results: OverlayResults,
 }
 
 impl OverlayContext {
     /// The three pieces every document-driven overlay needs at once.
     pub fn resolved(&self) -> Option<(&Document, (u32, u32), PlaybackPosition)> {
         Some((self.document.as_ref()?, self.resolution?, self.playback?))
+    }
+
+    /// Read a target result without guessing when evaluation has not arrived.
+    ///
+    /// Evaluation is per node, not per port: a node with several outputs
+    /// produces one [`PortRecord`] holding all of them, so the target's
+    /// `output` selects from it. Handing the record over whole would give an
+    /// overlay asking for port 1 a value of an entirely different type.
+    ///
+    /// `None` whenever the answer is not knowable — no result, the node is
+    /// gone from the network, or the port carries no value — which is the
+    /// same "draw nothing" signal as a result that has not arrived.
+    pub fn eval_result(&self, target: &OverlayTarget) -> Option<Arc<dyn NodeData>> {
+        let value = self.results.values.get(&target.node)?;
+        let ports = ravel_ui::document::resolve_network(self.document.as_ref()?, &target.network)?
+            .node(target.node)?
+            .outputs
+            .len();
+        PortRecord::extract(value, ports, target.output)
     }
 }
 
@@ -1110,6 +1162,7 @@ mod tests {
             show_safe_areas: false,
             error: None,
             colors: colors(),
+            results: OverlayResults::default(),
         }
     }
 
@@ -1461,6 +1514,137 @@ mod tests {
         assert!(painter.finish().is_empty());
         assert!(registry.labels(&ctx).is_empty());
         assert!(registry.eval_targets(&ctx).is_empty());
+    }
+
+    struct ResultProbe {
+        target: OverlayTarget,
+    }
+
+    impl ViewerOverlay for ResultProbe {
+        fn id(&self) -> OverlayId {
+            OverlayId("test.result")
+        }
+
+        fn priority(&self) -> i32 {
+            0
+        }
+
+        fn is_active(&self, _ctx: &OverlayContext) -> bool {
+            true
+        }
+
+        fn eval_target(&self, _ctx: &OverlayContext) -> Option<OverlayTarget> {
+            Some(self.target.clone())
+        }
+
+        fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
+            if ctx.eval_result(&self.target).is_some() {
+                painter.fill_screen_rect(painter.frame(), ctx.colors.path);
+            }
+        }
+    }
+
+    /// A context whose document holds one layer network containing `node`,
+    /// plus the path naming that network.
+    fn ctx_with_network_node(node: Node) -> (OverlayContext, NetworkPath) {
+        let comp_id = CompId::next();
+        let layer_id = LayerId::next();
+        let graph = Graph::new().add_node(node).unwrap();
+        let comp = Composition::new(comp_id, "Comp", (1920, 1080), FrameRate::new(30, 1), 300)
+            .add_layer(Layer::new(layer_id, "Layer", graph).with_time(0, 0, 300));
+        let mut ctx = base_context();
+        ctx.document = Some(Document::default().with_composition(comp));
+        (ctx, NetworkPath::layer(comp_id, layer_id))
+    }
+
+    fn scalar(value: f32) -> Arc<dyn NodeData> {
+        Arc::new(ravel_core::types::Scalar(value))
+    }
+
+    #[test]
+    fn an_overlay_without_a_current_result_paints_nothing() {
+        let node = Node::new(NodeId::next(), "test.single")
+            .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
+        let node_id = node.id;
+        let (base, network) = ctx_with_network_node(node);
+        let target = OverlayTarget {
+            network,
+            node: node_id,
+            output: OutputPortIndex(0),
+        };
+        let registry = OverlayRegistry::new(vec![Box::new(ResultProbe {
+            target: target.clone(),
+        })]);
+
+        let mut previous = base;
+        previous.results = OverlayResults::new(HashMap::from([(node_id, scalar(1.0))]));
+        let mut previous_painter = painter();
+        registry.paint(&previous, &mut previous_painter);
+        assert!(!previous_painter.finish().is_empty());
+
+        // The snapshot is replaced wholesale, so a target that did not come
+        // back has no entry at all. Another target's result is present to
+        // pin that the lookup is by node id: any value will not do.
+        let mut pending = previous;
+        pending.results = OverlayResults::new(HashMap::from([(NodeId::new(999_001), scalar(1.0))]));
+        let mut painter = painter();
+        registry.paint(&pending, &mut painter);
+        assert!(painter.finish().is_empty());
+    }
+
+    /// Evaluation is per node, so a multi-output node's result arrives as one
+    /// `PortRecord`. The target's port has to select from it — handing the
+    /// record over whole gives the overlay a value of the wrong type.
+    #[test]
+    fn a_multi_output_target_reads_its_own_port() {
+        let node = Node::new(NodeId::next(), "test.multi")
+            .with_output("a", ravel_core::id::DataTypeId::GEOMETRY)
+            .with_output("b", ravel_core::id::DataTypeId::GEOMETRY);
+        let node_id = node.id;
+        let (mut ctx, network) = ctx_with_network_node(node);
+        let record: Arc<dyn NodeData> = Arc::new(ravel_core::types::PortRecord(vec![
+            scalar(10.0),
+            scalar(20.0),
+        ]));
+        ctx.results = OverlayResults::new(HashMap::from([(node_id, record)]));
+
+        let read = |port: u32| {
+            ctx.eval_result(&OverlayTarget {
+                network: network.clone(),
+                node: node_id,
+                output: OutputPortIndex(port),
+            })
+            .and_then(|value| {
+                value
+                    .downcast_ref::<ravel_core::types::Scalar>()
+                    .map(|s| s.0)
+            })
+        };
+
+        assert_eq!(read(0), Some(10.0));
+        assert_eq!(read(1), Some(20.0));
+        // A port the node does not declare has no value to draw from.
+        assert_eq!(read(2), None);
+    }
+
+    /// A node that is no longer in the network cannot have its port count
+    /// resolved, so there is nothing to draw — not a guess from the record.
+    #[test]
+    fn a_result_for_a_node_outside_the_network_is_not_readable() {
+        let node = Node::new(NodeId::next(), "test.single")
+            .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
+        let (mut ctx, network) = ctx_with_network_node(node);
+        let stranger = NodeId::new(999_002);
+        ctx.results = OverlayResults::new(HashMap::from([(stranger, scalar(1.0))]));
+
+        assert!(
+            ctx.eval_result(&OverlayTarget {
+                network,
+                node: stranger,
+                output: OutputPortIndex(0),
+            })
+            .is_none()
+        );
     }
 
     // -----------------------------------------------------------------------

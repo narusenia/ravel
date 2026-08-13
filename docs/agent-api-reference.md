@@ -1131,19 +1131,7 @@ Geometry        // domains: points / primitives+attrs / instances / detail
     .validate()?           // P:Vec2|Vec3, prim + index ranges, detail len 1
     .positions(Domain) -> Option<Result<Positions<'_>>>   // the P column
     .points()/.points_mut() (+ primitive_attrs, instances, detail variants)
-    .push_primitive(InstanceSource::Geometry(Arc<Geometry>) | ::Image(InstanceImage)
-    .geometry() / .image() -> Option<..>  // `None` for the other kind
-    .ptr_eq(&Self)                        // identity, without looking inside;
-        // what `geometry.merge` compares when it decides two instance domains
-        // agree on their sources
-InstanceImage       // a frame buffer stamped by the instance domain
-    ::new(Arc<dyn NodeData>, width, height)?   // => NotAFrameBuffer / EmptyImage
-    .frame() -> &Arc<dyn NodeData>   // the representation it arrived in: a CPU
-        // FrameBuffer or a GpuFrameBuffer, held so a resident frame stamps
-        // without a readback (image-instancing-plan.md decision 6)
-    .width() / .height() / .aspect_ratio() / .rect()   // pixel size = comp units
-
-Primitive::Path { verts: Range<usize>, closed })
+    .push_primitive(Primitive::Path { verts: Range<usize>, closed })
     .push_mesh(verts: Range<usize>, triangles: &[u32])  // the only mesh builder
     .indices() -> &[u32]                  // shared triangle buffer (Arc CoW)
     .extend_indices(&[u32]) -> usize      // append, returns the start offset
@@ -1167,6 +1155,19 @@ Primitive::Mesh { verts: Range<usize>, indices: Range<usize> }
     // the blob instead of remapping every triangle.
     .verts() -> &Range<usize>            // both variants; kind-agnostic walks
     .is_mesh() / .shifted(points, indices) -> Primitive   // relocate for concat
+
+InstanceSource::Geometry(Arc<Geometry>) | ::Image(InstanceImage)
+    .geometry() / .image() -> Option<..>  // `None` for the other kind
+    .ptr_eq(&Self)                        // identity, without looking inside;
+        // what `geometry.merge` compares when it decides two instance domains
+        // agree on their sources
+
+InstanceImage       // a frame buffer stamped by the instance domain
+    ::new(Arc<dyn NodeData>, width, height)?   // => NotAFrameBuffer / EmptyImage
+    .frame() -> &Arc<dyn NodeData>   // the representation it arrived in: a CPU
+        // FrameBuffer or a GpuFrameBuffer, held so a resident frame stamps
+        // without a readback (image-instancing-plan.md decision 6)
+    .width() / .height() / .aspect_ratio() / .rect()   // pixel size = comp units
 
 Positions::{D2(&[Vec2]), D3(&[Vec3])}   // P at the dimension a domain carries
     ::from_column(&AttributeArray)?      // rejects non-position columns
@@ -1895,14 +1896,20 @@ unpremultiply pass.
 `ColorTarget { format: TextureFormat, blend: BlendMode }` (no wgpu type in the
 signature). Drawing is declarative like compute:
 `GpuContext::draw_quads(&QuadDraw { pipeline, uniform, storage, target,
-instance_count, .. })` — the uniform binds at `@binding(0)`, `storage[0..N]`
-(read-only storage buffers, each non-empty) at `@binding(1..N + 1)`, and the
-pass clears `target` before drawing six vertices per instance. It records into
+runs, .. })` — the uniform binds at `@binding(0)`, `storage[0..N]`
+(read-only storage buffers, each non-empty) at `@binding(1..N + 1)`, the run's
+texture at `@binding(N + 1)`, and the pass clears `target` before drawing six
+vertices per instance. `runs: &[QuadRun]` is how one draw samples more than one
+texture without leaving painter's order: `QuadRun { texture, instances:
+Range<u32> }` records into a **single** render pass in slice order, so quad
+`i + 1` still blends over quad `i` across a run boundary. Every run binds a
+texture because the layout is fixed at pipeline creation — a run that samples
+nothing binds the caller's placeholder. It records into
 the same frame-shared encoder as compute, and `target` joins the batch's
 pending-use set, so the attachment may be released to the pool immediately
-after recording. The draw's storage buffers and bind group are rebuilt every
-draw (the geometry differs frame to frame) and counted in
-`bind_groups_created`. Rasterize draws analytic-AA path/point quads into a
+after recording. The draw's storage buffers are rebuilt every draw (the
+geometry differs frame to frame) and one bind group per run is created and
+counted in `bind_groups_created`. Rasterize draws analytic-AA path/point quads into a
 premultiplied RGBA16Float attachment, then converts to straight-alpha
 RGBA32Float without a CPU transfer.
 Current keys:

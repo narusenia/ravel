@@ -446,6 +446,13 @@ impl GpuRasterizer {
                 gpu_util::WORKGROUP_SIZE,
             )
             .expect("rasterize.wgsl compilation failed");
+        // Held for the rasterizer's whole life rather than acquired per draw,
+        // and deliberately never released: the bind-group layout is fixed at
+        // pipeline creation, so a run that samples nothing still has to bind
+        // something. Acquiring it per rasterize churned the pool and moved its
+        // idle count, which `the_pending_render_attachment_is_not_reused_before_the_flush`
+        // pins. One 1x1 texture is a rounding error against the budget; the
+        // alternative is a second pipeline layout for the textureless case.
         let placeholder = pool
             .lock()
             .expect("texture pool poisoned")

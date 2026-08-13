@@ -213,10 +213,12 @@ index 順に `pixels` へ描き込むペインタ方式で、tint は `Cd` × `a
   そのときは `to_mesh`（UV 付きメッシュ）を別途足し、rasterize は既存の
   ガードで**正しく大声で拒否**する
 - **緩めるのは instance source の再帰だけ**である。`ensure_planar_paths` は
-  `geo.require_paths("rasterize")` を自分自身に掛けたうえで
-  `geo.instance_sources()` を再帰しているので、`InstanceSource::Image` は
-  再帰対象から外す（画像はプリミティブを持たないので検査するものが無い）。
-  `Geometry::require_paths` そのものは変更しない
+  `geo.require_paths("rasterize")` を自分自身に掛けたうえで instance source を
+  再帰しているので、`InstanceSource::Image` は再帰対象から外す（画像は
+  プリミティブを持たないので検査するものが無い）。`Geometry::require_paths`
+  そのものは変更しない
+  （計画時はこの再帰が `geo.instance_sources()` を通っていた。その便宜ビューは
+  `IMG-6` で削除され、今は `sources()` を `filter_map` する）
 
 ### 決定 9: 着手順 — 計画書を先に書き、実装は C4 の後
 

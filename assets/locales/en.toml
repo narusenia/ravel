@@ -1137,7 +1137,7 @@ description = "Returns a unit vector from each sample position toward a target p
 target = "Target point used when no target geometry is connected."
 
 [node."field.curl_noise"]
-label = "Curl Noise Field"
+label = "Curl Flow Field"
 description = "Builds a deterministic divergence-free flow field from simplex noise."
 [node."field.curl_noise".params]
 seed = "Random seed of the noise."

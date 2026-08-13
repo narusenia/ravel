@@ -1129,7 +1129,7 @@ description = "各サンプル位置からターゲット点またはターゲ�
 target = "ターゲットジオメトリが未接続のときに使うターゲット点。"
 
 [node."field.curl_noise"]
-label = "カールノイズフィールド"
+label = "カールフローフィールド"
 description = "既存の simplex ノイズから決定的で発散ゼロのフロー場を作る。"
 [node."field.curl_noise".params]
 seed = "ノイズの乱数シード。"

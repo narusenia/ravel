@@ -2253,9 +2253,8 @@ mod tests {
     ///
     /// `select_instance_source` applies the index to the full slice, so the
     /// geometry sources keep the positions the user gave them. Filtering the
-    /// images out *before* indexing — which is what the geometry-only
-    /// `instance_sources()` view would do — shifts every index after the image
-    /// by one and silently stamps the wrong source.
+    /// images out *before* indexing shifts every index after one by one and
+    /// silently stamps the wrong source.
     #[test]
     fn source_index_counts_image_sources_too() {
         let red = colored_point_source(Color::new(1.0, 0.0, 0.0, 1.0));

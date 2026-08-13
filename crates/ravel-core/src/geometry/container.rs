@@ -589,18 +589,6 @@ impl Geometry {
         self.instance_sources = source.into_iter().map(InstanceSource::Geometry).collect();
     }
 
-    /// The **geometry** sources available to the instance domain. Image
-    /// sources are not returned and the positions do not line up with
-    /// `source_index` once one is present — use [`Geometry::sources`] for
-    /// anything that indexes or must not lose a source.
-    pub fn instance_sources(&self) -> Vec<Arc<Geometry>> {
-        self.instance_sources
-            .iter()
-            .filter_map(InstanceSource::geometry)
-            .cloned()
-            .collect()
-    }
-
     /// Replaces the source geometries available to the instance domain,
     /// dropping any image source that was there.
     pub fn set_instance_sources(&mut self, sources: Vec<Arc<Geometry>>) {
@@ -958,10 +946,12 @@ mod tests {
         );
     }
 
-    /// The geometry-only view is a convenience, not the source list: it skips
-    /// images, so anything that indexes sources has to read `sources()`.
+    /// [`Geometry::sources`] is the whole list, images included and in the
+    /// order `source_index` addresses. The one geometry-only view left is the
+    /// singular one, and it says so by returning `None` rather than by
+    /// quietly renumbering what follows.
     #[test]
-    fn the_geometry_only_view_skips_image_sources() {
+    fn sources_keep_images_in_the_indexed_positions() {
         let stamped = Arc::new(two_point_geo());
         let mut geo = Geometry::new();
         geo.set_sources(vec![
@@ -972,10 +962,10 @@ mod tests {
         assert_eq!(geo.sources().len(), 2);
         assert!(geo.sources()[0].image().is_some());
         assert!(geo.sources()[0].geometry().is_none());
-
-        let geometries = geo.instance_sources();
-        assert_eq!(geometries.len(), 1);
-        assert!(Arc::ptr_eq(&geometries[0], &stamped));
+        assert!(Arc::ptr_eq(
+            geo.sources()[1].geometry().expect("a geometry source"),
+            &stamped
+        ));
         assert!(
             geo.instance_source().is_none(),
             "the first source is an image, so the singular geometry view is empty"
@@ -1058,15 +1048,15 @@ mod tests {
         let mut geo = Geometry::new();
 
         geo.set_instance_sources(vec![first.clone(), second.clone()]);
-        assert_eq!(geo.instance_sources().len(), 2);
+        assert_eq!(geo.sources().len(), 2);
         assert!(Arc::ptr_eq(geo.instance_source().unwrap(), &first));
 
         geo.set_instance_source(Some(second.clone()));
-        assert_eq!(geo.instance_sources().len(), 1);
+        assert_eq!(geo.sources().len(), 1);
         assert!(Arc::ptr_eq(geo.instance_source().unwrap(), &second));
 
         geo.set_instance_source(None);
-        assert!(geo.instance_sources().is_empty());
+        assert!(geo.sources().is_empty());
         assert!(geo.instance_source().is_none());
     }
 

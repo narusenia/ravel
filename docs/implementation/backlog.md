@@ -45,11 +45,9 @@
 | MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
-| STYLE-2 | `style.fill` / `style.stroke` ノード | `style-attributes-plan.md` |
+| VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
-| STYLE-3 | ダッシュ・キャップ・ジョイン | `style-attributes-plan.md` |
-| VEC-2 | 変換ノード（length / component / compose / angle） | `vector-field-plan.md` |
-| PARAM-4 | グラデーションエディタのインライン展開（PARAM-3 完了で着手可能） | `properties-parameter-editors-plan.md` |
+| PARAM-8 | `color.ramp`（値ドメインのカラーランプ） | `properties-parameter-editors-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -87,7 +85,7 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
-| IMG-2 | `InstanceSource` への一般化（フェーズ C4 完了で順序ゲートが解けた） | `image-instancing-plan.md` |
+| IMG-4 | `rasterize` のテクスチャ経路（CPU 参照。IMG-3 完了で着手可能） | `image-instancing-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -372,9 +370,9 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | STYLE-1 | ✅ | スタイル属性の読み出し（CPU / GPU）（#403） | — |
-| STYLE-2 | 🟡 | `style.fill` / `style.stroke` ノード | STYLE-1 |
-| STYLE-3 | 🟡 | ダッシュ・キャップ・ジョイン | STYLE-1 |
-| STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2, MOD-1 |
+| STYLE-2 | ✅ | `style.fill` / `style.stroke` ノード（#417） | STYLE-1 |
+| STYLE-3 | ✅ | ダッシュ・キャップ・ジョイン（#417。`stroke_align` は `PSHADE-3` へ移動） | STYLE-1 |
+| STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2 ✅, MOD-1 |
 | STYLE-5 | ✅ | `field.apply` の属性自動作成 + Color 既定マスクを `rgb` へ（#403） | — |
 | STYLE-6 | ✅ | `field.ramp`（位置 → 色のランプ）（#408） | STYLE-5, VEC-1 |
 
@@ -405,14 +403,14 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | VEC-1 | ✅ | 二項合成の多相化（**Color / Vec4 を含む**）（#405） | MOD-2 |
-| VEC-2 | 🟡 | 変換ノード（length / component / compose / angle） | VEC-1 |
-| VEC-3 | ⬜ | ベクタ場（direction_to / curl_noise / gradient / radial） | VEC-2 |
+| VEC-2 | ✅ | 変換ノード（length / component / compose / angle）（#415） | VEC-1 |
+| VEC-3 | ✅ | ベクタ場（direction_to / curl_noise / gradient / radial）（#420） | VEC-2 |
 | VEC-7a | ✅ | `vector.construct.vec2` / `vec3` / `vec4`（値ドメイン。VEC-5 の移行が挿入する） | — |
 | VEC-5 | ✅ | Vec パラメータの正規化（`_x`/`_y` → `Channel2` / `Channel3`、`Channel3`→VEC3 ポート、`attribute.set` の型駆動 `value` と再型付け、format v5 マイグレーション） | VEC-7a |
 | VEC-6 | ✅ | `constant.vec2` / `vec3` / `vec4`（#402） | VEC-5 |
 | VEC-7b | ✅ | `vector.split` / `swizzle`（値ドメイン）（#412） | VEC-6, NETIF-1 |
 | VEC-8 | ✅ | `vector.length` / `normalize` / `dot` / `cross`（値ドメイン）（#412） | VEC-6 |
-| VEC-4 | ⬜ | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
+| VEC-4 | 🟡 | look-at・フロー場のゴールデン検証と文書 | VEC-3, VEC-5〜8 |
 
 **VEC-7a を VEC-5 より先に置いているのは循環を切るため**。VEC-5 の移行は
 「`center_x` と `center_y` の両方に別ノードが繋がっている旧ファイル」で
@@ -610,10 +608,10 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 | PARAM-1 | ✅ | `ParameterValue::Curve` と文字列からのマイグレーション（format v6） | — |
 | PARAM-2 | ✅ | カーブエディタのインライン展開（アコーディオン） | PARAM-1 |
 | PARAM-3 | ✅ | `ParameterValue::Ramp` と `field.ramp`（`STYLE-6` と同じ実装。#408 が `RampParam` と両方の完了条件を入れた） | PARAM-1, STYLE-6 |
-| PARAM-4 | 🟡 | グラデーションエディタのインライン展開 | PARAM-3 |
+| PARAM-4 | ✅ | グラデーションエディタのインライン展開（#414） | PARAM-3 |
 | PARAM-5 | ✅ | カーブエディタの表示範囲を Timeline と共有（`widgets/curve_view.rs`。Timeline 側のホイール縦ズームは `MED-APP-17` に残る） | PARAM-2 |
 | PARAM-7 | ✅ | `math.curve`（値ドメインの curve remap）（#404） | PARAM-2 |
-| PARAM-8 | ⬜ | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
+| PARAM-8 | 🟡 | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
 | PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
 
 `field.curve_remap` の制御点は `PARAM-1` で `ParameterValue::Curve` になり
@@ -1132,9 +1130,9 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | IMG-1 | ✅ | `SceneContent::Image` の退場（挙動不変。REQ-3D-001 本文の修正を含む）（#309） | — |
-| IMG-2 | 🟡 | `InstanceSource` への一般化（`ravel-core`、挙動不変） | — |
-| IMG-3 | ⬜ | `geometry.from_image` ノード（FrameBuffer → Geometry） | IMG-2 |
-| IMG-4 | ⬜ | `rasterize` のテクスチャ経路（CPU 参照） | IMG-2, IMG-3 |
+| IMG-2 | ✅ | `InstanceSource` への一般化（`ravel-core`、挙動不変）（#418） | — |
+| IMG-3 | ✅ | `geometry.from_image` ノード（FrameBuffer → Geometry）（#418） | IMG-2 |
+| IMG-4 | 🟡 | `rasterize` のテクスチャ経路（CPU 参照） | IMG-2, IMG-3 |
 | IMG-5 | ⬜ | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
 | IMG-6 | ⬜ | レジストリ / ロケール / 文書 | IMG-1〜5 |
 

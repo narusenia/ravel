@@ -738,6 +738,57 @@ impl ParamCurveEditorState {
             .any(|input| input.read(cx).is_dragging())
     }
 
+    /// End the drag when the pointer arrives with the button already released
+    /// (a button lost outside the window). This commits what the user saw,
+    /// just like an ordinary release inside the editor.
+    pub(crate) fn end_drag_without_pointer(&mut self, cx: &mut Context<Self>) {
+        if self.drag.is_none() {
+            return;
+        }
+        self.end_drag(cx);
+    }
+
+    fn drag_move(
+        &mut self,
+        pointer: ViewPoint,
+        snap: bool,
+        pressed_button: Option<MouseButton>,
+        cx: &mut Context<Self>,
+    ) {
+        if pressed_button != Some(MouseButton::Left) {
+            self.end_drag_without_pointer(cx);
+            return;
+        }
+        self.drag_to_with_modifiers(pointer, snap, cx);
+    }
+
+    /// End every gesture owned by this editor before its row is rebuilt.
+    /// Point fields are document edits; range fields are view-only and are
+    /// ended without making them count as an undo step.
+    pub(crate) fn end_gestures(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut committed = self.end_drag(cx);
+        for input in [&self.inputs.point_x, &self.inputs.point_y] {
+            if input.read(cx).is_dragging() {
+                committed |= input
+                    .update(cx, |state, cx| state.end_drag_and_report_commit(cx))
+                    .unwrap_or(false);
+            }
+        }
+        for input in [
+            &self.inputs.input_min,
+            &self.inputs.input_max,
+            &self.inputs.output_min,
+            &self.inputs.output_max,
+        ] {
+            if input.read(cx).is_dragging() {
+                input.update(cx, |state, cx| {
+                    state.end_drag_and_report_commit(cx);
+                });
+            }
+        }
+        committed
+    }
+
     /// Replace the displayed curve from the document. Ignored mid-gesture:
     /// the drag is the source of truth until it ends.
     pub fn set_curve(&mut self, curve: CurveParam) {
@@ -1599,7 +1650,7 @@ impl RenderOnce for ParamCurveEditor {
                     }
                     let pointer = state.local(e.event.position);
                     let snap = e.event.modifiers.shift;
-                    state.drag_to_with_modifiers(pointer, snap, cx);
+                    state.drag_move(pointer, snap, e.event.pressed_button, cx);
                 },
             ))
             .on_mouse_up(
@@ -2300,6 +2351,36 @@ mod tests {
         let (_, committed) = log.last().expect("committed");
         assert_eq!(committed.len(), 3);
         assert!(committed.points().iter().any(|p| (p.y - 0.7).abs() < 1e-4));
+    }
+
+    /// A move delivered after the window lost the left button ends the point
+    /// drag immediately. The visible edit is committed, and a later move
+    /// cannot continue changing the curve without a new press.
+    #[gpui::test]
+    fn a_point_drag_ends_and_commits_when_the_button_is_lost(cx: &mut TestAppContext) {
+        let (state, log) = state_with_log(cx, curve());
+        state.update(cx, |state, cx| {
+            state.pointer_down(ViewPoint::new(100.0, 50.0), 1, cx);
+            state.drag_to(ViewPoint::new(120.0, 30.0), cx);
+            state.drag_move(ViewPoint::new(140.0, 10.0), false, None, cx);
+            assert!(!state.is_dragging());
+        });
+        let after_button_loss = state.read_with(cx, |state, _| state.curve().clone());
+
+        state.update(cx, |state, cx| {
+            state.drag_to(ViewPoint::new(140.0, 10.0), cx);
+        });
+
+        assert_eq!(
+            state.read_with(cx, |state, _| state.curve().clone()),
+            after_button_loss,
+            "a move without a pressed left button cannot continue the old drag"
+        );
+        assert_eq!(
+            log.borrow().iter().filter(|(commit, _)| *commit).count(),
+            1,
+            "button loss commits the visible edit exactly once"
+        );
     }
 
     /// Switching a point to Bezier and dragging its handle changes the curve

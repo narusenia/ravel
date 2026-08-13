@@ -402,6 +402,19 @@ impl ParamRampEditorState {
         self.end_drag(cx);
     }
 
+    /// End every gesture owned by this editor before its row is rebuilt.
+    /// The band drag and the position field both edit the ramp document.
+    pub(crate) fn end_gestures(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut committed = self.end_drag(cx);
+        if self.position.read(cx).is_dragging() {
+            committed |= self
+                .position
+                .update(cx, |state, cx| state.end_drag_and_report_commit(cx))
+                .unwrap_or(false);
+        }
+        committed
+    }
+
     /// Move the selected stop from the toolbar's position field.
     ///
     /// A non-finite value is refused outright and the field rolled back:

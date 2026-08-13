@@ -881,6 +881,7 @@ fn row_resize_strip(
     let begin = editor.clone();
     let moving = editor.clone();
     let ending = editor.clone();
+    let ending_out = editor.clone();
     let drag_key = handle_key.clone();
     div()
         .id(SharedString::from(format!("row-resize-{key}")))
@@ -910,6 +911,12 @@ fn row_resize_strip(
             if dragged != &drag_key {
                 return;
             }
+            if event.event.pressed_button != Some(MouseButton::Left) {
+                moving
+                    .update(cx, |this, _cx| this.end_row_resize_without_pointer())
+                    .ok();
+                return;
+            }
             let y: f32 = event.event.position.y.into();
             moving.update(cx, |this, cx| this.row_resize_to(y, cx)).ok();
         })
@@ -917,6 +924,14 @@ fn row_resize_strip(
             MouseButton::Left,
             move |_event: &MouseUpEvent, _window, cx| {
                 ending.update(cx, |this, _cx| this.end_row_resize()).ok();
+            },
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            move |_event: &MouseUpEvent, _window, cx| {
+                ending_out
+                    .update(cx, |this, _cx| this.end_row_resize())
+                    .ok();
             },
         )
 }
@@ -1920,6 +1935,9 @@ pub struct PropertiesGpuiPanel {
     pending_color_commit: Option<(String, PropertyValue, Vec<NodeId>)>,
     color_commit_generation: u64,
     needs_rebuild: bool,
+    /// A shape refresh found that the row owning a live gesture disappeared.
+    /// The next render must end that gesture before dropping its bindings.
+    end_gesture_before_rebuild: bool,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -2104,6 +2122,7 @@ impl PropertiesGpuiPanel {
             // The target above may already name something, and nothing has
             // built its widgets yet.
             needs_rebuild: true,
+            end_gesture_before_rebuild: false,
             focus_handle,
             focus_subscriptions,
             selection_sub,
@@ -2126,6 +2145,9 @@ impl PropertiesGpuiPanel {
             || expression_shape(&self.expressions) != before_expressions
         {
             self.needs_rebuild = true;
+            if self.gesture_row_disappeared(cx) {
+                self.end_gesture_before_rebuild = true;
+            }
         }
     }
 
@@ -2147,6 +2169,7 @@ impl PropertiesGpuiPanel {
     /// belongs to — see [`Self::end_gestures`].
     fn gesture_in_flight(&self, cx: &App) -> bool {
         self.pending_color_commit.is_some()
+            || self.row_resize.is_some()
             || self
                 .scrubs
                 .iter()
@@ -2161,8 +2184,76 @@ impl PropertiesGpuiPanel {
                 .any(|(_, binding)| binding.state.read(cx).gesture_in_flight(cx))
     }
 
+    /// Whether a shape refresh removed the editable row that owns a gesture.
+    /// A same-row refresh (including an expression collapsing to a plain
+    /// numeric value) keeps the existing binding alive; a driven conversion
+    /// or a removed node does not, so waiting for release would wait forever.
+    fn gesture_row_disappeared(&self, cx: &App) -> bool {
+        let field_for = |key: &str| {
+            self.sections
+                .iter()
+                .flat_map(|section| &section.fields)
+                .find(|field| field.key() == key)
+        };
+
+        if self
+            .pending_color_commit
+            .as_ref()
+            .is_some_and(|(key, _, _)| !matches!(field_for(key), Some(PropertyField::Color { .. })))
+        {
+            return true;
+        }
+
+        if self.scrubs.iter().any(|(key, binding)| {
+            binding.state.read(cx).is_dragging()
+                && !Self::field_accepts_scrub(
+                    field_for(key)
+                        .or_else(|| key.split_once('#').and_then(|(key, _)| field_for(key))),
+                    key,
+                )
+        }) {
+            return true;
+        }
+
+        if self.curves.iter().any(|(key, binding)| {
+            binding.state.read(cx).gesture_in_flight(cx)
+                && !matches!(field_for(key), Some(PropertyField::Curve { .. }))
+        }) {
+            return true;
+        }
+
+        if self.ramps.iter().any(|(key, binding)| {
+            binding.state.read(cx).gesture_in_flight(cx)
+                && !matches!(field_for(key), Some(PropertyField::Ramp { .. }))
+        }) {
+            return true;
+        }
+
+        self.row_resize.as_ref().is_some_and(|resize| {
+            !matches!(field_for(&resize.key), Some(PropertyField::Curve { .. }))
+                && !matches!(field_for(&resize.key), Some(PropertyField::Ramp { .. }))
+        })
+    }
+
+    fn field_accepts_scrub(field: Option<&PropertyField>, scrub_key: &str) -> bool {
+        match field {
+            Some(PropertyField::Float { key, .. }) | Some(PropertyField::Int { key, .. }) => {
+                key == scrub_key
+            }
+            Some(PropertyField::Vector {
+                key, components, ..
+            }) => vector_component_keys(key, components.len())
+                .iter()
+                .any(|key| key == scrub_key),
+            _ => false,
+        }
+    }
+
     /// End every in-flight edit gesture, taking the undo step it owes, before
-    /// the panel stops pointing at the row the gesture belongs to.
+    /// the panel stops pointing at the row the gesture belongs to — either
+    /// because the target changes or because a shape refresh removes that
+    /// row. The latter cannot deliver a mouse-up, so `render` calls this
+    /// before rebuilding the bindings.
     ///
     /// A widget's `Commit` travels on a subscription, and GPUI delivers an
     /// emitted event *after* the callback that triggered it returns — by then
@@ -2174,12 +2265,12 @@ impl PropertiesGpuiPanel {
     /// recording the undo step, so committing the live document as it stands
     /// is the snapshot the routed commit would have produced.
     fn end_gestures(&mut self, cx: &mut Context<Self>) {
+        let mut ended = self.row_resize.take().is_some();
         // The debounced color commit has no widget event racing the switch, so
         // it routes normally — while `self.target` is still the old one.
         let flushed = self.pending_color_commit.is_some();
         self.flush_pending_color_commit(cx);
 
-        let mut ended = false;
         let mut moved = false;
         for (_, binding) in &self.scrubs {
             if binding.state.read(cx).is_dragging() {
@@ -2188,15 +2279,15 @@ impl PropertiesGpuiPanel {
             }
         }
         for (_, binding) in &self.curves {
-            if binding.state.read(cx).is_dragging() {
+            if binding.state.read(cx).gesture_in_flight(cx) {
                 ended = true;
-                moved |= binding.state.update(cx, |state, cx| state.end_drag(cx));
+                moved |= binding.state.update(cx, |state, cx| state.end_gestures(cx));
             }
         }
         for (_, binding) in &self.ramps {
-            if binding.state.read(cx).is_dragging() {
+            if binding.state.read(cx).gesture_in_flight(cx) {
                 ended = true;
-                moved |= binding.state.update(cx, |state, cx| state.end_drag(cx));
+                moved |= binding.state.update(cx, |state, cx| state.end_gestures(cx));
             }
         }
         if !ended {
@@ -2605,6 +2696,10 @@ impl PropertiesGpuiPanel {
 
     fn end_row_resize(&mut self) {
         self.row_resize = None;
+    }
+
+    fn end_row_resize_without_pointer(&mut self) {
+        self.end_row_resize();
     }
 
     /// Run `f` against the live node editor after this panel's current update.
@@ -4232,11 +4327,17 @@ impl Focusable for PropertiesGpuiPanel {
 
 impl Render for PropertiesGpuiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A rebuild requested while a gesture is in flight waits for the
-        // gesture to end: `needs_rebuild` stays set, and the commit that ends
-        // the gesture notifies again (see `gesture_in_flight`).
-        if self.needs_rebuild && !self.gesture_in_flight(cx) {
-            self.rebuild_widgets(window, cx);
+        // A same-row refresh requested during a gesture waits for its normal
+        // release. If the row itself disappeared, release cannot arrive, so
+        // end it while its old bindings still exist before rebuilding.
+        if self.needs_rebuild {
+            if self.end_gesture_before_rebuild {
+                self.end_gesture_before_rebuild = false;
+                self.end_gestures(cx);
+            }
+            if !self.gesture_in_flight(cx) {
+                self.rebuild_widgets(window, cx);
+            }
         }
         // Widget-state consumption, same as the rebuild above: propagate
         // refreshed section colors into retained picker widgets.
@@ -4678,7 +4779,7 @@ mod tests {
     use ravel_core::animation::channel::ParameterExpression;
     use ravel_core::composition::{AudioSource, BlendMode, Layer};
     use ravel_core::graph::{Graph, Node, ParameterValue};
-    use ravel_core::id::{DataTypeId, LayerId};
+    use ravel_core::id::{DataTypeId, EdgeId, LayerId, OutputPortIndex};
     use ravel_core::network as net;
     use ravel_core::param_curve::CurveParam;
     use ravel_ui::properties::layer::{PARENT_NONE, parse_parent_option};
@@ -4860,6 +4961,58 @@ mod tests {
             .unwrap();
 
         (properties, editor, project, path, node_id)
+    }
+
+    /// Apply a graph change that makes a scalar parameter driven without
+    /// adding a separate undo step. This models an external graph update
+    /// arriving while Properties still owns the old row's gesture.
+    fn document_with_driven_amount(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        cx: &mut TestAppContext,
+    ) -> Document {
+        let document = project.read_with(cx, |project, _| project.document().clone());
+        let graph = resolve_network(&document, path).expect("network").clone();
+        let graph = graph
+            .expose_param_port(node_id, "amount")
+            .expect("amount can be exposed");
+        let target_port = graph
+            .node(node_id)
+            .and_then(|node| node.param_port_index("amount"))
+            .expect("the exposed amount port");
+        let source_id = NodeId::next();
+        let graph = graph
+            .add_node(Node::new(source_id, "test").with_output("value", DataTypeId::SCALAR))
+            .expect("source node");
+        let graph = graph
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                node_id,
+                target_port,
+            )
+            .expect("source drives amount");
+        ravel_ui::document::replace_network(&document, path, graph).expect("replace network")
+    }
+
+    fn apply_document(project: &Entity<ProjectState>, document: Document, cx: &mut TestAppContext) {
+        project.update(cx, |project, cx| {
+            project.apply_document(document, InvalidationHint::Structural, cx);
+        });
+    }
+
+    fn document_without_node(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        node_id: NodeId,
+        cx: &mut TestAppContext,
+    ) -> Document {
+        let document = project.read_with(cx, |project, _| project.document().clone());
+        let graph = resolve_network(&document, path).expect("network").clone();
+        let graph = graph.remove_node(node_id).expect("node exists");
+        ravel_ui::document::replace_network(&document, path, graph).expect("replace network")
     }
 
     /// Selects the In node of the layer network `setup` builds and returns
@@ -5554,6 +5707,58 @@ mod tests {
         assert_eq!(
             node_parameter(&project, &path, node_id, "amount", cx),
             ParameterValue::Float(scrubbed)
+        );
+    }
+
+    /// If an external graph update drives the parameter while its scrub row
+    /// is still dragging, the editable row disappears. The panel must end the
+    /// old gesture before rebuilding and record exactly one gesture step.
+    #[gpui::test]
+    fn a_scrub_ends_before_rebuild_when_its_row_becomes_driven(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, expression_node());
+        let before = node_parameter(&project, &path, node_id, "amount", cx);
+        let scrub = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .scrubs
+                    .iter()
+                    .find(|(key, _)| key == "amount")
+                    .expect("amount scrub")
+                    .1
+                    .state
+                    .clone()
+            })
+            .unwrap();
+        scrub.update(cx, |state, cx| {
+            state.begin_drag(0.0);
+            state.drag_to(100.0, &gpui::Modifiers::default(), cx);
+        });
+        cx.run_until_parked();
+
+        apply_document(
+            &project,
+            document_with_driven_amount(&project, &path, node_id, cx),
+            cx,
+        );
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |panel, cx| {
+                assert!(!panel.gesture_in_flight(cx));
+                assert!(!panel.needs_rebuild, "the rebuild was not left pending");
+                assert!(
+                    panel.scrubs.iter().all(|(key, _)| key != "amount"),
+                    "the stale editable binding was dropped"
+                );
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "amount", cx),
+            before,
+            "the forced gesture end took exactly one undo step"
         );
     }
 
@@ -6462,6 +6667,47 @@ mod tests {
         assert!((curve(cx).evaluate(0.5) - 0.9).abs() < 1e-3);
     }
 
+    /// A curve row removed while its point is being dragged cannot deliver a
+    /// release. The panel ends the old editor before rebuilding and keeps one
+    /// undo step for the gesture.
+    #[gpui::test]
+    fn a_curve_drag_ends_before_rebuild_when_its_row_disappears(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_row_expanded("points", cx)
+            })
+            .unwrap();
+        let state = curve_editor_state(&window, "points", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), CURVE_TEST_SIZE)
+        });
+        let start = curve_widget_pos(&state, 0.5, 0.5, cx);
+        let end = curve_widget_pos(&state, 0.5, 0.8, cx);
+        state.update(cx, |state, cx| {
+            state.pointer_down(start, 1, cx);
+            state.drag_to(end, cx);
+        });
+        cx.run_until_parked();
+
+        apply_document(
+            &project,
+            document_without_node(&project, &path, node_id, cx),
+            cx,
+        );
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |panel, cx| {
+                assert!(!panel.gesture_in_flight(cx));
+                assert!(!panel.needs_rebuild);
+                assert!(panel.curves.is_empty(), "the removed editor was dropped");
+            })
+            .unwrap();
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(node_curve(&project, &path, node_id, "points", cx).is_some());
+    }
+
     /// The selected point's value fields write through to the Document with
     /// the usual gesture granularity: live changes apply, the commit records
     /// one undo step.
@@ -6749,6 +6995,26 @@ mod tests {
             .unwrap();
     }
 
+    /// Losing the left button during an inline-editor resize clears the
+    /// resize state, so later drag moves cannot keep changing its height.
+    #[gpui::test]
+    fn losing_the_button_ends_an_inline_editor_resize(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(cx, ramp_node());
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.begin_row_resize("stops".into(), 10.0);
+                panel.row_resize_to(50.0, cx);
+                let height = panel.row_height("stops");
+                assert!(panel.row_resize.is_some());
+
+                panel.end_row_resize_without_pointer();
+                assert!(panel.row_resize.is_none());
+                panel.row_resize_to(500.0, cx);
+                assert_eq!(panel.row_height("stops"), height);
+            })
+            .unwrap();
+    }
+
     /// Expanding and collapsing a ramp row is view state: it changes no value
     /// and pushes nothing onto the undo stack.
     #[gpui::test]
@@ -6872,6 +7138,40 @@ mod tests {
         );
         // Only a committed step can be redone.
         project.update(cx, |project, cx| assert!(project.redo(cx)));
+    }
+
+    /// A ramp row removed while a stop is being dragged cannot deliver a
+    /// release. The panel ends the old editor before rebuilding and keeps one
+    /// undo step for the gesture.
+    #[gpui::test]
+    fn a_ramp_drag_ends_before_rebuild_when_its_row_disappears(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, ramp_node());
+        let state = ramp_editor_state(&window, "stops", cx);
+        state.read_with(cx, |state, _| {
+            state.set_bounds_for_tests((0.0, 0.0), RAMP_TEST_SIZE)
+        });
+        state.update(cx, |state, cx| {
+            state.pointer_down(0.0, 1, cx);
+            state.drag_to(60.0, cx);
+        });
+        cx.run_until_parked();
+
+        apply_document(
+            &project,
+            document_without_node(&project, &path, node_id, cx),
+            cx,
+        );
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |panel, cx| {
+                assert!(!panel.gesture_in_flight(cx));
+                assert!(!panel.needs_rebuild);
+                assert!(panel.ramps.is_empty(), "the removed editor was dropped");
+            })
+            .unwrap();
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(node_ramp(&project, &path, node_id, "stops", cx).is_some());
     }
 
     /// Adding and removing a stop each reach the document as their own undo

@@ -206,6 +206,19 @@ impl ScrubInputState {
         Some(moved)
     }
 
+    /// End a drag and report whether it has a net value change that should
+    /// become a document commit. Unlike [`end_drag`], this distinguishes a
+    /// scrub that moved and returned to its start from one that still differs
+    /// when a parent editor has to end the field without receiving release.
+    pub(crate) fn end_drag_and_report_commit(&mut self, cx: &mut Context<Self>) -> Option<bool> {
+        if !self.dragging {
+            return None;
+        }
+        let start = self.drag_start_value;
+        let moved = self.end_drag(cx)?;
+        Some(moved && (self.value - start).abs() > f32::EPSILON)
+    }
+
     /// Ends a drag. A release without any drag movement counts as a click
     /// and — when `may_edit` (mouse-up inside the widget) — opens the text
     /// editor.

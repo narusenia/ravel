@@ -667,3 +667,83 @@ GUI で調整した設定がそのまま効くという期待も裏切る。
 
 **解決済み**: この PR。global → project の設定層を `ravel-cli` の予算へ接続し、
 検証関数を `ravel-project::settings` に集約した。
+
+---
+
+---
+
+> **解決済み**: PR #419（2026-08-13）。カーブ点のドラッグと行の高さドラッグが
+> `pressed_button` を検査し、ボタンを失ったらドラッグを**コミットして**終える
+> （見えている編集を捨てない）。`param_ramp_editor.rs` が `PARAM-4` で入れた形に
+> 揃えた。回帰テストは `a_point_drag_ends_and_commits_when_the_button_is_lost` と
+> `losing_the_button_ends_an_inline_editor_resize`。
+
+## MED-APP-34 | bug | パラメータエディタのドラッグが `pressed_button` を確認せず、行の高さドラッグも後始末が無い
+
+**該当**: `crates/ravel-app/src/widgets/param_curve_editor.rs:1571-1581`（カーブ点の
+`on_drag_move`）、`crates/ravel-app/src/panels/properties.rs:908-920`（行の高さドラッグ）
+
+`MED-APP-03`（NodeEditor）と同じ形の穴が Properties 側にも 2 箇所ある。
+
+1. **カーブ点のドラッグ**が `event.pressed_button` を確認しない。ウィンドウ外で
+   左ボタンを離してから戻ると、ボタンを押していない状態でドラッグが継続する。
+   `on_mouse_up_out` が付いているので窓外の離しは拾えるが、**離した後の移動
+   イベント**は素通しになる
+2. **行の高さドラッグ**（アコーディオンのリサイズ）に `pressed_button` の検査も
+   mouse-up-out 相当の後始末も無い。リサイズ中にボタンを失うと `row_resize` が
+   残留する
+
+`viewer.rs:1741-1747` と `timeline.rs:3464-3467` が同じ問題に対する防御を持って
+いるので、**形は既にリポジトリ内にある**。
+
+**ランプエディタ側は防御済み**（`param_ramp_editor.rs` の `on_drag_move` が
+`pressed_button != Some(Left)` で `end_drag_without_pointer` を呼ぶ）。
+カーブ側が同じ形に揃っていないだけ。
+
+**修正方針**: `event.pressed_button != Some(MouseButton::Left)` のとき、
+カーブは `end_drag`（ランプと同じく**コミットする** — 見えている編集を捨てない）、
+行の高さは `row_resize` をクリアする。
+
+**検証**: ボタン喪失後の移動イベントでドラッグが継続しないテスト
+（`param_ramp_editor` の同種テストに倣う）。
+
+
+---
+
+---
+
+> **解決済み**: PR #419（2026-08-13）。`gesture_row_disappeared` が「ジェスチャの
+> 対象行が消えた」を検出し、次の render で `end_gestures` を通してから再構築する。
+> **行が同じままの再構築は従来どおり延期**する。
+>
+> 3 種のうちガードが効くのは**スクラブ行だけ**で、それが正しい —
+> `ParameterValue::Curve` / `Ramp` は構造パラメータで `port_accepted_types` が
+> 空を返すため driven 化できず、カーブ行・ランプ行が消える経路はノード削除だけ
+> （既存経路が処理する）。回帰テストは
+> `a_scrub_ends_before_rebuild_when_its_row_becomes_driven` ほか 3 本。
+
+## MED-APP-35 | bug | ジェスチャ中に行が消えると Properties が来ない release を待ち続ける
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:2121-2129`, `:2148-2162`, `:4235-4239`
+
+`gesture_in_flight()` が真の間、外部由来の再構築は `needs_rebuild` を立てるだけで
+延期される（ジェスチャと再構築が喧嘩しないための設計）。ところが**ジェスチャの
+対象そのものが消える**経路がある:
+
+- ドラッグ中に別経路（他パネル、undo、ノード接続）でそのパラメータが
+  driven になる、または行ごと消える
+- 行がツリーから外れるので、**mouse-up / release イベントがもう届かない**
+- ウィジェットの `drag` は立ったまま → `gesture_in_flight()` が真のまま →
+  再構築が永久に延期される
+
+カーブ行・ランプ行・スクラブ行のすべてに同じ形で存在する（**ランプ固有では
+ない**。`PARAM-4` の実装で発見されたが、`PARAM-2` の時点で同じ構造）。
+
+**修正方針**: 再構築を延期するのではなく、**行が消えるときにそのジェスチャを
+強制終了して undo ステップを取る**（`end_gestures` を再構築の前に必ず通す）。
+`caf929a`「ジェスチャは始めた対象の上で確定する」と同じ規律を、対象が
+消える場合へ広げる形になる。
+
+**検証**: ドラッグ中に対象パラメータを driven 化し、(1) undo ステップが 1 つ
+記録される、(2) 再構築が延期されずに走る、を落とすテスト。
+

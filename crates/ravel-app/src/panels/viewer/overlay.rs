@@ -34,7 +34,7 @@ use ravel_core::composition::Document;
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
-use ravel_core::types::NodeData;
+use ravel_core::types::{NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
 
@@ -137,8 +137,22 @@ impl OverlayContext {
     }
 
     /// Read a target result without guessing when evaluation has not arrived.
-    pub fn eval_result(&self, target: &OverlayTarget) -> Option<&Arc<dyn NodeData>> {
-        self.results.values.get(&target.node)
+    ///
+    /// Evaluation is per node, not per port: a node with several outputs
+    /// produces one [`PortRecord`] holding all of them, so the target's
+    /// `output` selects from it. Handing the record over whole would give an
+    /// overlay asking for port 1 a value of an entirely different type.
+    ///
+    /// `None` whenever the answer is not knowable — no result, the node is
+    /// gone from the network, or the port carries no value — which is the
+    /// same "draw nothing" signal as a result that has not arrived.
+    pub fn eval_result(&self, target: &OverlayTarget) -> Option<Arc<dyn NodeData>> {
+        let value = self.results.values.get(&target.node)?;
+        let ports = ravel_ui::document::resolve_network(self.document.as_ref()?, &target.network)?
+            .node(target.node)?
+            .outputs
+            .len();
+        PortRecord::extract(value, ports, target.output)
     }
 }
 
@@ -1530,21 +1544,40 @@ mod tests {
         }
     }
 
+    /// A context whose document holds one layer network containing `node`,
+    /// plus the path naming that network.
+    fn ctx_with_network_node(node: Node) -> (OverlayContext, NetworkPath) {
+        let comp_id = CompId::next();
+        let layer_id = LayerId::next();
+        let graph = Graph::new().add_node(node).unwrap();
+        let comp = Composition::new(comp_id, "Comp", (1920, 1080), FrameRate::new(30, 1), 300)
+            .add_layer(Layer::new(layer_id, "Layer", graph).with_time(0, 0, 300));
+        let mut ctx = base_context();
+        ctx.document = Some(Document::default().with_composition(comp));
+        (ctx, NetworkPath::layer(comp_id, layer_id))
+    }
+
+    fn scalar(value: f32) -> Arc<dyn NodeData> {
+        Arc::new(ravel_core::types::Scalar(value))
+    }
+
     #[test]
     fn an_overlay_without_a_current_result_paints_nothing() {
+        let node = Node::new(NodeId::next(), "test.single")
+            .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
+        let node_id = node.id;
+        let (base, network) = ctx_with_network_node(node);
         let target = OverlayTarget {
-            network: NetworkPath::layer(CompId::new(1), LayerId::new(1)),
-            node: NodeId::new(1),
+            network,
+            node: node_id,
             output: OutputPortIndex(0),
         };
         let registry = OverlayRegistry::new(vec![Box::new(ResultProbe {
             target: target.clone(),
         })]);
-        let mut previous = base_context();
-        previous
-            .results
-            .values
-            .insert(target.node, Arc::new(ravel_core::types::Scalar(1.0)));
+
+        let mut previous = base;
+        previous.results = OverlayResults::new(HashMap::from([(node_id, scalar(1.0))]));
         let mut previous_painter = painter();
         registry.paint(&previous, &mut previous_painter);
         assert!(!previous_painter.finish().is_empty());
@@ -1553,13 +1586,65 @@ mod tests {
         // back has no entry at all. Another target's result is present to
         // pin that the lookup is by node id: any value will not do.
         let mut pending = previous;
-        pending.results = OverlayResults::new(HashMap::from([(
-            NodeId::new(2),
-            Arc::new(ravel_core::types::Scalar(1.0)) as Arc<dyn NodeData>,
-        )]));
+        pending.results = OverlayResults::new(HashMap::from([(NodeId::new(999_001), scalar(1.0))]));
         let mut painter = painter();
         registry.paint(&pending, &mut painter);
         assert!(painter.finish().is_empty());
+    }
+
+    /// Evaluation is per node, so a multi-output node's result arrives as one
+    /// `PortRecord`. The target's port has to select from it — handing the
+    /// record over whole gives the overlay a value of the wrong type.
+    #[test]
+    fn a_multi_output_target_reads_its_own_port() {
+        let node = Node::new(NodeId::next(), "test.multi")
+            .with_output("a", ravel_core::id::DataTypeId::GEOMETRY)
+            .with_output("b", ravel_core::id::DataTypeId::GEOMETRY);
+        let node_id = node.id;
+        let (mut ctx, network) = ctx_with_network_node(node);
+        let record: Arc<dyn NodeData> = Arc::new(ravel_core::types::PortRecord(vec![
+            scalar(10.0),
+            scalar(20.0),
+        ]));
+        ctx.results = OverlayResults::new(HashMap::from([(node_id, record)]));
+
+        let read = |port: u32| {
+            ctx.eval_result(&OverlayTarget {
+                network: network.clone(),
+                node: node_id,
+                output: OutputPortIndex(port),
+            })
+            .and_then(|value| {
+                value
+                    .downcast_ref::<ravel_core::types::Scalar>()
+                    .map(|s| s.0)
+            })
+        };
+
+        assert_eq!(read(0), Some(10.0));
+        assert_eq!(read(1), Some(20.0));
+        // A port the node does not declare has no value to draw from.
+        assert_eq!(read(2), None);
+    }
+
+    /// A node that is no longer in the network cannot have its port count
+    /// resolved, so there is nothing to draw — not a guess from the record.
+    #[test]
+    fn a_result_for_a_node_outside_the_network_is_not_readable() {
+        let node = Node::new(NodeId::next(), "test.single")
+            .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
+        let (mut ctx, network) = ctx_with_network_node(node);
+        let stranger = NodeId::new(999_002);
+        ctx.results = OverlayResults::new(HashMap::from([(stranger, scalar(1.0))]));
+
+        assert!(
+            ctx.eval_result(&OverlayTarget {
+                network,
+                node: stranger,
+                output: OutputPortIndex(0),
+            })
+            .is_none()
+        );
     }
 
     // -----------------------------------------------------------------------

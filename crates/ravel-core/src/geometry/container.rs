@@ -4,6 +4,7 @@
 //! The column-oriented `Geometry` container with four attribute domains.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -171,6 +172,151 @@ impl<'a> Positions<'a> {
     }
 }
 
+/// A frame buffer stamped by the instance domain, sized in composition units
+/// by its own pixel resolution.
+///
+/// The frame is held as an `Arc<dyn NodeData>` rather than a concrete
+/// `FrameBuffer` so a GPU-resident frame passes through without a readback:
+/// both representations are tagged [`DataTypeId::FRAME_BUFFER`] and only the
+/// crate that owns the GPU one can name it. The resolution is captured
+/// alongside, which is what lets `ravel-core` size the rectangle without
+/// knowing which representation it holds
+/// (`docs/implementation/image-instancing-plan.md`, decisions 5 and 6).
+#[derive(Clone)]
+pub struct InstanceImage {
+    frame: Arc<dyn NodeData>,
+    width: u32,
+    height: u32,
+}
+
+impl InstanceImage {
+    /// Stamp `frame` as a rectangle of `width` × `height` composition units.
+    ///
+    /// The size is the image's own pixel resolution, so the rectangle keeps
+    /// the source's aspect ratio by construction.
+    pub fn new(frame: Arc<dyn NodeData>, width: u32, height: u32) -> Result<Self, GeometryError> {
+        if frame.data_type_id() != DataTypeId::FRAME_BUFFER {
+            return Err(GeometryError::NotAFrameBuffer {
+                data_type: frame.data_type_id().raw(),
+            });
+        }
+        if width == 0 || height == 0 {
+            return Err(GeometryError::EmptyImage { width, height });
+        }
+        Ok(Self {
+            frame,
+            width,
+            height,
+        })
+    }
+
+    /// The frame buffer value, in whichever representation it arrived.
+    pub fn frame(&self) -> &Arc<dyn NodeData> {
+        &self.frame
+    }
+
+    /// Width of the source image in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height of the source image in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Aspect ratio (width / height) of the source image.
+    pub fn aspect_ratio(&self) -> f32 {
+        self.width as f32 / self.height as f32
+    }
+
+    /// The rectangle this image occupies in the instance's own space, centred
+    /// on the origin and sized from the image resolution.
+    pub fn rect(&self) -> Rect {
+        let (width, height) = (self.width as f32, self.height as f32);
+        Rect {
+            x: -width * 0.5,
+            y: -height * 0.5,
+            width,
+            height,
+        }
+    }
+}
+
+/// Hand-written because `Arc<dyn NodeData>` has no `Debug`; printing the
+/// resolution and the residency is what a reader of a `Geometry` dump wants
+/// anyway.
+impl fmt::Debug for InstanceImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InstanceImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("gpu_resident", &self.frame.is_gpu_resident())
+            .finish()
+    }
+}
+
+/// One source the instance domain can stamp: a geometry, or a frame buffer as
+/// a textured rectangle.
+///
+/// Every operation that only *moves* sources around — `geometry.merge`,
+/// point reordering, `geometry.blast` — handles this opaquely; only the
+/// rasterizer looks inside.
+#[derive(Clone, Debug)]
+pub enum InstanceSource {
+    Geometry(Arc<Geometry>),
+    Image(InstanceImage),
+}
+
+impl InstanceSource {
+    /// The geometry this source stamps, or `None` for an image.
+    pub fn geometry(&self) -> Option<&Arc<Geometry>> {
+        match self {
+            Self::Geometry(geometry) => Some(geometry),
+            Self::Image(_) => None,
+        }
+    }
+
+    /// The image this source stamps, or `None` for a geometry.
+    pub fn image(&self) -> Option<&InstanceImage> {
+        match self {
+            Self::Image(image) => Some(image),
+            Self::Geometry(_) => None,
+        }
+    }
+
+    /// Whether two sources are the *same* value, by pointer. What
+    /// `geometry.merge` compares when it decides whether two instance domains
+    /// agree on their sources, without looking at what the source holds.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Geometry(a), Self::Geometry(b)) => Arc::ptr_eq(a, b),
+            (Self::Image(a), Self::Image(b)) => {
+                Arc::ptr_eq(&a.frame, &b.frame) && a.width == b.width && a.height == b.height
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether this source holds GPU-resident memory, recursing through a
+    /// nested geometry's own sources.
+    fn is_gpu_resident(&self) -> bool {
+        match self {
+            Self::Geometry(geometry) => geometry.is_gpu_resident(),
+            Self::Image(image) => image.frame.is_gpu_resident(),
+        }
+    }
+
+    /// Approximate bytes this source holds.
+    fn byte_size(&self) -> u64 {
+        match self {
+            Self::Geometry(geometry) => geometry.byte_size(),
+            Self::Image(image) => image.frame.byte_size(),
+        }
+    }
+}
+
 /// The attribute domain an operation targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Domain {
@@ -194,8 +340,8 @@ pub struct Geometry {
     /// points must not deep-copy the index blob (REQ-CORE-004).
     indices: Arc<Vec<u32>>,
     instances: AttributeSet,
-    /// Source geometries stamped by the instance domain.
-    instance_sources: Vec<Arc<Geometry>>,
+    /// Sources stamped by the instance domain: geometries, images, or both.
+    instance_sources: Vec<InstanceSource>,
     detail: AttributeSet,
 }
 
@@ -419,22 +565,46 @@ impl Geometry {
         &mut self.instances
     }
 
-    pub fn instance_source(&self) -> Option<&Arc<Geometry>> {
-        self.instance_sources.first()
-    }
-
-    pub fn set_instance_source(&mut self, source: Option<Arc<Geometry>>) {
-        self.instance_sources = source.into_iter().collect();
-    }
-
-    /// Source geometries available to the instance domain.
-    pub fn instance_sources(&self) -> &[Arc<Geometry>] {
+    /// Every source available to the instance domain, images included, in the
+    /// order `source_index` addresses them.
+    pub fn sources(&self) -> &[InstanceSource] {
         &self.instance_sources
     }
 
-    /// Replaces the source geometries available to the instance domain.
-    pub fn set_instance_sources(&mut self, sources: Vec<Arc<Geometry>>) {
+    /// Replaces every source available to the instance domain.
+    pub fn set_sources(&mut self, sources: Vec<InstanceSource>) {
         self.instance_sources = sources;
+    }
+
+    /// The first source, when it is a geometry. The convenience the
+    /// geometry-only call sites keep using; [`Geometry::sources`] is the
+    /// accessor that sees images too.
+    pub fn instance_source(&self) -> Option<&Arc<Geometry>> {
+        self.instance_sources
+            .first()
+            .and_then(InstanceSource::geometry)
+    }
+
+    pub fn set_instance_source(&mut self, source: Option<Arc<Geometry>>) {
+        self.instance_sources = source.into_iter().map(InstanceSource::Geometry).collect();
+    }
+
+    /// The **geometry** sources available to the instance domain. Image
+    /// sources are not returned and the positions do not line up with
+    /// `source_index` once one is present — use [`Geometry::sources`] for
+    /// anything that indexes or must not lose a source.
+    pub fn instance_sources(&self) -> Vec<Arc<Geometry>> {
+        self.instance_sources
+            .iter()
+            .filter_map(InstanceSource::geometry)
+            .cloned()
+            .collect()
+    }
+
+    /// Replaces the source geometries available to the instance domain,
+    /// dropping any image source that was there.
+    pub fn set_instance_sources(&mut self, sources: Vec<Arc<Geometry>>) {
+        self.instance_sources = sources.into_iter().map(InstanceSource::Geometry).collect();
     }
 
     pub fn detail(&self) -> &AttributeSet {
@@ -540,22 +710,45 @@ impl NodeData for Geometry {
         self
     }
 
+    /// A geometry reports GPU residency when any source it stamps is
+    /// resident, because that is what the flag documents: the value is then
+    /// not wholly CPU-readable and cannot be persisted or inspected without a
+    /// readback through the owning crate.
+    ///
+    /// The cache tier is a single choice per value, so a geometry that mixes
+    /// host attribute columns with one resident image is charged to VRAM in
+    /// full — the same deliberate over-charge `Scene` makes, for the same
+    /// reason: evicting sooner is cheap, under-reporting VRAM breaks a render.
+    fn is_gpu_resident(&self) -> bool {
+        self.instance_sources
+            .iter()
+            .any(InstanceSource::is_gpu_resident)
+    }
+
     fn byte_size(&self) -> u64 {
         // Attribute columns dominate; the primitive and index blobs matter
         // for meshes. Instance sources recurse — a stamped geometry can be
         // arbitrarily large and is exactly what the budget must see.
-        size_of::<Self>() as u64
-            + self.points.byte_size()
-            + self.primitive_attrs.byte_size()
-            + self.instances.byte_size()
-            + self.detail.byte_size()
-            + (self.primitives.len() * size_of::<Primitive>()) as u64
-            + (self.indices.len() * size_of::<u32>()) as u64
-            + self
-                .instance_sources
-                .iter()
-                .map(|source| source.byte_size())
-                .sum::<u64>()
+        //
+        // The additions saturate. An image source holds an `Arc<dyn NodeData>`
+        // whose `byte_size` is whatever that implementation says, so a hostile
+        // or simply wrong estimate must not overflow the accounting: a debug
+        // panic or a release wrap would turn a bad estimate into a broken
+        // budget, and `u64::MAX` is a perfectly good answer for "more than the
+        // budget will ever hold".
+        let sources = self.instance_sources.iter().fold(0u64, |total, source| {
+            total.saturating_add(source.byte_size())
+        });
+        (size_of::<Self>() as u64)
+            .saturating_add(self.points.byte_size())
+            .saturating_add(self.primitive_attrs.byte_size())
+            .saturating_add(self.instances.byte_size())
+            .saturating_add(self.detail.byte_size())
+            .saturating_add(
+                (self.primitives.len() as u64).saturating_mul(size_of::<Primitive>() as u64),
+            )
+            .saturating_add((self.indices.len() as u64).saturating_mul(size_of::<u32>() as u64))
+            .saturating_add(sources)
     }
 }
 
@@ -579,9 +772,244 @@ impl GeometricData for Geometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FrameBuffer;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn two_point_geo() -> Geometry {
         Geometry::from_points(vec![Vec2(-1.0, 2.0), Vec2(3.0, -4.0)])
+    }
+
+    /// A CPU frame stamped as an image source.
+    fn image(width: u32, height: u32) -> InstanceImage {
+        InstanceImage::new(
+            Arc::new(FrameBuffer::new_zeroed(width, height)),
+            width,
+            height,
+        )
+        .expect("a zeroed frame buffer is a valid instance image")
+    }
+
+    /// A frame buffer stand-in whose residency, size, and pixel access are all
+    /// observable. `ravel-core` cannot name a GPU frame — only the crate that
+    /// owns one can — so the behaviours a real `GpuFrameBuffer` would bring
+    /// are declared here instead.
+    struct FakeFrame {
+        resident: bool,
+        bytes: u64,
+        /// How many times anything asked for the concrete value behind the
+        /// `dyn NodeData`. Reaching the pixels means downcasting first, so a
+        /// readback cannot happen without moving this.
+        reads: AtomicUsize,
+    }
+
+    impl FakeFrame {
+        fn new(resident: bool, bytes: u64) -> Arc<Self> {
+            Arc::new(Self {
+                resident,
+                bytes,
+                reads: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl NodeData for FakeFrame {
+        fn data_type_id(&self) -> DataTypeId {
+            DataTypeId::FRAME_BUFFER
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self
+        }
+
+        fn is_gpu_resident(&self) -> bool {
+            self.resident
+        }
+
+        fn byte_size(&self) -> u64 {
+            self.bytes
+        }
+    }
+
+    /// A geometry stamping one image source.
+    fn geometry_with_image(image: InstanceImage) -> Geometry {
+        let mut geo = Geometry::new();
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        geo.set_sources(vec![InstanceSource::Image(image)]);
+        geo
+    }
+
+    /// The rectangle an image source occupies is its pixel resolution, centred
+    /// on the origin, so its aspect ratio is the source's (decision 5 of
+    /// `docs/implementation/image-instancing-plan.md`).
+    #[test]
+    fn an_image_source_is_sized_by_its_pixel_resolution() {
+        let wide = image(1920, 1080);
+        assert_eq!(wide.width(), 1920);
+        assert_eq!(wide.height(), 1080);
+        let rect = wide.rect();
+        assert_eq!((rect.x, rect.y), (-960.0, -540.0));
+        assert_eq!((rect.width, rect.height), (1920.0, 1080.0));
+        assert!((wide.aspect_ratio() - 16.0 / 9.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn an_image_source_requires_a_frame_buffer_with_pixels() {
+        let geometry: Arc<dyn NodeData> = Arc::new(two_point_geo());
+        assert_eq!(
+            InstanceImage::new(geometry, 4, 4).unwrap_err(),
+            GeometryError::NotAFrameBuffer {
+                data_type: DataTypeId::GEOMETRY.raw()
+            }
+        );
+
+        for (width, height) in [(0, 4), (4, 0)] {
+            let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(width.max(1), height));
+            assert_eq!(
+                InstanceImage::new(frame, width, height).unwrap_err(),
+                GeometryError::EmptyImage { width, height }
+            );
+        }
+    }
+
+    /// The pixels a geometry stamps are part of what it costs, so the cache
+    /// budget has to see them.
+    #[test]
+    fn byte_size_counts_the_image_a_source_holds() {
+        let bare = Geometry::new().byte_size();
+        // 64 * 64 RgbaF32 pixels is 64 KiB of pixel bytes.
+        let with_image = geometry_with_image(image(64, 64)).byte_size();
+        assert!(
+            with_image >= bare + 64 * 64 * 16,
+            "an image source must account for its pixels: {with_image} vs {bare}"
+        );
+    }
+
+    /// A `byte_size` an implementation is free to invent must not overflow the
+    /// accounting into a debug panic or a release wrap.
+    ///
+    /// The second source is deliberately **small**: two `u64::MAX` sources
+    /// wrap back to `u64::MAX - 1` and then saturate in the outer sum, which
+    /// would let a wrapping fold pass. `MAX + 1024` wraps to `1023`, which
+    /// nothing downstream can turn back into a large number.
+    #[test]
+    fn byte_size_saturates_instead_of_overflowing() {
+        let source = |bytes| {
+            InstanceSource::Image(
+                InstanceImage::new(FakeFrame::new(false, bytes), 1, 1).expect("frame buffer"),
+            )
+        };
+        let mut geo = Geometry::new();
+        geo.set_sources(vec![source(u64::MAX), source(1024)]);
+        assert_eq!(geo.byte_size(), u64::MAX);
+
+        // And through a nesting level, which recurses into the same addition.
+        let mut outer = Geometry::new();
+        outer.set_instance_source(Some(Arc::new(geo)));
+        assert_eq!(outer.byte_size(), u64::MAX);
+    }
+
+    /// Residency follows the content: a geometry holding a resident frame is
+    /// not wholly CPU-readable, and that answer has to survive nesting.
+    #[test]
+    fn a_resident_image_makes_the_geometry_gpu_resident() {
+        let cpu = geometry_with_image(image(8, 8));
+        assert!(!cpu.is_gpu_resident(), "a CPU frame is not resident");
+        assert!(
+            !two_point_geo().is_gpu_resident(),
+            "attribute columns alone are not resident"
+        );
+
+        let resident = geometry_with_image(
+            InstanceImage::new(FakeFrame::new(true, 4096), 32, 32).expect("frame buffer"),
+        );
+        assert!(resident.is_gpu_resident());
+
+        // Through a nested instance source, and past a CPU sibling so the
+        // recursion cannot pass by finding the first source resident.
+        let mut nested = Geometry::new();
+        nested.set_instance_sources(vec![Arc::new(cpu), Arc::new(resident)]);
+        assert!(nested.is_gpu_resident(), "residency propagates upward");
+
+        let mut deeper = Geometry::new();
+        deeper.set_instance_source(Some(Arc::new(nested)));
+        assert!(deeper.is_gpu_resident(), "two levels up as well");
+    }
+
+    /// Holding a frame must not read it. A GPU-resident frame reaches its
+    /// texture only through a downcast, so a construction, a size query, or a
+    /// residency query that never downcasts cannot have read anything back.
+    #[test]
+    fn building_an_image_source_does_not_read_the_frame() {
+        let frame = FakeFrame::new(true, 4096);
+        let geo = geometry_with_image(
+            InstanceImage::new(Arc::clone(&frame) as Arc<dyn NodeData>, 32, 32)
+                .expect("frame buffer"),
+        );
+        assert!(geo.is_gpu_resident());
+        assert!(geo.byte_size() >= 4096);
+        let _ = geo.clone();
+        assert_eq!(
+            frame.reads.load(Ordering::Relaxed),
+            0,
+            "nothing may reach the pixels while the frame is only being held"
+        );
+    }
+
+    /// The geometry-only view is a convenience, not the source list: it skips
+    /// images, so anything that indexes sources has to read `sources()`.
+    #[test]
+    fn the_geometry_only_view_skips_image_sources() {
+        let stamped = Arc::new(two_point_geo());
+        let mut geo = Geometry::new();
+        geo.set_sources(vec![
+            InstanceSource::Image(image(4, 4)),
+            InstanceSource::Geometry(Arc::clone(&stamped)),
+        ]);
+
+        assert_eq!(geo.sources().len(), 2);
+        assert!(geo.sources()[0].image().is_some());
+        assert!(geo.sources()[0].geometry().is_none());
+
+        let geometries = geo.instance_sources();
+        assert_eq!(geometries.len(), 1);
+        assert!(Arc::ptr_eq(&geometries[0], &stamped));
+        assert!(
+            geo.instance_source().is_none(),
+            "the first source is an image, so the singular geometry view is empty"
+        );
+    }
+
+    /// `geometry.merge` compares sources without looking inside them, so the
+    /// comparison has to distinguish two distinct images as well as two
+    /// distinct geometries.
+    #[test]
+    fn sources_compare_by_identity_across_both_kinds() {
+        let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(4, 4));
+        let shared = InstanceSource::Image(
+            InstanceImage::new(Arc::clone(&frame), 4, 4).expect("frame buffer"),
+        );
+        assert!(shared.ptr_eq(&shared.clone()));
+        assert!(
+            !shared.ptr_eq(&InstanceSource::Image(image(4, 4))),
+            "a different frame is a different source"
+        );
+
+        let geometry = InstanceSource::Geometry(Arc::new(two_point_geo()));
+        assert!(geometry.ptr_eq(&geometry.clone()));
+        assert!(!geometry.ptr_eq(&shared), "kinds never match each other");
+    }
+
+    /// `Geometry` derives `Debug`, so the hand-written image formatter has to
+    /// stay printable — and it prints the residency rather than the pixels.
+    #[test]
+    fn an_image_source_prints_its_resolution_and_residency() {
+        let text = format!("{:?}", geometry_with_image(image(16, 9)));
+        assert!(text.contains("width: 16"), "{text}");
+        assert!(text.contains("height: 9"), "{text}");
+        assert!(text.contains("gpu_resident: false"), "{text}");
     }
 
     #[test]

@@ -12,7 +12,9 @@ pub mod rotation;
 pub mod triangulate;
 
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
-pub use container::{Domain, Geometry, GeometrySummary, Positions, Primitive};
+pub use container::{
+    Domain, Geometry, GeometrySummary, InstanceImage, InstanceSource, Positions, Primitive,
+};
 pub use field::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
     ComposeField, ConstantField, CurveRemapField, ExpressionField, FalloffField, FalloffShape,

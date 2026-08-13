@@ -366,6 +366,7 @@ impl NodeData for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::{InstanceImage, InstanceSource};
     use crate::types::Vec2;
 
     fn geometry() -> Arc<Geometry> {
@@ -697,6 +698,98 @@ mod tests {
                 Transform3D::IDENTITY,
             ));
         assert!(!scene.is_gpu_resident());
+    }
+
+    /// A geometry that stamps a GPU-resident image makes every scene holding
+    /// it resident, nesting included.
+    ///
+    /// This is what keeps [`Scene::holds_gpu_resident`]'s recursion honest:
+    /// before a geometry could carry a frame there was no reachable value that
+    /// made it answer `true`, so flattening it to a constant `false` would
+    /// have gone unnoticed.
+    #[test]
+    fn a_resident_image_in_a_geometry_makes_the_whole_scene_gpu_resident() {
+        struct ResidentFrame;
+        impl NodeData for ResidentFrame {
+            fn data_type_id(&self) -> DataTypeId {
+                DataTypeId::FRAME_BUFFER
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn is_gpu_resident(&self) -> bool {
+                true
+            }
+            fn byte_size(&self) -> u64 {
+                4096
+            }
+        }
+
+        let mut carrier = Geometry::new();
+        carrier.set_sources(vec![InstanceSource::Image(
+            InstanceImage::new(Arc::new(ResidentFrame), 32, 32).expect("frame buffer"),
+        )]);
+        let carrier = Arc::new(carrier);
+
+        let scene = Scene::new().with_object(SceneObject::geometry(
+            Arc::clone(&carrier),
+            Transform3D::IDENTITY,
+        ));
+        assert!(scene.is_gpu_resident());
+
+        let nested =
+            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
+        assert!(nested.is_gpu_resident(), "residency propagates upward");
+
+        // A scene of the same shape without the image stays CPU-resident, so
+        // the assertions above are not passing on the nesting alone.
+        let plain = Scene::new().with_object(SceneObject::scene(
+            Arc::new(
+                Scene::new().with_object(SceneObject::geometry(geometry(), Transform3D::IDENTITY)),
+            ),
+            Transform3D::IDENTITY,
+        ));
+        assert!(!plain.is_gpu_resident());
+    }
+
+    /// A `byte_size` an image source is free to invent must not overflow the
+    /// scene's accounting either.
+    #[test]
+    fn byte_size_saturates_through_a_geometry_that_holds_a_huge_image() {
+        struct HugeFrame;
+        impl NodeData for HugeFrame {
+            fn data_type_id(&self) -> DataTypeId {
+                DataTypeId::FRAME_BUFFER
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn byte_size(&self) -> u64 {
+                u64::MAX
+            }
+        }
+
+        let mut carrier = Geometry::new();
+        carrier.set_sources(vec![InstanceSource::Image(
+            InstanceImage::new(Arc::new(HugeFrame), 1, 1).expect("frame buffer"),
+        )]);
+        // The second object is deliberately small: two `u64::MAX` objects wrap
+        // back to `u64::MAX - 1` and then saturate in the outer sum, which
+        // would let a wrapping fold pass unnoticed.
+        let scene = Scene::new()
+            .with_object(SceneObject::geometry(
+                Arc::new(carrier),
+                Transform3D::IDENTITY,
+            ))
+            .with_object(SceneObject::geometry(
+                geometry_of(64),
+                Transform3D::IDENTITY,
+            ));
+        assert_eq!(scene.byte_size(), u64::MAX);
+
+        let nested =
+            Scene::new().with_object(SceneObject::scene(Arc::new(scene), Transform3D::IDENTITY));
+        assert_eq!(nested.byte_size(), u64::MAX);
     }
 
     #[test]

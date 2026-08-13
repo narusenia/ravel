@@ -39,10 +39,9 @@ fn scene_content(value: &Arc<dyn NodeData>) -> anyhow::Result<SceneContent> {
     }
     if value.data_type_id() == DataTypeId::FRAME_BUFFER {
         bail!(
-            "scene.add: a frame buffer cannot be placed in a scene directly. An image reaches a \
-             scene as a geometry that carries it, through a `geometry.from_image` node — which \
-             this build does not have yet, so there is no route for a frame buffer into a scene \
-             for now"
+            "scene.add: a frame buffer cannot be placed in a scene directly. Insert a \
+             `geometry.from_image` node, which wraps it as a geometry that carries it, and \
+             connect that to the object port instead"
         );
     }
     bail!(
@@ -398,8 +397,13 @@ mod tests {
             "the error must name the conversion node: {message}"
         );
         assert!(
-            message.contains("does not have yet"),
-            "the error must say the conversion node is missing in this build: {message}"
+            message.contains("Insert a"),
+            "the error must tell the user to insert the conversion node: {message}"
+        );
+        assert!(
+            !message.contains("does not have yet"),
+            "the conversion node exists now, so the message must not still call it missing: \
+             {message}"
         );
     }
 

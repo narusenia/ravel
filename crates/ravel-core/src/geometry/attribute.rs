@@ -104,6 +104,24 @@ pub enum GeometryError {
         vertex_count: usize,
     },
 
+    /// The value handed to
+    /// [`InstanceImage::new`](super::InstanceImage::new) is not a frame
+    /// buffer.
+    #[error("an instance image must be a frame buffer, but the value is data type {data_type}")]
+    NotAFrameBuffer {
+        /// Raw [`DataTypeId`](crate::id::DataTypeId) of the offending value.
+        data_type: u32,
+    },
+
+    /// A frame buffer with no pixels has no rectangle to be stamped on.
+    #[error("an instance image must have a non-zero resolution, but this one is {width}x{height}")]
+    EmptyImage {
+        /// Declared width.
+        width: u32,
+        /// Declared height.
+        height: u32,
+    },
+
     /// More vertices than a triangle index can address. Mesh indices are
     /// `u32` ([`Geometry::indices`](super::Geometry::indices)), so a polygon
     /// past that bound has no representable triangulation.

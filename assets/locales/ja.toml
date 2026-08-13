@@ -884,6 +884,10 @@ group = "グループモードが読む Bool 型のポイント属性名。"
 interpolation = "直線か、隣接点から推定したベジェ接線か。"
 closed = "パスを閉じる。"
 
+[node."geometry.from_image"]
+label = "画像をジオメトリへ"
+description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。矩形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"
+
 [node."scene.add"]
 label = "シーン追加"
 description = "ジオメトリ・別のシーンを変換付きで 3D シーンに配置する。"

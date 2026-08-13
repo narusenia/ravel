@@ -407,7 +407,7 @@ fn reordered(geometry: &Geometry, order: &[usize]) -> Result<Geometry, GeometryO
             .instances_mut()
             .insert(name.as_str(), column.as_ref().clone())?;
     }
-    result.set_instance_sources(geometry.instance_sources().to_vec());
+    result.set_sources(geometry.sources().to_vec());
     for (name, column) in geometry.detail().iter() {
         result
             .detail_mut()

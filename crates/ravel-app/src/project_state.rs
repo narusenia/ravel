@@ -21,6 +21,7 @@
 
 use crate::app_settings;
 use crate::panels::ViewerImage;
+use crate::panels::viewer::overlay::{OverlayContext, OverlayRegistry, OverlayResults};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
@@ -378,6 +379,7 @@ pub(crate) struct ViewerUpdate {
     frame: u64,
     timings: Vec<(NodeId, Duration)>,
     output: ViewerOutput,
+    overlay_results: Vec<(NodeId, Arc<dyn ravel_core::types::NodeData>)>,
 }
 
 /// Whether an evaluation result is an image the viewer would have drawn had
@@ -397,7 +399,8 @@ impl ViewerUpdate {
     /// are not the viewer's business. A result-less update cannot arise from
     /// a request this crate builds, so it blanks rather than erroring.
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
-        let output = match update.results.into_iter().next() {
+        let mut results = update.results.into_iter();
+        let output = match results.next() {
             // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
             // what arrives is display bytes rather than a linear buffer.
             Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
@@ -425,11 +428,15 @@ impl ViewerUpdate {
             Some((_, Err(err))) => ViewerOutput::Failed(err.to_string()),
             None => ViewerOutput::NotAFrame,
         };
+        let overlay_results = results
+            .filter_map(|(node, result)| result.ok().map(|value| (node, value)))
+            .collect();
         Self {
             generation: update.generation,
             frame: update.frame,
             timings: update.timings,
             output,
+            overlay_results,
         }
     }
 }
@@ -1422,77 +1429,135 @@ impl ProjectState {
             .copied()
             .unwrap_or_default();
 
-        let request = match self.build_viewer_request(position.frame, cx) {
-            Ok(Some(request)) => request,
-            Ok(None) => {
-                // Nothing evaluable (no active composition, or an empty
-                // one): blank the viewer and outdate in-flight results (the
-                // fence keeps an older in-flight result from overwriting the
-                // blank).
-                if let Some(eval) = self.eval.as_mut() {
-                    self.published_generation = eval.cancel_pending();
+        let request =
+            match self.build_viewer_request(position.frame, &OverlayRegistry::builtin(), cx) {
+                Ok(Some(request)) => request,
+                Ok(None) => {
+                    // Nothing evaluable (no active composition, or an empty
+                    // one): blank the viewer and outdate in-flight results (the
+                    // fence keeps an older in-flight result from overwriting the
+                    // blank).
+                    if let Some(eval) = self.eval.as_mut() {
+                        self.published_generation = eval.cancel_pending();
+                    }
+                    let frame = self.viewer_blank(cx);
+                    cx.set_global(frame);
+                    // No evaluation follows, so nothing would replace the overlay
+                    // snapshot: drop it here or the overlays keep drawing over a
+                    // blank viewer.
+                    cx.set_global(OverlayResults::default());
+                    // Nothing will be evaluated, so nothing will republish the
+                    // band: it has to be cleared on the way out or an emptied
+                    // composition keeps the band of the one before it forever.
+                    self.clear_cache_band(cx);
+                    return;
                 }
-                let frame = self.viewer_blank(cx);
-                cx.set_global(frame);
-                // Nothing will be evaluated, so nothing will republish the
-                // band: it has to be cleared on the way out or an emptied
-                // composition keeps the band of the one before it forever.
-                self.clear_cache_band(cx);
-                return;
-            }
-            Err(err) => {
-                // The composition no longer compiles: surface the error in
-                // the viewer — a silent blank would read as "empty", not
-                // "broken".
-                tracing::error!(%err, "active composition compilation failed");
-                if let Some(eval) = self.eval.as_mut() {
-                    self.published_generation = eval.cancel_pending();
+                Err(err) => {
+                    // The composition no longer compiles: surface the error in
+                    // the viewer — a silent blank would read as "empty", not
+                    // "broken".
+                    tracing::error!(%err, "active composition compilation failed");
+                    if let Some(eval) = self.eval.as_mut() {
+                        self.published_generation = eval.cancel_pending();
+                    }
+                    let frame = self.viewer_error(err.to_string().into(), cx);
+                    cx.set_global(frame);
+                    // Same reason as the blank path above: no evaluation follows
+                    // a composition that does not compile.
+                    cx.set_global(OverlayResults::default());
+                    self.clear_cache_band(cx);
+                    return;
                 }
-                let frame = self.viewer_error(err.to_string().into(), cx);
-                cx.set_global(frame);
-                // Same reason as the blank path above: no evaluation follows
-                // a composition that does not compile.
-                self.clear_cache_band(cx);
-                return;
-            }
-        };
+            };
         let hint = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
         if let Some(eval) = self.eval.as_mut() {
             eval.request(EvalRequest { hint, ..request });
         } else {
-            // No worker (tests): the hint stays pending.
+            // No worker (tests): the hint stays pending, and no result will
+            // arrive to replace the snapshot.
             self.pending_hint = hint;
+            cx.set_global(OverlayResults::default());
         }
     }
 
     /// Assemble the active-composition evaluation request, without the hint
     /// (filled by the caller). `Ok(None)` when nothing is evaluable,
     /// `Err` when the composition fails to compile.
+    ///
+    /// `overlays` is a parameter rather than a call to
+    /// [`OverlayRegistry::builtin`] so a test can supply overlays that
+    /// actually declare an [`OverlayTarget`] — no built-in one does yet — and
+    /// still go through this, the production assembly path.
     fn build_viewer_request(
         &mut self,
         frame: u64,
+        overlays: &OverlayRegistry,
         cx: &App,
     ) -> Result<Option<EvalRequest>, CompileError> {
         let document = Arc::new(self.store.document().clone());
-        let Some(comp) = crate::panels::active_composition_in(&document, cx) else {
+        let Some(comp) = crate::panels::active_composition_in(&document, cx).cloned() else {
             return Ok(None);
         };
-        let ctx = self.viewer_eval_context(comp, frame);
+        let ctx = self.viewer_eval_context(&comp, frame);
+        let overlay_context = self.overlay_context_for_request(&document, &comp, frame, cx);
         let Some(compiled) = self.compiled_root(cx)? else {
             return Ok(None);
         };
+        let graph = compiled.graph.clone();
+        let output = compiled.output;
+        let mut nodes = vec![output];
+        append_overlay_targets(&mut nodes, &graph, comp.id, overlays, &overlay_context);
         Ok(Some(EvalRequest {
             comp: Some(comp.id),
-            graph: compiled.graph.clone(),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
             // reads that position, and inspection targets are appended after
             // it rather than reordering the viewer's.
-            nodes: vec![compiled.output],
+            graph,
+            nodes,
             path: Vec::new(),
             ctx,
             document: Some(document),
             hint: InvalidationHint::None,
         }))
+    }
+
+    /// The world an overlay is allowed to see while its evaluation targets
+    /// are collected.
+    ///
+    /// Only the fields `is_active` / `eval_target` can legitimately depend on
+    /// are filled: theme colors, the panel's grid and safe-area toggles and
+    /// the last error are presentation, and this runs with no window and no
+    /// installed theme. `results` is deliberately the *current* snapshot, so
+    /// an overlay that decides its target from what it already has keeps
+    /// asking for the same one.
+    fn overlay_context_for_request(
+        &self,
+        document: &Document,
+        comp: &Composition,
+        frame: u64,
+        cx: &App,
+    ) -> OverlayContext {
+        OverlayContext {
+            resolution: Some(comp.resolution),
+            playback: cx
+                .try_global::<crate::panels::PlaybackPosition>()
+                .copied()
+                .or(Some(crate::panels::PlaybackPosition {
+                    frame,
+                    fps: comp.frame_rate,
+                })),
+            document: Some(document.clone()),
+            selection: cx.try_global::<crate::panels::CanvasSelection>().cloned(),
+            layer_selection: crate::panels::layer_selection(cx),
+            tool: cx
+                .try_global::<crate::panels::ToolState>()
+                .map(|state| state.active),
+            results: cx
+                .try_global::<OverlayResults>()
+                .cloned()
+                .unwrap_or_default(),
+            ..OverlayContext::default()
+        }
     }
 
     /// The evaluation context the viewer asks for, at `frame`.
@@ -1632,6 +1697,14 @@ impl ProjectState {
             );
             return;
         }
+        // Published with the frame this update carries, and only past the
+        // generation fence above, so the values an overlay reads always
+        // belong to the image the viewer is showing. Replacing the whole map
+        // is what makes a target that failed or was dropped read as absent
+        // instead of keeping the value it had two frames ago.
+        cx.set_global(OverlayResults::new(
+            update.overlay_results.into_iter().collect(),
+        ));
         // Nothing here touches pixels: the worker already produced the
         // display image (HIGH-08), so publishing is a move.
         let frame = match update.output {
@@ -1729,6 +1802,35 @@ impl ProjectState {
 impl EventEmitter<ProjectEvent> for ProjectState {}
 impl EventEmitter<DocumentReplaced> for ProjectState {}
 
+/// Append the active overlays' evaluation targets to a viewer request's
+/// target list.
+///
+/// [`OverlayRegistry::eval_targets`] has already folded duplicates, so two
+/// overlays asking for the same node cost one entry in `nodes` and therefore
+/// one evaluation.
+///
+/// One `EvalRequest` carries exactly one `graph` and one ownership `path`, so
+/// a target only rides along when it names a node of *this* graph — the
+/// composition's compiled shell chain, evaluated at the root scope. A target
+/// pointing inside a layer network is skipped rather than translated: its
+/// `NodeId` is drawn from a different id space and could collide with a
+/// synthetic shell node, which would silently paint an unrelated node's
+/// result. Skipping is safe by construction — no result arrives, so
+/// `OverlayContext::eval_result` stays `None` and the overlay draws nothing.
+fn append_overlay_targets(
+    nodes: &mut Vec<NodeId>,
+    graph: &Graph,
+    comp: CompId,
+    overlays: &OverlayRegistry,
+    context: &OverlayContext,
+) {
+    for target in overlays.eval_targets(context) {
+        if target.network.comp == comp && graph.node(target.node).is_some() {
+            nodes.push(target.node);
+        }
+    }
+}
+
 /// A readable, collision-free asset id derived from the file name.
 fn unique_asset_id(doc: &Document, path: &Path) -> String {
     let base = path
@@ -1752,6 +1854,7 @@ fn unique_asset_id(doc: &Document, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::viewer::overlay::{OverlayId, OverlayTarget, ViewerOverlay};
     use gpui::{AppContext as _, TestAppContext};
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
@@ -1759,9 +1862,32 @@ mod tests {
     use ravel_core::composition::{BlendMode, Layer};
     use ravel_core::eval::ProcessorRegistry as _;
     use ravel_core::graph::{Node, ParameterValue};
-    use ravel_core::id::{DataTypeId, LayerId};
+    use ravel_core::id::{DataTypeId, LayerId, OutputPortIndex};
     use ravel_core::network as net;
     use ravel_core::types::FrameBuffer;
+    use ravel_ui::document::NetworkPath;
+
+    struct TargetOverlay {
+        target: OverlayTarget,
+    }
+
+    impl ViewerOverlay for TargetOverlay {
+        fn id(&self) -> OverlayId {
+            OverlayId("test.request-target")
+        }
+
+        fn priority(&self) -> i32 {
+            0
+        }
+
+        fn is_active(&self, _ctx: &OverlayContext) -> bool {
+            true
+        }
+
+        fn eval_target(&self, _ctx: &OverlayContext) -> Option<OverlayTarget> {
+            Some(self.target.clone())
+        }
+    }
 
     /// The default is what Ravel has always launched with — one composition,
     /// which is also the root — and turning the setting off launches with none
@@ -2098,7 +2224,10 @@ mod tests {
                     .unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
             let comp_resolution = project.active_composition(cx).unwrap().resolution;
-            let request = project.build_viewer_request(0, cx).unwrap().unwrap();
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                .unwrap()
+                .unwrap();
             (comp_resolution, request.ctx)
         });
 
@@ -2107,6 +2236,133 @@ mod tests {
             ViewerResolution::default().apply(comp_resolution)
         );
         assert_eq!(ctx.comp_resolution, comp_resolution);
+    }
+
+    /// A composition with one content layer, plus the compiled shell chain's
+    /// output node and one other node of that same graph — the only kind of
+    /// node a viewer request can carry as an inspection target.
+    fn project_with_a_shell_target(
+        project: &mut ProjectState,
+        cx: &mut Context<ProjectState>,
+    ) -> (Composition, NodeId, NodeId) {
+        let comp_id = project.document().root_comp.unwrap();
+        let document =
+            ravel_ui::document::add_layer(project.document(), comp_id, content_layer()).unwrap();
+        project.commit_document(document, InvalidationHint::Structural, cx);
+        let comp = project.active_composition(cx).unwrap().clone();
+        let compiled = project.compiled_root(cx).unwrap().unwrap();
+        let target = compiled
+            .graph
+            .nodes()
+            .find(|node| node.id != compiled.output)
+            .expect("the compiled shell chain has more than its output node")
+            .id;
+        (comp, compiled.output, target)
+    }
+
+    fn shell_target(comp: &Composition, node: NodeId) -> OverlayTarget {
+        OverlayTarget {
+            network: NetworkPath::layer(comp.id, comp.layers.front().unwrap().id),
+            node,
+            output: OutputPortIndex(0),
+        }
+    }
+
+    /// Completion criterion: no active overlay declares a target, so the
+    /// request carries the composition output and nothing else.
+    #[gpui::test]
+    fn viewer_request_without_active_overlay_targets_keeps_only_the_composition_output(
+        cx: &mut TestAppContext,
+    ) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (_, output, _) = project_with_a_shell_target(project, cx);
+            // The production registry: none of its overlays declares a target.
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.nodes, vec![output]);
+        });
+    }
+
+    /// Completion criterion: two overlays wanting the same node cost one
+    /// entry in `EvalRequest::nodes`, hence one evaluation — asserted on the
+    /// request the production path builds, not on `eval_targets` alone.
+    #[gpui::test]
+    fn duplicate_overlay_targets_are_folded_in_the_eval_request(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, target_node) = project_with_a_shell_target(project, cx);
+            let target = shell_target(&comp, target_node);
+            let overlays = OverlayRegistry::new(vec![
+                Box::new(TargetOverlay {
+                    target: target.clone(),
+                }),
+                Box::new(TargetOverlay { target }),
+            ]);
+
+            let request = project
+                .build_viewer_request(0, &overlays, cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.nodes, vec![output, target_node]);
+        });
+    }
+
+    /// One request carries one graph, so a target that names a node this
+    /// graph does not contain — anything inside a layer network — is skipped
+    /// instead of being evaluated under the viewer's scope.
+    #[gpui::test]
+    fn overlay_targets_outside_the_requested_graph_are_not_added(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, target_node) = project_with_a_shell_target(project, cx);
+            // A layer network's user nodes are small sequential ids and are
+            // never part of the compiled shell graph.
+            let inside_the_layer_network = NodeId::new(1);
+            assert_ne!(inside_the_layer_network, target_node);
+            let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay {
+                target: shell_target(&comp, inside_the_layer_network),
+            })]);
+
+            let request = project
+                .build_viewer_request(0, &overlays, cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.nodes, vec![output]);
+        });
+    }
+
+    /// A `NodeId` only means something together with the network it came
+    /// from: a target naming another composition must not be evaluated here
+    /// even when the id happens to exist in this graph.
+    #[gpui::test]
+    fn overlay_targets_from_another_composition_are_not_added(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, target_node) = project_with_a_shell_target(project, cx);
+            let mut target = shell_target(&comp, target_node);
+            target.network.comp = CompId::new(comp.id.raw() + 1);
+            let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay { target })]);
+
+            let request = project
+                .build_viewer_request(0, &overlays, cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.nodes, vec![output]);
+        });
     }
 
     /// The viewer is the interactive path, so it asks for `Preview` — and it
@@ -2128,7 +2384,11 @@ mod tests {
 
             for factor in ViewerResolution::ALL {
                 project.set_viewer_resolution(factor, cx);
-                let ctx = project.build_viewer_request(0, cx).unwrap().unwrap().ctx;
+                let ctx = project
+                    .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                    .unwrap()
+                    .unwrap()
+                    .ctx;
                 assert_eq!(ctx.quality, Quality::Preview, "{factor:?}");
             }
         });
@@ -2159,7 +2419,11 @@ mod tests {
                 project.set_viewer_resolution(factor, cx);
                 assert_eq!(project.viewer_resolution(), factor);
 
-                let ctx = project.build_viewer_request(0, cx).unwrap().unwrap().ctx;
+                let ctx = project
+                    .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                    .unwrap()
+                    .unwrap()
+                    .ctx;
                 assert_eq!(ctx.resolution, factor.apply(comp_resolution), "{factor:?}");
                 assert_eq!(ctx.comp_resolution, comp_resolution, "{factor:?}");
             }
@@ -2168,7 +2432,11 @@ mod tests {
             // long-edge cap this replaced made that unreachable for any
             // composition larger than the cap.
             project.set_viewer_resolution(ViewerResolution::Full, cx);
-            let ctx = project.build_viewer_request(0, cx).unwrap().unwrap().ctx;
+            let ctx = project
+                .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                .unwrap()
+                .unwrap()
+                .ctx;
             assert_eq!(ctx.resolution, comp_resolution);
         });
     }
@@ -2242,7 +2510,10 @@ mod tests {
                 ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
 
-            project.build_viewer_request(0, cx).unwrap().unwrap();
+            project
+                .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                .unwrap()
+                .unwrap();
             // The synthetic nodes are `Arc`ed, and a recompile allocates new
             // ones. Pointer identity is therefore the one thing that tells
             // "kept" from "rebuilt to something equal" — the ids are
@@ -2304,7 +2575,10 @@ mod tests {
 
             // The retained chain does not strand the edits: the request carries
             // the live document, which is where the shell processors read.
-            let request = project.build_viewer_request(0, cx).unwrap().unwrap();
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                .unwrap()
+                .unwrap();
             let document = request.document.as_ref().expect("the request carries one");
             let ctx = EvalContext::new(0, FrameRate::new(30, 1), (16, 16));
             let layer = document
@@ -3446,5 +3720,114 @@ mod tests {
         // backwards.
         project.update(cx, |project, cx| project.on_eval_update(update(2, 2), cx));
         assert_eq!(shown_size(cx), 3);
+    }
+
+    /// A path that blanks the viewer evaluates nothing, so nothing will
+    /// arrive to replace the snapshot: it has to be dropped on the way out or
+    /// the overlays keep drawing the last composition's results over a blank
+    /// frame.
+    #[gpui::test]
+    fn a_path_with_no_evaluation_drops_the_overlay_results(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let stale = NodeId::new(9001);
+        cx.update(|cx| {
+            cx.set_global(OverlayResults::new(HashMap::from([(
+                stale,
+                Arc::new(ravel_core::types::Scalar(1.0)) as Arc<dyn ravel_core::types::NodeData>,
+            )])));
+        });
+
+        // No active composition: `build_viewer_request` returns `Ok(None)`.
+        cx.update(|cx| crate::panels::set_active_composition(None, cx));
+        project.update(cx, |project, cx| {
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
+
+        cx.update(|cx| {
+            assert!(
+                cx.global::<OverlayResults>().values.is_empty(),
+                "the blank path kept the results of the composition before it"
+            );
+        });
+    }
+
+    /// The overlay snapshot is published with the frame it belongs to: an
+    /// accepted update installs its targets, a stale one changes nothing, and
+    /// an accepted update whose target did not return leaves no earlier value
+    /// behind for an overlay to paint.
+    #[gpui::test]
+    fn overlay_results_track_the_published_frame(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let overlay_node = NodeId::new(9001);
+        let frame = blank_display_frame(4, 4);
+        let scalar: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::types::Scalar(2.0));
+        let overlay_values = |cx: &App| {
+            cx.try_global::<OverlayResults>()
+                .map(|results| results.values.keys().copied().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 2,
+                    frame: 10,
+                    results: vec![
+                        (NodeId::new(1), Ok(frame.clone())),
+                        (overlay_node, Ok(scalar.clone())),
+                    ],
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        project.read_with(cx, |_, cx| {
+            assert_eq!(overlay_values(cx), vec![overlay_node]);
+        });
+
+        // Dropped as older than the published frame, so it must not install
+        // its own targets either.
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 9,
+                    results: vec![
+                        (NodeId::new(1), Ok(frame.clone())),
+                        (NodeId::new(9002), Ok(scalar.clone())),
+                    ],
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        project.read_with(cx, |_, cx| {
+            assert_eq!(overlay_values(cx), vec![overlay_node]);
+        });
+
+        // A target that failed contributes an `Err`, which is not a value: the
+        // previous frame's result must not stand in for it.
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 3,
+                    frame: 11,
+                    results: vec![
+                        (NodeId::new(1), Ok(frame)),
+                        (
+                            overlay_node,
+                            Err(ravel_core::eval::EvalError::MissingProcessor(overlay_node)),
+                        ),
+                    ],
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        project.read_with(cx, |_, cx| {
+            assert!(overlay_values(cx).is_empty());
+        });
     }
 }

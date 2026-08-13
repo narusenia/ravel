@@ -29,15 +29,18 @@
 //! [`OverlayLabel`]s that the panel renders as elements, because GPUI shapes
 //! text through elements rather than through the canvas painter.
 
-use gpui::{Bounds, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
+use gpui::{Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
 use ravel_core::composition::Document;
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::NodeData;
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
 
 use crate::panels::{CanvasSelection, LayerSelection, PlaybackPosition};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::{
     CompRect, PathHandleKind, ViewerPointerHint, edited_path_points, layer_selection_comp_rects,
@@ -70,7 +73,7 @@ pub mod priority {
 // ===========================================================================
 
 /// Colors an overlay may need that come from the active theme.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OverlayColors {
     /// Editable path stroke and handles.
     pub path: Hsla,
@@ -78,10 +81,38 @@ pub struct OverlayColors {
     pub error: Hsla,
 }
 
+/// The overlay-target results of the evaluation whose frame the viewer is
+/// currently showing.
+///
+/// Durable state, not an event: it is replaced wholesale, in the same update
+/// that publishes [`crate::panels::ViewerFrame`], so the values an overlay
+/// reads always belong to the image underneath them. A target that failed,
+/// was never requested, or has not been evaluated yet is simply absent —
+/// [`OverlayContext::eval_result`] then returns `None` and the overlay draws
+/// nothing rather than guessing.
+#[derive(Clone, Default)]
+pub struct OverlayResults {
+    pub(crate) values: HashMap<NodeId, Arc<dyn NodeData>>,
+}
+
+impl OverlayResults {
+    pub(crate) fn new(values: HashMap<NodeId, Arc<dyn NodeData>>) -> Self {
+        Self { values }
+    }
+}
+
+impl Global for OverlayResults {}
+
 /// Everything the overlays are allowed to see, snapshotted once per render or
 /// once per pointer event. Fields are optional exactly where the underlying
 /// global may be absent, so an overlay stays inactive instead of guessing.
-#[derive(Clone)]
+///
+/// `Default` is the "nothing is loaded" snapshot. It exists so the
+/// target-discovery context built while assembling an evaluation request
+/// (`ProjectState::overlay_context_for_request`) can name only the fields
+/// that decide `is_active` / `eval_target`, instead of inventing theme colors
+/// and panel toggles it has no access to.
+#[derive(Clone, Default)]
 pub struct OverlayContext {
     /// Resolution of the composition currently shown; `None` with no output.
     pub resolution: Option<(u32, u32)>,
@@ -95,12 +126,19 @@ pub struct OverlayContext {
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
     pub colors: OverlayColors,
+    /// Overlay-target results belonging to the frame currently shown.
+    pub results: OverlayResults,
 }
 
 impl OverlayContext {
     /// The three pieces every document-driven overlay needs at once.
     pub fn resolved(&self) -> Option<(&Document, (u32, u32), PlaybackPosition)> {
         Some((self.document.as_ref()?, self.resolution?, self.playback?))
+    }
+
+    /// Read a target result without guessing when evaluation has not arrived.
+    pub fn eval_result(&self, target: &OverlayTarget) -> Option<&Arc<dyn NodeData>> {
+        self.results.values.get(&target.node)
     }
 }
 
@@ -1110,6 +1148,7 @@ mod tests {
             show_safe_areas: false,
             error: None,
             colors: colors(),
+            results: OverlayResults::default(),
         }
     }
 
@@ -1461,6 +1500,66 @@ mod tests {
         assert!(painter.finish().is_empty());
         assert!(registry.labels(&ctx).is_empty());
         assert!(registry.eval_targets(&ctx).is_empty());
+    }
+
+    struct ResultProbe {
+        target: OverlayTarget,
+    }
+
+    impl ViewerOverlay for ResultProbe {
+        fn id(&self) -> OverlayId {
+            OverlayId("test.result")
+        }
+
+        fn priority(&self) -> i32 {
+            0
+        }
+
+        fn is_active(&self, _ctx: &OverlayContext) -> bool {
+            true
+        }
+
+        fn eval_target(&self, _ctx: &OverlayContext) -> Option<OverlayTarget> {
+            Some(self.target.clone())
+        }
+
+        fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
+            if ctx.eval_result(&self.target).is_some() {
+                painter.fill_screen_rect(painter.frame(), ctx.colors.path);
+            }
+        }
+    }
+
+    #[test]
+    fn an_overlay_without_a_current_result_paints_nothing() {
+        let target = OverlayTarget {
+            network: NetworkPath::layer(CompId::new(1), LayerId::new(1)),
+            node: NodeId::new(1),
+            output: OutputPortIndex(0),
+        };
+        let registry = OverlayRegistry::new(vec![Box::new(ResultProbe {
+            target: target.clone(),
+        })]);
+        let mut previous = base_context();
+        previous
+            .results
+            .values
+            .insert(target.node, Arc::new(ravel_core::types::Scalar(1.0)));
+        let mut previous_painter = painter();
+        registry.paint(&previous, &mut previous_painter);
+        assert!(!previous_painter.finish().is_empty());
+
+        // The snapshot is replaced wholesale, so a target that did not come
+        // back has no entry at all. Another target's result is present to
+        // pin that the lookup is by node id: any value will not do.
+        let mut pending = previous;
+        pending.results = OverlayResults::new(HashMap::from([(
+            NodeId::new(2),
+            Arc::new(ravel_core::types::Scalar(1.0)) as Arc<dyn NodeData>,
+        )]));
+        let mut painter = painter();
+        registry.paint(&pending, &mut painter);
+        assert!(painter.finish().is_empty());
     }
 
     // -----------------------------------------------------------------------

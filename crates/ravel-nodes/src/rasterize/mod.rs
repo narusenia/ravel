@@ -7,6 +7,9 @@
 //! points (those not referenced by a `Primitive::Path`) draw as analytic-AA
 //! circle sprites. Instances expand their source geometry
 //! with per-instance `P`/`rot`/`scale` and optional `Cd`/`alpha` tint.
+//! An instance whose source is an image stamps it as a textured rectangle
+//! sized by the image's own resolution — on the CPU path only, for now
+//! (`IMG-5` in `docs/implementation/image-instancing-plan.md`).
 //! The GPU path flattens those attributes into instanced-quad draw records;
 //! its fragment shader evaluates non-zero winding and edge distance directly,
 //! so concave and self-intersecting paths do not require triangulation.
@@ -16,7 +19,9 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeSet, Domain, Geometry, InstanceSource, Primitive, names};
+use ravel_core::geometry::{
+    AttributeSet, Domain, Geometry, InstanceImage, InstanceSource, Primitive, names,
+};
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
 use ravel_gpu::{
@@ -24,11 +29,15 @@ use ravel_gpu::{
     GpuFrameBuffer, QuadDraw, RasterPipeline, ShaderManager, ShaderVisibility, TextureFormat,
     TextureKey, TexturePool, TextureUsage,
 };
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use zeno::{Cap, Command, Fill, Join, Mask, Stroke, Vector};
 
 use crate::composition_scale;
+use crate::ensure_cpu;
 use crate::flatten;
 use crate::gpu_util;
 
@@ -153,6 +162,88 @@ impl Placement {
     }
 }
 
+/// The CPU pixels of one image instance source, resolved once per rasterize.
+struct ImagePixels<'a> {
+    width: u32,
+    height: u32,
+    /// Straight-alpha RGBA, four values per pixel — the frame's own pixels
+    /// when it was already a CPU `RgbaF32` buffer, an owned copy otherwise.
+    samples: Cow<'a, [f32]>,
+}
+
+/// Every image instance source the draw walk can reach, keyed by the identity
+/// of the frame value it holds.
+///
+/// The key is the frame's address, which is the identity
+/// [`InstanceSource::ptr_eq`] compares: two sources holding the same `Arc`
+/// resolve — and read back — once.
+type ImageMap<'a> = HashMap<*const (), ImagePixels<'a>>;
+
+fn image_key(image: &InstanceImage) -> *const () {
+    Arc::as_ptr(image.frame()) as *const ()
+}
+
+/// Resolve every image instance source the draw walk can reach into CPU
+/// pixels, once per distinct frame.
+///
+/// The CPU reference path samples texels, so a GPU-resident frame has to be
+/// read back — and the node entry is the only place that can be honest about
+/// it. The draw walk returns `()`, so doing it there could only swallow the
+/// failure or skip the picture without saying why; here it propagates. It
+/// also bounds the cost to one readback per *source* instead of one per
+/// instance. The production GPU path (`IMG-5`) does not read back at all;
+/// that asymmetry is deliberate
+/// (`docs/implementation/image-instancing-plan.md`, `IMG-4`).
+fn resolve_instance_images<'a>(
+    geo: &'a Geometry,
+    depth: u32,
+    images: &mut ImageMap<'a>,
+) -> anyhow::Result<()> {
+    // The same depth rule the draw walk uses: a source it will skip must not
+    // cost a readback here.
+    if depth >= MAX_INSTANCE_DEPTH {
+        return Ok(());
+    }
+    for source in geo.sources() {
+        match source {
+            InstanceSource::Geometry(geometry) => {
+                resolve_instance_images(geometry, depth + 1, images)?;
+            }
+            InstanceSource::Image(image) => {
+                if let Entry::Vacant(slot) = images.entry(image_key(image)) {
+                    slot.insert(image_pixels(image)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn image_pixels(image: &InstanceImage) -> anyhow::Result<ImagePixels<'_>> {
+    let frame = ensure_cpu(image.frame().as_ref()).with_context(|| {
+        format!(
+            "rasterize: reading a {}x{} image instance source into CPU memory",
+            image.width(),
+            image.height()
+        )
+    })?;
+    let context = || "rasterize: an image instance source is not four-channel";
+    Ok(match frame {
+        // Already on the CPU: sampled where it lies. Only a readback or a
+        // reduced-precision format costs a copy.
+        Cow::Borrowed(frame) => ImagePixels {
+            width: frame.width,
+            height: frame.height,
+            samples: frame.as_rgba_f32().with_context(context)?,
+        },
+        Cow::Owned(frame) => ImagePixels {
+            width: frame.width,
+            height: frame.height,
+            samples: Cow::Owned(frame.as_rgba_f32().with_context(context)?.into_owned()),
+        },
+    })
+}
+
 pub struct RasterizeProcessor {
     gpu: Option<GpuRasterizer>,
 }
@@ -238,6 +329,9 @@ impl NodeProcessor for RasterizeProcessor {
             instances = geo.instances().element_count()
         );
         let _guard = span.enter();
+        // Only the CPU path needs texels, so only the CPU path pays for them.
+        let mut images = ImageMap::new();
+        resolve_instance_images(geo, 0, &mut images)?;
         let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
         // One mask for the whole geometry, instances included. Allocating it
         // per primitive — twice per primitive, once more for the stroke — is
@@ -256,6 +350,7 @@ impl NodeProcessor for RasterizeProcessor {
                 height,
             },
             style,
+            &images,
         );
 
         Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
@@ -656,7 +751,11 @@ fn flatten_geometry(
                 Color::new(1.0, 1.0, 1.0, 1.0),
             ),
         };
-        let Some(source) = select_instance_source(sources, source_indices, index) else {
+        // Textured rectangles have no GPU form yet (`IMG-5`); the CPU
+        // reference path draws them. Skipping without shifting the selection
+        // keeps `source_index` addressing the same source on both paths.
+        let Some(source) = select_instance_source(sources, source_indices, index).geometry() else {
+            log::warn!("rasterize: image instance sources are not drawn on the GPU yet, skipping");
             continue;
         };
         flatten_geometry(
@@ -773,6 +872,7 @@ fn raster_geometry(
     depth: u32,
     canvas: &mut Canvas<'_>,
     style: Style,
+    images: &ImageMap<'_>,
 ) {
     let positions = geo
         .points()
@@ -782,7 +882,7 @@ fn raster_geometry(
 
     raster_paths(geo, &positions, placement, canvas, style);
     raster_points(geo, &positions, placement, canvas, style);
-    raster_instances(geo, placement, depth, canvas, style);
+    raster_instances(geo, placement, depth, canvas, style, images);
 }
 
 fn raster_paths(
@@ -873,6 +973,7 @@ fn raster_instances(
     depth: u32,
     canvas: &mut Canvas<'_>,
     style: Style,
+    images: &ImageMap<'_>,
 ) {
     if depth >= MAX_INSTANCE_DEPTH {
         log::warn!("rasterize: instance nesting deeper than {MAX_INSTANCE_DEPTH}, skipping");
@@ -910,38 +1011,156 @@ fn raster_instances(
             ),
         };
         let combined = compose(placement, local);
-        let Some(source) = select_instance_source(sources, source_indices, i) else {
-            continue;
-        };
-        raster_geometry(
-            source,
-            combined,
-            depth + 1,
-            canvas,
-            element_style(style, inst, i),
-        );
+        match select_instance_source(sources, source_indices, i) {
+            InstanceSource::Geometry(source) => raster_geometry(
+                source,
+                combined,
+                depth + 1,
+                canvas,
+                element_style(style, inst, i),
+                images,
+            ),
+            InstanceSource::Image(image) => {
+                let Some(pixels) = images.get(&image_key(image)) else {
+                    // Unreachable: `resolve_instance_images` walks these same
+                    // sources under the same depth rule before the draw
+                    // starts, so every image this walk reaches is resolved.
+                    debug_assert!(false, "an image instance source was not resolved");
+                    continue;
+                };
+                raster_image(image, pixels, combined, canvas);
+            }
+        }
     }
 }
 
-/// The geometry an instance stamps, or `None` when the selected source is an
-/// image.
+/// The source an instance stamps: `source_index` clamped into the source list.
 ///
-/// Drawing images is `IMG-4` / `IMG-5`; until then this rasterizer skips
-/// them rather than shifting the selection, so `source_index` keeps
-/// addressing the same source it will once they draw.
+/// The index addresses the full list, images included, so adding a picture to
+/// a geometry's sources does not shift what the indices after it select.
 fn select_instance_source<'a>(
     sources: &'a [InstanceSource],
     source_indices: Option<&[i32]>,
     instance_index: usize,
-) -> Option<&'a Geometry> {
+) -> &'a InstanceSource {
     let source_index = source_indices.map_or(0, |indices| indices[instance_index].max(0) as usize);
-    match &sources[source_index.min(sources.len() - 1)] {
-        InstanceSource::Geometry(geometry) => Some(geometry),
-        InstanceSource::Image(_) => {
-            log::warn!("rasterize: image instance sources are not drawn yet, skipping");
-            None
+    &sources[source_index.min(sources.len() - 1)]
+}
+
+/// Draw one image instance source as a textured rectangle: origin-centred,
+/// sized in composition units by the image's own pixel resolution (decision 5
+/// of `docs/implementation/image-instancing-plan.md`), placed by `placement`
+/// and sampled bilinearly through the inverse of that placement.
+///
+/// **Edges are hard, not antialiased**: a pixel draws when its centre falls
+/// inside the placed rectangle, the interval being half-open so abutting
+/// copies do not blend twice along the edge they share. Scaling a copy up
+/// therefore does not soften its outline — but it does blur its texels, which
+/// is the documented consequence of the image not being re-evaluated at the
+/// copy's resolution (decisions 1 and 5).
+fn raster_image(
+    image: &InstanceImage,
+    pixels: &ImagePixels<'_>,
+    placement: Placement,
+    canvas: &mut Canvas<'_>,
+) {
+    // A collapsed or non-finite scale has no inverse and covers no area.
+    if !placement.scale.0.is_finite()
+        || !placement.scale.1.is_finite()
+        || placement.scale.0 == 0.0
+        || placement.scale.1 == 0.0
+        || pixels.width == 0
+        || pixels.height == 0
+    {
+        return;
+    }
+    let (half_w, half_h) = (image.width() as f32 * 0.5, image.height() as f32 * 0.5);
+    let mut min = Vec2(f32::INFINITY, f32::INFINITY);
+    let mut max = Vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for corner in [
+        Vec2(-half_w, -half_h),
+        Vec2(half_w, -half_h),
+        Vec2(half_w, half_h),
+        Vec2(-half_w, half_h),
+    ] {
+        let device = placement.apply(corner);
+        min = Vec2(min.0.min(device.0), min.1.min(device.1));
+        max = Vec2(max.0.max(device.0), max.1.max(device.1));
+    }
+    let rect = coverage_rect((min, max), 0.0, canvas.width, canvas.height);
+    let (sin, cos) = placement.rot.sin_cos();
+    // Source texels per composition unit: exactly 1 when the image is stamped
+    // at its own resolution, which is what makes an unscaled copy sample texel
+    // centres exactly.
+    let u_scale = pixels.width as f32 / image.width() as f32;
+    let v_scale = pixels.height as f32 / image.height() as f32;
+
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let dx = x as f32 + 0.5 - placement.offset.0;
+            let dy = y as f32 + 0.5 - placement.offset.1;
+            // `Placement::apply` inverted: unrotate, then undo the scale.
+            let local = Vec2(
+                (dx * cos + dy * sin) / placement.scale.0,
+                (dy * cos - dx * sin) / placement.scale.1,
+            );
+            if local.0 < -half_w || local.0 >= half_w || local.1 < -half_h || local.1 >= half_h {
+                continue;
+            }
+            let Some(color) = sample_bilinear(
+                pixels,
+                (local.0 + half_w) * u_scale,
+                (local.1 + half_h) * v_scale,
+            ) else {
+                continue;
+            };
+            let index = ((y * canvas.width + x) * 4) as usize;
+            blend_pixel(
+                &mut canvas.pixels[index..index + 4],
+                // `Cd` x `alpha` of the enclosing instances, already composed
+                // into the placement's tint (decision 7).
+                tinted(color, 1.0, placement.tint),
+                1.0,
+            );
         }
     }
+}
+
+/// Bilinear sample at a source-pixel coordinate, where `(0.5, 0.5)` is the
+/// centre of the first texel. `None` for a fully transparent sample, which
+/// has no colour to blend.
+///
+/// The four texels are weighted in *premultiplied* form so a transparent one
+/// cannot bleed its colour into its neighbour, then converted back to the
+/// straight alpha [`blend_pixel`] and the rest of this rasterizer speak. An
+/// opaque texel sampled at its own centre survives that round trip exactly,
+/// which is what an unscaled copy relies on.
+fn sample_bilinear(pixels: &ImagePixels<'_>, u: f32, v: f32) -> Option<Color> {
+    let (tx, ty) = (u - 0.5, v - 0.5);
+    let (x0, y0) = (tx.floor(), ty.floor());
+    let (fx, fy) = (tx - x0, ty - y0);
+    let (x0, y0) = (x0 as i32, y0 as i32);
+    let mut acc = [0.0f32; 4];
+    for (row, weight_y) in [(y0, 1.0 - fy), (y0 + 1, fy)] {
+        for (column, weight_x) in [(x0, 1.0 - fx), (x0 + 1, fx)] {
+            let weight = weight_x * weight_y;
+            if weight == 0.0 {
+                continue;
+            }
+            // Clamp to edge: the rectangle's own border texel repeats rather
+            // than fading into nothing.
+            let row = row.clamp(0, pixels.height as i32 - 1) as usize;
+            let column = column.clamp(0, pixels.width as i32 - 1) as usize;
+            let base = (row * pixels.width as usize + column) * 4;
+            let texel = &pixels.samples[base..base + 4];
+            let alpha = texel[3];
+            acc[0] += texel[0] * alpha * weight;
+            acc[1] += texel[1] * alpha * weight;
+            acc[2] += texel[2] * alpha * weight;
+            acc[3] += alpha * weight;
+        }
+    }
+    (acc[3] > 0.0).then(|| Color::new(acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3], acc[3]))
 }
 
 /// Composes an outer placement with an instance-local one (outer ∘ local).
@@ -1837,15 +2056,13 @@ mod tests {
 
     /// `source_index` counts **every** source, images included.
     ///
-    /// `select_instance_source` applies the index to the full slice and then
-    /// declines to draw an image, so the geometry sources keep the positions
-    /// the user gave them. Filtering the images out *before* indexing — which
-    /// is what the geometry-only `instance_sources()` view would do — shifts
-    /// every index after the image by one and silently stamps the wrong
-    /// source. `IMG-4` will draw these instead of skipping them; the index
-    /// arithmetic has to already be right when it does.
+    /// `select_instance_source` applies the index to the full slice, so the
+    /// geometry sources keep the positions the user gave them. Filtering the
+    /// images out *before* indexing — which is what the geometry-only
+    /// `instance_sources()` view would do — shifts every index after the image
+    /// by one and silently stamps the wrong source.
     #[test]
-    fn source_index_counts_the_image_sources_it_cannot_draw_yet() {
+    fn source_index_counts_image_sources_too() {
         let red = colored_point_source(Color::new(1.0, 0.0, 0.0, 1.0));
         let blue = colored_point_source(Color::new(0.0, 0.0, 1.0, 1.0));
         let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(2, 2));
@@ -1929,6 +2146,382 @@ mod tests {
             above[2] > 0.9 && above[0] < 0.1,
             "large index clamps to last source: {above:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Image instance sources (`IMG-4`)
+    // -----------------------------------------------------------------------
+
+    /// An opaque image whose texels are all distinct, so a copy that samples
+    /// the wrong one shows.
+    fn test_image(width: u32, height: u32) -> FrameBuffer {
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                data.extend_from_slice(&[
+                    (x + 1) as f32 / (width + 1) as f32,
+                    (y + 1) as f32 / (height + 1) as f32,
+                    0.25,
+                    1.0,
+                ]);
+            }
+        }
+        FrameBuffer::from_f32(width, height, data)
+    }
+
+    fn solid_image(width: u32, height: u32, color: [f32; 4]) -> FrameBuffer {
+        FrameBuffer::from_f32(width, height, color.repeat((width * height) as usize))
+    }
+
+    fn image_source(frame: &FrameBuffer) -> InstanceSource {
+        InstanceSource::Image(
+            InstanceImage::new(Arc::new(frame.clone()), frame.width, frame.height)
+                .expect("a non-empty frame"),
+        )
+    }
+
+    /// One geometry stamping `frames` — addressed by `source_index` when the
+    /// caller sets one — at `positions`.
+    fn image_instances(frames: &[&FrameBuffer], positions: Vec<Vec2>) -> Geometry {
+        let mut geo = Geometry::new();
+        geo.set_sources(frames.iter().copied().map(image_source).collect());
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(positions))
+            .unwrap();
+        geo
+    }
+
+    /// The reference the GPU path (`IMG-5`) has to reproduce: at its own
+    /// resolution and no rotation, a copy is the source, pixel for pixel.
+    ///
+    /// Exact rather than approximate on purpose. The half-pixel offsets
+    /// between output pixel centre, geometry space and texel centre only line
+    /// up if every one of them is right; a tolerance would hide a copy that is
+    /// one texel off and slightly smeared.
+    #[test]
+    fn an_unscaled_image_instance_reproduces_the_source_pixel_for_pixel() {
+        let source = test_image(8, 6);
+        // Centred on an 8x6 canvas, the rectangle covers it exactly.
+        let geo = image_instances(&[&source], vec![Vec2(4.0, 3.0)]);
+
+        let fb = run(true, 0.0, &geo, 8, 6);
+        assert_eq!(fb.as_f32().as_ref(), source.as_f32().as_ref());
+    }
+
+    #[test]
+    fn image_instances_land_on_their_grid_positions() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let geo = image_instances(
+            &[&red],
+            vec![
+                Vec2(4.0, 4.0),
+                Vec2(12.0, 4.0),
+                Vec2(4.0, 12.0),
+                Vec2(12.0, 12.0),
+            ],
+        );
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        for (x, y) in [(4, 4), (12, 4), (4, 12), (12, 12)] {
+            let copy = pixel(&fb, x, y);
+            assert!(
+                copy[0] > 0.9 && copy[3] > 0.9,
+                "the copy at ({x}, {y}) is drawn: {copy:?}"
+            );
+        }
+        assert!(
+            pixel(&fb, 8, 8)[3] < 1e-6,
+            "the gap between the copies stays empty"
+        );
+    }
+
+    /// The edge rule, pinned: a pixel draws when its centre is inside the
+    /// placed rectangle, and the interval is half-open so abutting copies do
+    /// not blend twice along a shared edge. No antialiasing — `IMG-5` has to
+    /// match this on the GPU, and a hard rule is the one that can be matched.
+    #[test]
+    fn image_edges_are_hard_not_antialiased() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        // Centred at (8, 8), the rectangle spans [6, 10) on both axes.
+        let geo = image_instances(&[&red], vec![Vec2(8.0, 8.0)]);
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        assert!((pixel(&fb, 6, 8)[3] - 1.0).abs() < 1e-6, "border is opaque");
+        assert!((pixel(&fb, 9, 8)[3] - 1.0).abs() < 1e-6, "border is opaque");
+        assert!(pixel(&fb, 5, 8)[3] < 1e-6, "nothing feathers outside it");
+        assert!(pixel(&fb, 10, 8)[3] < 1e-6, "the far edge is half-open");
+    }
+
+    #[test]
+    fn image_instance_scale_grows_the_rectangle() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let mut geo = image_instances(&[&red], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(2.0, 2.0)]))
+            .unwrap();
+
+        // 4x4 at scale 2 spans [4, 12); unscaled it would stop at 6.
+        let fb = run(true, 0.0, &geo, 16, 16);
+        assert!(pixel(&fb, 5, 8)[3] > 0.9, "the scaled copy reaches x = 5");
+        assert!(pixel(&fb, 11, 8)[3] > 0.9, "and x = 11");
+        assert!(pixel(&fb, 3, 8)[3] < 1e-6, "but not past its half-width");
+    }
+
+    #[test]
+    fn image_instance_rotation_turns_the_rectangle() {
+        // 4 wide, 2 tall: red left half, blue right half.
+        let mut data = Vec::new();
+        for _ in 0..2 {
+            for x in 0..4 {
+                data.extend_from_slice(if x < 2 {
+                    &[1.0, 0.0, 0.0, 1.0]
+                } else {
+                    &[0.0, 0.0, 1.0, 1.0]
+                });
+            }
+        }
+        let frame = FrameBuffer::from_f32(4, 2, data);
+        let mut geo = image_instances(&[&frame], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(
+                names::ROT,
+                AttributeArray::F32(vec![std::f32::consts::FRAC_PI_2]),
+            )
+            .unwrap();
+
+        // A quarter turn stands the rectangle up — 2 wide, 4 tall — and puts
+        // its red half at the top.
+        let fb = run(true, 0.0, &geo, 16, 16);
+        let top = pixel(&fb, 8, 6);
+        let bottom = pixel(&fb, 8, 9);
+        assert!(
+            top[0] > 0.9 && top[2] < 0.1,
+            "the red half turns up: {top:?}"
+        );
+        assert!(
+            bottom[2] > 0.9 && bottom[0] < 0.1,
+            "the blue half turns down: {bottom:?}"
+        );
+        assert!(pixel(&fb, 8, 5)[3] < 1e-6, "four units tall after the turn");
+        assert!(pixel(&fb, 6, 8)[3] < 1e-6, "and two units wide");
+    }
+
+    /// Decision 7: the instance's `Cd` x `alpha` multiplies the texels, the
+    /// same tint the geometry sources get.
+    #[test]
+    fn instance_cd_and_alpha_tint_the_texels() {
+        let white = solid_image(4, 4, [1.0, 1.0, 1.0, 1.0]);
+        let mut geo = image_instances(&[&white], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![Color::new(1.0, 0.0, 0.0, 1.0)]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.5]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        let tinted = pixel(&fb, 8, 8);
+        assert!(
+            tinted[0] > 0.9 && tinted[1] < 1e-6 && tinted[2] < 1e-6,
+            "Cd multiplies the texel: {tinted:?}"
+        );
+        assert!(
+            (tinted[3] - 0.5).abs() < 1e-6,
+            "alpha multiplies the texel's: {tinted:?}"
+        );
+    }
+
+    /// Decision 7: painter's order, so the higher index lands on top.
+    #[test]
+    fn a_later_image_instance_covers_an_earlier_one() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let blue = solid_image(4, 4, [0.0, 0.0, 1.0, 1.0]);
+        // [5, 9) and [7, 11): they overlap over [7, 9).
+        let mut geo = image_instances(&[&red, &blue], vec![Vec2(7.0, 8.0), Vec2(9.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        let overlap = pixel(&fb, 8, 8);
+        assert!(
+            overlap[2] > 0.9 && overlap[0] < 0.1,
+            "instance 1 is on top of instance 0: {overlap:?}"
+        );
+        assert!(pixel(&fb, 5, 8)[0] > 0.9, "instance 0 shows where 1 is not");
+        assert!(pixel(&fb, 10, 8)[2] > 0.9, "and instance 1 where 0 is not");
+    }
+
+    /// The contact sheet: N pictures in the sources, `source_index` choosing
+    /// per copy.
+    #[test]
+    fn source_index_picks_between_two_images() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let blue = solid_image(4, 4, [0.0, 0.0, 1.0, 1.0]);
+        let mut geo = image_instances(
+            &[&red, &blue],
+            vec![Vec2(4.0, 8.0), Vec2(12.0, 8.0), Vec2(8.0, 3.0)],
+        );
+        geo.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![1, 0, 7]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        assert!(pixel(&fb, 4, 8)[2] > 0.9, "index 1 is the blue picture");
+        assert!(pixel(&fb, 12, 8)[0] > 0.9, "index 0 is the red picture");
+        assert!(
+            pixel(&fb, 8, 3)[2] > 0.9,
+            "an index past the end clamps to the last source"
+        );
+    }
+
+    /// Decision 8, pinned: drawing pictures did not loosen the mesh guard. A
+    /// geometry that stamps a picture *and* a mesh is still refused whole.
+    #[test]
+    fn a_mesh_source_beside_an_image_source_is_still_refused() {
+        let node = make_node(true, 0.0);
+        let mut mesh = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(1.0, 1.0)]);
+        mesh.push_mesh(0..3, &[0, 1, 2]);
+
+        let mut geo = Geometry::new();
+        geo.set_sources(vec![
+            image_source(&solid_image(4, 4, [1.0, 1.0, 1.0, 1.0])),
+            InstanceSource::Geometry(Arc::new(mesh)),
+        ]);
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(8.0, 8.0), Vec2(8.0, 8.0)]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1]))
+            .unwrap();
+
+        assert!(
+            rasterize_error(&node, geo).contains("rasterize requires path primitives"),
+            "a mesh source is refused whether or not an image sits beside it"
+        );
+    }
+
+    /// Decision 5, pinned as expected behaviour rather than tolerated as an
+    /// accident: a copy is stamped from the source's own pixels, so scaling it
+    /// up interpolates between texels instead of adding detail.
+    #[test]
+    fn magnifying_an_image_instance_blurs_between_texels() {
+        let frame = FrameBuffer::from_f32(2, 1, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        let mut geo = image_instances(&[&frame], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(8.0, 8.0)]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        let seam = pixel(&fb, 8, 8);
+        assert!(
+            seam[0] > 0.05 && seam[0] < 0.95,
+            "the black and white texels blend across the seam: {seam:?}"
+        );
+        assert!(
+            pixel(&fb, 7, 8)[0] < seam[0] && pixel(&fb, 9, 8)[0] > seam[0],
+            "and the blend is a ramp, not a step"
+        );
+    }
+
+    /// The four texels are weighted in premultiplied form, so a transparent
+    /// one contributes its transparency and **not** its colour.
+    ///
+    /// Interpolating straight alpha instead is a real bug that opaque test
+    /// images cannot see: every assertion above holds either way. The
+    /// transparent texel here carries poison magenta, so the moment the
+    /// weighting stops multiplying by alpha, red and blue appear in a copy
+    /// that should only ever fade from green to nothing.
+    #[test]
+    fn a_transparent_texel_does_not_bleed_its_colour_into_its_neighbour() {
+        // Opaque green beside fully transparent magenta.
+        let frame = FrameBuffer::from_f32(2, 1, vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]);
+        let mut geo = image_instances(&[&frame], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(8.0, 8.0)]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        // Both sit in the band where the two texels mix.
+        for x in [7, 9] {
+            let blended = pixel(&fb, x, 8);
+            assert!(
+                blended[3] > 0.01 && blended[3] < 0.99,
+                "x = {x} samples across the seam: {blended:?}"
+            );
+            assert!(
+                blended[0] < 1e-6 && blended[2] < 1e-6 && blended[1] > 0.99,
+                "x = {x} keeps the opaque texel's colour, tinted by nothing: {blended:?}"
+            );
+        }
+        assert!(
+            (pixel(&fb, 2, 8)[3] - 1.0).abs() < 1e-6,
+            "the opaque end stays opaque"
+        );
+        assert!(
+            pixel(&fb, 13, 8)[3] < 1e-6,
+            "and the transparent end draws nothing at all"
+        );
+    }
+
+    /// The CPU reference path needs texels, so a GPU-resident source is read
+    /// back — **once per source**, at the node entry, not once per copy
+    /// (`IMG-4`; the GPU path of `IMG-5` will not read back at all).
+    #[test]
+    fn a_gpu_resident_image_source_is_read_back_once_for_all_instances() {
+        let Ok(gpu) = GpuContext::new_blocking() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let cpu = solid_image(8, 8, [0.0, 1.0, 0.0, 1.0]);
+        let resident: Arc<dyn NodeData> =
+            match gpu_util::ensure_gpu(&gpu, &pool, &cpu as &dyn NodeData).expect("upload") {
+                gpu_util::GpuImage::Uploaded {
+                    texture,
+                    width,
+                    height,
+                } => Arc::new(GpuFrameBuffer::new(
+                    gpu.clone(),
+                    &pool,
+                    texture,
+                    width,
+                    height,
+                )),
+                _ => panic!("a CPU frame uploads into a pool texture"),
+            };
+
+        let mut geo = Geometry::new();
+        geo.set_sources(vec![InstanceSource::Image(
+            InstanceImage::new(resident, 8, 8).expect("an 8x8 image"),
+        )]);
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![
+                    Vec2(4.0, 4.0),
+                    Vec2(12.0, 4.0),
+                    Vec2(4.0, 12.0),
+                    Vec2(12.0, 12.0),
+                ]),
+            )
+            .unwrap();
+
+        let before = gpu.transfer_stats();
+        let fb = run(true, 0.0, &geo, 16, 16);
+        let delta = before.delta(&gpu.transfer_stats());
+        assert_eq!(
+            delta.readbacks, 1,
+            "four copies share one source, so one readback: {delta:?}"
+        );
+        let copy = pixel(&fb, 4, 4);
+        assert!(copy[1] > 0.9, "and the picture actually drew: {copy:?}");
     }
 
     #[test]

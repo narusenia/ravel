@@ -2430,6 +2430,46 @@ mod tests {
         );
     }
 
+    /// The four texels are weighted in premultiplied form, so a transparent
+    /// one contributes its transparency and **not** its colour.
+    ///
+    /// Interpolating straight alpha instead is a real bug that opaque test
+    /// images cannot see: every assertion above holds either way. The
+    /// transparent texel here carries poison magenta, so the moment the
+    /// weighting stops multiplying by alpha, red and blue appear in a copy
+    /// that should only ever fade from green to nothing.
+    #[test]
+    fn a_transparent_texel_does_not_bleed_its_colour_into_its_neighbour() {
+        // Opaque green beside fully transparent magenta.
+        let frame = FrameBuffer::from_f32(2, 1, vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]);
+        let mut geo = image_instances(&[&frame], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(8.0, 8.0)]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 16, 16);
+        // Both sit in the band where the two texels mix.
+        for x in [7, 9] {
+            let blended = pixel(&fb, x, 8);
+            assert!(
+                blended[3] > 0.01 && blended[3] < 0.99,
+                "x = {x} samples across the seam: {blended:?}"
+            );
+            assert!(
+                blended[0] < 1e-6 && blended[2] < 1e-6 && blended[1] > 0.99,
+                "x = {x} keeps the opaque texel's colour, tinted by nothing: {blended:?}"
+            );
+        }
+        assert!(
+            (pixel(&fb, 2, 8)[3] - 1.0).abs() < 1e-6,
+            "the opaque end stays opaque"
+        );
+        assert!(
+            pixel(&fb, 13, 8)[3] < 1e-6,
+            "and the transparent end draws nothing at all"
+        );
+    }
+
     /// The CPU reference path needs texels, so a GPU-resident source is read
     /// back — **once per source**, at the node entry, not once per copy
     /// (`IMG-4`; the GPU path of `IMG-5` will not read back at all).

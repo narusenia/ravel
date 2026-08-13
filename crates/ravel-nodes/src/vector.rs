@@ -10,7 +10,7 @@
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
 use ravel_core::registry::builtin::{VECTOR_COMPONENT_KEYS, VECTOR_SWIZZLE_PATTERN};
-use ravel_core::types::{NodeData, PortRecord, Scalar, Vec2, Vec3, Vec4};
+use ravel_core::types::{NodeData, PortRecord, Scalar, Vec2, Vec3, Vec4, magnitude};
 use std::sync::Arc;
 
 /// Component count of a value-domain vector node, one per `type_key`.
@@ -203,31 +203,6 @@ impl NodeProcessor for VectorSwizzleProcessor {
 /// `vector.length`: magnitude of a vector of any arity. An unconnected input
 /// reads as the zero vector, so the length is 0.
 pub struct VectorLengthProcessor;
-
-/// Euclidean length of the first `arity` components of `c`.
-///
-/// Scaled by the largest component rather than summing the raw squares.
-/// `(f32::MAX, 0)` squares to an infinity and `(f32::MIN_POSITIVE, 0)`
-/// squares to zero, so the direct form answers `inf` and `0` for two vectors
-/// whose lengths are perfectly representable — and `normalize`, which divides
-/// by this, turns both into the zero vector. Dividing through by the largest
-/// component first keeps every square inside `0..=1`.
-fn magnitude(arity: usize, c: [f32; 4]) -> f32 {
-    let comps = &c[..arity];
-    let scale = comps.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
-    // Scaling needs a finite, non-zero divisor. A zero vector, an infinity
-    // and a `NaN` all already have their answer in the raw sum — and `max`
-    // skips `NaN`, so that case has to come back here to stay a `NaN`.
-    if !scale.is_finite() || scale == 0.0 {
-        return comps.iter().map(|v| v * v).sum::<f32>().sqrt();
-    }
-    scale
-        * comps
-            .iter()
-            .map(|v| (v / scale).powi(2))
-            .sum::<f32>()
-            .sqrt()
-}
 
 impl NodeProcessor for VectorLengthProcessor {
     fn process(

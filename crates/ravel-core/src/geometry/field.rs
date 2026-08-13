@@ -14,7 +14,7 @@ use crate::expression::{self, Component, ExpressionError, Program, Scope};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
-use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
+use crate::types::{Color, NodeData, Vec2, Vec3, Vec4, magnitude};
 
 /// Everything a [`Field`] may read when it is evaluated.
 ///
@@ -1141,30 +1141,6 @@ fn transform_components(sampled: &AttributeArray, arity: usize, index: usize) ->
             0.0
         }
     })
-}
-
-/// Euclidean length of the first `arity` components of `c`.
-///
-/// Scaled by the largest component rather than summing the raw squares.
-/// `(f32::MAX, 0)` squares to an infinity and `(f32::MIN_POSITIVE, 0)` squares
-/// to zero, so the direct form answers `inf` and `0` for two vectors whose
-/// lengths are perfectly representable. Dividing through by the largest
-/// component first keeps every square inside `0..=1`.
-fn magnitude(arity: usize, c: [f32; 4]) -> f32 {
-    let comps = &c[..arity];
-    let scale = comps.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
-    // Scaling needs a finite, non-zero divisor. A zero vector, an infinity and
-    // a `NaN` all already have their answer in the raw sum — and `max` skips
-    // `NaN`, so that case has to come back here to stay a `NaN`.
-    if !scale.is_finite() || scale == 0.0 {
-        return comps.iter().map(|v| v * v).sum::<f32>().sqrt();
-    }
-    scale
-        * comps
-            .iter()
-            .map(|v| (v / scale).powi(2))
-            .sum::<f32>()
-            .sqrt()
 }
 
 /// `field.length`: the magnitude of a vector field, as a scalar field.

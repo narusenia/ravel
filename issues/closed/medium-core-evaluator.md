@@ -212,3 +212,60 @@ Viewer と出力が食い違う）。ハードコードされた黒 quad は撤�
 
 **引受先**: `docs/implementation/viewer-inspection-plan.md` の `INSP-1`
 （チェッカーボード表示と同じ単位。背景の描き方をまとめて扱う）
+
+---
+
+---
+
+> **解決済み**: PR #423（2026-08-13）。`domain` / `source_domain` /
+> `target_domain` / `aggregate` / `shape` に `with_param_options` が付き、
+> 未知の値は `tracing::warn!` を出してから既定へ落ちる。
+>
+> 回帰テストは**レジストリの宣言を読み、その各値を文字列パラメータ経由で
+> 流す**形（`declared_domain_options_reach_their_attribute_set_domains` ほか）。
+> Rust API を直接叩かないのが肝で、それが元の見逃しの原因だった。宣言に
+> 無い値が来ると `panic!` するので、選択肢だけ足して分岐を忘れる事故も落ちる。
+>
+> `attribute.set` の `domain` は Detail を含む 4 値。`style.*` が `point` を
+> 外している（`rasterize` が読まないため）のとは事情が違い、素の属性書き込み
+> には同じ制限が掛からない。
+
+## MED-CORE-10 | bug | 閉集合の文字列パラメータが dropdown でなく、未知の値を無言で既定へ落とす
+
+**該当**: `crates/ravel-core/src/registry/builtin.rs`（`with_param_options` の欠落）、
+`crates/ravel-nodes/src/attribute/mod.rs:208-215`（`domain_param`）、
+`crates/ravel-nodes/src/field/mod.rs`（`field.falloff` の `shape`）
+
+`string_parameter` で宣言された 20 個のうち、**閉集合なのに `with_param_options`
+が無いものが 5 個**ある。Properties では自由入力のテキスト欄になり、値の解釈は
+`match … _ => default` なので、**打ち間違いも未対応の値も無言で既定に落ちる。**
+
+| パラメータ | ノード | 既定への落ち方 |
+| --- | --- | --- |
+| `domain` | `attribute.set` ほか | `domain_param` に腕が無い値 → 既定 |
+| `source_domain` / `target_domain` | `attribute.transfer` | 同じヘルパ |
+| `aggregate` | `attribute.promote` | `match … => average` |
+| `shape` | `field.falloff` | `match … => sphere` |
+
+**実害が出た実例**: `domain_param` に **`"primitive"` の腕が無かった**ため、
+`attribute.set(name = "Cd", domain = "primitive")` が**無言で `point` へ書いて
+いた**。`rasterize` はパスの色を Primitive ドメインから引くので、図形は既定色の
+まま何のエラーも出ずに描かれる。**既存テストは全て Rust API で `Domain::Primitive`
+を直接渡しており、壊れていた文字列パラメータを 1 本も通っていなかった**ので
+緑のまま通り抜けた（`every_domain_name_reaches_the_domain_it_names` で回帰を固定済み）。
+
+**閉集合でないもの**（`name` / `group` / `target` / `expression` / `string_value` /
+`asset_id` / `port` / `pattern` / `components`）は対象外。`port` と `name` は
+文脈依存の候補が要るので `contextual-parameter-options-plan.md`（`CPO-*`）の担当。
+
+**修正方針**は 2 つで 1 組。片方だけでは不十分:
+
+1. **閉集合を宣言する**（`with_param_options`）。UI が不正な値を作れなくなる
+2. **未知の値を無言で既定にしない。** dropdown があっても、手編集した `.ravprj`・
+   将来のバージョン・パラメータポート駆動から未知の値は来る。最低限
+   `tracing::warn!` を出す（`field.attribute` が「列に無い成分」で既にやっている形）
+
+**検証**: **文字列パラメータを通す**形で、宣言された各値がそれぞれの分岐へ届く
+テスト（Rust API を直接叩かない — それが今回の見逃しの原因）。未知の値で警告が
+出るテスト。
+

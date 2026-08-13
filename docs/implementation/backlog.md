@@ -85,7 +85,6 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
-| IMG-5 | `rasterize` のテクスチャ経路（GPU。IMG-4 完了で着手可能） | `image-instancing-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -586,9 +585,9 @@ DISC-5 も同じ向きで、アイコンの対応表は UI 側に置き `NodeTem
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | OVL-1 | ✅ #255 | オーバーレイ機構の抽出（挙動不変のリファクタ） | — |
-| OVL-2 | 🟡 | オーバーレイ用の評価要求（multi-target に相乗り） | OVL-1, SHEET-1 |
-| OVL-3 | ⬜ | Geometry オーバーレイ + `shape_node_bounds` の廃止 | OVL-2 |
-| OVL-4 | ⬜ | Field オーバーレイ | OVL-2 |
+| OVL-2 | ✅ | オーバーレイ用の評価要求（multi-target に相乗り）（#429。機構はドーマント — OVL-3 の前提を計画書に記載） | OVL-1, SHEET-1 |
+| OVL-3 | 🟡 | Geometry オーバーレイ + `shape_node_bounds` の廃止（**着手前に評価スコープの設計判断が要る**） | OVL-2 |
+| OVL-4 | 🟡 | Field オーバーレイ | OVL-2 |
 | OVL-5 | 🟡 | `ParamRole` とマニピュレータ | OVL-1, VEC-5 |
 | OVL-7 | 🟡 | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 | OVL-1 |
 | OVL-8 | ⬜ | ジオメトリ属性の空間可視化（矢印 / index / group） | OVL-3 |
@@ -1135,8 +1134,8 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | IMG-2 | ✅ | `InstanceSource` への一般化（`ravel-core`、挙動不変）（#418） | — |
 | IMG-3 | ✅ | `geometry.from_image` ノード（FrameBuffer → Geometry）（#418） | IMG-2 |
 | IMG-4 | ✅ | `rasterize` のテクスチャ経路（CPU 参照）（#426） | IMG-2, IMG-3 |
-| IMG-5 | 🟡 | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
-| IMG-6 | ⬜ | レジストリ / ロケール / 文書 | IMG-1〜5 |
+| IMG-5 | ✅ | `rasterize` のテクスチャ経路（GPU）（#430） | IMG-4 |
+| IMG-6 | ✅ | レジストリ / ロケール / 文書（#430） | IMG-1〜5 |
 
 **`IMG-1` だけ先に入れる。** `scene.render`（`3D-4`）が未着手で
 `SceneContent::Image` / `FlatContent::Image` の消費者がテスト以外ゼロなので、

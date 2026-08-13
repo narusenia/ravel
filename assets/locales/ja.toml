@@ -1122,6 +1122,34 @@ seed = "ノイズの乱数シード。"
 frequency = "基本オクターブの空間周波数。"
 octaves = "fBm オクターブ数。1 段ごとに周波数 2 倍・振幅半分。"
 
+[node."field.direction_to"]
+label = "方向ベクトルフィールド"
+description = "各サンプル位置からターゲット点またはターゲットジオメトリの中心へ向かう単位ベクトルを返す。"
+[node."field.direction_to".params]
+target = "ターゲットジオメトリが未接続のときに使うターゲット点。"
+
+[node."field.curl_noise"]
+label = "カールノイズフィールド"
+description = "既存の simplex ノイズから決定的で発散ゼロのフロー場を作る。"
+[node."field.curl_noise".params]
+seed = "ノイズの乱数シード。"
+frequency = "ノイズの空間周波数。"
+octaves = "fBm オクターブ数。"
+step = "偏微分を推定する有限差分の刻み幅。"
+
+[node."field.gradient"]
+label = "勾配フィールド"
+description = "中心差分でスカラー場の勾配をサンプルする。"
+[node."field.gradient".params]
+step = "偏微分を推定する有限差分の刻み幅。"
+
+[node."field.radial"]
+label = "放射フィールド"
+description = "中心から外向き、または円周に沿う単位ベクトルを返す。"
+[node."field.radial".params]
+center = "放射フィールドの中心。"
+mode = "方向モード: radial は外向き、tangent は円周方向。"
+
 [node."field.falloff"]
 label = "フォールオフフィールド"
 description = "内側半径までは 1、外側半径で 0 へ滑らかに減衰するフォールオフ。"

@@ -230,6 +230,14 @@ pub enum RavelIcon {
     NodeStyleDash,
     /// Node header/menu: `field.noise`.
     NodeFieldNoise,
+    /// Node header/menu: `field.direction_to`.
+    NodeFieldDirectionTo,
+    /// Node header/menu: `field.curl_noise`.
+    NodeFieldCurlNoise,
+    /// Node header/menu: `field.gradient`.
+    NodeFieldGradient,
+    /// Node header/menu: `field.radial`.
+    NodeFieldRadial,
     /// Node header/menu: `field.falloff`.
     NodeFieldFalloff,
     /// Node header/menu: `field.curve_remap`.
@@ -401,6 +409,10 @@ impl RavelIcon {
             "style.stroke" => Self::NodeStyleStroke,
             "style.dash" => Self::NodeStyleDash,
             "field.noise" => Self::NodeFieldNoise,
+            "field.direction_to" => Self::NodeFieldDirectionTo,
+            "field.curl_noise" => Self::NodeFieldCurlNoise,
+            "field.gradient" => Self::NodeFieldGradient,
+            "field.radial" => Self::NodeFieldRadial,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
             "field.ramp" => Self::NodeFieldRamp,
@@ -532,6 +544,10 @@ impl IconNamed for RavelIcon {
             Self::NodeStyleStroke => "icons/pen-tool.svg",
             Self::NodeStyleDash => "icons/circle-dashed.svg",
             Self::NodeFieldNoise => "icons/waves.svg",
+            Self::NodeFieldDirectionTo => "icons/target.svg",
+            Self::NodeFieldCurlNoise => "icons/orbit.svg",
+            Self::NodeFieldGradient => "icons/spline.svg",
+            Self::NodeFieldRadial => "icons/radar.svg",
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",
             // A ramp is the colour node of the field family; it shares the

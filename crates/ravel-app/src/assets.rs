@@ -221,6 +221,12 @@ pub enum RavelIcon {
     NodeAttributePathSample,
     /// Node header/menu: `attribute.curveu`.
     NodeAttributeCurveU,
+    /// Node header/menu: `style.fill`.
+    NodeStyleFill,
+    /// Node header/menu: `style.stroke`.
+    NodeStyleStroke,
+    /// Node header/menu: `style.dash`.
+    NodeStyleDash,
     /// Node header/menu: `field.noise`.
     NodeFieldNoise,
     /// Node header/menu: `field.falloff`.
@@ -389,6 +395,9 @@ impl RavelIcon {
             "attribute.transfer" => Self::NodeAttributeTransfer,
             "attribute.path_sample" => Self::NodeAttributePathSample,
             "attribute.curveu" => Self::NodeAttributeCurveU,
+            "style.fill" => Self::NodeStyleFill,
+            "style.stroke" => Self::NodeStyleStroke,
+            "style.dash" => Self::NodeStyleDash,
             "field.noise" => Self::NodeFieldNoise,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
@@ -513,6 +522,12 @@ impl IconNamed for RavelIcon {
             Self::NodeAttributeTransfer => "icons/replace.svg",
             Self::NodeAttributePathSample => "icons/route.svg",
             Self::NodeAttributeCurveU => "icons/interpolation-bezier.svg",
+            // The style family shares glyphs with the nodes it is closest to:
+            // `field.apply` (which modulates the same attributes) and
+            // `shape.custom_path` (whose outline is what a stroke draws).
+            Self::NodeStyleFill => "icons/paintbrush.svg",
+            Self::NodeStyleStroke => "icons/pen-tool.svg",
+            Self::NodeStyleDash => "icons/circle-dashed.svg",
             Self::NodeFieldNoise => "icons/waves.svg",
             Self::NodeFieldFalloff => "icons/target.svg",
             Self::NodeFieldCurveRemap => "icons/spline.svg",

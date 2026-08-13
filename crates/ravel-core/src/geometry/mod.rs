@@ -22,7 +22,7 @@ pub use field::{
 };
 pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,
-    PathSample, TransferMode, attribute_set, attribute_transfer, bounds_center, connect, curve_u,
-    path_sample, promote_attribute,
+    PathSample, TransferMode, attribute_set, attribute_set_in_group, attribute_transfer,
+    bounds_center, connect, curve_u, path_sample, promote_attribute,
 };
 pub use triangulate::Triangulator;

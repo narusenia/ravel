@@ -162,6 +162,21 @@ Illustrator 的な「stroke を 2 本重ねて縁取り」は属性 1 名 1 値�
 - `group` 指定で対象外要素が変わらないテスト。
 - 2 回適用で後勝ちになるテスト。
 
+> **`align` パラメータは宣言しなかった（実装時の判断）。** `stroke_align` は
+> 属性の宣言ごと `path-shading-plan.md` の `PSHADE-3` が引き取っており、
+> ここでパラメータだけ出すと単位 1 が避けた「あるのに効かない」状態を
+> 作り直すことになる。`PSHADE-3` が属性・CPU / GPU 実装と同じ単位で足す。
+>
+> **既定ドメインは `primitive`。** `rasterize` が `fill` / `stroke_width` /
+> `stroke_color` を引くのはプリミティブ属性とインスタンス属性で、Detail は
+> 読まない（`domain` の選択肢も `point` / `primitive` / `instance` の 3 つ）。
+>
+> **group 外の要素の扱い**は `attribute_set_in_group`（`geometry/ops.rs`）に
+> 集約した。列があればその値を保ち、無ければ `unset` — `rasterize` の
+> パラメータ既定（`fill` = true、`stroke_width` = 0、色は白）を置く。
+> 密な列に「未設定」は表現できないので、**未設定と同じ絵になる値**を
+> 選ぶのが規約（`procedural-geometry.md` の「要素スコープ（group）」）。
+
 ### 単位 3: ダッシュ・キャップ・ジョイン
 
 - `style.dash`: `pattern` / `offset`。
@@ -179,6 +194,31 @@ Illustrator 的な「stroke を 2 本重ねて縁取り」は属性 1 名 1 値�
 - 各キャップ・ジョインのゴールデンテスト。
 - ダッシュのゴールデンテスト。
 - GPU フォールバックが起きた場合に CPU と一致するテスト。
+
+> **`stroke_align` はこの単位から外れた。** `path-shading-plan.md` の
+> `PSHADE-3` が属性の宣言ごと引き取る（同計画の単位表を参照）。
+>
+> **GPU はフォールバックを選んだ（実装時の判断）。** 落ちる条件は
+> 「シェーダで描けない線の形」——**round 以外のキャップ、round 以外の
+> ジョイン、ダッシュのいずれか**。GPU の被覆はポリラインへの符号なし距離で、
+> キャップもジョインも本質的に丸く、弧長を知らない。WGSL で近似すると
+> **CPU / GPU 一致テストが壊れる**（`stroke_align` を繰り延べたのと同じ理由）
+> ので、その場合は描画全体を CPU 経路へ回す。判定は
+> `StrokeShape::drawable_on_gpu`、ログは `tracing::debug!`
+> （`rasterize: stroke shape has no GPU form, drawing on the CPU`）。
+> フォールバック時の出力は CPU 経路そのものなので、一致は画素単位で厳密。
+> 弧長を GPU に入れるなら、頂点ごとの累積長を並列バッファで上げ、パターンを
+> もう 1 本のストレージバッファで渡す形になる（`PSHADE-1` の per-pixel
+> 評価器がセグメント情報を返すようになれば、その上に乗せるのが安い）。
+>
+> **キャップ・ジョイン・ダッシュは「ラスタライズするジオメトリの Detail」
+> から 1 度だけ読む。** インスタンスソースが自前の Detail を持っていても
+> それは読まない（Detail は「ジオメトリ全体で 1 値」という定義そのもの）。
+>
+> **CPU の被覆矩形はマイタを含めて広げた**（`stroke_margin`）。マイタは頂点の
+> 先まで伸びるのにパス自体の境界は頂点で終わるので、線幅だけで矩形を切ると
+> 尖りの先が共有マスクに残り、**次のプリミティブの幻の被覆**になる
+> （`Canvas::blend_coverage` の debug_assert が落ちる）。
 
 ### 単位 4: 変調との結合と文書更新
 

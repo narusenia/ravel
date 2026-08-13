@@ -1671,22 +1671,26 @@ pub fn apply_field(
 /// the wrong length falls back to every element with a warning rather than
 /// failing the evaluation: a half-typed name in the node editor must not turn
 /// the graph red (REQ-CORE-013 element-scope convention).
-fn group_selection(attributes: &AttributeSet, group: &str, length: usize) -> Option<Vec<bool>> {
+///
+/// Shared with the attribute writes in [`ops`](super::ops) so that every node
+/// taking a `group` parameter resolves it the same way.
+pub(super) fn group_selection(
+    attributes: &AttributeSet,
+    group: &str,
+    length: usize,
+) -> Option<Vec<bool>> {
     if group.is_empty() {
         return None;
     }
     let Some(column) = attributes.get(group) else {
-        tracing::warn!(
-            group,
-            "field group attribute not found; affecting every element"
-        );
+        tracing::warn!(group, "group attribute not found; affecting every element");
         return None;
     };
     let AttributeArray::Bool(values) = column.as_ref() else {
         tracing::warn!(
             group,
             attr_type = ?column.attr_type(),
-            "field group attribute is not Bool; affecting every element"
+            "group attribute is not Bool; affecting every element"
         );
         return None;
     };
@@ -1695,7 +1699,7 @@ fn group_selection(attributes: &AttributeSet, group: &str, length: usize) -> Opt
             group,
             expected = length,
             actual = values.len(),
-            "field group attribute has the wrong length; affecting every element"
+            "group attribute has the wrong length; affecting every element"
         );
         return None;
     }

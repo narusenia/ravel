@@ -1053,6 +1053,33 @@ int_value = "i32 型の値。"
 bool_value = "bool 型の値。"
 string_value = "string 型の値。"
 
+[node."style.fill"]
+label = "スタイル塗り"
+description = "塗りのアトリビュート（fill フラグと Cd）をジオメトリのドメインに書き込む。解決は rasterize が要素ごとに行う。"
+[node."style.fill".params]
+enabled = "要素を塗るかどうか。"
+color = "塗り色。Cd アトリビュートに書き込む。"
+domain = "書き込むドメイン（point / primitive / instance）。"
+group = "書き込む対象の要素を示す Bool アトリビュート名。空なら全要素。"
+
+[node."style.stroke"]
+label = "スタイル線"
+description = "線のアトリビュート（stroke_width と stroke_color）をジオメトリのドメインに書き込む。解決は rasterize が要素ごとに行う。"
+[node."style.stroke".params]
+width = "線幅（コンポジション画素）。0 なら線を描かない。"
+color = "線色。stroke_color アトリビュートに書き込む。"
+domain = "書き込むドメイン（point / primitive / instance）。"
+group = "書き込む対象の要素を示す Bool アトリビュート名。空なら全要素。"
+cap = "線の端点の形（butt / round / square）。Detail アトリビュートなのでジオメトリ全体で 1 値。"
+join = "線の角の形（miter / round / bevel）。Detail アトリビュートなのでジオメトリ全体で 1 値。"
+
+[node."style.dash"]
+label = "スタイル破線"
+description = "破線のアトリビュートを書き込む。破線のときは GPU 経路に弧長が無いため CPU 経路で描く。"
+[node."style.dash".params]
+pattern = "実線・空白の長さを交互に並べた列（コンポジション画素）。例: \"4,2\"。空なら実線。"
+offset = "パスに沿ったパターンの開始位置（コンポジション画素）。"
+
 [node."attribute.promote"]
 label = "アトリビュート昇格"
 description = "アトリビュートを集約して粗いドメインへ移す（例: ポイントごとの値を 1 つの detail 値へ）。"

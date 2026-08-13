@@ -193,7 +193,7 @@ impl NodeProcessor for CurveUProcessor {
     }
 }
 
-fn geometry_input<'a>(
+pub(crate) fn geometry_input<'a>(
     inputs: &'a [Option<Arc<dyn NodeData>>],
     index: usize,
     processor: &str,
@@ -205,9 +205,10 @@ fn geometry_input<'a>(
         .with_context(|| format!("{processor}: input {index} is not Geometry"))
 }
 
-fn domain_param(params: &ResolvedParams, key: &str, default: Domain) -> Domain {
+pub(crate) fn domain_param(params: &ResolvedParams, key: &str, default: Domain) -> Domain {
     match params.str_or(key, "") {
         "instance" => Domain::Instance,
+        "primitive" => Domain::Primitive,
         "detail" => Domain::Detail,
         "point" => Domain::Point,
         _ => default,
@@ -280,6 +281,67 @@ mod tests {
                 .unwrap(),
             &[2.5, 2.5]
         );
+    }
+
+    /// Every domain name the `domain` parameter accepts reaches the domain it
+    /// names — **through the string parameter**, which is the only way a user
+    /// can set it.
+    ///
+    /// `domain` is free text, not a closed set, and `domain_param` falls back
+    /// to the node's default for anything it does not recognise. `"primitive"`
+    /// was missing from that match, so a user who typed it silently got
+    /// `Point` instead: `attribute.set(name = "Cd", domain = "primitive")`
+    /// wrote a column `rasterize` does not read for paths, and the shape
+    /// stayed its default colour with no error anywhere. Every existing test
+    /// built the processor's domain through the Rust API, so none of them
+    /// crossed the parameter that was broken.
+    #[test]
+    fn every_domain_name_reaches_the_domain_it_names() {
+        for (name, expect_points, expect_primitives) in
+            [("point", true, false), ("primitive", false, true)]
+        {
+            let node = Node::new(NodeId::new(1), "attribute.set")
+                .with_input("geometry", &[DataTypeId::GEOMETRY])
+                .with_param("domain", ParameterValue::String(name.into()))
+                .with_param("name", ParameterValue::String("weight".into()))
+                .with_param("value", ParameterValue::Float(2.5));
+            let source =
+                Node::new(NodeId::new(2), "test.source").with_output("out", DataTypeId::GEOMETRY);
+            let graph = Graph::new()
+                .add_node(source)
+                .unwrap()
+                .add_node(node)
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(2),
+                    OutputPortIndex(0),
+                    NodeId::new(1),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]);
+            geometry.push_primitive(ravel_core::geometry::Primitive::Path {
+                verts: 0..2,
+                closed: false,
+            });
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(2), Arc::new(StubSource(Arc::new(geometry))));
+            ev.register(NodeId::new(1), Arc::new(AttributeSetProcessor));
+
+            let output = ev.evaluate(&graph, NodeId::new(1), &ctx()).unwrap();
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            assert_eq!(
+                output.points().get("weight").is_some(),
+                expect_points,
+                "domain = {name:?} on the point domain"
+            );
+            assert_eq!(
+                output.primitive_attrs().get("weight").is_some(),
+                expect_primitives,
+                "domain = {name:?} on the primitive domain"
+            );
+        }
     }
 
     /// The attribute operations touch columns, not coordinates: a 3D geometry

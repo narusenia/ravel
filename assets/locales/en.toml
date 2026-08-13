@@ -1061,6 +1061,33 @@ int_value = "Value for the i32 type."
 bool_value = "Value for the bool type."
 string_value = "Value for the string type."
 
+[node."style.fill"]
+label = "Style Fill"
+description = "Writes the fill attributes (fill flag and Cd) onto a geometry domain; rasterize resolves them per element."
+[node."style.fill".params]
+enabled = "Whether the elements are filled."
+color = "Fill color, written to the Cd attribute."
+domain = "Domain to write on (point, primitive, instance)."
+group = "Bool attribute naming the elements to write; empty writes every element."
+
+[node."style.stroke"]
+label = "Style Stroke"
+description = "Writes the stroke attributes (stroke_width and stroke_color) onto a geometry domain; rasterize resolves them per element."
+[node."style.stroke".params]
+width = "Stroke width in composition pixels; 0 draws no stroke."
+color = "Stroke color, written to the stroke_color attribute."
+domain = "Domain to write on (point, primitive, instance)."
+group = "Bool attribute naming the elements to write; empty writes every element."
+cap = "Shape of the stroke ends (butt, round, square); a Detail attribute, so one value for the geometry."
+join = "Shape of the stroke corners (miter, round, bevel); a Detail attribute, so one value for the geometry."
+
+[node."style.dash"]
+label = "Style Dash"
+description = "Writes the dash attributes; a dashed stroke draws on the CPU path because the GPU stroke has no arc length."
+[node."style.dash".params]
+pattern = "Alternating on/off run lengths in composition pixels, for example \"4,2\". Empty draws a solid stroke."
+offset = "Where the pattern starts along the path, in composition pixels."
+
 [node."attribute.promote"]
 label = "Attribute Promote"
 description = "Aggregates an attribute into a coarser domain (for example per-point values into one detail value)."

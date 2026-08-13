@@ -26,7 +26,7 @@ use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
-use ravel_core::eval::{EvalContext, Quality};
+use ravel_core::eval::{EvalContext, PathSegment, Quality};
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
@@ -1505,8 +1505,13 @@ impl ProjectState {
         };
         let graph = compiled.graph.clone();
         let output = compiled.output;
+        // The root scope: this request evaluates the composition's compiled
+        // shell chain. `append_overlay_targets` is handed the very path the
+        // request carries, so the scope it matches against cannot drift from
+        // the scope actually evaluated.
+        let path = Vec::new();
         let mut nodes = vec![output];
-        append_overlay_targets(&mut nodes, &graph, comp.id, overlays, &overlay_context);
+        append_overlay_targets(&mut nodes, &path, overlays, &overlay_context);
         Ok(Some(EvalRequest {
             comp: Some(comp.id),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
@@ -1514,7 +1519,7 @@ impl ProjectState {
             // it rather than reordering the viewer's.
             graph,
             nodes,
-            path: Vec::new(),
+            path,
             ctx,
             document: Some(document),
             hint: InvalidationHint::None,
@@ -1802,30 +1807,40 @@ impl ProjectState {
 impl EventEmitter<ProjectEvent> for ProjectState {}
 impl EventEmitter<DocumentReplaced> for ProjectState {}
 
-/// Append the active overlays' evaluation targets to a viewer request's
-/// target list.
+/// Append the active overlays' evaluation targets to a request's target list.
 ///
 /// [`OverlayRegistry::eval_targets`] has already folded duplicates, so two
 /// overlays asking for the same node cost one entry in `nodes` and therefore
 /// one evaluation.
 ///
-/// One `EvalRequest` carries exactly one `graph` and one ownership `path`, so
-/// a target only rides along when it names a node of *this* graph — the
-/// composition's compiled shell chain, evaluated at the root scope. A target
-/// pointing inside a layer network is skipped rather than translated: its
-/// `NodeId` is drawn from a different id space and could collide with a
-/// synthetic shell node, which would silently paint an unrelated node's
-/// result. Skipping is safe by construction — no result arrives, so
-/// `OverlayContext::eval_result` stays `None` and the overlay draws nothing.
+/// `path` is the ownership path the request evaluates under, and a target
+/// rides along only when it names *exactly* that scope. Identity of scope is
+/// the whole test: a `NodeId` means nothing without the network it was drawn
+/// from, so anything weaker hands the overlay a value from another graph.
+///
+/// In particular, checking whether the request's graph happens to contain the
+/// target's `NodeId` would be wrong. A layer network is evaluated recursively
+/// through its boundary node rather than inlined, so its nodes are never in a
+/// composition's compiled shell graph — a hit could only ever be an id
+/// collision, and `deterministic_node_id` (`comp << 32 | layer << 8 | role`)
+/// lands in the ordinary node-id range whenever the composition id is 0. The
+/// overlay would then be painted from an unrelated compositing node.
+///
+/// Every [`NetworkPath`] names a composition *and* a layer, so its
+/// [`NetworkPath::segments`] is never empty, while the viewer's request runs
+/// at the root scope with an empty path. **No overlay target can ride along
+/// on the composition request.** That is deliberate: the aggregation is in
+/// place and dormant until unit 3 issues a network-scoped request, and until
+/// then no result arrives, `OverlayContext::eval_result` stays `None`, and
+/// the overlay draws nothing.
 fn append_overlay_targets(
     nodes: &mut Vec<NodeId>,
-    graph: &Graph,
-    comp: CompId,
+    path: &[PathSegment],
     overlays: &OverlayRegistry,
     context: &OverlayContext,
 ) {
     for target in overlays.eval_targets(context) {
-        if target.network.comp == comp && graph.node(target.node).is_some() {
+        if target.network.segments() == path {
             nodes.push(target.node);
         }
     }
@@ -2238,9 +2253,8 @@ mod tests {
         assert_eq!(ctx.comp_resolution, comp_resolution);
     }
 
-    /// A composition with one content layer, plus the compiled shell chain's
-    /// output node and one other node of that same graph — the only kind of
-    /// node a viewer request can carry as an inspection target.
+    /// A composition with one content layer, plus its compiled shell chain's
+    /// output node and one other synthetic node of that graph.
     fn project_with_a_shell_target(
         project: &mut ProjectState,
         cx: &mut Context<ProjectState>,
@@ -2251,18 +2265,18 @@ mod tests {
         project.commit_document(document, InvalidationHint::Structural, cx);
         let comp = project.active_composition(cx).unwrap().clone();
         let compiled = project.compiled_root(cx).unwrap().unwrap();
-        let target = compiled
+        let synthetic = compiled
             .graph
             .nodes()
             .find(|node| node.id != compiled.output)
             .expect("the compiled shell chain has more than its output node")
             .id;
-        (comp, compiled.output, target)
+        (comp, compiled.output, synthetic)
     }
 
-    fn shell_target(comp: &Composition, node: NodeId) -> OverlayTarget {
+    fn target_in(network: &NetworkPath, node: NodeId) -> OverlayTarget {
         OverlayTarget {
-            network: NetworkPath::layer(comp.id, comp.layers.front().unwrap().id),
+            network: network.clone(),
             node,
             output: OutputPortIndex(0),
         }
@@ -2288,49 +2302,29 @@ mod tests {
         });
     }
 
-    /// Completion criterion: two overlays wanting the same node cost one
-    /// entry in `EvalRequest::nodes`, hence one evaluation — asserted on the
-    /// request the production path builds, not on `eval_targets` alone.
+    /// The composition request runs at the root scope and no `NetworkPath`
+    /// denotes that scope, so **nothing** rides along on it — not even a
+    /// target whose `NodeId` happens to name a node of the compiled shell
+    /// graph.
+    ///
+    /// That collision is the whole point. `deterministic_node_id` packs
+    /// `comp << 32 | layer << 8 | role`, so with composition id 0 a synthetic
+    /// node lands in the ordinary node-id range; a membership test would
+    /// accept this target and hand the overlay a compositing node's result.
     #[gpui::test]
-    fn duplicate_overlay_targets_are_folded_in_the_eval_request(cx: &mut TestAppContext) {
+    fn the_composition_request_carries_no_overlay_target_even_on_an_id_collision(
+        cx: &mut TestAppContext,
+    ) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
 
         project.update(cx, |project, cx| {
-            let (comp, output, target_node) = project_with_a_shell_target(project, cx);
-            let target = shell_target(&comp, target_node);
-            let overlays = OverlayRegistry::new(vec![
-                Box::new(TargetOverlay {
-                    target: target.clone(),
-                }),
-                Box::new(TargetOverlay { target }),
-            ]);
-
-            let request = project
-                .build_viewer_request(0, &overlays, cx)
-                .unwrap()
-                .unwrap();
-
-            assert_eq!(request.nodes, vec![output, target_node]);
-        });
-    }
-
-    /// One request carries one graph, so a target that names a node this
-    /// graph does not contain — anything inside a layer network — is skipped
-    /// instead of being evaluated under the viewer's scope.
-    #[gpui::test]
-    fn overlay_targets_outside_the_requested_graph_are_not_added(cx: &mut TestAppContext) {
-        disable_background_eval_for_tests();
-        let project = cx.new(ProjectState::new);
-
-        project.update(cx, |project, cx| {
-            let (comp, output, target_node) = project_with_a_shell_target(project, cx);
-            // A layer network's user nodes are small sequential ids and are
-            // never part of the compiled shell graph.
-            let inside_the_layer_network = NodeId::new(1);
-            assert_ne!(inside_the_layer_network, target_node);
+            let (comp, output, synthetic) = project_with_a_shell_target(project, cx);
+            let layer = comp.layers.front().unwrap().id;
+            // A target naming a node that *is* in the request's graph.
+            let network = NetworkPath::layer(comp.id, layer);
             let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay {
-                target: shell_target(&comp, inside_the_layer_network),
+                target: target_in(&network, synthetic),
             })]);
 
             let request = project
@@ -2338,30 +2332,83 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
+            assert!(
+                request.graph.node(synthetic).is_some(),
+                "the collision this test exists for did not occur",
+            );
             assert_eq!(request.nodes, vec![output]);
         });
     }
 
-    /// A `NodeId` only means something together with the network it came
-    /// from: a target naming another composition must not be evaluated here
-    /// even when the id happens to exist in this graph.
+    /// Completion criterion: two overlays wanting the same node cost one
+    /// entry in `EvalRequest::nodes`, hence one evaluation.
+    ///
+    /// Asserted against a request scoped to a layer network — the shape unit
+    /// 3 will issue — because the composition request rejects every target by
+    /// construction and so could not tell folding apart from rejection.
     #[gpui::test]
-    fn overlay_targets_from_another_composition_are_not_added(cx: &mut TestAppContext) {
+    fn duplicate_overlay_targets_are_folded_in_the_eval_request(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
 
         project.update(cx, |project, cx| {
-            let (comp, output, target_node) = project_with_a_shell_target(project, cx);
-            let mut target = shell_target(&comp, target_node);
-            target.network.comp = CompId::new(comp.id.raw() + 1);
-            let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay { target })]);
+            let (comp, _, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = NodeId::new(1);
+            let target = target_in(&network, node);
+            let overlays = OverlayRegistry::new(vec![
+                Box::new(TargetOverlay {
+                    target: target.clone(),
+                }),
+                Box::new(TargetOverlay { target }),
+            ]);
+            let document = Arc::new(project.document().clone());
+            let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
 
-            let request = project
-                .build_viewer_request(0, &overlays, cx)
-                .unwrap()
-                .unwrap();
+            let mut nodes = Vec::new();
+            append_overlay_targets(&mut nodes, &network.segments(), &overlays, &ctx);
 
-            assert_eq!(request.nodes, vec![output]);
+            assert_eq!(nodes, vec![node]);
+        });
+    }
+
+    /// A `NodeId` means nothing without the network it came from, so a target
+    /// naming a different layer — or a different composition — is rejected
+    /// even though the request evaluates a network of the same shape.
+    #[gpui::test]
+    fn overlay_targets_from_another_network_are_not_added(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, _, _) = project_with_a_shell_target(project, cx);
+            let layer = comp.layers.front().unwrap().id;
+            let scope = NetworkPath::layer(comp.id, layer);
+            let node = NodeId::new(1);
+            let overlays = OverlayRegistry::new(vec![
+                Box::new(TargetOverlay {
+                    target: target_in(
+                        &NetworkPath::layer(comp.id, LayerId::new(layer.raw() + 1)),
+                        node,
+                    ),
+                }),
+                Box::new(TargetOverlay {
+                    target: target_in(
+                        &NetworkPath::layer(CompId::new(comp.id.raw() + 1), layer),
+                        node,
+                    ),
+                }),
+                Box::new(TargetOverlay {
+                    target: target_in(&scope.entered(NodeId::new(7)), node),
+                }),
+            ]);
+            let document = Arc::new(project.document().clone());
+            let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
+
+            let mut nodes = Vec::new();
+            append_overlay_targets(&mut nodes, &scope.segments(), &overlays, &ctx);
+
+            assert!(nodes.is_empty());
         });
     }
 

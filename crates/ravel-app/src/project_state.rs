@@ -1702,14 +1702,7 @@ impl ProjectState {
             );
             return;
         }
-        // Published with the frame this update carries, and only past the
-        // generation fence above, so the values an overlay reads always
-        // belong to the image the viewer is showing. Replacing the whole map
-        // is what makes a target that failed or was dropped read as absent
-        // instead of keeping the value it had two frames ago.
-        cx.set_global(OverlayResults::new(
-            update.overlay_results.into_iter().collect(),
-        ));
+        let overlay_results: HashMap<_, _> = update.overlay_results.into_iter().collect();
         // Nothing here touches pixels: the worker already produced the
         // display image (HIGH-08), so publishing is a move.
         let frame = match update.output {
@@ -1739,6 +1732,20 @@ impl ProjectState {
             crate::panels::ViewerFrame::Blank { .. } => "blank",
             crate::panels::ViewerFrame::Error { .. } => "error",
         };
+        // Published with the frame this update carries — and only when that
+        // frame is an image. An overlay drawn over a blank or an error frame
+        // annotates a composition that is not on screen, which is the same
+        // mistake as painting a result that has not arrived. Replacing the
+        // whole map is what makes a target that failed or was dropped read as
+        // absent instead of keeping the value it had two frames ago.
+        let overlay_results = match &frame {
+            crate::panels::ViewerFrame::Frame { .. }
+            | crate::panels::ViewerFrame::GpuFrame { .. } => overlay_results,
+            crate::panels::ViewerFrame::Blank { .. } | crate::panels::ViewerFrame::Error { .. } => {
+                HashMap::new()
+            }
+        };
+        cx.set_global(OverlayResults::new(overlay_results));
         tracing::debug!(
             generation = update.generation,
             frame = update.frame,
@@ -3875,6 +3882,85 @@ mod tests {
         });
         project.read_with(cx, |_, cx| {
             assert!(overlay_values(cx).is_empty());
+        });
+    }
+
+    /// An overlay annotates the frame under it. When target 0 fails or is not
+    /// a frame the viewer shows an error or a blank, so the later targets'
+    /// values — however successful — describe a composition that is not on
+    /// screen and must not be published.
+    #[gpui::test]
+    fn overlay_results_are_withheld_when_the_frame_is_not_an_image(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let overlay_node = NodeId::new(9001);
+        let scalar: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::types::Scalar(2.0));
+        let overlay_is_empty = |cx: &App| {
+            cx.try_global::<OverlayResults>()
+                .is_none_or(|results| results.values.is_empty())
+        };
+
+        // Target 0 failed: the viewer publishes an error frame.
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 10,
+                    results: vec![
+                        (
+                            NodeId::new(1),
+                            Err(ravel_core::eval::EvalError::MissingProcessor(NodeId::new(
+                                1,
+                            ))),
+                        ),
+                        (overlay_node, Ok(scalar.clone())),
+                    ],
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        project.read_with(cx, |_, cx| {
+            assert!(
+                matches!(
+                    cx.global::<crate::panels::ViewerFrame>(),
+                    crate::panels::ViewerFrame::Error { .. }
+                ),
+                "this test needs the error frame it is written against",
+            );
+            assert!(
+                overlay_is_empty(cx),
+                "an overlay result was published over an error frame",
+            );
+        });
+
+        // Target 0 is not a frame at all: the viewer blanks.
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 2,
+                    frame: 11,
+                    results: vec![
+                        (NodeId::new(1), Ok(scalar.clone())),
+                        (overlay_node, Ok(scalar.clone())),
+                    ],
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        project.read_with(cx, |_, cx| {
+            assert!(
+                matches!(
+                    cx.global::<crate::panels::ViewerFrame>(),
+                    crate::panels::ViewerFrame::Blank { .. }
+                ),
+                "this test needs the blank frame it is written against",
+            );
+            assert!(
+                overlay_is_empty(cx),
+                "an overlay result was published over a blank frame",
+            );
         });
     }
 }

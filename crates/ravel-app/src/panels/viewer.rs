@@ -37,8 +37,8 @@ use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
 use overlay::{
-    LabelPlacement, OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter,
-    OverlayRegistry, OverlayResults,
+    DragModifiers, LabelPlacement, OverlayColors, OverlayContext, OverlayEdit, OverlayHandle,
+    OverlayPainter, OverlayRegistry, OverlayResults,
 };
 
 pub const KEY_CONTEXT: &str = "Viewer";
@@ -170,6 +170,18 @@ pub enum ViewerPointerHint {
     PathAnchor,
     PathTangent,
     PenClose,
+    /// Layer shell scale, on the ↖↘ diagonal.
+    ResizeUpLeftDownRight,
+    /// Layer shell scale, on the ↗↙ diagonal.
+    ResizeUpRightDownLeft,
+    /// Layer shell scale, horizontal edge grip.
+    ResizeLeftRight,
+    /// Layer shell scale, vertical edge grip.
+    ResizeUpDown,
+    /// Layer shell rotation, in the ring outside a corner grip.
+    Rotate,
+    /// The layer shell's anchor marker.
+    ShellAnchor,
 }
 
 impl ViewerPointerHint {
@@ -180,8 +192,22 @@ impl ViewerPointerHint {
             // GPUI-CE has no generic `Move` cursor. OpenHand communicates the
             // same grab-to-move affordance and matches the Node Editor.
             Self::MovableBody => CursorStyle::OpenHand,
-            Self::PathAnchor => CursorStyle::PointingHand,
+            // Both anchors are "a point you can pick up"; one glyph for both
+            // keeps the promise consistent across overlays.
+            Self::PathAnchor | Self::ShellAnchor => CursorStyle::PointingHand,
             Self::PenClose => CursorStyle::DragCopy,
+            // The scale grips finally have a gesture behind them, which is
+            // what `done/pointer-feedback-plan.md` was waiting for before
+            // assigning `Resize*` (a cursor is a promise about what works).
+            Self::ResizeUpLeftDownRight => CursorStyle::ResizeUpLeftDownRight,
+            Self::ResizeUpRightDownLeft => CursorStyle::ResizeUpRightDownLeft,
+            Self::ResizeLeftRight => CursorStyle::ResizeLeftRight,
+            Self::ResizeUpDown => CursorStyle::ResizeUpDown,
+            // GPUI-CE has no rotation cursor and no custom bitmaps, so the 24
+            // built-ins have to supply a stand-in. `DragLink` is the only one
+            // whose glyph carries a curved arrow — it reads as "turn" rather
+            // than "move", and nothing else in the Viewer uses it.
+            Self::Rotate => CursorStyle::DragLink,
         }
     }
 }
@@ -200,7 +226,14 @@ fn viewer_drag_cursor(
     drawing_shape: bool,
     drawing_pen: bool,
     path_handle: Option<PathHandleKind>,
+    shell_handle: Option<ViewerPointerHint>,
 ) -> Option<CursorStyle> {
+    // A shell grip keeps the cursor the pointer showed before the press: the
+    // gesture is the one the hover promised, so changing the glyph mid-drag
+    // would only unsay it.
+    if let Some(hint) = shell_handle {
+        return Some(hint.cursor());
+    }
     if pan || moving || path_handle == Some(PathHandleKind::Point) {
         Some(CursorStyle::ClosedHand)
     } else if drawing_shape || drawing_pen || path_handle.is_some() {
@@ -1039,10 +1072,9 @@ impl ViewerPanel {
         let Some(original_document) = context.document.clone() else {
             return false;
         };
-        let Some(press_edit) = registry
-            .overlay(handle.overlay)
-            .and_then(|overlay| overlay.drag(&handle, (0.0, 0.0), &context))
-        else {
+        let Some(press_edit) = registry.overlay(handle.overlay).and_then(|overlay| {
+            overlay.drag(&handle, (0.0, 0.0), DragModifiers::default(), &context)
+        }) else {
             return false;
         };
         self.handle_drag = Some(OverlayHandleDrag {
@@ -1078,6 +1110,7 @@ impl ViewerPanel {
             show_grid: self.show_grid,
             show_safe_areas: self.show_safe_areas,
             error: self.error.clone(),
+            active_handle: self.handle_drag.as_ref().map(|drag| drag.handle.id),
             colors: OverlayColors {
                 // A bright semantic info color keeps the editable path legible
                 // over both dark footage and the black composition background.
@@ -1400,7 +1433,12 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    fn handle_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn handle_dragged(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: DragModifiers,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pointer) = self.comp_position(position) else {
             return;
         };
@@ -1418,7 +1456,9 @@ impl ViewerPanel {
             );
             registry
                 .overlay(drag.handle.overlay)
-                .and_then(|overlay| overlay.drag(&drag.handle, delta, &drag.press_context))
+                .and_then(|overlay| {
+                    overlay.drag(&drag.handle, delta, modifiers, &drag.press_context)
+                })
                 .map(|edit| (edit, delta))
         }) else {
             return;
@@ -1660,6 +1700,12 @@ fn overlay_label_element(label: overlay::OverlayLabel) -> Div {
                     .text_color(label.color)
                     .child(label.text.clone()),
             ),
+        LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(
+            div()
+                .text_xs()
+                .text_color(label.color)
+                .child(label.text.clone()),
+        ),
     }
 }
 
@@ -1910,6 +1956,10 @@ impl Render for ViewerPanel {
             self.handle_drag
                 .as_ref()
                 .and_then(|drag| drag.handle.id.path_handle_kind()),
+            self.handle_drag
+                .as_ref()
+                .filter(|drag| drag.handle.id.shell().is_some())
+                .map(|drag| drag.handle.hint),
         );
         let composition_background = (|| {
             let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
@@ -2125,7 +2175,14 @@ impl Render for ViewerPanel {
                     Some(MouseButton::Left) => {
                         this.pan_drag = None;
                         if this.handle_drag.is_some() {
-                            this.handle_dragged(event.position, cx);
+                            this.handle_dragged(
+                                event.position,
+                                DragModifiers {
+                                    shift: event.modifiers.shift,
+                                    alt: event.modifiers.alt,
+                                },
+                                cx,
+                            );
                         } else if this
                             .pen_session
                             .as_ref()
@@ -3982,11 +4039,18 @@ mod tests {
             CursorStyle::OpenHand
         );
         assert_eq!(
-            viewer_drag_cursor(false, true, false, false, None),
+            viewer_drag_cursor(false, true, false, false, None, None),
             Some(CursorStyle::ClosedHand)
         );
         assert_eq!(
-            viewer_drag_cursor(false, false, false, false, Some(PathHandleKind::OutTangent),),
+            viewer_drag_cursor(
+                false,
+                false,
+                false,
+                false,
+                Some(PathHandleKind::OutTangent),
+                None
+            ),
             Some(CursorStyle::Crosshair)
         );
     }

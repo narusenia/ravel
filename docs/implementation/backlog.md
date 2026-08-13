@@ -85,7 +85,7 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
-| IMG-4 | `rasterize` のテクスチャ経路（CPU 参照。IMG-3 完了で着手可能） | `image-instancing-plan.md` |
+| IMG-5 | `rasterize` のテクスチャ経路（GPU。IMG-4 完了で着手可能） | `image-instancing-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -1134,8 +1134,8 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | IMG-1 | ✅ | `SceneContent::Image` の退場（挙動不変。REQ-3D-001 本文の修正を含む）（#309） | — |
 | IMG-2 | ✅ | `InstanceSource` への一般化（`ravel-core`、挙動不変）（#418） | — |
 | IMG-3 | ✅ | `geometry.from_image` ノード（FrameBuffer → Geometry）（#418） | IMG-2 |
-| IMG-4 | 🟡 | `rasterize` のテクスチャ経路（CPU 参照） | IMG-2, IMG-3 |
-| IMG-5 | ⬜ | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
+| IMG-4 | ✅ | `rasterize` のテクスチャ経路（CPU 参照）（#426） | IMG-2, IMG-3 |
+| IMG-5 | 🟡 | `rasterize` のテクスチャ経路（GPU） | IMG-4 |
 | IMG-6 | ⬜ | レジストリ / ロケール / 文書 | IMG-1〜5 |
 
 **`IMG-1` だけ先に入れる。** `scene.render`（`3D-4`）が未着手で

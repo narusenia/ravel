@@ -4,7 +4,7 @@
 //! Node-graph adapters for pure geometry attribute operations.
 
 use anyhow::Context as _;
-use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
 use ravel_core::geometry::{
     AggregateMode, AttributeArray, AttributeValue, CurveUMode, Domain, Geometry, TransferMode,
     attribute_set, attribute_transfer, curve_u, path_sample, promote_attribute,
@@ -88,11 +88,7 @@ impl NodeProcessor for AttributePromoteProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "attribute.promote")?;
-        let mode = match params.str_or("aggregate", "average") {
-            "max" => AggregateMode::Max,
-            "first" => AggregateMode::First,
-            _ => AggregateMode::Average,
-        };
+        let mode = aggregate_param(params);
         Ok(Arc::new(promote_attribute(
             geometry,
             domain_param(params, "source_domain", Domain::Point),
@@ -206,12 +202,55 @@ pub(crate) fn geometry_input<'a>(
 }
 
 pub(crate) fn domain_param(params: &ResolvedParams, key: &str, default: Domain) -> Domain {
-    match params.str_or(key, "") {
+    let Some(value) = params.get(key) else {
+        return default;
+    };
+    let ResolvedValue::Str(value) = value else {
+        tracing::warn!(
+            parameter = key,
+            "attribute parameter is not a string; using the default value"
+        );
+        return default;
+    };
+    match value.as_str() {
         "instance" => Domain::Instance,
         "primitive" => Domain::Primitive,
         "detail" => Domain::Detail,
         "point" => Domain::Point,
-        _ => default,
+        _ => {
+            tracing::warn!(
+                parameter = key,
+                value = %value,
+                "attribute parameter has an unknown domain; using the default value"
+            );
+            default
+        }
+    }
+}
+
+fn aggregate_param(params: &ResolvedParams) -> AggregateMode {
+    let Some(value) = params.get("aggregate") else {
+        return AggregateMode::Average;
+    };
+    let ResolvedValue::Str(value) = value else {
+        tracing::warn!(
+            parameter = "aggregate",
+            "attribute parameter is not a string; using the default value"
+        );
+        return AggregateMode::Average;
+    };
+    match value.as_str() {
+        "max" => AggregateMode::Max,
+        "first" => AggregateMode::First,
+        "average" => AggregateMode::Average,
+        _ => {
+            tracing::warn!(
+                parameter = "aggregate",
+                value = %value,
+                "attribute parameter has an unknown aggregate; using the default value"
+            );
+            AggregateMode::Average
+        }
     }
 }
 
@@ -242,6 +281,172 @@ mod tests {
         ) -> anyhow::Result<Arc<dyn NodeData>> {
             Ok(self.0.clone())
         }
+    }
+
+    fn run_attribute_node(node: &Node, inputs: &[Arc<dyn NodeData>]) -> Arc<dyn NodeData> {
+        let mut graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        let processor: Arc<dyn NodeProcessor> = match node.type_key.as_str() {
+            "attribute.set" => Arc::new(AttributeSetProcessor::from_node(node)),
+            "attribute.promote" => Arc::new(AttributePromoteProcessor::from_node(node)),
+            "attribute.transfer" => Arc::new(AttributeTransferProcessor::from_node(node)),
+            _ => panic!("unsupported test processor {}", node.type_key),
+        };
+        ev.register(node.id, processor);
+        for (index, value) in inputs.iter().enumerate() {
+            let source_id = NodeId::new(100 + index as u64);
+            graph = graph
+                .add_node(
+                    Node::new(source_id, "test.source").with_output("out", value.data_type_id()),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(index as u64 + 1),
+                    source_id,
+                    OutputPortIndex(0),
+                    node.id,
+                    InputPortIndex(index as u32),
+                )
+                .unwrap();
+            ev.register(source_id, Arc::new(StubSource(value.clone())));
+        }
+        ev.evaluate(&graph, node.id, &ctx()).unwrap()
+    }
+
+    fn registered_node(type_key: &str, id: u64) -> Node {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        registry
+            .create_node(type_key, NodeId::new(id))
+            .unwrap_or_else(|| panic!("{type_key} is not registered"))
+    }
+
+    fn set_string_param(node: &mut Node, key: &str, value: &str) {
+        node.parameters
+            .iter_mut()
+            .find(|parameter| parameter.key == key)
+            .unwrap_or_else(|| panic!("{} has no {key}", node.type_key))
+            .value = ParameterValue::String(value.into());
+    }
+
+    fn geometry_with_domains() -> Geometry {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        geometry.push_primitive(ravel_core::geometry::Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geometry
+            .instances_mut()
+            .insert(
+                "P",
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(1.0, 1.0)]),
+            )
+            .unwrap();
+        geometry
+    }
+
+    fn transfer_geometry() -> Geometry {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(20.0, 0.0)]);
+        geometry.push_primitive(ravel_core::geometry::Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geometry
+            .points_mut()
+            .insert("value", AttributeArray::F32(vec![1.0, 5.0, 3.0]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                "P",
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert("value", AttributeArray::F32(vec![7.0, 9.0]))
+            .unwrap();
+        geometry
+    }
+
+    fn transfer_geometry_with_domain(domain: &str) -> Geometry {
+        let mut geometry = transfer_geometry();
+        match domain {
+            "point" => {}
+            "primitive" => {
+                geometry
+                    .primitive_attrs_mut()
+                    .insert("P", AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+                    .unwrap();
+                geometry
+                    .primitive_attrs_mut()
+                    .insert("value", AttributeArray::F32(vec![11.0]))
+                    .unwrap();
+            }
+            "instance" => {}
+            "detail" => {
+                geometry
+                    .detail_mut()
+                    .insert("P", AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+                    .unwrap();
+                geometry
+                    .detail_mut()
+                    .insert("value", AttributeArray::F32(vec![13.0]))
+                    .unwrap();
+            }
+            other => panic!("unexpected transfer domain {other}"),
+        }
+        geometry
+    }
+
+    fn transfer_target_geometry() -> Geometry {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(20.0, 0.0)]);
+        geometry.push_primitive(ravel_core::geometry::Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geometry
+            .instances_mut()
+            .insert(
+                "P",
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+    }
+
+    fn warnings_from(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Self;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
     }
 
     #[test]
@@ -342,6 +547,248 @@ mod tests {
                 "domain = {name:?} on the primitive domain"
             );
         }
+    }
+
+    /// The registry is the source of the strings Properties presents. Drive
+    /// every one of those strings through `attribute.set` and check the
+    /// resulting column, so a declaration cannot drift away from
+    /// `domain_param` without this test failing.
+    #[test]
+    fn declared_domain_options_reach_their_attribute_set_domains() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let options = registry
+            .param_options("attribute.set", "domain")
+            .unwrap()
+            .to_vec();
+        assert_eq!(options, ravel_core::registry::builtin::ATTRIBUTE_DOMAINS);
+
+        for domain in options {
+            let mut node = registered_node("attribute.set", 1);
+            set_string_param(&mut node, "domain", &domain);
+            set_string_param(&mut node, "name", "marker");
+            let output = run_attribute_node(&node, &[Arc::new(geometry_with_domains())]);
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            let present = match domain.as_str() {
+                "point" => output.points().get("marker").is_some(),
+                "primitive" => output.primitive_attrs().get("marker").is_some(),
+                "instance" => output.instances().get("marker").is_some(),
+                "detail" => output.detail().get("marker").is_some(),
+                other => panic!("unexpected domain option {other}"),
+            };
+            assert!(present, "domain = {domain:?} did not receive the attribute");
+        }
+    }
+
+    /// Every aggregate option is sent through the string parameter. The
+    /// values are deliberately distinct, so accidentally treating all values
+    /// as the default average cannot satisfy this test.
+    #[test]
+    fn declared_aggregate_options_reach_their_promotion_modes() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let options = registry
+            .param_options("attribute.promote", "aggregate")
+            .unwrap()
+            .to_vec();
+        assert_eq!(options, ravel_core::registry::builtin::ATTRIBUTE_AGGREGATES);
+
+        let mut geometry = geometry_with_domains();
+        geometry
+            .points_mut()
+            .insert("value", AttributeArray::F32(vec![1.0, 5.0, 3.0]))
+            .unwrap();
+        for aggregate in options {
+            let mut node = registered_node("attribute.promote", 1);
+            set_string_param(&mut node, "aggregate", &aggregate);
+            set_string_param(&mut node, "name", "value");
+            let output = run_attribute_node(&node, &[Arc::new(geometry.clone())]);
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            let actual = output
+                .detail()
+                .get("value")
+                .unwrap()
+                .as_f32("value")
+                .unwrap()[0];
+            let expected = match aggregate.as_str() {
+                "average" => 3.0,
+                "max" => 5.0,
+                "first" => 1.0,
+                other => panic!("unexpected aggregate option {other}"),
+            };
+            assert_eq!(actual, expected, "aggregate = {aggregate:?}");
+        }
+    }
+
+    /// Both transfer domain parameters use the same four strings as
+    /// `domain_param`; the geometry below gives every selected domain a
+    /// position and value column so each branch is observable.
+    /// Each value is sent through the evaluator rather than converted to a
+    /// `Domain` in the test.
+    #[test]
+    fn declared_transfer_domain_options_reach_their_string_parameter_branches() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let options = registry
+            .param_options("attribute.transfer", "source_domain")
+            .unwrap()
+            .to_vec();
+        assert_eq!(options, ravel_core::registry::builtin::ATTRIBUTE_DOMAINS);
+        assert_eq!(
+            registry.param_options("attribute.transfer", "target_domain"),
+            Some(options.as_slice())
+        );
+
+        for domain in options {
+            let mut source_domain_node = registered_node("attribute.transfer", 1);
+            set_string_param(&mut source_domain_node, "source_domain", &domain);
+            let source_output = run_attribute_node(
+                &source_domain_node,
+                &[
+                    Arc::new(transfer_target_geometry()),
+                    Arc::new(transfer_geometry_with_domain(&domain)),
+                ],
+            );
+            let source = source_output.downcast_ref::<Geometry>().unwrap();
+            let source_values = source
+                .points()
+                .get("value")
+                .unwrap()
+                .as_f32("value")
+                .unwrap();
+            let expected = match domain.as_str() {
+                "point" => [1.0, 5.0, 3.0],
+                "primitive" => [11.0, 11.0, 11.0],
+                "instance" => [7.0, 9.0, 9.0],
+                "detail" => [13.0, 13.0, 13.0],
+                other => panic!("unexpected domain option {other}"),
+            };
+            assert_eq!(source_values, &expected, "source_domain = {domain:?}");
+
+            let mut target_domain_node = registered_node("attribute.transfer", 2);
+            set_string_param(&mut target_domain_node, "target_domain", &domain);
+            let target_output = run_attribute_node(
+                &target_domain_node,
+                &[
+                    Arc::new(transfer_geometry_with_domain(&domain)),
+                    Arc::new(transfer_geometry()),
+                ],
+            );
+            let target = target_output.downcast_ref::<Geometry>().unwrap();
+            let (target_values, expected) = match domain.as_str() {
+                "point" => (
+                    target
+                        .points()
+                        .get("value")
+                        .unwrap()
+                        .as_f32("value")
+                        .unwrap(),
+                    &[1.0, 5.0, 3.0][..],
+                ),
+                "primitive" => (
+                    target
+                        .primitive_attrs()
+                        .get("value")
+                        .unwrap()
+                        .as_f32("value")
+                        .unwrap(),
+                    &[1.0][..],
+                ),
+                "instance" => (
+                    target
+                        .instances()
+                        .get("value")
+                        .unwrap()
+                        .as_f32("value")
+                        .unwrap(),
+                    &[1.0, 5.0][..],
+                ),
+                "detail" => (
+                    target
+                        .detail()
+                        .get("value")
+                        .unwrap()
+                        .as_f32("value")
+                        .unwrap(),
+                    &[1.0][..],
+                ),
+                other => panic!("unexpected domain option {other}"),
+            };
+            assert_eq!(target_values, expected, "target_domain = {domain:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_attribute_set_values_warn_and_use_the_default_domain() {
+        let mut node = registered_node("attribute.set", 1);
+        set_string_param(&mut node, "domain", "future_domain");
+        set_string_param(&mut node, "name", "marker");
+        let logged = warnings_from(|| {
+            let output = run_attribute_node(&node, &[Arc::new(geometry_with_domains())]);
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            assert!(output.points().get("marker").is_some());
+            assert!(output.primitive_attrs().get("marker").is_none());
+        });
+        assert!(
+            logged.contains("unknown domain"),
+            "missing warning: {logged:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_aggregate_values_warn_and_use_average() {
+        let mut node = registered_node("attribute.promote", 1);
+        set_string_param(&mut node, "aggregate", "future_aggregate");
+        set_string_param(&mut node, "name", "value");
+        let mut geometry = geometry_with_domains();
+        geometry
+            .points_mut()
+            .insert("value", AttributeArray::F32(vec![1.0, 5.0, 3.0]))
+            .unwrap();
+        let logged = warnings_from(|| {
+            let output = run_attribute_node(&node, &[Arc::new(geometry)]);
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            assert_eq!(
+                output
+                    .detail()
+                    .get("value")
+                    .unwrap()
+                    .as_f32("value")
+                    .unwrap(),
+                &[3.0]
+            );
+        });
+        assert!(
+            logged.contains("unknown aggregate"),
+            "missing warning: {logged:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_transfer_domain_warns_and_uses_the_point_default() {
+        let mut node = registered_node("attribute.transfer", 1);
+        set_string_param(&mut node, "source_domain", "future_domain");
+        let logged = warnings_from(|| {
+            let output = run_attribute_node(
+                &node,
+                &[
+                    Arc::new(transfer_target_geometry()),
+                    Arc::new(transfer_geometry()),
+                ],
+            );
+            assert!(
+                output
+                    .downcast_ref::<Geometry>()
+                    .unwrap()
+                    .points()
+                    .get("value")
+                    .is_some()
+            );
+        });
+        assert!(
+            logged.contains("unknown domain"),
+            "missing warning: {logged:?}"
+        );
     }
 
     /// The attribute operations touch columns, not coordinates: a 3D geometry

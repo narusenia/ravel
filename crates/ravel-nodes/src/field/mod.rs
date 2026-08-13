@@ -6,9 +6,10 @@
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
-    ComposeField, ConstantField, CurveRemapField, Domain, ExpressionField, FalloffField,
-    FalloffShape, FieldApply, FieldValue, Geometry, LengthField, MaxField, MultiplyField,
-    NoiseField, RampField, apply_field, component_index,
+    ComposeField, ConstantField, CurlNoiseField, CurveRemapField, DirectionToField, Domain,
+    ExpressionField, FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, GradientField,
+    LengthField, MaxField, MultiplyField, NoiseField, RadialField, RampField, apply_field,
+    component_index,
 };
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
@@ -35,6 +36,96 @@ impl NodeProcessor for NoiseFieldProcessor {
             seed: params.i32_or("seed", 0) as u32,
             frequency: params.f32_or("frequency", 1.0),
             octaves: params.i32_or("octaves", 1).max(1) as u32,
+        })))
+    }
+}
+
+pub struct DirectionToFieldProcessor;
+
+impl NodeProcessor for DirectionToFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let parameter_target = || {
+            let [x, y] = params.vec2_or("target", [0.0, 0.0]);
+            Vec2(x, y)
+        };
+        let target = match inputs.first().and_then(|input| input.as_ref()) {
+            None => parameter_target(),
+            Some(input) => {
+                let geometry = input
+                    .downcast_ref::<Geometry>()
+                    .ok_or_else(|| anyhow::anyhow!("field.direction_to: target is not Geometry"))?;
+                ravel_core::geometry::bounds_center(geometry)
+                    .map(|center| Vec2(center.0, center.1))
+                    .unwrap_or_else(parameter_target)
+            }
+        };
+        Ok(Arc::new(FieldValue::new(DirectionToField { target })))
+    }
+}
+
+pub struct CurlNoiseFieldProcessor;
+
+impl NodeProcessor for CurlNoiseFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(FieldValue::new(CurlNoiseField::new(
+            NoiseField {
+                seed: params.i32_or("seed", 0) as u32,
+                frequency: params.f32_or("frequency", 1.0),
+                octaves: params.i32_or("octaves", 1).max(1) as u32,
+            },
+            params.f32_or("step", 0.01),
+        ))))
+    }
+}
+
+pub struct GradientFieldProcessor;
+
+impl NodeProcessor for GradientFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let source = field_input(inputs, 0, "field.gradient")?;
+        Ok(Arc::new(FieldValue::new(GradientField::new(
+            source,
+            params.f32_or("step", 0.01),
+        ))))
+    }
+}
+
+pub struct RadialFieldProcessor;
+
+impl NodeProcessor for RadialFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let [x, y] = params.vec2_or("center", [0.0, 0.0]);
+        Ok(Arc::new(FieldValue::new(RadialField {
+            center: Vec2(x, y),
+            tangent: params.str_or("mode", "radial") == "tangent",
         })))
     }
 }
@@ -1348,6 +1439,106 @@ mod tests {
             .downcast_ref::<FieldValue>()
             .unwrap()
             .sample(&FieldSample::positions_only(&[Vec2(0.25, 0.75)], &ctx()))
+    }
+
+    fn sample_vec2(value: &dyn NodeData, positions: &[Vec2]) -> Vec<Vec2> {
+        match value
+            .downcast_ref::<FieldValue>()
+            .expect("a FieldValue")
+            .sample(&FieldSample::positions_only(positions, &ctx()))
+        {
+            AttributeArray::Vec2(values) => values,
+            other => panic!("expected a Vec2 field, got {:?}", other.attr_type()),
+        }
+    }
+
+    #[test]
+    fn direction_to_returns_unit_vectors_and_reads_the_target_parameter() {
+        let node = Node::new(NodeId::new(1), "field.direction_to")
+            .with_input("target_geometry", &[DataTypeId::GEOMETRY])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("target", ParameterValue::vec2(1.25, 0.75));
+        let output = run(&node, Arc::new(DirectionToFieldProcessor), &[]);
+        let vector = sample_vec2(output.as_ref(), &[Vec2(0.25, 0.75)])[0];
+        assert_eq!(vector, Vec2(1.0, 0.0));
+        assert!((vector.0.hypot(vector.1) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn direction_to_prefers_the_center_of_connected_target_geometry() {
+        let node = Node::new(NodeId::new(1), "field.direction_to")
+            .with_input("target_geometry", &[DataTypeId::GEOMETRY])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("target", ParameterValue::vec2(-100.0, -100.0));
+        let geometry: Arc<dyn NodeData> = Arc::new(Geometry::from_points(vec![
+            Vec2(2.25, 0.75),
+            Vec2(4.25, 0.75),
+        ]));
+        let output = run(&node, Arc::new(DirectionToFieldProcessor), &[geometry]);
+        assert_eq!(
+            sample_vec2(output.as_ref(), &[Vec2(0.25, 0.75)])[0],
+            Vec2(1.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn curl_noise_is_reproducible_and_has_near_zero_divergence() {
+        let node = Node::new(NodeId::new(1), "field.curl_noise")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("seed", ParameterValue::Int(23))
+            .with_param("frequency", ParameterValue::Float(1.7))
+            .with_param("octaves", ParameterValue::Int(3))
+            .with_param("step", ParameterValue::Float(0.02));
+        let first = run(&node, Arc::new(CurlNoiseFieldProcessor), &[]);
+        let second = run(&node, Arc::new(CurlNoiseFieldProcessor), &[]);
+        let positions = [Vec2(0.13, 0.71), Vec2(-2.4, 8.1), Vec2(31.0, -0.25)];
+        assert_eq!(
+            sample_vec2(first.as_ref(), &positions),
+            sample_vec2(second.as_ref(), &positions)
+        );
+
+        let step = 0.02;
+        for position in positions {
+            let x_plus = sample_vec2(first.as_ref(), &[Vec2(position.0 + step, position.1)])[0];
+            let x_minus = sample_vec2(first.as_ref(), &[Vec2(position.0 - step, position.1)])[0];
+            let y_plus = sample_vec2(first.as_ref(), &[Vec2(position.0, position.1 + step)])[0];
+            let y_minus = sample_vec2(first.as_ref(), &[Vec2(position.0, position.1 - step)])[0];
+            let divergence = (x_plus.0 - x_minus.0 + y_plus.1 - y_minus.1) / (2.0 * step);
+            assert!(
+                divergence.abs() < 1e-3,
+                "divergence at {position:?}: {divergence}"
+            );
+        }
+    }
+
+    #[test]
+    fn gradient_matches_the_analytic_gradient_of_a_scalar_field() {
+        let source: Arc<dyn NodeData> = Arc::new(FieldValue::new(
+            ravel_core::geometry::ExpressionField::new("@P.x * 2 + @P.y * 3", 0.0),
+        ));
+        let node = Node::new(NodeId::new(1), "field.gradient")
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("step", ParameterValue::Float(0.01));
+        let output = run(&node, Arc::new(GradientFieldProcessor), &[source]);
+        let values = sample_vec2(output.as_ref(), &[Vec2(0.25, 0.75), Vec2(-4.0, 2.0)]);
+        for value in values {
+            assert!((value.0 - 2.0).abs() < 1e-4, "x gradient: {value:?}");
+            assert!((value.1 - 3.0).abs() < 1e-4, "y gradient: {value:?}");
+        }
+    }
+
+    #[test]
+    fn radial_field_can_follow_the_tangent_direction() {
+        let node = Node::new(NodeId::new(1), "field.radial")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("center", ParameterValue::vec2(0.0, 0.0))
+            .with_param("mode", ParameterValue::String("tangent".into()));
+        let output = run(&node, Arc::new(RadialFieldProcessor), &[]);
+        assert_eq!(
+            sample_vec2(output.as_ref(), &[Vec2(1.0, 0.0)])[0],
+            Vec2(-0.0, 1.0)
+        );
     }
 
     /// `field.length` of a one-element column.

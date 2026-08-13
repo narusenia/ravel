@@ -14,7 +14,7 @@ use crate::expression::{self, Component, ExpressionError, Program, Scope};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
-use crate::types::{Color, NodeData, Vec2, Vec3, Vec4};
+use crate::types::{Color, NodeData, Vec2, Vec3, Vec4, magnitude};
 
 /// Everything a [`Field`] may read when it is evaluated.
 ///
@@ -197,6 +197,185 @@ impl Field for NoiseField {
             })
             .collect();
         AttributeArray::F32(values)
+    }
+}
+
+/// A unit vector from each sample position toward a fixed target.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DirectionToField {
+    pub target: Vec2,
+}
+
+impl Field for DirectionToField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        AttributeArray::Vec2(
+            input
+                .positions
+                .iter()
+                .map(|position| {
+                    unit_vector(Vec2(self.target.0 - position.0, self.target.1 - position.1))
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A divergence-free vector field made from the existing simplex noise field.
+///
+/// The scalar noise is treated as a stream function `N`; returning
+/// `(∂N/∂y, -∂N/∂x)` makes the two terms cancel in the divergence. Both
+/// derivatives use the same [`NoiseField`] rather than a second noise
+/// implementation, so seed, octave and frequency semantics stay identical to
+/// [`NoiseField`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurlNoiseField {
+    pub noise: NoiseField,
+    pub step: f32,
+}
+
+impl CurlNoiseField {
+    pub fn new(noise: NoiseField, step: f32) -> Self {
+        Self { noise, step }
+    }
+}
+
+impl Field for CurlNoiseField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let step = finite_difference_step(self.step);
+        let values = input
+            .positions
+            .iter()
+            .map(|position| {
+                let samples = [
+                    Vec2(position.0, position.1 + step),
+                    Vec2(position.0, position.1 - step),
+                    Vec2(position.0 + step, position.1),
+                    Vec2(position.0 - step, position.1),
+                ];
+                let values = scalar_values(
+                    self.noise
+                        .sample(&FieldSample::new(&samples, input.attributes, input.ctx)),
+                    samples.len(),
+                );
+                Vec2(
+                    (values[0] - values[1]) / (2.0 * step),
+                    -(values[2] - values[3]) / (2.0 * step),
+                )
+            })
+            .collect();
+        AttributeArray::Vec2(values)
+    }
+}
+
+/// The finite-difference gradient of a scalar field.
+#[derive(Clone, Debug)]
+pub struct GradientField {
+    pub source: FieldValue,
+    pub step: f32,
+}
+
+impl GradientField {
+    pub fn new(source: FieldValue, step: f32) -> Self {
+        Self { source, step }
+    }
+}
+
+impl Field for GradientField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64 + self.source.byte_size()
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        let step = finite_difference_step(self.step);
+        let x_plus: Vec<_> = input
+            .positions
+            .iter()
+            .map(|position| Vec2(position.0 + step, position.1))
+            .collect();
+        let x_minus: Vec<_> = input
+            .positions
+            .iter()
+            .map(|position| Vec2(position.0 - step, position.1))
+            .collect();
+        let y_plus: Vec<_> = input
+            .positions
+            .iter()
+            .map(|position| Vec2(position.0, position.1 + step))
+            .collect();
+        let y_minus: Vec<_> = input
+            .positions
+            .iter()
+            .map(|position| Vec2(position.0, position.1 - step))
+            .collect();
+        let x_plus_values = scalar_values(
+            self.source
+                .sample(&FieldSample::new(&x_plus, input.attributes, input.ctx)),
+            input.len(),
+        );
+        let x_minus_values = scalar_values(
+            self.source
+                .sample(&FieldSample::new(&x_minus, input.attributes, input.ctx)),
+            input.len(),
+        );
+        let y_plus_values = scalar_values(
+            self.source
+                .sample(&FieldSample::new(&y_plus, input.attributes, input.ctx)),
+            input.len(),
+        );
+        let y_minus_values = scalar_values(
+            self.source
+                .sample(&FieldSample::new(&y_minus, input.attributes, input.ctx)),
+            input.len(),
+        );
+        AttributeArray::Vec2(
+            (0..input.len())
+                .map(|index| {
+                    Vec2(
+                        (x_plus_values[index] - x_minus_values[index]) / (2.0 * step),
+                        (y_plus_values[index] - y_minus_values[index]) / (2.0 * step),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A normalized vector from a center, either outward or tangent to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialField {
+    pub center: Vec2,
+    pub tangent: bool,
+}
+
+impl Field for RadialField {
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        AttributeArray::Vec2(
+            input
+                .positions
+                .iter()
+                .map(|position| {
+                    let delta = Vec2(position.0 - self.center.0, position.1 - self.center.1);
+                    let radial = unit_vector(delta);
+                    if self.tangent {
+                        Vec2(-radial.1, radial.0)
+                    } else {
+                        radial
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
@@ -962,36 +1141,6 @@ fn transform_components(sampled: &AttributeArray, arity: usize, index: usize) ->
             0.0
         }
     })
-}
-
-/// Euclidean length of the first `arity` components of `c`.
-///
-/// Scaled by the largest component rather than summing the raw squares.
-/// `(f32::MAX, 0)` squares to an infinity and `(f32::MIN_POSITIVE, 0)` squares
-/// to zero, so the direct form answers `inf` and `0` for two vectors whose
-/// lengths are perfectly representable. Dividing through by the largest
-/// component first keeps every square inside `0..=1`.
-///
-/// The value-domain `vector.length` node computes the same thing over a wire
-/// value instead of a column. The two are separate because neither crate can
-/// call the other's — this is `ravel-core`, that is `ravel-nodes` — and
-/// `field_length_answers_what_vector_length_answers` pins them to the same
-/// answer, bit for bit.
-fn magnitude(arity: usize, c: [f32; 4]) -> f32 {
-    let comps = &c[..arity];
-    let scale = comps.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
-    // Scaling needs a finite, non-zero divisor. A zero vector, an infinity and
-    // a `NaN` all already have their answer in the raw sum — and `max` skips
-    // `NaN`, so that case has to come back here to stay a `NaN`.
-    if !scale.is_finite() || scale == 0.0 {
-        return comps.iter().map(|v| v * v).sum::<f32>().sqrt();
-    }
-    scale
-        * comps
-            .iter()
-            .map(|v| (v / scale).powi(2))
-            .sum::<f32>()
-            .sqrt()
 }
 
 /// `field.length`: the magnitude of a vector field, as a scalar field.
@@ -1832,6 +1981,23 @@ fn scalar_values(array: AttributeArray, expected_len: usize) -> Vec<f32> {
     match array {
         AttributeArray::F32(values) if values.len() == expected_len => values,
         _ => vec![0.0; expected_len],
+    }
+}
+
+fn finite_difference_step(step: f32) -> f32 {
+    if step.is_finite() && step > 0.0 {
+        step
+    } else {
+        0.01
+    }
+}
+
+fn unit_vector(value: Vec2) -> Vec2 {
+    let length = value.0.hypot(value.1);
+    if length > 0.0 && length.is_finite() {
+        Vec2(value.0 / length, value.1 / length)
+    } else {
+        Vec2(0.0, 0.0)
     }
 }
 

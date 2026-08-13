@@ -1130,6 +1130,34 @@ seed = "Random seed of the noise."
 frequency = "Spatial frequency of the base octave."
 octaves = "Number of fBm octaves; each doubles the frequency and halves the amplitude."
 
+[node."field.direction_to"]
+label = "Direction To Field"
+description = "Returns a unit vector from each sample position toward a target point or target geometry center."
+[node."field.direction_to".params]
+target = "Target point used when no target geometry is connected."
+
+[node."field.curl_noise"]
+label = "Curl Flow Field"
+description = "Builds a deterministic divergence-free flow field from simplex noise."
+[node."field.curl_noise".params]
+seed = "Random seed of the noise."
+frequency = "Spatial frequency of the noise."
+octaves = "Number of fBm octaves."
+step = "Finite-difference step used to estimate the derivatives."
+
+[node."field.gradient"]
+label = "Gradient Field"
+description = "Samples the gradient of a scalar field with centered finite differences."
+[node."field.gradient".params]
+step = "Finite-difference step used to estimate the derivatives."
+
+[node."field.radial"]
+label = "Radial Field"
+description = "Returns an outward radial or tangent unit vector around a center."
+[node."field.radial".params]
+center = "Center of the radial field."
+mode = "Direction mode: radial points outward; tangent follows the circle."
+
 [node."field.falloff"]
 label = "Falloff Field"
 description = "A falloff that is 1 through the inner radius and fades smoothly to 0 at the outer radius."

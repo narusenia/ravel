@@ -164,6 +164,10 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(attribute_path_sample());
     reg.register(attribute_curveu());
     reg.register(field_noise());
+    reg.register(field_direction_to());
+    reg.register(field_curl_noise());
+    reg.register(field_gradient());
+    reg.register(field_radial());
     reg.register(field_falloff());
     reg.register(field_curve_remap());
     reg.register(field_ramp());
@@ -539,6 +543,48 @@ fn field_noise() -> NodeTemplate {
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("frequency", 0.0..=1000.0, 0.0..=10.0)
         .with_param_range("octaves", 1.0..=8.0, 1.0..=8.0)
+}
+
+fn field_direction_to() -> NodeTemplate {
+    NodeTemplate::new(
+        "field.direction_to",
+        "Direction To Field",
+        NodeCategory::Field,
+    )
+    .with_input(geometry_input("target_geometry"))
+    .with_output(field_output())
+    .with_param(channel2_parameter("target", 0.0, 0.0))
+    .with_param_range("target", -1e9..=1e9, -10_000.0..=10_000.0)
+}
+
+fn field_curl_noise() -> NodeTemplate {
+    NodeTemplate::new("field.curl_noise", "Curl Noise Field", NodeCategory::Field)
+        .with_output(field_output())
+        .with_param(int_parameter("seed", 0))
+        .with_param(float_parameter("frequency", 1.0))
+        .with_param(int_parameter("octaves", 1))
+        .with_param(float_parameter("step", 0.01))
+        .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_range("frequency", 0.0..=1000.0, 0.0..=10.0)
+        .with_param_range("octaves", 1.0..=8.0, 1.0..=8.0)
+        .with_param_range("step", 1e-5..=100.0, 0.001..=1.0)
+}
+
+fn field_gradient() -> NodeTemplate {
+    NodeTemplate::new("field.gradient", "Gradient Field", NodeCategory::Field)
+        .with_input(field_input("field"))
+        .with_output(field_output())
+        .with_param(float_parameter("step", 0.01))
+        .with_param_range("step", 1e-5..=100.0, 0.001..=1.0)
+}
+
+fn field_radial() -> NodeTemplate {
+    NodeTemplate::new("field.radial", "Radial Field", NodeCategory::Field)
+        .with_output(field_output())
+        .with_param(channel2_parameter("center", 0.0, 0.0))
+        .with_param(string_parameter("mode", "radial"))
+        .with_param_options("mode", ["radial", "tangent"])
+        .with_param_range("center", -1e9..=1e9, -10_000.0..=10_000.0)
 }
 
 fn field_falloff() -> NodeTemplate {
@@ -1759,7 +1805,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 75);
+        assert_eq!(reg.all_templates().count(), 79);
     }
 
     #[test]
@@ -1768,7 +1814,7 @@ mod tests {
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
-        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 17);
+        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 21);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);

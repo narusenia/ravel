@@ -21,6 +21,31 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Euclidean length of the first `arity` components of `components`.
+///
+/// Scaling by the largest component avoids overflow at `f32::MAX` and
+/// underflow at `f32::MIN_POSITIVE`, while preserving the existing IEEE
+/// behavior for zero, infinity, and NaN inputs.
+pub fn magnitude(arity: usize, components: [f32; 4]) -> f32 {
+    let components = &components[..arity];
+    let scale = components
+        .iter()
+        .fold(0.0f32, |accumulator, value| accumulator.max(value.abs()));
+    if !scale.is_finite() || scale == 0.0 {
+        return components
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+    }
+    scale
+        * components
+            .iter()
+            .map(|value| (value / scale).powi(2))
+            .sum::<f32>()
+            .sqrt()
+}
+
 // ===========================================================================
 // Pixel format
 // ===========================================================================

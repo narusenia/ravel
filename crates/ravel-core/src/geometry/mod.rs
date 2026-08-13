@@ -17,10 +17,10 @@ pub use container::{
 };
 pub use field::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
-    ComposeField, ConstantField, CurveRemapField, ExpressionField, FalloffField, FalloffShape,
-    Field, FieldApply, FieldError, FieldExpressionError, FieldSample, FieldValue,
-    ImageSamplerField, LengthField, MaxField, MultiplyField, NoiseField, RampField, apply_field,
-    component_index,
+    ComposeField, ConstantField, CurlNoiseField, CurveRemapField, DirectionToField,
+    ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError,
+    FieldExpressionError, FieldSample, FieldValue, GradientField, ImageSamplerField, LengthField,
+    MaxField, MultiplyField, NoiseField, RadialField, RampField, apply_field, component_index,
 };
 pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,

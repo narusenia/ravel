@@ -1766,11 +1766,7 @@ mod tests {
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-<<<<<<< HEAD
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 22);
-=======
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 20);
->>>>>>> 92191d6 (feat: add geometry.from_image wrapping a frame buffer as an instance source)
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 17);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

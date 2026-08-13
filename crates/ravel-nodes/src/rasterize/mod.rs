@@ -1835,6 +1835,52 @@ mod tests {
         geo
     }
 
+    /// `source_index` counts **every** source, images included.
+    ///
+    /// `select_instance_source` applies the index to the full slice and then
+    /// declines to draw an image, so the geometry sources keep the positions
+    /// the user gave them. Filtering the images out *before* indexing — which
+    /// is what the geometry-only `instance_sources()` view would do — shifts
+    /// every index after the image by one and silently stamps the wrong
+    /// source. `IMG-4` will draw these instead of skipping them; the index
+    /// arithmetic has to already be right when it does.
+    #[test]
+    fn source_index_counts_the_image_sources_it_cannot_draw_yet() {
+        let red = colored_point_source(Color::new(1.0, 0.0, 0.0, 1.0));
+        let blue = colored_point_source(Color::new(0.0, 0.0, 1.0, 1.0));
+        let frame: Arc<dyn NodeData> = Arc::new(FrameBuffer::new_zeroed(2, 2));
+        let image = InstanceSource::Image(
+            ravel_core::geometry::InstanceImage::new(frame, 2, 2).expect("a 2x2 image"),
+        );
+        let mut geo = Geometry::new();
+        geo.set_sources(vec![
+            image,
+            InstanceSource::Geometry(red),
+            InstanceSource::Geometry(blue),
+        ]);
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(5.0, 8.0), Vec2(15.0, 8.0)]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![1, 2]))
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 32, 16);
+        let first = pixel(&fb, 5, 8);
+        let second = pixel(&fb, 15, 8);
+        assert!(
+            first[0] > 0.9 && first[2] < 0.1,
+            "index 1 is the red geometry, not the one after the image: {first:?}"
+        );
+        assert!(
+            second[2] > 0.9 && second[0] < 0.1,
+            "index 2 is the blue geometry: {second:?}"
+        );
+    }
+
     #[test]
     fn instances_select_source_per_source_index() {
         let geo = two_source_instances(Some(vec![0, 1, 0]));

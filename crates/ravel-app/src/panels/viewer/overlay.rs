@@ -2571,4 +2571,433 @@ mod tests {
             .unwrap();
         assert_eq!(again, edit);
     }
+
+    // -----------------------------------------------------------------------
+    // Unit 7: the layer shell manipulator
+    // -----------------------------------------------------------------------
+
+    /// One selected layer holding a 40x20 rect centered at (100, 200), so the
+    /// shell bbox is (80, 190, 40, 20) and its handle centers are round
+    /// numbers.
+    fn shell_context() -> (OverlayContext, CompId, LayerId) {
+        let (mut ctx, _, comp_id, layer_id) = doc_with_node(rect_node((100.0, 200.0)));
+        ctx.layer_selection = LayerSelection::of(comp_id, vec![layer_id]);
+        (ctx, comp_id, layer_id)
+    }
+
+    fn eval() -> ravel_core::eval::EvalContext {
+        ravel_core::eval::EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
+    }
+
+    /// Anchor, position, scale and rotation of a layer's shell at frame 0.
+    #[allow(clippy::type_complexity)]
+    fn shell_values(
+        document: &Document,
+        comp: CompId,
+        layer: LayerId,
+    ) -> ((f32, f32), (f32, f32), (f32, f32), f32) {
+        let eval = eval();
+        let transform = &document
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .transform;
+        let at = |channel: &ravel_core::animation::channel::AnimationChannel| {
+            channel.evaluate(0.0, &eval)
+        };
+        (
+            (
+                at(&transform.anchor_point[0]),
+                at(&transform.anchor_point[1]),
+            ),
+            (at(&transform.position[0]), at(&transform.position[1])),
+            (at(&transform.scale[0]), at(&transform.scale[1])),
+            at(&transform.rotation),
+        )
+    }
+
+    fn shell_handle(ctx: &OverlayContext, id: ShellHandle) -> OverlayHandle {
+        ShellManipulator
+            .handles(ctx)
+            .into_iter()
+            .find(|handle| handle.id == OverlayHandleId::Shell(id))
+            .unwrap_or_else(|| panic!("no {id:?} handle"))
+    }
+
+    /// Run one drag of `id` and return the document it produces.
+    fn drag_shell(
+        ctx: &OverlayContext,
+        id: ShellHandle,
+        delta: (f32, f32),
+        modifiers: DragModifiers,
+    ) -> Document {
+        let handle = shell_handle(ctx, id);
+        ShellManipulator
+            .drag(&handle, delta, modifiers, ctx)
+            .expect("the grip produced no edit")
+            .apply(ctx.document.as_ref().unwrap())
+            .expect("the edit did not apply")
+    }
+
+    fn close(actual: f32, expected: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "{what}: {actual} != {expected}"
+        );
+    }
+
+    fn world_of(document: &Document, comp: CompId, layer: LayerId) -> Affine {
+        let composition = document.get_composition(comp).unwrap();
+        world_matrix(composition, composition.get_layer(layer).unwrap(), &eval())
+    }
+
+    #[test]
+    fn a_corner_grip_scales_the_shell_and_keeps_the_opposite_corner_still() {
+        let (ctx, comp, layer) = shell_context();
+        // The south-east grip (index 7) of the (80, 190, 40, 20) bbox, pulled
+        // 40 out on x and 5 on y: x doubles, y grows by a quarter.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers::default(),
+        );
+        let (_, position, scale, _) = shell_values(&updated, comp, layer);
+        close(scale.0, 2.0, "scale x");
+        close(scale.1, 1.25, "scale y");
+
+        // The grabbed corner ends under the pointer and the opposite corner
+        // has not moved — which is what `position` was rewritten for.
+        let world = world_of(&updated, comp, layer);
+        let grabbed = world.apply(120.0, 210.0);
+        close(grabbed.0, 160.0, "grabbed corner x");
+        close(grabbed.1, 215.0, "grabbed corner y");
+        let fixed = world.apply(80.0, 190.0);
+        close(fixed.0, 80.0, "fixed corner x");
+        close(fixed.1, 190.0, "fixed corner y");
+        assert_ne!(position, (0.0, 0.0), "the compensation wrote position");
+    }
+
+    #[test]
+    fn shift_locks_the_aspect_ratio_to_the_larger_movement() {
+        let (ctx, comp, layer) = shell_context();
+        let free = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers::default(),
+        );
+        let (.., free_scale, _) = shell_values(&free, comp, layer);
+        assert_ne!(free_scale.0, free_scale.1, "without Shift the axes differ");
+
+        let locked = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers {
+                shift: true,
+                alt: false,
+            },
+        );
+        let (.., locked_scale, _) = shell_values(&locked, comp, layer);
+        close(locked_scale.0, 2.0, "scale x");
+        close(
+            locked_scale.1,
+            2.0,
+            "Shift takes the larger movement (x) for both axes",
+        );
+    }
+
+    #[test]
+    fn an_edge_grip_scales_one_axis_only() {
+        let (ctx, comp, layer) = shell_context();
+        // Index 4 is the east edge midpoint: a big vertical movement must not
+        // reach the y scale.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Scale(4),
+            (40.0, 50.0),
+            DragModifiers::default(),
+        );
+        let (.., scale, _) = shell_values(&updated, comp, layer);
+        close(scale.0, 2.0, "scale x");
+        close(scale.1, 1.0, "scale y is untouched by an edge grip");
+    }
+
+    #[test]
+    fn alt_scales_about_the_anchor_and_leaves_position_alone() {
+        let (ctx, comp, layer) = shell_context();
+        let handle = shell_handle(&ctx, ShellHandle::Scale(7));
+        let edit = ShellManipulator
+            .drag(
+                &handle,
+                (40.0, 5.0),
+                DragModifiers {
+                    shift: false,
+                    alt: true,
+                },
+                &ctx,
+            )
+            .unwrap();
+        let OverlayEdit::Batch(edits) = &edit else {
+            panic!("a shell drag batches its writes");
+        };
+        assert_eq!(
+            edits.len(),
+            2,
+            "the anchor is already the fixed point, so nothing corrects position"
+        );
+
+        let updated = edit.apply(ctx.document.as_ref().unwrap()).unwrap();
+        let (anchor, position, scale, _) = shell_values(&updated, comp, layer);
+        assert_eq!(position, (0.0, 0.0));
+        // Grabbed (120, 210) relative to the anchor (0, 0) reaches (160, 215).
+        close(scale.0, 160.0 / 120.0, "scale x about the anchor");
+        close(scale.1, 215.0 / 210.0, "scale y about the anchor");
+        assert_eq!(anchor, (0.0, 0.0), "Alt scales about the anchor, not it");
+    }
+
+    #[test]
+    fn the_ring_outside_a_corner_rotates_the_shell() {
+        let (ctx, comp, layer) = shell_context();
+        // The grip at (120, 210) swung a quarter turn about the anchor (0, 0):
+        // (x, y) -> (-y, x) is +90 degrees in the matrix's convention.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Rotate(7),
+            (-210.0 - 120.0, 120.0 - 210.0),
+            DragModifiers::default(),
+        );
+        let (.., rotation) = shell_values(&updated, comp, layer);
+        close(rotation, 90.0, "rotation");
+
+        // Sign check that does not restate the formula: the layer really does
+        // end up where the pointer put the grip.
+        let landed = world_of(&updated, comp, layer).apply(120.0, 210.0);
+        close(landed.0, -210.0, "grip x after the turn");
+        close(landed.1, 120.0, "grip y after the turn");
+    }
+
+    #[test]
+    fn moving_the_anchor_leaves_the_picture_where_it_was() {
+        let (ctx, comp, layer) = shell_context();
+        // A shell with every channel non-trivial: an uncompensated anchor move
+        // would shift the content by R·S·(a' − a), which needs all three.
+        let mut ctx = ctx;
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                use ravel_core::animation::channel::AnimationChannel;
+                layer.transform.anchor_point = [
+                    AnimationChannel::constant(10.0),
+                    AnimationChannel::constant(20.0),
+                ];
+                layer.transform.position = [
+                    AnimationChannel::constant(50.0),
+                    AnimationChannel::constant(60.0),
+                ];
+                layer.transform.scale = [
+                    AnimationChannel::constant(2.0),
+                    AnimationChannel::constant(3.0),
+                ];
+                layer.transform.rotation = AnimationChannel::constant(30.0);
+            },
+        );
+        let before = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let (anchor_before, ..) = shell_values(ctx.document.as_ref().unwrap(), comp, layer);
+
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Anchor,
+            (30.0, -15.0),
+            DragModifiers::default(),
+        );
+        let (anchor_after, position_after, ..) = shell_values(&updated, comp, layer);
+        assert_ne!(anchor_after, anchor_before, "the anchor did move");
+        // The marker followed the pointer: it sits at the parent-space
+        // position, and the parent chain here is the identity.
+        close(
+            position_after.0,
+            50.0 + 30.0,
+            "position x follows the marker",
+        );
+        close(
+            position_after.1,
+            60.0 - 15.0,
+            "position y follows the marker",
+        );
+
+        let after = world_of(&updated, comp, layer);
+        for (index, (a, b)) in before.0.iter().zip(after.0).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "the world matrix moved at {index}: {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyframed_scale_channel_gains_a_key_instead_of_being_flattened() {
+        use ravel_core::animation::Interpolation;
+
+        let (mut ctx, comp, layer) = shell_context();
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 1.0, Interpolation::Linear);
+        curve.insert(10, 4.0, Interpolation::Linear);
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.scale[0] =
+                    ravel_core::animation::channel::AnimationChannel::keyframes(curve.clone());
+            },
+        );
+
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers::default(),
+        );
+        let channel = updated
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .transform
+            .scale[0]
+            .clone();
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            panic!("the drag flattened an animated scale channel");
+        };
+        assert_eq!(curve.keyframes().len(), 2, "frame 0's key was updated");
+        close(
+            channel.evaluate(0.0, &eval()),
+            2.0,
+            "the key at the playhead",
+        );
+        close(
+            channel.evaluate(10.0, &eval()),
+            4.0,
+            "the later key is untouched",
+        );
+    }
+
+    #[test]
+    fn a_parented_layer_is_manipulated_through_its_parents_transform() {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (mut ctx, comp, layer) = shell_context();
+        let parent_id = LayerId::next();
+        ctx.document = {
+            // A parent that both moves and scales: identity-blind code passes
+            // a translation-only parent.
+            let mut parent = Layer::new(parent_id, "Parent", Graph::new()).with_time(0, 0, 300);
+            parent.transform.position = [
+                AnimationChannel::constant(100.0),
+                AnimationChannel::constant(50.0),
+            ];
+            parent.transform.scale = [
+                AnimationChannel::constant(2.0),
+                AnimationChannel::constant(2.0),
+            ];
+            let document =
+                ravel_ui::document::add_layer(ctx.document.as_ref().unwrap(), comp, parent)
+                    .unwrap();
+            ravel_ui::document::update_layer(&document, comp, layer, |layer| {
+                layer.parent = Some(parent_id)
+            })
+        };
+
+        // The bbox, the grips and the anchor marker all sit where the parent
+        // chain puts the content: (x, y) -> (2x + 100, 2y + 50).
+        let handle = shell_handle(&ctx, ShellHandle::Scale(7));
+        close(handle.position.0, 2.0 * 120.0 + 100.0, "grip x");
+        close(handle.position.1, 2.0 * 210.0 + 50.0, "grip y");
+        let anchor = shell_handle(&ctx, ShellHandle::Anchor);
+        close(anchor.position.0, 100.0, "anchor marker x");
+        close(anchor.position.1, 50.0, "anchor marker y");
+
+        // A move grip dragged 40 canvas pixels writes 20 into `position`,
+        // because `position` lives in the parent's space.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Position,
+            (40.0, 20.0),
+            DragModifiers::default(),
+        );
+        let (_, position, ..) = shell_values(&updated, comp, layer);
+        close(position.0, 20.0, "position x is parent-space");
+        close(position.1, 10.0, "position y is parent-space");
+    }
+
+    #[test]
+    fn the_rotation_ring_only_wins_outside_the_scale_grip() {
+        let (ctx, ..) = shell_context();
+        let registry = OverlayRegistry::new(vec![Box::new(ShellManipulator)]);
+        let at = |point: (f32, f32)| registry.hit_test_draggable(&ctx, point, 1.0).map(|h| h.id);
+        assert_eq!(
+            at((120.0, 210.0)),
+            Some(OverlayHandleId::Shell(ShellHandle::Scale(7))),
+            "the inner disc scales"
+        );
+        assert_eq!(
+            at((132.0, 210.0)),
+            Some(OverlayHandleId::Shell(ShellHandle::Rotate(7))),
+            "the ring around it rotates"
+        );
+        assert_eq!(at((300.0, 300.0)), None);
+    }
+
+    #[test]
+    fn the_drag_hud_reports_the_channel_the_gesture_holds() {
+        let (mut ctx, comp, layer) = shell_context();
+        assert!(
+            ShellManipulator.labels(&ctx).is_empty(),
+            "no HUD while the pointer is idle"
+        );
+
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.rotation =
+                    ravel_core::animation::channel::AnimationChannel::constant(45.0)
+            },
+        );
+        ctx.active_handle = Some(OverlayHandleId::Shell(ShellHandle::Rotate(0)));
+        let labels = ShellManipulator.labels(&ctx);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].text.as_ref(), "45.0°");
+        assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
+
+        ctx.active_handle = Some(OverlayHandleId::Shell(ShellHandle::Scale(0)));
+        assert_eq!(
+            ShellManipulator.labels(&ctx)[0].text.as_ref(),
+            "100.0% × 100.0%"
+        );
+    }
+
+    #[test]
+    fn the_manipulator_needs_exactly_one_selected_layer() {
+        let (ctx, comp, layer) = shell_context();
+        assert!(ShellManipulator.is_active(&ctx));
+
+        let mut none = ctx.clone();
+        none.layer_selection = LayerSelection::default();
+        assert!(!ShellManipulator.is_active(&none));
+        assert!(ShellManipulator.handles(&none).is_empty());
+
+        let mut two = ctx;
+        two.layer_selection = LayerSelection::of(comp, vec![layer, LayerId::next()]);
+        assert!(
+            !ShellManipulator.is_active(&two),
+            "two layers have no single shell to write"
+        );
+    }
 }

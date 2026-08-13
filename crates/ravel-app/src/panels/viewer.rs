@@ -4538,4 +4538,206 @@ mod tests {
             "the layer starting at 10 is keyed at its own local frame 0"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Shell manipulator gestures (REQ-UI-011 unit 7)
+    // -----------------------------------------------------------------------
+
+    /// One selected layer with a 40x20 rect centered at (100, 200), on a 1:1
+    /// viewport: the shell bbox is (80, 190, 40, 20) and its south-east grip
+    /// sits at window pixel (120, 210).
+    fn shell_setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        ravel_core::id::CompId,
+        ravel_core::id::LayerId,
+    ) {
+        use ravel_core::id::LayerId;
+
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            cx.set_global(crate::panels::SelectedPropertiesTarget::default());
+            cx.set_global(CanvasSelection::default());
+            cx.set_global(crate::panels::PlaybackPosition::default());
+        });
+
+        let (comp_id, layer) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let layer = LayerId::next();
+            let network = Graph::new()
+                .add_node(shape_node(
+                    "shape.rect",
+                    &[
+                        v2("center", 100.0, 200.0),
+                        f("width", 40.0),
+                        f("height", 20.0),
+                    ],
+                ))
+                .unwrap();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(layer, "L", network).with_time(0, 0, 300),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, layer)
+        });
+        cx.update(|cx| crate::panels::set_layer_selection(vec![layer], cx));
+
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.composition_resolution = Some((1920, 1080));
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+            })
+            .unwrap();
+        (window, project, comp_id, layer)
+    }
+
+    fn press_at(x: f32, y: f32) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(x), px(y)),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    fn shell_scale(
+        project: &Entity<ProjectState>,
+        comp_id: ravel_core::id::CompId,
+        layer: ravel_core::id::LayerId,
+        cx: &mut TestAppContext,
+    ) -> (f32, f32) {
+        project.read_with(cx, |project, _| {
+            let transform = &project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .transform;
+            (
+                transform.scale[0].evaluate(0.0, &eval_ctx()),
+                transform.scale[1].evaluate(0.0, &eval_ctx()),
+            )
+        })
+    }
+
+    /// A whole shell drag is one undo step, however many previews it published
+    /// on the way. Three moves and a single `undo` must land back at 100%.
+    #[gpui::test]
+    fn a_shell_handle_drag_is_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        assert_eq!(shell_scale(&project, comp_id, layer, cx), (1.0, 1.0));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.overlay_handle_mouse_down(&press_at(120.0, 210.0), cx),
+                    "the south-east grip took the press"
+                );
+                for x in [130.0, 150.0, 160.0] {
+                    panel.handle_dragged(point(px(x), px(215.0)), DragModifiers::default(), cx);
+                }
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let scaled = shell_scale(&project, comp_id, layer, cx);
+        assert!(
+            (scaled.0 - 2.0).abs() < 1e-3 && (scaled.1 - 1.25).abs() < 1e-3,
+            "the last preview is what the gesture committed: {scaled:?}"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            shell_scale(&project, comp_id, layer, cx),
+            (1.0, 1.0),
+            "one undo covers the whole gesture, not just the last preview"
+        );
+        // That single undo did not eat the layer: the next step back is its
+        // creation, so the gesture really was one step.
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layer_count(),
+                1
+            );
+        });
+    }
+
+    /// Escape during a shell drag restores the document the gesture started
+    /// from and leaves no undo step behind.
+    #[gpui::test]
+    fn escape_reverts_a_shell_handle_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(120.0, 210.0), cx));
+                panel.handle_dragged(point(px(160.0), px(215.0)), DragModifiers::default(), cx);
+                assert_ne!(shell_scale_of(panel, cx, comp_id, layer), (1.0, 1.0));
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "Escape restores the document the press captured"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layer_count()
+            }),
+            0,
+            "the cancelled gesture left no step of its own in the history"
+        );
+    }
+
+    /// The scale of `layer` as the panel currently sees it, for assertions
+    /// made from inside a `window.update`.
+    fn shell_scale_of(
+        panel: &ViewerPanel,
+        cx: &mut Context<ViewerPanel>,
+        comp_id: ravel_core::id::CompId,
+        layer: ravel_core::id::LayerId,
+    ) -> (f32, f32) {
+        let project = panel.project(cx).unwrap();
+        let document = project.read(cx).document().clone();
+        let transform = &document
+            .get_composition(comp_id)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .transform;
+        (
+            transform.scale[0].evaluate(0.0, &eval_ctx()),
+            transform.scale[1].evaluate(0.0, &eval_ctx()),
+        )
+    }
 }

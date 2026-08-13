@@ -14,7 +14,7 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 30 | 1件1ファイル |
-| medium | 40 | 領域別5ファイル（`medium-*.md`） |
+| medium | 42 | 領域別5ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -63,7 +63,7 @@
 
 ## medium（40件）
 
-- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33`
+- [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33` `34` `35`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09`
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
   無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）

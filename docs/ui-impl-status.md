@@ -253,6 +253,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | 表示変換（リニア → sRGB） | ✅ | 評価バッファはリニア光なので、リードバック前に GPU で 1 パス掛ける（`ravel_nodes::DisplayTransform`、`CM-7`）。**変換点はこの 1 箇所**で、CPU 側に画素ごとの色計算は無い。`scripts/lint-patterns.sh` の `raw-pixel-quantisation` が自前の量子化を禁じる。`quality` / `ViewerResolution` と直交。CPU の `to_display_rgba8` との一致基準は **8bit で ±1 コード**。ユーザー提供の `.cube` を差し込めるが**選ぶ UI は `CM-8`**、`.ocio` は `CM-9`（表示色空間は **sRGB 固定**）。変換が走らなかったフレームは Viewer のエラーオーバーレイになる（CPU 救済はしない）|
 | root comp 常時評価 | ✅ | ProjectState が Document 変更・再生位置ごとに root comp 出力（殻コンパイル + Document-aware 評価）を要求（REQ-LAYER-007）。選択ノードの単独プレビューは不採用（ユーザー判断で削除） |
 | Geometry 自動ラスタライズ | ✅ | 評価ワーカーの `GpuEvalHooks::finalize` で CPU reference により rasterize（GPU texture Viewer は後続） |
+| 画像インスタンスの描画 | ✅ | `geometry.from_image` で包んだ FrameBuffer を `scatter.*` / `geometry.repeat` などで並べた結果が Viewer に出る。CPU 参照経路と GPU 経路の両方が描き、`source_index` でコピーごとに別の画像を選べる。**GPU 経路は GPU 常駐フレームを読み戻さない**（CPU 参照経路だけがソースごとに 1 回読み戻す）。コピーを拡大するとボケるのは仕様（`image-instancing-plan.md` 決定 1 / 5）|
 | コンプ背景と透過確認 | ✅ | `Composition.background_color` は `comp.background` として評価結果へ合成。表示下地をコンプ背景 / 固定セルのチェッカーボード / 黒単色からセッション内で切替 |
 | 未選択時プレースホルダ | ✅ | `viewer.no_output` locale キー |
 | 再生・スクラブ・タイム同期 | ✅ | PlaybackController が再生/シーク毎に ProjectState へ root comp 評価を要求（latest-wins、ドロップ数カウント）。音声同期も実装済み: 音声トラックあり + デバイス稼働時は `SyncClock` が再生位置の正（`ClockSource::Audio`）、それ以外は従来の wall clock（`audio-plan.md` 単位 3） |

@@ -1674,10 +1674,11 @@ mod tests {
             Some(Arc::new(instance_geo(1.0))),
             Some(Arc::new(instance_geo(2.0))),
         );
-        let sources = out.downcast_ref::<Geometry>().unwrap().instance_sources();
+        let merged = out.downcast_ref::<Geometry>().unwrap();
+        let sources = merged.sources();
         assert_eq!(sources.len(), 2);
-        assert!(Arc::ptr_eq(&sources[0], &first));
-        assert!(Arc::ptr_eq(&sources[1], &second));
+        assert!(Arc::ptr_eq(sources[0].geometry().unwrap(), &first));
+        assert!(Arc::ptr_eq(sources[1].geometry().unwrap(), &second));
     }
 
     #[test]

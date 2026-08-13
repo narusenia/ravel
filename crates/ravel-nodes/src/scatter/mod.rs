@@ -456,8 +456,15 @@ mod tests {
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::{FrameRate, Vec3};
 
+    use ravel_core::geometry::InstanceSource;
+
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (100, 100))
+    }
+
+    /// The geometry at source slot `index`, which every scatter output holds.
+    fn source_geometry(geo: &Geometry, index: usize) -> &Geometry {
+        geo.sources()[index].geometry().expect("a geometry source")
     }
 
     /// Emits a fixed value; stands in for upstream nodes in evaluator tests.
@@ -690,7 +697,7 @@ mod tests {
             &[arc_geo(small_square()), arc_geo(off_center_square(true))],
         );
 
-        assert_eq!(output.instance_sources().len(), 2);
+        assert_eq!(output.sources().len(), 2);
         assert_eq!(source_indices(&output), Some(&[0, 1, 0, 1, 0][..]));
     }
 
@@ -753,7 +760,7 @@ mod tests {
             ],
         );
         let without_source = run(&node, Arc::new(GridProcessor::from_node(&node)), &[]);
-        assert!(without_source.instance_sources().is_empty());
+        assert!(without_source.sources().is_empty());
         assert!(source_indices(&without_source).is_none());
 
         let input = off_center_square(true);
@@ -762,7 +769,7 @@ mod tests {
             Arc::new(GridProcessor::from_node(&node)),
             &[arc_geo(input.clone())],
         );
-        assert_eq!(with_source.instance_sources().len(), 1);
+        assert_eq!(with_source.sources().len(), 1);
         assert!(source_indices(&with_source).is_none());
         assert_eq!(
             positions(with_source.instance_source().unwrap(), false),
@@ -799,16 +806,16 @@ mod tests {
             &[arc_geo(off_center_square(true)), arc_geo(second)],
         );
 
-        assert_eq!(output.instance_sources().len(), 2);
+        assert_eq!(output.sources().len(), 2);
         assert_eq!(
-            positions(&output.instance_sources()[0], false)[0],
+            positions(source_geometry(&output, 0), false)[0],
             Vec2(-5.0, -5.0)
         );
         assert_eq!(
-            positions(&output.instance_sources()[1], false)[0],
+            positions(source_geometry(&output, 1), false)[0],
             Vec2(-10.0, -10.0)
         );
-        for source in output.instance_sources() {
+        for source in output.sources().iter().filter_map(InstanceSource::geometry) {
             assert_eq!(
                 source
                     .detail()
@@ -841,7 +848,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(output.instance_sources().len(), 2);
+        assert_eq!(output.sources().len(), 2);
         assert_eq!(source_indices(&output), Some(&[0, 1, 0, 1][..]));
     }
 

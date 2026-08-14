@@ -11,6 +11,8 @@
 //! Geometry node feeding a Rasterize) are immediately visible instead of
 //! leaving stale content.
 
+pub mod field;
+pub mod geometry;
 pub mod overlay;
 mod viewport;
 
@@ -302,8 +304,26 @@ pub struct ViewerPanel {
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
     show_safe_areas: bool,
+    /// Selection bounding-box overlay toggle. On by default — the outline is
+    /// what tells the user which shape a gesture will act on.
+    show_geometry_bounds: bool,
+    /// Evaluated geometry point / instance markers.
+    show_geometry_points: bool,
+    /// Evaluated geometry path outlines.
+    show_geometry_paths: bool,
+    /// What the field overlay draws, if anything.
+    field_display: field::FieldDisplay,
+    field_map: field::FieldColorMap,
+    field_opacity: f32,
     /// Session-local transparency preview background.
     background_mode: ViewerBackgroundMode,
+    /// The selection the last overlay evaluation was requested for.
+    ///
+    /// Overlay targets are collected while the request is assembled, so a
+    /// selection change has to post a new one — and `observe_global` fires on
+    /// every `set_global`, including the re-publish a click on an already
+    /// selected node performs, so the request is posted on a real change only.
+    requested_selection: Option<(CanvasSelection, super::LayerSelection)>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -393,6 +413,7 @@ impl ViewerPanel {
             }) {
                 this.move_drag = None;
             }
+            this.request_overlay_eval(cx);
             cx.notify();
         });
 
@@ -425,6 +446,7 @@ impl ViewerPanel {
             }) {
                 this.cancel_handle_drag(cx);
             }
+            this.request_overlay_eval(cx);
             cx.notify();
         });
 
@@ -497,7 +519,14 @@ impl ViewerPanel {
             pointer_hint: ViewerPointerHint::default(),
             show_grid: false,
             show_safe_areas: false,
+            show_geometry_bounds: true,
+            show_geometry_points: false,
+            show_geometry_paths: false,
+            field_display: field::FieldDisplay::default(),
+            field_map: field::FieldColorMap::default(),
+            field_opacity: field::DEFAULT_FIELD_OPACITY,
             background_mode: ViewerBackgroundMode::default(),
+            requested_selection: None,
             focus_handle,
             focus_subscriptions,
             viewer_sub,
@@ -610,16 +639,14 @@ impl ViewerPanel {
         let Some(layer) = comp.get_layer(network.layer) else {
             return;
         };
-        let Some(graph) = ravel_ui::document::resolve_network(&document, &network) else {
-            return;
-        };
         let eval = EvalContext::new(position.frame, position.fps, resolution);
         let shell = world_matrix(comp, layer, &eval);
         // Network parameters live in layer-local time (REQ-LAYER-006): the
-        // hit test and the drag origins below must sample the same frame the
-        // keyframe writes target.
+        // drag origins below must sample the same frame the keyframe writes
+        // target.
         let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
-        let hit = hit_test_shape_nodes(graph, pointer, local_frame, &eval, &shell);
+        let overlay_ctx = self.overlay_context(cx);
+        let hit = hit_test_shape_nodes(&overlay_ctx, &network, pointer);
         let nodes = selection_after_click(&selection.nodes, hit, event.modifiers.shift);
         // Publish both the durable selection and its Properties projection,
         // including a plain click on an already-selected node. This mirrors
@@ -630,11 +657,14 @@ impl ViewerPanel {
         if event.modifiers.shift || hit.is_none() || !shell.is_identity() {
             return;
         }
+        let Some(graph) = ravel_ui::document::resolve_network(&document, &network) else {
+            return;
+        };
         let origins: Vec<_> = nodes
             .iter()
             .filter_map(|id| {
                 let node = graph.node(*id)?;
-                let bounds = shape_node_bounds(node, local_frame, &eval)?;
+                let bounds = geometry::evaluated_bounds(&overlay_ctx, &network, *id)?;
                 Some(MoveOrigin {
                     node: *id,
                     center: sample_vec2_param(node, "center", local_frame, &eval)
@@ -684,6 +714,7 @@ impl ViewerPanel {
             return;
         };
         let eval = EvalContext::new(position.frame, position.fps, resolution);
+        let overlay_ctx = self.overlay_context(cx);
 
         let mut hit = false;
         let mut targets = Vec::new();
@@ -691,7 +722,7 @@ impl ViewerPanel {
             let Some(layer) = comp.get_layer(*layer_id) else {
                 continue;
             };
-            let Some(rect) = layer_comp_rect(comp, layer, position.frame, &eval) else {
+            let Some(rect) = layer_comp_rect(&overlay_ctx, &document, comp_id, *layer_id) else {
                 continue;
             };
             let shell = world_matrix(comp, layer, &eval);
@@ -701,13 +732,15 @@ impl ViewerPanel {
                 // press has to land on something this gesture can actually move.
                 continue;
             }
+            let network = NetworkPath::layer(comp_id, *layer_id);
             let local_frame = ravel_ui::keyframes::layer_local_frame(layer, position.frame);
-            let origins: Vec<MoveOrigin> = layer_shape_nodes(layer, local_frame, &eval)
+            let origins: Vec<MoveOrigin> = layer_geometry_nodes(&overlay_ctx, &network)
                 .into_iter()
-                .filter_map(|node| {
-                    let bounds = shape_node_bounds(node, local_frame, &eval)?;
+                .filter_map(|id| {
+                    let node = layer.network.node(id)?;
+                    let bounds = geometry::evaluated_bounds(&overlay_ctx, &network, id)?;
                     Some(MoveOrigin {
-                        node: node.id,
+                        node: id,
                         center: sample_vec2_param(node, "center", local_frame, &eval)
                             .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
                         path_points: path_points(node)
@@ -720,7 +753,7 @@ impl ViewerPanel {
             }
             hit |= rect_contains(&rect, pointer);
             targets.push(MoveTarget {
-                network: NetworkPath::layer(comp_id, *layer_id),
+                network,
                 origins,
                 local_frame,
             });
@@ -1128,8 +1161,18 @@ impl ViewerPanel {
     /// Snapshot the world the overlays are allowed to see. Read-only, and the
     /// same snapshot backs painting, labels and hit-testing.
     fn overlay_context(&self, cx: &App) -> OverlayContext {
+        let project = self.project(cx);
         OverlayContext {
             resolution: self.composition_resolution,
+            // The very factor `ProjectState::viewer_eval_context` puts in the
+            // request, so a sampled field reads the `res.*` the frame under it
+            // was evaluated with.
+            eval_resolution: self.composition_resolution.map(|resolution| {
+                project
+                    .as_ref()
+                    .map(|project| project.read(cx).viewer_resolution().apply(resolution))
+                    .unwrap_or(resolution)
+            }),
             playback: cx.try_global::<super::PlaybackPosition>().copied(),
             document: self
                 .project(cx)
@@ -1139,6 +1182,12 @@ impl ViewerPanel {
             tool: cx.try_global::<ToolState>().map(|state| state.active),
             show_grid: self.show_grid,
             show_safe_areas: self.show_safe_areas,
+            show_geometry_bounds: self.show_geometry_bounds,
+            show_geometry_points: self.show_geometry_points,
+            show_geometry_paths: self.show_geometry_paths,
+            field_display: self.field_display,
+            field_map: self.field_map,
+            field_opacity: self.field_opacity,
             error: self.error.clone(),
             active_drag: self.handle_drag.as_ref().map(|drag| ActiveDrag {
                 handle: drag.handle.id,
@@ -1161,6 +1210,38 @@ impl ViewerPanel {
                 .project(cx)
                 .map(|project| project.read(cx).shared_registry()),
         }
+    }
+
+    /// Post a viewer evaluation when the selection changed.
+    ///
+    /// The overlays declare their evaluation targets while
+    /// [`ProjectState::build_viewer_request`] assembles the request, and
+    /// nothing else re-assembles one when only the selection moved: with the
+    /// playhead stopped and the document untouched, selecting another layer,
+    /// another network or another field node would leave the new target
+    /// unevaluated and the overlay blank until the next frame step.
+    ///
+    /// Called from the selection observers, never from `render()`, and it
+    /// rides the one existing request path rather than opening a second.
+    fn request_overlay_eval(&mut self, cx: &mut Context<Self>) {
+        let selection = (
+            cx.try_global::<CanvasSelection>()
+                .cloned()
+                .unwrap_or_default(),
+            super::layer_selection(cx),
+        );
+        if self.requested_selection.as_ref() == Some(&selection) {
+            return;
+        }
+        self.requested_selection = Some(selection);
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        // Nothing about the document changed, so the evaluator keeps every
+        // cached value and the new target is the only work this adds.
+        project.update(cx, |project, cx| {
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
     }
 
     fn comp_hit_radius(&self, pixels: f32) -> Option<f32> {
@@ -1210,40 +1291,11 @@ impl ViewerPanel {
     }
 
     fn selected_body_contains(&self, pointer: (f32, f32), cx: &App) -> bool {
-        let Some(resolution) = self.composition_resolution else {
-            return false;
-        };
-        let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
-            return false;
-        };
-        let Some(project) = self.project(cx) else {
-            return false;
-        };
-        let document = project.read(cx).document().clone();
-        let layer_selection = super::layer_selection(cx);
-        let rects = if layer_selection.layers().len() >= 2 {
-            let Some(comp) = layer_selection.comp() else {
-                return false;
-            };
-            layer_selection_comp_rects(
-                &document,
-                comp,
-                layer_selection.layers(),
-                position.frame,
-                position.fps,
-                resolution,
-            )
+        let ctx = self.overlay_context(cx);
+        let rects = if ctx.layer_selection.layers().len() >= 2 {
+            layer_selection_comp_rects(&ctx)
         } else {
-            let Some(selection) = cx.try_global::<CanvasSelection>() else {
-                return false;
-            };
-            selection_comp_rects(
-                selection,
-                &document,
-                position.frame,
-                position.fps,
-                resolution,
-            )
+            selection_comp_rects(&ctx)
         };
         selected_body_pointer_hint(&rects, pointer).is_some()
     }
@@ -1611,6 +1663,9 @@ impl ViewerPanel {
         let entity = cx.entity().downgrade();
         let background_entity = entity.clone();
         let background_mode = self.background_mode;
+        let field_entity = entity.clone();
+        let (field_display, field_map, field_opacity) =
+            (self.field_display, self.field_map, self.field_opacity);
         div()
             .flex()
             .items_center()
@@ -1716,6 +1771,115 @@ impl ViewerPanel {
                         this.show_safe_areas = !this.show_safe_areas;
                         cx.notify();
                     })),
+            )
+            .child(
+                Button::new("viewer-geometry-bounds")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.show_geometry_bounds)
+                    .icon(Icon::new(RavelIcon::GeometryBounds))
+                    .tooltip(t!("viewer.geometry_bounds"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_geometry_bounds = !this.show_geometry_bounds;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("viewer-geometry-points")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.show_geometry_points)
+                    .icon(Icon::new(RavelIcon::GeometryPoints))
+                    .tooltip(t!("viewer.geometry_points"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_geometry_points = !this.show_geometry_points;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("viewer-geometry-paths")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.show_geometry_paths)
+                    .icon(Icon::new(RavelIcon::GeometryPaths))
+                    .tooltip(t!("viewer.geometry_paths"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_geometry_paths = !this.show_geometry_paths;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                // One menu rather than three controls: the display mode, the
+                // colour map and the opacity are all "how do I want to look at
+                // this field", and only the first of them is ever off.
+                Button::new("viewer-field")
+                    .xsmall()
+                    .ghost()
+                    .selected(field_display != field::FieldDisplay::Off)
+                    .icon(Icon::new(RavelIcon::FieldOverlay))
+                    .tooltip(t!("viewer.field"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for mode in field::FieldDisplay::ALL {
+                            let entity = field_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(mode.label_key())))
+                                    .checked(mode == field_display)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.field_display != mode {
+                                                    this.field_display = mode;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu = menu.separator();
+                        for map in field::FieldColorMap::ALL {
+                            let entity = field_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(map.label_key())))
+                                    .checked(map == field_map)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.field_map != map {
+                                                    this.field_map = map;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu = menu.separator();
+                        for step in field::FIELD_OPACITY_STEPS {
+                            let entity = field_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(format!(
+                                    "{}: {:.0}%",
+                                    t!("viewer.field_opacity"),
+                                    step * 100.0
+                                )))
+                                .checked((step - field_opacity).abs() < f32::EPSILON)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.field_opacity != step {
+                                                    this.field_opacity = step;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    }),
             )
     }
 }
@@ -2330,11 +2494,12 @@ impl Render for ViewerPanel {
 // Selection bbox overlay (REQ-UI-011 unit 3)
 // ---------------------------------------------------------------------------
 
-use ravel_core::composition::{Composition, Document, Layer};
+use ravel_core::composition::Document;
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Graph, Node, ParameterValue, PathPoint};
 use ravel_core::types::{FrameRate, Vec2};
 
+#[cfg(test)]
 fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> Option<f32> {
     let param = node.parameters.iter().find(|p| p.key == key)?;
     match &param.value {
@@ -2422,23 +2587,25 @@ fn selected_body_pointer_hint(
         .then_some(ViewerPointerHint::MovableBody)
 }
 
+/// The topmost node of `network` whose evaluated geometry contains `point`.
+///
+/// Driven by the same evaluated bounds the bbox is drawn from, so what the
+/// pointer picks is what the outline promised — a shape node this crate has
+/// never heard of is selectable, and a transformed one is picked where it
+/// appears rather than where its parameters say.
 fn hit_test_shape_nodes(
-    graph: &Graph,
+    ctx: &OverlayContext,
+    network: &NetworkPath,
     point: (f32, f32),
-    frame: u64,
-    ctx: &EvalContext,
-    shell: &Affine,
 ) -> Option<NodeId> {
+    let document = ctx.document.as_ref()?;
+    let graph = ravel_ui::document::resolve_network(document, network)?;
+    let shell = layer_shell(ctx, document, network.comp, network.layer)?;
     let mut candidates: Vec<_> = graph.nodes().collect();
     candidates.sort_by_key(|node| std::cmp::Reverse(node.metadata.z));
     candidates.into_iter().find_map(|node| {
-        let bounds = shape_node_bounds(node, frame, ctx)?;
-        let bounds = if shell.is_identity() {
-            bounds
-        } else {
-            transform_rect(&bounds, shell)
-        };
-        rect_contains(&bounds, point).then_some(node.id)
+        let bounds = geometry::evaluated_bounds(ctx, network, node.id)?;
+        rect_contains(&to_comp_space(&shell, bounds), point).then_some(node.id)
     })
 }
 
@@ -2858,51 +3025,42 @@ fn create_layer_with_custom_path(
     Some((doc, path, node))
 }
 
-/// Parameter-derived AABB of a shape node (half extents around the center).
-/// Polygon and star use the (outer) radius as a square bound — a conservative
-/// AABB that never under-covers the actual vertices.
-fn shape_node_bounds(node: &Node, frame: u64, ctx: &EvalContext) -> Option<CompRect> {
-    if node.type_key == "shape.custom_path" {
-        let points = path_points(node)?;
-        let first = points.first()?;
-        let (mut min_x, mut min_y) = (first.p.0, first.p.1);
-        let (mut max_x, mut max_y) = (first.p.0, first.p.1);
-        for point in &points[1..] {
-            min_x = min_x.min(point.p.0);
-            min_y = min_y.min(point.p.1);
-            max_x = max_x.max(point.p.0);
-            max_y = max_y.max(point.p.1);
-        }
-        return Some(CompRect {
-            x: min_x,
-            y: min_y,
-            w: max_x - min_x,
-            h: max_y - min_y,
-        });
+/// The compositing chain transform of `layer`, at the context's frame.
+fn layer_shell(
+    ctx: &OverlayContext,
+    document: &Document,
+    comp: CompId,
+    layer: LayerId,
+) -> Option<Affine> {
+    let (resolution, playback) = (ctx.resolution?, ctx.playback?);
+    let composition = document.get_composition(comp)?;
+    let layer = composition.get_layer(layer)?;
+    let eval = EvalContext::new(playback.frame, playback.fps, resolution);
+    Some(world_matrix(composition, layer, &eval))
+}
+
+fn to_comp_space(shell: &Affine, rect: CompRect) -> CompRect {
+    if shell.is_identity() {
+        rect
+    } else {
+        transform_rect(&rect, shell)
     }
-    let half = match node.type_key.as_str() {
-        "shape.rect" => (
-            sample_float_param(node, "width", frame, ctx)? * 0.5,
-            sample_float_param(node, "height", frame, ctx)? * 0.5,
-        ),
-        "shape.ellipse" => sample_vec2_param(node, "radius", frame, ctx)?,
-        "shape.polygon" => {
-            let r = sample_float_param(node, "radius", frame, ctx)?;
-            (r, r)
-        }
-        "shape.star" => {
-            let r = sample_float_param(node, "outer_radius", frame, ctx)?;
-            (r, r)
-        }
-        _ => return None,
-    };
-    let (cx, cy) = sample_vec2_param(node, "center", frame, ctx)?;
-    Some(CompRect {
-        x: cx - half.0,
-        y: cy - half.1,
-        w: half.0 * 2.0,
-        h: half.1 * 2.0,
-    })
+}
+
+/// Comp-space bounds of one node's **evaluated** geometry: the extent the
+/// evaluator produced, put through the owning layer's compositing chain.
+///
+/// `None` while the result has not arrived, when the node produced something
+/// that is not a geometry, and when the geometry places nothing. Deliberately
+/// not backed by a parameter reading: mixing the two would make a bbox jump
+/// from an estimate to the truth on the frame the evaluation lands.
+fn node_comp_rect(ctx: &OverlayContext, network: &NetworkPath, node: NodeId) -> Option<CompRect> {
+    let bounds = geometry::evaluated_bounds(ctx, network, node)?;
+    let document = ctx.document.as_ref()?;
+    Some(to_comp_space(
+        &layer_shell(ctx, document, network.comp, network.layer)?,
+        bounds,
+    ))
 }
 
 fn transform_rect(r: &CompRect, m: &Affine) -> CompRect {
@@ -2942,104 +3100,127 @@ fn union_rect(a: CompRect, b: CompRect) -> CompRect {
     }
 }
 
-/// The shape nodes of a layer's own network that carry comp-space geometry —
-/// what a layer-level bbox outlines and what a layer-level move drags. Nested
-/// subnets are not descended into: their nodes' parameters are not addressable
-/// from the layer network, so a drag could not write them.
-fn layer_shape_nodes<'a>(layer: &'a Layer, frame: u64, ctx: &EvalContext) -> Vec<&'a Node> {
-    layer
-        .network
+/// The geometry nodes of a network whose result nothing else in that network
+/// consumes as geometry — what the layer actually draws.
+///
+/// The last node of a chain, not every node in it: `shape.rect →
+/// geometry.transform → rasterize` places one shape, and unioning both the
+/// pre- and post-transform extents would outline a rectangle the layer never
+/// shows. `rasterize` consumes the geometry but produces a frame, so the
+/// transform stays terminal; `geometry.transform` produces geometry, so the
+/// rect it consumes drops out.
+fn terminal_geometry_nodes(graph: &Graph) -> Vec<NodeId> {
+    let geometry = ravel_core::id::DataTypeId::GEOMETRY;
+    let produces_geometry = |id: NodeId| {
+        graph
+            .node(id)
+            .is_some_and(|node| node.outputs.iter().any(|port| port.data_type == geometry))
+    };
+    // Which port an edge leaves by, not merely which node. A multi-output node
+    // whose *other* port feeds a geometry operator — a scalar driving a
+    // `geometry.transform` parameter, say — still places its own geometry, and
+    // ignoring the port index dropped it from the layer's bbox entirely.
+    //
+    // A port index the node does not declare reads as no port at all, the same
+    // boundary `PortRecord::extract` draws: an edge left over from an earlier
+    // interface must not resolve to a neighbouring port's type.
+    let leaves_a_geometry_port = |edge: &ravel_core::graph::Edge| {
+        graph
+            .node(edge.source)
+            .and_then(|node| node.outputs.get(edge.source_port.0 as usize))
+            .is_some_and(|port| port.data_type == geometry)
+    };
+    graph
         .nodes()
-        .filter(|node| shape_node_bounds(node, frame, ctx).is_some())
-        .map(std::sync::Arc::as_ref)
+        .filter(|node| produces_geometry(node.id))
+        .filter(|node| {
+            !graph.edges().any(|edge| {
+                edge.source == node.id
+                    && leaves_a_geometry_port(edge)
+                    && produces_geometry(edge.target)
+            })
+        })
+        .map(|node| node.id)
         .collect()
 }
 
-/// Comp-space bounds of a whole layer: the union of its shape nodes' bounds put
-/// through the layer's compositing chain transform (REQ-UI-013 multi-selection).
+/// [`terminal_geometry_nodes`] of a network named by path.
+fn terminal_geometry_nodes_of(ctx: &OverlayContext, network: &NetworkPath) -> Vec<NodeId> {
+    ctx.document
+        .as_ref()
+        .and_then(|document| ravel_ui::document::resolve_network(document, network))
+        .map(terminal_geometry_nodes)
+        .unwrap_or_default()
+}
+
+/// The nodes of a layer's own network that a layer-level move drags: those
+/// with an evaluated geometry. Nested subnets are not descended into — their
+/// parameters are not addressable from the layer network, so a drag could not
+/// write them.
+fn layer_geometry_nodes(ctx: &OverlayContext, network: &NetworkPath) -> Vec<NodeId> {
+    let Some(document) = ctx.document.as_ref() else {
+        return Vec::new();
+    };
+    let Some(graph) = ravel_ui::document::resolve_network(document, network) else {
+        return Vec::new();
+    };
+    graph
+        .nodes()
+        .map(|node| node.id)
+        .filter(|id| geometry::evaluated_bounds(ctx, network, *id).is_some())
+        .collect()
+}
+
+/// Comp-space bounds of a whole layer: the union of the extents its terminal
+/// geometry nodes evaluated to, put through the layer's compositing chain
+/// transform (REQ-UI-013 multi-selection).
 ///
-/// `None` when the layer draws nothing with known bounds — a media or
-/// effects-only network has no geometry to measure, so it gets no bbox rather
-/// than a guessed one.
+/// `None` until the evaluation lands, and `None` for a layer that places no
+/// geometry at all — a media or effects-only network has nothing to measure,
+/// so it gets no bbox rather than a guessed one.
 fn layer_comp_rect(
-    comp: &Composition,
-    layer: &Layer,
-    frame: u64,
-    ctx: &EvalContext,
+    ctx: &OverlayContext,
+    document: &Document,
+    comp: CompId,
+    layer: LayerId,
 ) -> Option<CompRect> {
-    // Network parameters live in layer-local time (REQ-LAYER-006).
-    let local_frame = ravel_ui::keyframes::layer_local_frame(layer, frame);
-    let bounds = layer_shape_nodes(layer, local_frame, ctx)
+    let network = NetworkPath::layer(comp, layer);
+    let graph = ravel_ui::document::resolve_network(document, &network)?;
+    let bounds = terminal_geometry_nodes(graph)
         .into_iter()
-        .filter_map(|node| shape_node_bounds(node, local_frame, ctx))
+        .filter_map(|node| geometry::evaluated_bounds(ctx, &network, node))
         .reduce(union_rect)?;
-    let shell = world_matrix(comp, layer, ctx);
-    Some(if shell.is_identity() {
-        bounds
-    } else {
-        transform_rect(&bounds, &shell)
-    })
+    Some(to_comp_space(
+        &layer_shell(ctx, document, comp, layer)?,
+        bounds,
+    ))
 }
 
 /// One bbox per selected layer that has measurable geometry, in selection order.
-fn layer_selection_comp_rects(
-    document: &Document,
-    comp_id: CompId,
-    layers: &[LayerId],
-    frame: u64,
-    fps: FrameRate,
-    comp_resolution: (u32, u32),
-) -> Vec<CompRect> {
-    let Some(comp) = document.get_composition(comp_id) else {
+fn layer_selection_comp_rects(ctx: &OverlayContext) -> Vec<CompRect> {
+    let (Some(comp), Some(document)) = (ctx.layer_selection.comp(), ctx.document.as_ref()) else {
         return Vec::new();
     };
-    let ctx = EvalContext::new(frame, fps, comp_resolution);
-    layers
+    ctx.layer_selection
+        .layers()
         .iter()
-        .filter_map(|id| layer_comp_rect(comp, comp.get_layer(*id)?, frame, &ctx))
+        .filter_map(|layer| layer_comp_rect(ctx, document, comp, *layer))
         .collect()
 }
 
-fn selection_comp_rects(
-    selection: &CanvasSelection,
-    document: &Document,
-    frame: u64,
-    fps: FrameRate,
-    comp_resolution: (u32, u32),
-) -> Vec<CompRect> {
-    let Some(path) = &selection.path else {
+fn selection_comp_rects(ctx: &OverlayContext) -> Vec<CompRect> {
+    let Some(selection) = ctx.selection.as_ref() else {
         return Vec::new();
     };
-    if selection.nodes.is_empty() {
-        return Vec::new();
-    }
-    let Some(comp) = document.get_composition(path.comp) else {
+    let Some(network) = selection.path.as_ref() else {
         return Vec::new();
     };
-    let Some(layer) = comp.get_layer(path.layer) else {
-        return Vec::new();
-    };
-    let Some(graph) = ravel_ui::document::resolve_network(document, path) else {
-        return Vec::new();
-    };
-    let ctx = EvalContext::new(frame, fps, comp_resolution);
-    let shell = world_matrix(comp, layer, &ctx);
-    let is_identity = shell.is_identity();
-    // Network parameters live in layer-local time (REQ-LAYER-006).
-    let local_frame = ravel_ui::keyframes::layer_local_frame(layer, frame);
-
-    selection
-        .nodes
-        .iter()
-        .filter_map(|id| {
-            let node = graph.node(*id)?;
-            let rect = shape_node_bounds(node, local_frame, &ctx)?;
-            Some(if is_identity {
-                rect
-            } else {
-                transform_rect(&rect, &shell)
-            })
-        })
+    let mut ids: Vec<_> = selection.nodes.iter().copied().collect();
+    // The set has no order of its own and the rects are compared positionally
+    // in tests and unioned in production; sorting keeps both deterministic.
+    ids.sort_by_key(|id| id.raw());
+    ids.into_iter()
+        .filter_map(|id| node_comp_rect(ctx, network, id))
         .collect()
 }
 
@@ -3100,6 +3281,8 @@ mod tests {
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
     // to the built-in one for these plain unit tests.
     use core::prelude::v1::test;
+    use ravel_core::composition::{Composition, Layer};
+    use std::collections::HashMap;
 
     #[test]
     fn checkerboard_cells_stay_screen_space_sized_across_zoomed_frames() {
@@ -3147,120 +3330,300 @@ mod tests {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
     }
 
-    #[test]
-    fn rect_bounds_use_full_width_and_height() {
-        let node = shape_node(
-            "shape.rect",
-            &[
-                v2("center", 100.0, 50.0),
-                f("width", 80.0),
-                f("height", 40.0),
-            ],
-        );
-        let r = shape_node_bounds(&node, 0, &eval_ctx()).unwrap();
-        assert_eq!((r.x, r.y, r.w, r.h), (60.0, 30.0, 80.0, 40.0));
+    // ---- evaluated geometry -------------------------------------------
+
+    /// A processor for a `type_key` this crate has never heard of. Emits a
+    /// square of side `2 * half` centred on `center`, so the bbox it produces
+    /// is knowable without the Viewer knowing anything about the node.
+    struct UnknownShape {
+        center: (f32, f32),
+        half: f32,
     }
 
-    #[test]
-    fn ellipse_bounds_use_radii() {
-        let node = shape_node(
-            "shape.ellipse",
-            &[v2("center", 0.0, 0.0), v2("radius", 30.0, 20.0)],
-        );
-        let r = shape_node_bounds(&node, 0, &eval_ctx()).unwrap();
-        assert_eq!((r.x, r.y, r.w, r.h), (-30.0, -20.0, 60.0, 40.0));
-    }
-
-    #[test]
-    fn polygon_and_star_bounds_are_radius_squares() {
-        let polygon = shape_node(
-            "shape.polygon",
-            &[v2("center", 10.0, 10.0), f("radius", 25.0)],
-        );
-        let r = shape_node_bounds(&polygon, 0, &eval_ctx()).unwrap();
-        assert_eq!((r.x, r.y, r.w, r.h), (-15.0, -15.0, 50.0, 50.0));
-
-        let star = shape_node(
-            "shape.star",
-            &[
-                v2("center", 0.0, 0.0),
-                f("outer_radius", 40.0),
-                f("inner_radius", 15.0),
-            ],
-        );
-        let r = shape_node_bounds(&star, 0, &eval_ctx()).unwrap();
-        assert_eq!((r.x, r.y, r.w, r.h), (-40.0, -40.0, 80.0, 80.0));
-    }
-
-    /// Guards against registry drift: every shape template registered by
-    /// `register_builtins` must yield bounds from its actual default
-    /// parameters (a renamed parameter would return `None` here).
-    #[test]
-    fn registry_shape_defaults_yield_bounds() {
-        use ravel_core::registry::NodeRegistry;
-        use ravel_core::registry::builtin::register_builtins;
-
-        let mut registry = NodeRegistry::new();
-        register_builtins(&mut registry);
-        let expected = [
-            ("shape.rect", 100.0, 100.0),
-            ("shape.ellipse", 100.0, 100.0),
-            ("shape.polygon", 100.0, 100.0),
-            ("shape.star", 100.0, 100.0),
-        ];
-        for (type_key, w, h) in expected {
-            let node = registry
-                .create_node(type_key, ravel_core::id::NodeId::next())
-                .unwrap_or_else(|| panic!("{type_key}: registered template"));
-            let r = shape_node_bounds(&node, 0, &eval_ctx())
-                .unwrap_or_else(|| panic!("{type_key}: bounds from default parameters"));
-            assert_eq!((r.w, r.h), (w, h), "{type_key}: default extents");
+    impl ravel_core::eval::NodeProcessor for UnknownShape {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+            _params: &ravel_core::eval::ResolvedParams,
+            _scope: &mut dyn ravel_core::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+            let (x, y, h) = (self.center.0, self.center.1, self.half);
+            Ok(Arc::new(ravel_core::geometry::Geometry::from_points(vec![
+                ravel_core::types::Vec2(x - h, y - h),
+                ravel_core::types::Vec2(x + h, y - h),
+                ravel_core::types::Vec2(x + h, y + h),
+                ravel_core::types::Vec2(x - h, y + h),
+            ])))
         }
     }
 
-    #[test]
-    fn non_shape_nodes_have_no_bounds() {
-        let node = shape_node("scatter.grid", &[v2("center", 0.0, 0.0)]);
-        assert!(shape_node_bounds(&node, 0, &eval_ctx()).is_none());
+    /// Register the CPU processors these tests evaluate with.
+    ///
+    /// Explicit rather than `ravel_nodes::register_all_processors`, which
+    /// wants a GPU context: everything the geometry overlay reads is produced
+    /// on the CPU, so a headless test can drive the real processors.
+    fn register_geometry_processors(evaluator: &mut ravel_core::eval::Evaluator, graph: &Graph) {
+        for node in graph.nodes() {
+            let processor: Arc<dyn ravel_core::eval::NodeProcessor> = match node.type_key.as_str() {
+                "shape.rect" => Arc::new(ravel_nodes::shape::RectProcessor::from_node(node)),
+                "shape.ellipse" => Arc::new(ravel_nodes::shape::EllipseProcessor::from_node(node)),
+                "geometry.transform" => {
+                    Arc::new(ravel_nodes::geometry::GeometryTransformProcessor::from_node(node))
+                }
+                "scatter.grid" => Arc::new(ravel_nodes::scatter::GridProcessor::from_node(node)),
+                "shape.custom_path" => {
+                    Arc::new(ravel_nodes::shape::CustomPathProcessor::from_node(node))
+                }
+                "test.unknown_shape" => Arc::new(UnknownShape {
+                    center: sample_vec2_param(node, "center", 0, &eval_ctx()).unwrap_or((0.0, 0.0)),
+                    half: sample_float_param(node, "half", 0, &eval_ctx()).unwrap_or(1.0),
+                }),
+                _ => continue,
+            };
+            evaluator.register(node.id, processor);
+        }
     }
 
-    #[test]
-    fn animated_center_samples_the_frame() {
-        use ravel_core::animation::channel::AnimationChannel;
-        use ravel_core::animation::curve::KeyframeCurve;
-        use ravel_core::animation::interpolation::Interpolation;
+    /// Evaluate every node of `graph` in `network`'s scope and index the
+    /// results the way the request → publish path does.
+    fn evaluated_results(graph: &Graph, network: &NetworkPath) -> overlay::OverlayResults {
+        let mut evaluator = ravel_core::eval::Evaluator::new();
+        register_geometry_processors(&mut evaluator, graph);
+        let ctx = eval_ctx();
+        let path = network.segments();
+        let mut values = HashMap::new();
+        for node in graph.nodes() {
+            if let Ok(value) = evaluator.evaluate_at(&path, graph, node.id, &ctx) {
+                values.insert((path.clone(), node.id), value);
+            }
+        }
+        overlay::OverlayResults::new(values)
+    }
 
-        let mut curve = KeyframeCurve::new();
-        curve.insert(0, 0.0, Interpolation::Linear);
-        curve.insert(10, 100.0, Interpolation::Linear);
-        let node = Node::new(ravel_core::id::NodeId::next(), "shape.rect")
-            .with_param(
-                "center",
-                ParameterValue::Channel2([
-                    AnimationChannel::keyframes(curve),
-                    AnimationChannel::constant(0.0),
-                ]),
+    /// Publish the overlay snapshot a real evaluation would have produced for
+    /// every layer network of the project.
+    ///
+    /// The panel tests run with the background worker disabled, so nothing
+    /// else fills it — and since unit 3 the bbox, the click test and the layer
+    /// drag all read it rather than the node parameters.
+    fn publish_geometry_results(project: &Entity<ProjectState>, cx: &mut TestAppContext) {
+        let document = project.read_with(cx, |project, _| project.document().clone());
+        let mut values = HashMap::new();
+        for comp in document.compositions.values() {
+            for layer in &comp.layers {
+                let network = NetworkPath::layer(comp.id, layer.id);
+                values.extend(evaluated_results(&layer.network, &network).values);
+            }
+        }
+        cx.update(|cx| cx.set_global(overlay::OverlayResults::new(values)));
+    }
+
+    /// A one-layer document holding `network`, plus the overlay context an
+    /// overlay would see with `selected` selected inside it.
+    fn geometry_context(network: Graph, selected: &[NodeId]) -> (OverlayContext, NetworkPath) {
+        use ravel_core::id::LayerId;
+        let layer = Layer::new(LayerId::next(), "shapes", network.clone()).with_time(0, 0, 300);
+        let comp = comp_with_layers(vec![layer.clone()]);
+        let path = NetworkPath::layer(comp.id, layer.id);
+        let document = Document::default().with_composition(comp);
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            document: Some(document),
+            selection: Some(CanvasSelection {
+                path: Some(path.clone()),
+                nodes: selected.iter().copied().collect(),
+            }),
+            show_geometry_bounds: true,
+            results: evaluated_results(&network, &path),
+            ..OverlayContext::default()
+        };
+        (ctx, path)
+    }
+
+    /// Completion criterion: a shape node the Viewer knows nothing about
+    /// still gets a bbox, because the bbox comes from the value the evaluator
+    /// produced rather than from a `type_key` table.
+    #[test]
+    fn a_node_type_the_viewer_does_not_know_still_gets_a_bbox() {
+        let node = shape_node(
+            "test.unknown_shape",
+            &[v2("center", 100.0, 50.0), f("half", 40.0)],
+        )
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let id = node.id;
+        let graph = Graph::new().add_node(node).unwrap();
+        let (ctx, network) = geometry_context(graph, &[id]);
+
+        let rect = node_comp_rect(&ctx, &network, id).expect("bbox from the evaluated geometry");
+        assert_eq!((rect.x, rect.y, rect.w, rect.h), (60.0, 10.0, 80.0, 80.0));
+    }
+
+    /// Completion criterion: a shape put through `geometry.transform`
+    /// outlines where the transform put it, not where its own parameters say.
+    #[test]
+    fn a_transformed_shape_outlines_after_the_transform() {
+        use ravel_core::id::{EdgeId, InputPortIndex, OutputPortIndex};
+
+        let rect = shape_node(
+            "shape.rect",
+            &[
+                v2("center", 0.0, 0.0),
+                f("width", 100.0),
+                f("height", 100.0),
+            ],
+        )
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let rect_id = rect.id;
+        let transform = shape_node(
+            "geometry.transform",
+            &[("translate", ParameterValue::vec3(200.0, 30.0, 0.0))],
+        )
+        .with_input("geometry", &[ravel_core::id::DataTypeId::GEOMETRY])
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let transform_id = transform.id;
+        let graph = Graph::new()
+            .add_node(rect)
+            .unwrap()
+            .add_node(transform)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                rect_id,
+                OutputPortIndex(0),
+                transform_id,
+                InputPortIndex(0),
             )
-            .with_param("width", ParameterValue::Float(10.0))
-            .with_param("height", ParameterValue::Float(10.0));
-        let r = shape_node_bounds(&node, 5, &eval_ctx()).unwrap();
-        assert_eq!((r.x, r.w), (45.0, 10.0));
+            .unwrap();
+        let (ctx, network) = geometry_context(graph, &[transform_id]);
+
+        let source = node_comp_rect(&ctx, &network, rect_id).expect("the rect evaluated");
+        let moved = node_comp_rect(&ctx, &network, transform_id).expect("the transform evaluated");
+        assert_eq!((source.x, source.y), (-50.0, -50.0));
+        assert_eq!(
+            (moved.x, moved.y),
+            (150.0, -20.0),
+            "the bbox did not follow the transform"
+        );
+        assert_eq!((moved.w, moved.h), (source.w, source.h));
+    }
+
+    /// Completion criterion: every instance a `scatter.*` places is drawn as a
+    /// point, and the bbox spans all of them — the instance domain is where a
+    /// scatter's copies live, and a points-only reading would miss them.
+    #[test]
+    fn every_scatter_instance_is_drawn_as_a_point() {
+        use ravel_core::id::{EdgeId, InputPortIndex, OutputPortIndex};
+
+        let source = shape_node(
+            "shape.rect",
+            &[v2("center", 0.0, 0.0), f("width", 10.0), f("height", 10.0)],
+        )
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let source_id = source.id;
+        let scatter = shape_node(
+            "scatter.grid",
+            &[
+                ("count_x", ParameterValue::Int(3)),
+                ("count_y", ParameterValue::Int(2)),
+                v2("spacing", 100.0, 50.0),
+                v2("center", 0.0, 0.0),
+                ("center_input", ParameterValue::Bool(true)),
+            ],
+        )
+        .with_input("geometry", &[ravel_core::id::DataTypeId::GEOMETRY])
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let scatter_id = scatter.id;
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(scatter)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                scatter_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let (ctx, network) = geometry_context(graph, &[scatter_id]);
+
+        let value =
+            geometry::evaluated_geometry(&ctx, &network, scatter_id).expect("scatter evaluated");
+        let scattered = geometry::as_geometry(&value).expect("a geometry");
+        assert_eq!(
+            scattered.instance_count(),
+            6,
+            "the grid scatter placed a different number of instances than this test assumes"
+        );
+        let points = geometry::geometry_points(scattered);
+        for instance in 0..scattered.instance_count() {
+            let position = scattered
+                .positions(ravel_core::geometry::Domain::Instance)
+                .and_then(|p| p.ok())
+                .and_then(|p| p.get3(instance))
+                .expect("every instance carries P");
+            assert!(
+                points
+                    .iter()
+                    .any(|p| (p.0 - position.0).abs() < 1e-4 && (p.1 - position.1).abs() < 1e-4),
+                "instance {instance} at {position:?} was not drawn"
+            );
+        }
+        let rect =
+            node_comp_rect(&ctx, &network, scatter_id).expect("bbox spans the placed instances");
+        assert!(
+            rect.w >= 200.0 && rect.h >= 50.0,
+            "the bbox missed the instance domain: {rect:?}"
+        );
+    }
+
+    /// The migration rule: no result, no drawing. A guessed rectangle that
+    /// jumps to the truth a frame later is worse than one that arrives late.
+    #[test]
+    fn nothing_is_outlined_before_the_result_arrives() {
+        let node = shape_node(
+            "shape.rect",
+            &[v2("center", 0.0, 0.0), f("width", 10.0), f("height", 10.0)],
+        )
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let id = node.id;
+        let graph = Graph::new().add_node(node).unwrap();
+        let (mut ctx, network) = geometry_context(graph, &[id]);
+        assert!(node_comp_rect(&ctx, &network, id).is_some());
+
+        ctx.results = overlay::OverlayResults::default();
+        assert_eq!(node_comp_rect(&ctx, &network, id), None);
+        assert!(selection_comp_rects(&ctx).is_empty());
+        assert_eq!(hit_test_shape_nodes(&ctx, &network, (0.0, 0.0)), None);
+    }
+
+    /// A shape node the tests can build without knowing a processor: a square
+    /// of side `size` at `center`, declaring a geometry output.
+    fn square_node(center: (f32, f32), size: f32) -> Node {
+        shape_node(
+            "shape.rect",
+            &[
+                v2("center", center.0, center.1),
+                f("width", size),
+                f("height", size),
+            ],
+        )
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY)
     }
 
     #[test]
     fn hit_test_uses_frontmost_shape_and_reports_misses() {
-        let mut back = shape_node(
-            "shape.rect",
-            &[
-                v2("center", 50.0, 50.0),
-                f("width", 40.0),
-                f("height", 40.0),
-            ],
-        );
+        let mut back = square_node((50.0, 50.0), 40.0);
         back.metadata.z = 2;
         let back_id = back.id;
-        let mut front = back.clone();
-        front.id = NodeId::next();
+        let mut front = square_node((50.0, 50.0), 40.0);
         front.metadata.z = 8;
         let front_id = front.id;
         let graph = Graph::new()
@@ -3268,41 +3631,47 @@ mod tests {
             .unwrap()
             .add_node(front)
             .unwrap();
-        let identity = Affine::IDENTITY;
+        let (ctx, network) = geometry_context(graph, &[]);
 
         assert_eq!(
-            hit_test_shape_nodes(&graph, (50.0, 50.0), 0, &eval_ctx(), &identity),
+            hit_test_shape_nodes(&ctx, &network, (50.0, 50.0)),
             Some(front_id)
         );
-        assert_eq!(
-            hit_test_shape_nodes(&graph, (200.0, 200.0), 0, &eval_ctx(), &identity),
-            None
-        );
+        assert_eq!(hit_test_shape_nodes(&ctx, &network, (200.0, 200.0)), None);
         assert_ne!(front_id, back_id);
     }
 
+    /// The click test reads the same evaluated bounds the outline is drawn
+    /// from, put through the same shell — so what the pointer picks is what
+    /// the outline promised.
     #[test]
     fn hit_test_applies_shell_transform() {
-        let node = shape_node(
-            "shape.rect",
-            &[
-                v2("center", 20.0, 20.0),
-                f("width", 20.0),
-                f("height", 20.0),
-            ],
-        );
-        let id = node.id;
-        let graph = Graph::new().add_node(node).unwrap();
-        let translated = Affine([1.0, 0.0, 100.0, 0.0, 1.0, 50.0]);
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::id::LayerId;
 
-        assert_eq!(
-            hit_test_shape_nodes(&graph, (120.0, 70.0), 0, &eval_ctx(), &translated),
-            Some(id)
-        );
-        assert_eq!(
-            hit_test_shape_nodes(&graph, (20.0, 20.0), 0, &eval_ctx(), &translated),
-            None
-        );
+        let node = square_node((20.0, 20.0), 20.0);
+        let id = node.id;
+        let network = Graph::new().add_node(node).unwrap();
+        let mut layer = Layer::new(LayerId::next(), "shapes", network.clone()).with_time(0, 0, 300);
+        layer.transform.position = [
+            AnimationChannel::constant(100.0),
+            AnimationChannel::constant(50.0),
+        ];
+        let comp = comp_with_layers(vec![layer.clone()]);
+        let path = NetworkPath::layer(comp.id, layer.id);
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            results: evaluated_results(&network, &path),
+            document: Some(Document::default().with_composition(comp)),
+            ..OverlayContext::default()
+        };
+
+        assert_eq!(hit_test_shape_nodes(&ctx, &path, (120.0, 70.0)), Some(id));
+        assert_eq!(hit_test_shape_nodes(&ctx, &path, (20.0, 20.0)), None);
     }
 
     #[test]
@@ -3394,25 +3763,35 @@ mod tests {
             AnimationChannel::constant(50.0),
         ];
         let network = Graph::new()
-            .add_node(shape_node(
-                "shape.rect",
-                &[v2("center", 0.0, 0.0), f("width", 20.0), f("height", 20.0)],
-            ))
+            .add_node(square_node((0.0, 0.0), 20.0))
             .unwrap();
-        let child = Layer::new(LayerId::next(), "child", network)
+        let child = Layer::new(LayerId::next(), "child", network.clone())
             .with_time(0, 0, 300)
             .with_parent(parent.id);
 
         for muted in [false, true] {
             parent.muted = muted;
             let comp = comp_with_layers(vec![parent.clone(), child.clone()]);
+            let comp_id = comp.id;
+            let path = NetworkPath::layer(comp_id, child.id);
             let m = world_matrix(&comp, &child, &eval_ctx());
             assert_eq!(
                 (m.0[2], m.0[5]),
                 (100.0, 50.0),
                 "the parent transform applies regardless of mute (muted = {muted})"
             );
-            let rect = layer_comp_rect(&comp, &child, 0, &eval_ctx()).unwrap();
+            let document = Document::default().with_composition(comp);
+            let ctx = OverlayContext {
+                resolution: Some((1920, 1080)),
+                playback: Some(super::super::PlaybackPosition {
+                    frame: 0,
+                    fps: FrameRate::new(30, 1),
+                }),
+                results: evaluated_results(&network, &path),
+                document: Some(document.clone()),
+                ..OverlayContext::default()
+            };
+            let rect = layer_comp_rect(&ctx, &document, comp_id, child.id).unwrap();
             assert_eq!(
                 (rect.x, rect.y, rect.w, rect.h),
                 (90.0, 40.0, 20.0, 20.0),
@@ -3434,33 +3813,46 @@ mod tests {
         assert!(m.is_identity());
     }
 
-    /// A layer's bbox is the union of its shape nodes, put through the layer's
-    /// shell transform (REQ-UI-013 multi-selection).
+    /// A layer's bbox is the union of the extents its **terminal** geometry
+    /// nodes evaluated to, put through the layer's shell transform (REQ-UI-013
+    /// multi-selection).
     #[test]
-    fn layer_bbox_unions_shape_nodes_and_follows_the_shell() {
+    fn layer_bbox_unions_terminal_geometry_and_follows_the_shell() {
         use ravel_core::animation::channel::AnimationChannel;
         use ravel_core::id::LayerId;
 
-        let left = shape_node(
-            "shape.rect",
-            &[
-                v2("center", 0.0, 0.0),
-                f("width", 100.0),
-                f("height", 100.0),
-            ],
-        );
+        let left = square_node((0.0, 0.0), 100.0);
         let right = shape_node(
             "shape.ellipse",
             &[v2("center", 200.0, 0.0), v2("radius", 50.0, 10.0)],
-        );
+        )
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
         let network = Graph::new()
             .add_node(left)
             .unwrap()
             .add_node(right)
             .unwrap();
-        let mut layer = Layer::new(LayerId::next(), "shapes", network).with_time(0, 0, 300);
-        let comp = comp_with_layers(vec![layer.clone()]);
-        let rect = layer_comp_rect(&comp, &layer, 0, &eval_ctx()).unwrap();
+        let mut layer = Layer::new(LayerId::next(), "shapes", network.clone()).with_time(0, 0, 300);
+
+        let rect_of = |layer: &Layer| {
+            let comp = comp_with_layers(vec![layer.clone()]);
+            let comp_id = comp.id;
+            let path = NetworkPath::layer(comp_id, layer.id);
+            let document = Document::default().with_composition(comp);
+            let ctx = OverlayContext {
+                resolution: Some((1920, 1080)),
+                playback: Some(super::super::PlaybackPosition {
+                    frame: 0,
+                    fps: FrameRate::new(30, 1),
+                }),
+                results: evaluated_results(&layer.network, &path),
+                document: Some(document.clone()),
+                ..OverlayContext::default()
+            };
+            layer_comp_rect(&ctx, &document, comp_id, layer.id)
+        };
+
+        let rect = rect_of(&layer).unwrap();
         assert_eq!(
             (rect.x, rect.y, rect.w, rect.h),
             (-50.0, -50.0, 300.0, 100.0),
@@ -3472,8 +3864,7 @@ mod tests {
             AnimationChannel::constant(10.0),
             AnimationChannel::constant(20.0),
         ];
-        let comp = comp_with_layers(vec![layer.clone()]);
-        let moved = layer_comp_rect(&comp, &layer, 0, &eval_ctx()).unwrap();
+        let moved = rect_of(&layer).unwrap();
         assert_eq!((moved.x, moved.y), (-40.0, -30.0));
         assert_eq!((moved.w, moved.h), (rect.w, rect.h));
         assert_eq!(
@@ -3483,11 +3874,121 @@ mod tests {
         );
         assert_eq!(selected_body_pointer_hint(&[moved], (-45.0, 25.0)), None);
 
-        // A layer that draws nothing measurable gets no bbox rather than a
-        // guessed one.
-        let empty = Layer::new(LayerId::next(), "null", Graph::new());
-        let comp = comp_with_layers(vec![empty.clone()]);
-        assert!(layer_comp_rect(&comp, &empty, 0, &eval_ctx()).is_none());
+        // A layer that places no geometry gets no bbox rather than a guessed
+        // one — a media or effects-only network has nothing to measure.
+        let empty = Layer::new(LayerId::next(), "null", Graph::new()).with_time(0, 0, 300);
+        assert!(rect_of(&empty).is_none());
+    }
+
+    /// A chain is measured at its end: unioning both the pre- and
+    /// post-transform extents would outline a rectangle the layer never shows.
+    #[test]
+    fn a_transform_chain_contributes_only_its_result_to_the_layer_bbox() {
+        use ravel_core::id::{EdgeId, InputPortIndex, LayerId, OutputPortIndex};
+
+        let rect = square_node((0.0, 0.0), 100.0);
+        let rect_id = rect.id;
+        let transform = shape_node(
+            "geometry.transform",
+            &[("translate", ParameterValue::vec3(400.0, 0.0, 0.0))],
+        )
+        .with_input("geometry", &[ravel_core::id::DataTypeId::GEOMETRY])
+        .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
+        let transform_id = transform.id;
+        let network = Graph::new()
+            .add_node(rect)
+            .unwrap()
+            .add_node(transform)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                rect_id,
+                OutputPortIndex(0),
+                transform_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(
+            terminal_geometry_nodes(&network),
+            vec![transform_id],
+            "the source rect is consumed by another geometry node"
+        );
+
+        let layer = Layer::new(LayerId::next(), "chain", network.clone()).with_time(0, 0, 300);
+        let comp = comp_with_layers(vec![layer.clone()]);
+        let comp_id = comp.id;
+        let path = NetworkPath::layer(comp_id, layer.id);
+        let document = Document::default().with_composition(comp);
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            results: evaluated_results(&network, &path),
+            document: Some(document.clone()),
+            ..OverlayContext::default()
+        };
+        let rect = layer_comp_rect(&ctx, &document, comp_id, layer.id).unwrap();
+        assert_eq!(
+            (rect.x, rect.w),
+            (350.0, 100.0),
+            "the bbox spanned the chain instead of its result: {rect:?}"
+        );
+    }
+
+    /// A multi-output node whose non-geometry port feeds a geometry operator
+    /// still places its own geometry: it is the *port* the edge leaves by that
+    /// says whether the geometry was consumed, not the node.
+    #[test]
+    fn a_multi_output_node_stays_terminal_when_only_its_other_port_is_wired() {
+        use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
+
+        // Port 0 geometry, port 1 a scalar that drives the transform.
+        let source = shape_node("test.shape_and_scalar", &[])
+            .with_output("geometry", DataTypeId::GEOMETRY)
+            .with_output("amount", DataTypeId::SCALAR);
+        let source_id = source.id;
+        let transform = shape_node("geometry.transform", &[])
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("amount", &[DataTypeId::SCALAR])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        let transform_id = transform.id;
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(transform)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                // The **scalar** port, not the geometry one.
+                OutputPortIndex(1),
+                transform_id,
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut terminal = terminal_geometry_nodes(&graph);
+        terminal.sort_by_key(|id| id.raw());
+        let mut expected = vec![source_id, transform_id];
+        expected.sort_by_key(|id| id.raw());
+        assert_eq!(
+            terminal, expected,
+            "the source's geometry is unconsumed, so it is terminal too"
+        );
+
+        // Wiring the geometry port as well does drop it.
+        let wired = graph
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                transform_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_geometry_nodes(&wired), vec![transform_id]);
     }
 
     /// The selection's rects come out in selection order, skipping layers with
@@ -3497,29 +3998,28 @@ mod tests {
         use ravel_core::id::LayerId;
 
         let network = Graph::new()
-            .add_node(shape_node(
-                "shape.rect",
-                &[
-                    v2("center", 10.0, 10.0),
-                    f("width", 20.0),
-                    f("height", 20.0),
-                ],
-            ))
+            .add_node(square_node((10.0, 10.0), 20.0))
             .unwrap();
-        let shapes = Layer::new(LayerId::next(), "shapes", network).with_time(0, 0, 300);
+        let shapes = Layer::new(LayerId::next(), "shapes", network.clone()).with_time(0, 0, 300);
         let null = Layer::new(LayerId::next(), "null", Graph::new()).with_time(0, 0, 300);
         let comp = comp_with_layers(vec![shapes.clone(), null.clone()]);
         let comp_id = comp.id;
+        let path = NetworkPath::layer(comp_id, shapes.id);
         let document = Document::default().with_composition(comp);
+        let layer_selection = crate::panels::LayerSelection::of(comp_id, vec![null.id, shapes.id]);
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            results: evaluated_results(&network, &path),
+            document: Some(document),
+            layer_selection,
+            ..OverlayContext::default()
+        };
 
-        let rects = layer_selection_comp_rects(
-            &document,
-            comp_id,
-            &[null.id, shapes.id],
-            0,
-            FrameRate::new(30, 1),
-            (1920, 1080),
-        );
+        let rects = layer_selection_comp_rects(&ctx);
         assert_eq!(rects.len(), 1, "only the measurable layer draws a bbox");
         assert_eq!((rects[0].x, rects[0].y), (0.0, 0.0));
     }
@@ -3789,8 +4289,11 @@ mod tests {
         let ctx = eval_ctx();
         assert_eq!(sample_float_param(node, "width", 0, &ctx), Some(100.0));
         assert_eq!(sample_float_param(node, "height", 0, &ctx), Some(50.0));
-        // bbox/hit-test integration: the drawn node yields its dragged bounds.
-        let bounds = shape_node_bounds(node, 0, &ctx).unwrap();
+        // bbox/hit-test integration: the drawn node evaluates to the extent
+        // the gesture drew.
+        let (overlay_ctx, network) = geometry_context(graph.clone(), &[node_id]);
+        let bounds =
+            node_comp_rect(&overlay_ctx, &network, node_id).expect("the drawn rect evaluated");
         assert_eq!(
             (bounds.x, bounds.y, bounds.w, bounds.h),
             (10.0, 20.0, 100.0, 50.0)
@@ -3949,8 +4452,13 @@ mod tests {
         assert_eq!(pen_close_pointer_hint(&points, (16.0, 10.0), 5.0), None);
     }
 
+    /// A custom path outlines the curve the evaluator produced, tangents
+    /// included. The parameter-derived bbox this replaces used the control
+    /// points alone and therefore under-covered a curve that bulges past
+    /// them — the outline no longer contains the drawn shape only because it
+    /// no longer guesses at it.
     #[test]
-    fn custom_path_bounds_use_control_points_not_tangent_extremes() {
+    fn a_custom_path_outlines_the_evaluated_curve() {
         let node = custom_path_node(
             registry()
                 .create_node("shape.custom_path", NodeId::next())
@@ -3958,21 +4466,24 @@ mod tests {
             vec![
                 PathPoint {
                     p: Vec2(10.0, 20.0),
-                    in_tan: Vec2(-1000.0, -1000.0),
-                    out_tan: Vec2(1000.0, 1000.0),
+                    in_tan: Vec2(-40.0, -40.0),
+                    out_tan: Vec2(40.0, 40.0),
                 },
                 corner_path_point((50.0, 80.0)),
             ],
             false,
         );
-        assert_eq!(
-            shape_node_bounds(&node, 0, &eval_ctx()),
-            Some(CompRect {
-                x: 10.0,
-                y: 20.0,
-                w: 40.0,
-                h: 60.0,
-            })
+        let id = node.id;
+        let graph = Graph::new().add_node(node).unwrap();
+        let (ctx, network) = geometry_context(graph, &[id]);
+        let bounds = node_comp_rect(&ctx, &network, id).expect("the path evaluated");
+        assert!(
+            bounds.x <= 10.0 && bounds.y <= 20.0,
+            "the outline does not contain the first control point: {bounds:?}"
+        );
+        assert!(
+            bounds.x + bounds.w >= 50.0 && bounds.y + bounds.h >= 80.0,
+            "the outline does not contain the last control point: {bounds:?}"
         );
     }
 
@@ -4221,18 +4732,7 @@ mod tests {
             cx.set_global(crate::panels::PlaybackPosition::default());
         });
 
-        let rect = |center: (f32, f32)| {
-            Graph::new()
-                .add_node(shape_node(
-                    "shape.rect",
-                    &[
-                        v2("center", center.0, center.1),
-                        f("width", 100.0),
-                        f("height", 100.0),
-                    ],
-                ))
-                .unwrap()
-        };
+        let rect = |center: (f32, f32)| Graph::new().add_node(square_node(center, 100.0)).unwrap();
         let (comp_id, layers) = project.update(cx, |project, cx| {
             let comp_id = project.document().root_comp.expect("root comp");
             let ids = vec![LayerId::next(), LayerId::next()];
@@ -4261,6 +4761,7 @@ mod tests {
                 panel.viewport_size.set((1920.0, 1080.0));
             })
             .unwrap();
+        publish_geometry_results(&project, cx);
         (window, project, comp_id, layers)
     }
 
@@ -4385,6 +4886,92 @@ mod tests {
         );
     }
 
+    /// With the playhead stopped and the document untouched, changing the
+    /// selection has to post a new viewer evaluation: the overlays declare
+    /// their targets while the request is assembled, so without this the new
+    /// selection's geometry or field is never evaluated and the overlay stays
+    /// blank until the next frame step.
+    ///
+    /// The signal is the overlay snapshot. These tests run without an
+    /// evaluation worker, and the no-worker branch of `request_viewer_eval` is
+    /// the only thing on this path that replaces the snapshot — so a cleared
+    /// snapshot means a request went out, and a surviving one means none did.
+    #[gpui::test]
+    fn changing_the_selection_while_stopped_posts_a_viewer_evaluation(cx: &mut TestAppContext) {
+        let (_window, project, comp_id, layers) = multi_layer_setup(cx);
+        let network = NetworkPath::layer(comp_id, layers[0]);
+        let node = project.read_with(cx, |project, _| {
+            ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the layer network")
+                .nodes()
+                .next()
+                .expect("a node to select")
+                .id
+        });
+        let snapshot_present = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.try_global::<overlay::OverlayResults>()
+                    .is_some_and(|results| !results.values.is_empty())
+            })
+        };
+        let select = |nodes: HashSet<NodeId>, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes,
+                });
+            });
+            cx.run_until_parked();
+        };
+
+        publish_geometry_results(&project, cx);
+        assert!(snapshot_present(cx), "the fixture publishes a snapshot");
+
+        // A real change: the request goes out.
+        select(HashSet::from([node]), cx);
+        assert!(
+            !snapshot_present(cx),
+            "changing the selection posted no evaluation, so the overlay would \
+             stay blank until the next frame step"
+        );
+
+        // Re-publishing the *same* selection — what a click on an already
+        // selected node does — must not post another request.
+        publish_geometry_results(&project, cx);
+        select(HashSet::from([node]), cx);
+        assert!(
+            snapshot_present(cx),
+            "an unchanged selection re-posted the evaluation"
+        );
+
+        // Clearing it is a change too: the overlay has to stop drawing the
+        // node that is no longer selected.
+        select(HashSet::new(), cx);
+        assert!(!snapshot_present(cx));
+    }
+
+    /// The layer selection drives the layer-level bboxes, so it posts the
+    /// request on the same rule.
+    #[gpui::test]
+    fn changing_the_layer_selection_while_stopped_posts_a_viewer_evaluation(
+        cx: &mut TestAppContext,
+    ) {
+        let (_window, project, _comp_id, layers) = multi_layer_setup(cx);
+        publish_geometry_results(&project, cx);
+
+        cx.update(|cx| crate::panels::set_layer_selection(vec![layers[1]], cx));
+        cx.run_until_parked();
+
+        let present = cx.update(|cx| {
+            cx.try_global::<overlay::OverlayResults>()
+                .is_some_and(|results| !results.values.is_empty())
+        });
+        assert!(
+            !present,
+            "changing the layer selection posted no evaluation"
+        );
+    }
+
     /// A transformed layer cannot be moved by this gesture (the drag writes
     /// comp-space deltas into layer-local parameters), so pressing inside *its*
     /// bbox must not drag the rest of the selection either.
@@ -4404,6 +4991,8 @@ mod tests {
             project.commit_document(doc, InvalidationHint::Structural, cx);
         });
         cx.run_until_parked();
+        // The commit's re-request cleared the snapshot (no worker in tests).
+        publish_geometry_results(&project, cx);
 
         window
             .update(cx, |panel, _window, cx| {
@@ -4478,7 +5067,8 @@ mod tests {
                     ]),
                 )
                 .with_param("width", ParameterValue::Float(100.0))
-                .with_param("height", ParameterValue::Float(100.0));
+                .with_param("height", ParameterValue::Float(100.0))
+                .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY);
             Graph::new().add_node(node).unwrap()
         };
         let (comp_id, early, late) = project.update(cx, |project, cx| {
@@ -4506,6 +5096,7 @@ mod tests {
         let window = cx.add_window(|window, cx| {
             ViewerPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
         });
+        publish_geometry_results(&project, cx);
         window
             .update(cx, |panel, _window, cx| {
                 panel.composition_resolution = Some((1920, 1080));
@@ -4609,14 +5200,17 @@ mod tests {
             let comp_id = project.document().root_comp.expect("root comp");
             let layer = LayerId::next();
             let network = Graph::new()
-                .add_node(shape_node(
-                    "shape.rect",
-                    &[
-                        v2("center", 100.0, 200.0),
-                        f("width", 40.0),
-                        f("height", 20.0),
-                    ],
-                ))
+                .add_node(
+                    shape_node(
+                        "shape.rect",
+                        &[
+                            v2("center", 100.0, 200.0),
+                            f("width", 40.0),
+                            f("height", 20.0),
+                        ],
+                    )
+                    .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY),
+                )
                 .unwrap();
             let doc = ravel_ui::document::add_layer(
                 project.document(),
@@ -4639,6 +5233,7 @@ mod tests {
                 panel.viewport_size.set((1920.0, 1080.0));
             })
             .unwrap();
+        publish_geometry_results(&project, cx);
         (window, project, comp_id, layer)
     }
 

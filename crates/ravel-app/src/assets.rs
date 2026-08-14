@@ -72,6 +72,14 @@ pub enum RavelIcon {
     GridOverlay,
     /// Viewer toolbar: action/title safe-area overlay.
     SafeAreas,
+    /// Viewer toolbar: selection bounding-box overlay.
+    GeometryBounds,
+    /// Viewer toolbar: geometry point markers.
+    GeometryPoints,
+    /// Viewer toolbar: geometry path outlines.
+    GeometryPaths,
+    /// Viewer toolbar: field visualisation.
+    FieldOverlay,
     /// Timeline transport: jump to the first frame.
     SkipBack,
     /// Timeline transport: step one frame backward.
@@ -460,6 +468,10 @@ impl IconNamed for RavelIcon {
             Self::ZoomActualSize => "icons/square-square.svg",
             Self::GridOverlay => "icons/grid-3x3.svg",
             Self::SafeAreas => "icons/frame.svg",
+            Self::GeometryBounds => "icons/square-square.svg",
+            Self::GeometryPoints => "icons/circle-dot.svg",
+            Self::GeometryPaths => "icons/spline.svg",
+            Self::FieldOverlay => "icons/waves.svg",
             Self::SkipBack => "icons/skip-back.svg",
             Self::StepBack => "icons/step-back.svg",
             Self::Play => "icons/play.svg",

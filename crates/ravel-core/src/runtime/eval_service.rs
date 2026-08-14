@@ -83,6 +83,44 @@ impl InvalidationHint {
 /// What one target of an [`EvalRequest`] evaluated to.
 pub type EvalOutput = Result<Arc<dyn NodeData>, EvalError>;
 
+/// A target that carries its own scope, evaluated alongside the request's
+/// [`nodes`](EvalRequest::nodes) rather than inside their graph.
+///
+/// A request is one graph at one ownership path, which is exactly what a
+/// composition's compiled shell chain needs — and exactly what an inspection
+/// point *inside* a layer network cannot use, because a layer network is
+/// evaluated recursively through its boundary node and its nodes are never in
+/// the shell graph. [`Evaluator::evaluate_at`] rebinds the path and the graph
+/// per call, so the worker pulls these through the **same** evaluator: what
+/// the shell evaluation already computed for that network is a cache hit here
+/// rather than a second pull.
+#[derive(Clone)]
+pub struct ScopedTarget {
+    /// Ownership path the node is evaluated under (never empty in practice —
+    /// the root scope is what `nodes` is for).
+    pub path: Vec<PathSegment>,
+    /// The graph `node` lives in: the network `path` names.
+    pub graph: Graph,
+    pub node: NodeId,
+    /// The context this scope is evaluated under, which is **not** the
+    /// request's: a layer network runs on layer-local time (REQ-LAYER-006),
+    /// and the recursive shell evaluation entered it with exactly that
+    /// context. Passing the request's own would both read the wrong frame and
+    /// miss the cache entry the shell just filled.
+    pub ctx: EvalContext,
+}
+
+/// One [`ScopedTarget`]'s outcome, tagged with the scope it was evaluated in.
+///
+/// The scope travels with the result because a `NodeId` alone does not
+/// identify a node: two networks routinely hold the same id, and a consumer
+/// that keyed results by id would hand an overlay a value from another graph.
+pub struct ScopedResult {
+    pub path: Vec<PathSegment>,
+    pub node: NodeId,
+    pub output: EvalOutput,
+}
+
 /// Result of one background evaluation, delivered via `on_update`.
 pub struct EvalUpdate {
     /// Generation of the request that produced this result. Consumers must
@@ -96,6 +134,11 @@ pub struct EvalUpdate {
     /// failed contributes its `Err` rather than dropping out, so a consumer
     /// can address results positionally as well as by id.
     pub results: Vec<(NodeId, EvalOutput)>,
+    /// One outcome per [`EvalRequest::scoped`] target, in the same order and
+    /// with the same length. Kept apart from [`results`](Self::results) so the
+    /// positional convention that field carries — target 0 is the composition
+    /// output — holds however many scoped targets ride along.
+    pub scoped: Vec<ScopedResult>,
     /// Per-node `process()` durations of this evaluation (cache hits are
     /// absent). Drives the node editor's load readout.
     ///
@@ -119,6 +162,10 @@ pub struct EvalRequest {
     /// [`Evaluator`] so later targets reuse what earlier ones computed.
     /// A failing target does not stop the rest.
     pub nodes: Vec<NodeId>,
+    /// Targets that name their own scope, pulled after `nodes` through the
+    /// same [`Evaluator`] (see [`ScopedTarget`]). Empty for every caller that
+    /// only wants the request's own graph.
+    pub scoped: Vec<ScopedTarget>,
     /// Which composition this request evaluates, for the output-stage frame
     /// cache (`CACHE-5`).
     ///
@@ -363,8 +410,12 @@ enum Job {
 }
 
 /// Outcome of a wait with nothing to do.
+///
+/// The job is boxed: a [`Job`] carries a whole [`EvalRequest`] — graph,
+/// document, scoped targets — while the other two variants carry nothing, and
+/// every `select!` arm would otherwise return that much stack.
 enum Wait {
-    Work(Job),
+    Work(Box<Job>),
     /// Nothing arrived within the read-ahead threshold.
     Idle,
     /// The service was dropped.
@@ -384,14 +435,14 @@ fn wait_for_work(
     idle: Option<Duration>,
 ) -> Wait {
     let interactive = |result: Result<Request, crossbeam_channel::RecvError>| match result {
-        Ok(request) => Wait::Work(Job::Interactive(request)),
+        Ok(request) => Wait::Work(Box::new(Job::Interactive(request))),
         Err(_) => Wait::Closed,
     };
     match idle {
         Some(idle) => select! {
             recv(rx) -> result => interactive(result),
             recv(speculative) -> result => match result {
-                Ok(request) => Wait::Work(Job::Speculative(request)),
+                Ok(request) => Wait::Work(Box::new(Job::Speculative(request))),
                 Err(_) => Wait::Closed,
             },
             default(idle) => Wait::Idle,
@@ -399,7 +450,7 @@ fn wait_for_work(
         None => select! {
             recv(rx) -> result => interactive(result),
             recv(speculative) -> result => match result {
-                Ok(request) => Wait::Work(Job::Speculative(request)),
+                Ok(request) => Wait::Work(Box::new(Job::Speculative(request))),
                 Err(_) => Wait::Closed,
             },
         },
@@ -468,6 +519,7 @@ impl ReadAheadTemplate {
             let request = EvalRequest {
                 graph: self.graph.clone(),
                 nodes: vec![self.node],
+                scoped: Vec::new(),
                 comp: Some(self.comp),
                 path: Vec::new(),
                 ctx,
@@ -627,11 +679,12 @@ impl EvalService {
                                     .filter(|_| !filled && template.is_some())
                                     .map(|config| config.idle);
                                 match wait_for_work(&rx, &speculative_rx, idle) {
-                                    Wait::Work(Job::Interactive(request)) => {
-                                        discard_speculative(&speculative_rx);
-                                        Job::Interactive(request)
+                                    Wait::Work(job) => {
+                                        if matches!(*job, Job::Interactive(_)) {
+                                            discard_speculative(&speculative_rx);
+                                        }
+                                        *job
                                     }
-                                    Wait::Work(job) => job,
                                     Wait::Idle => {
                                         if let (Some(config), Some(template)) =
                                             (read_ahead, &template)
@@ -821,6 +874,46 @@ impl EvalService {
                         }
                         results.push((node, result));
                     }
+                    // Scoped targets come last and through the same evaluator,
+                    // which is the whole point: the shell pull above already
+                    // ran every layer network it composites, so a node inside
+                    // one is served from the node cache rather than pulled a
+                    // second time.
+                    //
+                    // Neither the frame cache nor `finalize` applies here. Both
+                    // exist for the composition output — the frame cache is
+                    // keyed by `(comp, TimeKey)` alone, and `finalize` is the
+                    // display transform. A geometry or a field put through
+                    // either would be cached under the frame's key or handed
+                    // back as display bytes.
+                    let mut scoped = Vec::with_capacity(request.scoped.len());
+                    for target in &request.scoped {
+                        let result = evaluator.evaluate_at(
+                            &target.path,
+                            &target.graph,
+                            target.node,
+                            &target.ctx,
+                        );
+                        settle_evictions(&mut evaluator, Some(&frames), &mut hooks);
+                        timings.append(&mut evaluator.take_timings());
+                        if let Err(err) = &result
+                            && !err.is_cancelled()
+                        {
+                            tracing::debug!(
+                                generation = generation,
+                                node = target.node.raw(),
+                                frame = target.ctx.frame,
+                                path_depth = target.path.len(),
+                                %err,
+                                "scoped eval target failed"
+                            );
+                        }
+                        scoped.push(ScopedResult {
+                            path: target.path.clone(),
+                            node: target.node,
+                            output: result,
+                        });
+                    }
                     let elapsed = started.elapsed();
                     // Per-request outcome: a frozen viewer with a stream of
                     // `ok = 0` results is an evaluation error; results that
@@ -840,6 +933,8 @@ impl EvalService {
                         frame = request.ctx.frame,
                         targets = results.len(),
                         ok = results.iter().filter(|(_, r)| r.is_ok()).count(),
+                        scoped_targets = scoped.len(),
+                        scoped_ok = scoped.iter().filter(|r| r.output.is_ok()).count(),
                         timings = timings.len(),
                         ?elapsed,
                         frames_cached = frame_stats.entries,
@@ -871,6 +966,7 @@ impl EvalService {
                         generation,
                         frame: request.ctx.frame,
                         results,
+                        scoped,
                         timings,
                     });
                 }
@@ -1191,6 +1287,7 @@ mod tests {
         EvalRequest {
             graph,
             nodes,
+            scoped: Vec::new(),
             comp: None,
             path: Vec::new(),
             ctx: ctx(),
@@ -1437,6 +1534,170 @@ mod tests {
         );
     }
 
+    // ---- scoped targets ----------------------------------------------------
+
+    fn scoped_scalar(update: &EvalUpdate, index: usize) -> f32 {
+        update.scoped[index]
+            .output
+            .as_ref()
+            .expect("scoped evaluation succeeded")
+            .downcast_ref::<Scalar>()
+            .expect("scalar output")
+            .0
+    }
+
+    /// The reason scoped targets ride on the composition's request rather than
+    /// on a service of their own: they run through the **same** [`Evaluator`],
+    /// so a node the request's own pull already computed at that scope is a
+    /// cache hit. A second evaluator would process it again.
+    #[test]
+    fn a_scoped_target_hits_the_cache_of_the_requests_own_pull() {
+        let (update_tx, update_rx) = unbounded();
+        let process_count = Arc::new(AtomicUsize::new(0));
+        let hooks = StubHooks {
+            gate: None,
+            process_count: process_count.clone(),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let node = NodeId::new(1);
+        let graph = Graph::new().add_node(value_node(1, 7.0)).unwrap();
+        let path = vec![PathSegment::Layer(
+            CompId::new(3),
+            crate::id::LayerId::new(4),
+        )];
+        service.request(EvalRequest {
+            graph: graph.clone(),
+            nodes: vec![node],
+            scoped: vec![ScopedTarget {
+                path: path.clone(),
+                graph,
+                node,
+                ctx: ctx(),
+            }],
+            comp: None,
+            path: path.clone(),
+            ctx: ctx(),
+            document: None,
+            hint: InvalidationHint::None,
+        });
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.results.len(), 1, "`results` stays one per `nodes`");
+        assert_eq!(scalar_of(&update), 7.0);
+        assert_eq!(update.scoped.len(), 1, "one result per scoped target");
+        assert_eq!(update.scoped[0].node, node);
+        assert_eq!(update.scoped[0].path, path, "the scope travels back");
+        assert_eq!(scoped_scalar(&update, 0), 7.0);
+        assert_eq!(
+            process_count.load(Ordering::SeqCst),
+            1,
+            "the scoped target re-processed a node the request had just pulled"
+        );
+        assert_eq!(
+            update.timings.len(),
+            1,
+            "a cache hit contributes no timing: {:?}",
+            update.timings
+        );
+    }
+
+    /// The scope is not decoration: `evaluate_at` rebinds it per call, so the
+    /// same node at another path is a different cache entry and is processed
+    /// again. That is what keeps one layer network's result from standing in
+    /// for another's when both hold the same `NodeId`.
+    #[test]
+    fn a_scoped_target_is_evaluated_under_the_scope_it_names() {
+        let (update_tx, update_rx) = unbounded();
+        let process_count = Arc::new(AtomicUsize::new(0));
+        let hooks = StubHooks {
+            gate: None,
+            process_count: process_count.clone(),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let node = NodeId::new(1);
+        let graph = Graph::new().add_node(value_node(1, 5.0)).unwrap();
+        let other = vec![PathSegment::Layer(
+            CompId::new(1),
+            crate::id::LayerId::new(2),
+        )];
+        service.request(EvalRequest {
+            graph: graph.clone(),
+            nodes: vec![node],
+            scoped: vec![ScopedTarget {
+                path: other.clone(),
+                graph,
+                node,
+                ctx: ctx(),
+            }],
+            comp: None,
+            // The request's own pull runs at the root scope.
+            path: Vec::new(),
+            ctx: ctx(),
+            document: None,
+            hint: InvalidationHint::None,
+        });
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(update.scoped[0].path, other);
+        assert_eq!(scoped_scalar(&update, 0), 5.0);
+        assert_eq!(
+            process_count.load(Ordering::SeqCst),
+            2,
+            "the two scopes shared one cache entry, so the scope was ignored"
+        );
+    }
+
+    /// A scoped target that cannot be evaluated reports its own `Err` and
+    /// leaves the composition output — target 0 of `results` — alone.
+    #[test]
+    fn a_failing_scoped_target_leaves_the_composition_output_alone() {
+        let (update_tx, update_rx) = unbounded();
+        let hooks = StubHooks {
+            gate: None,
+            process_count: Arc::new(AtomicUsize::new(0)),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, move |update| {
+            let _ = update_tx.send(update);
+        });
+
+        let graph = Graph::new().add_node(value_node(1, 4.0)).unwrap();
+        service.request(EvalRequest {
+            graph: graph.clone(),
+            nodes: vec![NodeId::new(1)],
+            scoped: vec![ScopedTarget {
+                path: vec![PathSegment::Layer(
+                    CompId::new(1),
+                    crate::id::LayerId::new(1),
+                )],
+                graph,
+                // Absent from the graph: nothing to pull.
+                node: NodeId::new(99),
+                ctx: ctx(),
+            }],
+            comp: None,
+            path: Vec::new(),
+            ctx: ctx(),
+            document: None,
+            hint: InvalidationHint::None,
+        });
+
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(scalar_of(&update), 4.0);
+        assert!(update.scoped[0].output.is_err());
+    }
+
     /// One broken target must not blank the others: the viewer keeps drawing
     /// while an inspection target is unevaluable, and vice versa.
     #[test]
@@ -1589,6 +1850,7 @@ mod tests {
             comp: None,
             graph,
             nodes: vec![node],
+            scoped: Vec::new(),
             path: Vec::new(),
             ctx: ctx(),
             document: Some(Arc::new(Document::default())),
@@ -1630,6 +1892,7 @@ mod tests {
             comp: None,
             graph,
             nodes: vec![node],
+            scoped: Vec::new(),
             path: Vec::new(),
             ctx: ctx(),
             document: Some(Arc::new(Document::default())),
@@ -1792,6 +2055,7 @@ mod tests {
         EvalRequest {
             graph,
             nodes: vec![node],
+            scoped: Vec::new(),
             comp: Some(comp_id()),
             path: Vec::new(),
             ctx: EvalContext::new(frame, FPS, (2, 2)),

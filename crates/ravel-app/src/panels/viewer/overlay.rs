@@ -32,7 +32,7 @@
 use gpui::{Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
 use ravel_core::composition::Document;
 use ravel_core::composition::transform::{Affine, world_matrix};
-use ravel_core::eval::EvalContext;
+use ravel_core::eval::{EvalContext, PathSegment};
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::registry::{NodeRegistry, ParamRange, ParamRole};
@@ -65,6 +65,9 @@ pub struct OverlayId(pub &'static str);
 pub mod priority {
     pub const GRID: i32 = 0;
     pub const SAFE_AREAS: i32 = 10;
+    /// Under both bboxes: the field is a background wash the outlines and
+    /// handles have to stay readable over.
+    pub const FIELD: i32 = 15;
     pub const NODE_SELECTION_BBOX: i32 = 20;
     pub const LAYER_SELECTION_BBOX: i32 = 30;
     /// Above both bboxes and below the path handles: a path point drawn on
@@ -100,13 +103,21 @@ pub struct OverlayColors {
 /// was never requested, or has not been evaluated yet is simply absent —
 /// [`OverlayContext::eval_result`] then returns `None` and the overlay draws
 /// nothing rather than guessing.
+/// Which node, in which network instance, a result belongs to.
+///
+/// The scope is part of the key because a `NodeId` is not an identity on its
+/// own: two layer networks routinely hold the same ids, and a map keyed by id
+/// alone would hand one layer's overlay the geometry of another whenever two
+/// layers are selected at once.
+pub type OverlayResultKey = (Vec<PathSegment>, NodeId);
+
 #[derive(Clone, Default)]
 pub struct OverlayResults {
-    pub(crate) values: HashMap<NodeId, Arc<dyn NodeData>>,
+    pub(crate) values: HashMap<OverlayResultKey, Arc<dyn NodeData>>,
 }
 
 impl OverlayResults {
-    pub(crate) fn new(values: HashMap<NodeId, Arc<dyn NodeData>>) -> Self {
+    pub(crate) fn new(values: HashMap<OverlayResultKey, Arc<dyn NodeData>>) -> Self {
         Self { values }
     }
 }
@@ -125,7 +136,22 @@ impl Global for OverlayResults {}
 #[derive(Clone, Default)]
 pub struct OverlayContext {
     /// Resolution of the composition currently shown; `None` with no output.
+    ///
+    /// The composition's own, which is the coordinate basis every overlay draws
+    /// in — not the resolution the frame under them was evaluated at. That one
+    /// is [`eval_resolution`](Self::eval_resolution).
     pub resolution: Option<(u32, u32)>,
+    /// The resolution the viewer's evaluation request runs at: the composition
+    /// resolution scaled by the preview factor (`ViewerResolution`, `VRES-1`).
+    ///
+    /// Only sampling reads it, and only because a field can: an
+    /// `ExpressionField` sees `res.width` / `res.height` / `res.aspect`, so a
+    /// grid sampled at the composition resolution would draw numbers the
+    /// composition never rendered — at the default `Half` factor, twice the
+    /// width the frame underneath was evaluated with. `None` falls back to
+    /// [`resolution`](Self::resolution), which is what a context assembled
+    /// without a project has.
+    pub eval_resolution: Option<(u32, u32)>,
     pub playback: Option<PlaybackPosition>,
     pub document: Option<Document>,
     pub selection: Option<CanvasSelection>,
@@ -133,6 +159,17 @@ pub struct OverlayContext {
     pub tool: Option<ToolKind>,
     pub show_grid: bool,
     pub show_safe_areas: bool,
+    /// Selection bounding boxes, drawn from evaluated geometry.
+    pub show_geometry_bounds: bool,
+    /// Point and instance markers of the evaluated geometry.
+    pub show_geometry_points: bool,
+    /// Path primitives of the evaluated geometry.
+    pub show_geometry_paths: bool,
+    /// What the field overlay draws, if anything.
+    pub field_display: super::field::FieldDisplay,
+    pub field_map: super::field::FieldColorMap,
+    /// Alpha the field marks are drawn at.
+    pub field_opacity: f32,
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
     /// The gesture the pointer currently holds, or `None` when it is idle.
@@ -176,7 +213,10 @@ impl OverlayContext {
     /// gone from the network, or the port carries no value — which is the
     /// same "draw nothing" signal as a result that has not arrived.
     pub fn eval_result(&self, target: &OverlayTarget) -> Option<Arc<dyn NodeData>> {
-        let value = self.results.values.get(&target.node)?;
+        let value = self
+            .results
+            .values
+            .get(&(target.network.segments(), target.node))?;
         let ports = ravel_ui::document::resolve_network(self.document.as_ref()?, &target.network)?
             .node(target.node)?
             .outputs
@@ -718,9 +758,13 @@ pub trait ViewerOverlay {
     /// Visibility condition. Nothing else on the overlay is called when false.
     fn is_active(&self, ctx: &OverlayContext) -> bool;
 
-    /// The node output this overlay needs evaluated, if any (unit 2).
-    fn eval_target(&self, _ctx: &OverlayContext) -> Option<OverlayTarget> {
-        None
+    /// The node outputs this overlay needs evaluated, if any (unit 2).
+    ///
+    /// A list rather than one target because a bbox is per selected node and
+    /// a selection is a set: one target per overlay would have forced a
+    /// registry entry per selected element.
+    fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<OverlayTarget> {
+        Vec::new()
     }
 
     /// Draw in composition or screen space through the painter.
@@ -767,12 +811,13 @@ impl OverlayRegistry {
         Self::new(vec![
             Box::new(GridOverlay),
             Box::new(SafeAreaOverlay),
-            Box::new(SelectionBboxOverlay {
+            Box::new(GeometryOverlay {
                 scope: BboxScope::Node,
             }),
-            Box::new(SelectionBboxOverlay {
+            Box::new(GeometryOverlay {
                 scope: BboxScope::Layer,
             }),
+            Box::new(super::field::FieldOverlay),
             Box::new(ShellManipulator),
             Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
@@ -814,10 +859,10 @@ impl OverlayRegistry {
     pub fn eval_targets(&self, ctx: &OverlayContext) -> Vec<OverlayTarget> {
         let mut targets: Vec<OverlayTarget> = Vec::new();
         for overlay in self.active(ctx) {
-            if let Some(target) = overlay.eval_target(ctx)
-                && !targets.contains(&target)
-            {
-                targets.push(target);
+            for target in overlay.eval_targets(ctx) {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
             }
         }
         targets
@@ -1002,39 +1047,51 @@ fn paint_handle_mark(painter: &mut OverlayPainter, center: (f32, f32), size_px: 
     painter.screen_square_at(center, size_px - 2.0, HANDLE_FILL);
 }
 
-/// Outlines the selection, with the eight transform handles for a node
-/// selection.
+/// Screen-pixel side length of a geometry point marker.
+const GEOMETRY_POINT_PX: f32 = 3.0;
+
+/// Point and path marks: a warmer accent than the bbox, so a dense point cloud
+/// stays distinguishable from the outline around it.
+const GEOMETRY_MARK_COLOR: Hsla = Hsla {
+    h: 0.12,
+    s: 0.85,
+    l: 0.62,
+    a: 0.9,
+};
+
+/// Draws what the evaluator produced for the selection: the bounding box, the
+/// point and instance positions, and the path primitives — each behind its own
+/// toggle.
 ///
-/// These handles stay decorative, and the reason is now specific rather than
-/// general: they outline *nodes*, and scaling a node means writing its own
-/// size parameters, which is unit 5's `ParamRole` work. The layer shell is
-/// grabbable — [`ShellManipulator`] draws the same eight marks around the
+/// Everything here comes from an evaluated [`ravel_core::geometry::Geometry`],
+/// never from a `type_key` reading of the node's parameters. That is what makes
+/// a shape node this crate does not know about outline correctly, a
+/// `geometry.transform` outline where it actually is, and a `scatter.*` show
+/// every copy it places.
+///
+/// The eight bbox handles stay decorative, and the reason is now specific
+/// rather than general: they outline *nodes*, and scaling a node means writing
+/// its own size parameters, which is unit 5's `ParamRole` work. The layer shell
+/// is grabbable — [`ShellManipulator`] draws the same eight marks around the
 /// layer bbox and backs them with [`OverlayHandle`]s.
-pub struct SelectionBboxOverlay {
+pub struct GeometryOverlay {
     pub scope: BboxScope,
 }
 
-impl SelectionBboxOverlay {
-    pub const NODE_ID: OverlayId = OverlayId("viewer.selection_bbox.node");
-    pub const LAYER_ID: OverlayId = OverlayId("viewer.selection_bbox.layer");
+impl GeometryOverlay {
+    pub const NODE_ID: OverlayId = OverlayId("viewer.geometry.node");
+    pub const LAYER_ID: OverlayId = OverlayId("viewer.geometry.layer");
 
-    fn rects(&self, ctx: &OverlayContext) -> Vec<CompRect> {
-        let Some((document, resolution, playback)) = ctx.resolved() else {
-            return Vec::new();
-        };
+    /// The networks this scope outlines, in selection order.
+    fn networks(&self, ctx: &OverlayContext) -> Vec<NetworkPath> {
         match self.scope {
-            BboxScope::Node => {
-                let Some(selection) = ctx.selection.as_ref() else {
-                    return Vec::new();
-                };
-                selection_comp_rects(
-                    selection,
-                    document,
-                    playback.frame,
-                    playback.fps,
-                    resolution,
-                )
-            }
+            BboxScope::Node => ctx
+                .selection
+                .as_ref()
+                .filter(|selection| !selection.nodes.is_empty())
+                .and_then(|selection| selection.path.clone())
+                .into_iter()
+                .collect(),
             // Layer-level bboxes stand in for node bboxes exactly when several
             // layers are selected (REQ-UI-013): no network is open then, so
             // there is no node selection, and what is outlined is what a drag
@@ -1046,20 +1103,66 @@ impl SelectionBboxOverlay {
                 let Some(comp) = ctx.layer_selection.comp() else {
                     return Vec::new();
                 };
-                layer_selection_comp_rects(
-                    document,
-                    comp,
-                    ctx.layer_selection.layers(),
-                    playback.frame,
-                    playback.fps,
-                    resolution,
-                )
+                ctx.layer_selection
+                    .layers()
+                    .iter()
+                    .map(|layer| NetworkPath::layer(comp, *layer))
+                    .collect()
+            }
+        }
+    }
+
+    /// The `(network, node)` pairs whose geometry the point and path marks are
+    /// drawn from.
+    ///
+    /// A node selection draws the nodes the user selected. A layer selection
+    /// has no node selection to draw, so it falls back to what the layers
+    /// terminally place — the same nodes their bbox is unioned from.
+    fn drawn_nodes(&self, ctx: &OverlayContext) -> Vec<(NetworkPath, NodeId)> {
+        match self.scope {
+            BboxScope::Node => {
+                let Some(selection) = ctx.selection.as_ref() else {
+                    return Vec::new();
+                };
+                let Some(network) = selection.path.clone() else {
+                    return Vec::new();
+                };
+                let mut nodes: Vec<_> = selection.nodes.iter().copied().collect();
+                nodes.sort_by_key(|id| id.raw());
+                nodes
+                    .into_iter()
+                    .map(|node| (network.clone(), node))
+                    .collect()
+            }
+            BboxScope::Layer => self
+                .networks(ctx)
+                .into_iter()
+                .flat_map(|network| {
+                    super::terminal_geometry_nodes_of(ctx, &network)
+                        .into_iter()
+                        .map(move |node| (network.clone(), node))
+                })
+                .collect(),
+        }
+    }
+
+    fn rects(&self, ctx: &OverlayContext) -> Vec<CompRect> {
+        if ctx.resolved().is_none() {
+            return Vec::new();
+        }
+        match self.scope {
+            BboxScope::Node => selection_comp_rects(ctx),
+            BboxScope::Layer => {
+                if ctx.layer_selection.layers().len() < 2 {
+                    return Vec::new();
+                }
+                layer_selection_comp_rects(ctx)
             }
         }
     }
 }
 
-impl ViewerOverlay for SelectionBboxOverlay {
+impl ViewerOverlay for GeometryOverlay {
     fn id(&self) -> OverlayId {
         match self.scope {
             BboxScope::Node => Self::NODE_ID,
@@ -1074,18 +1177,73 @@ impl ViewerOverlay for SelectionBboxOverlay {
         }
     }
 
+    /// Active on the *selection*, not on the results.
+    ///
+    /// Deciding it from `rects()` would deadlock the mechanism: an inactive
+    /// overlay is never asked for its targets, so the evaluation it needs to
+    /// become active would never be requested. `paint` draws nothing until the
+    /// results land, which is where "no guessing" is enforced.
     fn is_active(&self, ctx: &OverlayContext) -> bool {
-        !self.rects(ctx).is_empty()
+        ctx.resolution.is_some() && !self.networks(ctx).is_empty()
+    }
+
+    /// Every geometry node of the outlined networks, not only the selected
+    /// ones: the Viewer's click test picks a node by its evaluated bounds, so
+    /// an unselected shape needs its geometry to be selectable at all.
+    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<OverlayTarget> {
+        let Some(document) = ctx.document.as_ref() else {
+            return Vec::new();
+        };
+        self.networks(ctx)
+            .iter()
+            .flat_map(|network| super::geometry::geometry_targets(document, network))
+            .collect()
     }
 
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
-        for rect in self.rects(ctx) {
-            painter.stroke_comp_rect(rect, SELECTION_COLOR);
-            if self.scope != BboxScope::Node {
-                continue;
+        if ctx.show_geometry_bounds {
+            for rect in self.rects(ctx) {
+                painter.stroke_comp_rect(rect, SELECTION_COLOR);
+                if self.scope != BboxScope::Node {
+                    continue;
+                }
+                for center in selection_handle_centers(rect.x, rect.y, rect.w, rect.h) {
+                    paint_handle_mark(painter, center, SELECTION_HANDLE_PX, SELECTION_COLOR);
+                }
             }
-            for center in selection_handle_centers(rect.x, rect.y, rect.w, rect.h) {
-                paint_handle_mark(painter, center, SELECTION_HANDLE_PX, SELECTION_COLOR);
+        }
+        if !ctx.show_geometry_points && !ctx.show_geometry_paths {
+            return;
+        }
+        for (network, node) in self.drawn_nodes(ctx) {
+            let Some(shell) = super::layer_shell(
+                ctx,
+                match ctx.document.as_ref() {
+                    Some(document) => document,
+                    None => return,
+                },
+                network.comp,
+                network.layer,
+            ) else {
+                continue;
+            };
+            let Some(value) = super::geometry::evaluated_geometry(ctx, &network, node) else {
+                continue;
+            };
+            let Some(geometry) = super::geometry::as_geometry(&value) else {
+                continue;
+            };
+            let place = |point: (f32, f32)| shell.apply(point.0, point.1);
+            if ctx.show_geometry_paths {
+                for (points, closed) in super::geometry::geometry_paths(geometry) {
+                    let points: Vec<_> = points.into_iter().map(place).collect();
+                    painter.stroke_comp_polyline(&points, closed, 1.0, GEOMETRY_MARK_COLOR);
+                }
+            }
+            if ctx.show_geometry_points {
+                for point in super::geometry::geometry_points(geometry) {
+                    painter.screen_square_at(place(point), GEOMETRY_POINT_PX, GEOMETRY_MARK_COLOR);
+                }
             }
         }
     }
@@ -1355,7 +1513,7 @@ impl ShellState {
         let comp = document.get_composition(comp_id)?;
         let layer = comp.get_layer(*layer_id)?;
         let eval = EvalContext::new(playback.frame, playback.fps, resolution);
-        let rect = super::layer_comp_rect(comp, layer, playback.frame, &eval)?;
+        let rect = super::layer_comp_rect(ctx, document, comp_id, *layer_id)?;
 
         let anchor_of = |layer: &ravel_core::composition::Layer| {
             let lf = layer.local_frame_continuous(eval.sample_frame());
@@ -2069,8 +2227,15 @@ mod tests {
             selection: None,
             layer_selection: LayerSelection::default(),
             tool: Some(ToolKind::Select),
+            eval_resolution: Some((1920, 1080)),
             show_grid: false,
             show_safe_areas: false,
+            show_geometry_bounds: true,
+            show_geometry_points: false,
+            show_geometry_paths: false,
+            field_display: crate::panels::viewer::field::FieldDisplay::default(),
+            field_map: crate::panels::viewer::field::FieldColorMap::default(),
+            field_opacity: crate::panels::viewer::field::DEFAULT_FIELD_OPACITY,
             error: None,
             active_drag: None,
             colors: colors(),
@@ -2143,13 +2308,67 @@ mod tests {
 
     fn rect_node(center: (f32, f32)) -> Node {
         Node::new(NodeId::next(), "shape.rect")
+            .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY)
             .with_param("center", ParameterValue::vec2(center.0, center.1))
             .with_param("width", ParameterValue::Float(40.0))
             .with_param("height", ParameterValue::Float(20.0))
     }
 
+    /// The geometry a test node stands for.
+    ///
+    /// The overlays read evaluated values, so a document alone no longer
+    /// decides what they draw. These tests are about the overlays; the real
+    /// processors are driven through the real evaluator in the parent
+    /// module's tests, which is where "the bbox follows the evaluation" is
+    /// pinned. Here the stub only has to be the shape the assertions assume.
+    fn stub_geometry(node: &Node) -> Option<ravel_core::geometry::Geometry> {
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080));
+        match node.type_key.as_str() {
+            "shape.rect" => {
+                let (cx, cy) = crate::panels::viewer::sample_vec2_param(node, "center", 0, &ctx)?;
+                let (hw, hh) = (
+                    crate::panels::viewer::sample_float_param(node, "width", 0, &ctx)? * 0.5,
+                    crate::panels::viewer::sample_float_param(node, "height", 0, &ctx)? * 0.5,
+                );
+                Some(ravel_core::geometry::Geometry::from_points(vec![
+                    Vec2(cx - hw, cy - hh),
+                    Vec2(cx + hw, cy - hh),
+                    Vec2(cx + hw, cy + hh),
+                    Vec2(cx - hw, cy + hh),
+                ]))
+            }
+            "shape.custom_path" => {
+                let points = crate::panels::viewer::path_points(node)?;
+                Some(ravel_core::geometry::Geometry::from_points(
+                    points
+                        .iter()
+                        .map(|point| Vec2(point.p.0, point.p.1))
+                        .collect(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The published snapshot a document's own layer networks would produce.
+    fn stub_results(document: &Document) -> OverlayResults {
+        let mut values: HashMap<OverlayResultKey, Arc<dyn NodeData>> = HashMap::new();
+        for comp in document.compositions.values() {
+            for layer in &comp.layers {
+                let path = NetworkPath::layer(comp.id, layer.id).segments();
+                for node in layer.network.nodes() {
+                    if let Some(geometry) = stub_geometry(node) {
+                        values.insert((path.clone(), node.id), Arc::new(geometry));
+                    }
+                }
+            }
+        }
+        OverlayResults::new(values)
+    }
+
     fn path_node(points: Vec<PathPoint>) -> Node {
         Node::new(NodeId::next(), "shape.custom_path")
+            .with_output("geometry", ravel_core::id::DataTypeId::GEOMETRY)
             .with_param("points", ParameterValue::PathPoints(points))
             .with_param("closed", ParameterValue::Bool(false))
     }
@@ -2165,6 +2384,7 @@ mod tests {
             .add_layer(Layer::new(layer_id, "Layer", graph).with_time(0, 0, 300));
         let document = Document::default().with_composition(comp);
         let mut ctx = base_context();
+        ctx.results = stub_results(&document);
         ctx.document = Some(document);
         ctx.selection = Some(CanvasSelection {
             path: Some(NetworkPath::layer(comp_id, layer_id)),
@@ -2246,7 +2466,7 @@ mod tests {
     #[test]
     fn node_selection_bbox_outlines_the_shape_and_keeps_its_eight_handles() {
         let (ctx, ..) = doc_with_node(rect_node((100.0, 200.0)));
-        let overlay = SelectionBboxOverlay {
+        let overlay = GeometryOverlay {
             scope: BboxScope::Node,
         };
         assert!(overlay.is_active(&ctx));
@@ -2321,9 +2541,11 @@ mod tests {
             comp = comp.add_layer(Layer::new(*id, "Layer", graph).with_time(0, 0, 300));
         }
         let mut ctx = base_context();
-        ctx.document = Some(Document::default().with_composition(comp));
+        let document = Document::default().with_composition(comp);
+        ctx.results = stub_results(&document);
+        ctx.document = Some(document);
 
-        let overlay = SelectionBboxOverlay {
+        let overlay = GeometryOverlay {
             scope: BboxScope::Layer,
         };
         ctx.layer_selection = LayerSelection::of(comp_id, vec![layers[0]]);
@@ -2449,8 +2671,8 @@ mod tests {
             true
         }
 
-        fn eval_target(&self, _ctx: &OverlayContext) -> Option<OverlayTarget> {
-            Some(self.target.clone())
+        fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<OverlayTarget> {
+            vec![self.target.clone()]
         }
 
         fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
@@ -2477,6 +2699,16 @@ mod tests {
         Arc::new(ravel_core::types::Scalar(value))
     }
 
+    /// The published snapshot for one `(network, node)` pair, keyed the way
+    /// the evaluation worker tags a scoped result.
+    fn results_for(
+        network: &NetworkPath,
+        node: NodeId,
+        value: Arc<dyn NodeData>,
+    ) -> OverlayResults {
+        OverlayResults::new(HashMap::from([((network.segments(), node), value)]))
+    }
+
     #[test]
     fn an_overlay_without_a_current_result_paints_nothing() {
         let node = Node::new(NodeId::next(), "test.single")
@@ -2493,16 +2725,16 @@ mod tests {
         })]);
 
         let mut previous = base;
-        previous.results = OverlayResults::new(HashMap::from([(node_id, scalar(1.0))]));
+        previous.results = results_for(&target.network, node_id, scalar(1.0));
         let mut previous_painter = painter();
         registry.paint(&previous, &mut previous_painter);
         assert!(!previous_painter.finish().is_empty());
 
         // The snapshot is replaced wholesale, so a target that did not come
         // back has no entry at all. Another target's result is present to
-        // pin that the lookup is by node id: any value will not do.
+        // pin that the lookup is by identity: any value will not do.
         let mut pending = previous;
-        pending.results = OverlayResults::new(HashMap::from([(NodeId::new(999_001), scalar(1.0))]));
+        pending.results = results_for(&target.network, NodeId::new(999_001), scalar(1.0));
         let mut painter = painter();
         registry.paint(&pending, &mut painter);
         assert!(painter.finish().is_empty());
@@ -2522,7 +2754,7 @@ mod tests {
             scalar(10.0),
             scalar(20.0),
         ]));
-        ctx.results = OverlayResults::new(HashMap::from([(node_id, record)]));
+        ctx.results = results_for(&network, node_id, record);
 
         let read = |port: u32| {
             ctx.eval_result(&OverlayTarget {
@@ -2551,7 +2783,7 @@ mod tests {
             .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
         let (mut ctx, network) = ctx_with_network_node(node);
         let stranger = NodeId::new(999_002);
-        ctx.results = OverlayResults::new(HashMap::from([(stranger, scalar(1.0))]));
+        ctx.results = results_for(&network, stranger, scalar(1.0));
 
         assert!(
             ctx.eval_result(&OverlayTarget {
@@ -2560,6 +2792,31 @@ mod tests {
                 output: OutputPortIndex(0),
             })
             .is_none()
+        );
+    }
+
+    /// Two layer networks routinely hold the same `NodeId`. The snapshot is
+    /// keyed by scope *and* id, so one layer's result can never be drawn as
+    /// another's — the failure a map keyed by id alone would produce the
+    /// moment two layers are selected together.
+    #[test]
+    fn a_result_from_another_network_is_never_read_as_this_ones() {
+        let node = Node::new(NodeId::next(), "test.single")
+            .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
+        let node_id = node.id;
+        let (mut ctx, network) = ctx_with_network_node(node);
+        let elsewhere = NetworkPath::layer(network.comp, LayerId::new(network.layer.raw() + 1));
+        assert_ne!(elsewhere.segments(), network.segments());
+        ctx.results = results_for(&elsewhere, node_id, scalar(1.0));
+
+        let target = OverlayTarget {
+            network,
+            node: node_id,
+            output: OutputPortIndex(0),
+        };
+        assert!(
+            ctx.eval_result(&target).is_none(),
+            "a value evaluated in another network was served to this one"
         );
     }
 

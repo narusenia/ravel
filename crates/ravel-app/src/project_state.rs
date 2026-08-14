@@ -1884,15 +1884,18 @@ fn overlay_scoped_targets(
         else {
             continue;
         };
-        // Layer-local time (REQ-LAYER-006), and the shell's own interval
-        // check: outside `[in, out)` the compositing chain does not evaluate
-        // the network at all, so asking for a node inside it would both draw
-        // an overlay over a layer that is not on screen and pay for an
-        // evaluation the frame did not need.
-        let local_frame = ravel_ui::keyframes::layer_local_frame(layer, ctx.frame);
-        if local_frame < layer.in_frame || local_frame >= layer.out_frame {
+        // Layer-local time (REQ-LAYER-006) and the shell's own interval check
+        // in one answer: outside `[in, out)` the compositing chain does not
+        // evaluate the network at all, so asking for a node inside it would
+        // both draw an overlay over a layer that is not on screen and pay for
+        // an evaluation the frame did not need.
+        //
+        // `Layer::local_frame` is the wrong question here: it clamps at zero,
+        // so a layer that starts at composition frame 5 reports local frame 0
+        // — its own `in_frame` — at composition frame 0 and reads as showing.
+        let Some(local_frame) = layer.displayed_local_frame(ctx.frame) else {
             continue;
-        }
+        };
         scoped.push(ScopedTarget {
             path,
             graph: graph.clone(),
@@ -2462,6 +2465,67 @@ mod tests {
                 request.scoped[0].ctx.frame,
                 ravel_ui::keyframes::layer_local_frame(layer, 0),
             );
+        });
+    }
+
+    /// A layer that has not started yet composites as transparent, so an
+    /// overlay must not annotate it — and the evaluation it would need must
+    /// not be paid for either.
+    ///
+    /// The trap this pins: `Layer::local_frame` clamps at zero, so a layer
+    /// starting at composition frame 5 reports its own `in_frame` at
+    /// composition frame 0 and passes an `>= in_frame` interval test while
+    /// showing nothing.
+    #[gpui::test]
+    fn a_layer_that_has_not_started_contributes_no_scoped_target(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let layer = Layer {
+                ..content_layer().with_time(5, 0, 300)
+            };
+            let layer_id = layer.id;
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            let comp = project.active_composition(cx).unwrap().clone();
+
+            let network = NetworkPath::layer(comp_id, layer_id);
+            let node = ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the layer network")
+                .nodes()
+                .next()
+                .expect("a node to target")
+                .id;
+            let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay {
+                target: target_in(&network, node),
+            })]);
+            let document = project.document().clone();
+            let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
+
+            let before_start = overlay_scoped_targets(
+                &document,
+                &project.viewer_eval_context(&comp, 0),
+                &overlays,
+                &ctx,
+            );
+            assert!(
+                before_start.is_empty(),
+                "an overlay target rode along for a layer that is not on screen"
+            );
+
+            // The very first frame the layer *is* on screen still asks, at the
+            // layer-local frame the compositing chain enters the network with.
+            let at_start = overlay_scoped_targets(
+                &document,
+                &project.viewer_eval_context(&comp, 5),
+                &overlays,
+                &ctx,
+            );
+            assert_eq!(at_start.len(), 1);
+            assert_eq!(at_start[0].ctx.frame, 0);
         });
     }
 

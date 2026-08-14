@@ -277,6 +277,22 @@ impl Layer {
         (comp_frame as i64 - self.start_frame + self.in_frame as i64).max(0) as u64
     }
 
+    /// The layer-local frame of `comp_frame` **while the layer is on screen**,
+    /// or `None` outside its display interval `[in_frame, out_frame)`.
+    ///
+    /// Use this, not [`local_frame`](Self::local_frame), to ask whether a
+    /// composition frame falls inside the layer. `local_frame` clamps at zero
+    /// because channel sampling wants a frame index whatever happens, and that
+    /// clamp makes every frame before `start_frame` read back as `in_frame`
+    /// itself — which passes an `>= in_frame` interval test for a layer that
+    /// has not started. The compositing chain answers the question on the
+    /// unclamped value, so anything deciding "is this layer showing" has to
+    /// agree with it.
+    pub fn displayed_local_frame(&self, comp_frame: u64) -> Option<u64> {
+        let local = comp_frame as i64 - self.start_frame + self.in_frame as i64;
+        (local >= self.in_frame as i64 && local < self.out_frame as i64).then_some(local as u64)
+    }
+
     /// [`local_frame`](Self::local_frame) for a continuous composition frame.
     ///
     /// Channel evaluation samples between integer frames (motion blur, time
@@ -1499,6 +1515,46 @@ mod tests {
         let layer = empty_layer(1).with_time(10, 5, 100);
         assert_eq!(layer.duration(), 95);
         assert_eq!(layer.end_frame(), 105);
+    }
+
+    /// The interval question and the sampling question have different
+    /// answers before the layer starts, and conflating them is a real bug
+    /// class: `local_frame` clamps at zero, so a layer starting at
+    /// composition frame 5 reports its own `in_frame` at composition frame 0
+    /// and passes a naive `>= in_frame` test while showing nothing.
+    #[test]
+    fn a_layer_is_not_displayed_before_it_starts() {
+        let layer = empty_layer(1).with_time(5, 0, 100);
+
+        assert_eq!(
+            layer.local_frame(0),
+            0,
+            "the sampling formula still clamps, which is what it is for"
+        );
+        assert_eq!(
+            layer.displayed_local_frame(0),
+            None,
+            "a layer that has not started is not on screen"
+        );
+        assert_eq!(layer.displayed_local_frame(4), None);
+        assert_eq!(layer.displayed_local_frame(5), Some(0));
+        assert_eq!(layer.displayed_local_frame(6), Some(1));
+        // `[in, out)`: the out frame itself is past the end.
+        assert_eq!(layer.displayed_local_frame(104), Some(99));
+        assert_eq!(layer.displayed_local_frame(105), None);
+    }
+
+    /// A trimmed layer starts at its `in_frame`, and the frames before its
+    /// start are still off screen however large the trim is.
+    #[test]
+    fn a_trimmed_layer_maps_its_start_onto_its_in_frame() {
+        let layer = empty_layer(1).with_time(10, 20, 50);
+
+        assert_eq!(layer.displayed_local_frame(0), None);
+        assert_eq!(layer.displayed_local_frame(9), None);
+        assert_eq!(layer.displayed_local_frame(10), Some(20));
+        assert_eq!(layer.displayed_local_frame(39), Some(49));
+        assert_eq!(layer.displayed_local_frame(40), None);
     }
 
     #[test]

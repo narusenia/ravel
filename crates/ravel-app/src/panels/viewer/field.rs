@@ -367,7 +367,9 @@ impl ViewerOverlay for FieldOverlay {
             w: resolution.0 as f32,
             h: resolution.1 as f32,
         };
-        let eval = field_eval_context(ctx, document, &network, resolution);
+        let Some(eval) = field_eval_context(ctx, document, &network, resolution) else {
+            return;
+        };
         let grid = sample_grid(field, rect, cols, rows, &to_local, &eval);
         paint_grid(
             &grid,
@@ -379,22 +381,27 @@ impl ViewerOverlay for FieldOverlay {
     }
 }
 
-/// The context the field is sampled at: the layer-local frame, which is the
-/// frame the field itself was evaluated at.
+/// The context the field is sampled at: the layer-local frame the field itself
+/// was evaluated at, so a time-varying field is drawn at the frame on screen.
+///
+/// `None` when the layer is not on screen at all. `Layer::displayed_local_frame`
+/// rather than `local_frame` on purpose: the clamped form reports `in_frame`
+/// for every composition frame before the layer starts, and the two frames have
+/// to agree with the interval check that decided to request this field
+/// (`ProjectState::overlay_scoped_targets`) or the overlay samples one frame and
+/// draws the value of another.
 fn field_eval_context(
     ctx: &OverlayContext,
     document: &ravel_core::composition::Document,
     network: &NetworkPath,
     resolution: (u32, u32),
-) -> EvalContext {
-    let playback = ctx.playback.unwrap_or_default();
+) -> Option<EvalContext> {
+    let playback = ctx.playback?;
     let frame = document
-        .get_composition(network.comp)
-        .and_then(|comp| comp.get_layer(network.layer))
-        .map_or(playback.frame, |layer| {
-            ravel_ui::keyframes::layer_local_frame(layer, playback.frame)
-        });
-    EvalContext::new(frame, playback.fps, resolution).with_comp_resolution(resolution)
+        .get_composition(network.comp)?
+        .get_layer(network.layer)?
+        .displayed_local_frame(playback.frame)?;
+    Some(EvalContext::new(frame, playback.fps, resolution).with_comp_resolution(resolution))
 }
 
 /// Draw a sampled grid. Split from `paint` so the drawing is testable without

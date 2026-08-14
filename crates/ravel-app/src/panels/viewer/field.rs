@@ -24,7 +24,7 @@
 use gpui::Hsla;
 use ravel_core::composition::transform::Affine;
 use ravel_core::eval::EvalContext;
-use ravel_core::geometry::{AttributeArray, FieldSample, FieldValue};
+use ravel_core::geometry::{AttributeArray, AttributeType, FieldSample, FieldValue};
 use ravel_core::id::{DataTypeId, NodeId, OutputPortIndex};
 use ravel_core::types::{Vec2, magnitude};
 use ravel_ui::document::NetworkPath;
@@ -218,19 +218,46 @@ impl FieldGrid {
     }
 }
 
-/// The planar reading of a vector column, or `None` for a column with no
-/// direction in it.
+/// Whether a column holds planar vectors at all.
 ///
-/// Shared with the geometry attribute arrows: both draw the same arrow from
-/// the same three cases, and a second copy of this match is how a `Vec4`
-/// column ends up drawable in one overlay and not the other.
-pub fn planar_values(values: &AttributeArray) -> Option<Vec<(f32, f32)>> {
+/// The type question on its own, so a caller that only wants to know *whether*
+/// an attribute is drawable does not pay for reading it. The toolbar's arrow
+/// picker asks it once per render for every column of the drawn geometry:
+/// answering by copying the columns cost 758 µs and ~16 MB of allocation per
+/// render on a million-point geometry, against ~1 µs for the type check.
+pub fn is_planar(values: &AttributeArray) -> bool {
+    matches!(
+        values.attr_type(),
+        AttributeType::Vec2 | AttributeType::Vec3 | AttributeType::Vec4
+    )
+}
+
+/// The planar reading of one element of a vector column, or `None` when the
+/// column has no direction in it or does not reach `index`.
+///
+/// Element-wise rather than whole-column, because every caller that draws is
+/// bounded by a cap far below the column length. Shared with the geometry
+/// attribute arrows: both draw the same arrow from the same three cases, and a
+/// second copy of this match is how a `Vec4` column ends up drawable in one
+/// overlay and not the other.
+pub fn planar_at(values: &AttributeArray, index: usize) -> Option<(f32, f32)> {
     match values {
-        AttributeArray::Vec2(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
-        AttributeArray::Vec3(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
-        AttributeArray::Vec4(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
+        AttributeArray::Vec2(values) => values.get(index).map(|v| (v.0, v.1)),
+        AttributeArray::Vec3(values) => values.get(index).map(|v| (v.0, v.1)),
+        AttributeArray::Vec4(values) => values.get(index).map(|v| (v.0, v.1)),
         _ => None,
     }
+}
+
+/// The whole column as planar readings. For a sampled field grid, where the
+/// values *are* the drawn set and the grid is already capped by
+/// [`MAX_FIELD_SAMPLES`].
+pub fn planar_values(values: &AttributeArray) -> Option<Vec<(f32, f32)>> {
+    is_planar(values).then(|| {
+        (0..values.len())
+            .filter_map(|i| planar_at(values, i))
+            .collect()
+    })
 }
 
 /// Normalise `values` to `0..=1` over their own range.

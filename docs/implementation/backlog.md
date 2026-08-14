@@ -57,8 +57,7 @@
 | OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
 | OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
 | INFO-1 | `InvalidationHint::Shell`（挙動不変） | `scene-info-nodes-plan.md` |
-| OVL-8 | ジオメトリ属性の空間可視化（矢印 / index / group。OVL-3 完了で着手可能） | `viewer-overlay-manipulator-plan.md` |
-| OVL-9 | モーションパス（軌跡表示 + キー位置のドラッグ。OVL-7 完了で着手可能） | `viewer-overlay-manipulator-plan.md` |
+| OVL-6 | オーバーレイのロケール / 文書（OVL の他単位すべて完了で着手可能） | `viewer-overlay-manipulator-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
@@ -590,9 +589,9 @@ DISC-5 も同じ向きで、アイコンの対応表は UI 側に置き `NodeTem
 | OVL-4 | ✅ | Field オーバーレイ（#437） | OVL-2 |
 | OVL-5 | ✅ | `ParamRole` とマニピュレータ（#435。`Position` / `Size` のみ — `Direction` / `Angle` は実装する単位が宣言と同時に足す） | OVL-1, VEC-5 |
 | OVL-7 | ✅ | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線（#432） | OVL-1 |
-| OVL-8 | 🟡 | ジオメトリ属性の空間可視化（矢印 / index / group） | OVL-3 |
-| OVL-9 | 🟡 | モーションパス（軌跡表示 + キー位置のドラッグ。空間ベジェは持たない） | OVL-1, OVL-7 |
-| OVL-6 | ⬜ | ロケール / 文書 | OVL-1〜5, OVL-7〜9 |
+| OVL-8 | ✅ | ジオメトリ属性の空間可視化（矢印 / index / group）（#439） | OVL-3 |
+| OVL-9 | ✅ | モーションパス（軌跡表示 + キー位置のドラッグ。空間ベジェは持たない）（#439） | OVL-1, OVL-7 |
+| OVL-6 | 🟡 | ロケール / 文書 | OVL-1〜5, OVL-7〜9 |
 
 OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
 `attribute-spreadsheet-plan.md` 単位 1 の multi-target 化に乗る。

@@ -60,7 +60,8 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   Viewer のマニピュレータは宣言だけを見てハンドルを出すので、宣言しない限り
   そのノードは掴めず、宣言すれば Viewer 側の変更は不要
   （`shape.rect` の `center` が例）。役割は `Channel2` / `Channel3` にだけ
-  付ける — スカラーにはハンドルを置く点が無い
+  付ける — スカラーにはハンドルを置く点が無い。**役割を増やすときは
+  ハンドルの実装と同じ単位で入れる**（宣言だけ足しても何も掴めない）
 - 可変長入力は `variadic_input_group`
 - **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
   Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /

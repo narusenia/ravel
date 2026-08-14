@@ -214,12 +214,22 @@ impl FieldGrid {
     /// Planar readings, for the arrow mode. `None` for a field that does not
     /// sample to a vector — an arrow needs a direction, and a scalar has none.
     pub fn vectors(&self) -> Option<Vec<(f32, f32)>> {
-        match &self.values {
-            AttributeArray::Vec2(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
-            AttributeArray::Vec3(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
-            AttributeArray::Vec4(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
-            _ => None,
-        }
+        planar_values(&self.values)
+    }
+}
+
+/// The planar reading of a vector column, or `None` for a column with no
+/// direction in it.
+///
+/// Shared with the geometry attribute arrows: both draw the same arrow from
+/// the same three cases, and a second copy of this match is how a `Vec4`
+/// column ends up drawable in one overlay and not the other.
+pub fn planar_values(values: &AttributeArray) -> Option<Vec<(f32, f32)>> {
+    match values {
+        AttributeArray::Vec2(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
+        AttributeArray::Vec3(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
+        AttributeArray::Vec4(values) => Some(values.iter().map(|v| (v.0, v.1)).collect()),
+        _ => None,
     }
 }
 

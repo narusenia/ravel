@@ -311,6 +311,12 @@ pub struct ViewerPanel {
     show_geometry_points: bool,
     /// Evaluated geometry path outlines.
     show_geometry_paths: bool,
+    /// The geometry attribute drawn as arrows, or `None` for none.
+    geometry_arrow_attr: Option<SharedString>,
+    /// Element index labels over the drawn geometry marks.
+    show_geometry_indices: bool,
+    /// Colour the geometry marks by group membership.
+    show_geometry_groups: bool,
     /// What the field overlay draws, if anything.
     field_display: field::FieldDisplay,
     field_map: field::FieldColorMap,
@@ -522,6 +528,9 @@ impl ViewerPanel {
             show_geometry_bounds: true,
             show_geometry_points: false,
             show_geometry_paths: false,
+            geometry_arrow_attr: None,
+            show_geometry_indices: false,
+            show_geometry_groups: false,
             field_display: field::FieldDisplay::default(),
             field_map: field::FieldColorMap::default(),
             field_opacity: field::DEFAULT_FIELD_OPACITY,
@@ -1185,6 +1194,9 @@ impl ViewerPanel {
             show_geometry_bounds: self.show_geometry_bounds,
             show_geometry_points: self.show_geometry_points,
             show_geometry_paths: self.show_geometry_paths,
+            geometry_arrow_attr: self.geometry_arrow_attr.clone(),
+            show_geometry_indices: self.show_geometry_indices,
+            show_geometry_groups: self.show_geometry_groups,
             field_display: self.field_display,
             field_map: self.field_map,
             field_opacity: self.field_opacity,
@@ -1666,6 +1678,12 @@ impl ViewerPanel {
         let field_entity = entity.clone();
         let (field_display, field_map, field_opacity) =
             (self.field_display, self.field_map, self.field_opacity);
+        let attr_entity = entity.clone();
+        let arrow_attr = self.geometry_arrow_attr.clone();
+        let (show_indices, show_groups) = (self.show_geometry_indices, self.show_geometry_groups);
+        // What the picker can offer comes from the geometry the overlays draw,
+        // so an attribute is listed exactly while it exists.
+        let arrow_names = overlay::drawn_vector_attributes(&self.overlay_context(cx));
         div()
             .flex()
             .items_center()
@@ -1809,6 +1827,87 @@ impl ViewerPanel {
                     })),
             )
             .child(
+                // One menu for the three attribute visualisations, the way the
+                // field menu holds its three: they answer "what about these
+                // elements do I want to see", and the arrow picker is a list of
+                // whatever the evaluated geometry actually carries rather than
+                // a fixed set of reserved names.
+                Button::new("viewer-geometry-attrs")
+                    .xsmall()
+                    .ghost()
+                    .selected(
+                        self.geometry_arrow_attr.is_some()
+                            || self.show_geometry_indices
+                            || self.show_geometry_groups,
+                    )
+                    .icon(Icon::new(RavelIcon::GeometryAttributes))
+                    .tooltip(t!("viewer.geometry_attrs"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        let selected = |name: Option<&str>| match (&arrow_attr, name) {
+                            (Some(current), Some(name)) => current.as_ref() == name,
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        for name in std::iter::once(None)
+                            .chain(arrow_names.iter().map(|name| Some(name.as_str())))
+                        {
+                            let entity = attr_entity.clone();
+                            let value: Option<SharedString> =
+                                name.map(|name| SharedString::from(name.to_string()));
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(match name {
+                                    Some(name) => {
+                                        format!("{}: {name}", t!("viewer.geometry_arrows"))
+                                    }
+                                    None => t!("viewer.geometry_arrows_off").to_string(),
+                                }))
+                                .checked(selected(name))
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        let value = value.clone();
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.geometry_arrow_attr != value {
+                                                    this.geometry_arrow_attr = value;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            );
+                        }
+                        menu = menu.separator();
+                        let entity = attr_entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(SharedString::from(t!("viewer.geometry_indices")))
+                                .checked(show_indices)
+                                .on_click(move |_, _window, cx| {
+                                    entity
+                                        .update(cx, |this, cx| {
+                                            this.show_geometry_indices =
+                                                !this.show_geometry_indices;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                }),
+                        );
+                        let entity = attr_entity.clone();
+                        menu.item(
+                            PopupMenuItem::new(SharedString::from(t!("viewer.geometry_groups")))
+                                .checked(show_groups)
+                                .on_click(move |_, _window, cx| {
+                                    entity
+                                        .update(cx, |this, cx| {
+                                            this.show_geometry_groups = !this.show_geometry_groups;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                }),
+                        )
+                    }),
+            )
+            .child(
                 // One menu rather than three controls: the display mode, the
                 // colour map and the opacity are all "how do I want to look at
                 // this field", and only the first of them is ever off.
@@ -1886,27 +1985,34 @@ impl ViewerPanel {
 
 /// Render a screen-space overlay label as an element. GPUI shapes text
 /// through elements, so labels take this path instead of the canvas painter.
-fn overlay_label_element(label: overlay::OverlayLabel) -> Div {
-    match label.placement {
+///
+/// `viewport` is the composition rectangle and resolution a composition-anchored
+/// label is placed through — the same pair the pointer is resolved with. `None`
+/// when there is no composition on screen, and such a label then has nowhere to
+/// sit and is dropped.
+fn overlay_label_element(
+    label: overlay::OverlayLabel,
+    viewport: Option<(viewport::Rect, (u32, u32))>,
+) -> Option<Div> {
+    let text = div()
+        .text_xs()
+        .text_color(label.color)
+        .child(label.text.clone());
+    Some(match label.placement {
         LabelPlacement::CanvasCenter => div()
             .absolute()
             .inset_0()
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(label.color)
-                    .child(label.text.clone()),
-            ),
-        LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(
-            div()
-                .text_xs()
-                .text_color(label.color)
-                .child(label.text.clone()),
-        ),
-    }
+            .child(text),
+        LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(text),
+        LabelPlacement::Comp(comp) => {
+            let (rect, resolution) = viewport?;
+            let (x, y) = comp_to_screen(comp, rect, resolution.0);
+            div().absolute().left(px(x)).top(px(y)).child(text)
+        }
+    })
 }
 
 /// Overlay line color: light gray that stays readable over both the black
@@ -2277,8 +2383,20 @@ impl Render for ViewerPanel {
             .size_full(),
         );
 
+        // Composition-anchored labels go through the viewport the pointer is
+        // resolved with, so an index label sits on the mark it names.
+        let label_viewport = self.composition_resolution.map(|resolution| {
+            (
+                self.viewport.rect(self.viewport_size.get(), resolution),
+                resolution,
+            )
+        });
         let content = if !labels.is_empty() {
-            content.children(labels.into_iter().map(overlay_label_element))
+            content.children(
+                labels
+                    .into_iter()
+                    .filter_map(|label| overlay_label_element(label, label_viewport)),
+            )
         } else if self.composition_resolution.is_none() {
             content.child(
                 div()
@@ -2564,7 +2682,8 @@ fn screen_to_comp(
     Some(((local.0 - rect.x) / zoom, (local.1 - rect.y) / zoom))
 }
 
-#[cfg(test)]
+/// The panel-local pixel position of a composition point: the inverse of
+/// [`screen_to_comp`], and where a composition-anchored overlay label sits.
 fn comp_to_screen(comp: (f32, f32), rect: viewport::Rect, comp_width: u32) -> (f32, f32) {
     let zoom = rect.width / comp_width as f32;
     (rect.x + comp.0 * zoom, rect.y + comp.1 * zoom)
@@ -3562,7 +3681,10 @@ mod tests {
             6,
             "the grid scatter placed a different number of instances than this test assumes"
         );
-        let points = geometry::geometry_points(scattered);
+        let points: Vec<_> = geometry::geometry_marks(scattered)
+            .into_iter()
+            .map(|mark| mark.position)
+            .collect();
         for instance in 0..scattered.instance_count() {
             let position = scattered
                 .positions(ravel_core::geometry::Domain::Instance)

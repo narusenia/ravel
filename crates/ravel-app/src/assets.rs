@@ -78,6 +78,8 @@ pub enum RavelIcon {
     GeometryPoints,
     /// Viewer toolbar: geometry path outlines.
     GeometryPaths,
+    /// Viewer toolbar: field visualisation.
+    FieldOverlay,
     /// Timeline transport: jump to the first frame.
     SkipBack,
     /// Timeline transport: step one frame backward.
@@ -469,6 +471,7 @@ impl IconNamed for RavelIcon {
             Self::GeometryBounds => "icons/square-square.svg",
             Self::GeometryPoints => "icons/circle-dot.svg",
             Self::GeometryPaths => "icons/spline.svg",
+            Self::FieldOverlay => "icons/waves.svg",
             Self::SkipBack => "icons/skip-back.svg",
             Self::StepBack => "icons/step-back.svg",
             Self::Play => "icons/play.svg",

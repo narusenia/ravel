@@ -11,6 +11,7 @@
 //! Geometry node feeding a Rasterize) are immediately visible instead of
 //! leaving stale content.
 
+pub mod field;
 pub mod geometry;
 pub mod overlay;
 mod viewport;
@@ -310,6 +311,10 @@ pub struct ViewerPanel {
     show_geometry_points: bool,
     /// Evaluated geometry path outlines.
     show_geometry_paths: bool,
+    /// What the field overlay draws, if anything.
+    field_display: field::FieldDisplay,
+    field_map: field::FieldColorMap,
+    field_opacity: f32,
     /// Session-local transparency preview background.
     background_mode: ViewerBackgroundMode,
     focus_handle: FocusHandle,
@@ -508,6 +513,9 @@ impl ViewerPanel {
             show_geometry_bounds: true,
             show_geometry_points: false,
             show_geometry_paths: false,
+            field_display: field::FieldDisplay::default(),
+            field_map: field::FieldColorMap::default(),
+            field_opacity: field::DEFAULT_FIELD_OPACITY,
             background_mode: ViewerBackgroundMode::default(),
             focus_handle,
             focus_subscriptions,
@@ -1157,6 +1165,9 @@ impl ViewerPanel {
             show_geometry_bounds: self.show_geometry_bounds,
             show_geometry_points: self.show_geometry_points,
             show_geometry_paths: self.show_geometry_paths,
+            field_display: self.field_display,
+            field_map: self.field_map,
+            field_opacity: self.field_opacity,
             error: self.error.clone(),
             active_drag: self.handle_drag.as_ref().map(|drag| ActiveDrag {
                 handle: drag.handle.id,
@@ -1600,6 +1611,9 @@ impl ViewerPanel {
         let entity = cx.entity().downgrade();
         let background_entity = entity.clone();
         let background_mode = self.background_mode;
+        let field_entity = entity.clone();
+        let (field_display, field_map, field_opacity) =
+            (self.field_display, self.field_map, self.field_opacity);
         div()
             .flex()
             .items_center()
@@ -1741,6 +1755,79 @@ impl ViewerPanel {
                         this.show_geometry_paths = !this.show_geometry_paths;
                         cx.notify();
                     })),
+            )
+            .child(
+                // One menu rather than three controls: the display mode, the
+                // colour map and the opacity are all "how do I want to look at
+                // this field", and only the first of them is ever off.
+                Button::new("viewer-field")
+                    .xsmall()
+                    .ghost()
+                    .selected(field_display != field::FieldDisplay::Off)
+                    .icon(Icon::new(RavelIcon::FieldOverlay))
+                    .tooltip(t!("viewer.field"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for mode in field::FieldDisplay::ALL {
+                            let entity = field_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(mode.label_key())))
+                                    .checked(mode == field_display)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.field_display != mode {
+                                                    this.field_display = mode;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu = menu.separator();
+                        for map in field::FieldColorMap::ALL {
+                            let entity = field_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(map.label_key())))
+                                    .checked(map == field_map)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.field_map != map {
+                                                    this.field_map = map;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu = menu.separator();
+                        for step in field::FIELD_OPACITY_STEPS {
+                            let entity = field_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(format!(
+                                    "{}: {:.0}%",
+                                    t!("viewer.field_opacity"),
+                                    step * 100.0
+                                )))
+                                .checked((step - field_opacity).abs() < f32::EPSILON)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                if this.field_opacity != step {
+                                                    this.field_opacity = step;
+                                                    cx.notify();
+                                                }
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            );
+                        }
+                        menu
+                    }),
             )
     }
 }

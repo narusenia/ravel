@@ -65,6 +65,9 @@ pub struct OverlayId(pub &'static str);
 pub mod priority {
     pub const GRID: i32 = 0;
     pub const SAFE_AREAS: i32 = 10;
+    /// Under both bboxes: the field is a background wash the outlines and
+    /// handles have to stay readable over.
+    pub const FIELD: i32 = 15;
     pub const NODE_SELECTION_BBOX: i32 = 20;
     pub const LAYER_SELECTION_BBOX: i32 = 30;
     /// Above both bboxes and below the path handles: a path point drawn on
@@ -147,6 +150,11 @@ pub struct OverlayContext {
     pub show_geometry_points: bool,
     /// Path primitives of the evaluated geometry.
     pub show_geometry_paths: bool,
+    /// What the field overlay draws, if anything.
+    pub field_display: super::field::FieldDisplay,
+    pub field_map: super::field::FieldColorMap,
+    /// Alpha the field marks are drawn at.
+    pub field_opacity: f32,
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
     /// The gesture the pointer currently holds, or `None` when it is idle.
@@ -794,6 +802,7 @@ impl OverlayRegistry {
             Box::new(GeometryOverlay {
                 scope: BboxScope::Layer,
             }),
+            Box::new(super::field::FieldOverlay),
             Box::new(ShellManipulator),
             Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
@@ -2208,6 +2217,9 @@ mod tests {
             show_geometry_bounds: true,
             show_geometry_points: false,
             show_geometry_paths: false,
+            field_display: crate::panels::viewer::field::FieldDisplay::default(),
+            field_map: crate::panels::viewer::field::FieldColorMap::default(),
+            field_opacity: crate::panels::viewer::field::DEFAULT_FIELD_OPACITY,
             error: None,
             active_drag: None,
             colors: colors(),

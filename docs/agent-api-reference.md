@@ -1359,8 +1359,13 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     .with_param_options(key, options)    // closed option set for a String
     // param → Properties renders an enum dropdown (merge `operation`,
     // math.scalar `op`)
+    .with_param_role(key, ParamRole)     // Position | Size | Direction |
+    // Angle: what a vector param means on the canvas. The Viewer's
+    // ParamManipulator puts a handle on it; Size/Direction/Angle are measured
+    // from the node's first Position param. Channel2/Channel3 only.
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
+registry.param_role(type_key, param_key) -> Option<ParamRole>
 template.create_node(id) / registry.create_node(type_key, id) -> Node
     // NOT a pure function of the template for one type key: a `subnet`
     // template declares no ports, so this builds the inner net.in/net.out pair

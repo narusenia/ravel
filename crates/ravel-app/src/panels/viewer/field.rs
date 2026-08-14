@@ -483,6 +483,7 @@ fn cell_rect(grid: &FieldGrid, index: usize) -> CompRect {
 
 #[cfg(test)]
 mod tests {
+    use super::super::overlay::OverlayResults;
     use super::*;
 
     /// A field whose value is the x coordinate, so a sampled grid has a value
@@ -692,6 +693,16 @@ mod tests {
     /// A one-layer document whose network holds `nodes`, with `selected`
     /// selected inside it.
     fn context(nodes: Vec<ravel_core::graph::Node>, selected: Vec<NodeId>) -> OverlayContext {
+        context_starting_at(nodes, selected, 0)
+    }
+
+    /// `start` places the layer on the composition timeline, so a test can put
+    /// the playhead before the layer begins.
+    fn context_starting_at(
+        nodes: Vec<ravel_core::graph::Node>,
+        selected: Vec<NodeId>,
+        start: i64,
+    ) -> OverlayContext {
         use ravel_core::composition::{Composition, Document, Layer};
         use ravel_core::graph::Graph;
         use ravel_core::id::{CompId, LayerId};
@@ -703,7 +714,7 @@ mod tests {
         }
         let (comp_id, layer_id) = (CompId::next(), LayerId::next());
         let comp = Composition::new(comp_id, "Comp", (100, 100), FrameRate::new(30, 1), 300)
-            .add_layer(Layer::new(layer_id, "Layer", graph).with_time(0, 0, 300));
+            .add_layer(Layer::new(layer_id, "Layer", graph).with_time(start, 0, 300));
         OverlayContext {
             resolution: Some((100, 100)),
             playback: Some(crate::panels::PlaybackPosition {
@@ -783,6 +794,59 @@ mod tests {
 
         assert!(selected_field_node(&ctx).is_none());
         assert!(!FieldOverlay.is_active(&ctx));
+    }
+
+    /// A layer that has not started composites as transparent, so the field
+    /// overlay must not draw over it — even handed a result, which is a state
+    /// only a stale snapshot could produce, because
+    /// `ProjectState::overlay_scoped_targets` refuses to request one.
+    ///
+    /// Defence in depth on purpose: the sampling frame and the interval check
+    /// that decided to request the field have to agree, and the clamped
+    /// `Layer::local_frame` disagrees with it for exactly these frames.
+    #[test]
+    fn a_layer_that_has_not_started_draws_no_field() {
+        let node = node_with_output("field.noise", DataTypeId::FIELD);
+        // Playhead at composition frame 0, layer starting at 5.
+        let mut ctx = context_starting_at(vec![node.clone()], vec![node.id], 5);
+        let network = ctx.selection.as_ref().unwrap().path.clone().unwrap();
+        ctx.results = OverlayResults::new(std::collections::HashMap::from([(
+            (network.segments(), node.id),
+            std::sync::Arc::new(FieldValue::new(RampField))
+                as std::sync::Arc<dyn ravel_core::types::NodeData>,
+        )]));
+
+        let mut painter = OverlayPainter::new(
+            gpui::Bounds {
+                origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+            },
+            (100, 100),
+        );
+        FieldOverlay.paint(&ctx, &mut painter);
+        assert!(
+            painter.finish().is_empty(),
+            "the field was drawn over a layer that is not on screen"
+        );
+
+        // The same snapshot on the first frame the layer *is* on screen draws.
+        let mut shown = ctx.clone();
+        shown.playback = Some(crate::panels::PlaybackPosition {
+            frame: 5,
+            fps: ravel_core::types::FrameRate::new(30, 1),
+        });
+        let mut painter = OverlayPainter::new(
+            gpui::Bounds {
+                origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+            },
+            (100, 100),
+        );
+        FieldOverlay.paint(&shown, &mut painter);
+        assert!(
+            !painter.finish().is_empty(),
+            "this test needs the drawing path it is written against"
+        );
     }
 
     /// The grid is laid out in composition space but sampled in the field's

@@ -74,6 +74,12 @@ pub mod priority {
     /// Above both bboxes and below the path handles: a path point drawn on
     /// top of a shell handle is the more specific thing to grab.
     pub const SHELL_MANIPULATOR: i32 = 35;
+    /// Above the shell: a position key landing on the bbox's move grip — or on
+    /// the anchor marker, which sits exactly on the key whenever the playhead is
+    /// on one — is the more specific thing to grab. The grip and the anchor act
+    /// on the layer as a whole; the key acts on one frame of its trajectory and
+    /// keeps the channel keyed.
+    pub const MOTION_PATH: i32 = 36;
     /// Above the shell: with a node selected, the parameter under the pointer
     /// is the more specific thing to grab — a node's own centre and the bbox's
     /// move grip land on the same point.
@@ -528,6 +534,9 @@ pub enum OverlayHandleId {
     /// A parameter handle of the selected node, indexed into the order
     /// [`ParamManipulator`] resolves its marks in.
     Param(u8),
+    /// A `position` key of the motion path, identified by the layer-local frame
+    /// it sits on — the frame the drag writes.
+    MotionKey(u64),
     #[cfg(test)]
     Test(u8),
 }
@@ -559,6 +568,14 @@ impl OverlayHandleId {
     pub fn param(self) -> Option<u8> {
         match self {
             Self::Param(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// The layer-local frame, when this handle is a motion path key.
+    pub fn motion_key(self) -> Option<u64> {
+        match self {
+            Self::MotionKey(frame) => Some(frame),
             _ => None,
         }
     }
@@ -833,6 +850,7 @@ impl OverlayRegistry {
             }),
             Box::new(super::field::FieldOverlay),
             Box::new(ShellManipulator),
+            Box::new(super::motion_path::MotionPathOverlay),
             Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
             Box::new(EvalErrorOverlay),
@@ -1056,7 +1074,12 @@ pub fn selection_handle_centers(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 
 
 /// A handle mark: an outer square in `color` with a light core, so it reads
 /// against both the composition and the outline it sits on.
-fn paint_handle_mark(painter: &mut OverlayPainter, center: (f32, f32), size_px: f32, color: Hsla) {
+pub(super) fn paint_handle_mark(
+    painter: &mut OverlayPainter,
+    center: (f32, f32),
+    size_px: f32,
+    color: Hsla,
+) {
     painter.screen_square_at(center, size_px, color);
     painter.screen_square_at(center, size_px - 2.0, HANDLE_FILL);
 }

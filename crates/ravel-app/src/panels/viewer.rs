@@ -13,6 +13,7 @@
 
 pub mod field;
 pub mod geometry;
+pub mod motion_path;
 pub mod overlay;
 mod viewport;
 
@@ -5587,6 +5588,155 @@ mod tests {
             project.read_with(cx, |project, _| project.document().clone()),
             snapshot,
             "the release found nothing to commit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Motion path gestures (unit 9)
+    // -----------------------------------------------------------------------
+
+    /// The shell fixture with its `position` keyed from (100, 100) at frame 0 to
+    /// (400, 300) at frame 60, so the motion path has a trajectory and two
+    /// grabbable keys.
+    fn motion_setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        ravel_core::id::CompId,
+        ravel_core::id::LayerId,
+    ) {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        project.update(cx, |project, cx| {
+            let keyed = |from: f32, to: f32| {
+                let mut curve = ravel_core::animation::KeyframeCurve::new();
+                curve.insert(0, from, ravel_core::animation::Interpolation::Linear);
+                curve.insert(60, to, ravel_core::animation::Interpolation::Linear);
+                AnimationChannel::keyframes(curve)
+            };
+            let document =
+                ravel_ui::document::update_layer(project.document(), comp_id, layer, |layer| {
+                    layer.transform.position = [keyed(100.0, 400.0), keyed(100.0, 300.0)];
+                })
+                .unwrap();
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+        (window, project, comp_id, layer)
+    }
+
+    /// The `position` keys of a layer, as `(frame, x, y)`.
+    fn position_keys(
+        project: &Entity<ProjectState>,
+        comp: ravel_core::id::CompId,
+        layer: ravel_core::id::LayerId,
+        cx: &mut TestAppContext,
+    ) -> Vec<(u64, f32, f32)> {
+        use ravel_core::animation::channel::ChannelSource;
+
+        project.read_with(cx, |project, _| {
+            let position = &project
+                .document()
+                .get_composition(comp)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .transform
+                .position;
+            let curve = |channel: &ravel_core::animation::channel::AnimationChannel| match &channel
+                .source
+            {
+                ChannelSource::Keyframes(curve) => curve.clone(),
+                other => panic!("the channel was flattened to {other:?}"),
+            };
+            let (x, y) = (curve(&position[0]), curve(&position[1]));
+            assert_eq!(x.len(), y.len(), "the components hold different key counts");
+            x.keyframes()
+                .iter()
+                .zip(y.keyframes())
+                .map(|(x, y)| {
+                    assert_eq!(x.frame, y.frame, "the components keyed different frames");
+                    (x.frame, x.value, y.value)
+                })
+                .collect()
+        })
+    }
+
+    /// A whole key drag is one undo step, it writes both components at the
+    /// grabbed key's own frame, and it leaves the other key alone.
+    #[gpui::test]
+    fn a_motion_key_drag_is_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = motion_setup(cx);
+        assert_eq!(
+            position_keys(&project, comp_id, layer, cx),
+            vec![(0, 100.0, 100.0), (60, 400.0, 300.0)]
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.overlay_handle_mouse_down(&press_at(panel, (400.0, 300.0)), cx),
+                    "the second key took the press"
+                );
+                assert_eq!(
+                    panel.handle_drag.as_ref().map(|drag| drag.handle.id),
+                    Some(overlay::OverlayHandleId::MotionKey(60)),
+                    "another overlay answered a press meant for the key"
+                );
+                for x in [410.0, 425.0, 430.0] {
+                    let to = window_point(panel, (x, 310.0));
+                    panel.handle_dragged(to, DragModifiers::default(), cx);
+                }
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            position_keys(&project, comp_id, layer, cx),
+            vec![(0, 100.0, 100.0), (60, 430.0, 310.0)],
+            "the gesture committed its last preview onto the grabbed key only"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            position_keys(&project, comp_id, layer, cx),
+            vec![(0, 100.0, 100.0), (60, 400.0, 300.0)],
+            "one undo covers the whole gesture, not just the last preview"
+        );
+    }
+
+    /// The gesture belongs to the selection: a selection that moves elsewhere
+    /// mid-drag reverts the preview rather than leaving it to be committed
+    /// against a layer nobody is looking at.
+    #[gpui::test]
+    fn changing_the_layer_selection_reverts_a_motion_key_drag(cx: &mut TestAppContext) {
+        let (window, project, ..) = motion_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (400.0, 300.0)), cx));
+                let to = window_point(panel, (430.0, 310.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+            })
+            .unwrap();
+        cx.update(|cx| crate::panels::set_layer_selection(Vec::new(), cx));
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.handle_drag.is_none(), "the gesture was released");
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the preview was reverted, not left in the document"
         );
     }
 

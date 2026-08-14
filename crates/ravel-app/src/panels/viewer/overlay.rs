@@ -1258,9 +1258,6 @@ const ROTATE_RING_COLOR: Hsla = Hsla {
     a: 0.4,
 };
 
-/// `numerator / denominator`, or `1.0` when the denominator is too small to
-/// carry a ratio — a grip that already sits on its fixed point cannot say
-/// anything about scale, so it must leave the channel where it is.
 /// An angle in radians folded into `(−π, π]`.
 fn wrap_angle(radians: f32) -> f32 {
     use std::f32::consts::{PI, TAU};
@@ -1268,6 +1265,9 @@ fn wrap_angle(radians: f32) -> f32 {
     if wrapped > PI { wrapped - TAU } else { wrapped }
 }
 
+/// `numerator / denominator`, or `1.0` when the denominator is too small to
+/// carry a ratio — a grip that already sits on its fixed point cannot say
+/// anything about scale, so it must leave the channel where it is.
 fn scale_ratio(numerator: f32, denominator: f32) -> f32 {
     if denominator.abs() < 1e-4 {
         1.0

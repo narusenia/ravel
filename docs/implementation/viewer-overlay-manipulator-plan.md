@@ -365,12 +365,21 @@ ViewerPanel::render()
 
 ### 単位 7: レイヤー殻のマニピュレータとドラッグ HUD
 
-bbox の 8 ハンドルを機能させ、殻 transform を Viewer で掴めるようにする。
+選択 bbox の 8 ハンドルに実際の動作を与え、殻 transform を Viewer で掴める
+ようにする。
+
+**実装後の注記**: 動作するハンドルは `ShellManipulator` が**自前で出す印**で、
+位置は `selection_handle_centers` を共有するので見た目は一致する。
+`SelectionBboxOverlay`（ノード選択の bbox）が描く 8 個は**飾りのまま残る** —
+ノードの箱から殻を拡大縮小するのは意味がずれ、ノードのサイズを書くのは
+単位 5 の `ParamRole` の担当だから。下記「この単位が見送った範囲」も参照。
 
 - `ShellManipulator` オーバーレイ: `LayerTransform` の
-  `scale`（角・辺のハンドル）、`rotation`（bbox 外側のドラッグ）、
-  `anchor_point`（アンカーマーカーのドラッグ）、`position`（bbox 内側の
-  ドラッグ。既存の移動を機構へ載せ替え）を対象にする
+  `scale`（角・辺のハンドル）、`rotation`（角グリップの外側のリング）、
+  `anchor_point`（アンカーマーカーのドラッグ）、`position`（**実装は bbox
+  中央の移動グリップ**。当初は「bbox 内側のドラッグ。既存の移動を機構へ
+  載せ替え」と書いていたが、内側全面をハンドルにするとレイヤー内ノードの
+  クリック選択を潰すため見送った）を対象にする
 - Shift で縦横比固定、Alt でアンカー基準など修飾キーの規約は Timeline の
   トリム / Viewer のシェイプ描画と揃える
 - ドラッグ中はスクリーン空間の HUD にデルタを出す（位置なら座標、スケールなら

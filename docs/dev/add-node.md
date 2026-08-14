@@ -55,6 +55,13 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   無制限スクラブになる
 - `param_options` を付けた文字列パラメータは Properties で dropdown になる
   （自由入力にしない）
+- **キャンバス上の意味を持つベクタには `with_param_role` を宣言する。**
+  `ParamRole::Position` は点、`Size` は Position からのオフセット（半径など）。
+  Viewer のマニピュレータは宣言だけを見てハンドルを出すので、宣言しない限り
+  そのノードは掴めず、宣言すれば Viewer 側の変更は不要
+  （`shape.rect` の `center` が例）。役割は `Channel2` / `Channel3` にだけ
+  付ける — スカラーにはハンドルを置く点が無い。**役割を増やすときは
+  ハンドルの実装と同じ単位で入れる**（宣言だけ足しても何も掴めない）
 - 可変長入力は `variadic_input_group`
 - **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
   Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /

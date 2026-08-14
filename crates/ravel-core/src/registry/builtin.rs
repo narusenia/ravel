@@ -8,7 +8,7 @@ use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
-use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
+use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate, ParamRole};
 use crate::scene::camera;
 
 /// Direct separable blur loop budget. Larger visual radii need a future
@@ -1495,6 +1495,9 @@ fn shape_rect() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("width", 0.0..=1e5, 0.0..=1000.0)
         .with_param_range("height", 0.0..=1e5, 0.0..=1000.0)
+        // `width` / `height` are separate scalars, not an offset from the
+        // centre, so they carry no role: a role is a point on the canvas.
+        .with_param_role("center", ParamRole::Position)
 }
 
 fn shape_ellipse() -> NodeTemplate {
@@ -1512,6 +1515,10 @@ fn shape_ellipse() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("segments", 3.0..=512.0, 3.0..=128.0)
+        .with_param_role("center", ParamRole::Position)
+        // The radius *is* the offset from the centre to the rim, which is
+        // what a `Size` handle writes.
+        .with_param_role("radius", ParamRole::Size)
 }
 
 fn shape_polygon() -> NodeTemplate {
@@ -1532,6 +1539,7 @@ fn shape_polygon() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("sides", 3.0..=128.0, 3.0..=32.0)
+        .with_param_role("center", ParamRole::Position)
 }
 
 fn shape_star() -> NodeTemplate {
@@ -1557,6 +1565,7 @@ fn shape_star() -> NodeTemplate {
         .with_param_range("outer_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("points", 3.0..=128.0, 3.0..=32.0)
+        .with_param_role("center", ParamRole::Position)
 }
 
 fn scatter_grid() -> NodeTemplate {
@@ -1601,6 +1610,7 @@ fn scatter_grid() -> NodeTemplate {
         .with_param_range("spacing", -1e5..=1e5, 0.0..=200.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_role("center", ParamRole::Position)
 }
 
 fn scatter_circular() -> NodeTemplate {
@@ -1645,6 +1655,7 @@ fn scatter_circular() -> NodeTemplate {
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_role("center", ParamRole::Position)
 }
 
 fn scatter_path_array() -> NodeTemplate {
@@ -1726,6 +1737,7 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_role("center", ParamRole::Position)
 }
 
 /// `shape.line`: one open path from `start` to `end`.
@@ -1745,6 +1757,11 @@ fn shape_line() -> NodeTemplate {
         .with_param_range("start", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("end", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("segments", 1.0..=1000.0, 1.0..=64.0)
+        // Both ends are points on the canvas, so both are `Position`. The
+        // first one declared is also what a `Size` / `Direction` on the same
+        // node would measure from; the line declares neither.
+        .with_param_role("start", ParamRole::Position)
+        .with_param_role("end", ParamRole::Position)
 }
 
 /// `shape.grid`: a lattice of open paths — `rows` horizontal lines and
@@ -1770,6 +1787,10 @@ fn shape_grid() -> NodeTemplate {
         .with_param_range("size", 0.0..=1e5, 0.0..=1000.0)
         .with_param_range("rows", 2.0..=1000.0, 2.0..=50.0)
         .with_param_range("columns", 2.0..=1000.0, 2.0..=50.0)
+        // `size` is the lattice's full extent, not the offset from its
+        // centre, so it is not a `Size` handle: dragging one would move the
+        // corner at half the pointer's speed.
+        .with_param_role("center", ParamRole::Position)
 }
 
 fn shape_custom_path() -> NodeTemplate {
@@ -2351,6 +2372,60 @@ mod tests {
                 .map(|p| &p.value),
             Some(ParameterValue::Int(5))
         ));
+    }
+
+    /// The shape sources declare what their vector parameters mean, so the
+    /// Viewer's manipulator puts a handle on them without knowing any of these
+    /// type keys. `shape.line` and `shape.grid` are named explicitly because
+    /// they were added after the manipulator's other subjects and a new shape
+    /// that forgets its roles is simply not grabbable.
+    #[test]
+    fn the_shape_sources_declare_what_their_vectors_mean() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+
+        for (type_key, key, role) in [
+            ("shape.rect", "center", ParamRole::Position),
+            ("shape.ellipse", "center", ParamRole::Position),
+            ("shape.ellipse", "radius", ParamRole::Size),
+            ("shape.polygon", "center", ParamRole::Position),
+            ("shape.star", "center", ParamRole::Position),
+            ("shape.line", "start", ParamRole::Position),
+            ("shape.line", "end", ParamRole::Position),
+            ("shape.grid", "center", ParamRole::Position),
+            ("scatter.grid", "center", ParamRole::Position),
+            ("scatter.circular", "center", ParamRole::Position),
+            ("scatter.scatter", "center", ParamRole::Position),
+        ] {
+            assert_eq!(
+                reg.param_role(type_key, key),
+                Some(role),
+                "{type_key}.{key} declares no role"
+            );
+        }
+
+        // A role names a point on the canvas: a scalar has no place to put a
+        // handle, so declaring one would promise a grip that cannot exist.
+        for tmpl in reg.all_templates() {
+            for key in tmpl.param_roles.keys() {
+                let value = &tmpl
+                    .default_params
+                    .iter()
+                    .find(|param| &param.key == key)
+                    .unwrap_or_else(|| {
+                        panic!("{}.{key} has a role but no parameter", tmpl.type_key)
+                    })
+                    .value;
+                assert!(
+                    matches!(
+                        value,
+                        ParameterValue::Channel2(_) | ParameterValue::Channel3(_)
+                    ),
+                    "{}.{key} is {value:?}, which carries no canvas point",
+                    tmpl.type_key
+                );
+            }
+        }
     }
 
     #[test]

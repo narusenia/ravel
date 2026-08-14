@@ -62,6 +62,35 @@ impl ParamRange {
     }
 }
 
+/// What a parameter *means* geometrically, so direct manipulation can put a
+/// handle on it instead of guessing from its name.
+///
+/// The declaration lives on the template because the meaning belongs to the
+/// node type, not to the Viewer: a manipulator driven by names would have to
+/// carry a table of every built-in's spelling, and adding a node would mean
+/// editing the Viewer. Roles apply to vector parameters (`Channel2` /
+/// `Channel3`); the canvas is two-dimensional, so a `Channel3` is driven by
+/// its X and Y and keeps its Z.
+///
+/// [`Size`] is measured from the node's [`Position`] parameter — the first one
+/// it declares — or from the local origin when it declares none.
+///
+/// Only the roles the manipulator actually draws a handle for live here. A
+/// direction (which needs a display length) and an angle (which needs a pivot
+/// convention) arrive with the unit that draws them: a declared role that
+/// silently does nothing is the trap `style-attributes-plan.md` declined for
+/// `stroke_align`.
+///
+/// [`Position`]: ParamRole::Position
+/// [`Size`]: ParamRole::Size
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamRole {
+    /// A point in the node's local space (`shape.rect`'s `center`).
+    Position,
+    /// An offset from the position: a radius, a half extent.
+    Size,
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeTemplate {
     pub type_key: String,
@@ -77,6 +106,8 @@ pub struct NodeTemplate {
     /// Closed option sets for string parameters (rendered as enum
     /// dropdowns instead of free-text fields).
     pub param_options: HashMap<String, Vec<String>>,
+    /// Geometric meanings the Viewer's manipulator reads.
+    pub param_roles: HashMap<String, ParamRole>,
 }
 
 impl NodeTemplate {
@@ -95,6 +126,7 @@ impl NodeTemplate {
             default_params: Vec::new(),
             param_ranges: HashMap::new(),
             param_options: HashMap::new(),
+            param_roles: HashMap::new(),
         }
     }
 
@@ -149,6 +181,16 @@ impl NodeTemplate {
 
     pub fn param_option_values(&self, key: &str) -> Option<&[String]> {
         self.param_options.get(key).map(|v| v.as_slice())
+    }
+
+    /// Declares what a vector parameter means on the canvas.
+    pub fn with_param_role(mut self, key: impl Into<String>, role: ParamRole) -> Self {
+        self.param_roles.insert(key.into(), role);
+        self
+    }
+
+    pub fn param_role(&self, key: &str) -> Option<ParamRole> {
+        self.param_roles.get(key).copied()
     }
 
     /// Instantiate this template as a node with `id`.
@@ -221,6 +263,11 @@ impl NodeRegistry {
     /// Closed option set for a string parameter, if declared.
     pub fn param_options(&self, type_key: &str, param_key: &str) -> Option<&[String]> {
         self.templates.get(type_key)?.param_option_values(param_key)
+    }
+
+    /// Geometric meaning of `param_key` on `type_key`, if declared.
+    pub fn param_role(&self, type_key: &str, param_key: &str) -> Option<ParamRole> {
+        self.templates.get(type_key)?.param_role(param_key)
     }
 
     pub fn categories(&self) -> Vec<NodeCategory> {

@@ -209,7 +209,9 @@ fn fresh_document(cx: &App) -> Document {
 /// evaluation service.
 pub struct ProjectState {
     store: DocumentStore,
-    registry: NodeRegistry,
+    /// Shared so an overlay snapshot can carry the parameter declarations
+    /// without copying every template on each pointer move.
+    registry: Arc<NodeRegistry>,
     /// Background evaluation worker; owns the Evaluator, GpuContext, and
     /// ShaderManager so the UI thread never blocks on evaluation. `None`
     /// only in tests (a live worker thread breaks the deterministic gpui
@@ -545,6 +547,7 @@ impl ProjectState {
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
+        let registry = Arc::new(registry);
 
         let store = DocumentStore::new(fresh_document(cx));
         // The startup document opens on its root composition; from here on
@@ -650,6 +653,11 @@ impl ProjectState {
 
     pub fn registry(&self) -> &NodeRegistry {
         &self.registry
+    }
+
+    /// The same registry as a shared handle, for the overlay snapshot.
+    pub fn shared_registry(&self) -> Arc<NodeRegistry> {
+        self.registry.clone()
     }
 
     /// The composition the UI is editing, resolved in the live document.
@@ -1561,6 +1569,7 @@ impl ProjectState {
                 .try_global::<OverlayResults>()
                 .cloned()
                 .unwrap_or_default(),
+            registry: Some(self.registry.clone()),
             ..OverlayContext::default()
         }
     }

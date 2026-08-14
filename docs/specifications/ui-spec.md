@@ -1,6 +1,6 @@
 # Ravel — UI 仕様書
 
-> 最終更新: 2026-08-08
+> 最終更新: 2026-08-15
 
 この文書は**索引**。各ビューの仕様は `docs/specifications/ui/` に分かれている。
 
@@ -10,7 +10,7 @@
 | Outliner | [ui/outliner.md](ui/outliner.md) |
 | Node Graph Editor | [ui/node-editor.md](ui/node-editor.md) |
 | Timeline（ドープシート / カーブエディタ） | [ui/timeline.md](ui/timeline.md) |
-| Viewer | [ui/viewer.md](ui/viewer.md) |
+| Viewer（オーバーレイ機構・マニピュレータ） | [ui/viewer.md](ui/viewer.md) |
 | Properties Inspector | [ui/properties.md](ui/properties.md) |
 | Media Bin | [ui/media-bin.md](ui/media-bin.md) |
 | 書き出しダイアログ / Render Queue | [ui/render-queue.md](ui/render-queue.md) |

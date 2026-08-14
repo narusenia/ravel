@@ -26,7 +26,7 @@ use ravel_core::composition::transform::Affine;
 use ravel_core::eval::EvalContext;
 use ravel_core::geometry::{AttributeArray, FieldSample, FieldValue};
 use ravel_core::id::{DataTypeId, NodeId, OutputPortIndex};
-use ravel_core::types::Vec2;
+use ravel_core::types::{Vec2, magnitude};
 use ravel_ui::document::NetworkPath;
 
 use super::CompRect;
@@ -163,6 +163,17 @@ impl FieldGrid {
         self.centers.len()
     }
 
+    /// How many cells a column of `values` can actually draw.
+    ///
+    /// A [`Field`](ravel_core::geometry::Field) is contracted to return one
+    /// value per sampled position, and this is the one place that does not take
+    /// that on trust: every draw loop takes its length from here, so a shorter
+    /// column cannot index past the cell centres and a longer one cannot draw
+    /// cells that have none.
+    fn drawable(&self, values: usize) -> usize {
+        self.centers.len().min(values)
+    }
+
     /// Scalar readings: the magnitude of a vector, the value of a scalar, the
     /// luminance-free lightness of a colour. `None` for a field that samples
     /// to something with no magnitude (a string, a bool).
@@ -170,22 +181,27 @@ impl FieldGrid {
         match &self.values {
             AttributeArray::F32(values) => Some(values.clone()),
             AttributeArray::I32(values) => Some(values.iter().map(|v| *v as f32).collect()),
+            // `types::magnitude` rather than a local `sqrt` of squares: it
+            // scales by the largest component, so a field whose values sit near
+            // `f32::MAX` reports a length instead of overflowing to infinity,
+            // and it keeps the IEEE answers for zero, infinity and NaN — which
+            // `normalize` is then the one place to turn into a drawable value.
             AttributeArray::Vec2(values) => Some(
                 values
                     .iter()
-                    .map(|v| (v.0 * v.0 + v.1 * v.1).sqrt())
+                    .map(|v| magnitude(2, [v.0, v.1, 0.0, 0.0]))
                     .collect(),
             ),
             AttributeArray::Vec3(values) => Some(
                 values
                     .iter()
-                    .map(|v| (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt())
+                    .map(|v| magnitude(3, [v.0, v.1, v.2, 0.0]))
                     .collect(),
             ),
             AttributeArray::Vec4(values) => Some(
                 values
                     .iter()
-                    .map(|v| (v.0 * v.0 + v.1 * v.1 + v.2 * v.2 + v.3 * v.3).sqrt())
+                    .map(|v| magnitude(4, [v.0, v.1, v.2, v.3]))
                     .collect(),
             ),
             AttributeArray::Color(values) => {
@@ -213,6 +229,18 @@ impl FieldGrid {
 /// in `0..=1`, an expression anywhere at all, and a fixed range would show
 /// most of them as flat. A constant field normalises to the middle of the map
 /// instead of dividing by zero.
+///
+/// **Every output is finite and inside `0..=1`.** This is the display boundary,
+/// and it is the place a non-finite reading becomes a drawable one — the same
+/// division of labour the expression language draws, where `res.aspect` of a
+/// zero-sized target yields `inf` and the channel boundary substitutes. A
+/// colour built from `NaN` is not a wrong colour, it is an undefined one, so
+/// the substitution belongs here rather than inside the colour map:
+///
+/// - `NaN` has no place on a ramp and reads as the bottom of it.
+/// - `+inf` / `-inf` fall on the ends through the clamp.
+/// - values that are *all* non-finite leave no range to normalise over and read
+///   as the middle, the same answer a constant field gets.
 pub fn normalize(values: &[f32]) -> Vec<f32> {
     let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
     for value in values.iter().filter(|v| v.is_finite()) {
@@ -225,7 +253,12 @@ pub fn normalize(values: &[f32]) -> Vec<f32> {
     }
     values
         .iter()
-        .map(|value| ((value - min) / span).clamp(0.0, 1.0))
+        .map(|value| {
+            if value.is_nan() {
+                return 0.0;
+            }
+            ((value - min) / span).clamp(0.0, 1.0)
+        })
         .collect()
 }
 
@@ -431,8 +464,10 @@ pub fn paint_grid(
             let Some(scalars) = grid.scalars() else {
                 return;
             };
-            for (index, value) in normalize(&scalars).into_iter().enumerate() {
-                painter.fill_comp_rect(cell_rect(grid, index), map.color(value, opacity));
+            let normalized = normalize(&scalars);
+            let count = grid.drawable(normalized.len());
+            for (index, value) in normalized.iter().enumerate().take(count) {
+                painter.fill_comp_rect(cell_rect(grid, index), map.color(*value, opacity));
             }
         }
         FieldDisplay::Contours => {
@@ -443,11 +478,14 @@ pub fn paint_grid(
             // Eight bands: enough to read the shape, few enough that the lines
             // stay apart at overlay sizes.
             let band = |value: f32| (value * 8.0).min(7.0) as u8;
-            for index in 0..grid.sample_count() {
+            let count = grid.drawable(normalized.len());
+            for index in 0..count {
                 let (col, row) = (index % grid.cols, index / grid.cols);
                 let here = band(normalized[index]);
-                let right = (col + 1 < grid.cols).then(|| band(normalized[index + 1]));
-                let below = (row + 1 < grid.rows).then(|| band(normalized[index + grid.cols]));
+                let right =
+                    (col + 1 < grid.cols && index + 1 < count).then(|| band(normalized[index + 1]));
+                let below = (row + 1 < grid.rows && index + grid.cols < count)
+                    .then(|| band(normalized[index + grid.cols]));
                 if right.is_some_and(|other| other != here)
                     || below.is_some_and(|other| other != here)
                 {
@@ -464,17 +502,26 @@ pub fn paint_grid(
                 // than an arrow pointing at an arbitrary axis.
                 return;
             };
-            let longest = vectors
+            let count = grid.drawable(vectors.len());
+            // Non-finite readings are skipped rather than scaled: an arrow at a
+            // `NaN` coordinate is not a short arrow, it is an unpaintable one,
+            // and letting one reach `longest` would shrink every other arrow.
+            let finite = |v: &(f32, f32)| v.0.is_finite() && v.1.is_finite();
+            let longest = vectors[..count]
                 .iter()
-                .map(|v| (v.0 * v.0 + v.1 * v.1).sqrt())
+                .filter(|v| finite(v))
+                .map(|v| magnitude(2, [v.0, v.1, 0.0, 0.0]))
                 .fold(0.0f32, f32::max);
-            if longest <= f32::EPSILON {
+            if !longest.is_finite() || longest <= f32::EPSILON {
                 return;
             }
             let reach = grid.cell.0.min(grid.cell.1) * ARROW_CELL_FRACTION;
             let scale = reach / longest;
             let color = map.color(1.0, opacity);
-            for (index, vector) in vectors.iter().enumerate() {
+            for (index, vector) in vectors.iter().enumerate().take(count) {
+                if !finite(vector) {
+                    continue;
+                }
                 let from = grid.centers[index];
                 let to = (from.0 + vector.0 * scale, from.1 + vector.1 * scale);
                 painter.stroke_comp_polyline(&[from, to], false, 1.0, color);
@@ -612,6 +659,134 @@ mod tests {
         assert!((quads[0].1.h - 0.66).abs() < 1e-6);
         assert!((quads[3].1.h - 0.0).abs() < 1e-6);
         assert!((quads[0].1.a - 0.5).abs() < 1e-6, "opacity was ignored");
+    }
+
+    /// A field that samples to `NaN` or `inf` still produces a drawable
+    /// picture: a colour built from `NaN` is undefined, not merely wrong, so
+    /// the display boundary maps every non-finite reading onto the ramp.
+    #[test]
+    fn a_non_finite_sample_still_maps_onto_the_colour_ramp() {
+        let values = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, 10.0];
+        let normalized = normalize(&values);
+
+        assert!(
+            normalized
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "a non-finite reading escaped the display boundary: {normalized:?}"
+        );
+        assert_eq!(normalized[0], 0.0, "NaN reads as the bottom of the ramp");
+        assert_eq!(normalized[1], 1.0, "+inf reads as the top");
+        assert_eq!(normalized[2], 0.0, "-inf reads as the bottom");
+        // The finite readings keep their own range: 0 and 10 are the ends.
+        assert_eq!(normalized[3], 0.0);
+        assert_eq!(normalized[4], 1.0);
+
+        // Every colour the map builds from them is a defined colour.
+        for value in normalized {
+            let color = FieldColorMap::Heat.color(value, 1.0);
+            assert!(
+                color.h.is_finite() && color.s.is_finite() && color.l.is_finite(),
+                "undefined colour from {value}"
+            );
+        }
+
+        // Nothing to range over at all: the middle of the map, not a division
+        // by zero.
+        assert_eq!(normalize(&[f32::NAN, f32::INFINITY]), vec![0.5, 0.5]);
+    }
+
+    /// `types::magnitude` scales by the largest component, so a large vector
+    /// field reports a length where squaring the components first would
+    /// overflow to infinity and flatten the whole heatmap onto one value.
+    ///
+    /// `1e30` is chosen for exactly that gap: `(1e30)^2` is past `f32::MAX`
+    /// while `1e30 * sqrt(2)` is well inside it. A field whose *true* length
+    /// exceeds `f32::MAX` still reports `inf`, which is the correct IEEE
+    /// answer and is what `normalize` then turns into a drawable value.
+    #[test]
+    fn a_large_vector_field_reports_a_length_instead_of_infinity() {
+        let grid = FieldGrid {
+            cols: 2,
+            rows: 1,
+            cell: (1.0, 1.0),
+            centers: vec![(0.0, 0.0), (1.0, 0.0)],
+            values: AttributeArray::Vec2(vec![Vec2(1e30, 1e30), Vec2(5e29, 0.0)]),
+        };
+        assert!(
+            (1e30f32 * 1e30f32).is_infinite(),
+            "this test needs the naive overflow it is written against"
+        );
+        let scalars = grid.scalars().expect("a vector field has a magnitude");
+        assert!(
+            scalars.iter().all(|v| v.is_finite()),
+            "the magnitude overflowed: {scalars:?}"
+        );
+        assert!(scalars[0] > scalars[1], "{scalars:?}");
+    }
+
+    /// Arrows skip a non-finite reading rather than painting at a `NaN`
+    /// coordinate, and one such reading does not shrink the rest.
+    #[test]
+    fn arrows_skip_a_non_finite_vector() {
+        let grid = FieldGrid {
+            cols: 2,
+            rows: 1,
+            cell: (10.0, 10.0),
+            centers: vec![(0.0, 0.0), (10.0, 0.0)],
+            values: AttributeArray::Vec2(vec![Vec2(f32::NAN, 0.0), Vec2(1.0, 0.0)]),
+        };
+        let mut painter = OverlayPainter::new(
+            gpui::Bounds {
+                origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+            },
+            (100, 100),
+        );
+        paint_grid(
+            &grid,
+            FieldDisplay::Arrows,
+            FieldColorMap::Heat,
+            1.0,
+            &mut painter,
+        );
+        let primitives = painter.finish();
+        assert_eq!(primitives.len(), 1, "the NaN vector was drawn");
+        let super::super::overlay::OverlayPrimitive::Stroke { points, .. } = &primitives[0] else {
+            panic!("an arrow is a stroke");
+        };
+        assert!(
+            points
+                .iter()
+                .all(|p| f32::from(p.x).is_finite() && f32::from(p.y).is_finite()),
+            "a stroke landed at a non-finite point: {points:?}"
+        );
+    }
+
+    /// A field that breaks its contract and returns a column of the wrong
+    /// length must not index past the cell centres.
+    #[test]
+    fn a_short_value_column_draws_only_the_cells_it_covers() {
+        let grid = FieldGrid {
+            cols: 4,
+            rows: 1,
+            cell: (1.0, 1.0),
+            centers: vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+            values: AttributeArray::F32(vec![0.0, 1.0]),
+        };
+        assert_eq!(grid.drawable(2), 2);
+        for display in [FieldDisplay::Heatmap, FieldDisplay::Contours] {
+            let mut painter = OverlayPainter::new(
+                gpui::Bounds {
+                    origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                    size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+                },
+                (100, 100),
+            );
+            // The point is that this does not panic.
+            paint_grid(&grid, display, FieldColorMap::Heat, 1.0, &mut painter);
+            assert!(painter.finish().len() <= 2, "{display:?}");
+        }
     }
 
     /// Completion criterion: the sample count is bounded however far the

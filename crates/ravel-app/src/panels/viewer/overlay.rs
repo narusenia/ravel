@@ -136,7 +136,22 @@ impl Global for OverlayResults {}
 #[derive(Clone, Default)]
 pub struct OverlayContext {
     /// Resolution of the composition currently shown; `None` with no output.
+    ///
+    /// The composition's own, which is the coordinate basis every overlay draws
+    /// in — not the resolution the frame under them was evaluated at. That one
+    /// is [`eval_resolution`](Self::eval_resolution).
     pub resolution: Option<(u32, u32)>,
+    /// The resolution the viewer's evaluation request runs at: the composition
+    /// resolution scaled by the preview factor (`ViewerResolution`, `VRES-1`).
+    ///
+    /// Only sampling reads it, and only because a field can: an
+    /// `ExpressionField` sees `res.width` / `res.height` / `res.aspect`, so a
+    /// grid sampled at the composition resolution would draw numbers the
+    /// composition never rendered — at the default `Half` factor, twice the
+    /// width the frame underneath was evaluated with. `None` falls back to
+    /// [`resolution`](Self::resolution), which is what a context assembled
+    /// without a project has.
+    pub eval_resolution: Option<(u32, u32)>,
     pub playback: Option<PlaybackPosition>,
     pub document: Option<Document>,
     pub selection: Option<CanvasSelection>,
@@ -2212,6 +2227,7 @@ mod tests {
             selection: None,
             layer_selection: LayerSelection::default(),
             tool: Some(ToolKind::Select),
+            eval_resolution: Some((1920, 1080)),
             show_grid: false,
             show_safe_areas: false,
             show_geometry_bounds: true,

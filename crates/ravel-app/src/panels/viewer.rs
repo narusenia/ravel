@@ -1161,8 +1161,18 @@ impl ViewerPanel {
     /// Snapshot the world the overlays are allowed to see. Read-only, and the
     /// same snapshot backs painting, labels and hit-testing.
     fn overlay_context(&self, cx: &App) -> OverlayContext {
+        let project = self.project(cx);
         OverlayContext {
             resolution: self.composition_resolution,
+            // The very factor `ProjectState::viewer_eval_context` puts in the
+            // request, so a sampled field reads the `res.*` the frame under it
+            // was evaluated with.
+            eval_resolution: self.composition_resolution.map(|resolution| {
+                project
+                    .as_ref()
+                    .map(|project| project.read(cx).viewer_resolution().apply(resolution))
+                    .unwrap_or(resolution)
+            }),
             playback: cx.try_global::<super::PlaybackPosition>().copied(),
             document: self
                 .project(cx)

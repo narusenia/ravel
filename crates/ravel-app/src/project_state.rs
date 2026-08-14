@@ -1563,6 +1563,7 @@ impl ProjectState {
     ) -> OverlayContext {
         OverlayContext {
             resolution: Some(comp.resolution),
+            eval_resolution: Some(self.viewer_resolution.apply(comp.resolution)),
             playback: cx
                 .try_global::<crate::panels::PlaybackPosition>()
                 .copied()

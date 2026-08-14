@@ -401,7 +401,19 @@ fn field_eval_context(
         .get_composition(network.comp)?
         .get_layer(network.layer)?
         .displayed_local_frame(playback.frame)?;
-    Some(EvalContext::new(frame, playback.fps, resolution).with_comp_resolution(resolution))
+    // Two different resolutions on purpose, matching the request the field was
+    // evaluated by: `resolution` is what the evaluation targets (the preview
+    // factor applies, `VRES-1`) and drives the `res.*` an expression field
+    // reads; `comp_resolution` is the geometry coordinate basis the grid is
+    // laid out in and never scales.
+    Some(
+        EvalContext::new(
+            frame,
+            playback.fps,
+            ctx.eval_resolution.unwrap_or(resolution),
+        )
+        .with_comp_resolution(resolution),
+    )
 }
 
 /// Draw a sampled grid. Split from `paint` so the drawing is testable without
@@ -492,6 +504,23 @@ mod tests {
 
     impl ravel_core::geometry::Field for RampField {
         fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+            AttributeArray::F32(input.positions.iter().map(|p| p.0).collect())
+        }
+
+        fn byte_size(&self) -> u64 {
+            0
+        }
+    }
+
+    static WIDTH_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// Records the `resolution` width its sampling context carried, the way an
+    /// `ExpressionField` reading `res.width` would see it.
+    struct WidthField;
+
+    impl ravel_core::geometry::Field for WidthField {
+        fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+            WIDTH_SEEN.store(input.ctx.resolution.0, std::sync::atomic::Ordering::SeqCst);
             AttributeArray::F32(input.positions.iter().map(|p| p.0).collect())
         }
 
@@ -794,6 +823,41 @@ mod tests {
 
         assert!(selected_field_node(&ctx).is_none());
         assert!(!FieldOverlay.is_active(&ctx));
+    }
+
+    /// The grid is sampled at the resolution the *request* evaluates at, not
+    /// the composition's, because an `ExpressionField` reads `res.width` and
+    /// friends: at the default `Half` preview factor the two differ by 2x, and
+    /// sampling at the composition resolution would draw numbers the frame
+    /// underneath never rendered.
+    #[test]
+    fn the_grid_is_sampled_at_the_resolution_the_request_evaluates_at() {
+        let node = node_with_output("field.expression", DataTypeId::FIELD);
+        let mut ctx = context(vec![node.clone()], vec![node.id]);
+        let network = ctx.selection.as_ref().unwrap().path.clone().unwrap();
+        // A half-resolution preview of a 100x100 composition.
+        ctx.eval_resolution = Some((50, 50));
+        ctx.results = OverlayResults::new(std::collections::HashMap::from([(
+            (network.segments(), node.id),
+            std::sync::Arc::new(FieldValue::new(WidthField))
+                as std::sync::Arc<dyn ravel_core::types::NodeData>,
+        )]));
+
+        let mut painter = OverlayPainter::new(
+            gpui::Bounds {
+                origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+            },
+            (100, 100),
+        );
+        FieldOverlay.paint(&ctx, &mut painter);
+        assert_eq!(
+            WIDTH_SEEN.load(std::sync::atomic::Ordering::SeqCst),
+            50,
+            "the field was sampled at the composition resolution, not the \
+             resolution the request evaluates at"
+        );
+        assert!(!painter.finish().is_empty(), "the grid was drawn");
     }
 
     /// A layer that has not started composites as transparent, so the field

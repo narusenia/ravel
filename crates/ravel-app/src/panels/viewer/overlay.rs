@@ -35,7 +35,7 @@ use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
-use ravel_core::registry::{NodeRegistry, ParamRole};
+use ravel_core::registry::{NodeRegistry, ParamRange, ParamRole};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{NodeData, PortRecord};
 use ravel_ui::ToolKind;
@@ -1768,6 +1768,10 @@ struct ParamMark {
     local: (f32, f32),
     /// The same point on the canvas: `world · local`.
     world: (f32, f32),
+    /// The parameter's declared clamp boundary, applied to every component a
+    /// drag writes. Without it a gesture can push a value where no other
+    /// editor can: a radius past zero and out the other side.
+    range: Option<ParamRange>,
 }
 
 /// The selected node's role-carrying parameters, resolved once and read by
@@ -1810,6 +1814,12 @@ impl ParamState {
         let local_frame = ravel_ui::keyframes::layer_local_frame(layer, playback.frame);
         let world = world_matrix(comp, layer, &eval);
 
+        // A parameter fed by a connected port is not the node's to write: the
+        // stored value is overridden at evaluation, so a handle on it would
+        // move nothing and still pile up undo steps. The Properties panel
+        // stops the same edits from the same list.
+        let driven = crate::panels::node_editor::driven_params(graph, &node, registry);
+
         // Declaration order, so the marks keep a stable index across a
         // gesture: the handle id carries nothing else.
         let declared: Vec<(String, ParamRole, (f32, f32))> = node
@@ -1817,6 +1827,9 @@ impl ParamState {
             .iter()
             .filter_map(|parameter| {
                 let role = template.param_role(&parameter.key)?;
+                if driven.iter().any(|driven| driven.key == parameter.key) {
+                    return None;
+                }
                 let value = super::sample_vec2_param(&node, &parameter.key, local_frame, &eval)?;
                 Some((parameter.key.clone(), role, value))
             })
@@ -1827,22 +1840,18 @@ impl ParamState {
             .map_or((0.0, 0.0), |(_, _, value)| *value);
         let marks: Vec<ParamMark> = declared
             .iter()
-            .filter_map(|(key, role, value)| {
+            .map(|(key, role, value)| {
                 let local = match role {
                     ParamRole::Position => *value,
                     ParamRole::Size => (anchor.0 + value.0, anchor.1 + value.1),
-                    // A direction carries no length and an angle no distance,
-                    // so neither has a point to sit at until the node that
-                    // declares one says how far out to draw it. No built-in
-                    // declares either yet, so nothing is silently ignored.
-                    ParamRole::Direction | ParamRole::Angle => return None,
                 };
-                Some(ParamMark {
+                ParamMark {
                     key: key.clone(),
                     role: *role,
                     local,
                     world: world.apply(local.0, local.1),
-                })
+                    range: template.param_range(key).cloned(),
+                }
             })
             .collect();
         if marks.is_empty() {
@@ -1862,10 +1871,14 @@ impl ParamState {
     /// `target`, in the node's own space.
     fn value_at(&self, mark: &ParamMark, target: (f32, f32)) -> Option<(f32, f32)> {
         let local = self.world.inverse()?.apply(target.0, target.1);
-        Some(match mark.role {
+        let (x, y) = match mark.role {
             ParamRole::Position => local,
             ParamRole::Size => (local.0 - self.anchor.0, local.1 - self.anchor.1),
-            ParamRole::Direction | ParamRole::Angle => return None,
+        };
+        // The declared hard boundary, the one every other editor clamps to.
+        Some(match &mark.range {
+            Some(range) => (range.clamp(x), range.clamp(y)),
+            None => (x, y),
         })
     }
 }
@@ -4008,6 +4021,313 @@ mod tests {
         unregistered.registry = None;
         assert!(!ParamManipulator.is_active(&unregistered));
         let _ = node;
+    }
+
+    /// A parameter fed by a connected port belongs to its source, not to the
+    /// pointer: writing the stored value would change nothing on screen and
+    /// still cost an undo step. The sibling parameter keeps its handle.
+    #[test]
+    fn a_parameter_driven_by_a_connection_gets_no_handle() {
+        use ravel_core::id::{DataTypeId, EdgeId, OutputPortIndex};
+
+        let (ctx, node, comp, layer) = param_context(ellipse_node((100.0, 200.0), (50.0, 50.0)));
+        let network = NetworkPath::layer(comp, layer);
+        assert_eq!(
+            ParamManipulator.handles(&ctx).len(),
+            2,
+            "the fixture starts with a centre and a radius handle"
+        );
+
+        let source = Node::new(NodeId::next(), "constant").with_output("out", DataTypeId::VEC2);
+        let source_id = source.id;
+        let graph = ravel_ui::document::resolve_network(ctx.document.as_ref().unwrap(), &network)
+            .unwrap()
+            .clone()
+            .add_node(source)
+            .unwrap()
+            .expose_param_port(node, "center")
+            .unwrap();
+        let port = graph
+            .node(node)
+            .unwrap()
+            .param_port_index("center")
+            .unwrap();
+        let graph = graph
+            .add_edge(EdgeId::next(), source_id, OutputPortIndex(0), node, port)
+            .unwrap();
+        let ctx = with_document(
+            &ctx,
+            ravel_ui::document::replace_network(ctx.document.as_ref().unwrap(), &network, graph)
+                .unwrap(),
+        );
+
+        let state = ParamState::resolve(&ctx).expect("the radius is still manipulable");
+        assert_eq!(
+            state
+                .marks
+                .iter()
+                .map(|mark| mark.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["radius"],
+            "the connected centre still offered a handle"
+        );
+        assert_eq!(ParamManipulator.handles(&ctx).len(), 1);
+        assert_eq!(
+            painted_marks(&ctx).len(),
+            1,
+            "a mark was drawn where nothing can be grabbed"
+        );
+    }
+
+    /// A drag stops at the parameter's declared hard boundary — the one every
+    /// other editor clamps to — instead of pushing a radius through zero.
+    #[test]
+    fn a_drag_stops_at_the_declared_hard_range() {
+        let (ctx, node, comp, layer) = param_context(ellipse_node((100.0, 200.0), (50.0, 50.0)));
+        let network = NetworkPath::layer(comp, layer);
+        let handle = param_handle(&ctx, "radius");
+
+        // Far past the centre: the raw offset would be (-150, -80).
+        let updated = ParamManipulator
+            .drag(&handle, (-200.0, -130.0), DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            vec_param(&updated, &network, node, "radius"),
+            vec![0.0, 0.0],
+            "the radius went negative"
+        );
+    }
+
+    /// A gesture is two-dimensional and the parameter need not be: the
+    /// components the canvas cannot address keep their value.
+    #[test]
+    fn a_drag_leaves_the_third_component_alone() {
+        use ravel_core::registry::{NodeCategory, NodeTemplate};
+
+        let mut registry = NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        registry.register(
+            NodeTemplate::new("test.vec3", "Vec3", NodeCategory::Geometry)
+                .with_param(ravel_core::graph::Parameter {
+                    key: "center".into(),
+                    value: ParameterValue::vec3(10.0, 20.0, 30.0),
+                })
+                .with_param_role("center", ParamRole::Position),
+        );
+        let node = Node::new(NodeId::next(), "test.vec3")
+            .with_param("center", ParameterValue::vec3(10.0, 20.0, 30.0));
+        let (mut ctx, node, comp, layer) = doc_with_node(node);
+        ctx.registry = Some(Arc::new(registry));
+        let network = NetworkPath::layer(comp, layer);
+
+        let handle = param_handle(&ctx, "center");
+        assert_eq!(handle.position, (10.0, 20.0));
+        let updated = ParamManipulator
+            .drag(&handle, (5.0, -5.0), DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            vec_param(&updated, &network, node, "center"),
+            vec![15.0, 15.0, 30.0],
+            "the drag wrote a component the canvas cannot address"
+        );
+    }
+
+    /// Network parameters live in layer-local time (REQ-LAYER-006): a layer
+    /// placed later on the timeline, trimmed to start inside its own footage,
+    /// is keyed at the frame *it* is showing, not at the playhead.
+    #[test]
+    fn a_drag_keys_the_layers_own_local_frame() {
+        let (mut ctx, node, comp, layer) = param_context(rect_node((100.0, 200.0)));
+        let network = NetworkPath::layer(comp, layer);
+        // Local frame 12 while the playhead sits at 20: neither offset alone
+        // reproduces it, so a drag that reuses the comp frame lands elsewhere.
+        ctx.document = Some(
+            ravel_ui::document::update_layer(
+                ctx.document.as_ref().unwrap(),
+                comp,
+                layer,
+                |layer| {
+                    layer.start_frame = 12;
+                    layer.in_frame = 4;
+                },
+            )
+            .unwrap(),
+        );
+        ctx.playback = Some(PlaybackPosition {
+            frame: 20,
+            ..PlaybackPosition::default()
+        });
+        ctx.document = Some(keyframed_center(
+            ctx.document.as_ref().unwrap(),
+            &network,
+            node,
+        ));
+
+        let handle = param_handle(&ctx, "center");
+        let updated = ParamManipulator
+            .drag(&handle, (7.0, 0.0), DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+
+        let ChannelSource::Keyframes(curve) = &centre_channels(&updated, &network, node)[0].source
+        else {
+            panic!("the drag flattened an animated component");
+        };
+        let frames: Vec<u64> = curve.keyframes().iter().map(|key| key.frame).collect();
+        assert_eq!(
+            frames,
+            vec![0, 12, 30],
+            "the key landed on the playhead instead of the layer's own frame"
+        );
+    }
+
+    /// A layer inside a rotated, non-uniformly scaled parent: the handle sits
+    /// where the picture is, the value written is the node-space point under
+    /// the pointer, and an animated component survives both trips.
+    #[test]
+    fn a_parented_layer_writes_through_the_whole_chain() {
+        let (plain, node, comp, layer) = param_context(rect_node((100.0, 200.0)));
+        let ctx = with_own_transform(&plain, comp, layer);
+        let ctx = parented_context(&ctx, comp, layer, (70.0, -40.0), (2.0, 0.5), 40.0);
+        let network = NetworkPath::layer(comp, layer);
+        let ctx = with_document(
+            &ctx,
+            keyframed_center(ctx.document.as_ref().unwrap(), &network, node),
+        );
+        let ctx = {
+            let mut ctx = ctx;
+            ctx.playback = Some(PlaybackPosition {
+                frame: 5,
+                ..PlaybackPosition::default()
+            });
+            ctx
+        };
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+
+        // The animated X reads 50 at frame 5; the handle sits on the picture.
+        let handle = param_handle(&ctx, "center");
+        let expected = world.apply(50.0, 200.0);
+        close_within(handle.position.0, expected.0, 1e-2, "handle x");
+        close_within(handle.position.1, expected.1, 1e-2, "handle y");
+        let layer_only = {
+            let document = ctx.document.as_ref().unwrap();
+            let composition = document.get_composition(comp).unwrap();
+            let layer = composition.get_layer(layer).unwrap();
+            ravel_core::composition::transform::layer_matrix(layer, 5.0, &eval()).apply(50.0, 200.0)
+        };
+        assert!(
+            (handle.position.0 - layer_only.0).abs() > 1.0
+                || (handle.position.1 - layer_only.1).abs() > 1.0,
+            "the parent chain made no difference: the fixture cannot see it"
+        );
+
+        let delta = (35.0, -20.0);
+        let updated = ParamManipulator
+            .drag(&handle, delta, DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+        let target = (handle.position.0 + delta.0, handle.position.1 + delta.1);
+        let local = world.inverse().unwrap().apply(target.0, target.1);
+        let channels = centre_channels(&updated, &network, node);
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("the drag flattened an animated component under a parent");
+        };
+        assert_eq!(curve.keyframes().len(), 3);
+        close_within(
+            channels[0].evaluate(5.0, &eval()),
+            local.0,
+            1e-2,
+            "written x",
+        );
+        close_within(
+            channels[1].evaluate(5.0, &eval()),
+            local.1,
+            1e-2,
+            "written y",
+        );
+        close_within(
+            channels[0].evaluate(0.0, &eval()),
+            0.0,
+            1e-3,
+            "the untouched key moved",
+        );
+    }
+
+    /// `center` with a keyframed X (0 → 0, 10 → 100) and a constant Y.
+    fn keyframed_center(document: &Document, network: &NetworkPath, node: NodeId) -> Document {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, ravel_core::animation::Interpolation::Linear);
+        curve.insert(30, 300.0, ravel_core::animation::Interpolation::Linear);
+        let graph = ravel_ui::document::resolve_network(document, network)
+            .unwrap()
+            .clone();
+        let mut animated = graph.node(node).unwrap().as_ref().clone();
+        for parameter in animated.parameters.iter_mut() {
+            if parameter.key == "center" {
+                parameter.value = ParameterValue::Channel2([
+                    AnimationChannel::keyframes(curve.clone()),
+                    AnimationChannel::constant(200.0),
+                ]);
+            }
+        }
+        ravel_ui::document::replace_network(
+            document,
+            network,
+            graph.replace_node(Arc::new(animated)),
+        )
+        .unwrap()
+    }
+
+    /// The two channels of a node's `center`.
+    fn centre_channels(
+        document: &Document,
+        network: &NetworkPath,
+        node: NodeId,
+    ) -> [ravel_core::animation::channel::AnimationChannel; 2] {
+        let graph = ravel_ui::document::resolve_network(document, network).unwrap();
+        let ParameterValue::Channel2(channels) = &graph
+            .node(node)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == "center")
+            .unwrap()
+            .value
+        else {
+            panic!("the drag retyped the parameter");
+        };
+        channels.clone()
+    }
+
+    /// The centres of the marks the manipulator paints, in composition space.
+    fn painted_marks(ctx: &OverlayContext) -> Vec<(f32, f32)> {
+        let mut painter = painter();
+        ParamManipulator.paint(ctx, &mut painter);
+        let frame = painter.frame();
+        let zoom = painter.zoom();
+        quads(&painter.finish())
+            .iter()
+            // The inner core of each mark is drawn 2px smaller; count outers.
+            .filter(|(bounds, _)| (f32::from(bounds.size.width) - PARAM_MARK_PX).abs() < 1e-3)
+            .map(|(bounds, _)| {
+                (
+                    (f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5
+                        - f32::from(frame.origin.x))
+                        / zoom.0,
+                    (f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5
+                        - f32::from(frame.origin.y))
+                        / zoom.1,
+                )
+            })
+            .collect()
     }
 
     /// Every drawn mark answers the pointer at the point it is drawn at: the

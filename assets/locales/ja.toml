@@ -367,6 +367,15 @@ background_composition = "コンポジション"
 background_checkerboard = "チェッカーボード"
 background_solid = "単色"
 
+[viewer.manipulator]
+shell = "レイヤー変形ハンドル"
+parameter = "パラメータハンドル"
+motion_path = "モーションパス"
+move = "移動"
+scale = "拡大縮小"
+rotate = "回転"
+anchor = "アンカーポイント"
+
 [panel.properties]
 _self = "プロパティ"
 empty = "ノード未選択"

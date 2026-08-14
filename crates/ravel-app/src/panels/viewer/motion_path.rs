@@ -186,24 +186,28 @@ fn keyed_frames(layer: &Layer) -> Vec<u64> {
     frames.into_iter().step_by(stride).collect()
 }
 
-/// The layer-local frames the trajectory is sampled at: `[in, out)` strided down
-/// to [`MAX_MOTION_SAMPLES`].
+/// The layer-local frames the trajectory is sampled at: `[in, out)` thinned to
+/// **at most** [`MAX_MOTION_SAMPLES`] frames, both ends included.
 ///
-/// The last frame of the interval is appended when the stride would have skipped
-/// it, so the drawn path reaches the end of the layer instead of stopping a
-/// stride short of it.
+/// Spread over the interval rather than strided with the end appended. A stride
+/// of `ceil(span / N)` lands on `N` frames and then misses the last one whenever
+/// the stride does not divide the span — appending it made `N + 1`, one over the
+/// cap. Placing sample `i` at `in + i·(last − in) / (N − 1)` gives exactly `N`
+/// frames with the first and last among them, so the path reaches the end of the
+/// layer *and* the cap holds.
 fn sample_frames(in_frame: u64, out_frame: u64) -> Vec<u64> {
     let last = out_frame.saturating_sub(1);
     if last <= in_frame {
         return vec![in_frame];
     }
-    let span = (last - in_frame + 1) as usize;
-    let stride = stride_for(span, MAX_MOTION_SAMPLES) as u64;
-    let mut frames: Vec<u64> = (in_frame..=last).step_by(stride as usize).collect();
-    if frames.last() != Some(&last) {
-        frames.push(last);
+    let span = last - in_frame + 1;
+    if span <= MAX_MOTION_SAMPLES as u64 {
+        return (in_frame..=last).collect();
     }
-    frames
+    let steps = MAX_MOTION_SAMPLES as u64 - 1;
+    (0..=steps)
+        .map(|step| in_frame + step * (last - in_frame) / steps)
+        .collect()
 }
 
 /// The trajectory of the selected layer's `position`, with a grabbable mark on
@@ -418,8 +422,8 @@ mod tests {
         );
     }
 
-    /// Completion criterion: the sample count stays under the cap however long
-    /// the layer is.
+    /// Completion criterion: the sample count never exceeds the cap however long
+    /// the layer is — and the trajectory still reaches the end of it.
     #[test]
     fn the_sample_count_stays_under_its_cap() {
         let (ctx, ..) = context(
@@ -429,11 +433,11 @@ mod tests {
         );
         let path = path_of(&ctx);
         assert!(
-            path.points.len() <= MAX_MOTION_SAMPLES + 1,
+            path.points.len() <= MAX_MOTION_SAMPLES,
             "{} samples for a 10 000 frame layer",
             path.points.len()
         );
-        // Strided, not truncated: the path still reaches the end of the layer.
+        // Thinned, not truncated: the path still reaches the end of the layer.
         assert!(
             path.points.last().unwrap().0 > 490.0,
             "the cap cut the trajectory short: {:?}",
@@ -451,6 +455,62 @@ mod tests {
             1_000,
         );
         assert!(path_of(&ctx).keys.len() <= MAX_MOTION_SAMPLES);
+    }
+
+    /// The cap holds at the boundaries, which is where a stride-plus-endpoint
+    /// scheme spills over it: a span that is a multiple of the cap lands on the
+    /// last frame only by luck, and appending it makes one sample too many.
+    ///
+    /// Both ends are pinned as well, since a scheme that satisfies the cap by
+    /// dropping the end of the interval is the other way to pass this.
+    #[test]
+    fn the_sample_cap_holds_at_its_boundaries() {
+        let cap = MAX_MOTION_SAMPLES as u64;
+        for span in [
+            cap - 1,
+            cap,
+            cap + 1,
+            cap * 2 - 1,
+            cap * 2,
+            cap * 2 + 1,
+            cap * 7 + 3,
+        ] {
+            // `in_frame` is non-zero so an implementation that spreads from zero
+            // instead of from the interval's start cannot pass either.
+            let (in_frame, out_frame) = (5, 5 + span);
+            let frames = sample_frames(in_frame, out_frame);
+            assert!(
+                frames.len() <= MAX_MOTION_SAMPLES,
+                "span {span}: {} samples",
+                frames.len()
+            );
+            assert_eq!(
+                frames.first(),
+                Some(&in_frame),
+                "span {span} lost its start"
+            );
+            assert_eq!(
+                frames.last(),
+                Some(&(out_frame - 1)),
+                "span {span} stopped short of the end"
+            );
+            assert!(
+                frames.windows(2).all(|pair| pair[0] < pair[1]),
+                "span {span} repeated or reordered a frame: {frames:?}"
+            );
+        }
+    }
+
+    /// The key marks are thinned by [`stride_for`], which cannot exceed the cap
+    /// at any count — pinned here at the same boundaries, because the two
+    /// schemes are separate code and only one of them was ever off by one.
+    #[test]
+    fn the_key_cap_holds_at_its_boundaries() {
+        let cap = MAX_MOTION_SAMPLES;
+        for count in [cap - 1, cap, cap + 1, cap * 2 - 1, cap * 2, cap * 2 + 1] {
+            let kept = (0..count).step_by(stride_for(count, cap)).count();
+            assert!(kept <= cap, "{count} keys thinned to {kept}");
+        }
     }
 
     /// Completion criterion: dragging a key writes both components of

@@ -372,6 +372,15 @@ background_composition = "Composition"
 background_checkerboard = "Checkerboard"
 background_solid = "Solid"
 
+[viewer.manipulator]
+shell = "Layer transform handles"
+parameter = "Parameter handles"
+motion_path = "Motion path"
+move = "Move"
+scale = "Scale"
+rotate = "Rotate"
+anchor = "Anchor point"
+
 [panel.properties]
 _self = "Properties"
 empty = "No node selected"

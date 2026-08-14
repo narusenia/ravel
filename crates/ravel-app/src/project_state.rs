@@ -21,19 +21,21 @@
 
 use crate::app_settings;
 use crate::panels::ViewerImage;
-use crate::panels::viewer::overlay::{OverlayContext, OverlayRegistry, OverlayResults};
+use crate::panels::viewer::overlay::{
+    OverlayContext, OverlayRegistry, OverlayResultKey, OverlayResults,
+};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
-use ravel_core::eval::{EvalContext, PathSegment, Quality};
+use ravel_core::eval::{EvalContext, Quality};
 use ravel_core::graph::Graph;
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{
     EvalRequest, EvalService, EvalServiceConfig, EvalUpdate, EvalWorkerHooks, InvalidationHint,
-    ReadAhead,
+    ReadAhead, ScopedTarget,
 };
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::{GpuContext, GpuFrameBuffer};
@@ -381,7 +383,7 @@ pub(crate) struct ViewerUpdate {
     frame: u64,
     timings: Vec<(NodeId, Duration)>,
     output: ViewerOutput,
-    overlay_results: Vec<(NodeId, Arc<dyn ravel_core::types::NodeData>)>,
+    overlay_results: Vec<(OverlayResultKey, Arc<dyn ravel_core::types::NodeData>)>,
 }
 
 /// Whether an evaluation result is an image the viewer would have drawn had
@@ -400,9 +402,11 @@ impl ViewerUpdate {
     /// composition output; further targets exist for inspection panels and
     /// are not the viewer's business. A result-less update cannot arise from
     /// a request this crate builds, so it blanks rather than erroring.
+    ///
+    /// Overlay values come from `scoped`, which is where the request put
+    /// them, and keep the scope they were evaluated in as part of their key.
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
-        let mut results = update.results.into_iter();
-        let output = match results.next() {
+        let output = match update.results.into_iter().next() {
             // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
             // what arrives is display bytes rather than a linear buffer.
             Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
@@ -430,8 +434,15 @@ impl ViewerUpdate {
             Some((_, Err(err))) => ViewerOutput::Failed(err.to_string()),
             None => ViewerOutput::NotAFrame,
         };
-        let overlay_results = results
-            .filter_map(|(node, result)| result.ok().map(|value| (node, value)))
+        let overlay_results = update
+            .scoped
+            .into_iter()
+            .filter_map(|scoped| {
+                scoped
+                    .output
+                    .ok()
+                    .map(|value| ((scoped.path, scoped.node), value))
+            })
             .collect();
         Self {
             generation: update.generation,
@@ -1514,19 +1525,19 @@ impl ProjectState {
         let graph = compiled.graph.clone();
         let output = compiled.output;
         // The root scope: this request evaluates the composition's compiled
-        // shell chain. `append_overlay_targets` is handed the very path the
-        // request carries, so the scope it matches against cannot drift from
-        // the scope actually evaluated.
+        // shell chain. Overlay targets name networks *inside* it and travel in
+        // `scoped`, each carrying the graph and path it is evaluated under.
         let path = Vec::new();
-        let mut nodes = vec![output];
-        append_overlay_targets(&mut nodes, &path, overlays, &overlay_context);
+        let nodes = vec![output];
+        let scoped = overlay_scoped_targets(&document, &ctx, overlays, &overlay_context);
         Ok(Some(EvalRequest {
             comp: Some(comp.id),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
-            // reads that position, and inspection targets are appended after
-            // it rather than reordering the viewer's.
+            // reads that position, and overlay targets ride in `scoped` rather
+            // than displacing it.
             graph,
             nodes,
+            scoped,
             path,
             ctx,
             document: Some(document),
@@ -1823,43 +1834,76 @@ impl ProjectState {
 impl EventEmitter<ProjectEvent> for ProjectState {}
 impl EventEmitter<DocumentReplaced> for ProjectState {}
 
-/// Append the active overlays' evaluation targets to a request's target list.
+/// The active overlays' evaluation targets, each resolved to the graph and the
+/// ownership path it must be evaluated under.
 ///
-/// [`OverlayRegistry::eval_targets`] has already folded duplicates, so two
-/// overlays asking for the same node cost one entry in `nodes` and therefore
-/// one evaluation.
+/// Every [`NetworkPath`] names a composition *and* a layer, so no overlay
+/// target ever lives in the composition's compiled shell graph: a layer
+/// network is evaluated recursively through its boundary node rather than
+/// inlined. Each target therefore carries its own scope
+/// ([`ravel_core::runtime::ScopedTarget`]) and the worker pulls it with
+/// [`ravel_core::eval::Evaluator::evaluate_at`], through the same evaluator
+/// that just ran the shell — so a node the composition already composited is a
+/// cache hit rather than a second pull.
 ///
-/// `path` is the ownership path the request evaluates under, and a target
-/// rides along only when it names *exactly* that scope. Identity of scope is
-/// the whole test: a `NodeId` means nothing without the network it was drawn
-/// from, so anything weaker hands the overlay a value from another graph.
+/// Membership in the request's graph would have been the wrong test and is not
+/// used anywhere: a hit could only ever be an id collision, because
+/// `deterministic_node_id` (`comp << 32 | layer << 8 | role`) lands in the
+/// ordinary node-id range whenever the composition id is 0, and the overlay
+/// would then be painted from an unrelated compositing node.
 ///
-/// In particular, checking whether the request's graph happens to contain the
-/// target's `NodeId` would be wrong. A layer network is evaluated recursively
-/// through its boundary node rather than inlined, so its nodes are never in a
-/// composition's compiled shell graph — a hit could only ever be an id
-/// collision, and `deterministic_node_id` (`comp << 32 | layer << 8 | role`)
-/// lands in the ordinary node-id range whenever the composition id is 0. The
-/// overlay would then be painted from an unrelated compositing node.
-///
-/// Every [`NetworkPath`] names a composition *and* a layer, so its
-/// [`NetworkPath::segments`] is never empty, while the viewer's request runs
-/// at the root scope with an empty path. **No overlay target can ride along
-/// on the composition request.** That is deliberate: the aggregation is in
-/// place and dormant until unit 3 issues a network-scoped request, and until
-/// then no result arrives, `OverlayContext::eval_result` stays `None`, and
-/// the overlay draws nothing.
-fn append_overlay_targets(
-    nodes: &mut Vec<NodeId>,
-    path: &[PathSegment],
+/// Two folds happen here. [`OverlayRegistry::eval_targets`] has already
+/// dropped exact duplicates; this drops targets that differ only in output
+/// port, because evaluation is per node. A target whose network or node no
+/// longer resolves is dropped rather than requested — the overlay then reads
+/// no result and draws nothing.
+fn overlay_scoped_targets(
+    document: &Document,
+    ctx: &EvalContext,
     overlays: &OverlayRegistry,
     context: &OverlayContext,
-) {
+) -> Vec<ScopedTarget> {
+    let mut scoped: Vec<ScopedTarget> = Vec::new();
     for target in overlays.eval_targets(context) {
-        if target.network.segments() == path {
-            nodes.push(target.node);
+        let path = target.network.segments();
+        if scoped
+            .iter()
+            .any(|existing| existing.node == target.node && existing.path == path)
+        {
+            continue;
         }
+        let Some(graph) = ravel_ui::document::resolve_network(document, &target.network) else {
+            continue;
+        };
+        if graph.node(target.node).is_none() {
+            continue;
+        }
+        let Some(layer) = document
+            .get_composition(target.network.comp)
+            .and_then(|comp| comp.get_layer(target.network.layer))
+        else {
+            continue;
+        };
+        // Layer-local time (REQ-LAYER-006), and the shell's own interval
+        // check: outside `[in, out)` the compositing chain does not evaluate
+        // the network at all, so asking for a node inside it would both draw
+        // an overlay over a layer that is not on screen and pay for an
+        // evaluation the frame did not need.
+        let local_frame = ravel_ui::keyframes::layer_local_frame(layer, ctx.frame);
+        if local_frame < layer.in_frame || local_frame >= layer.out_frame {
+            continue;
+        }
+        scoped.push(ScopedTarget {
+            path,
+            graph: graph.clone(),
+            node: target.node,
+            // The very context `comp.network` enters the layer network with,
+            // so this pull lands on the cache entry the shell evaluation just
+            // filled instead of computing it a second time.
+            ctx: ctx.with_frame(local_frame),
+        });
     }
+    scoped
 }
 
 /// A readable, collision-free asset id derived from the file name.
@@ -1891,7 +1935,7 @@ mod tests {
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::composition::{BlendMode, Layer};
-    use ravel_core::eval::ProcessorRegistry as _;
+    use ravel_core::eval::{PathSegment, ProcessorRegistry as _};
     use ravel_core::graph::{Node, ParameterValue};
     use ravel_core::id::{DataTypeId, LayerId, OutputPortIndex};
     use ravel_core::network as net;
@@ -1915,8 +1959,8 @@ mod tests {
             true
         }
 
-        fn eval_target(&self, _ctx: &OverlayContext) -> Option<OverlayTarget> {
-            Some(self.target.clone())
+        fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<OverlayTarget> {
+            vec![self.target.clone()]
         }
     }
 
@@ -2051,6 +2095,7 @@ mod tests {
             comp: None,
             graph,
             nodes: vec![node],
+            scoped: Vec::new(),
             path: Vec::new(),
             ctx: EvalContext::new(0, FrameRate::new(30, 1), (2, 2)),
             document: None,
@@ -2290,6 +2335,20 @@ mod tests {
         (comp, compiled.output, synthetic)
     }
 
+    /// A scoped outcome as the worker tags one, in an arbitrary but fixed
+    /// layer scope — these tests are about publication, not about which
+    /// network a value came from.
+    fn scoped_result(
+        node: NodeId,
+        output: ravel_core::runtime::EvalOutput,
+    ) -> ravel_core::runtime::ScopedResult {
+        ravel_core::runtime::ScopedResult {
+            path: vec![PathSegment::Layer(CompId::new(1), LayerId::new(1))],
+            node,
+            output,
+        }
+    }
+
     fn target_in(network: &NetworkPath, node: NodeId) -> OverlayTarget {
         OverlayTarget {
             network: network.clone(),
@@ -2352,16 +2411,64 @@ mod tests {
                 request.graph.node(synthetic).is_some(),
                 "the collision this test exists for did not occur",
             );
-            assert_eq!(request.nodes, vec![output]);
+            assert_eq!(
+                request.nodes,
+                vec![output],
+                "an overlay target displaced the composition output",
+            );
+            // The colliding id is not in the layer network, so nothing is
+            // requested for it — and had it been, it would have been pulled
+            // from that network's graph, never from the shell graph the
+            // collision lives in.
+            assert!(request.scoped.is_empty());
+        });
+    }
+
+    /// The whole point of unit 3: an overlay target reaches the request the
+    /// viewer actually posts, carrying its own network's graph and path.
+    /// Unit 2's aggregation was dormant precisely because nothing did this.
+    #[gpui::test]
+    fn the_viewer_request_carries_the_overlays_scoped_targets(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the seeded layer network")
+                .nodes()
+                .next()
+                .expect("a node to target")
+                .id;
+            let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay {
+                target: target_in(&network, node),
+            })]);
+
+            let request = project
+                .build_viewer_request(0, &overlays, cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.nodes, vec![output], "target 0 is the comp output");
+            assert_eq!(request.scoped.len(), 1, "the overlay target was dropped");
+            assert_eq!(request.scoped[0].node, node);
+            assert_eq!(request.scoped[0].path, network.segments());
+            assert!(request.scoped[0].graph.node(node).is_some());
+            // Layer-local time, which is the context `comp.network` enters the
+            // network with — a request-frame pull would miss that cache entry.
+            let layer = comp.layers.front().unwrap();
+            assert_eq!(
+                request.scoped[0].ctx.frame,
+                ravel_ui::keyframes::layer_local_frame(layer, 0),
+            );
         });
     }
 
     /// Completion criterion: two overlays wanting the same node cost one
-    /// entry in `EvalRequest::nodes`, hence one evaluation.
-    ///
-    /// Asserted against a request scoped to a layer network — the shape unit
-    /// 3 will issue — because the composition request rejects every target by
-    /// construction and so could not tell folding apart from rejection.
+    /// scoped target, hence one evaluation. Folding is by `(scope, node)` —
+    /// evaluation is per node, so two targets differing only in output port
+    /// are the same pull.
     #[gpui::test]
     fn duplicate_overlay_targets_are_folded_in_the_eval_request(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
@@ -2370,61 +2477,83 @@ mod tests {
         project.update(cx, |project, cx| {
             let (comp, _, _) = project_with_a_shell_target(project, cx);
             let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
-            let node = NodeId::new(1);
+            let node = ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the seeded layer network")
+                .nodes()
+                .next()
+                .expect("a node to target")
+                .id;
             let target = target_in(&network, node);
+            let mut other_port = target.clone();
+            other_port.output = OutputPortIndex(1);
             let overlays = OverlayRegistry::new(vec![
                 Box::new(TargetOverlay {
                     target: target.clone(),
                 }),
-                Box::new(TargetOverlay { target }),
+                Box::new(TargetOverlay {
+                    target: target.clone(),
+                }),
+                Box::new(TargetOverlay { target: other_port }),
             ]);
-            let document = Arc::new(project.document().clone());
+            let document = project.document().clone();
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
+            let eval = project.viewer_eval_context(&comp, 0);
 
-            let mut nodes = Vec::new();
-            append_overlay_targets(&mut nodes, &network.segments(), &overlays, &ctx);
+            let scoped = overlay_scoped_targets(&document, &eval, &overlays, &ctx);
 
-            assert_eq!(nodes, vec![node]);
+            assert_eq!(scoped.len(), 1, "the same node was pulled more than once");
+            assert_eq!(scoped[0].node, node);
+            assert_eq!(scoped[0].path, network.segments());
         });
     }
 
-    /// A `NodeId` means nothing without the network it came from, so a target
-    /// naming a different layer — or a different composition — is rejected
-    /// even though the request evaluates a network of the same shape.
+    /// A `NodeId` means nothing without the network it came from. Each target
+    /// is therefore evaluated **in its own network**, with that network's
+    /// graph and path — never against the request's graph, where an id can
+    /// only collide.
     #[gpui::test]
-    fn overlay_targets_from_another_network_are_not_added(cx: &mut TestAppContext) {
+    fn overlay_targets_carry_the_network_they_name(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
 
         project.update(cx, |project, cx| {
-            let (comp, _, _) = project_with_a_shell_target(project, cx);
+            let (comp, _, synthetic) = project_with_a_shell_target(project, cx);
             let layer = comp.layers.front().unwrap().id;
-            let scope = NetworkPath::layer(comp.id, layer);
-            let node = NodeId::new(1);
+            let network = NetworkPath::layer(comp.id, layer);
+            let node = ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the seeded layer network")
+                .nodes()
+                .next()
+                .expect("a node to target")
+                .id;
             let overlays = OverlayRegistry::new(vec![
                 Box::new(TargetOverlay {
-                    target: target_in(
-                        &NetworkPath::layer(comp.id, LayerId::new(layer.raw() + 1)),
-                        node,
-                    ),
+                    target: target_in(&network, node),
                 }),
+                // A network that does not exist has nothing to evaluate.
                 Box::new(TargetOverlay {
                     target: target_in(
                         &NetworkPath::layer(CompId::new(comp.id.raw() + 1), layer),
                         node,
                     ),
                 }),
-                Box::new(TargetOverlay {
-                    target: target_in(&scope.entered(NodeId::new(7)), node),
-                }),
             ]);
-            let document = Arc::new(project.document().clone());
+            let document = project.document().clone();
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
+            let eval = project.viewer_eval_context(&comp, 0);
 
-            let mut nodes = Vec::new();
-            append_overlay_targets(&mut nodes, &scope.segments(), &overlays, &ctx);
+            let scoped = overlay_scoped_targets(&document, &eval, &overlays, &ctx);
 
-            assert!(nodes.is_empty());
+            assert_eq!(scoped.len(), 1, "an unresolvable network was requested");
+            assert_eq!(scoped[0].path, network.segments());
+            assert!(
+                scoped[0].graph.node(node).is_some(),
+                "the target was not paired with its own network's graph",
+            );
+            assert!(
+                scoped[0].graph.node(synthetic).is_none(),
+                "the shell graph was handed to a layer-network target",
+            );
         });
     }
 
@@ -2734,6 +2863,7 @@ mod tests {
                         frame: generation,
                         results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                         timings: Vec::new(),
+                        scoped: Vec::new(),
                     }),
                     cx,
                 );
@@ -2881,6 +3011,7 @@ mod tests {
                 frame: 0,
                 results: vec![(node, Ok(blank_display_frame(4, 4)))],
                 timings: vec![(node, std::time::Duration::from_micros(micros))],
+                scoped: Vec::new(),
             })
         };
 
@@ -2955,6 +3086,7 @@ mod tests {
                         generation: project.published_generation + 1,
                         frame: 0,
                         results: vec![(first, Ok(blank_display_frame(4, 4)))],
+                        scoped: Vec::new(),
                         timings,
                     }),
                     cx,
@@ -3055,6 +3187,7 @@ mod tests {
                     frame: 0,
                     results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
+                    scoped: Vec::new(),
                 }),
                 cx,
             )
@@ -3106,6 +3239,7 @@ mod tests {
                     frame: 0,
                     results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
+                    scoped: Vec::new(),
                 }),
                 cx,
             )
@@ -3616,6 +3750,7 @@ mod tests {
                 frame: 0,
                 results: vec![(NodeId::new(1), Ok(value))],
                 timings: Vec::new(),
+                scoped: Vec::new(),
             })
         };
 
@@ -3658,6 +3793,7 @@ mod tests {
                 frame: 0,
                 results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                 timings: Vec::new(),
+                scoped: Vec::new(),
             })
         };
         let err_update = |generation| {
@@ -3669,6 +3805,7 @@ mod tests {
                     Err(ravel_core::eval::EvalError::NodeNotFound(NodeId::new(42))),
                 )],
                 timings: Vec::new(),
+                scoped: Vec::new(),
             })
         };
 
@@ -3728,6 +3865,7 @@ mod tests {
                     frame: 0,
                     results: vec![(NodeId::new(1), Ok(Arc::new(ravel_core::types::Scalar(1.0))))],
                     timings: Vec::new(),
+                    scoped: Vec::new(),
                 }),
                 cx,
             );
@@ -3761,6 +3899,7 @@ mod tests {
                 frame: 0,
                 results: vec![(NodeId::new(1), Ok(blank_display_frame(size, size)))],
                 timings: Vec::new(),
+                scoped: Vec::new(),
             })
         };
         let shown_size = |cx: &mut TestAppContext| {
@@ -3796,7 +3935,10 @@ mod tests {
         let stale = NodeId::new(9001);
         cx.update(|cx| {
             cx.set_global(OverlayResults::new(HashMap::from([(
-                stale,
+                (
+                    vec![PathSegment::Layer(CompId::new(1), LayerId::new(1))],
+                    stale,
+                ),
                 Arc::new(ravel_core::types::Scalar(1.0)) as Arc<dyn ravel_core::types::NodeData>,
             )])));
         });
@@ -3828,7 +3970,13 @@ mod tests {
         let scalar: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::types::Scalar(2.0));
         let overlay_values = |cx: &App| {
             cx.try_global::<OverlayResults>()
-                .map(|results| results.values.keys().copied().collect::<Vec<_>>())
+                .map(|results| {
+                    results
+                        .values
+                        .keys()
+                        .map(|(_, node)| *node)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         };
 
@@ -3837,11 +3985,9 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 2,
                     frame: 10,
-                    results: vec![
-                        (NodeId::new(1), Ok(frame.clone())),
-                        (overlay_node, Ok(scalar.clone())),
-                    ],
+                    results: vec![(NodeId::new(1), Ok(frame.clone()))],
                     timings: Vec::new(),
+                    scoped: vec![scoped_result(overlay_node, Ok(scalar.clone()))],
                 }),
                 cx,
             );
@@ -3857,11 +4003,9 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 9,
-                    results: vec![
-                        (NodeId::new(1), Ok(frame.clone())),
-                        (NodeId::new(9002), Ok(scalar.clone())),
-                    ],
+                    results: vec![(NodeId::new(1), Ok(frame.clone()))],
                     timings: Vec::new(),
+                    scoped: vec![scoped_result(NodeId::new(9002), Ok(scalar.clone()))],
                 }),
                 cx,
             );
@@ -3877,14 +4021,12 @@ mod tests {
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 3,
                     frame: 11,
-                    results: vec![
-                        (NodeId::new(1), Ok(frame)),
-                        (
-                            overlay_node,
-                            Err(ravel_core::eval::EvalError::MissingProcessor(overlay_node)),
-                        ),
-                    ],
+                    results: vec![(NodeId::new(1), Ok(frame))],
                     timings: Vec::new(),
+                    scoped: vec![scoped_result(
+                        overlay_node,
+                        Err(ravel_core::eval::EvalError::MissingProcessor(overlay_node)),
+                    )],
                 }),
                 cx,
             );
@@ -3925,6 +4067,7 @@ mod tests {
                         (overlay_node, Ok(scalar.clone())),
                     ],
                     timings: Vec::new(),
+                    scoped: Vec::new(),
                 }),
                 cx,
             );
@@ -3954,6 +4097,7 @@ mod tests {
                         (overlay_node, Ok(scalar.clone())),
                     ],
                     timings: Vec::new(),
+                    scoped: Vec::new(),
                 }),
                 cx,
             );

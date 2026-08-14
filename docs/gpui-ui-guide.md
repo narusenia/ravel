@@ -352,6 +352,40 @@ canvas 内の描画物は GPUI element ではないため、hover の `CursorSty
 カーソルは「ここで何ができるか」の約束なので、未実装の操作には付けない。
 Viewer の装飾だけの bbox ハンドルや dead な Hand / Zoom がその例。
 
+### Viewer オーバーレイを追加する
+
+Viewer の重ね描きは `ViewerOverlay` と `OverlayRegistry` に集約する。
+`render()` の canvas クロージャやマウスハンドラへ個別の分岐を足さない。
+
+1. `crates/ravel-app/src/panels/viewer/overlay.rs`、または Field / Geometry の
+   ようにまとまりがある場合は `panels/viewer/` の専用モジュールに
+   `ViewerOverlay` を実装する。`OverlayId` と描画順・ヒットテスト優先度を
+   決め、`OverlayRegistry::builtin()` に登録する。
+2. `is_active` は選択・ツール・表示条件だけで決める。評価結果が必要な場合も、
+   結果の到着を `is_active` に含めない。`eval_targets` が返す対象を
+   `ProjectState` が既存の viewer 評価要求へまとめるため、未到着の結果は
+   `paint` / `labels` 側で何も描かない。
+3. 描画は `OverlayPainter` の composition-space API を使い、固定 px の
+   ハンドルやルールは screen-space API を使う。`paint` と `handles` は同じ
+   resolved data から座標を作り、描いた印と掴める位置をずらさない。文字は
+   `labels` から返す（canvas の painter で直接文字を描かない）。
+4. ハンドルを持つ場合は `handles` と `drag` を同じオーバーレイに実装する。
+   ドラッグは `OverlayEdit` に変換し、Document の live apply / mouse-up commit
+   の既存経路へ渡す。1 ジェスチャ 1 undo、Escape で revert とし、接続で駆動
+   される値や結果未到着の値を編集対象にしない。
+5. 入力の競合は registry の優先度に任せる。新しいハンドルを専用の
+   `on_mouse_down` 分岐へ割り込ませず、描画ツールの押下を奪わない条件を
+   `is_active` に書く。既存の pointer hint からカーソルを割り当て、動作の
+   ない印にはカーソルを付けない。
+6. 表示名やツールバーのトグルを追加する場合は、`assets/locales/en.toml` と
+   `ja.toml` の両方へキーを追加する。オーバーレイにトグルが無い設計なら、
+   locale にトグルを作って「表示を切り替えられる」ように見せない。
+7. 座標変換、優先度、ズーム不変の印、未評価時の空描画、編集の undo 単位を
+   純粋なユニットテストで固定する。GPUI 統合テストは実際の focus・Action・
+   入力ルーティングが必要な経路に限る。実装済みの範囲と制約は
+   `docs/ui-impl-status.md`、意図した挙動は `docs/specifications/ui/viewer.md`
+   に同期する。
+
 ## コンテキストメニュー
 
 ```rust

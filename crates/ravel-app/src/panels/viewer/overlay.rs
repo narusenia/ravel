@@ -609,6 +609,18 @@ impl OverlayEdit {
         }
     }
 
+    /// The layer shell this edit writes, when it writes one. The gesture's
+    /// lifetime hangs off it: a selection that no longer holds this layer has
+    /// to end the drag rather than keep transforming what is no longer
+    /// selected.
+    pub fn layer_target(&self) -> Option<(CompId, LayerId)> {
+        match self {
+            Self::NodeParameter { .. } => None,
+            Self::LayerTransform { comp, layer, .. } => Some((*comp, *layer)),
+            Self::Batch(edits) => edits.iter().find_map(Self::layer_target),
+        }
+    }
+
     /// How much of the evaluator the edit invalidates.
     pub fn invalidation(&self) -> InvalidationHint {
         match self {
@@ -1493,7 +1505,12 @@ impl ViewerOverlay for ShellManipulator {
     }
 
     fn is_active(&self, ctx: &OverlayContext) -> bool {
-        ShellState::resolve(ctx).is_some()
+        // Only the Select tool. The overlay hit test runs before
+        // `select_mouse_down` / `shape_mouse_down`, so a manipulator that
+        // stayed live under Rect / Ellipse / Hand / Zoom would answer the
+        // press those tools are waiting for and start a transform instead of
+        // a shape or a pan.
+        ctx.tool == Some(ToolKind::Select) && ShellState::resolve(ctx).is_some()
     }
 
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {

@@ -395,6 +395,17 @@ impl ViewerPanel {
                 // (a deleted node) and reverting would undo that change.
                 this.cancel_move(cx);
             }
+            // A shell drag belongs to the selection the same way: the
+            // manipulator only exists while its layer is the one selected
+            // layer, so losing that selection has to revert the preview
+            // instead of committing it to a layer nobody is looking at.
+            if this.handle_drag.as_ref().is_some_and(|drag| {
+                drag.press_edit.layer_target().is_some_and(|(comp, layer)| {
+                    selection.comp() != Some(comp) || !selection.contains(layer)
+                })
+            }) {
+                this.cancel_handle_drag(cx);
+            }
             cx.notify();
         });
 
@@ -4565,6 +4576,8 @@ mod tests {
             cx.set_global(crate::panels::SelectedPropertiesTarget::default());
             cx.set_global(CanvasSelection::default());
             cx.set_global(crate::panels::PlaybackPosition::default());
+            // The manipulator only answers the pointer under Select.
+            cx.set_global(ToolState::default());
         });
 
         let (comp_id, layer) = project.update(cx, |project, cx| {
@@ -4604,15 +4617,32 @@ mod tests {
         (window, project, comp_id, layer)
     }
 
-    fn press_at(x: f32, y: f32) -> MouseDownEvent {
+    /// The window position of a composition point, read from the panel's
+    /// *current* viewport. The fixture's 1:1 viewport only survives until the
+    /// canvas lays out for real, so a test that hardcodes window pixels
+    /// silently starts pressing somewhere else.
+    fn window_point(panel: &ViewerPanel, comp: (f32, f32)) -> Point<Pixels> {
+        let resolution = panel.composition_resolution.expect("no composition");
+        let rect = panel.viewport.rect(panel.viewport_size.get(), resolution);
+        let origin = panel.viewport_origin.get();
+        let (x, y) = comp_to_screen(comp, rect, resolution.0);
+        point(px(x + origin.0), px(y + origin.1))
+    }
+
+    /// A left press on the composition point `comp`.
+    fn press_at(panel: &ViewerPanel, comp: (f32, f32)) -> MouseDownEvent {
         MouseDownEvent {
             button: MouseButton::Left,
-            position: point(px(x), px(y)),
+            position: window_point(panel, comp),
             modifiers: Modifiers::default(),
             click_count: 1,
             first_mouse: false,
         }
     }
+
+    /// The composition point of the south-east scale grip for the fixture's
+    /// (80, 190, 40, 20) bbox.
+    const SE_GRIP: (f32, f32) = (120.0, 210.0);
 
     fn shell_scale(
         project: &Entity<ProjectState>,
@@ -4645,11 +4675,12 @@ mod tests {
         window
             .update(cx, |panel, _window, cx| {
                 assert!(
-                    panel.overlay_handle_mouse_down(&press_at(120.0, 210.0), cx),
+                    panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx),
                     "the south-east grip took the press"
                 );
                 for x in [130.0, 150.0, 160.0] {
-                    panel.handle_dragged(point(px(x), px(215.0)), DragModifiers::default(), cx);
+                    let to = window_point(panel, (x, 215.0));
+                    panel.handle_dragged(to, DragModifiers::default(), cx);
                 }
                 panel.handle_drag_ended(cx);
             })
@@ -4692,8 +4723,9 @@ mod tests {
 
         window
             .update(cx, |panel, _window, cx| {
-                assert!(panel.overlay_handle_mouse_down(&press_at(120.0, 210.0), cx));
-                panel.handle_dragged(point(px(160.0), px(215.0)), DragModifiers::default(), cx);
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
                 assert_ne!(shell_scale_of(panel, cx, comp_id, layer), (1.0, 1.0));
                 panel.cancel_handle_drag(cx);
             })
@@ -4716,6 +4748,103 @@ mod tests {
             }),
             0,
             "the cancelled gesture left no step of its own in the history"
+        );
+    }
+
+    /// The overlay hit test runs before `select_mouse_down` and
+    /// `shape_mouse_down`, so a press on a shell grip under a drawing or
+    /// navigation tool has to fall through to that tool instead of starting a
+    /// transform.
+    #[gpui::test]
+    fn only_the_select_tool_grabs_a_shell_grip(cx: &mut TestAppContext) {
+        // `_project` keeps the entity alive: `ProjectStateHandle` is weak, and
+        // dropping it here would empty every overlay's document instead of
+        // testing the tool gate.
+        let (window, _project, ..) = shell_setup(cx);
+
+        for tool in [
+            ravel_ui::ToolKind::Rect,
+            ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Pen,
+            ravel_ui::ToolKind::Hand,
+            ravel_ui::ToolKind::Zoom,
+        ] {
+            cx.update(|cx| {
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..Default::default()
+                })
+            });
+            window
+                .update(cx, |panel, _window, cx| {
+                    assert!(
+                        !panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx),
+                        "{tool:?} must keep the press it is waiting for"
+                    );
+                    assert!(panel.handle_drag.is_none(), "{tool:?} started a shell drag");
+                    // The cursor must not promise a transform either.
+                    assert_ne!(
+                        panel.pointer_hint_at(window_point(panel, SE_GRIP), cx),
+                        Some(ViewerPointerHint::ResizeUpLeftDownRight),
+                        "{tool:?} still advertises the scale grip"
+                    );
+                })
+                .unwrap();
+        }
+
+        cx.update(|cx| cx.set_global(ToolState::default()));
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx),
+                    "Select owns the grip"
+                );
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+    }
+
+    /// The manipulator exists only while its layer is the selected one, so a
+    /// selection that moves elsewhere mid-drag reverts the preview instead of
+    /// leaving it to be committed against a layer nobody is looking at.
+    #[gpui::test]
+    fn changing_the_layer_selection_reverts_a_shell_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert_ne!(shell_scale_of(panel, cx, comp_id, layer), (1.0, 1.0));
+            })
+            .unwrap();
+
+        // Another panel selects something else while the button is still down.
+        cx.update(|cx| crate::panels::set_layer_selection(Vec::new(), cx));
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.handle_drag.is_none(), "the gesture was released");
+            })
+            .unwrap();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the preview was reverted, not left in the document"
+        );
+
+        // A mouse-up after the selection moved must not commit anything.
+        window
+            .update(cx, |panel, _window, cx| panel.handle_drag_ended(cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the release found nothing to commit"
         );
     }
 

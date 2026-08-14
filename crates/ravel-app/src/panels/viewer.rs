@@ -317,6 +317,13 @@ pub struct ViewerPanel {
     field_opacity: f32,
     /// Session-local transparency preview background.
     background_mode: ViewerBackgroundMode,
+    /// The selection the last overlay evaluation was requested for.
+    ///
+    /// Overlay targets are collected while the request is assembled, so a
+    /// selection change has to post a new one — and `observe_global` fires on
+    /// every `set_global`, including the re-publish a click on an already
+    /// selected node performs, so the request is posted on a real change only.
+    requested_selection: Option<(CanvasSelection, super::LayerSelection)>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -406,6 +413,7 @@ impl ViewerPanel {
             }) {
                 this.move_drag = None;
             }
+            this.request_overlay_eval(cx);
             cx.notify();
         });
 
@@ -438,6 +446,7 @@ impl ViewerPanel {
             }) {
                 this.cancel_handle_drag(cx);
             }
+            this.request_overlay_eval(cx);
             cx.notify();
         });
 
@@ -517,6 +526,7 @@ impl ViewerPanel {
             field_map: field::FieldColorMap::default(),
             field_opacity: field::DEFAULT_FIELD_OPACITY,
             background_mode: ViewerBackgroundMode::default(),
+            requested_selection: None,
             focus_handle,
             focus_subscriptions,
             viewer_sub,
@@ -1190,6 +1200,38 @@ impl ViewerPanel {
                 .project(cx)
                 .map(|project| project.read(cx).shared_registry()),
         }
+    }
+
+    /// Post a viewer evaluation when the selection changed.
+    ///
+    /// The overlays declare their evaluation targets while
+    /// [`ProjectState::build_viewer_request`] assembles the request, and
+    /// nothing else re-assembles one when only the selection moved: with the
+    /// playhead stopped and the document untouched, selecting another layer,
+    /// another network or another field node would leave the new target
+    /// unevaluated and the overlay blank until the next frame step.
+    ///
+    /// Called from the selection observers, never from `render()`, and it
+    /// rides the one existing request path rather than opening a second.
+    fn request_overlay_eval(&mut self, cx: &mut Context<Self>) {
+        let selection = (
+            cx.try_global::<CanvasSelection>()
+                .cloned()
+                .unwrap_or_default(),
+            super::layer_selection(cx),
+        );
+        if self.requested_selection.as_ref() == Some(&selection) {
+            return;
+        }
+        self.requested_selection = Some(selection);
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        // Nothing about the document changed, so the evaluator keeps every
+        // cached value and the new target is the only work this adds.
+        project.update(cx, |project, cx| {
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
     }
 
     fn comp_hit_radius(&self, pixels: f32) -> Option<f32> {
@@ -4762,6 +4804,92 @@ mod tests {
             }),
             0,
             "the polluted commit was removed rather than left in undo history"
+        );
+    }
+
+    /// With the playhead stopped and the document untouched, changing the
+    /// selection has to post a new viewer evaluation: the overlays declare
+    /// their targets while the request is assembled, so without this the new
+    /// selection's geometry or field is never evaluated and the overlay stays
+    /// blank until the next frame step.
+    ///
+    /// The signal is the overlay snapshot. These tests run without an
+    /// evaluation worker, and the no-worker branch of `request_viewer_eval` is
+    /// the only thing on this path that replaces the snapshot — so a cleared
+    /// snapshot means a request went out, and a surviving one means none did.
+    #[gpui::test]
+    fn changing_the_selection_while_stopped_posts_a_viewer_evaluation(cx: &mut TestAppContext) {
+        let (_window, project, comp_id, layers) = multi_layer_setup(cx);
+        let network = NetworkPath::layer(comp_id, layers[0]);
+        let node = project.read_with(cx, |project, _| {
+            ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the layer network")
+                .nodes()
+                .next()
+                .expect("a node to select")
+                .id
+        });
+        let snapshot_present = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.try_global::<overlay::OverlayResults>()
+                    .is_some_and(|results| !results.values.is_empty())
+            })
+        };
+        let select = |nodes: HashSet<NodeId>, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes,
+                });
+            });
+            cx.run_until_parked();
+        };
+
+        publish_geometry_results(&project, cx);
+        assert!(snapshot_present(cx), "the fixture publishes a snapshot");
+
+        // A real change: the request goes out.
+        select(HashSet::from([node]), cx);
+        assert!(
+            !snapshot_present(cx),
+            "changing the selection posted no evaluation, so the overlay would \
+             stay blank until the next frame step"
+        );
+
+        // Re-publishing the *same* selection — what a click on an already
+        // selected node does — must not post another request.
+        publish_geometry_results(&project, cx);
+        select(HashSet::from([node]), cx);
+        assert!(
+            snapshot_present(cx),
+            "an unchanged selection re-posted the evaluation"
+        );
+
+        // Clearing it is a change too: the overlay has to stop drawing the
+        // node that is no longer selected.
+        select(HashSet::new(), cx);
+        assert!(!snapshot_present(cx));
+    }
+
+    /// The layer selection drives the layer-level bboxes, so it posts the
+    /// request on the same rule.
+    #[gpui::test]
+    fn changing_the_layer_selection_while_stopped_posts_a_viewer_evaluation(
+        cx: &mut TestAppContext,
+    ) {
+        let (_window, project, _comp_id, layers) = multi_layer_setup(cx);
+        publish_geometry_results(&project, cx);
+
+        cx.update(|cx| crate::panels::set_layer_selection(vec![layers[1]], cx));
+        cx.run_until_parked();
+
+        let present = cx.update(|cx| {
+            cx.try_global::<overlay::OverlayResults>()
+                .is_some_and(|results| !results.values.is_empty())
+        });
+        assert!(
+            !present,
+            "changing the layer selection posted no evaluation"
         );
     }
 

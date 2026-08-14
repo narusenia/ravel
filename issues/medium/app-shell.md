@@ -304,38 +304,6 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 ---
 
-## MED-APP-21 | debt | Viewer の bbox が `type_key` の固定 match でパラメータから再構成される
-
-**該当**: `crates/ravel-app/src/panels/viewer.rs:2388-2423`, `:453`, `:527`
-
-`shape_node_bounds` はジオメトリを評価せず、`type_key` の match で
-パラメータ名を直読みして矩形を作る。
-
-```rust
-"shape.rect"    => (width * 0.5, height * 0.5)
-"shape.ellipse" => (radius_x, radius_y)
-"shape.polygon" => (radius, radius)
-"shape.star"    => (outer_radius, outer_radius)
-```
-
-帰結が 3 つ:
-
-1. shape ノードを追加するたびにこの match を編集しないと bbox が出ない
-   （`geometry-ops-plan.md` 単位 11 の `shape.line` / `shape.grid` が該当）
-2. `geometry.transform` や `scatter.*` を経た**実際の形状が反映されない**
-3. `docs/specifications/procedural-geometry.md` の設計原則 1
-   「固定機能のリピーターを作らない」に対する既存の例外
-
-ドラッグ経路（`:453`, `:527`）も同じ関数に依存している。
-
-**修正方針**: 評価済み Geometry から bbox を出す。設計と実装単位は
-`docs/implementation/viewer-overlay-manipulator-plan.md` 単位 3
-（`shape_node_bounds` の廃止を含む）。**推測値と実測値を並存させない** —
-並存させると評価前後で bbox が飛ぶ。
-
-**検証**: `type_key` を知らないノードで bbox が描かれるテスト。
-`geometry.transform` を経た形状の bbox が変換後になるテスト。
-
 ## MED-APP-29 | bug / debt | `layer.ref` のレイヤー指定が数値スクラブで、参照ポートを変えても出力型が変わらない
 
 **該当**: `crates/ravel-core/src/registry/builtin.rs:529-540`（`layer_ref`）
@@ -402,7 +370,5 @@ let names = match components.len() {
 **検証**: 色として宣言されていない `Channel3` のキーフレーム行が
 `X` / `Y` / `Z` になるテスト。`constant.color` が従来どおり `R` / `G` / `B` /
 `A` のままであるテスト。
-
----
 
 ---

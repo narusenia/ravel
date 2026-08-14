@@ -747,3 +747,48 @@ GUI で調整した設定がそのまま効くという期待も裏切る。
 **検証**: ドラッグ中に対象パラメータを driven 化し、(1) undo ステップが 1 つ
 記録される、(2) 再構築が延期されずに走る、を落とすテスト。
 
+---
+
+## MED-APP-21 | debt | Viewer の bbox が `type_key` の固定 match でパラメータから再構成される
+
+**該当**: `crates/ravel-app/src/panels/viewer.rs:2388-2423`, `:453`, `:527`
+
+`shape_node_bounds` はジオメトリを評価せず、`type_key` の match で
+パラメータ名を直読みして矩形を作る。
+
+```rust
+"shape.rect"    => (width * 0.5, height * 0.5)
+"shape.ellipse" => (radius_x, radius_y)
+"shape.polygon" => (radius, radius)
+"shape.star"    => (outer_radius, outer_radius)
+```
+
+帰結が 3 つ:
+
+1. shape ノードを追加するたびにこの match を編集しないと bbox が出ない
+   （`geometry-ops-plan.md` 単位 11 の `shape.line` / `shape.grid` が該当）
+2. `geometry.transform` や `scatter.*` を経た**実際の形状が反映されない**
+3. `docs/specifications/procedural-geometry.md` の設計原則 1
+   「固定機能のリピーターを作らない」に対する既存の例外
+
+ドラッグ経路（`:453`, `:527`）も同じ関数に依存している。
+
+**修正方針**: 評価済み Geometry から bbox を出す。設計と実装単位は
+`docs/implementation/viewer-overlay-manipulator-plan.md` 単位 3
+（`shape_node_bounds` の廃止を含む）。**推測値と実測値を並存させない** —
+並存させると評価前後で bbox が飛ぶ。
+
+**検証**: `type_key` を知らないノードで bbox が描かれるテスト。
+`geometry.transform` を経た形状の bbox が変換後になるテスト。
+
+> **解決済み**: `viewer-overlay-manipulator-plan.md` 単位 3。`shape_node_bounds` を
+> 削除し、bbox・点・パス・クリック判定・レイヤードラッグのすべてを**評価済み
+> Geometry** から引くようにした（`crates/ravel-app/src/panels/viewer/geometry.rs`）。
+> 対象ノードの評価は `EvalRequest::scoped` に載せてコンプ要求と同じ
+> `Evaluator` から引くので、シェル評価が既に走らせたノードはキャッシュヒットになる。
+>
+> **推測値と実測値は並存しない**: 結果が未着なら描かず、クリックも当たらない。
+> `type_key` を知らないノードで bbox が出ること、`geometry.transform` 後の
+> bbox が変換後になること、`scatter.*` の全インスタンスが点として描かれることを
+> それぞれテストで固定した。
+

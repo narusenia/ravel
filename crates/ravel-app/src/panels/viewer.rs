@@ -3110,20 +3110,35 @@ fn union_rect(a: CompRect, b: CompRect) -> CompRect {
 /// transform stays terminal; `geometry.transform` produces geometry, so the
 /// rect it consumes drops out.
 fn terminal_geometry_nodes(graph: &Graph) -> Vec<NodeId> {
+    let geometry = ravel_core::id::DataTypeId::GEOMETRY;
     let produces_geometry = |id: NodeId| {
-        graph.node(id).is_some_and(|node| {
-            node.outputs
-                .iter()
-                .any(|port| port.data_type == ravel_core::id::DataTypeId::GEOMETRY)
-        })
+        graph
+            .node(id)
+            .is_some_and(|node| node.outputs.iter().any(|port| port.data_type == geometry))
+    };
+    // Which port an edge leaves by, not merely which node. A multi-output node
+    // whose *other* port feeds a geometry operator — a scalar driving a
+    // `geometry.transform` parameter, say — still places its own geometry, and
+    // ignoring the port index dropped it from the layer's bbox entirely.
+    //
+    // A port index the node does not declare reads as no port at all, the same
+    // boundary `PortRecord::extract` draws: an edge left over from an earlier
+    // interface must not resolve to a neighbouring port's type.
+    let leaves_a_geometry_port = |edge: &ravel_core::graph::Edge| {
+        graph
+            .node(edge.source)
+            .and_then(|node| node.outputs.get(edge.source_port.0 as usize))
+            .is_some_and(|port| port.data_type == geometry)
     };
     graph
         .nodes()
         .filter(|node| produces_geometry(node.id))
         .filter(|node| {
-            !graph
-                .edges()
-                .any(|edge| edge.source == node.id && produces_geometry(edge.target))
+            !graph.edges().any(|edge| {
+                edge.source == node.id
+                    && leaves_a_geometry_port(edge)
+                    && produces_geometry(edge.target)
+            })
         })
         .map(|node| node.id)
         .collect()
@@ -3920,6 +3935,60 @@ mod tests {
             (350.0, 100.0),
             "the bbox spanned the chain instead of its result: {rect:?}"
         );
+    }
+
+    /// A multi-output node whose non-geometry port feeds a geometry operator
+    /// still places its own geometry: it is the *port* the edge leaves by that
+    /// says whether the geometry was consumed, not the node.
+    #[test]
+    fn a_multi_output_node_stays_terminal_when_only_its_other_port_is_wired() {
+        use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
+
+        // Port 0 geometry, port 1 a scalar that drives the transform.
+        let source = shape_node("test.shape_and_scalar", &[])
+            .with_output("geometry", DataTypeId::GEOMETRY)
+            .with_output("amount", DataTypeId::SCALAR);
+        let source_id = source.id;
+        let transform = shape_node("geometry.transform", &[])
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("amount", &[DataTypeId::SCALAR])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        let transform_id = transform.id;
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(transform)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                // The **scalar** port, not the geometry one.
+                OutputPortIndex(1),
+                transform_id,
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut terminal = terminal_geometry_nodes(&graph);
+        terminal.sort_by_key(|id| id.raw());
+        let mut expected = vec![source_id, transform_id];
+        expected.sort_by_key(|id| id.raw());
+        assert_eq!(
+            terminal, expected,
+            "the source's geometry is unconsumed, so it is terminal too"
+        );
+
+        // Wiring the geometry port as well does drop it.
+        let wired = graph
+            .add_edge(
+                EdgeId::next(),
+                source_id,
+                OutputPortIndex(0),
+                transform_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_geometry_nodes(&wired), vec![transform_id]);
     }
 
     /// The selection's rects come out in selection order, skipping layers with

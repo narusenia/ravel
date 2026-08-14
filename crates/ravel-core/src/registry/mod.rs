@@ -72,25 +72,23 @@ impl ParamRange {
 /// `Channel3`); the canvas is two-dimensional, so a `Channel3` is driven by
 /// its X and Y and keeps its Z.
 ///
-/// [`Size`], [`Direction`] and [`Angle`] are measured from the node's
-/// [`Position`] parameter — the first one it declares — or from the local
-/// origin when it declares none.
+/// [`Size`] is measured from the node's [`Position`] parameter — the first one
+/// it declares — or from the local origin when it declares none.
+///
+/// Only the roles the manipulator actually draws a handle for live here. A
+/// direction (which needs a display length) and an angle (which needs a pivot
+/// convention) arrive with the unit that draws them: a declared role that
+/// silently does nothing is the trap `style-attributes-plan.md` declined for
+/// `stroke_align`.
 ///
 /// [`Position`]: ParamRole::Position
 /// [`Size`]: ParamRole::Size
-/// [`Direction`]: ParamRole::Direction
-/// [`Angle`]: ParamRole::Angle
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamRole {
     /// A point in the node's local space (`shape.rect`'s `center`).
     Position,
     /// An offset from the position: a radius, a half extent.
     Size,
-    /// A direction from the position. Its length carries no meaning, so a
-    /// handle for it is drawn at a fixed distance.
-    Direction,
-    /// An angle in degrees about the position.
-    Angle,
 }
 
 #[derive(Clone, Debug)]

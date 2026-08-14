@@ -1115,17 +1115,32 @@ const ARROW_COMP_FRACTION: f32 = 0.15;
 ///
 /// Derived from the name, not from the group's position in a list, so a group
 /// keeps its colour when another one appears beside it or when the same group
-/// exists on both drawn domains. The hue comes off a small FNV-1a hash: any
-/// spread would do, and this one needs no table to maintain.
+/// exists on both drawn domains, and no table has to be maintained.
+///
+/// **Three axes, not one.** Telling groups apart is the whole point of colouring
+/// them, so two names sharing a colour defeats the feature — and hue alone has
+/// only 360 buckets. Distinct colours produced, measured rather than assumed:
+///
+/// | group names | hue only | hue + saturation + lightness |
+/// |---|---|---|
+/// | 26 (single letters) | 26 | 26 |
+/// | 100 (`g0`…`g99`) | 92 | 100 |
+/// | 500 (`g0`…`g499`) | 258 | 500 |
+///
+/// A splitmix finalizer over the hash was measured too and bought nothing at any
+/// plausible group count (it only separates 994 of 1000 names against 984), so it
+/// is not carried.
 fn group_color(name: &str) -> Hsla {
-    let mut hash: u32 = 2_166_136_261;
+    let mut hash: u64 = 14_695_981_039_346_656_037;
     for byte in name.as_bytes() {
-        hash = (hash ^ u32::from(*byte)).wrapping_mul(16_777_619);
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211);
     }
     Hsla {
-        h: (hash % 360) as f32 / 360.0,
-        s: 0.85,
-        l: 0.62,
+        h: (hash % 720) as f32 / 720.0,
+        // Kept inside a legible band: every combination has to read as a mark
+        // over both the composition and the point cloud around it.
+        s: 0.55 + ((hash >> 32) & 0x7) as f32 * 0.05,
+        l: 0.45 + ((hash >> 40) & 0x7) as f32 * 0.04,
         a: 0.9,
     }
 }
@@ -2761,6 +2776,34 @@ mod tests {
         assert_eq!(grouped[1], group_color("tail"));
         assert_ne!(grouped[0], grouped[1], "both groups read as one colour");
         assert!(grouped.iter().all(|color| *color != GEOMETRY_MARK_COLOR));
+    }
+
+    /// Two different group names have to read as two colours — that is the whole
+    /// point of colouring them.
+    ///
+    /// A hue-only hash has 360 buckets and separated only 258 of these 500
+    /// names, `g0` and `g413` among the collisions, so the spread is pinned here
+    /// rather than assumed: **495** of 500 is out of reach for any scheme that
+    /// varies hue alone, and the current one reaches 500.
+    #[test]
+    fn group_colours_stay_distinct_across_many_names() {
+        let key = |color: Hsla| (color.h.to_bits(), color.s.to_bits(), color.l.to_bits());
+        assert_ne!(
+            key(group_color("g0")),
+            key(group_color("g413")),
+            "the pair that collided under a hue-only hash still does"
+        );
+        let colors: std::collections::HashSet<_> = (0..500)
+            .map(|i| key(group_color(&format!("g{i}"))))
+            .collect();
+        assert!(
+            colors.len() >= 495,
+            "500 group names produced only {} colours",
+            colors.len()
+        );
+        // Deterministic: the same name is the same colour every time, which is
+        // what makes a group keep its colour across domains and selections.
+        assert_eq!(key(group_color("head")), key(group_color("head")));
     }
 
     // -----------------------------------------------------------------------

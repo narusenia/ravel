@@ -33,6 +33,7 @@ use gpui::{Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, poin
 use ravel_core::composition::Document;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::{EvalContext, PathSegment};
+use ravel_core::geometry::{Domain, Geometry};
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::registry::{NodeRegistry, ParamRange, ParamRole};
@@ -73,6 +74,12 @@ pub mod priority {
     /// Above both bboxes and below the path handles: a path point drawn on
     /// top of a shell handle is the more specific thing to grab.
     pub const SHELL_MANIPULATOR: i32 = 35;
+    /// Above the shell: a position key landing on the bbox's move grip — or on
+    /// the anchor marker, which sits exactly on the key whenever the playhead is
+    /// on one — is the more specific thing to grab. The grip and the anchor act
+    /// on the layer as a whole; the key acts on one frame of its trajectory and
+    /// keeps the channel keyed.
+    pub const MOTION_PATH: i32 = 36;
     /// Above the shell: with a node selected, the parameter under the pointer
     /// is the more specific thing to grab — a node's own centre and the bbox's
     /// move grip land on the same point.
@@ -165,6 +172,15 @@ pub struct OverlayContext {
     pub show_geometry_points: bool,
     /// Path primitives of the evaluated geometry.
     pub show_geometry_paths: bool,
+    /// The geometry attribute drawn as arrows, or `None` for none. A name
+    /// rather than a mode: the overlay names no attribute of its own, so a
+    /// `velocity` a simulation writes and a `N` a 3D node writes take the same
+    /// path (`particle-plan.md` adds no drawing code of its own).
+    pub geometry_arrow_attr: Option<SharedString>,
+    /// Element index labels on the drawn geometry marks.
+    pub show_geometry_indices: bool,
+    /// Colour the geometry marks by the group (`Bool` attribute) they are in.
+    pub show_geometry_groups: bool,
     /// What the field overlay draws, if anything.
     pub field_display: super::field::FieldDisplay,
     pub field_map: super::field::FieldColorMap,
@@ -479,9 +495,8 @@ pub fn paint_primitives(primitives: &[OverlayPrimitive], window: &mut Window) {
 // Labels
 // ===========================================================================
 
-/// Where a screen-space label sits. Unit 8's element index labels extend this
-/// with composition-anchored placements.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a screen-space label sits.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LabelPlacement {
     /// Centered over the whole viewer canvas area.
     CanvasCenter,
@@ -489,6 +504,11 @@ pub enum LabelPlacement {
     /// a fixed corner never lands under the pointer or under the handles the
     /// gesture is moving.
     CanvasTopLeft,
+    /// Anchored at a composition point, so the text travels with the element
+    /// it annotates under pan and zoom. The panel converts through the same
+    /// viewport the pointer is resolved with; a label outside the canvas is
+    /// simply off-screen.
+    Comp((f32, f32)),
 }
 
 /// Screen-space text produced by an overlay.
@@ -514,6 +534,9 @@ pub enum OverlayHandleId {
     /// A parameter handle of the selected node, indexed into the order
     /// [`ParamManipulator`] resolves its marks in.
     Param(u8),
+    /// A `position` key of the motion path, identified by the layer-local frame
+    /// it sits on — the frame the drag writes.
+    MotionKey(u64),
     #[cfg(test)]
     Test(u8),
 }
@@ -545,6 +568,14 @@ impl OverlayHandleId {
     pub fn param(self) -> Option<u8> {
         match self {
             Self::Param(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// The layer-local frame, when this handle is a motion path key.
+    pub fn motion_key(self) -> Option<u64> {
+        match self {
+            Self::MotionKey(frame) => Some(frame),
             _ => None,
         }
     }
@@ -819,6 +850,7 @@ impl OverlayRegistry {
             }),
             Box::new(super::field::FieldOverlay),
             Box::new(ShellManipulator),
+            Box::new(super::motion_path::MotionPathOverlay),
             Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
             Box::new(EvalErrorOverlay),
@@ -1042,7 +1074,12 @@ pub fn selection_handle_centers(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 
 
 /// A handle mark: an outer square in `color` with a light core, so it reads
 /// against both the composition and the outline it sits on.
-fn paint_handle_mark(painter: &mut OverlayPainter, center: (f32, f32), size_px: f32, color: Hsla) {
+pub(super) fn paint_handle_mark(
+    painter: &mut OverlayPainter,
+    center: (f32, f32),
+    size_px: f32,
+    color: Hsla,
+) {
     painter.screen_square_at(center, size_px, color);
     painter.screen_square_at(center, size_px - 2.0, HANDLE_FILL);
 }
@@ -1058,6 +1095,55 @@ const GEOMETRY_MARK_COLOR: Hsla = Hsla {
     l: 0.62,
     a: 0.9,
 };
+
+/// Attribute arrows: cool where the point marks are warm, so an arrow reads as
+/// a separate thing from the element it leaves.
+const ARROW_COLOR: Hsla = Hsla {
+    h: 0.45,
+    s: 0.85,
+    l: 0.62,
+    a: 0.95,
+};
+
+/// Longest attribute arrow drawn, as a fraction of the composition's shorter
+/// side. A cap in composition units rather than in the geometry's own bounds:
+/// a single particle has no extent to measure an arrow against, and its
+/// velocity still has to be visible.
+const ARROW_COMP_FRACTION: f32 = 0.15;
+
+/// The colour of the group named `name`.
+///
+/// Derived from the name, not from the group's position in a list, so a group
+/// keeps its colour when another one appears beside it or when the same group
+/// exists on both drawn domains, and no table has to be maintained.
+///
+/// **Three axes, not one.** Telling groups apart is the whole point of colouring
+/// them, so two names sharing a colour defeats the feature — and hue alone has
+/// only 360 buckets. Distinct colours produced, measured rather than assumed:
+///
+/// | group names | hue only | hue + saturation + lightness |
+/// |---|---|---|
+/// | 26 (single letters) | 26 | 26 |
+/// | 100 (`g0`…`g99`) | 92 | 100 |
+/// | 500 (`g0`…`g499`) | 258 | 500 |
+///
+/// A splitmix finalizer over the hash was measured too and bought nothing at any
+/// plausible group count (it only separates 994 of 1000 names against 984), so it
+/// is not carried.
+fn group_color(name: &str) -> Hsla {
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    for byte in name.as_bytes() {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211);
+    }
+    Hsla {
+        h: (hash % 720) as f32 / 720.0,
+        // Kept inside a legible band: every combination has to read as a mark
+        // over both the composition and the point cloud around it.
+        s: 0.55 + ((hash >> 32) & 0x7) as f32 * 0.05,
+        l: 0.45 + ((hash >> 40) & 0x7) as f32 * 0.04,
+        a: 0.9,
+    }
+}
 
 /// Draws what the evaluator produced for the selection: the bounding box, the
 /// point and instance positions, and the path primitives — each behind its own
@@ -1146,6 +1232,30 @@ impl GeometryOverlay {
         }
     }
 
+    /// Run `draw` over every drawn geometry with the compositing matrix that
+    /// places it on the canvas.
+    ///
+    /// One traversal for `paint` and `labels` alike: the index labels have to
+    /// land on the marks the point pass drew, and two walks of "which geometry,
+    /// placed how" is how they would stop agreeing.
+    fn for_each_geometry(&self, ctx: &OverlayContext, mut draw: impl FnMut(&Affine, &Geometry)) {
+        let Some(document) = ctx.document.as_ref() else {
+            return;
+        };
+        for (network, node) in self.drawn_nodes(ctx) {
+            let Some(shell) = super::layer_shell(ctx, document, network.comp, network.layer) else {
+                continue;
+            };
+            let Some(value) = super::geometry::evaluated_geometry(ctx, &network, node) else {
+                continue;
+            };
+            let Some(geometry) = super::geometry::as_geometry(&value) else {
+                continue;
+            };
+            draw(&shell, geometry);
+        }
+    }
+
     fn rects(&self, ctx: &OverlayContext) -> Vec<CompRect> {
         if ctx.resolved().is_none() {
             return Vec::new();
@@ -1212,27 +1322,16 @@ impl ViewerOverlay for GeometryOverlay {
                 }
             }
         }
-        if !ctx.show_geometry_points && !ctx.show_geometry_paths {
+        let arrows = ctx.geometry_arrow_attr.clone();
+        if !ctx.show_geometry_points && !ctx.show_geometry_paths && arrows.is_none() {
             return;
         }
-        for (network, node) in self.drawn_nodes(ctx) {
-            let Some(shell) = super::layer_shell(
-                ctx,
-                match ctx.document.as_ref() {
-                    Some(document) => document,
-                    None => return,
-                },
-                network.comp,
-                network.layer,
-            ) else {
-                continue;
-            };
-            let Some(value) = super::geometry::evaluated_geometry(ctx, &network, node) else {
-                continue;
-            };
-            let Some(geometry) = super::geometry::as_geometry(&value) else {
-                continue;
-            };
+        // The arrow cap is in composition units, so it does not change with
+        // zoom: an arrow is a reading of the attribute, and a value that
+        // stretched further the closer you looked would not be one.
+        let (width, height) = painter.resolution();
+        let reach = width.min(height) as f32 * ARROW_COMP_FRACTION;
+        self.for_each_geometry(ctx, |shell, geometry| {
             let place = |point: (f32, f32)| shell.apply(point.0, point.1);
             if ctx.show_geometry_paths {
                 for (points, closed) in super::geometry::geometry_paths(geometry) {
@@ -1240,13 +1339,83 @@ impl ViewerOverlay for GeometryOverlay {
                     painter.stroke_comp_polyline(&points, closed, 1.0, GEOMETRY_MARK_COLOR);
                 }
             }
+            if !ctx.show_geometry_points && arrows.is_none() {
+                return;
+            }
+            let marks = super::geometry::geometry_marks(geometry);
             if ctx.show_geometry_points {
-                for point in super::geometry::geometry_points(geometry) {
-                    painter.screen_square_at(place(point), GEOMETRY_POINT_PX, GEOMETRY_MARK_COLOR);
+                for domain in [Domain::Point, Domain::Instance] {
+                    // Resolved once per domain rather than once per mark: the
+                    // group columns are the same for every element of it.
+                    let groups = if ctx.show_geometry_groups {
+                        super::geometry::group_columns(geometry, domain)
+                    } else {
+                        Vec::new()
+                    };
+                    for mark in marks.iter().filter(|mark| mark.domain == domain) {
+                        let color = super::geometry::mark_group(&groups, mark.index)
+                            .map_or(GEOMETRY_MARK_COLOR, group_color);
+                        painter.screen_square_at(place(mark.position), GEOMETRY_POINT_PX, color);
+                    }
                 }
             }
-        }
+            if let Some(name) = arrows.as_ref() {
+                for (tail, tip) in
+                    super::geometry::attribute_arrows(geometry, &marks, name.as_ref(), reach)
+                {
+                    // Both ends through the shell, so an arrow on a rotated or
+                    // scaled layer points where the geometry under it does.
+                    painter.stroke_comp_polyline(
+                        &[place(tail), place(tip)],
+                        false,
+                        1.0,
+                        ARROW_COLOR,
+                    );
+                    painter.screen_square_at(place(tip), GEOMETRY_POINT_PX, ARROW_COLOR);
+                }
+            }
+        });
     }
+
+    /// The element index of each drawn mark, anchored in composition space.
+    ///
+    /// Thinned to [`MAX_DRAWN_LABELS`](super::geometry::MAX_DRAWN_LABELS): a
+    /// number per element of a scatter is an unreadable block of text and one
+    /// GPUI element each.
+    fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
+        if !ctx.show_geometry_indices {
+            return Vec::new();
+        }
+        let mut labels = Vec::new();
+        self.for_each_geometry(ctx, |shell, geometry| {
+            for mark in super::geometry::label_marks(&super::geometry::geometry_marks(geometry)) {
+                labels.push(OverlayLabel {
+                    text: SharedString::from(mark.index.to_string()),
+                    color: GEOMETRY_MARK_COLOR,
+                    placement: LabelPlacement::Comp(shell.apply(mark.position.0, mark.position.1)),
+                });
+            }
+        });
+        labels
+    }
+}
+
+/// Every planar-vector attribute the geometry overlays currently draw, for the
+/// toolbar's arrow picker.
+///
+/// Read off the evaluated geometry rather than from a fixed list of reserved
+/// names, so a `velocity` a simulation writes and an attribute a user invented
+/// are equally pickable.
+pub fn drawn_vector_attributes(ctx: &OverlayContext) -> Vec<String> {
+    let mut names = Vec::new();
+    for scope in [BboxScope::Node, BboxScope::Layer] {
+        GeometryOverlay { scope }.for_each_geometry(ctx, |_, geometry| {
+            names.extend(super::geometry::vector_attribute_names(geometry));
+        });
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The editable path of a selected `shape.custom_path` node: the flattened
@@ -2233,6 +2402,9 @@ mod tests {
             show_geometry_bounds: true,
             show_geometry_points: false,
             show_geometry_paths: false,
+            geometry_arrow_attr: None,
+            show_geometry_indices: false,
+            show_geometry_groups: false,
             field_display: crate::panels::viewer::field::FieldDisplay::default(),
             field_map: crate::panels::viewer::field::FieldColorMap::default(),
             field_opacity: crate::panels::viewer::field::DEFAULT_FIELD_OPACITY,
@@ -2391,6 +2563,247 @@ mod tests {
             nodes: std::collections::HashSet::from([node_id]),
         });
         (ctx, node_id, comp_id, layer_id)
+    }
+
+    /// The fixture's node standing for `geometry`, so a test can drive a
+    /// geometry the stub generator does not produce — one carrying the
+    /// attribute columns unit 8 draws.
+    fn ctx_with_geometry(
+        geometry: ravel_core::geometry::Geometry,
+    ) -> (OverlayContext, CompId, LayerId) {
+        let (mut ctx, node, comp, layer) = doc_with_node(rect_node((100.0, 200.0)));
+        ctx.results = OverlayResults::new(HashMap::from([(
+            (NetworkPath::layer(comp, layer).segments(), node),
+            Arc::new(geometry) as Arc<dyn NodeData>,
+        )]));
+        // The bbox is another overlay's business; these tests read the marks.
+        ctx.show_geometry_bounds = false;
+        (ctx, comp, layer)
+    }
+
+    /// Two points carrying a `velocity` column and two groups.
+    fn attributed_points() -> ravel_core::geometry::Geometry {
+        use ravel_core::geometry::AttributeArray;
+        let mut geometry =
+            ravel_core::geometry::Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert(
+                "velocity",
+                AttributeArray::Vec2(vec![Vec2(3.0, 4.0), Vec2(-6.0, 8.0)]),
+            )
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert("head", AttributeArray::Bool(vec![true, false]))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert("tail", AttributeArray::Bool(vec![false, true]))
+            .unwrap();
+        geometry
+    }
+
+    /// The polyline vertices of every stroke, back in composition space — the
+    /// coordinates the assertions are written in. Reads the zoom and offset off
+    /// the same [`painter`] fixture the primitives were drawn with.
+    fn stroke_polylines(primitives: &[OverlayPrimitive]) -> Vec<Vec<(f32, f32)>> {
+        let painter = painter();
+        let (zoom_x, zoom_y) = painter.zoom();
+        let origin = painter.frame().origin;
+        primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                OverlayPrimitive::Stroke { points, .. } => Some(
+                    points
+                        .iter()
+                        .map(|p| {
+                            (
+                                (f32::from(p.x) - f32::from(origin.x)) / zoom_x,
+                                (f32::from(p.y) - f32::from(origin.y)) / zoom_y,
+                            )
+                        })
+                        .collect(),
+                ),
+                OverlayPrimitive::Quad { .. } => None,
+            })
+            .collect()
+    }
+
+    fn close_point(actual: (f32, f32), expected: (f32, f32), what: &str) {
+        assert!(
+            (actual.0 - expected.0).abs() < 0.05 && (actual.1 - expected.1).abs() < 0.05,
+            "{what}: {actual:?} != {expected:?}"
+        );
+    }
+
+    /// What `overlay` paints onto the shared [`painter`] fixture.
+    fn painted(overlay: &dyn ViewerOverlay, ctx: &OverlayContext) -> Vec<OverlayPrimitive> {
+        let mut painter = painter();
+        overlay.paint(ctx, &mut painter);
+        painter.finish()
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit 8: the geometry attributes drawn in place
+    // -----------------------------------------------------------------------
+
+    /// Completion criteria: the picked `Vec2` attribute is drawn as arrows with
+    /// its own direction and length, an attribute the geometry does not carry
+    /// draws nothing, and the display is a toggle.
+    #[test]
+    fn attribute_arrows_are_drawn_for_the_picked_attribute_only() {
+        let (mut ctx, ..) = ctx_with_geometry(attributed_points());
+        let overlay = GeometryOverlay {
+            scope: BboxScope::Node,
+        };
+        assert!(overlay.is_active(&ctx));
+
+        // Off by default: the toggle is what turns the arrows on.
+        assert!(
+            painted(&overlay, &ctx).is_empty(),
+            "something was drawn with every attribute toggle off"
+        );
+
+        ctx.geometry_arrow_attr = Some("velocity".into());
+        let arrows = stroke_polylines(&painted(&overlay, &ctx));
+        assert_eq!(arrows.len(), 2, "one arrow per element: {arrows:?}");
+        close_point(arrows[0][0], (0.0, 0.0), "first tail");
+        close_point(arrows[0][1], (3.0, 4.0), "first tip");
+        close_point(arrows[1][0], (10.0, 0.0), "second tail");
+        close_point(arrows[1][1], (4.0, 8.0), "second tip");
+
+        // An attribute this geometry does not carry draws nothing at all.
+        ctx.geometry_arrow_attr = Some("force".into());
+        assert!(
+            painted(&overlay, &ctx).is_empty(),
+            "an absent attribute still drew something"
+        );
+    }
+
+    /// Both ends of an arrow go through the layer's compositing matrix, so an
+    /// arrow on a rotated, non-uniformly scaled layer points where the geometry
+    /// under it does.
+    #[test]
+    fn a_transformed_shell_carries_both_ends_of_an_arrow() {
+        let (ctx, comp, layer) = ctx_with_geometry(attributed_points());
+        let mut ctx = with_own_transform(&ctx, comp, layer);
+        ctx.geometry_arrow_attr = Some("velocity".into());
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+
+        let arrows = stroke_polylines(&painted(
+            &GeometryOverlay {
+                scope: BboxScope::Node,
+            },
+            &ctx,
+        ));
+        assert_eq!(arrows.len(), 2);
+        close_point(arrows[0][0], world.apply(0.0, 0.0), "placed tail");
+        close_point(arrows[0][1], world.apply(3.0, 4.0), "placed tip");
+    }
+
+    /// Completion criteria: the index labels are a toggle, they sit on the
+    /// marks they name, and past the cap they are thinned.
+    #[test]
+    fn index_labels_ride_the_toggle_and_land_on_their_marks() {
+        let (base, comp, layer) = ctx_with_geometry(attributed_points());
+        let overlay = GeometryOverlay {
+            scope: BboxScope::Node,
+        };
+        assert!(overlay.labels(&base).is_empty(), "labels drew while off");
+
+        // A layer with a transform of its own, so a label that skipped the
+        // compositing matrix lands somewhere else than the mark it names.
+        let mut ctx = with_own_transform(&base, comp, layer);
+        ctx.show_geometry_indices = true;
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let labels = overlay.labels(&ctx);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].text.as_ref(), "0");
+        assert_eq!(labels[1].text.as_ref(), "1");
+        assert_eq!(
+            labels[0].placement,
+            LabelPlacement::Comp(world.apply(0.0, 0.0))
+        );
+        assert_eq!(
+            labels[1].placement,
+            LabelPlacement::Comp(world.apply(10.0, 0.0))
+        );
+
+        // Past the cap the labels thin out rather than pile up.
+        let cloud = ravel_core::geometry::Geometry::from_points(
+            (0..crate::panels::viewer::geometry::MAX_DRAWN_LABELS * 4)
+                .map(|i| Vec2(i as f32, 0.0))
+                .collect::<Vec<_>>(),
+        );
+        let (mut ctx, ..) = ctx_with_geometry(cloud);
+        ctx.show_geometry_indices = true;
+        let labels = overlay.labels(&ctx);
+        assert!(
+            labels.len() <= crate::panels::viewer::geometry::MAX_DRAWN_LABELS,
+            "{} labels for one geometry",
+            labels.len()
+        );
+    }
+
+    /// Group colouring is a toggle, and a group's colour comes from its name so
+    /// two groups never read as one.
+    #[test]
+    fn group_colours_ride_the_toggle() {
+        let (mut ctx, ..) = ctx_with_geometry(attributed_points());
+        ctx.show_geometry_points = true;
+        let overlay = GeometryOverlay {
+            scope: BboxScope::Node,
+        };
+
+        let plain: Vec<_> = quads(&painted(&overlay, &ctx))
+            .into_iter()
+            .map(|(_, color)| color)
+            .collect();
+        assert_eq!(plain.len(), 2);
+        assert!(
+            plain.iter().all(|color| *color == GEOMETRY_MARK_COLOR),
+            "the marks were coloured with the toggle off"
+        );
+
+        ctx.show_geometry_groups = true;
+        let grouped: Vec<_> = quads(&painted(&overlay, &ctx))
+            .into_iter()
+            .map(|(_, color)| color)
+            .collect();
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0], group_color("head"));
+        assert_eq!(grouped[1], group_color("tail"));
+        assert_ne!(grouped[0], grouped[1], "both groups read as one colour");
+        assert!(grouped.iter().all(|color| *color != GEOMETRY_MARK_COLOR));
+    }
+
+    /// Two different group names have to read as two colours — that is the whole
+    /// point of colouring them.
+    ///
+    /// A hue-only hash has 360 buckets and separated only 258 of these 500
+    /// names, `g0` and `g413` among the collisions, so the spread is pinned here
+    /// rather than assumed: **495** of 500 is out of reach for any scheme that
+    /// varies hue alone, and the current one reaches 500.
+    #[test]
+    fn group_colours_stay_distinct_across_many_names() {
+        let key = |color: Hsla| (color.h.to_bits(), color.s.to_bits(), color.l.to_bits());
+        assert_ne!(
+            key(group_color("g0")),
+            key(group_color("g413")),
+            "the pair that collided under a hue-only hash still does"
+        );
+        let colors: std::collections::HashSet<_> = (0..500)
+            .map(|i| key(group_color(&format!("g{i}"))))
+            .collect();
+        assert!(
+            colors.len() >= 495,
+            "500 group names produced only {} colours",
+            colors.len()
+        );
+        // Deterministic: the same name is the same colour every time, which is
+        // what makes a group keep its colour across domains and selections.
+        assert_eq!(key(group_color("head")), key(group_color("head")));
     }
 
     // -----------------------------------------------------------------------

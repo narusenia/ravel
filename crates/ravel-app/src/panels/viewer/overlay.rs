@@ -2748,10 +2748,87 @@ mod tests {
     }
 
     fn close(actual: f32, expected: f32, what: &str) {
+        close_within(actual, expected, 1e-3, what);
+    }
+
+    /// `close` with an explicit tolerance: coordinates that have been through a
+    /// scaled parent chain and back carry more float error than a raw channel.
+    fn close_within(actual: f32, expected: f32, tolerance: f32, what: &str) {
         assert!(
-            (actual - expected).abs() < 1e-3,
+            (actual - expected).abs() < tolerance,
             "{what}: {actual} != {expected}"
         );
+    }
+
+    /// The same context reading a different document.
+    fn with_document(ctx: &OverlayContext, document: Document) -> OverlayContext {
+        let mut ctx = ctx.clone();
+        ctx.document = Some(document);
+        ctx
+    }
+
+    /// Give the fixture's layer a transform of its own, so `world` and
+    /// `parent` stop being the same map. Without this a manipulator that
+    /// confuses layer-local space with parent space still passes every
+    /// parented test.
+    fn with_own_transform(ctx: &OverlayContext, comp: CompId, layer: LayerId) -> OverlayContext {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.anchor_point = [
+                    AnimationChannel::constant(10.0),
+                    AnimationChannel::constant(20.0),
+                ];
+                layer.transform.position = [
+                    AnimationChannel::constant(50.0),
+                    AnimationChannel::constant(60.0),
+                ];
+                layer.transform.scale = [
+                    AnimationChannel::constant(2.0),
+                    AnimationChannel::constant(3.0),
+                ];
+                layer.transform.rotation = AnimationChannel::constant(30.0);
+            },
+        )
+        .unwrap();
+        with_document(ctx, document)
+    }
+
+    /// The fixture's layer parented to a fresh layer carrying `position`,
+    /// `scale` and `rotation` — the knobs that decide whether the manipulator
+    /// really goes through the parent chain or just happens to agree with it.
+    fn parented_context(
+        ctx: &OverlayContext,
+        comp: CompId,
+        layer: LayerId,
+        position: (f32, f32),
+        scale: (f32, f32),
+        rotation: f32,
+    ) -> OverlayContext {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let parent_id = LayerId::next();
+        let mut parent = Layer::new(parent_id, "Parent", Graph::new()).with_time(0, 0, 300);
+        parent.transform.position = [
+            AnimationChannel::constant(position.0),
+            AnimationChannel::constant(position.1),
+        ];
+        parent.transform.scale = [
+            AnimationChannel::constant(scale.0),
+            AnimationChannel::constant(scale.1),
+        ];
+        parent.transform.rotation = AnimationChannel::constant(rotation);
+        let document =
+            ravel_ui::document::add_layer(ctx.document.as_ref().unwrap(), comp, parent).unwrap();
+        let document = ravel_ui::document::update_layer(&document, comp, layer, |layer| {
+            layer.parent = Some(parent_id)
+        })
+        .unwrap();
+        with_document(ctx, document)
     }
 
     fn world_of(document: &Document, comp: CompId, layer: LayerId) -> Affine {
@@ -2996,29 +3073,10 @@ mod tests {
 
     #[test]
     fn a_parented_layer_is_manipulated_through_its_parents_transform() {
-        use ravel_core::animation::channel::AnimationChannel;
-
-        let (mut ctx, comp, layer) = shell_context();
-        let parent_id = LayerId::next();
-        ctx.document = {
-            // A parent that both moves and scales: identity-blind code passes
-            // a translation-only parent.
-            let mut parent = Layer::new(parent_id, "Parent", Graph::new()).with_time(0, 0, 300);
-            parent.transform.position = [
-                AnimationChannel::constant(100.0),
-                AnimationChannel::constant(50.0),
-            ];
-            parent.transform.scale = [
-                AnimationChannel::constant(2.0),
-                AnimationChannel::constant(2.0),
-            ];
-            let document =
-                ravel_ui::document::add_layer(ctx.document.as_ref().unwrap(), comp, parent)
-                    .unwrap();
-            ravel_ui::document::update_layer(&document, comp, layer, |layer| {
-                layer.parent = Some(parent_id)
-            })
-        };
+        let (ctx, comp, layer) = shell_context();
+        // A parent that both moves and scales: identity-blind code passes a
+        // translation-only parent.
+        let ctx = parented_context(&ctx, comp, layer, (100.0, 50.0), (2.0, 2.0), 0.0);
 
         // The bbox, the grips and the anchor marker all sit where the parent
         // chain puts the content: (x, y) -> (2x + 100, 2y + 50).
@@ -3040,6 +3098,278 @@ mod tests {
         let (_, position, ..) = shell_values(&updated, comp, layer);
         close(position.0, 20.0, "position x is parent-space");
         close(position.1, 10.0, "position y is parent-space");
+    }
+
+    /// A rotated, non-uniformly scaled parent is where a manipulator that
+    /// merely *offsets* by the parent instead of inverting it stops agreeing
+    /// with the picture. The contract is stated in world coordinates: the
+    /// fixed corner does not move and the grabbed corner ends under the
+    /// pointer, whatever the chain does in between.
+    #[test]
+    fn a_corner_scale_holds_its_fixed_point_under_a_rotated_non_uniform_parent() {
+        let (ctx, comp, layer) = shell_context();
+        let ctx = with_own_transform(&ctx, comp, layer);
+        let ctx = parented_context(&ctx, comp, layer, (70.0, -40.0), (2.0, 3.0), 30.0);
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let inverse = world.inverse().unwrap();
+
+        let grabbed = shell_handle(&ctx, ShellHandle::Scale(7)).position;
+        let fixed = shell_handle(&ctx, ShellHandle::Scale(0)).position;
+        let delta = (33.0, -17.0);
+        let updated = drag_shell(&ctx, ShellHandle::Scale(7), delta, DragModifiers::default());
+        let after = world_of(&updated, comp, layer);
+
+        // Both corners are layer-local points; where they land afterwards is
+        // the whole contract.
+        let local = |point: (f32, f32)| inverse.apply(point.0, point.1);
+        let landed = |point: (f32, f32)| {
+            let local = local(point);
+            after.apply(local.0, local.1)
+        };
+        let held = landed(fixed);
+        close_within(held.0, fixed.0, 1e-2, "fixed corner x");
+        close_within(held.1, fixed.1, 1e-2, "fixed corner y");
+        let pulled = landed(grabbed);
+        close_within(pulled.0, grabbed.0 + delta.0, 1e-2, "grabbed corner x");
+        close_within(pulled.1, grabbed.1 + delta.1, 1e-2, "grabbed corner y");
+    }
+
+    /// Rotation under a rotated parent: the layer turns about its anchor, so
+    /// the grabbed grip keeps its distance from the anchor and swings onto the
+    /// pointer's bearing. Measuring the sweep in comp space instead of parent
+    /// space gets the angle wrong the moment the parent is turned.
+    #[test]
+    fn a_rotation_under_a_rotated_parent_swings_onto_the_pointers_bearing() {
+        let (ctx, comp, layer) = shell_context();
+        let ctx = parented_context(&ctx, comp, layer, (10.0, 20.0), (1.5, 1.5), 40.0);
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+
+        let anchor = shell_handle(&ctx, ShellHandle::Anchor).position;
+        let grabbed = shell_handle(&ctx, ShellHandle::Rotate(7)).position;
+        let delta = (60.0, 25.0);
+        let target = (grabbed.0 + delta.0, grabbed.1 + delta.1);
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Rotate(7),
+            delta,
+            DragModifiers::default(),
+        );
+        let after = world_of(&updated, comp, layer);
+
+        let local = world.inverse().unwrap().apply(grabbed.0, grabbed.1);
+        let landed = after.apply(local.0, local.1);
+        let arm = |point: (f32, f32)| (point.0 - anchor.0, point.1 - anchor.1);
+        let (before_arm, after_arm, target_arm) = (arm(grabbed), arm(landed), arm(target));
+        close_within(
+            after_arm.0.hypot(after_arm.1),
+            before_arm.0.hypot(before_arm.1),
+            1e-2,
+            "a rotation keeps the grip's distance from the anchor",
+        );
+        close_within(
+            wrap_angle(after_arm.1.atan2(after_arm.0) - target_arm.1.atan2(target_arm.0)),
+            0.0,
+            1e-3,
+            "the grip ends on the pointer's bearing",
+        );
+
+        // Rotation alone: the anchor marker has not moved.
+        let anchor_after =
+            shell_handle(&with_document(&ctx, updated), ShellHandle::Anchor).position;
+        close_within(anchor_after.0, anchor.0, 1e-2, "anchor x");
+        close_within(anchor_after.1, anchor.1, 1e-2, "anchor y");
+    }
+
+    /// The anchor correction has to survive a chain that rotates *and* scales
+    /// unevenly: `a' = W⁻¹(pointer)` and `p' = P⁻¹(pointer)` only cancel if
+    /// both inverses are the real ones.
+    #[test]
+    fn an_anchor_move_under_a_rotated_non_uniform_parent_leaves_the_picture_alone() {
+        let (ctx, comp, layer) = shell_context();
+        // The child carries its own non-trivial transform too, so the
+        // correction cannot be right by symmetry.
+        let ctx = with_own_transform(&ctx, comp, layer);
+        let ctx = parented_context(&ctx, comp, layer, (70.0, -40.0), (2.0, 3.0), 25.0);
+
+        let before = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let (anchor_before, ..) = shell_values(ctx.document.as_ref().unwrap(), comp, layer);
+        let marker = shell_handle(&ctx, ShellHandle::Anchor).position;
+        let delta = (25.0, -13.0);
+        let updated = drag_shell(&ctx, ShellHandle::Anchor, delta, DragModifiers::default());
+
+        let (anchor_after, ..) = shell_values(&updated, comp, layer);
+        assert_ne!(anchor_after, anchor_before, "the anchor did move");
+        let after = world_of(&updated, comp, layer);
+        for (index, (a, b)) in before.0.iter().zip(after.0).enumerate() {
+            close_within(
+                b,
+                *a,
+                1e-2,
+                &format!("world matrix component {index} moved: {before:?} -> {after:?}"),
+            );
+        }
+
+        // And the marker went where the pointer put it.
+        let marker_after =
+            shell_handle(&with_document(&ctx, updated), ShellHandle::Anchor).position;
+        close_within(marker_after.0, marker.0 + delta.0, 1e-2, "anchor marker x");
+        close_within(marker_after.1, marker.1 + delta.1, 1e-2, "anchor marker y");
+    }
+
+    /// The rotation zone has to be visible, not just reachable: a cursor is a
+    /// promise, and unit 7 only earns the `Resize*` / rotate cursors once the
+    /// marks under them show what is grabbable. The drawn ring is asserted
+    /// against the *handle's own* hit radius, so the picture cannot drift away
+    /// from the zone that answers the pointer.
+    #[test]
+    fn every_rotation_grip_draws_its_ring_at_the_radius_it_grabs() {
+        let (ctx, ..) = shell_context();
+
+        // Centre and pixel extent of every closed stroke the overlay paints.
+        let rings = |zoom: f32| {
+            let mut painter = OverlayPainter::new(
+                Bounds {
+                    origin: point(px(0.0), px(0.0)),
+                    size: size(px(1920.0 * zoom), px(1080.0 * zoom)),
+                },
+                (1920, 1080),
+            );
+            ShellManipulator.paint(&ctx, &mut painter);
+            painter
+                .finish()
+                .into_iter()
+                .filter_map(|primitive| match primitive {
+                    OverlayPrimitive::Stroke {
+                        points,
+                        close: true,
+                        ..
+                    } => {
+                        let bound = |values: Vec<f32>| {
+                            let low = values.iter().copied().fold(f32::INFINITY, f32::min);
+                            let high = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                            ((low + high) * 0.5, high - low)
+                        };
+                        let (cx, width) = bound(points.iter().map(|p| f32::from(p.x)).collect());
+                        let (cy, height) = bound(points.iter().map(|p| f32::from(p.y)).collect());
+                        Some(((cx, cy), (width, height)))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let rotate: Vec<OverlayHandle> = ShellManipulator
+            .handles(&ctx)
+            .into_iter()
+            .filter(|handle| matches!(handle.id.shell(), Some(ShellHandle::Rotate(_))))
+            .collect();
+        assert_eq!(rotate.len(), 4, "one rotation grip per corner");
+
+        let projector = OverlayPainter::new(
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(1920.0), px(1080.0)),
+            },
+            (1920, 1080),
+        );
+        let at_1x = rings(1.0);
+        assert_eq!(at_1x.len(), rotate.len(), "one ring per rotation grip");
+        for handle in &rotate {
+            let expected = projector.to_screen(handle.position);
+            let ring = at_1x
+                .iter()
+                .find(|(center, _)| {
+                    (center.0 - expected.0).abs() < 1e-3 && (center.1 - expected.1).abs() < 1e-3
+                })
+                .unwrap_or_else(|| panic!("no ring drawn on {handle:?}"));
+            close(ring.1.0, handle.hit_radius_px * 2.0, "ring width");
+            close(ring.1.1, handle.hit_radius_px * 2.0, "ring height");
+        }
+
+        // Zoomed four times the rings keep their pixel size, like every other
+        // screen-space mark.
+        let at_4x = rings(4.0);
+        assert_eq!(at_4x.len(), at_1x.len());
+        for (one, four) in at_1x.iter().zip(&at_4x) {
+            close(four.1.0, one.1.0, "ring width across zoom");
+            close(four.1.1, one.1.1, "ring height across zoom");
+        }
+    }
+
+    /// `atan2` jumps by a full turn across the negative x axis. A drag that
+    /// straddles it is still a small turn, and the sign has to survive.
+    #[test]
+    fn a_rotation_drag_across_the_angle_boundary_turns_the_short_way() {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (mut ctx, comp, layer) = shell_context();
+        // Park the anchor so the grip's arm points along −x: the branch cut of
+        // `atan2` runs straight through this gesture.
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.anchor_point = [
+                    AnimationChannel::constant(400.0),
+                    AnimationChannel::constant(209.0),
+                ];
+            },
+        );
+        let grip = shell_handle(&ctx, ShellHandle::Rotate(7)).position;
+        close(grip.0, -280.0, "grip x");
+        close(grip.1, 1.0, "grip y");
+
+        // Two pixels down: a fraction of a degree the positive way round. An
+        // unwrapped difference reads the same drag as about −359.6°.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Rotate(7),
+            (0.0, -2.0),
+            DragModifiers::default(),
+        );
+        let (.., rotation) = shell_values(&updated, comp, layer);
+        assert!(
+            rotation > 0.0 && rotation < 1.0,
+            "expected a fraction of a degree the short way, got {rotation}"
+        );
+    }
+
+    /// `Batch` claims its writes land together. A later edit that cannot apply
+    /// therefore has to discard the earlier ones rather than publish a
+    /// half-transformed layer.
+    #[test]
+    fn a_batch_with_one_impossible_edit_applies_none_of_it() {
+        let (ctx, comp, layer) = shell_context();
+        let document = ctx.document.clone().unwrap();
+        let before = document.clone();
+        let turn = OverlayEdit::LayerTransform {
+            comp,
+            layer,
+            channel: ShellChannel::Rotation,
+            value: 45.0,
+            local_frame: None,
+        };
+        let missing = OverlayEdit::LayerTransform {
+            comp,
+            layer: LayerId::next(),
+            channel: ShellChannel::Scale(Axis::X),
+            value: 9.0,
+            local_frame: None,
+        };
+        assert!(turn.apply(&document).is_some(), "the good edit does apply");
+
+        for batch in [
+            OverlayEdit::Batch(vec![turn.clone(), missing.clone()]),
+            OverlayEdit::Batch(vec![missing, turn]),
+        ] {
+            assert!(!batch.target_exists(&document));
+            assert!(
+                batch.apply(&document).is_none(),
+                "a batch that cannot finish must not produce a document"
+            );
+            assert_eq!(document, before, "the source document was left untouched");
+        }
     }
 
     #[test]

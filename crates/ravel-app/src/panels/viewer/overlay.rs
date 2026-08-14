@@ -35,6 +35,7 @@ use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
+use ravel_core::registry::{NodeRegistry, ParamRole};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{NodeData, PortRecord};
 use ravel_ui::ToolKind;
@@ -69,6 +70,10 @@ pub mod priority {
     /// Above both bboxes and below the path handles: a path point drawn on
     /// top of a shell handle is the more specific thing to grab.
     pub const SHELL_MANIPULATOR: i32 = 35;
+    /// Above the shell: with a node selected, the parameter under the pointer
+    /// is the more specific thing to grab — a node's own centre and the bbox's
+    /// move grip land on the same point.
+    pub const PARAM_MANIPULATOR: i32 = 37;
     pub const PATH_EDIT: i32 = 40;
     pub const EVAL_ERROR: i32 = 50;
 }
@@ -136,6 +141,10 @@ pub struct OverlayContext {
     pub colors: OverlayColors,
     /// Overlay-target results belonging to the frame currently shown.
     pub results: OverlayResults,
+    /// The node templates, for the parameter declarations an overlay reads
+    /// (`ParamRole`). Shared rather than cloned: the snapshot is rebuilt on
+    /// every pointer move.
+    pub registry: Option<Arc<NodeRegistry>>,
 }
 
 /// The handle drag in flight, as the overlays see it.
@@ -462,6 +471,9 @@ pub enum OverlayHandleId {
     PathPoint { index: usize, kind: PathHandleKind },
     /// A grip of the layer shell manipulator.
     Shell(ShellHandle),
+    /// A parameter handle of the selected node, indexed into the order
+    /// [`ParamManipulator`] resolves its marks in.
+    Param(u8),
     #[cfg(test)]
     Test(u8),
 }
@@ -484,6 +496,15 @@ impl OverlayHandleId {
     pub fn shell(self) -> Option<ShellHandle> {
         match self {
             Self::Shell(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// The parameter mark index, when this handle belongs to the parameter
+    /// manipulator.
+    pub fn param(self) -> Option<u8> {
+        match self {
+            Self::Param(index) => Some(index),
             _ => None,
         }
     }
@@ -656,6 +677,19 @@ impl OverlayEdit {
         }
     }
 
+    /// The node this edit writes, when it writes one. The counterpart of
+    /// [`Self::layer_target`], and the gesture's lifetime hangs off it the
+    /// same way: a node parameter is only manipulable while that node is the
+    /// selected one, so a selection that moved on has to end the drag instead
+    /// of writing a node nobody is looking at.
+    pub fn node_target(&self) -> Option<(NetworkPath, NodeId)> {
+        match self {
+            Self::NodeParameter { network, node, .. } => Some((network.clone(), *node)),
+            Self::LayerTransform { .. } => None,
+            Self::Batch(edits) => edits.iter().find_map(Self::node_target),
+        }
+    }
+
     /// How much of the evaluator the edit invalidates.
     pub fn invalidation(&self) -> InvalidationHint {
         match self {
@@ -740,6 +774,7 @@ impl OverlayRegistry {
                 scope: BboxScope::Layer,
             }),
             Box::new(ShellManipulator),
+            Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
             Box::new(EvalErrorOverlay),
         ])
@@ -1714,6 +1749,238 @@ impl ViewerOverlay for ShellManipulator {
     }
 }
 
+// ===========================================================================
+// The node parameter manipulator
+// ===========================================================================
+
+/// Screen-pixel side length of a parameter mark. Larger than
+/// [`SELECTION_HANDLE_PX`] so it reads as its own grip where it lands on a
+/// bbox handle, and the hit radius below matches it.
+const PARAM_MARK_PX: f32 = 9.0;
+
+/// One manipulable parameter of the selected node, resolved at the current
+/// frame.
+#[derive(Clone, Debug, PartialEq)]
+struct ParamMark {
+    key: String,
+    role: ParamRole,
+    /// The layer-local point the mark sits at.
+    local: (f32, f32),
+    /// The same point on the canvas: `world · local`.
+    world: (f32, f32),
+}
+
+/// The selected node's role-carrying parameters, resolved once and read by
+/// `paint`, `handles` and `drag` alike — so a drawn mark, the point that
+/// answers the pointer, and the value a drag writes cannot drift apart.
+struct ParamState {
+    network: NetworkPath,
+    node: Arc<ravel_core::graph::Node>,
+    /// The layer's compositing matrix: parameters are written in the node's
+    /// own space, and the handles have to sit on the picture.
+    world: Affine,
+    /// The layer-local frame every write targets (REQ-LAYER-006).
+    local_frame: u64,
+    /// The layer-local point [`ParamRole::Size`] is measured from.
+    anchor: (f32, f32),
+    marks: Vec<ParamMark>,
+}
+
+impl ParamState {
+    fn resolve(ctx: &OverlayContext) -> Option<Self> {
+        let (document, resolution, playback) = ctx.resolved()?;
+        let registry = ctx.registry.as_ref()?;
+        let selection = ctx.selection.as_ref()?;
+        let network = selection.path.clone()?;
+        // Exactly one node: two selected nodes have no single parameter set to
+        // put handles on, and the marks of both at once would overlap without
+        // saying which is which.
+        let mut selected = selection.nodes.iter().copied();
+        let node_id = selected.next()?;
+        if selected.next().is_some() {
+            return None;
+        }
+        let comp = document.get_composition(network.comp)?;
+        let layer = comp.get_layer(network.layer)?;
+        let graph = ravel_ui::document::resolve_network(document, &network)?;
+        let node = graph.node(node_id)?.clone();
+        let template = registry.get(&node.type_key)?;
+        let eval = EvalContext::new(playback.frame, playback.fps, resolution);
+        // Network parameters live in layer-local time (REQ-LAYER-006).
+        let local_frame = ravel_ui::keyframes::layer_local_frame(layer, playback.frame);
+        let world = world_matrix(comp, layer, &eval);
+
+        // Declaration order, so the marks keep a stable index across a
+        // gesture: the handle id carries nothing else.
+        let declared: Vec<(String, ParamRole, (f32, f32))> = node
+            .parameters
+            .iter()
+            .filter_map(|parameter| {
+                let role = template.param_role(&parameter.key)?;
+                let value = super::sample_vec2_param(&node, &parameter.key, local_frame, &eval)?;
+                Some((parameter.key.clone(), role, value))
+            })
+            .collect();
+        let anchor = declared
+            .iter()
+            .find(|(_, role, _)| *role == ParamRole::Position)
+            .map_or((0.0, 0.0), |(_, _, value)| *value);
+        let marks: Vec<ParamMark> = declared
+            .iter()
+            .filter_map(|(key, role, value)| {
+                let local = match role {
+                    ParamRole::Position => *value,
+                    ParamRole::Size => (anchor.0 + value.0, anchor.1 + value.1),
+                    // A direction carries no length and an angle no distance,
+                    // so neither has a point to sit at until the node that
+                    // declares one says how far out to draw it. No built-in
+                    // declares either yet, so nothing is silently ignored.
+                    ParamRole::Direction | ParamRole::Angle => return None,
+                };
+                Some(ParamMark {
+                    key: key.clone(),
+                    role: *role,
+                    local,
+                    world: world.apply(local.0, local.1),
+                })
+            })
+            .collect();
+        if marks.is_empty() {
+            return None;
+        }
+        Some(Self {
+            network,
+            node,
+            world,
+            local_frame,
+            anchor,
+            marks,
+        })
+    }
+
+    /// The value `mark` takes when its handle is dragged to the canvas point
+    /// `target`, in the node's own space.
+    fn value_at(&self, mark: &ParamMark, target: (f32, f32)) -> Option<(f32, f32)> {
+        let local = self.world.inverse()?.apply(target.0, target.1);
+        Some(match mark.role {
+            ParamRole::Position => local,
+            ParamRole::Size => (local.0 - self.anchor.0, local.1 - self.anchor.1),
+            ParamRole::Direction | ParamRole::Angle => return None,
+        })
+    }
+}
+
+/// Handles for the parameters the selected node declares a [`ParamRole`] for.
+///
+/// The declaration is the whole mechanism: this overlay names no type key and
+/// no parameter spelling, so a node becomes manipulable by declaring a role in
+/// the registry and nothing here changes.
+///
+/// Writes go through [`param_edit::edited_vector_param`], which is what keeps
+/// an animated parameter animated: a drag inserts a key at the layer-local
+/// frame instead of collapsing the curve, the same rule the Properties scrub
+/// follows.
+///
+/// [`param_edit::edited_vector_param`]: crate::panels::param_edit::edited_vector_param
+pub struct ParamManipulator;
+
+impl ParamManipulator {
+    pub const ID: OverlayId = OverlayId("viewer.param_manipulator");
+    /// Screen-pixel grab radius, the same measure the mark is drawn with so a
+    /// grabbable point is always a visible one.
+    const HIT_RADIUS_PX: f32 = PARAM_MARK_PX;
+}
+
+impl ViewerOverlay for ParamManipulator {
+    fn id(&self) -> OverlayId {
+        Self::ID
+    }
+
+    fn priority(&self) -> i32 {
+        priority::PARAM_MANIPULATOR
+    }
+
+    fn is_active(&self, ctx: &OverlayContext) -> bool {
+        // Only the Select tool, for the reason [`ShellManipulator`] states:
+        // the overlay hit test runs before `select_mouse_down` /
+        // `shape_mouse_down`, so a live manipulator under Rect / Ellipse /
+        // Hand / Zoom would answer the press those tools are waiting for.
+        ctx.tool == Some(ToolKind::Select) && ParamState::resolve(ctx).is_some()
+    }
+
+    fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
+        let Some(state) = ParamState::resolve(ctx) else {
+            return;
+        };
+        let color = ctx.colors.path;
+        let anchor_world = state.world.apply(state.anchor.0, state.anchor.1);
+        for mark in &state.marks {
+            // A size is an offset, so the tether says what it is measured
+            // from; without it the mark reads as a second position.
+            if mark.role == ParamRole::Size {
+                painter.stroke_comp_polyline(&[anchor_world, mark.world], false, 1.0, color);
+            }
+            paint_handle_mark(painter, mark.world, PARAM_MARK_PX, color);
+        }
+    }
+
+    fn handles(&self, ctx: &OverlayContext) -> Vec<OverlayHandle> {
+        let Some(state) = ParamState::resolve(ctx) else {
+            return Vec::new();
+        };
+        state
+            .marks
+            .iter()
+            .enumerate()
+            .map(|(index, mark)| OverlayHandle {
+                overlay: Self::ID,
+                id: OverlayHandleId::Param(index as u8),
+                position: mark.world,
+                hit_radius_px: Self::HIT_RADIUS_PX,
+                hint: match mark.role {
+                    ParamRole::Size => ViewerPointerHint::ResizeUpLeftDownRight,
+                    _ => ViewerPointerHint::MovableBody,
+                },
+                draggable: true,
+            })
+            .collect()
+    }
+
+    fn drag(
+        &self,
+        handle: &OverlayHandle,
+        delta: (f32, f32),
+        _modifiers: DragModifiers,
+        ctx: &OverlayContext,
+    ) -> Option<OverlayEdit> {
+        let state = ParamState::resolve(ctx)?;
+        let mark = state.marks.get(handle.id.param()? as usize)?;
+        // The mark's own point is the grabbed one, so repeated calls during a
+        // gesture stay absolute instead of compounding onto their preview.
+        let target = (handle.position.0 + delta.0, handle.position.1 + delta.1);
+        let (x, y) = state.value_at(mark, target)?;
+        let existing = &state
+            .node
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == mark.key)?
+            .value;
+        // Two components for a two-dimensional canvas: a `Channel3` keeps its
+        // Z, and every component keeps its curve.
+        let value = crate::panels::param_edit::edited_vector_param(
+            existing,
+            &[x, y],
+            Some(state.local_frame),
+        )?;
+        Some(OverlayEdit::NodeParameter {
+            network: state.network.clone(),
+            node: state.node.id,
+            key: mark.key.clone().into(),
+            value,
+        })
+    }
+}
+
 /// The latest evaluation error, centered over the canvas.
 ///
 /// Text is the one thing the canvas painter cannot express, so this overlay
@@ -1795,6 +2062,10 @@ mod tests {
             active_drag: None,
             colors: colors(),
             results: OverlayResults::default(),
+            // Absent by default so every overlay that does not read the
+            // templates is tested against the same snapshot it always was;
+            // `param_context` supplies the real one.
+            registry: None,
         }
     }
 
@@ -3456,5 +3727,310 @@ mod tests {
             !ShellManipulator.is_active(&two),
             "two layers have no single shell to write"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit 5: the node parameter manipulator
+    // -----------------------------------------------------------------------
+
+    fn builtin_registry() -> Arc<NodeRegistry> {
+        let mut registry = NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        Arc::new(registry)
+    }
+
+    /// The selected-node fixture with the templates the manipulator reads.
+    fn param_context(node: Node) -> (OverlayContext, NodeId, CompId, LayerId) {
+        let (mut ctx, node, comp, layer) = doc_with_node(node);
+        ctx.registry = Some(builtin_registry());
+        (ctx, node, comp, layer)
+    }
+
+    fn ellipse_node(center: (f32, f32), radius: (f32, f32)) -> Node {
+        Node::new(NodeId::next(), "shape.ellipse")
+            .with_param("center", ParameterValue::vec2(center.0, center.1))
+            .with_param("radius", ParameterValue::vec2(radius.0, radius.1))
+            .with_param("segments", ParameterValue::Int(32))
+    }
+
+    /// The handle the manipulator exposes for parameter `key`.
+    fn param_handle(ctx: &OverlayContext, key: &str) -> OverlayHandle {
+        let state = ParamState::resolve(ctx).expect("no manipulable parameter");
+        let index = state
+            .marks
+            .iter()
+            .position(|mark| mark.key == key)
+            .unwrap_or_else(|| panic!("no {key} handle"));
+        ParamManipulator
+            .handles(ctx)
+            .into_iter()
+            .find(|handle| handle.id == OverlayHandleId::Param(index as u8))
+            .expect("the mark has no handle")
+    }
+
+    /// The value of a vector parameter of `node`, sampled at frame 0.
+    fn vec_param(document: &Document, network: &NetworkPath, node: NodeId, key: &str) -> Vec<f32> {
+        let graph = ravel_ui::document::resolve_network(document, network).unwrap();
+        let value = &graph
+            .node(node)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == key)
+            .unwrap()
+            .value;
+        let channels = match value {
+            ParameterValue::Channel2(channels) => channels.to_vec(),
+            ParameterValue::Channel3(channels) => channels.to_vec(),
+            other => panic!("{key} is {other:?}"),
+        };
+        channels
+            .iter()
+            .map(|channel| channel.evaluate(0.0, &eval()))
+            .collect()
+    }
+
+    /// Dragging the declared `center` moves the shape, and repeating the same
+    /// gesture from the same press context stays absolute.
+    #[test]
+    fn dragging_the_declared_centre_moves_the_shape() {
+        let (ctx, node, comp, layer) = param_context(rect_node((100.0, 200.0)));
+        let network = NetworkPath::layer(comp, layer);
+        let handle = param_handle(&ctx, "center");
+        assert_eq!(handle.position, (100.0, 200.0));
+
+        let edit = ParamManipulator
+            .drag(&handle, (30.0, -10.0), DragModifiers::default(), &ctx)
+            .expect("the centre handle produced no edit");
+        let updated = edit.apply(ctx.document.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            vec_param(&updated, &network, node, "center"),
+            vec![130.0, 190.0]
+        );
+
+        let again = ParamManipulator
+            .drag(&handle, (30.0, -10.0), DragModifiers::default(), &ctx)
+            .unwrap();
+        assert_eq!(again, edit, "the gesture compounded onto its own preview");
+    }
+
+    /// A `Size` role is an offset from the node's position, so its handle sits
+    /// at the rim and a drag writes the radius, not the point under the
+    /// pointer.
+    #[test]
+    fn a_size_handle_writes_the_offset_from_the_position() {
+        let (ctx, node, comp, layer) = param_context(ellipse_node((100.0, 200.0), (50.0, 50.0)));
+        let network = NetworkPath::layer(comp, layer);
+        let handle = param_handle(&ctx, "radius");
+        assert_eq!(
+            handle.position,
+            (150.0, 250.0),
+            "the radius handle sits on the rim, not at the origin"
+        );
+
+        let updated = ParamManipulator
+            .drag(&handle, (10.0, -20.0), DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(
+            vec_param(&updated, &network, node, "radius"),
+            vec![60.0, 30.0]
+        );
+        assert_eq!(
+            vec_param(&updated, &network, node, "center"),
+            vec![100.0, 200.0],
+            "a size drag left the position alone"
+        );
+    }
+
+    /// An animated parameter stays animated: the drag keys the layer-local
+    /// frame instead of collapsing the curve, and the components it does not
+    /// touch keep their own shape.
+    #[test]
+    fn dragging_a_keyframed_centre_keys_it_instead_of_flattening_it() {
+        let (mut ctx, node, comp, layer) = param_context(rect_node((100.0, 200.0)));
+        let network = NetworkPath::layer(comp, layer);
+        ctx.playback = Some(PlaybackPosition {
+            frame: 5,
+            ..PlaybackPosition::default()
+        });
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, ravel_core::animation::Interpolation::Linear);
+        curve.insert(10, 100.0, ravel_core::animation::Interpolation::Linear);
+        let graph = ravel_ui::document::resolve_network(ctx.document.as_ref().unwrap(), &network)
+            .unwrap()
+            .clone();
+        let mut animated = graph.node(node).unwrap().as_ref().clone();
+        animated.parameters.iter_mut().for_each(|parameter| {
+            if parameter.key == "center" {
+                parameter.value = ParameterValue::Channel2([
+                    ravel_core::animation::channel::AnimationChannel::keyframes(curve.clone()),
+                    ravel_core::animation::channel::AnimationChannel::constant(200.0),
+                ]);
+            }
+        });
+        let document = ravel_ui::document::replace_network(
+            ctx.document.as_ref().unwrap(),
+            &network,
+            graph.replace_node(Arc::new(animated)),
+        )
+        .unwrap();
+        ctx.document = Some(document);
+
+        // At frame 5 the curve reads 50, so that is where the handle sits.
+        let handle = param_handle(&ctx, "center");
+        assert_eq!(handle.position, (50.0, 200.0));
+        let updated = ParamManipulator
+            .drag(&handle, (10.0, 5.0), DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+
+        let graph = ravel_ui::document::resolve_network(&updated, &network).unwrap();
+        let ParameterValue::Channel2(channels) = &graph
+            .node(node)
+            .unwrap()
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == "center")
+            .unwrap()
+            .value
+        else {
+            panic!("the drag retyped the parameter");
+        };
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("the drag flattened an animated component");
+        };
+        assert_eq!(curve.keyframes().len(), 3);
+        assert_eq!(channels[0].evaluate(5.0, &eval()), 60.0);
+        assert_eq!(
+            channels[0].evaluate(0.0, &eval()),
+            0.0,
+            "the drag rewrote the whole curve instead of keying one frame"
+        );
+        assert!(
+            matches!(channels[1].source, ChannelSource::Constant(205.0)),
+            "the constant component stayed constant"
+        );
+    }
+
+    /// A layer whose shell scales, rotates and offsets its network still shows
+    /// its handles on the picture, and a drag lands the parameter where the
+    /// pointer is — both directions of the same matrix.
+    #[test]
+    fn a_transformed_shell_keeps_the_handles_on_the_shape() {
+        let (plain, node, comp, layer) = param_context(rect_node((100.0, 200.0)));
+        let ctx = with_own_transform(&plain, comp, layer);
+        let network = NetworkPath::layer(comp, layer);
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+
+        let handle = param_handle(&ctx, "center");
+        let expected = world.apply(100.0, 200.0);
+        close(handle.position.0, expected.0, "handle x");
+        close(handle.position.1, expected.1, "handle y");
+        assert!(
+            (handle.position.0 - 100.0).abs() > 1.0 || (handle.position.1 - 200.0).abs() > 1.0,
+            "the shell transform was ignored: the handle stayed in node space"
+        );
+
+        // Dragging to a canvas point writes the node-space point under it.
+        let delta = (40.0, -25.0);
+        let updated = ParamManipulator
+            .drag(&handle, delta, DragModifiers::default(), &ctx)
+            .unwrap()
+            .apply(ctx.document.as_ref().unwrap())
+            .unwrap();
+        let target = (handle.position.0 + delta.0, handle.position.1 + delta.1);
+        let local = world.inverse().unwrap().apply(target.0, target.1);
+        let written = vec_param(&updated, &network, node, "center");
+        close_within(written[0], local.0, 1e-2, "written x");
+        close_within(written[1], local.1, 1e-2, "written y");
+        assert!(
+            (written[0] - target.0).abs() > 1.0 || (written[1] - target.1).abs() > 1.0,
+            "the drag wrote canvas coordinates into a node-space parameter"
+        );
+    }
+
+    /// The overlay hit test runs before the drawing and navigation tools see
+    /// the press, so the manipulator has to stand down unless Select is
+    /// active.
+    #[test]
+    fn only_the_select_tool_offers_parameter_handles() {
+        let (ctx, ..) = param_context(rect_node((100.0, 200.0)));
+        assert!(ParamManipulator.is_active(&ctx));
+
+        for tool in [
+            ToolKind::Rect,
+            ToolKind::Ellipse,
+            ToolKind::Pen,
+            ToolKind::Hand,
+            ToolKind::Zoom,
+        ] {
+            let mut other = ctx.clone();
+            other.tool = Some(tool);
+            assert!(
+                !ParamManipulator.is_active(&other),
+                "{tool:?} lost its press to the parameter manipulator"
+            );
+        }
+    }
+
+    /// Without a role there is no handle, and without a single selected node
+    /// there is no parameter set to put one on.
+    #[test]
+    fn the_manipulator_needs_one_selected_node_that_declares_a_role() {
+        let (ctx, node, ..) = param_context(rect_node((100.0, 200.0)));
+        assert!(ParamManipulator.is_active(&ctx));
+
+        let mut two = ctx.clone();
+        two.selection.as_mut().unwrap().nodes.insert(NodeId::next());
+        assert!(
+            !ParamManipulator.is_active(&two),
+            "two nodes have no single parameter set"
+        );
+
+        let mut none = ctx.clone();
+        none.selection.as_mut().unwrap().nodes.clear();
+        assert!(!ParamManipulator.is_active(&none));
+
+        // `shape.custom_path` declares no role: its points are the path
+        // overlay's business.
+        let (path_ctx, ..) = param_context(path_node(vec![PathPoint {
+            p: Vec2(10.0, 10.0),
+            in_tan: Vec2(0.0, 0.0),
+            out_tan: Vec2(0.0, 0.0),
+        }]));
+        assert!(!ParamManipulator.is_active(&path_ctx));
+
+        // And without the templates there is nothing to read a role from.
+        let mut unregistered = ctx;
+        unregistered.registry = None;
+        assert!(!ParamManipulator.is_active(&unregistered));
+        let _ = node;
+    }
+
+    /// Every drawn mark answers the pointer at the point it is drawn at: the
+    /// paint and the handles come from the same resolved marks.
+    #[test]
+    fn every_parameter_mark_is_grabbable_where_it_is_drawn() {
+        let (ctx, ..) = param_context(ellipse_node((100.0, 200.0), (50.0, 50.0)));
+        let mut marks = painter();
+        ParamManipulator.paint(&ctx, &mut marks);
+        let primitives = marks.finish();
+        let screen = painter();
+
+        for handle in ParamManipulator.handles(&ctx) {
+            let (screen_x, screen_y) = screen.to_screen(handle.position);
+            assert!(
+                quads(&primitives).iter().any(|(bounds, _)| {
+                    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5;
+                    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
+                    (center_x - screen_x).abs() < 1e-3 && (center_y - screen_y).abs() < 1e-3
+                }),
+                "nothing is drawn at {:?}, but the pointer is answered there",
+                handle.position
+            );
+        }
     }
 }

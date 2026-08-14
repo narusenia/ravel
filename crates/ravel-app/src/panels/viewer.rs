@@ -365,6 +365,25 @@ impl ViewerPanel {
             }) {
                 this.handle_drag = None;
             }
+            // A node parameter is manipulable only while its node is the
+            // selected one, so a selection that moved elsewhere has to revert
+            // the preview rather than leave it to be committed against a node
+            // nobody is looking at — the shell manipulator's rule, applied to
+            // the node side of `OverlayEdit`.
+            let selection = cx
+                .try_global::<CanvasSelection>()
+                .cloned()
+                .unwrap_or_default();
+            if this.handle_drag.as_ref().is_some_and(|drag| {
+                drag.press_edit
+                    .node_target()
+                    .is_some_and(|(network, node)| {
+                        selection.path.as_ref() != Some(&network)
+                            || !selection.nodes.contains(&node)
+                    })
+            }) {
+                this.cancel_handle_drag(cx);
+            }
             if this.move_drag.as_ref().is_some_and(|drag| {
                 drag.targets.iter().any(|target| {
                     target.origins.iter().any(|origin| {
@@ -1138,6 +1157,9 @@ impl ViewerPanel {
                 .try_global::<OverlayResults>()
                 .cloned()
                 .unwrap_or_default(),
+            registry: self
+                .project(cx)
+                .map(|project| project.read(cx).shared_registry()),
         }
     }
 
@@ -4826,6 +4848,151 @@ mod tests {
 
         // Another panel selects something else while the button is still down.
         cx.update(|cx| crate::panels::set_layer_selection(Vec::new(), cx));
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.handle_drag.is_none(), "the gesture was released");
+            })
+            .unwrap();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the preview was reverted, not left in the document"
+        );
+
+        // A mouse-up after the selection moved must not commit anything.
+        window
+            .update(cx, |panel, _window, cx| panel.handle_drag_ended(cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the release found nothing to commit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter manipulator gestures (REQ-UI-011 unit 5)
+    // -----------------------------------------------------------------------
+
+    /// The shell fixture with its rect node selected in the node editor, so
+    /// the parameter manipulator has a node to put handles on. Its `center`
+    /// handle sits at composition (100, 200) — the same point as the shell's
+    /// move grip, which is what makes this also a test of the priority order.
+    fn param_setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        NetworkPath,
+        NodeId,
+    ) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        let node = project.read_with(cx, |project, _| {
+            ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the layer network")
+                .node_ids()
+                .next()
+                .expect("the rect node")
+        });
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::from([node]),
+            })
+        });
+        (window, project, network, node)
+    }
+
+    /// The `center` of `node` as the live document holds it, at frame 0.
+    fn node_center(
+        project: &Entity<ProjectState>,
+        network: &NetworkPath,
+        node: NodeId,
+        cx: &mut TestAppContext,
+    ) -> (f32, f32) {
+        project.read_with(cx, |project, _| {
+            let graph = ravel_ui::document::resolve_network(project.document(), network).unwrap();
+            sample_vec2_param(graph.node(node).unwrap(), "center", 0, &eval_ctx()).unwrap()
+        })
+    }
+
+    /// A whole parameter drag is one undo step, and the press it starts from
+    /// is the node's handle rather than the shell grip drawn at the same point.
+    #[gpui::test]
+    fn a_param_handle_drag_is_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, network, node) = param_setup(cx);
+        assert_eq!(node_center(&project, &network, node, cx), (100.0, 200.0));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx),
+                    "the centre handle took the press"
+                );
+                assert_eq!(
+                    panel.handle_drag.as_ref().map(|drag| drag.handle.id),
+                    Some(overlay::OverlayHandleId::Param(0)),
+                    "the shell's move grip answered a press meant for the node"
+                );
+                for x in [130.0, 150.0, 160.0] {
+                    let to = window_point(panel, (x, 215.0));
+                    panel.handle_dragged(to, DragModifiers::default(), cx);
+                }
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            node_center(&project, &network, node, cx),
+            (160.0, 215.0),
+            "the last preview is what the gesture committed"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            node_center(&project, &network, node, cx),
+            (100.0, 200.0),
+            "one undo covers the whole gesture, not just the last preview"
+        );
+        // That single undo did not eat the layer: the next step back is its
+        // creation, so the gesture really was one step.
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(network.comp)
+                    .unwrap()
+                    .layer_count(),
+                1
+            );
+        });
+    }
+
+    /// The manipulator exists only while its node is the selected one, so a
+    /// selection that moves elsewhere mid-drag reverts the preview instead of
+    /// committing it against a node nobody is looking at.
+    #[gpui::test]
+    fn changing_the_node_selection_reverts_a_param_drag(cx: &mut TestAppContext) {
+        let (window, project, network, node) = param_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+            })
+            .unwrap();
+        assert_ne!(node_center(&project, &network, node, cx), (100.0, 200.0));
+
+        // Another panel selects something else while the button is still down.
+        cx.update(|cx| cx.set_global(CanvasSelection::default()));
         cx.run_until_parked();
 
         window

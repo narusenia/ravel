@@ -327,6 +327,31 @@ impl OverlayPainter {
         self.fill_screen_rect(bounds, color);
     }
 
+    /// A circle of constant screen size centered on a composition point.
+    ///
+    /// The segment count is fixed: the rings this draws are a couple of dozen
+    /// pixels across, where more vertices are invisible and fewer are a
+    /// polygon.
+    pub fn screen_ring_at(&mut self, comp: (f32, f32), radius_px: f32, width_px: f32, color: Hsla) {
+        const SEGMENTS: usize = 24;
+        let (screen_x, screen_y) = self.to_screen(comp);
+        let points = (0..SEGMENTS)
+            .map(|segment| {
+                let angle = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                point(
+                    px(screen_x + radius_px * angle.cos()),
+                    px(screen_y + radius_px * angle.sin()),
+                )
+            })
+            .collect();
+        self.primitives.push(OverlayPrimitive::Stroke {
+            points,
+            width: px(width_px),
+            color,
+            close: true,
+        });
+    }
+
     pub fn fill_screen_rect(&mut self, bounds: Bounds<Pixels>, color: Hsla) {
         self.primitives
             .push(OverlayPrimitive::Quad { bounds, color });
@@ -1224,9 +1249,25 @@ const PARENT_LINK_COLOR: Hsla = Hsla {
 /// Screen-pixel side length of the anchor marker.
 const ANCHOR_MARKER_PX: f32 = 11.0;
 
+/// The rotation ring: the selection accent held back so the ring reads as a
+/// zone around the corner rather than as another grip.
+const ROTATE_RING_COLOR: Hsla = Hsla {
+    h: 0.58,
+    s: 0.7,
+    l: 0.6,
+    a: 0.4,
+};
+
 /// `numerator / denominator`, or `1.0` when the denominator is too small to
 /// carry a ratio — a grip that already sits on its fixed point cannot say
 /// anything about scale, so it must leave the channel where it is.
+/// An angle in radians folded into `(−π, π]`.
+fn wrap_angle(radians: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let wrapped = radians.rem_euclid(TAU);
+    if wrapped > PI { wrapped - TAU } else { wrapped }
+}
+
 fn scale_ratio(numerator: f32, denominator: f32) -> f32 {
     if denominator.abs() < 1e-4 {
         1.0
@@ -1427,7 +1468,11 @@ impl ShellState {
         if from.0.hypot(from.1) < 1e-3 || to.0.hypot(to.1) < 1e-3 {
             return None;
         }
-        let delta = to.1.atan2(to.0) - from.1.atan2(from.0);
+        // `atan2` is discontinuous across the negative x axis, so the raw
+        // difference of two arms straddling it reads as most of a turn the
+        // wrong way (+2° arrives as −358°). Fold it back into (−π, π]: a
+        // pointer drag is always the short way round.
+        let delta = wrap_angle(to.1.atan2(to.0) - from.1.atan2(from.0));
         Some(vec![self.write(
             ShellChannel::Rotation,
             self.rotation + delta.to_degrees(),
@@ -1515,6 +1560,11 @@ impl ShellManipulator {
     /// one point is what makes the rotation zone zoom-invariant without the
     /// overlay having to know the zoom.
     const ROTATE_RADIUS_PX: f32 = 18.0;
+    /// The bbox grips that carry a rotation ring, in
+    /// [`selection_handle_centers`]' order: the four corners. One list, read
+    /// by both `paint` and `handles`, so the drawn ring cannot drift away from
+    /// the zone that answers the pointer.
+    const ROTATE_CORNERS: [u8; 4] = [0, 2, 5, 7];
 }
 
 impl ViewerOverlay for ShellManipulator {
@@ -1540,7 +1590,19 @@ impl ViewerOverlay for ShellManipulator {
             return;
         };
         painter.stroke_comp_rect(state.rect, SELECTION_COLOR);
-        for center in state.centers() {
+        let centers = state.centers();
+        // The rotation zone is drawn before the grips so the grip's mark stays
+        // on top of the ring that surrounds it. A cursor promises what works,
+        // and an undrawn hit radius promises nothing.
+        for corner in Self::ROTATE_CORNERS {
+            painter.screen_ring_at(
+                centers[corner as usize],
+                Self::ROTATE_RADIUS_PX,
+                1.0,
+                ROTATE_RING_COLOR,
+            );
+        }
+        for center in centers {
             paint_handle_mark(painter, center, SELECTION_HANDLE_PX, SELECTION_COLOR);
         }
         painter.screen_square_at(
@@ -1618,7 +1680,7 @@ impl ViewerOverlay for ShellManipulator {
                 ShellHandle::scale_hint(index),
             ));
         }
-        for index in [0u8, 2, 5, 7] {
+        for index in Self::ROTATE_CORNERS {
             handles.push(grip(
                 ShellHandle::Rotate(index),
                 state.centers()[index as usize],

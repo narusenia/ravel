@@ -37,8 +37,8 @@ use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
 use overlay::{
-    DragModifiers, LabelPlacement, OverlayColors, OverlayContext, OverlayEdit, OverlayHandle,
-    OverlayPainter, OverlayRegistry, OverlayResults,
+    ActiveDrag, DragModifiers, LabelPlacement, OverlayColors, OverlayContext, OverlayEdit,
+    OverlayHandle, OverlayPainter, OverlayRegistry, OverlayResults,
 };
 
 pub const KEY_CONTEXT: &str = "Viewer";
@@ -1121,7 +1121,10 @@ impl ViewerPanel {
             show_grid: self.show_grid,
             show_safe_areas: self.show_safe_areas,
             error: self.error.clone(),
-            active_handle: self.handle_drag.as_ref().map(|drag| drag.handle.id),
+            active_drag: self.handle_drag.as_ref().map(|drag| ActiveDrag {
+                handle: drag.handle.id,
+                press_document: drag.original_document.clone(),
+            }),
             colors: OverlayColors {
                 // A bright semantic info color keeps the editable path legible
                 // over both dark footage and the black composition background.

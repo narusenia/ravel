@@ -130,14 +130,24 @@ pub struct OverlayContext {
     pub show_safe_areas: bool,
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
-    /// The handle a gesture currently holds, or `None` when the pointer is
-    /// idle. Only the drag HUD reads it: the panel refreshes the snapshot on
-    /// every preview, so an overlay can label the document it just produced
-    /// without the panel having to know what the number means.
-    pub active_handle: Option<OverlayHandleId>,
+    /// The gesture the pointer currently holds, or `None` when it is idle.
+    /// Only the drag HUD reads it.
+    pub active_drag: Option<ActiveDrag>,
     pub colors: OverlayColors,
     /// Overlay-target results belonging to the frame currently shown.
     pub results: OverlayResults,
+}
+
+/// The handle drag in flight, as the overlays see it.
+///
+/// The press-time document rides along because a HUD reports what the gesture
+/// has *done* — a factor, an angle swept — and that is a difference between
+/// two documents, not a reading of one. The panel already holds this snapshot
+/// for the undo path, so carrying it costs a structurally shared clone.
+#[derive(Clone)]
+pub struct ActiveDrag {
+    pub handle: OverlayHandleId,
+    pub press_document: Document,
 }
 
 impl OverlayContext {
@@ -1253,7 +1263,13 @@ struct ShellState {
 
 impl ShellState {
     fn resolve(ctx: &OverlayContext) -> Option<Self> {
-        let (document, resolution, playback) = ctx.resolved()?;
+        Self::resolve_in(ctx, ctx.document.as_ref()?)
+    }
+
+    /// The same resolution against a document the caller supplies, so the HUD
+    /// can read the shell as it stood when the gesture pressed.
+    fn resolve_in(ctx: &OverlayContext, document: &Document) -> Option<Self> {
+        let (resolution, playback) = (ctx.resolution?, ctx.playback?);
         let comp_id = ctx.layer_selection.comp()?;
         // Exactly one layer: two or more have no single shell to manipulate,
         // and the multi-layer bbox already says so by drawing no handles.
@@ -1453,17 +1469,23 @@ impl ShellState {
         ])
     }
 
-    /// What the drag HUD shows for the grip being held. The values come from
-    /// the document the preview already wrote, so the HUD needs no copy of the
-    /// gesture's arithmetic.
-    fn hud(&self, handle: ShellHandle) -> String {
+    /// What the drag HUD shows for the grip being held: how far the gesture
+    /// has got, read as the difference between the previewed document (`self`)
+    /// and the one the press captured (`press`).
+    ///
+    /// Scale reports the factor this drag applied and rotation the angle it
+    /// swept, because "200%" tells you nothing while you are dragging a layer
+    /// that was already at 200%. The two positional channels report
+    /// coordinates instead — the plan's "位置なら座標" — since where the
+    /// anchor or the layer now sits is the thing being aimed.
+    fn hud(&self, press: &ShellState, handle: ShellHandle) -> String {
         match handle {
             ShellHandle::Scale(_) => format!(
                 "{:.1}% × {:.1}%",
-                self.scale.0 * 100.0,
-                self.scale.1 * 100.0
+                scale_ratio(self.scale.0, press.scale.0) * 100.0,
+                scale_ratio(self.scale.1, press.scale.1) * 100.0
             ),
-            ShellHandle::Rotate(_) => format!("{:.1}°", self.rotation),
+            ShellHandle::Rotate(_) => format!("{:+.1}°", self.rotation - press.rotation),
             ShellHandle::Anchor => format!("({:.1}, {:.1})", self.anchor.0, self.anchor.1),
             ShellHandle::Position => format!("({:.1}, {:.1})", self.position.0, self.position.1),
         }
@@ -1539,14 +1561,20 @@ impl ViewerOverlay for ShellManipulator {
     }
 
     fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
-        let Some(handle) = ctx.active_handle.and_then(OverlayHandleId::shell) else {
+        let Some(drag) = ctx.active_drag.as_ref() else {
             return Vec::new();
         };
-        let Some(state) = ShellState::resolve(ctx) else {
+        let Some(handle) = drag.handle.shell() else {
+            return Vec::new();
+        };
+        let (Some(state), Some(press)) = (
+            ShellState::resolve(ctx),
+            ShellState::resolve_in(ctx, &drag.press_document),
+        ) else {
             return Vec::new();
         };
         vec![OverlayLabel {
-            text: SharedString::from(state.hud(handle)),
+            text: SharedString::from(state.hud(&press, handle)),
             color: SELECTION_COLOR,
             placement: LabelPlacement::CanvasTopLeft,
         }]
@@ -1702,7 +1730,7 @@ mod tests {
             show_grid: false,
             show_safe_areas: false,
             error: None,
-            active_handle: None,
+            active_drag: None,
             colors: colors(),
             results: OverlayResults::default(),
         }
@@ -2970,33 +2998,53 @@ mod tests {
         assert_eq!(at((300.0, 300.0)), None);
     }
 
+    /// The HUD reports how far the gesture has got, not where the channel
+    /// happens to sit: a layer already at 200% scaled by half must read 50%,
+    /// and one already turned 30° nudged by 15° must read +15°.
     #[test]
-    fn the_drag_hud_reports_the_channel_the_gesture_holds() {
+    fn the_drag_hud_reports_the_gestures_delta_not_the_absolute_channel() {
+        use ravel_core::animation::channel::AnimationChannel;
+
         let (mut ctx, comp, layer) = shell_context();
         assert!(
             ShellManipulator.labels(&ctx).is_empty(),
             "no HUD while the pointer is idle"
         );
 
-        ctx.document = ravel_ui::document::update_layer(
-            ctx.document.as_ref().unwrap(),
-            comp,
-            layer,
-            |layer| {
-                layer.transform.rotation =
-                    ravel_core::animation::channel::AnimationChannel::constant(45.0)
-            },
-        );
-        ctx.active_handle = Some(OverlayHandleId::Shell(ShellHandle::Rotate(0)));
+        let with = |ctx: &OverlayContext, scale: (f32, f32), rotation: f32| {
+            ravel_ui::document::update_layer(ctx.document.as_ref().unwrap(), comp, layer, |layer| {
+                layer.transform.scale = [
+                    AnimationChannel::constant(scale.0),
+                    AnimationChannel::constant(scale.1),
+                ];
+                layer.transform.rotation = AnimationChannel::constant(rotation);
+            })
+            .unwrap()
+        };
+        let pressed = with(&ctx, (2.0, 4.0), 30.0);
+        ctx.document = Some(with(&ctx, (1.0, 1.0), 45.0));
+        ctx.active_drag = Some(ActiveDrag {
+            handle: OverlayHandleId::Shell(ShellHandle::Rotate(0)),
+            press_document: pressed.clone(),
+        });
+
         let labels = ShellManipulator.labels(&ctx);
         assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].text.as_ref(), "45.0°");
+        assert_eq!(
+            labels[0].text.as_ref(),
+            "+15.0°",
+            "the angle swept, not the angle reached"
+        );
         assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
 
-        ctx.active_handle = Some(OverlayHandleId::Shell(ShellHandle::Scale(0)));
+        ctx.active_drag = Some(ActiveDrag {
+            handle: OverlayHandleId::Shell(ShellHandle::Scale(0)),
+            press_document: pressed,
+        });
         assert_eq!(
             ShellManipulator.labels(&ctx)[0].text.as_ref(),
-            "100.0% × 100.0%"
+            "50.0% × 25.0%",
+            "the factor this drag applied, not the scale reached"
         );
     }
 

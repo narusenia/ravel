@@ -1877,6 +1877,7 @@ mod tests {
             comp: None,
             graph: compiled.graph.clone(),
             nodes: vec![compiled.output_node],
+            scoped: Vec::new(),
             path: Vec::new(),
             ctx: EvalContext::new(frame, FPS, RES).with_quality(Quality::Preview),
             document: Some(document.clone()),

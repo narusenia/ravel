@@ -339,7 +339,7 @@ ViewerPanel::render()
 ことを（ID が衝突するターゲットを使って）テストで固定してあり、機構は単位 3
 がネットワークスコープの要求を出すまでドーマントである。**
 
-### 実装
+### 単位 3 の実装
 
 **評価側**: `EvalRequest` に `scoped: Vec<ScopedTarget>` を足した
 （`crates/ravel-core/src/runtime/eval_service.rs`）。1 ターゲットが
@@ -397,7 +397,7 @@ ViewerPanel::render()
   サンプル数が発散しないようにする
 - カラーマップと不透明度をパネルのトグルで調整する
 
-### 実装
+### 単位 4 の実装
 
 `crates/ravel-app/src/panels/viewer/field.rs`。単位 3 が開けた
 `EvalRequest::scoped` にそのまま乗り、選択ノードの FIELD 出力を 1 件だけ

@@ -61,7 +61,7 @@
 | [HIGH-32](HIGH-32-linear-ingest-powf-per-pixel.md) | 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる | #378 |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 
-## medium（40件）
+## medium（44件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `21` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33` `34` `35`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09` `10`

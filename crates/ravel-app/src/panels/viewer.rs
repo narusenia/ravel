@@ -37,8 +37,8 @@ use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
 use overlay::{
-    LabelPlacement, OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter,
-    OverlayRegistry, OverlayResults,
+    ActiveDrag, DragModifiers, LabelPlacement, OverlayColors, OverlayContext, OverlayEdit,
+    OverlayHandle, OverlayPainter, OverlayRegistry, OverlayResults,
 };
 
 pub const KEY_CONTEXT: &str = "Viewer";
@@ -170,6 +170,18 @@ pub enum ViewerPointerHint {
     PathAnchor,
     PathTangent,
     PenClose,
+    /// Layer shell scale, on the ↖↘ diagonal.
+    ResizeUpLeftDownRight,
+    /// Layer shell scale, on the ↗↙ diagonal.
+    ResizeUpRightDownLeft,
+    /// Layer shell scale, horizontal edge grip.
+    ResizeLeftRight,
+    /// Layer shell scale, vertical edge grip.
+    ResizeUpDown,
+    /// Layer shell rotation, in the ring outside a corner grip.
+    Rotate,
+    /// The layer shell's anchor marker.
+    ShellAnchor,
 }
 
 impl ViewerPointerHint {
@@ -180,8 +192,22 @@ impl ViewerPointerHint {
             // GPUI-CE has no generic `Move` cursor. OpenHand communicates the
             // same grab-to-move affordance and matches the Node Editor.
             Self::MovableBody => CursorStyle::OpenHand,
-            Self::PathAnchor => CursorStyle::PointingHand,
+            // Both anchors are "a point you can pick up"; one glyph for both
+            // keeps the promise consistent across overlays.
+            Self::PathAnchor | Self::ShellAnchor => CursorStyle::PointingHand,
             Self::PenClose => CursorStyle::DragCopy,
+            // The scale grips finally have a gesture behind them, which is
+            // what `done/pointer-feedback-plan.md` was waiting for before
+            // assigning `Resize*` (a cursor is a promise about what works).
+            Self::ResizeUpLeftDownRight => CursorStyle::ResizeUpLeftDownRight,
+            Self::ResizeUpRightDownLeft => CursorStyle::ResizeUpRightDownLeft,
+            Self::ResizeLeftRight => CursorStyle::ResizeLeftRight,
+            Self::ResizeUpDown => CursorStyle::ResizeUpDown,
+            // GPUI-CE has no rotation cursor and no custom bitmaps, so the 24
+            // built-ins have to supply a stand-in. `DragLink` is the only one
+            // whose glyph carries a curved arrow — it reads as "turn" rather
+            // than "move", and nothing else in the Viewer uses it.
+            Self::Rotate => CursorStyle::DragLink,
         }
     }
 }
@@ -200,7 +226,14 @@ fn viewer_drag_cursor(
     drawing_shape: bool,
     drawing_pen: bool,
     path_handle: Option<PathHandleKind>,
+    shell_handle: Option<ViewerPointerHint>,
 ) -> Option<CursorStyle> {
+    // A shell grip keeps the cursor the pointer showed before the press: the
+    // gesture is the one the hover promised, so changing the glyph mid-drag
+    // would only unsay it.
+    if let Some(hint) = shell_handle {
+        return Some(hint.cursor());
+    }
     if pan || moving || path_handle == Some(PathHandleKind::Point) {
         Some(CursorStyle::ClosedHand)
     } else if drawing_shape || drawing_pen || path_handle.is_some() {
@@ -361,6 +394,17 @@ impl ViewerPanel {
                 // the node path above, where the document already changed
                 // (a deleted node) and reverting would undo that change.
                 this.cancel_move(cx);
+            }
+            // A shell drag belongs to the selection the same way: the
+            // manipulator only exists while its layer is the one selected
+            // layer, so losing that selection has to revert the preview
+            // instead of committing it to a layer nobody is looking at.
+            if this.handle_drag.as_ref().is_some_and(|drag| {
+                drag.press_edit.layer_target().is_some_and(|(comp, layer)| {
+                    selection.comp() != Some(comp) || !selection.contains(layer)
+                })
+            }) {
+                this.cancel_handle_drag(cx);
             }
             cx.notify();
         });
@@ -1039,10 +1083,9 @@ impl ViewerPanel {
         let Some(original_document) = context.document.clone() else {
             return false;
         };
-        let Some(press_edit) = registry
-            .overlay(handle.overlay)
-            .and_then(|overlay| overlay.drag(&handle, (0.0, 0.0), &context))
-        else {
+        let Some(press_edit) = registry.overlay(handle.overlay).and_then(|overlay| {
+            overlay.drag(&handle, (0.0, 0.0), DragModifiers::default(), &context)
+        }) else {
             return false;
         };
         self.handle_drag = Some(OverlayHandleDrag {
@@ -1078,6 +1121,10 @@ impl ViewerPanel {
             show_grid: self.show_grid,
             show_safe_areas: self.show_safe_areas,
             error: self.error.clone(),
+            active_drag: self.handle_drag.as_ref().map(|drag| ActiveDrag {
+                handle: drag.handle.id,
+                press_document: drag.original_document.clone(),
+            }),
             colors: OverlayColors {
                 // A bright semantic info color keeps the editable path legible
                 // over both dark footage and the black composition background.
@@ -1400,7 +1447,12 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    fn handle_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn handle_dragged(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: DragModifiers,
+        cx: &mut Context<Self>,
+    ) {
         let Some(pointer) = self.comp_position(position) else {
             return;
         };
@@ -1418,7 +1470,9 @@ impl ViewerPanel {
             );
             registry
                 .overlay(drag.handle.overlay)
-                .and_then(|overlay| overlay.drag(&drag.handle, delta, &drag.press_context))
+                .and_then(|overlay| {
+                    overlay.drag(&drag.handle, delta, modifiers, &drag.press_context)
+                })
                 .map(|edit| (edit, delta))
         }) else {
             return;
@@ -1660,6 +1714,12 @@ fn overlay_label_element(label: overlay::OverlayLabel) -> Div {
                     .text_color(label.color)
                     .child(label.text.clone()),
             ),
+        LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(
+            div()
+                .text_xs()
+                .text_color(label.color)
+                .child(label.text.clone()),
+        ),
     }
 }
 
@@ -1910,6 +1970,10 @@ impl Render for ViewerPanel {
             self.handle_drag
                 .as_ref()
                 .and_then(|drag| drag.handle.id.path_handle_kind()),
+            self.handle_drag
+                .as_ref()
+                .filter(|drag| drag.handle.id.shell().is_some())
+                .map(|drag| drag.handle.hint),
         );
         let composition_background = (|| {
             let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
@@ -2125,7 +2189,14 @@ impl Render for ViewerPanel {
                     Some(MouseButton::Left) => {
                         this.pan_drag = None;
                         if this.handle_drag.is_some() {
-                            this.handle_dragged(event.position, cx);
+                            this.handle_dragged(
+                                event.position,
+                                DragModifiers {
+                                    shift: event.modifiers.shift,
+                                    alt: event.modifiers.alt,
+                                },
+                                cx,
+                            );
                         } else if this
                             .pen_session
                             .as_ref()
@@ -3982,11 +4053,18 @@ mod tests {
             CursorStyle::OpenHand
         );
         assert_eq!(
-            viewer_drag_cursor(false, true, false, false, None),
+            viewer_drag_cursor(false, true, false, false, None, None),
             Some(CursorStyle::ClosedHand)
         );
         assert_eq!(
-            viewer_drag_cursor(false, false, false, false, Some(PathHandleKind::OutTangent),),
+            viewer_drag_cursor(
+                false,
+                false,
+                false,
+                false,
+                Some(PathHandleKind::OutTangent),
+                None
+            ),
             Some(CursorStyle::Crosshair)
         );
     }
@@ -4473,5 +4551,325 @@ mod tests {
             vec![(0, 150.0), (60, 100.0)],
             "the layer starting at 10 is keyed at its own local frame 0"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Shell manipulator gestures (REQ-UI-011 unit 7)
+    // -----------------------------------------------------------------------
+
+    /// One selected layer with a 40x20 rect centered at (100, 200), on a 1:1
+    /// viewport: the shell bbox is (80, 190, 40, 20) and its south-east grip
+    /// sits at window pixel (120, 210).
+    fn shell_setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        ravel_core::id::CompId,
+        ravel_core::id::LayerId,
+    ) {
+        use ravel_core::id::LayerId;
+
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            cx.set_global(crate::panels::SelectedPropertiesTarget::default());
+            cx.set_global(CanvasSelection::default());
+            cx.set_global(crate::panels::PlaybackPosition::default());
+            // The manipulator only answers the pointer under Select.
+            cx.set_global(ToolState::default());
+        });
+
+        let (comp_id, layer) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let layer = LayerId::next();
+            let network = Graph::new()
+                .add_node(shape_node(
+                    "shape.rect",
+                    &[
+                        v2("center", 100.0, 200.0),
+                        f("width", 40.0),
+                        f("height", 20.0),
+                    ],
+                ))
+                .unwrap();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(layer, "L", network).with_time(0, 0, 300),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, layer)
+        });
+        cx.update(|cx| crate::panels::set_layer_selection(vec![layer], cx));
+
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.composition_resolution = Some((1920, 1080));
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+            })
+            .unwrap();
+        (window, project, comp_id, layer)
+    }
+
+    /// The window position of a composition point, read from the panel's
+    /// *current* viewport. The fixture's 1:1 viewport only survives until the
+    /// canvas lays out for real, so a test that hardcodes window pixels
+    /// silently starts pressing somewhere else.
+    fn window_point(panel: &ViewerPanel, comp: (f32, f32)) -> Point<Pixels> {
+        let resolution = panel.composition_resolution.expect("no composition");
+        let rect = panel.viewport.rect(panel.viewport_size.get(), resolution);
+        let origin = panel.viewport_origin.get();
+        let (x, y) = comp_to_screen(comp, rect, resolution.0);
+        point(px(x + origin.0), px(y + origin.1))
+    }
+
+    /// A left press on the composition point `comp`.
+    fn press_at(panel: &ViewerPanel, comp: (f32, f32)) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: window_point(panel, comp),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    /// The composition point of the south-east scale grip for the fixture's
+    /// (80, 190, 40, 20) bbox.
+    const SE_GRIP: (f32, f32) = (120.0, 210.0);
+
+    fn shell_scale(
+        project: &Entity<ProjectState>,
+        comp_id: ravel_core::id::CompId,
+        layer: ravel_core::id::LayerId,
+        cx: &mut TestAppContext,
+    ) -> (f32, f32) {
+        project.read_with(cx, |project, _| {
+            let transform = &project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .transform;
+            (
+                transform.scale[0].evaluate(0.0, &eval_ctx()),
+                transform.scale[1].evaluate(0.0, &eval_ctx()),
+            )
+        })
+    }
+
+    /// A whole shell drag is one undo step, however many previews it published
+    /// on the way. Three moves and a single `undo` must land back at 100%.
+    #[gpui::test]
+    fn a_shell_handle_drag_is_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        assert_eq!(shell_scale(&project, comp_id, layer, cx), (1.0, 1.0));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx),
+                    "the south-east grip took the press"
+                );
+                for x in [130.0, 150.0, 160.0] {
+                    let to = window_point(panel, (x, 215.0));
+                    panel.handle_dragged(to, DragModifiers::default(), cx);
+                }
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let scaled = shell_scale(&project, comp_id, layer, cx);
+        assert!(
+            (scaled.0 - 2.0).abs() < 1e-3 && (scaled.1 - 1.25).abs() < 1e-3,
+            "the last preview is what the gesture committed: {scaled:?}"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            shell_scale(&project, comp_id, layer, cx),
+            (1.0, 1.0),
+            "one undo covers the whole gesture, not just the last preview"
+        );
+        // That single undo did not eat the layer: the next step back is its
+        // creation, so the gesture really was one step.
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layer_count(),
+                1
+            );
+        });
+    }
+
+    /// Escape during a shell drag restores the document the gesture started
+    /// from and leaves no undo step behind.
+    #[gpui::test]
+    fn escape_reverts_a_shell_handle_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert_ne!(shell_scale_of(panel, cx, comp_id, layer), (1.0, 1.0));
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "Escape restores the document the press captured"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layer_count()
+            }),
+            0,
+            "the cancelled gesture left no step of its own in the history"
+        );
+    }
+
+    /// The overlay hit test runs before `select_mouse_down` and
+    /// `shape_mouse_down`, so a press on a shell grip under a drawing or
+    /// navigation tool has to fall through to that tool instead of starting a
+    /// transform.
+    #[gpui::test]
+    fn only_the_select_tool_grabs_a_shell_grip(cx: &mut TestAppContext) {
+        // `_project` keeps the entity alive: `ProjectStateHandle` is weak, and
+        // dropping it here would empty every overlay's document instead of
+        // testing the tool gate.
+        let (window, _project, ..) = shell_setup(cx);
+
+        for tool in [
+            ravel_ui::ToolKind::Rect,
+            ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Pen,
+            ravel_ui::ToolKind::Hand,
+            ravel_ui::ToolKind::Zoom,
+        ] {
+            cx.update(|cx| {
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..Default::default()
+                })
+            });
+            window
+                .update(cx, |panel, _window, cx| {
+                    assert!(
+                        !panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx),
+                        "{tool:?} must keep the press it is waiting for"
+                    );
+                    assert!(panel.handle_drag.is_none(), "{tool:?} started a shell drag");
+                    // The cursor must not promise a transform either.
+                    assert_ne!(
+                        panel.pointer_hint_at(window_point(panel, SE_GRIP), cx),
+                        Some(ViewerPointerHint::ResizeUpLeftDownRight),
+                        "{tool:?} still advertises the scale grip"
+                    );
+                })
+                .unwrap();
+        }
+
+        cx.update(|cx| cx.set_global(ToolState::default()));
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(
+                    panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx),
+                    "Select owns the grip"
+                );
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+    }
+
+    /// The manipulator exists only while its layer is the selected one, so a
+    /// selection that moves elsewhere mid-drag reverts the preview instead of
+    /// leaving it to be committed against a layer nobody is looking at.
+    #[gpui::test]
+    fn changing_the_layer_selection_reverts_a_shell_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let snapshot = project.read_with(cx, |project, _| project.document().clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert_ne!(shell_scale_of(panel, cx, comp_id, layer), (1.0, 1.0));
+            })
+            .unwrap();
+
+        // Another panel selects something else while the button is still down.
+        cx.update(|cx| crate::panels::set_layer_selection(Vec::new(), cx));
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.handle_drag.is_none(), "the gesture was released");
+            })
+            .unwrap();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the preview was reverted, not left in the document"
+        );
+
+        // A mouse-up after the selection moved must not commit anything.
+        window
+            .update(cx, |panel, _window, cx| panel.handle_drag_ended(cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.document().clone()),
+            snapshot,
+            "the release found nothing to commit"
+        );
+    }
+
+    /// The scale of `layer` as the panel currently sees it, for assertions
+    /// made from inside a `window.update`.
+    fn shell_scale_of(
+        panel: &ViewerPanel,
+        cx: &mut Context<ViewerPanel>,
+        comp_id: ravel_core::id::CompId,
+        layer: ravel_core::id::LayerId,
+    ) -> (f32, f32) {
+        let project = panel.project(cx).unwrap();
+        let document = project.read(cx).document().clone();
+        let transform = &document
+            .get_composition(comp_id)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .transform;
+        (
+            transform.scale[0].evaluate(0.0, &eval_ctx()),
+            transform.scale[1].evaluate(0.0, &eval_ctx()),
+        )
     }
 }

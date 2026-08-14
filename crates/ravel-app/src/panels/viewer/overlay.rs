@@ -31,6 +31,8 @@
 
 use gpui::{Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
 use ravel_core::composition::Document;
+use ravel_core::composition::transform::{Affine, world_matrix};
+use ravel_core::eval::EvalContext;
 use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
@@ -64,6 +66,9 @@ pub mod priority {
     pub const SAFE_AREAS: i32 = 10;
     pub const NODE_SELECTION_BBOX: i32 = 20;
     pub const LAYER_SELECTION_BBOX: i32 = 30;
+    /// Above both bboxes and below the path handles: a path point drawn on
+    /// top of a shell handle is the more specific thing to grab.
+    pub const SHELL_MANIPULATOR: i32 = 35;
     pub const PATH_EDIT: i32 = 40;
     pub const EVAL_ERROR: i32 = 50;
 }
@@ -125,9 +130,24 @@ pub struct OverlayContext {
     pub show_safe_areas: bool,
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
+    /// The gesture the pointer currently holds, or `None` when it is idle.
+    /// Only the drag HUD reads it.
+    pub active_drag: Option<ActiveDrag>,
     pub colors: OverlayColors,
     /// Overlay-target results belonging to the frame currently shown.
     pub results: OverlayResults,
+}
+
+/// The handle drag in flight, as the overlays see it.
+///
+/// The press-time document rides along because a HUD reports what the gesture
+/// has *done* — a factor, an angle swept — and that is a difference between
+/// two documents, not a reading of one. The panel already holds this snapshot
+/// for the undo path, so carrying it costs a structurally shared clone.
+#[derive(Clone)]
+pub struct ActiveDrag {
+    pub handle: OverlayHandleId,
+    pub press_document: Document,
 }
 
 impl OverlayContext {
@@ -307,6 +327,31 @@ impl OverlayPainter {
         self.fill_screen_rect(bounds, color);
     }
 
+    /// A circle of constant screen size centered on a composition point.
+    ///
+    /// The segment count is fixed: the rings this draws are a couple of dozen
+    /// pixels across, where more vertices are invisible and fewer are a
+    /// polygon.
+    pub fn screen_ring_at(&mut self, comp: (f32, f32), radius_px: f32, width_px: f32, color: Hsla) {
+        const SEGMENTS: usize = 24;
+        let (screen_x, screen_y) = self.to_screen(comp);
+        let points = (0..SEGMENTS)
+            .map(|segment| {
+                let angle = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                point(
+                    px(screen_x + radius_px * angle.cos()),
+                    px(screen_y + radius_px * angle.sin()),
+                )
+            })
+            .collect();
+        self.primitives.push(OverlayPrimitive::Stroke {
+            points,
+            width: px(width_px),
+            color,
+            close: true,
+        });
+    }
+
     pub fn fill_screen_rect(&mut self, bounds: Bounds<Pixels>, color: Hsla) {
         self.primitives
             .push(OverlayPrimitive::Quad { bounds, color });
@@ -385,12 +430,16 @@ pub fn paint_primitives(primitives: &[OverlayPrimitive], window: &mut Window) {
 // Labels
 // ===========================================================================
 
-/// Where a screen-space label sits. Unit 7's drag HUD and unit 8's element
-/// index labels extend this with composition-anchored placements.
+/// Where a screen-space label sits. Unit 8's element index labels extend this
+/// with composition-anchored placements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabelPlacement {
     /// Centered over the whole viewer canvas area.
     CanvasCenter,
+    /// Pinned to the canvas area's top-left corner. Where the drag HUD sits:
+    /// a fixed corner never lands under the pointer or under the handles the
+    /// gesture is moving.
+    CanvasTopLeft,
 }
 
 /// Screen-space text produced by an overlay.
@@ -411,6 +460,8 @@ pub struct OverlayLabel {
 pub enum OverlayHandleId {
     /// A control point of an editable path, or one of its tangents.
     PathPoint { index: usize, kind: PathHandleKind },
+    /// A grip of the layer shell manipulator.
+    Shell(ShellHandle),
     #[cfg(test)]
     Test(u8),
 }
@@ -420,8 +471,7 @@ impl OverlayHandleId {
     pub fn path_point(self) -> Option<(usize, PathHandleKind)> {
         match self {
             Self::PathPoint { index, kind } => Some((index, kind)),
-            #[cfg(test)]
-            Self::Test(_) => None,
+            _ => None,
         }
     }
 
@@ -429,6 +479,26 @@ impl OverlayHandleId {
     pub fn path_handle_kind(self) -> Option<PathHandleKind> {
         self.path_point().map(|(_, kind)| kind)
     }
+
+    /// The shell grip, when this handle belongs to the shell manipulator.
+    pub fn shell(self) -> Option<ShellHandle> {
+        match self {
+            Self::Shell(handle) => Some(handle),
+            _ => None,
+        }
+    }
+}
+
+/// Modifier keys sampled at each move of a handle drag.
+///
+/// The convention is the one the shape-drawing drag (`drag_geometry`) and the
+/// Timeline gestures already use: **Shift constrains** (a square there, a
+/// locked aspect ratio here) and **Alt changes the fixed reference point**
+/// (the drag's origin there, the anchor point here).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DragModifiers {
+    pub shift: bool,
+    pub alt: bool,
 }
 
 /// A grabbable point an overlay exposes to the pointer.
@@ -501,6 +571,11 @@ pub enum OverlayEdit {
         value: f32,
         local_frame: Option<u64>,
     },
+    /// Several writes that belong to one gesture step and must land together.
+    /// A shell scale about the opposite corner moves `scale` *and* `position`;
+    /// an anchor move rewrites all four channels. Applying them one at a time
+    /// would publish a document in which the picture has jumped.
+    Batch(Vec<OverlayEdit>),
 }
 
 impl OverlayEdit {
@@ -540,6 +615,11 @@ impl OverlayEdit {
                 };
                 *slot = crate::panels::param_edit::edited_channel(slot, *value, *local_frame);
             }),
+            // All or nothing: a half-applied batch is a document nobody asked
+            // for.
+            Self::Batch(edits) => edits
+                .iter()
+                .try_fold(document.clone(), |document, edit| edit.apply(&document)),
         }
     }
 
@@ -560,6 +640,19 @@ impl OverlayEdit {
                 .get_composition(*comp)
                 .and_then(|comp| comp.get_layer(*layer))
                 .is_some(),
+            Self::Batch(edits) => edits.iter().all(|edit| edit.target_exists(document)),
+        }
+    }
+
+    /// The layer shell this edit writes, when it writes one. The gesture's
+    /// lifetime hangs off it: a selection that no longer holds this layer has
+    /// to end the drag rather than keep transforming what is no longer
+    /// selected.
+    pub fn layer_target(&self) -> Option<(CompId, LayerId)> {
+        match self {
+            Self::NodeParameter { .. } => None,
+            Self::LayerTransform { comp, layer, .. } => Some((*comp, *layer)),
+            Self::Batch(edits) => edits.iter().find_map(Self::layer_target),
         }
     }
 
@@ -570,6 +663,9 @@ impl OverlayEdit {
             // The shell compositing chain is recompiled from the layer, so no
             // node registration goes stale.
             Self::LayerTransform { .. } => InvalidationHint::None,
+            Self::Batch(edits) => edits.iter().fold(InvalidationHint::None, |hint, edit| {
+                hint.merge(edit.invalidation())
+            }),
         }
     }
 }
@@ -607,13 +703,15 @@ pub trait ViewerOverlay {
     }
 
     /// Translate a handle drag into a document change. `delta` is the
-    /// composition-space offset from the press position, and `ctx` is the
-    /// context captured at press time, so repeated calls during one gesture
-    /// stay absolute instead of compounding.
+    /// composition-space offset from the press position, `modifiers` are the
+    /// keys held at this move, and `ctx` is the context captured at press
+    /// time, so repeated calls during one gesture stay absolute instead of
+    /// compounding.
     fn drag(
         &self,
         _handle: &OverlayHandle,
         _delta: (f32, f32),
+        _modifiers: DragModifiers,
         _ctx: &OverlayContext,
     ) -> Option<OverlayEdit> {
         None
@@ -628,8 +726,9 @@ pub struct OverlayRegistry {
 
 impl OverlayRegistry {
     /// The overlays the Viewer ships with: the five kinds the panel drew
-    /// before the registry existed, with the selection bbox registered once per
-    /// scope so the node and layer variants order independently.
+    /// before the registry existed — with the selection bbox registered once
+    /// per scope so the node and layer variants order independently — plus the
+    /// layer shell manipulator.
     pub fn builtin() -> Self {
         Self::new(vec![
             Box::new(GridOverlay),
@@ -640,6 +739,7 @@ impl OverlayRegistry {
             Box::new(SelectionBboxOverlay {
                 scope: BboxScope::Layer,
             }),
+            Box::new(ShellManipulator),
             Box::new(PathEditOverlay),
             Box::new(EvalErrorOverlay),
         ])
@@ -836,6 +936,14 @@ const SELECTION_COLOR: Hsla = Hsla {
 /// Screen-pixel side length of a selection handle (zoom-independent).
 pub const SELECTION_HANDLE_PX: f32 = 7.0;
 
+/// Inner fill of a two-square handle mark.
+const HANDLE_FILL: Hsla = Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 1.0,
+    a: 1.0,
+};
+
 /// The eight handle anchor points of a bbox: four corners and the four edge
 /// midpoints. Coordinate-system agnostic.
 pub fn selection_handle_centers(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 8] {
@@ -852,12 +960,21 @@ pub fn selection_handle_centers(x: f32, y: f32, w: f32, h: f32) -> [(f32, f32); 
     ]
 }
 
+/// A handle mark: an outer square in `color` with a light core, so it reads
+/// against both the composition and the outline it sits on.
+fn paint_handle_mark(painter: &mut OverlayPainter, center: (f32, f32), size_px: f32, color: Hsla) {
+    painter.screen_square_at(center, size_px, color);
+    painter.screen_square_at(center, size_px - 2.0, HANDLE_FILL);
+}
+
 /// Outlines the selection, with the eight transform handles for a node
 /// selection.
 ///
-/// The handles are still decorative: they expose no [`OverlayHandle`], because
-/// no layer- or node-level scale gesture exists yet. Unit 7 gives them one and
-/// makes them grabbable through the same overlay.
+/// These handles stay decorative, and the reason is now specific rather than
+/// general: they outline *nodes*, and scaling a node means writing its own
+/// size parameters, which is unit 5's `ParamRole` work. The layer shell is
+/// grabbable — [`ShellManipulator`] draws the same eight marks around the
+/// layer bbox and backs them with [`OverlayHandle`]s.
 pub struct SelectionBboxOverlay {
     pub scope: BboxScope,
 }
@@ -933,17 +1050,7 @@ impl ViewerOverlay for SelectionBboxOverlay {
                 continue;
             }
             for center in selection_handle_centers(rect.x, rect.y, rect.w, rect.h) {
-                painter.screen_square_at(center, SELECTION_HANDLE_PX, SELECTION_COLOR);
-                painter.screen_square_at(
-                    center,
-                    SELECTION_HANDLE_PX - 2.0,
-                    Hsla {
-                        h: 0.0,
-                        s: 0.0,
-                        l: 1.0,
-                        a: 1.0,
-                    },
-                );
+                paint_handle_mark(painter, center, SELECTION_HANDLE_PX, SELECTION_COLOR);
             }
         }
     }
@@ -1062,6 +1169,7 @@ impl ViewerOverlay for PathEditOverlay {
         &self,
         handle: &OverlayHandle,
         delta: (f32, f32),
+        _modifiers: DragModifiers,
         ctx: &OverlayContext,
     ) -> Option<OverlayEdit> {
         let (index, kind) = handle.id.path_point()?;
@@ -1080,6 +1188,529 @@ impl ViewerOverlay for PathEditOverlay {
             key: "points".into(),
             value: ParameterValue::PathPoints(points),
         })
+    }
+}
+
+// ===========================================================================
+// The layer shell manipulator
+// ===========================================================================
+
+/// One grip of [`ShellManipulator`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellHandle {
+    /// A scale grip, indexed into [`selection_handle_centers`]' order.
+    Scale(u8),
+    /// The rotation ring around the corner grip with this index.
+    Rotate(u8),
+    /// The anchor marker.
+    Anchor,
+    /// The move grip at the middle of the bbox.
+    Position,
+}
+
+impl ShellHandle {
+    /// Which axes a scale grip drives: corners both, edge midpoints one.
+    fn scale_axes(index: u8) -> (bool, bool) {
+        match index {
+            1 | 6 => (false, true),
+            3 | 4 => (true, false),
+            _ => (true, true),
+        }
+    }
+
+    /// The cursor a scale grip promises, from the diagonal it sits on.
+    fn scale_hint(index: u8) -> ViewerPointerHint {
+        match index {
+            0 | 7 => ViewerPointerHint::ResizeUpLeftDownRight,
+            2 | 5 => ViewerPointerHint::ResizeUpRightDownLeft,
+            1 | 6 => ViewerPointerHint::ResizeUpDown,
+            _ => ViewerPointerHint::ResizeLeftRight,
+        }
+    }
+}
+
+/// Anchor marker colour: warm, so it never reads as one of the blue scale
+/// handles.
+const ANCHOR_COLOR: Hsla = Hsla {
+    h: 0.09,
+    s: 0.9,
+    l: 0.6,
+    a: 0.95,
+};
+
+/// The line from a child's anchor to its parent's.
+const PARENT_LINK_COLOR: Hsla = Hsla {
+    h: 0.09,
+    s: 0.5,
+    l: 0.6,
+    a: 0.55,
+};
+
+/// Screen-pixel side length of the anchor marker.
+const ANCHOR_MARKER_PX: f32 = 11.0;
+
+/// The rotation ring: the selection accent held back so the ring reads as a
+/// zone around the corner rather than as another grip.
+const ROTATE_RING_COLOR: Hsla = Hsla {
+    h: 0.58,
+    s: 0.7,
+    l: 0.6,
+    a: 0.4,
+};
+
+/// An angle in radians folded into `(−π, π]`.
+fn wrap_angle(radians: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let wrapped = radians.rem_euclid(TAU);
+    if wrapped > PI { wrapped - TAU } else { wrapped }
+}
+
+/// `numerator / denominator`, or `1.0` when the denominator is too small to
+/// carry a ratio — a grip that already sits on its fixed point cannot say
+/// anything about scale, so it must leave the channel where it is.
+fn scale_ratio(numerator: f32, denominator: f32) -> f32 {
+    if denominator.abs() < 1e-4 {
+        1.0
+    } else {
+        numerator / denominator
+    }
+}
+
+/// The shell transform of one layer, resolved at the current frame, plus the
+/// matrices the grips need. Every field is read-only; the edits are derived.
+struct ShellState {
+    comp: CompId,
+    layer: LayerId,
+    /// World-space AABB of the layer's drawn geometry — the same rectangle
+    /// the selection bbox outlines.
+    rect: CompRect,
+    /// The parent chain's matrix; identity when the layer has no parent.
+    /// `position` lives in this space.
+    parent: Affine,
+    /// `parent · layer`: the matrix taking layer-local points to the canvas.
+    world: Affine,
+    anchor: (f32, f32),
+    position: (f32, f32),
+    scale: (f32, f32),
+    /// Degrees, the unit the channel stores.
+    rotation: f32,
+    /// The layer-local frame every write targets (REQ-LAYER-006).
+    local_frame: u64,
+    /// Where the anchor lands on the canvas: `parent · position`.
+    anchor_world: (f32, f32),
+    /// The parent layer's own anchor, for the link line.
+    parent_anchor_world: Option<(f32, f32)>,
+}
+
+impl ShellState {
+    fn resolve(ctx: &OverlayContext) -> Option<Self> {
+        Self::resolve_in(ctx, ctx.document.as_ref()?)
+    }
+
+    /// The same resolution against a document the caller supplies, so the HUD
+    /// can read the shell as it stood when the gesture pressed.
+    fn resolve_in(ctx: &OverlayContext, document: &Document) -> Option<Self> {
+        let (resolution, playback) = (ctx.resolution?, ctx.playback?);
+        let comp_id = ctx.layer_selection.comp()?;
+        // Exactly one layer: two or more have no single shell to manipulate,
+        // and the multi-layer bbox already says so by drawing no handles.
+        let [layer_id] = ctx.layer_selection.layers() else {
+            return None;
+        };
+        let comp = document.get_composition(comp_id)?;
+        let layer = comp.get_layer(*layer_id)?;
+        let eval = EvalContext::new(playback.frame, playback.fps, resolution);
+        let rect = super::layer_comp_rect(comp, layer, playback.frame, &eval)?;
+
+        let anchor_of = |layer: &ravel_core::composition::Layer| {
+            let lf = layer.local_frame_continuous(eval.sample_frame());
+            (
+                layer.transform.anchor_point[0].evaluate(lf, &eval),
+                layer.transform.anchor_point[1].evaluate(lf, &eval),
+            )
+        };
+        let lf = layer.local_frame_continuous(eval.sample_frame());
+        let transform = &layer.transform;
+        let position = (
+            transform.position[0].evaluate(lf, &eval),
+            transform.position[1].evaluate(lf, &eval),
+        );
+        let parent_layer = layer.parent.and_then(|id| comp.get_layer(id));
+        let parent = parent_layer
+            .map(|parent| world_matrix(comp, parent, &eval))
+            .unwrap_or(Affine::IDENTITY);
+        Some(Self {
+            comp: comp_id,
+            layer: *layer_id,
+            rect,
+            parent,
+            world: world_matrix(comp, layer, &eval),
+            anchor: anchor_of(layer),
+            position,
+            scale: (
+                transform.scale[0].evaluate(lf, &eval),
+                transform.scale[1].evaluate(lf, &eval),
+            ),
+            rotation: transform.rotation.evaluate(lf, &eval),
+            local_frame: ravel_ui::keyframes::layer_local_frame(layer, playback.frame),
+            anchor_world: parent.apply(position.0, position.1),
+            parent_anchor_world: parent_layer.map(|parent| {
+                let anchor = anchor_of(parent);
+                world_matrix(comp, parent, &eval).apply(anchor.0, anchor.1)
+            }),
+        })
+    }
+
+    fn centers(&self) -> [(f32, f32); 8] {
+        selection_handle_centers(self.rect.x, self.rect.y, self.rect.w, self.rect.h)
+    }
+
+    fn rect_center(&self) -> (f32, f32) {
+        (
+            self.rect.x + self.rect.w * 0.5,
+            self.rect.y + self.rect.h * 0.5,
+        )
+    }
+
+    /// One channel write at the layer's own local frame. `Some(frame)` is what
+    /// keeps a keyframed channel keyframed: [`param_edit::edited_channel`]
+    /// only collapses a curve when the frame is `None`.
+    ///
+    /// [`param_edit::edited_channel`]: crate::panels::param_edit::edited_channel
+    fn write(&self, channel: ShellChannel, value: f32) -> OverlayEdit {
+        OverlayEdit::LayerTransform {
+            comp: self.comp,
+            layer: self.layer,
+            channel,
+            value,
+            local_frame: Some(self.local_frame),
+        }
+    }
+
+    /// Scale so the grabbed grip follows the pointer while a fixed point stays
+    /// put: the opposite grip by default, the anchor under Alt.
+    fn scale_edits(
+        &self,
+        index: u8,
+        grabbed: (f32, f32),
+        target: (f32, f32),
+        modifiers: DragModifiers,
+    ) -> Option<Vec<OverlayEdit>> {
+        let inverse = self.world.inverse()?;
+        let local = |point: (f32, f32)| inverse.apply(point.0, point.1);
+        // Ratios are taken in layer-local space, so the current scale, the
+        // rotation and the whole parent chain are already divided out and the
+        // result is the factor to multiply onto `scale`.
+        let fixed = if modifiers.alt {
+            self.anchor
+        } else {
+            local(self.centers()[7 - index as usize])
+        };
+        let grabbed = local(grabbed);
+        let moved = local(target);
+        let ratio_x = scale_ratio(moved.0 - fixed.0, grabbed.0 - fixed.0);
+        let ratio_y = scale_ratio(moved.1 - fixed.1, grabbed.1 - fixed.1);
+        let axes = ShellHandle::scale_axes(index);
+        let (factor_x, factor_y) = if modifiers.shift {
+            // The larger movement decides both axes — the rule `drag_geometry`
+            // uses to square off a shape drag.
+            let uniform = match axes {
+                (true, true) if (moved.1 - grabbed.1).abs() > (moved.0 - grabbed.0).abs() => {
+                    ratio_y
+                }
+                (false, true) => ratio_y,
+                _ => ratio_x,
+            };
+            (uniform, uniform)
+        } else {
+            (
+                if axes.0 { ratio_x } else { 1.0 },
+                if axes.1 { ratio_y } else { 1.0 },
+            )
+        };
+        let scaled = (self.scale.0 * factor_x, self.scale.1 * factor_y);
+        let mut edits = vec![
+            self.write(ShellChannel::Scale(Axis::X), scaled.0),
+            self.write(ShellChannel::Scale(Axis::Y), scaled.1),
+        ];
+        if !modifiers.alt {
+            // The layer's matrix pins the anchor, not the opposite grip, so
+            // scaling about anything else drags the content along unless
+            // `position` absorbs the difference:
+            //   L(q) = R·S·(q − a) + p, and holding L(fixed) fixed gives
+            //   p' = p + R·(S − S')·(fixed − a).
+            let (sin, cos) = self.rotation.to_radians().sin_cos();
+            let dx = (self.scale.0 - scaled.0) * (fixed.0 - self.anchor.0);
+            let dy = (self.scale.1 - scaled.1) * (fixed.1 - self.anchor.1);
+            edits.push(self.write(
+                ShellChannel::Position(Axis::X),
+                self.position.0 + cos * dx - sin * dy,
+            ));
+            edits.push(self.write(
+                ShellChannel::Position(Axis::Y),
+                self.position.1 + sin * dx + cos * dy,
+            ));
+        }
+        Some(edits)
+    }
+
+    /// Rotation measured in the parent's space, where the layer turns around
+    /// `position`: the angle the pointer sweeps there *is* the delta in
+    /// degrees, whatever the parent chain does.
+    fn rotate_edits(&self, grabbed: (f32, f32), target: (f32, f32)) -> Option<Vec<OverlayEdit>> {
+        let inverse = self.parent.inverse()?;
+        let arm = |point: (f32, f32)| {
+            let point = inverse.apply(point.0, point.1);
+            (point.0 - self.position.0, point.1 - self.position.1)
+        };
+        let from = arm(grabbed);
+        let to = arm(target);
+        if from.0.hypot(from.1) < 1e-3 || to.0.hypot(to.1) < 1e-3 {
+            return None;
+        }
+        // `atan2` is discontinuous across the negative x axis, so the raw
+        // difference of two arms straddling it reads as most of a turn the
+        // wrong way (+2° arrives as −358°). Fold it back into (−π, π]: a
+        // pointer drag is always the short way round.
+        let delta = wrap_angle(to.1.atan2(to.0) - from.1.atan2(from.0));
+        Some(vec![self.write(
+            ShellChannel::Rotation,
+            self.rotation + delta.to_degrees(),
+        )])
+    }
+
+    /// Move the anchor without moving the picture.
+    ///
+    /// The anchor becomes the layer-local point under the pointer and
+    /// `position` becomes the same point in the parent's space. That pair is
+    /// exactly the correction that leaves `L = T(p)·R·S·T(−a)` unchanged:
+    /// writing the anchor alone would shift the content by `R·S·(a' − a)`.
+    fn anchor_edits(&self, target: (f32, f32)) -> Option<Vec<OverlayEdit>> {
+        let world = self.world.inverse()?;
+        let parent = self.parent.inverse()?;
+        let anchor = world.apply(target.0, target.1);
+        let position = parent.apply(target.0, target.1);
+        Some(vec![
+            self.write(ShellChannel::AnchorPoint(Axis::X), anchor.0),
+            self.write(ShellChannel::AnchorPoint(Axis::Y), anchor.1),
+            self.write(ShellChannel::Position(Axis::X), position.0),
+            self.write(ShellChannel::Position(Axis::Y), position.1),
+        ])
+    }
+
+    fn position_edits(&self, grabbed: (f32, f32), target: (f32, f32)) -> Option<Vec<OverlayEdit>> {
+        let inverse = self.parent.inverse()?;
+        let from = inverse.apply(grabbed.0, grabbed.1);
+        let to = inverse.apply(target.0, target.1);
+        Some(vec![
+            self.write(
+                ShellChannel::Position(Axis::X),
+                self.position.0 + to.0 - from.0,
+            ),
+            self.write(
+                ShellChannel::Position(Axis::Y),
+                self.position.1 + to.1 - from.1,
+            ),
+        ])
+    }
+
+    /// What the drag HUD shows for the grip being held: how far the gesture
+    /// has got, read as the difference between the previewed document (`self`)
+    /// and the one the press captured (`press`).
+    ///
+    /// Scale reports the factor this drag applied and rotation the angle it
+    /// swept, because "200%" tells you nothing while you are dragging a layer
+    /// that was already at 200%. The two positional channels report
+    /// coordinates instead — the plan's "位置なら座標" — since where the
+    /// anchor or the layer now sits is the thing being aimed.
+    fn hud(&self, press: &ShellState, handle: ShellHandle) -> String {
+        match handle {
+            ShellHandle::Scale(_) => format!(
+                "{:.1}% × {:.1}%",
+                scale_ratio(self.scale.0, press.scale.0) * 100.0,
+                scale_ratio(self.scale.1, press.scale.1) * 100.0
+            ),
+            ShellHandle::Rotate(_) => format!("{:+.1}°", self.rotation - press.rotation),
+            ShellHandle::Anchor => format!("({:.1}, {:.1})", self.anchor.0, self.anchor.1),
+            ShellHandle::Position => format!("({:.1}, {:.1})", self.position.0, self.position.1),
+        }
+    }
+}
+
+/// The manipulator for a single selected layer's shell transform: scale on the
+/// eight bbox grips, rotation in the ring just outside each corner, the anchor
+/// marker, and a move grip at the middle.
+///
+/// It stands down unless exactly one layer is selected — with two or more
+/// there is no single shell to write, and with none there is nothing to
+/// outline.
+///
+/// The parent link line lives here too. Choosing the parent is `SHELL-5`'s
+/// Properties dropdown; this overlay only shows the relationship, as a line
+/// from the child's anchor to the parent's.
+pub struct ShellManipulator;
+
+impl ShellManipulator {
+    pub const ID: OverlayId = OverlayId("viewer.shell_manipulator");
+    /// Screen-pixel grab radius of a grip.
+    const HIT_RADIUS_PX: f32 = 8.0;
+    /// Rotation is grabbed in the ring *around* a corner grip: the same anchor
+    /// point with a wider radius, listed after every scale grip so the inner
+    /// disc still scales and only the surrounding ring turns. Keeping both on
+    /// one point is what makes the rotation zone zoom-invariant without the
+    /// overlay having to know the zoom.
+    const ROTATE_RADIUS_PX: f32 = 18.0;
+    /// The bbox grips that carry a rotation ring, in
+    /// [`selection_handle_centers`]' order: the four corners. One list, read
+    /// by both `paint` and `handles`, so the drawn ring cannot drift away from
+    /// the zone that answers the pointer.
+    const ROTATE_CORNERS: [u8; 4] = [0, 2, 5, 7];
+}
+
+impl ViewerOverlay for ShellManipulator {
+    fn id(&self) -> OverlayId {
+        Self::ID
+    }
+
+    fn priority(&self) -> i32 {
+        priority::SHELL_MANIPULATOR
+    }
+
+    fn is_active(&self, ctx: &OverlayContext) -> bool {
+        // Only the Select tool. The overlay hit test runs before
+        // `select_mouse_down` / `shape_mouse_down`, so a manipulator that
+        // stayed live under Rect / Ellipse / Hand / Zoom would answer the
+        // press those tools are waiting for and start a transform instead of
+        // a shape or a pan.
+        ctx.tool == Some(ToolKind::Select) && ShellState::resolve(ctx).is_some()
+    }
+
+    fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
+        let Some(state) = ShellState::resolve(ctx) else {
+            return;
+        };
+        painter.stroke_comp_rect(state.rect, SELECTION_COLOR);
+        let centers = state.centers();
+        // The rotation zone is drawn before the grips so the grip's mark stays
+        // on top of the ring that surrounds it. A cursor promises what works,
+        // and an undrawn hit radius promises nothing.
+        for corner in Self::ROTATE_CORNERS {
+            painter.screen_ring_at(
+                centers[corner as usize],
+                Self::ROTATE_RADIUS_PX,
+                1.0,
+                ROTATE_RING_COLOR,
+            );
+        }
+        for center in centers {
+            paint_handle_mark(painter, center, SELECTION_HANDLE_PX, SELECTION_COLOR);
+        }
+        painter.screen_square_at(
+            state.rect_center(),
+            SELECTION_HANDLE_PX - 2.0,
+            SELECTION_COLOR,
+        );
+        // Drawn before the marker so the line ends under it rather than over.
+        if let Some(parent) = state.parent_anchor_world {
+            painter.stroke_comp_polyline(
+                &[state.anchor_world, parent],
+                false,
+                1.0,
+                PARENT_LINK_COLOR,
+            );
+        }
+        paint_handle_mark(painter, state.anchor_world, ANCHOR_MARKER_PX, ANCHOR_COLOR);
+    }
+
+    fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
+        let Some(drag) = ctx.active_drag.as_ref() else {
+            return Vec::new();
+        };
+        let Some(handle) = drag.handle.shell() else {
+            return Vec::new();
+        };
+        let (Some(state), Some(press)) = (
+            ShellState::resolve(ctx),
+            ShellState::resolve_in(ctx, &drag.press_document),
+        ) else {
+            return Vec::new();
+        };
+        vec![OverlayLabel {
+            text: SharedString::from(state.hud(&press, handle)),
+            color: SELECTION_COLOR,
+            placement: LabelPlacement::CanvasTopLeft,
+        }]
+    }
+
+    fn handles(&self, ctx: &OverlayContext) -> Vec<OverlayHandle> {
+        let Some(state) = ShellState::resolve(ctx) else {
+            return Vec::new();
+        };
+        let grip = |id, position, hit_radius_px, hint| OverlayHandle {
+            overlay: Self::ID,
+            id: OverlayHandleId::Shell(id),
+            position,
+            hit_radius_px,
+            hint,
+            draggable: true,
+        };
+        let mut handles = vec![
+            // First, so an anchor parked on a bbox grip still wins the press:
+            // there is no other way to grab it, while every scale grip has
+            // seven siblings.
+            grip(
+                ShellHandle::Anchor,
+                state.anchor_world,
+                Self::HIT_RADIUS_PX,
+                ViewerPointerHint::ShellAnchor,
+            ),
+            grip(
+                ShellHandle::Position,
+                state.rect_center(),
+                Self::HIT_RADIUS_PX,
+                ViewerPointerHint::MovableBody,
+            ),
+        ];
+        for (index, center) in state.centers().into_iter().enumerate() {
+            let index = index as u8;
+            handles.push(grip(
+                ShellHandle::Scale(index),
+                center,
+                Self::HIT_RADIUS_PX,
+                ShellHandle::scale_hint(index),
+            ));
+        }
+        for index in Self::ROTATE_CORNERS {
+            handles.push(grip(
+                ShellHandle::Rotate(index),
+                state.centers()[index as usize],
+                Self::ROTATE_RADIUS_PX,
+                ViewerPointerHint::Rotate,
+            ));
+        }
+        handles
+    }
+
+    fn drag(
+        &self,
+        handle: &OverlayHandle,
+        delta: (f32, f32),
+        modifiers: DragModifiers,
+        ctx: &OverlayContext,
+    ) -> Option<OverlayEdit> {
+        let state = ShellState::resolve(ctx)?;
+        // The grip's own mark is treated as the grabbed point, so the gesture
+        // stays absolute in `delta` instead of accumulating pointer offsets.
+        let target = (handle.position.0 + delta.0, handle.position.1 + delta.1);
+        let edits = match handle.id.shell()? {
+            ShellHandle::Scale(index) => {
+                state.scale_edits(index, handle.position, target, modifiers)?
+            }
+            ShellHandle::Rotate(_) => state.rotate_edits(handle.position, target)?,
+            ShellHandle::Anchor => state.anchor_edits(target)?,
+            ShellHandle::Position => state.position_edits(handle.position, target)?,
+        };
+        Some(OverlayEdit::Batch(edits))
     }
 }
 
@@ -1161,6 +1792,7 @@ mod tests {
             show_grid: false,
             show_safe_areas: false,
             error: None,
+            active_drag: None,
             colors: colors(),
             results: OverlayResults::default(),
         }
@@ -2014,7 +2646,9 @@ mod tests {
             })
             .unwrap();
 
-        let edit = PathEditOverlay.drag(anchor, (7.0, -3.0), &ctx).unwrap();
+        let edit = PathEditOverlay
+            .drag(anchor, (7.0, -3.0), DragModifiers::default(), &ctx)
+            .unwrap();
         let OverlayEdit::NodeParameter {
             node: edited, key, ..
         } = &edit
@@ -2039,7 +2673,788 @@ mod tests {
 
         // Repeating the gesture from the same press context stays absolute
         // instead of compounding onto its own preview.
-        let again = PathEditOverlay.drag(anchor, (7.0, -3.0), &ctx).unwrap();
+        let again = PathEditOverlay
+            .drag(anchor, (7.0, -3.0), DragModifiers::default(), &ctx)
+            .unwrap();
         assert_eq!(again, edit);
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit 7: the layer shell manipulator
+    // -----------------------------------------------------------------------
+
+    /// One selected layer holding a 40x20 rect centered at (100, 200), so the
+    /// shell bbox is (80, 190, 40, 20) and its handle centers are round
+    /// numbers.
+    fn shell_context() -> (OverlayContext, CompId, LayerId) {
+        let (mut ctx, _, comp_id, layer_id) = doc_with_node(rect_node((100.0, 200.0)));
+        ctx.layer_selection = LayerSelection::of(comp_id, vec![layer_id]);
+        (ctx, comp_id, layer_id)
+    }
+
+    fn eval() -> ravel_core::eval::EvalContext {
+        ravel_core::eval::EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
+    }
+
+    /// Anchor, position, scale and rotation of a layer's shell at frame 0.
+    #[allow(clippy::type_complexity)]
+    fn shell_values(
+        document: &Document,
+        comp: CompId,
+        layer: LayerId,
+    ) -> ((f32, f32), (f32, f32), (f32, f32), f32) {
+        let eval = eval();
+        let transform = &document
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .transform;
+        let at = |channel: &ravel_core::animation::channel::AnimationChannel| {
+            channel.evaluate(0.0, &eval)
+        };
+        (
+            (
+                at(&transform.anchor_point[0]),
+                at(&transform.anchor_point[1]),
+            ),
+            (at(&transform.position[0]), at(&transform.position[1])),
+            (at(&transform.scale[0]), at(&transform.scale[1])),
+            at(&transform.rotation),
+        )
+    }
+
+    fn shell_handle(ctx: &OverlayContext, id: ShellHandle) -> OverlayHandle {
+        ShellManipulator
+            .handles(ctx)
+            .into_iter()
+            .find(|handle| handle.id == OverlayHandleId::Shell(id))
+            .unwrap_or_else(|| panic!("no {id:?} handle"))
+    }
+
+    /// Run one drag of `id` and return the document it produces.
+    fn drag_shell(
+        ctx: &OverlayContext,
+        id: ShellHandle,
+        delta: (f32, f32),
+        modifiers: DragModifiers,
+    ) -> Document {
+        let handle = shell_handle(ctx, id);
+        ShellManipulator
+            .drag(&handle, delta, modifiers, ctx)
+            .expect("the grip produced no edit")
+            .apply(ctx.document.as_ref().unwrap())
+            .expect("the edit did not apply")
+    }
+
+    fn close(actual: f32, expected: f32, what: &str) {
+        close_within(actual, expected, 1e-3, what);
+    }
+
+    /// `close` with an explicit tolerance: coordinates that have been through a
+    /// scaled parent chain and back carry more float error than a raw channel.
+    fn close_within(actual: f32, expected: f32, tolerance: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "{what}: {actual} != {expected}"
+        );
+    }
+
+    /// The same context reading a different document.
+    fn with_document(ctx: &OverlayContext, document: Document) -> OverlayContext {
+        let mut ctx = ctx.clone();
+        ctx.document = Some(document);
+        ctx
+    }
+
+    /// Give the fixture's layer a transform of its own, so `world` and
+    /// `parent` stop being the same map. Without this a manipulator that
+    /// confuses layer-local space with parent space still passes every
+    /// parented test.
+    fn with_own_transform(ctx: &OverlayContext, comp: CompId, layer: LayerId) -> OverlayContext {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.anchor_point = [
+                    AnimationChannel::constant(10.0),
+                    AnimationChannel::constant(20.0),
+                ];
+                layer.transform.position = [
+                    AnimationChannel::constant(50.0),
+                    AnimationChannel::constant(60.0),
+                ];
+                layer.transform.scale = [
+                    AnimationChannel::constant(2.0),
+                    AnimationChannel::constant(3.0),
+                ];
+                layer.transform.rotation = AnimationChannel::constant(30.0);
+            },
+        )
+        .unwrap();
+        with_document(ctx, document)
+    }
+
+    /// The fixture's layer parented to a fresh layer carrying `position`,
+    /// `scale` and `rotation` — the knobs that decide whether the manipulator
+    /// really goes through the parent chain or just happens to agree with it.
+    fn parented_context(
+        ctx: &OverlayContext,
+        comp: CompId,
+        layer: LayerId,
+        position: (f32, f32),
+        scale: (f32, f32),
+        rotation: f32,
+    ) -> OverlayContext {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let parent_id = LayerId::next();
+        let mut parent = Layer::new(parent_id, "Parent", Graph::new()).with_time(0, 0, 300);
+        parent.transform.position = [
+            AnimationChannel::constant(position.0),
+            AnimationChannel::constant(position.1),
+        ];
+        parent.transform.scale = [
+            AnimationChannel::constant(scale.0),
+            AnimationChannel::constant(scale.1),
+        ];
+        parent.transform.rotation = AnimationChannel::constant(rotation);
+        let document =
+            ravel_ui::document::add_layer(ctx.document.as_ref().unwrap(), comp, parent).unwrap();
+        let document = ravel_ui::document::update_layer(&document, comp, layer, |layer| {
+            layer.parent = Some(parent_id)
+        })
+        .unwrap();
+        with_document(ctx, document)
+    }
+
+    fn world_of(document: &Document, comp: CompId, layer: LayerId) -> Affine {
+        let composition = document.get_composition(comp).unwrap();
+        world_matrix(composition, composition.get_layer(layer).unwrap(), &eval())
+    }
+
+    #[test]
+    fn a_corner_grip_scales_the_shell_and_keeps_the_opposite_corner_still() {
+        let (ctx, comp, layer) = shell_context();
+        // The south-east grip (index 7) of the (80, 190, 40, 20) bbox, pulled
+        // 40 out on x and 5 on y: x doubles, y grows by a quarter.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers::default(),
+        );
+        let (_, position, scale, _) = shell_values(&updated, comp, layer);
+        close(scale.0, 2.0, "scale x");
+        close(scale.1, 1.25, "scale y");
+
+        // The grabbed corner ends under the pointer and the opposite corner
+        // has not moved — which is what `position` was rewritten for.
+        let world = world_of(&updated, comp, layer);
+        let grabbed = world.apply(120.0, 210.0);
+        close(grabbed.0, 160.0, "grabbed corner x");
+        close(grabbed.1, 215.0, "grabbed corner y");
+        let fixed = world.apply(80.0, 190.0);
+        close(fixed.0, 80.0, "fixed corner x");
+        close(fixed.1, 190.0, "fixed corner y");
+        assert_ne!(position, (0.0, 0.0), "the compensation wrote position");
+    }
+
+    #[test]
+    fn shift_locks_the_aspect_ratio_to_the_larger_movement() {
+        let (ctx, comp, layer) = shell_context();
+        let free = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers::default(),
+        );
+        let (.., free_scale, _) = shell_values(&free, comp, layer);
+        assert_ne!(free_scale.0, free_scale.1, "without Shift the axes differ");
+
+        let locked = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers {
+                shift: true,
+                alt: false,
+            },
+        );
+        let (.., locked_scale, _) = shell_values(&locked, comp, layer);
+        close(locked_scale.0, 2.0, "scale x");
+        close(
+            locked_scale.1,
+            2.0,
+            "Shift takes the larger movement (x) for both axes",
+        );
+    }
+
+    #[test]
+    fn an_edge_grip_scales_one_axis_only() {
+        let (ctx, comp, layer) = shell_context();
+        // Index 4 is the east edge midpoint: a big vertical movement must not
+        // reach the y scale.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Scale(4),
+            (40.0, 50.0),
+            DragModifiers::default(),
+        );
+        let (.., scale, _) = shell_values(&updated, comp, layer);
+        close(scale.0, 2.0, "scale x");
+        close(scale.1, 1.0, "scale y is untouched by an edge grip");
+    }
+
+    #[test]
+    fn alt_scales_about_the_anchor_and_leaves_position_alone() {
+        let (ctx, comp, layer) = shell_context();
+        let handle = shell_handle(&ctx, ShellHandle::Scale(7));
+        let edit = ShellManipulator
+            .drag(
+                &handle,
+                (40.0, 5.0),
+                DragModifiers {
+                    shift: false,
+                    alt: true,
+                },
+                &ctx,
+            )
+            .unwrap();
+        let OverlayEdit::Batch(edits) = &edit else {
+            panic!("a shell drag batches its writes");
+        };
+        assert_eq!(
+            edits.len(),
+            2,
+            "the anchor is already the fixed point, so nothing corrects position"
+        );
+
+        let updated = edit.apply(ctx.document.as_ref().unwrap()).unwrap();
+        let (anchor, position, scale, _) = shell_values(&updated, comp, layer);
+        assert_eq!(position, (0.0, 0.0));
+        // Grabbed (120, 210) relative to the anchor (0, 0) reaches (160, 215).
+        close(scale.0, 160.0 / 120.0, "scale x about the anchor");
+        close(scale.1, 215.0 / 210.0, "scale y about the anchor");
+        assert_eq!(anchor, (0.0, 0.0), "Alt scales about the anchor, not it");
+    }
+
+    #[test]
+    fn the_ring_outside_a_corner_rotates_the_shell() {
+        let (ctx, comp, layer) = shell_context();
+        // The grip at (120, 210) swung a quarter turn about the anchor (0, 0):
+        // (x, y) -> (-y, x) is +90 degrees in the matrix's convention.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Rotate(7),
+            (-210.0 - 120.0, 120.0 - 210.0),
+            DragModifiers::default(),
+        );
+        let (.., rotation) = shell_values(&updated, comp, layer);
+        close(rotation, 90.0, "rotation");
+
+        // Sign check that does not restate the formula: the layer really does
+        // end up where the pointer put the grip.
+        let landed = world_of(&updated, comp, layer).apply(120.0, 210.0);
+        close(landed.0, -210.0, "grip x after the turn");
+        close(landed.1, 120.0, "grip y after the turn");
+    }
+
+    #[test]
+    fn moving_the_anchor_leaves_the_picture_where_it_was() {
+        let (ctx, comp, layer) = shell_context();
+        // A shell with every channel non-trivial: an uncompensated anchor move
+        // would shift the content by R·S·(a' − a), which needs all three.
+        let mut ctx = ctx;
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                use ravel_core::animation::channel::AnimationChannel;
+                layer.transform.anchor_point = [
+                    AnimationChannel::constant(10.0),
+                    AnimationChannel::constant(20.0),
+                ];
+                layer.transform.position = [
+                    AnimationChannel::constant(50.0),
+                    AnimationChannel::constant(60.0),
+                ];
+                layer.transform.scale = [
+                    AnimationChannel::constant(2.0),
+                    AnimationChannel::constant(3.0),
+                ];
+                layer.transform.rotation = AnimationChannel::constant(30.0);
+            },
+        );
+        let before = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let (anchor_before, ..) = shell_values(ctx.document.as_ref().unwrap(), comp, layer);
+
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Anchor,
+            (30.0, -15.0),
+            DragModifiers::default(),
+        );
+        let (anchor_after, position_after, ..) = shell_values(&updated, comp, layer);
+        assert_ne!(anchor_after, anchor_before, "the anchor did move");
+        // The marker followed the pointer: it sits at the parent-space
+        // position, and the parent chain here is the identity.
+        close(
+            position_after.0,
+            50.0 + 30.0,
+            "position x follows the marker",
+        );
+        close(
+            position_after.1,
+            60.0 - 15.0,
+            "position y follows the marker",
+        );
+
+        let after = world_of(&updated, comp, layer);
+        for (index, (a, b)) in before.0.iter().zip(after.0).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "the world matrix moved at {index}: {before:?} -> {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyframed_scale_channel_gains_a_key_instead_of_being_flattened() {
+        use ravel_core::animation::Interpolation;
+
+        let (mut ctx, comp, layer) = shell_context();
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 1.0, Interpolation::Linear);
+        curve.insert(10, 4.0, Interpolation::Linear);
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.scale[0] =
+                    ravel_core::animation::channel::AnimationChannel::keyframes(curve.clone());
+            },
+        );
+
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Scale(7),
+            (40.0, 5.0),
+            DragModifiers::default(),
+        );
+        let channel = updated
+            .get_composition(comp)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .transform
+            .scale[0]
+            .clone();
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            panic!("the drag flattened an animated scale channel");
+        };
+        assert_eq!(curve.keyframes().len(), 2, "frame 0's key was updated");
+        close(
+            channel.evaluate(0.0, &eval()),
+            2.0,
+            "the key at the playhead",
+        );
+        close(
+            channel.evaluate(10.0, &eval()),
+            4.0,
+            "the later key is untouched",
+        );
+    }
+
+    #[test]
+    fn a_parented_layer_is_manipulated_through_its_parents_transform() {
+        let (ctx, comp, layer) = shell_context();
+        // A parent that both moves and scales: identity-blind code passes a
+        // translation-only parent.
+        let ctx = parented_context(&ctx, comp, layer, (100.0, 50.0), (2.0, 2.0), 0.0);
+
+        // The bbox, the grips and the anchor marker all sit where the parent
+        // chain puts the content: (x, y) -> (2x + 100, 2y + 50).
+        let handle = shell_handle(&ctx, ShellHandle::Scale(7));
+        close(handle.position.0, 2.0 * 120.0 + 100.0, "grip x");
+        close(handle.position.1, 2.0 * 210.0 + 50.0, "grip y");
+        let anchor = shell_handle(&ctx, ShellHandle::Anchor);
+        close(anchor.position.0, 100.0, "anchor marker x");
+        close(anchor.position.1, 50.0, "anchor marker y");
+
+        // A move grip dragged 40 canvas pixels writes 20 into `position`,
+        // because `position` lives in the parent's space.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Position,
+            (40.0, 20.0),
+            DragModifiers::default(),
+        );
+        let (_, position, ..) = shell_values(&updated, comp, layer);
+        close(position.0, 20.0, "position x is parent-space");
+        close(position.1, 10.0, "position y is parent-space");
+    }
+
+    /// A rotated, non-uniformly scaled parent is where a manipulator that
+    /// merely *offsets* by the parent instead of inverting it stops agreeing
+    /// with the picture. The contract is stated in world coordinates: the
+    /// fixed corner does not move and the grabbed corner ends under the
+    /// pointer, whatever the chain does in between.
+    #[test]
+    fn a_corner_scale_holds_its_fixed_point_under_a_rotated_non_uniform_parent() {
+        let (ctx, comp, layer) = shell_context();
+        let ctx = with_own_transform(&ctx, comp, layer);
+        let ctx = parented_context(&ctx, comp, layer, (70.0, -40.0), (2.0, 3.0), 30.0);
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let inverse = world.inverse().unwrap();
+
+        let grabbed = shell_handle(&ctx, ShellHandle::Scale(7)).position;
+        let fixed = shell_handle(&ctx, ShellHandle::Scale(0)).position;
+        let delta = (33.0, -17.0);
+        let updated = drag_shell(&ctx, ShellHandle::Scale(7), delta, DragModifiers::default());
+        let after = world_of(&updated, comp, layer);
+
+        // Both corners are layer-local points; where they land afterwards is
+        // the whole contract.
+        let local = |point: (f32, f32)| inverse.apply(point.0, point.1);
+        let landed = |point: (f32, f32)| {
+            let local = local(point);
+            after.apply(local.0, local.1)
+        };
+        let held = landed(fixed);
+        close_within(held.0, fixed.0, 1e-2, "fixed corner x");
+        close_within(held.1, fixed.1, 1e-2, "fixed corner y");
+        let pulled = landed(grabbed);
+        close_within(pulled.0, grabbed.0 + delta.0, 1e-2, "grabbed corner x");
+        close_within(pulled.1, grabbed.1 + delta.1, 1e-2, "grabbed corner y");
+    }
+
+    /// Rotation under a rotated parent: the layer turns about its anchor, so
+    /// the grabbed grip keeps its distance from the anchor and swings onto the
+    /// pointer's bearing. Measuring the sweep in comp space instead of parent
+    /// space gets the angle wrong the moment the parent is turned.
+    #[test]
+    fn a_rotation_under_a_rotated_parent_swings_onto_the_pointers_bearing() {
+        let (ctx, comp, layer) = shell_context();
+        let ctx = parented_context(&ctx, comp, layer, (10.0, 20.0), (1.5, 1.5), 40.0);
+        let world = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+
+        let anchor = shell_handle(&ctx, ShellHandle::Anchor).position;
+        let grabbed = shell_handle(&ctx, ShellHandle::Rotate(7)).position;
+        let delta = (60.0, 25.0);
+        let target = (grabbed.0 + delta.0, grabbed.1 + delta.1);
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Rotate(7),
+            delta,
+            DragModifiers::default(),
+        );
+        let after = world_of(&updated, comp, layer);
+
+        let local = world.inverse().unwrap().apply(grabbed.0, grabbed.1);
+        let landed = after.apply(local.0, local.1);
+        let arm = |point: (f32, f32)| (point.0 - anchor.0, point.1 - anchor.1);
+        let (before_arm, after_arm, target_arm) = (arm(grabbed), arm(landed), arm(target));
+        close_within(
+            after_arm.0.hypot(after_arm.1),
+            before_arm.0.hypot(before_arm.1),
+            1e-2,
+            "a rotation keeps the grip's distance from the anchor",
+        );
+        close_within(
+            wrap_angle(after_arm.1.atan2(after_arm.0) - target_arm.1.atan2(target_arm.0)),
+            0.0,
+            1e-3,
+            "the grip ends on the pointer's bearing",
+        );
+
+        // Rotation alone: the anchor marker has not moved.
+        let anchor_after =
+            shell_handle(&with_document(&ctx, updated), ShellHandle::Anchor).position;
+        close_within(anchor_after.0, anchor.0, 1e-2, "anchor x");
+        close_within(anchor_after.1, anchor.1, 1e-2, "anchor y");
+    }
+
+    /// The anchor correction has to survive a chain that rotates *and* scales
+    /// unevenly: `a' = W⁻¹(pointer)` and `p' = P⁻¹(pointer)` only cancel if
+    /// both inverses are the real ones.
+    #[test]
+    fn an_anchor_move_under_a_rotated_non_uniform_parent_leaves_the_picture_alone() {
+        let (ctx, comp, layer) = shell_context();
+        // The child carries its own non-trivial transform too, so the
+        // correction cannot be right by symmetry.
+        let ctx = with_own_transform(&ctx, comp, layer);
+        let ctx = parented_context(&ctx, comp, layer, (70.0, -40.0), (2.0, 3.0), 25.0);
+
+        let before = world_of(ctx.document.as_ref().unwrap(), comp, layer);
+        let (anchor_before, ..) = shell_values(ctx.document.as_ref().unwrap(), comp, layer);
+        let marker = shell_handle(&ctx, ShellHandle::Anchor).position;
+        let delta = (25.0, -13.0);
+        let updated = drag_shell(&ctx, ShellHandle::Anchor, delta, DragModifiers::default());
+
+        let (anchor_after, ..) = shell_values(&updated, comp, layer);
+        assert_ne!(anchor_after, anchor_before, "the anchor did move");
+        let after = world_of(&updated, comp, layer);
+        for (index, (a, b)) in before.0.iter().zip(after.0).enumerate() {
+            close_within(
+                b,
+                *a,
+                1e-2,
+                &format!("world matrix component {index} moved: {before:?} -> {after:?}"),
+            );
+        }
+
+        // And the marker went where the pointer put it.
+        let marker_after =
+            shell_handle(&with_document(&ctx, updated), ShellHandle::Anchor).position;
+        close_within(marker_after.0, marker.0 + delta.0, 1e-2, "anchor marker x");
+        close_within(marker_after.1, marker.1 + delta.1, 1e-2, "anchor marker y");
+    }
+
+    /// The rotation zone has to be visible, not just reachable: a cursor is a
+    /// promise, and unit 7 only earns the `Resize*` / rotate cursors once the
+    /// marks under them show what is grabbable. The drawn ring is asserted
+    /// against the *handle's own* hit radius, so the picture cannot drift away
+    /// from the zone that answers the pointer.
+    #[test]
+    fn every_rotation_grip_draws_its_ring_at_the_radius_it_grabs() {
+        let (ctx, ..) = shell_context();
+
+        // Centre and pixel extent of every closed stroke the overlay paints.
+        let rings = |zoom: f32| {
+            let mut painter = OverlayPainter::new(
+                Bounds {
+                    origin: point(px(0.0), px(0.0)),
+                    size: size(px(1920.0 * zoom), px(1080.0 * zoom)),
+                },
+                (1920, 1080),
+            );
+            ShellManipulator.paint(&ctx, &mut painter);
+            painter
+                .finish()
+                .into_iter()
+                .filter_map(|primitive| match primitive {
+                    OverlayPrimitive::Stroke {
+                        points,
+                        close: true,
+                        ..
+                    } => {
+                        let bound = |values: Vec<f32>| {
+                            let low = values.iter().copied().fold(f32::INFINITY, f32::min);
+                            let high = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                            ((low + high) * 0.5, high - low)
+                        };
+                        let (cx, width) = bound(points.iter().map(|p| f32::from(p.x)).collect());
+                        let (cy, height) = bound(points.iter().map(|p| f32::from(p.y)).collect());
+                        Some(((cx, cy), (width, height)))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let rotate: Vec<OverlayHandle> = ShellManipulator
+            .handles(&ctx)
+            .into_iter()
+            .filter(|handle| matches!(handle.id.shell(), Some(ShellHandle::Rotate(_))))
+            .collect();
+        assert_eq!(rotate.len(), 4, "one rotation grip per corner");
+
+        let projector = OverlayPainter::new(
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(1920.0), px(1080.0)),
+            },
+            (1920, 1080),
+        );
+        let at_1x = rings(1.0);
+        assert_eq!(at_1x.len(), rotate.len(), "one ring per rotation grip");
+        for handle in &rotate {
+            let expected = projector.to_screen(handle.position);
+            let ring = at_1x
+                .iter()
+                .find(|(center, _)| {
+                    (center.0 - expected.0).abs() < 1e-3 && (center.1 - expected.1).abs() < 1e-3
+                })
+                .unwrap_or_else(|| panic!("no ring drawn on {handle:?}"));
+            close(ring.1.0, handle.hit_radius_px * 2.0, "ring width");
+            close(ring.1.1, handle.hit_radius_px * 2.0, "ring height");
+        }
+
+        // Zoomed four times the rings keep their pixel size, like every other
+        // screen-space mark.
+        let at_4x = rings(4.0);
+        assert_eq!(at_4x.len(), at_1x.len());
+        for (one, four) in at_1x.iter().zip(&at_4x) {
+            close(four.1.0, one.1.0, "ring width across zoom");
+            close(four.1.1, one.1.1, "ring height across zoom");
+        }
+    }
+
+    /// `atan2` jumps by a full turn across the negative x axis. A drag that
+    /// straddles it is still a small turn, and the sign has to survive.
+    #[test]
+    fn a_rotation_drag_across_the_angle_boundary_turns_the_short_way() {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (mut ctx, comp, layer) = shell_context();
+        // Park the anchor so the grip's arm points along −x: the branch cut of
+        // `atan2` runs straight through this gesture.
+        ctx.document = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.anchor_point = [
+                    AnimationChannel::constant(400.0),
+                    AnimationChannel::constant(209.0),
+                ];
+            },
+        );
+        let grip = shell_handle(&ctx, ShellHandle::Rotate(7)).position;
+        close(grip.0, -280.0, "grip x");
+        close(grip.1, 1.0, "grip y");
+
+        // Two pixels down: a fraction of a degree the positive way round. An
+        // unwrapped difference reads the same drag as about −359.6°.
+        let updated = drag_shell(
+            &ctx,
+            ShellHandle::Rotate(7),
+            (0.0, -2.0),
+            DragModifiers::default(),
+        );
+        let (.., rotation) = shell_values(&updated, comp, layer);
+        assert!(
+            rotation > 0.0 && rotation < 1.0,
+            "expected a fraction of a degree the short way, got {rotation}"
+        );
+    }
+
+    /// `Batch` claims its writes land together. A later edit that cannot apply
+    /// therefore has to discard the earlier ones rather than publish a
+    /// half-transformed layer.
+    #[test]
+    fn a_batch_with_one_impossible_edit_applies_none_of_it() {
+        let (ctx, comp, layer) = shell_context();
+        let document = ctx.document.clone().unwrap();
+        let before = document.clone();
+        let turn = OverlayEdit::LayerTransform {
+            comp,
+            layer,
+            channel: ShellChannel::Rotation,
+            value: 45.0,
+            local_frame: None,
+        };
+        let missing = OverlayEdit::LayerTransform {
+            comp,
+            layer: LayerId::next(),
+            channel: ShellChannel::Scale(Axis::X),
+            value: 9.0,
+            local_frame: None,
+        };
+        assert!(turn.apply(&document).is_some(), "the good edit does apply");
+
+        for batch in [
+            OverlayEdit::Batch(vec![turn.clone(), missing.clone()]),
+            OverlayEdit::Batch(vec![missing, turn]),
+        ] {
+            assert!(!batch.target_exists(&document));
+            assert!(
+                batch.apply(&document).is_none(),
+                "a batch that cannot finish must not produce a document"
+            );
+            assert_eq!(document, before, "the source document was left untouched");
+        }
+    }
+
+    #[test]
+    fn the_rotation_ring_only_wins_outside_the_scale_grip() {
+        let (ctx, ..) = shell_context();
+        let registry = OverlayRegistry::new(vec![Box::new(ShellManipulator)]);
+        let at = |point: (f32, f32)| registry.hit_test_draggable(&ctx, point, 1.0).map(|h| h.id);
+        assert_eq!(
+            at((120.0, 210.0)),
+            Some(OverlayHandleId::Shell(ShellHandle::Scale(7))),
+            "the inner disc scales"
+        );
+        assert_eq!(
+            at((132.0, 210.0)),
+            Some(OverlayHandleId::Shell(ShellHandle::Rotate(7))),
+            "the ring around it rotates"
+        );
+        assert_eq!(at((300.0, 300.0)), None);
+    }
+
+    /// The HUD reports how far the gesture has got, not where the channel
+    /// happens to sit: a layer already at 200% scaled by half must read 50%,
+    /// and one already turned 30° nudged by 15° must read +15°.
+    #[test]
+    fn the_drag_hud_reports_the_gestures_delta_not_the_absolute_channel() {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (mut ctx, comp, layer) = shell_context();
+        assert!(
+            ShellManipulator.labels(&ctx).is_empty(),
+            "no HUD while the pointer is idle"
+        );
+
+        let with = |ctx: &OverlayContext, scale: (f32, f32), rotation: f32| {
+            ravel_ui::document::update_layer(ctx.document.as_ref().unwrap(), comp, layer, |layer| {
+                layer.transform.scale = [
+                    AnimationChannel::constant(scale.0),
+                    AnimationChannel::constant(scale.1),
+                ];
+                layer.transform.rotation = AnimationChannel::constant(rotation);
+            })
+            .unwrap()
+        };
+        let pressed = with(&ctx, (2.0, 4.0), 30.0);
+        ctx.document = Some(with(&ctx, (1.0, 1.0), 45.0));
+        ctx.active_drag = Some(ActiveDrag {
+            handle: OverlayHandleId::Shell(ShellHandle::Rotate(0)),
+            press_document: pressed.clone(),
+        });
+
+        let labels = ShellManipulator.labels(&ctx);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            labels[0].text.as_ref(),
+            "+15.0°",
+            "the angle swept, not the angle reached"
+        );
+        assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
+
+        ctx.active_drag = Some(ActiveDrag {
+            handle: OverlayHandleId::Shell(ShellHandle::Scale(0)),
+            press_document: pressed,
+        });
+        assert_eq!(
+            ShellManipulator.labels(&ctx)[0].text.as_ref(),
+            "50.0% × 25.0%",
+            "the factor this drag applied, not the scale reached"
+        );
+    }
+
+    #[test]
+    fn the_manipulator_needs_exactly_one_selected_layer() {
+        let (ctx, comp, layer) = shell_context();
+        assert!(ShellManipulator.is_active(&ctx));
+
+        let mut none = ctx.clone();
+        none.layer_selection = LayerSelection::default();
+        assert!(!ShellManipulator.is_active(&none));
+        assert!(ShellManipulator.handles(&none).is_empty());
+
+        let mut two = ctx;
+        two.layer_selection = LayerSelection::of(comp, vec![layer, LayerId::next()]);
+        assert!(
+            !ShellManipulator.is_active(&two),
+            "two layers have no single shell to write"
+        );
     }
 }

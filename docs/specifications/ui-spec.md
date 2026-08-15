@@ -13,6 +13,7 @@
 | Viewer（オーバーレイ機構・マニピュレータ） | [ui/viewer.md](ui/viewer.md) |
 | Properties Inspector | [ui/properties.md](ui/properties.md) |
 | Media Bin | [ui/media-bin.md](ui/media-bin.md) |
+| 属性スプレッドシート | [ui/attribute-spreadsheet.md](ui/attribute-spreadsheet.md) |
 | 書き出しダイアログ / Render Queue | [ui/render-queue.md](ui/render-queue.md) |
 | テーマ | [ui/theme.md](ui/theme.md) |
 | キーバインド | [ui/keybindings.md](ui/keybindings.md) |
@@ -74,6 +75,7 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 | Viewer | プレビュー表示とツール操作 | ✅ | 全プリセット |
 | Properties Inspector | 選択対象（レイヤー / ノード / コンプ / メディア）の編集 | ✅ | Edit, Node, Motion |
 | Media Bin | プロジェクトのメディアアセット管理 | ✅ | Edit |
+| 属性スプレッドシート | 選択ノードが評価したジオメトリ属性の行×列検査 | ✅ | （どのプリセットにも無い） |
 | Dopesheet | 打点一覧の独立パネル | 🔲 | Node, Motion, Color |
 | Scopes (Waveform / Vectorscope / Histogram / Parade) | 波形・ベクトルスコープ・ヒストグラム・パレード | 🔲 | Color |
 | Text Editor | タイポグラフィ編集 | 🔲 | Motion |
@@ -83,8 +85,8 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 
 `🔲` のパネルのうち Dopesheet / スコープ 4 種 / Text Editor は
 ワークスペースプリセット（`assets/workspaces/*.toml`）が実際に配置しており、
-開くとプレースホルダが出る。Shader Editor / Lua Console は
-どのプリセットにも無いが、**16 種すべてに View メニューの表示トグルがある**ので
+開くとプレースホルダが出る。Shader Editor / Lua Console / 属性スプレッドシートは
+どのプリセットにも無いが、**17 種すべてに View メニューの表示トグルがある**ので
 プリセットに依らず出せる。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
 `viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
@@ -92,6 +94,8 @@ Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 
 
 Render Queue はどのプリセットにも無いが実装済みで、View メニューか
 `File ▸ Export…` の後に開く。仕様は [ui/render-queue.md](ui/render-queue.md)。
+属性スプレッドシートも同じくどのプリセットにも無く、View メニューから開く。
+仕様は [ui/attribute-spreadsheet.md](ui/attribute-spreadsheet.md)。
 
 ## サブグラフ
 

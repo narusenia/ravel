@@ -11,7 +11,7 @@
 //! sized by the image's own resolution, on either path. The GPU one splits the
 //! draw where the sampled source changes, which keeps painter's order without
 //! an atlas or a texture array
-//! (`docs/implementation/image-instancing-plan.md`, `IMG-5`).
+//! (`docs/implementation/done/image-instancing-plan.md`, `IMG-5`).
 //! The GPU path flattens those attributes into instanced-quad draw records;
 //! its fragment shader evaluates non-zero winding and edge distance directly,
 //! so concave and self-intersecting paths do not require triangulation.
@@ -199,7 +199,7 @@ fn image_key(image: &InstanceImage) -> *const () {
 /// also bounds the cost to one readback per *source* instead of one per
 /// instance. The production GPU path (`IMG-5`) does not read back at all;
 /// that asymmetry is deliberate
-/// (`docs/implementation/image-instancing-plan.md`, `IMG-4`).
+/// (`docs/implementation/done/image-instancing-plan.md`, `IMG-4`).
 fn resolve_instance_images<'a>(
     geo: &'a Geometry,
     depth: u32,
@@ -1251,7 +1251,7 @@ fn select_instance_source<'a>(
 
 /// Draw one image instance source as a textured rectangle: origin-centred,
 /// sized in composition units by the image's own pixel resolution (decision 5
-/// of `docs/implementation/image-instancing-plan.md`), placed by `placement`
+/// of `docs/implementation/done/image-instancing-plan.md`), placed by `placement`
 /// and sampled bilinearly through the inverse of that placement.
 ///
 /// **Edges are hard, not antialiased**: a pixel draws when its centre falls

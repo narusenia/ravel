@@ -1329,7 +1329,7 @@ fn scene_output() -> OutputPort {
 /// A frame buffer is deliberately **not** accepted: an image reaches a scene
 /// as a geometry carrying it as an instance source, so images and geometry
 /// share one placement mechanism
-/// (`docs/implementation/image-instancing-plan.md`).
+/// (`docs/implementation/done/image-instancing-plan.md`).
 ///
 /// The transform parameters carry the same keys as `geometry.transform`, so
 /// the two read alike in Properties, and each is a `Channel3` on the unified

@@ -960,8 +960,8 @@ DOCK-2 が担う。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | SHEET-1 | ✅ | `EvalRequest` の複数ターゲット化（#302） | — |
-| SHEET-2 | 🟡 | 選択ノード評価と `SelectedGeometry` グローバル | SHEET-1 |
-| SHEET-3 | ⬜ | パネル本体（`DataTable`） | SHEET-2, DOCK-8 |
+| SHEET-2 | ✅ | 選択ノードの評価（#448。`SelectedGeometry` グローバルは作らず、既存の scoped ターゲット経路を非オーバーレイへ開いた） | SHEET-1 |
+| SHEET-3 | 🟡 | パネル本体（`DataTable`） | SHEET-2, DOCK-8 |
 | SHEET-4 | ⬜ | 実機確認と文書更新 | SHEET-3 |
 
 SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触る。

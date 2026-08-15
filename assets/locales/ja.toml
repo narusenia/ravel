@@ -45,6 +45,7 @@ text_editor = "テキストエディタ"
 shader_editor = "シェーダエディタ"
 lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
+attribute_spreadsheet = "属性スプレッドシート"
 fit = "全体表示"
 
 [menu.composition]
@@ -131,6 +132,7 @@ text_editor = "テキストエディタ"
 shader_editor = "シェーダエディタ"
 lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
+attribute_spreadsheet = "属性スプレッドシート"
 
 [panel.timeline]
 _self = "タイムライン"
@@ -317,6 +319,22 @@ add_layer = "レイヤーを追加"
 rename = "名前を変更"
 duplicate = "レイヤーを複製"
 delete = "レイヤーを削除"
+
+[attribute_spreadsheet]
+# 左端の合成列の見出し。ドメイン内の要素番号で、属性ではない
+row = "#"
+
+[attribute_spreadsheet.domain]
+point = "ポイント"
+primitive = "プリミティブ"
+instance = "インスタンス"
+detail = "ディテール"
+
+[attribute_spreadsheet.empty]
+no_selection = "ノードを選択するとジオメトリ属性を表示します"
+no_geometry_output = "このノードはジオメトリを出力しません"
+pending = "評価中…"
+no_elements = "このドメインに要素はありません"
 
 [media_bin]
 empty = "メディアアセットなし — ファイル > インポートまたはドラッグ&ドロップで追加"

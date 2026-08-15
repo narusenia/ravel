@@ -3,6 +3,7 @@
 
 //! Panel views for the dock layout.
 
+pub mod attribute_spreadsheet;
 pub mod media_bin;
 pub mod node_editor;
 pub mod outliner;
@@ -226,6 +227,29 @@ pub(crate) fn selected_node_eval_target(
     document: &Document,
     cx: &App,
 ) -> Option<viewer::overlay::EvalTarget> {
+    let (network, node) = selected_node_for_inspection(cx)?;
+    Some(viewer::overlay::EvalTarget {
+        // The port the node itself declares, not a guessed index: a
+        // multi-output node's geometry is not necessarily port 0, and the
+        // consumer extracts by port from the record the evaluation returns.
+        output: viewer::geometry::geometry_output_port(document, &network, node)?,
+        network,
+        node,
+    })
+}
+
+/// The node the selection currently points an inspection panel at: the first
+/// node of a node target made in the composition on screen.
+///
+/// The first three of the four `None` cases of [`selected_node_eval_target`],
+/// factored out because a panel has to tell them apart from the fourth. "No
+/// node is selected" and "the selected node produces no geometry" are different
+/// sentences on screen, and both are silence at the request-building end — a
+/// consumer that read only the target could not distinguish them, and printing
+/// the wrong one is a statement about the user's graph that is not true.
+pub(crate) fn selected_node_for_inspection(
+    cx: &App,
+) -> Option<(ravel_ui::document::NetworkPath, NodeId)> {
     let PropertiesTarget::Nodes { network, ids } = &cx.try_global::<SelectedPropertiesTarget>()?.0
     else {
         return None;
@@ -233,15 +257,7 @@ pub(crate) fn selected_node_eval_target(
     if active_composition(cx) != Some(network.comp) {
         return None;
     }
-    let node = *ids.first()?;
-    Some(viewer::overlay::EvalTarget {
-        network: network.clone(),
-        node,
-        // The port the node itself declares, not a guessed index: a
-        // multi-output node's geometry is not necessarily port 0, and the
-        // consumer extracts by port from the record the evaluation returns.
-        output: viewer::geometry::geometry_output_port(document, network, node)?,
-    })
+    Some((network.clone(), *ids.first()?))
 }
 
 /// Durable shared state: the canvas-level node selection. The node editor
@@ -1148,6 +1164,9 @@ fn build_panel_view(
         PanelKind::MediaBin => panel!(|cx| media_bin::MediaBinGpuiPanel::new(id, window, cx)),
         PanelKind::RenderQueue => {
             panel!(|cx| render_queue::RenderQueueGpuiPanel::new(id, window, cx))
+        }
+        PanelKind::AttributeSpreadsheet => {
+            panel!(|cx| attribute_spreadsheet::AttributeSpreadsheetGpuiPanel::new(id, window, cx))
         }
         kind => panel!(|cx| PlaceholderPanel::new(id, kind, window, cx)),
     }

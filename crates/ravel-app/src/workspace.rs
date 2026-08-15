@@ -107,6 +107,7 @@ macro_rules! for_each_command {
             ViewToggleShaderEditor,
             ViewToggleLuaConsole,
             ViewToggleRenderQueue,
+            ViewToggleAttributeSpreadsheet,
             ViewFit,
             PlaybackToggle,
             PlaybackStop,

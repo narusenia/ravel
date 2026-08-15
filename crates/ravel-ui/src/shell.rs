@@ -304,6 +304,9 @@ impl AppShell {
             CommandId::ViewToggleShaderEditor => self.toggle_panel(PanelKind::ShaderEditor),
             CommandId::ViewToggleLuaConsole => self.toggle_panel(PanelKind::LuaConsole),
             CommandId::ViewToggleRenderQueue => self.toggle_panel(PanelKind::RenderQueue),
+            CommandId::ViewToggleAttributeSpreadsheet => {
+                self.toggle_panel(PanelKind::AttributeSpreadsheet)
+            }
             CommandId::WorkspaceEdit => self.switch_preset(BuiltinPreset::Edit),
             CommandId::WorkspaceNode => self.switch_preset(BuiltinPreset::Node),
             CommandId::WorkspaceColor => self.switch_preset(BuiltinPreset::Color),
@@ -549,7 +552,7 @@ mod tests {
     }
 
     /// `MED-APP-23` regression, and the mechanical form of the REQ-UI-005
-    /// acceptance criterion "the View toggle works for all 16 panels".
+    /// acceptance criterion "the View toggle works for all 17 panels".
     ///
     /// The panel ↔ command mapping is *discovered* by dispatching every
     /// `view.toggle_*` command rather than declared here, so a new
@@ -599,7 +602,7 @@ mod tests {
                 );
                 assert!(s.layout().is_valid(), "{preset:?}/{kind:?}");
             }
-            // All 16 panels are now docked in the main window.
+            // All 17 panels are now docked in the main window.
             assert_eq!(
                 s.visibility().visible_panels().count(),
                 PanelKind::ALL.len()

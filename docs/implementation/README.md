@@ -34,6 +34,7 @@ the design behind a unit.
 | `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
 | `viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, plus input-driven adaptive resolution — **the only way to inspect output at full resolution today** | VRES-1 done — 2026-08-06 (no UI to change the factor until VRES-2) | REQ-UI-004 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
+| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | units 1–4 done — 2026-08-15 | REQ-CORE-010, REQ-UI-013 |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
 ## Planned
@@ -61,7 +62,6 @@ several plans here wait on its later units rather than on each other.
 | `path-shading-plan.md` | The CPU per-pixel path evaluator, vertex-colour interpolation along a stroke, and `stroke_align` — the three things blocked on zeno returning coverage and nothing else | `style-attributes-plan.md` unit 6 (merged) | REQ-MOGRAPH-001, REQ-RENDER-001, REQ-CORE-012 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, the green cache bar, layer-scoped invalidation and idle read-ahead — **the cross-cutting cache charter**; what is left is the disk tier (`CACHE-11`, measurement-gated) and the f16 pixel loops (`CACHE-Y`) | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
-| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-CORE-010, REQ-UI-013 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
 | `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache | — | REQ-CORE-011 |
 | `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |

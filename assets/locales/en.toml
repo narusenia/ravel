@@ -47,6 +47,7 @@ text_editor = "Text Editor"
 shader_editor = "Shader Editor"
 lua_console = "Lua Console"
 render_queue = "Render Queue"
+attribute_spreadsheet = "Attribute Spreadsheet"
 fit = "Fit View"
 
 [menu.composition]
@@ -134,6 +135,7 @@ text_editor = "Text Editor"
 shader_editor = "Shader Editor"
 lua_console = "Lua Console"
 render_queue = "Render Queue"
+attribute_spreadsheet = "Attribute Spreadsheet"
 
 [panel.timeline]
 _self = "Timeline"
@@ -322,6 +324,23 @@ add_layer = "Add Layer"
 rename = "Rename"
 duplicate = "Duplicate Layer"
 delete = "Delete Layer"
+
+[attribute_spreadsheet]
+# Header of the synthetic leftmost column: the element number within the
+# domain, which is not an attribute.
+row = "#"
+
+[attribute_spreadsheet.domain]
+point = "Point"
+primitive = "Primitive"
+instance = "Instance"
+detail = "Detail"
+
+[attribute_spreadsheet.empty]
+no_selection = "Select a node to inspect its geometry attributes"
+no_geometry_output = "This node does not output geometry"
+pending = "Evaluating…"
+no_elements = "This domain has no elements"
 
 [media_bin]
 empty = "No media assets — import with File > Import or drop files"

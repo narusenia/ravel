@@ -71,11 +71,13 @@ pub enum PanelKind {
     LuaConsole,
     /// Render job queue.
     RenderQueue,
+    /// Geometry attribute spreadsheet (REQ-CORE-010 inspection UI).
+    AttributeSpreadsheet,
 }
 
 impl PanelKind {
     /// All panel kinds in declaration order.
-    pub const ALL: [PanelKind; 16] = [
+    pub const ALL: [PanelKind; 17] = [
         PanelKind::Outliner,
         PanelKind::NodeGraph,
         PanelKind::Timeline,
@@ -92,6 +94,7 @@ impl PanelKind {
         PanelKind::ShaderEditor,
         PanelKind::LuaConsole,
         PanelKind::RenderQueue,
+        PanelKind::AttributeSpreadsheet,
     ];
 
     /// Returns a stable snake_case identifier for serialization and dock identity.
@@ -113,6 +116,7 @@ impl PanelKind {
             PanelKind::ShaderEditor => "shader_editor",
             PanelKind::LuaConsole => "lua_console",
             PanelKind::RenderQueue => "render_queue",
+            PanelKind::AttributeSpreadsheet => "attribute_spreadsheet",
         }
     }
 
@@ -135,6 +139,7 @@ impl PanelKind {
             PanelKind::ShaderEditor => "panel.shader_editor",
             PanelKind::LuaConsole => "panel.lua_console",
             PanelKind::RenderQueue => "panel.render_queue",
+            PanelKind::AttributeSpreadsheet => "panel.attribute_spreadsheet",
         }
     }
 
@@ -153,7 +158,8 @@ impl PanelKind {
             | PanelKind::Dopesheet
             | PanelKind::CurveEditor
             | PanelKind::LuaConsole
-            | PanelKind::RenderQueue => DockSlot::Bottom,
+            | PanelKind::RenderQueue
+            | PanelKind::AttributeSpreadsheet => DockSlot::Bottom,
             PanelKind::Properties
             | PanelKind::Waveform
             | PanelKind::Vectorscope

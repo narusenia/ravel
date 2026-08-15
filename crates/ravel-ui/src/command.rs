@@ -97,6 +97,7 @@ pub enum CommandId {
     ViewToggleShaderEditor,
     ViewToggleLuaConsole,
     ViewToggleRenderQueue,
+    ViewToggleAttributeSpreadsheet,
     ViewFit,
     // Playback
     PlaybackToggle,
@@ -339,6 +340,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     ),
     (CommandId::ViewToggleLuaConsole, "view.toggle_lua_console"),
     (CommandId::ViewToggleRenderQueue, "view.toggle_render_queue"),
+    (
+        CommandId::ViewToggleAttributeSpreadsheet,
+        "view.toggle_attribute_spreadsheet",
+    ),
     (CommandId::ViewFit, "view.fit"),
     (CommandId::PlaybackToggle, "playback.toggle"),
     (CommandId::PlaybackStop, "playback.stop"),
@@ -453,6 +458,7 @@ impl CommandId {
             CommandId::ViewToggleShaderEditor => "menu.view.shader_editor",
             CommandId::ViewToggleLuaConsole => "menu.view.lua_console",
             CommandId::ViewToggleRenderQueue => "menu.view.render_queue",
+            CommandId::ViewToggleAttributeSpreadsheet => "menu.view.attribute_spreadsheet",
             CommandId::ViewFit => "menu.view.fit",
             CommandId::PlaybackToggle => "menu.playback.toggle",
             CommandId::PlaybackStop => "menu.playback.stop",

@@ -185,6 +185,10 @@ impl MenuBar {
                     CommandId::ViewToggleRenderQueue,
                     visibility.is_visible(PanelKind::RenderQueue),
                 ),
+                MenuItem::check(
+                    CommandId::ViewToggleAttributeSpreadsheet,
+                    visibility.is_visible(PanelKind::AttributeSpreadsheet),
+                ),
                 MenuItem::Separator,
                 MenuItem::action(CommandId::ViewFit),
                 // Detaching had a label key and a keybinding but no menu row,

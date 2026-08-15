@@ -6004,6 +6004,12 @@ mod tests {
             guides_of(&project, comp_id, cx).is_empty(),
             "one undo took the whole gesture"
         );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::horizontal(300.0)],
+            "and one redo puts the created guide back"
+        );
     }
 
     /// A guide moves across itself and nowhere else. The delta on the other
@@ -6035,6 +6041,18 @@ mod tests {
             guides_of(&project, comp_id, cx),
             vec![Guide::vertical(620.0)],
             "only the guide's own axis moved"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(500.0)],
+            "one undo returns the guide to where the drag picked it up"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(620.0)],
+            "and one redo replays the move"
         );
     }
 
@@ -6088,6 +6106,11 @@ mod tests {
             guides_of(&project, comp_id, cx),
             vec![Guide::horizontal(300.0)],
             "and the deletion is one undo step"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "and one redo deletes it again"
         );
     }
 

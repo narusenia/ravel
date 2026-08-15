@@ -135,8 +135,10 @@ variant を位置で索引するので途中挿入は旧 journal を壊す。`.r
 
 **追加フィールドでバージョンを上げない**のは前例がある: `Layer.audio` は
 format v4 のまま `#[serde(default)]` の追加フィールドとして入り、
-マイグレーションも作っていない。`ui_state.json` も format_version 3 のまま
-追加された。
+マイグレーションも作っていない。`Composition.guides`（ユーザーガイド、
+`SNAP-2`）も v8 のまま同じ形で入っている — 欠落は「ガイドが無い」という事実
+そのもので、旧ビルドが捨てても画面から線が消えるので気づける。
+`ui_state.json` も format_version 3 のまま追加された。
 
 この判断は `docs/implementation/roadmap.md` の基準 1（移行コストが時間で
 増える単位を先に）にも影響する。**フィールド追加だけなら後回しのコストは

@@ -149,11 +149,17 @@ struct Composition {
     duration_frames: u64,
     layers: im::Vector<Layer>,     // 下から上への合成順序
     background_color: Color,
+    guides: Vec<Guide>,            // ユーザーガイド（縦/横 + コンプ空間の位置）
 }
 ```
 
 Composition はドキュメント層に `im::HashMap<CompId, Arc<Composition>>` として保持し、
 Graph と同様にイミュータブル操作 + 構造共有で undo 対応。
+
+`guides` はビューアの定規からドラッグして置く整列用の線で、コンプ所有にする
+（レイヤーやネットワークは持たない — 同じコンプの全レイヤーが同じ線に揃う）。
+format v8 への `#[serde(default)]` の追加フィールドなので版もマイグレーションも
+増やさない。表示 / 非表示とロックはセッション状態で、ここには入らない。
 
 #### Layer（殻 + ネットワーク）
 

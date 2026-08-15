@@ -386,6 +386,14 @@ Viewer の重ね描きは `ViewerOverlay` と `OverlayRegistry` に集約する�
    `docs/ui-impl-status.md`、意図した挙動は `docs/specifications/ui/viewer.md`
    に同期する。
 
+**オーバーレイにできないもの**: `OverlayPainter` が知るのはコンプ矩形だけで、
+ズームインすると矩形はパネルから出る。パネルの縁に貼り付くクロム（定規）は
+オーバーレイでは書けないので、チェッカーボードと同じ `(panel, frame)` の組から
+キャンバスの描画クロージャで描く。線の掴み（ガイド）も同じで、`OverlayHandle` は
+「点からの半径」しか表現できないためパネル側の押下分岐が受ける。どちらの場合も
+**ツールで条件を絞って描画ツールの押下を奪わない**（Viewer の定規とガイドは
+`Select` 限定）。純粋関数へ切り出して headless で試験する点は変わらない。
+
 ## コンテキストメニュー
 
 ```rust

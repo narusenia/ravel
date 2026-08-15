@@ -961,8 +961,8 @@ DOCK-2 が担う。
 |---|---|---|---|
 | SHEET-1 | ✅ | `EvalRequest` の複数ターゲット化（#302） | — |
 | SHEET-2 | ✅ | 選択ノードの評価（#448。`SelectedGeometry` グローバルは作らず、既存の scoped ターゲット経路を非オーバーレイへ開いた） | SHEET-1 |
-| SHEET-3 | 🟡 | パネル本体（`DataTable`） | SHEET-2, DOCK-8 |
-| SHEET-4 | ⬜ | 実機確認と文書更新 | SHEET-3 |
+| SHEET-3 | ✅ | パネル本体（`DataTable`）（#450。ソートと列移動は実装せず — delegate の既定実装が空本体なので動かない UI になる） | SHEET-2, DOCK-8 |
+| SHEET-4 | ✅ | 実機確認と文書更新（#450。1 万インスタンスのスクロールを実機で計測） | SHEET-3 |
 
 SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触る。
 **順序は SHEET-1 が先で決着した**（2026-08-06、#302）。複数ターゲット化が入った

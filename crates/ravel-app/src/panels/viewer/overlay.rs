@@ -110,35 +110,39 @@ pub struct OverlayColors {
     pub error: Hsla,
 }
 
-/// The overlay-target results of the evaluation whose frame the viewer is
+/// The scoped-target results of the evaluation whose frame the viewer is
 /// currently showing.
 ///
 /// Durable state, not an event: it is replaced wholesale, in the same update
-/// that publishes [`crate::panels::ViewerFrame`], so the values an overlay
+/// that publishes [`crate::panels::ViewerFrame`], so the values a consumer
 /// reads always belong to the image underneath them. A target that failed,
 /// was never requested, or has not been evaluated yet is simply absent —
 /// [`OverlayContext::eval_result`] then returns `None` and the overlay draws
 /// nothing rather than guessing.
+///
+/// Overlays are not the only consumers: a target declared from the selection
+/// ([`crate::panels::selected_node_eval_target`]) lands here under the same
+/// key, which is why neither this type nor [`EvalTarget`] is named for them.
 /// Which node, in which network instance, a result belongs to.
 ///
 /// The scope is part of the key because a `NodeId` is not an identity on its
 /// own: two layer networks routinely hold the same ids, and a map keyed by id
 /// alone would hand one layer's overlay the geometry of another whenever two
 /// layers are selected at once.
-pub type OverlayResultKey = (Vec<PathSegment>, NodeId);
+pub type EvalResultKey = (Vec<PathSegment>, NodeId);
 
 #[derive(Clone, Default)]
-pub struct OverlayResults {
-    pub(crate) values: HashMap<OverlayResultKey, Arc<dyn NodeData>>,
+pub struct EvalResults {
+    pub(crate) values: HashMap<EvalResultKey, Arc<dyn NodeData>>,
 }
 
-impl OverlayResults {
-    pub(crate) fn new(values: HashMap<OverlayResultKey, Arc<dyn NodeData>>) -> Self {
+impl EvalResults {
+    pub(crate) fn new(values: HashMap<EvalResultKey, Arc<dyn NodeData>>) -> Self {
         Self { values }
     }
 }
 
-impl Global for OverlayResults {}
+impl Global for EvalResults {}
 
 /// Everything the overlays are allowed to see, snapshotted once per render or
 /// once per pointer event. Fields are optional exactly where the underlying
@@ -147,7 +151,7 @@ impl Global for OverlayResults {}
 /// `Default` is the "nothing is loaded" snapshot. It exists so the
 /// target-discovery context built while assembling an evaluation request
 /// (`ProjectState::overlay_context_for_request`) can name only the fields
-/// that decide `is_active` / `eval_target`, instead of inventing theme colors
+/// that decide `is_active` / `eval_targets`, instead of inventing theme colors
 /// and panel toggles it has no access to.
 #[derive(Clone, Default)]
 pub struct OverlayContext {
@@ -214,8 +218,8 @@ pub struct OverlayContext {
     /// Only the drag HUD reads it.
     pub active_drag: Option<ActiveDrag>,
     pub colors: OverlayColors,
-    /// Overlay-target results belonging to the frame currently shown.
-    pub results: OverlayResults,
+    /// Scoped-target results belonging to the frame currently shown.
+    pub results: EvalResults,
     /// The node templates, for the parameter declarations an overlay reads
     /// (`ParamRole`). Shared rather than cloned: the snapshot is rebuilt on
     /// every pointer move.
@@ -250,7 +254,7 @@ impl OverlayContext {
     /// `None` whenever the answer is not knowable — no result, the node is
     /// gone from the network, or the port carries no value — which is the
     /// same "draw nothing" signal as a result that has not arrived.
-    pub fn eval_result(&self, target: &OverlayTarget) -> Option<Arc<dyn NodeData>> {
+    pub fn eval_result(&self, target: &EvalTarget) -> Option<Arc<dyn NodeData>> {
         let value = self
             .results
             .values
@@ -263,11 +267,16 @@ impl OverlayContext {
     }
 }
 
-/// A node output an overlay needs evaluated before it can draw. Unit 2
-/// aggregates these into the multi-target `EvalRequest`; none of the overlays
-/// ported in unit 1 declare one, because all five read the `Document`.
+/// A node output that has to be evaluated before a consumer can use it.
+///
+/// Declared by an overlay through [`ViewerOverlay::eval_targets`] and by the
+/// selection through [`crate::panels::selected_node_eval_target`];
+/// [`crate::project_state::scoped_eval_targets`] folds both lists into the
+/// viewer's request, where each becomes a
+/// [`ravel_core::runtime::ScopedTarget`] carrying its network's graph and
+/// path.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OverlayTarget {
+pub struct EvalTarget {
     pub network: NetworkPath,
     pub node: NodeId,
     pub output: OutputPortIndex,
@@ -826,7 +835,7 @@ pub trait ViewerOverlay {
     /// A list rather than one target because a bbox is per selected node and
     /// a selection is a set: one target per overlay would have forced a
     /// registry entry per selected element.
-    fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<OverlayTarget> {
+    fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<EvalTarget> {
         Vec::new()
     }
 
@@ -922,8 +931,8 @@ impl OverlayRegistry {
 
     /// Distinct evaluation targets of the active overlays (unit 2 folds these
     /// into one multi-target request).
-    pub fn eval_targets(&self, ctx: &OverlayContext) -> Vec<OverlayTarget> {
-        let mut targets: Vec<OverlayTarget> = Vec::new();
+    pub fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget> {
+        let mut targets: Vec<EvalTarget> = Vec::new();
         for overlay in self.active(ctx) {
             for target in overlay.eval_targets(ctx) {
                 if !targets.contains(&target) {
@@ -1340,7 +1349,7 @@ impl ViewerOverlay for GeometryOverlay {
     /// Every geometry node of the outlined networks, not only the selected
     /// ones: the Viewer's click test picks a node by its evaluated bounds, so
     /// an unselected shape needs its geometry to be selectable at all.
-    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<OverlayTarget> {
+    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget> {
         let Some(document) = ctx.document.as_ref() else {
             return Vec::new();
         };
@@ -2470,7 +2479,7 @@ mod tests {
             snap_guides: crate::panels::viewer::snap::SnapGuides::default(),
             active_drag: None,
             colors: colors(),
-            results: OverlayResults::default(),
+            results: EvalResults::default(),
             // Absent by default so every overlay that does not read the
             // templates is tested against the same snapshot it always was;
             // `param_context` supplies the real one.
@@ -2582,8 +2591,8 @@ mod tests {
     }
 
     /// The published snapshot a document's own layer networks would produce.
-    fn stub_results(document: &Document) -> OverlayResults {
-        let mut values: HashMap<OverlayResultKey, Arc<dyn NodeData>> = HashMap::new();
+    fn stub_results(document: &Document) -> EvalResults {
+        let mut values: HashMap<EvalResultKey, Arc<dyn NodeData>> = HashMap::new();
         for comp in document.compositions.values() {
             for layer in &comp.layers {
                 let path = NetworkPath::layer(comp.id, layer.id).segments();
@@ -2594,7 +2603,7 @@ mod tests {
                 }
             }
         }
-        OverlayResults::new(values)
+        EvalResults::new(values)
     }
 
     fn path_node(points: Vec<PathPoint>) -> Node {
@@ -2631,7 +2640,7 @@ mod tests {
         geometry: ravel_core::geometry::Geometry,
     ) -> (OverlayContext, CompId, LayerId) {
         let (mut ctx, node, comp, layer) = doc_with_node(rect_node((100.0, 200.0)));
-        ctx.results = OverlayResults::new(HashMap::from([(
+        ctx.results = EvalResults::new(HashMap::from([(
             (NetworkPath::layer(comp, layer).segments(), node),
             Arc::new(geometry) as Arc<dyn NodeData>,
         )]));
@@ -3127,7 +3136,7 @@ mod tests {
     }
 
     struct ResultProbe {
-        target: OverlayTarget,
+        target: EvalTarget,
     }
 
     impl ViewerOverlay for ResultProbe {
@@ -3143,7 +3152,7 @@ mod tests {
             true
         }
 
-        fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<OverlayTarget> {
+        fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<EvalTarget> {
             vec![self.target.clone()]
         }
 
@@ -3173,12 +3182,8 @@ mod tests {
 
     /// The published snapshot for one `(network, node)` pair, keyed the way
     /// the evaluation worker tags a scoped result.
-    fn results_for(
-        network: &NetworkPath,
-        node: NodeId,
-        value: Arc<dyn NodeData>,
-    ) -> OverlayResults {
-        OverlayResults::new(HashMap::from([((network.segments(), node), value)]))
+    fn results_for(network: &NetworkPath, node: NodeId, value: Arc<dyn NodeData>) -> EvalResults {
+        EvalResults::new(HashMap::from([((network.segments(), node), value)]))
     }
 
     #[test]
@@ -3187,7 +3192,7 @@ mod tests {
             .with_output("out", ravel_core::id::DataTypeId::GEOMETRY);
         let node_id = node.id;
         let (base, network) = ctx_with_network_node(node);
-        let target = OverlayTarget {
+        let target = EvalTarget {
             network,
             node: node_id,
             output: OutputPortIndex(0),
@@ -3229,7 +3234,7 @@ mod tests {
         ctx.results = results_for(&network, node_id, record);
 
         let read = |port: u32| {
-            ctx.eval_result(&OverlayTarget {
+            ctx.eval_result(&EvalTarget {
                 network: network.clone(),
                 node: node_id,
                 output: OutputPortIndex(port),
@@ -3258,7 +3263,7 @@ mod tests {
         ctx.results = results_for(&network, stranger, scalar(1.0));
 
         assert!(
-            ctx.eval_result(&OverlayTarget {
+            ctx.eval_result(&EvalTarget {
                 network,
                 node: stranger,
                 output: OutputPortIndex(0),
@@ -3281,7 +3286,7 @@ mod tests {
         assert_ne!(elsewhere.segments(), network.segments());
         ctx.results = results_for(&elsewhere, node_id, scalar(1.0));
 
-        let target = OverlayTarget {
+        let target = EvalTarget {
             network,
             node: node_id,
             output: OutputPortIndex(0),

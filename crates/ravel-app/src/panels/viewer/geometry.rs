@@ -24,7 +24,7 @@ use ravel_ui::document::NetworkPath;
 use std::sync::Arc;
 
 use super::CompRect;
-use super::overlay::{OverlayContext, OverlayTarget};
+use super::overlay::{EvalTarget, OverlayContext};
 
 /// Upper bound on the marks one geometry contributes, per kind.
 ///
@@ -347,7 +347,7 @@ pub fn evaluated_geometry(
     network: &NetworkPath,
     node: NodeId,
 ) -> Option<Arc<dyn NodeData>> {
-    ctx.eval_result(&OverlayTarget {
+    ctx.eval_result(&EvalTarget {
         network: network.clone(),
         node,
         output: geometry_output_port(ctx.document.as_ref()?, network, node)?,
@@ -392,14 +392,14 @@ fn geometry_port_of(node: &ravel_core::graph::Node) -> Option<OutputPortIndex> {
 /// are what makes a shape selectable at all. They cost little — the shell
 /// evaluation for the frame underneath has already run every node upstream of
 /// the layer's output, so those are cache hits.
-pub fn geometry_targets(document: &Document, network: &NetworkPath) -> Vec<OverlayTarget> {
+pub fn geometry_targets(document: &Document, network: &NetworkPath) -> Vec<EvalTarget> {
     let Some(graph) = ravel_ui::document::resolve_network(document, network) else {
         return Vec::new();
     };
     graph
         .nodes()
         .filter_map(|node| {
-            Some(OverlayTarget {
+            Some(EvalTarget {
                 network: network.clone(),
                 node: node.id,
                 output: geometry_port_of(node)?,

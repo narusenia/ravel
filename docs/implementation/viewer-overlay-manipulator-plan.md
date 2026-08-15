@@ -104,7 +104,7 @@ trait ViewerOverlay {
     fn is_active(&self, ctx: &OverlayContext) -> bool;
 
     /// 評価結果を要求する場合の pull 対象。None なら Document だけで描ける。
-    fn eval_target(&self, ctx: &OverlayContext) -> Option<OverlayTarget>;
+    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget>;
 
     /// コンプ空間で描く。window への paint はここだけ。
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter<'_>);
@@ -127,7 +127,7 @@ trait ViewerOverlay {
   `paint()` が描く形と一致する。今の path overlay は描画
   （`:1620`）とヒットテスト（`:2060`）が離れており、ずれうる
 - **`render()` は純粋なまま**。`.agents/rules/gpui.md` の render 純粋性を守る。
-  評価要求は `eval_target()` の宣言を集めて 1 回発行し、結果は
+  評価要求は `eval_targets()` の宣言を集めて 1 回発行し、結果は
   グローバル経由で届く（`NodeEvalTimings` / `ViewerFrame` と同じ扱い。
   `project_state.rs:935-940` の方針）
 - **ハンドルのドラッグは 1 ジェスチャ 1 undo**。既存のスクラブと同じ
@@ -146,7 +146,7 @@ trait ViewerOverlay {
 
 | 次元 | 当初の前提 | 破る候補 | 単位 1 で用意するもの |
 |---|---|---|---|
-| 時間 | `eval_target()` は現在フレームの 1 点 | モーションパス（位置キーフレームの空間軌跡） | `OverlayContext` にフレーム範囲を持たせる余地を残す。**評価要求としては 1 点のまま**（軌跡はチャネル直読みで足りる。理由は「非対象」節） |
+| 時間 | `eval_targets()` は現在フレームの 1 点 | モーションパス（位置キーフレームの空間軌跡） | `OverlayContext` にフレーム範囲を持たせる余地を残す。**評価要求としては 1 点のまま**（軌跡はチャネル直読みで足りる。理由は「非対象」節） |
 | 座標系 | `OverlayPainter` はコンプ空間のみ | ドラッグ中の数値 HUD、定規・ガイド、要素 index ラベル | **スクリーン空間の描画も `OverlayPainter` の API に入れる**。既に `SELECTION_HANDLE_PX`（`viewer.rs:2716`）と `paint_path_handle`（`:2705`）がズーム不変の固定 px で描いており、2 つの座標系は実質すでに混在している |
 | 入力 | `handles()` と `drag()`（マウスのみ） | Viewer 上のテキスト編集（キャレット・IME） | trait には**追加しない**。フォーカスとキー入力を取るオーバーレイは別の設計判断なので `typography-plan.md` 側の課題として記録する（「非対象」節） |
 | 編集対象 | `OverlayEdit` はノードパラメータの更新 | レイヤー殻の transform、親子付け替え | **`OverlayEdit` を「Document への変更」として定義する**。ノードパラメータ更新と殻チャネル更新の両方を表せる形にし、undo 規約（1 ジェスチャ 1 スナップショット）は共通にする |
@@ -213,10 +213,10 @@ ViewerPanel::render()
        ├ GeometryAttrOverlay  (Geometry 評価結果 + 属性の矢印 / ラベル)
        ├ ParamManipulator     (ParamRole 宣言 + ハンドル)
        └ ShellManipulator     (LayerTransform の 4 チャネル + HUD)
-             ↓ eval_target() を集約
+             ↓ eval_targets() を集約
        EvalRequest (multi-target)
              ↓ 結果はグローバル経由
-       OverlayResults グローバル → paint / handles
+       EvalResults グローバル → paint / handles
              ↓ ハンドルのドラッグ
        OverlayEdit = Document への変更（ノードパラメータ | 殻チャネル）
 ```
@@ -249,7 +249,7 @@ ViewerPanel::render()
 
 ### 単位 2: オーバーレイ用の評価要求
 
-- `eval_target()` の集約と、multi-target 化した `EvalRequest` への相乗り
+- `eval_targets()` の集約と、multi-target 化した `EvalRequest` への相乗り
 - 結果を運ぶグローバルと、オーバーレイからの読み出し
 - 結果未着のときはそのオーバーレイを描かない（推測で埋めない）
 
@@ -263,7 +263,7 @@ ViewerPanel::render()
 
 **前提 — 単位 2 の実装で判明した制約（解決済み。下記「実装」節）。**
 
-単位 2 が載せた相乗りは、**要求が評価するスコープと `OverlayTarget.network`
+単位 2 が載せた相乗りは、**要求が評価するスコープと `EvalTarget.network`
 が一致するターゲットだけ**を対象にできる。`EvalRequest` は 1 リクエスト =
 1 グラフ + 1 パスだからである。viewer の `EvalRequest` は `graph` にシェルの
 コンパイル済みグラフ、`path` に空（root スコープ）を入れる。一方

@@ -8,7 +8,7 @@
 //!
 //! - **It asks for no evaluation.** A trajectory is two animation channels read
 //!   at a list of frames, which is a document reading — nothing about it needs
-//!   the evaluator, and returning an [`OverlayTarget`] would add a scoped target
+//!   the evaluator, and returning an [`EvalTarget`] would add a scoped target
 //!   per selected layer to every viewer request for a picture that does not
 //!   depend on one. [`ViewerOverlay::eval_targets`] therefore stays the trait
 //!   default, and a test pins that.

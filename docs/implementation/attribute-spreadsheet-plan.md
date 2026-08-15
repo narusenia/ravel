@@ -112,7 +112,7 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
                    EvalService（ワーカー1本 / Evaluator 1個 / キャッシュ共有）
                         │
       results[0] ──→ FrameBuffer ─→ ViewerFrame グローバル ─→ Viewer
-      scoped ──────→ 任意の型 ────→ OverlayResults グローバル ─┬→ オーバーレイ
+      scoped ──────→ 任意の型 ────→ EvalResults グローバル ─┬→ オーバーレイ
                                     キー = (path, node)        └→ Spreadsheet
 ```
 
@@ -173,20 +173,35 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
 - `EvalRequest.scoped: Vec<ScopedTarget>` に、選択ノードのターゲットを足す。
   1 ターゲットが `(path, graph, node, ctx)` を持つので、レイヤーネットワーク
   内部のノードをレイヤーローカル時間で評価できる（`OVL-3` が入れた形）
-- 結果は `OverlayResults`
+- 結果は `EvalResults`
   （`crates/ravel-app/src/panels/viewer/overlay.rs`）から読む。キーは
-  `OverlayResultKey = (Vec<PathSegment>, NodeId)`
+  `EvalResultKey = (Vec<PathSegment>, NodeId)`
 - **この単位の本体は「オーバーレイ以外の消費者がターゲットを宣言する経路」**
-  である。今は `ViewerOverlay::eval_target` →
+  である。今は `ViewerOverlay::eval_targets` →
   `OverlayRegistry::eval_targets` に閉じており、スプレッドシートは
   オーバーレイではない。宣言元を一般化する
-  （`OverlayResults` / `OverlayResultKey` は `ravel-app` 内なので、
+  （`EvalResults` / `EvalResultKey` は `ravel-app` 内なので、
   クレートを跨ぐ設計変更にはならない）
 - `PropertiesTarget::Nodes` の `ids` の並びが**決定的であることをテストで
   固定する**（下記「表示対象はノードエディタの選択に追従する」の未確認事項。
   ここは旧案のまま有効）
 - 対象が `Nodes` 以外（`Layer` / `Composition` / `MediaAsset`）のとき、
   および `Geometry` を出さないノードのときの表示（旧案のまま有効）
+
+#### 実装（単位 3 が読む口）
+
+宣言の口は 2 つになった。オーバーレイ側は従来どおり
+`ViewerOverlay::eval_targets`、それ以外は
+`panels::selected_node_eval_target(document, cx)`
+（`crates/ravel-app/src/panels/mod.rs`）で、
+`SelectedPropertiesTarget` の先頭ノードのジオメトリ出力を 1 つ宣言する。
+両者を `project_state::scoped_eval_targets` が畳んで `EvalRequest.scoped`
+に入れるので、重複除去・ネットワーク解決・区間外の除外は宣言元を問わず
+同じように効く。
+
+宣言が無い（＝パネルは「表示するものが無い」を出す）のは 3 つ:
+選択なし、対象が `Nodes` 以外、選択ノードがジオメトリ出力を持たない。
+単位 3 は結果を `EvalResults`（キー `(network.segments(), node)`）から読む。
 
 #### 旧案が成り立たない理由
 
@@ -200,7 +215,7 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
   合成ノードの ID は `comp_id << 32 | layer_id << 8 | role`
   （`crates/ravel-core/src/composition/compile.rs`）なので、`comp_id == 0`
   では通常のノード ID の範囲に落ちて衝突し、**別ノードの結果を表示する**。
-  `OverlayResultKey` がパスを含むのはこのため
+  `EvalResultKey` がパスを含むのはこのため
 - **旧完了条件 3 件は既に満たされ、テストで固定済み**（`OVL-2` #429）:
   `results[0]` はコンプ出力のままなので Viewer が乗っ取られない、
   target の失敗は `Err` としてスロットを保つので Viewer が生き残る、
@@ -211,7 +226,7 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
 
 #### 完了条件
 
-- ジオメトリノードを選択 → その結果が `OverlayResults` から読め、
+- ジオメトリノードを選択 → その結果が `EvalResults` から読め、
   同時に `ViewerFrame` も従来どおり更新されるテスト
 - 選択解除で結果が消えるテスト
 - **別ネットワーク / 別コンプの同じ `NodeId` を持つノードの結果を

@@ -2218,11 +2218,20 @@ impl NodeEditorPanel {
     /// `panels::set_layer_selection`), and opening a network as a consequence
     /// of a layer being selected must not blank the Properties panel that same
     /// selection just filled.
+    ///
+    /// The ids are published in ascending id order, the order the Viewer's own
+    /// selection publisher already uses. The canvas selection is a
+    /// [`HashSet`], so its iteration order is an artifact of the hasher: the
+    /// consumers that follow `ids.first()` — Properties for the keyframe
+    /// target, the scoped evaluation target an inspection panel declares —
+    /// would otherwise name a different node from run to run, and a different
+    /// one again depending on which panel published the selection.
     fn notify_properties_selection(&self, cx: &mut App) {
         let sel = Self::selected_nodes(cx);
         let target = match &self.context {
             Some(network) if !sel.is_empty() => {
-                let ids: Vec<_> = sel.into_iter().collect();
+                let mut ids: Vec<_> = sel.into_iter().collect();
+                ids.sort_by_key(|id| id.raw());
                 super::PropertiesTarget::Nodes {
                     network: network.clone(),
                     ids,
@@ -7007,6 +7016,58 @@ mod tests {
             .unwrap();
         let sel = read_sel(cx);
         assert!(sel.nodes.is_empty());
+    }
+
+    /// The node ids the Properties target carries are ordered by id, not by
+    /// whatever order the selection's `HashSet` happens to iterate in.
+    ///
+    /// Consumers follow `ids.first()`: Properties resolves the keyframe target
+    /// from it, and the request assembly declares the scoped evaluation target
+    /// an inspection panel reads from it. An unsorted publication makes that
+    /// "first" node vary between runs of the same selection — and differ from
+    /// the Viewer's publication of the *same* nodes, which has always sorted.
+    #[gpui::test]
+    fn the_published_properties_selection_is_ordered_by_node_id(cx: &mut TestAppContext) {
+        let (window, _project, path, _blur) = setup(cx);
+        // Ids that are not in ascending order to begin with, so "sorted" and
+        // "as they were written down" cannot be the same answer.
+        let ids: Vec<NodeId> = [907, 431, 998, 102, 555, 880, 213, 660]
+            .into_iter()
+            .map(NodeId::new)
+            .collect();
+        let selection: HashSet<NodeId> = ids.iter().copied().collect();
+        let mut expected = ids.clone();
+        expected.sort_by_key(|id| id.raw());
+        // Vacuity guard: publishing the set unsorted would hand over its hash
+        // order, so a run where that order is already ascending proves nothing
+        // and has to say so rather than pass.
+        let hash_order: Vec<NodeId> = selection.iter().copied().collect();
+        assert_ne!(
+            hash_order, expected,
+            "this run's hash order is already sorted, so it cannot tell a \
+             sorted publication from an unsorted one",
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.set_selected_nodes(selection.clone(), cx);
+                panel.notify_properties_selection(cx);
+
+                let crate::panels::PropertiesTarget::Nodes {
+                    network,
+                    ids: published,
+                } = &cx.global::<crate::panels::SelectedPropertiesTarget>().0
+                else {
+                    panic!("the node selection was not published as a node target");
+                };
+                assert_eq!(network, &path);
+                assert_eq!(published, &expected);
+                assert!(
+                    published.windows(2).all(|w| w[0].raw() < w[1].raw()),
+                    "the published ids are not strictly ascending: {published:?}",
+                );
+            })
+            .unwrap();
     }
 
     /// `selection_matches` is what lets `refresh_from_document` skip

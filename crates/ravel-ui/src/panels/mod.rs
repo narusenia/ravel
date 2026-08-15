@@ -8,6 +8,7 @@
 //! are hosted as empty frames driven by [`crate::panel::PanelKind`] until their
 //! tasks land.
 
+pub mod attribute_spreadsheet;
 pub mod layer_selection;
 pub mod media_bin;
 pub mod outliner;

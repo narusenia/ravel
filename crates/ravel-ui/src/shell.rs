@@ -304,6 +304,9 @@ impl AppShell {
             CommandId::ViewToggleShaderEditor => self.toggle_panel(PanelKind::ShaderEditor),
             CommandId::ViewToggleLuaConsole => self.toggle_panel(PanelKind::LuaConsole),
             CommandId::ViewToggleRenderQueue => self.toggle_panel(PanelKind::RenderQueue),
+            CommandId::ViewToggleAttributeSpreadsheet => {
+                self.toggle_panel(PanelKind::AttributeSpreadsheet)
+            }
             CommandId::WorkspaceEdit => self.switch_preset(BuiltinPreset::Edit),
             CommandId::WorkspaceNode => self.switch_preset(BuiltinPreset::Node),
             CommandId::WorkspaceColor => self.switch_preset(BuiltinPreset::Color),

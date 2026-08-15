@@ -199,8 +199,12 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
 に入れるので、重複除去・ネットワーク解決・区間外の除外は宣言元を問わず
 同じように効く。
 
-宣言が無い（＝パネルは「表示するものが無い」を出す）のは 3 つ:
-選択なし、対象が `Nodes` 以外、選択ノードがジオメトリ出力を持たない。
+宣言が無い（＝パネルは「表示するものが無い」を出す）のは 4 つ:
+選択なし、対象が `Nodes` 以外、選択が今の active composition の外、
+選択ノードがジオメトリ出力を持たない。4 つ目だけは
+「このノードはジオメトリを出力しない」という別の文になるので、
+`panels::selected_node_for_inspection` が前 3 つを切り出しており、
+パネルはそれと突き合わせて言い分ける。
 単位 3 は結果を `EvalResults`（キー `(network.segments(), node)`）から読む。
 
 #### 旧案が成り立たない理由

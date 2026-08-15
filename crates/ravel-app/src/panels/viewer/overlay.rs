@@ -255,16 +255,30 @@ impl OverlayContext {
     /// gone from the network, or the port carries no value — which is the
     /// same "draw nothing" signal as a result that has not arrived.
     pub fn eval_result(&self, target: &EvalTarget) -> Option<Arc<dyn NodeData>> {
-        let value = self
-            .results
-            .values
-            .get(&(target.network.segments(), target.node))?;
-        let ports = ravel_ui::document::resolve_network(self.document.as_ref()?, &target.network)?
-            .node(target.node)?
-            .outputs
-            .len();
-        PortRecord::extract(value, ports, target.output)
+        eval_result(&self.results, self.document.as_ref()?, target)
     }
+}
+
+/// [`OverlayContext::eval_result`] for a consumer that has no overlay context.
+///
+/// The port extraction is the part that must not be re-derived: a node with
+/// several outputs evaluates to one [`PortRecord`], so a consumer that took the
+/// value whole would show port 1's caller a value of a different type. An
+/// inspection panel reads the same results global as the overlays and needs the
+/// same rule, so both call this rather than each writing the lookup out.
+pub(crate) fn eval_result(
+    results: &EvalResults,
+    document: &Document,
+    target: &EvalTarget,
+) -> Option<Arc<dyn NodeData>> {
+    let value = results
+        .values
+        .get(&(target.network.segments(), target.node))?;
+    let ports = ravel_ui::document::resolve_network(document, &target.network)?
+        .node(target.node)?
+        .outputs
+        .len();
+    PortRecord::extract(value, ports, target.output)
 }
 
 /// A node output that has to be evaluated before a consumer can use it.

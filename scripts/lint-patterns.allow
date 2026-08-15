@@ -110,6 +110,17 @@ observe-global crates/ravel-app/src/panels/media_bin.rs MediaSelection
 # (ui-responsiveness-plan.md RESP-1).
 observe-global crates/ravel-app/src/panels/node_editor.rs NodeEvalTimings
 
+# Attribute spreadsheet (REQ-CORE-010 inspection UI): the panel reads the same
+# two pieces of durable shared state the Viewer overlays read. The selection
+# names the node to inspect and changes with no evaluation behind it;
+# `EvalResults` is the scoped-target results of the frame on screen, republished
+# wholesale per evaluation, and `ProjectState::on_eval_update` deliberately does
+# not notify its observers when it publishes it (the same reason
+# `NodeEvalTimings` is on this list). Both are durable state with the same
+# lifecycle as `ViewerFrame`, not one-shot events.
+observe-global crates/ravel-app/src/panels/attribute_spreadsheet.rs SelectedPropertiesTarget
+observe-global crates/ravel-app/src/panels/attribute_spreadsheet.rs EvalResults
+
 # Test probe, not a signal path: the RESP-2 regression test asserts that the
 # Node Editor stops republishing an unchanged `CanvasSelection` on every graph
 # change (HIGH-07). Counting publications is only observable by subscribing to

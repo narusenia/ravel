@@ -177,7 +177,7 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
   （`crates/ravel-app/src/panels/viewer/overlay.rs`）から読む。キーは
   `EvalResultKey = (Vec<PathSegment>, NodeId)`
 - **この単位の本体は「オーバーレイ以外の消費者がターゲットを宣言する経路」**
-  である。今は `ViewerOverlay::eval_target` →
+  である。今は `ViewerOverlay::eval_targets` →
   `OverlayRegistry::eval_targets` に閉じており、スプレッドシートは
   オーバーレイではない。宣言元を一般化する
   （`EvalResults` / `EvalResultKey` は `ravel-app` 内なので、

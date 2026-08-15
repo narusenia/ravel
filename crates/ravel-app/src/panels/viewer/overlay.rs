@@ -151,7 +151,7 @@ impl Global for EvalResults {}
 /// `Default` is the "nothing is loaded" snapshot. It exists so the
 /// target-discovery context built while assembling an evaluation request
 /// (`ProjectState::overlay_context_for_request`) can name only the fields
-/// that decide `is_active` / `eval_target`, instead of inventing theme colors
+/// that decide `is_active` / `eval_targets`, instead of inventing theme colors
 /// and panel toggles it has no access to.
 #[derive(Clone, Default)]
 pub struct OverlayContext {
@@ -218,7 +218,7 @@ pub struct OverlayContext {
     /// Only the drag HUD reads it.
     pub active_drag: Option<ActiveDrag>,
     pub colors: OverlayColors,
-    /// Overlay-target results belonging to the frame currently shown.
+    /// Scoped-target results belonging to the frame currently shown.
     pub results: EvalResults,
     /// The node templates, for the parameter declarations an overlay reads
     /// (`ParamRole`). Shared rather than cloned: the snapshot is rebuilt on

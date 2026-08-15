@@ -1561,7 +1561,7 @@ impl ProjectState {
     /// The world an overlay is allowed to see while its evaluation targets
     /// are collected.
     ///
-    /// Only the fields `is_active` / `eval_target` can legitimately depend on
+    /// Only the fields `is_active` / `eval_targets` can legitimately depend on
     /// are filled: theme colors, the panel's grid and safe-area toggles and
     /// the last error are presentation, and this runs with no window and no
     /// installed theme. `results` is deliberately the *current* snapshot, so
@@ -4514,7 +4514,7 @@ mod tests {
     /// the overlays keep drawing the last composition's results over a blank
     /// frame.
     #[gpui::test]
-    fn a_path_with_no_evaluation_drops_the_overlay_results(cx: &mut TestAppContext) {
+    fn a_path_with_no_evaluation_drops_the_scoped_results(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
         let stale = NodeId::new(9001);
@@ -4547,7 +4547,7 @@ mod tests {
     /// an accepted update whose target did not return leaves no earlier value
     /// behind for an overlay to paint.
     #[gpui::test]
-    fn overlay_results_track_the_published_frame(cx: &mut TestAppContext) {
+    fn scoped_results_track_the_published_frame(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
         let overlay_node = NodeId::new(9001);
@@ -4626,7 +4626,7 @@ mod tests {
     /// values — however successful — describe a composition that is not on
     /// screen and must not be published.
     #[gpui::test]
-    fn overlay_results_are_withheld_when_the_frame_is_not_an_image(cx: &mut TestAppContext) {
+    fn scoped_results_are_withheld_when_the_frame_is_not_an_image(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
         let overlay_node = NodeId::new(9001);

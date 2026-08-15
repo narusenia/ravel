@@ -436,6 +436,25 @@ mod tests {
         Arc::new(geometry)
     }
 
+    /// A geometry with ten thousand instances, the size the plan's completion
+    /// criterion names.
+    fn ten_thousand_instances() -> Arc<dyn NodeData> {
+        const COUNT: i32 = 10_000;
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0)]);
+        geometry
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32((0..COUNT).collect()))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2((0..COUNT).map(|i| Vec2(i as f32, 0.0)).collect()),
+            )
+            .unwrap();
+        Arc::new(geometry)
+    }
+
     fn delegate_with(value: Arc<dyn NodeData>) -> AttributeSheetDelegate {
         let mut delegate = AttributeSheetDelegate::new();
         assert!(delegate.apply(Resolved {
@@ -560,6 +579,72 @@ mod tests {
                 let delegate = panel.table.read(cx).delegate();
                 assert_eq!(delegate.rows(), 0);
                 assert!(delegate.empty.is_some());
+            })
+            .unwrap();
+    }
+
+    /// Ten thousand rows reach the `DataTable` through the panel's own
+    /// `TableState`, and the panel's `refresh` is what feeds that state.
+    ///
+    /// `tests/attribute_spreadsheet.rs` pins the row count and the cell text
+    /// headlessly; both survive a broken panel. This pins the wiring between
+    /// them: the rendered `DataTable` reports a visible row range on *this*
+    /// state (a table built from another state would leave it empty), the
+    /// range is a window rather than all ten thousand rows (the virtual scroll
+    /// the row count depends on), and `refresh` writes the resolved snapshot
+    /// into the delegate instead of leaving whatever was there.
+    #[gpui::test]
+    fn ten_thousand_rows_reach_the_table_the_panel_renders(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx.add_window(|window, cx| {
+            AttributeSpreadsheetGpuiPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(gpui::size(gpui::px(520.0), gpui::px(300.0)));
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.table.update(cx, |state, cx| {
+                    assert!(state.delegate_mut().sheet.set_domain(Domain::Instance));
+                    state.delegate_mut().apply(Resolved {
+                        has_node_target: true,
+                        has_geometry_output: true,
+                        value: Some(ten_thousand_instances()),
+                    });
+                    state.refresh(cx);
+                });
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let state = panel.table.read(cx);
+                assert_eq!(state.delegate().rows_count(cx), 10_000);
+                assert!(state.delegate().empty.is_none());
+                let visible = state.visible_range().rows().clone();
+                assert!(
+                    !visible.is_empty(),
+                    "the rendered DataTable reported no visible rows on the panel's state"
+                );
+                assert!(
+                    visible.end < 10_000,
+                    "every row was rendered ({visible:?}); the virtual scroll is gone"
+                );
+            })
+            .unwrap();
+
+        // The panel's own refresh path is what moves a resolution into the
+        // delegate: with no project behind it, the next refresh must empty the
+        // sheet rather than leave the ten thousand rows standing.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.refresh(cx);
+                let state = panel.table.read(cx);
+                assert_eq!(state.delegate().empty, Some(SheetEmpty::NoSelection));
+                assert_eq!(state.delegate().rows_count(cx), 0);
             })
             .unwrap();
     }

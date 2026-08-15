@@ -27,6 +27,7 @@
 //! the anchor" for the shell grips.
 
 use gpui::Hsla;
+use ravel_core::composition::GuideAxis;
 use ravel_core::id::{CompId, LayerId};
 
 use super::CompRect;
@@ -49,7 +50,9 @@ pub fn comp_threshold(comp_per_px: f32) -> f32 {
 ///
 /// Order is the tie-break: [`snap_delta`] keeps the first line of a group of
 /// equally distant ones, so the composition frame wins over the safe areas,
-/// which win over the layers, which are read in composition order.
+/// which win over the user guides, which win over the layers, which are read in
+/// composition order. A guide beats a layer edge because the user put it there
+/// on purpose and the layer edge is wherever the picture happens to end.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SnapLines {
     pub x: Vec<f32>,
@@ -58,13 +61,20 @@ pub struct SnapLines {
 
 impl SnapLines {
     /// The candidates a gesture in `comp` sees: the composition frame, the safe
-    /// areas while they are drawn, and the bounding box of every layer except
-    /// the ones the gesture is moving.
+    /// areas while they are drawn, the user guides while they are shown, and
+    /// the bounding box of every layer except the ones the gesture is moving.
     ///
     /// The moving layers are excluded because their own edges travel with the
     /// gesture: a rectangle is always within zero of itself, so leaving them in
-    /// would pin every drag to its start.
-    pub fn collect(ctx: &OverlayContext, comp: Option<CompId>, moving: &[LayerId]) -> Self {
+    /// would pin every drag to its start. `moving_guide` — the index into
+    /// `Composition::guides` of the guide a guide drag is moving — is left out
+    /// for exactly the same reason.
+    pub fn collect(
+        ctx: &OverlayContext,
+        comp: Option<CompId>,
+        moving: &[LayerId],
+        moving_guide: Option<usize>,
+    ) -> Self {
         let mut lines = Self::default();
         if let Some((width, height)) = ctx.resolution {
             let (width, height) = (width as f32, height as f32);
@@ -87,6 +97,20 @@ impl SnapLines {
         if let (Some(comp), Some(document)) = (comp, ctx.document.as_ref())
             && let Some(composition) = document.get_composition(comp)
         {
+            // Only while they are drawn, and never the one being dragged.
+            // A locked guide stays a candidate: locking says "do not move
+            // this", not "stop aligning to it".
+            if ctx.show_guides {
+                for (index, guide) in composition.guides.iter().enumerate() {
+                    if Some(index) == moving_guide {
+                        continue;
+                    }
+                    match guide.axis {
+                        GuideAxis::Vertical => lines.x.push(guide.position),
+                        GuideAxis::Horizontal => lines.y.push(guide.position),
+                    }
+                }
+            }
             for layer in &composition.layers {
                 if moving.contains(&layer.id) {
                     continue;

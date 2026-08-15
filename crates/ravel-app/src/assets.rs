@@ -72,6 +72,8 @@ pub enum RavelIcon {
     GridOverlay,
     /// Viewer toolbar: action/title safe-area overlay.
     SafeAreas,
+    /// Viewer toolbar: rulers and user guides.
+    Rulers,
     /// Viewer toolbar: selection bounding-box overlay.
     GeometryBounds,
     /// Viewer toolbar: geometry point markers.
@@ -471,6 +473,7 @@ impl IconNamed for RavelIcon {
             Self::ZoomActualSize => "icons/square-square.svg",
             Self::GridOverlay => "icons/grid-3x3.svg",
             Self::SafeAreas => "icons/frame.svg",
+            Self::Rulers => "icons/ruler.svg",
             Self::GeometryBounds => "icons/square-square.svg",
             Self::GeometryPoints => "icons/circle-dot.svg",
             Self::GeometryPaths => "icons/spline.svg",

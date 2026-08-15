@@ -85,6 +85,11 @@ pub mod priority {
     /// move grip land on the same point.
     pub const PARAM_MANIPULATOR: i32 = 37;
     pub const PATH_EDIT: i32 = 40;
+    /// Above the editable marks and below the snap guides: a user guide is a
+    /// standing line the picture is aligned against, so it has to be readable
+    /// over the content — but the line the drag in flight has just landed on is
+    /// the more urgent of the two.
+    pub const GUIDES: i32 = 44;
     /// Above every mark a gesture can be aligned against: a guide reports what
     /// the drag in flight has snapped to, so it has to be readable over the
     /// bbox, the grips and the safe areas it lands on.
@@ -163,6 +168,10 @@ pub struct OverlayContext {
     /// [`resolution`](Self::resolution), which is what a context assembled
     /// without a project has.
     pub eval_resolution: Option<(u32, u32)>,
+    /// The composition on screen. Not derivable from the selection — an
+    /// overlay drawn from composition-owned data (the user guides) has to know
+    /// which composition that is with nothing selected at all.
+    pub comp: Option<CompId>,
     pub playback: Option<PlaybackPosition>,
     pub document: Option<Document>,
     pub selection: Option<CanvasSelection>,
@@ -170,6 +179,10 @@ pub struct OverlayContext {
     pub tool: Option<ToolKind>,
     pub show_grid: bool,
     pub show_safe_areas: bool,
+    /// The composition's user guides are drawn and snapped to. Hidden guides
+    /// are left out of both, for the reason the safe areas are: a pull towards
+    /// a line nobody can see reads as the picture moving on its own.
+    pub show_guides: bool,
     /// Selection bounding boxes, drawn from evaluated geometry.
     pub show_geometry_bounds: bool,
     /// Point and instance markers of the evaluated geometry.
@@ -872,6 +885,7 @@ impl OverlayRegistry {
             Box::new(super::motion_path::MotionPathOverlay),
             Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
+            Box::new(super::guides::GuideOverlay),
             Box::new(super::snap::SnapGuideOverlay),
             Box::new(EvalErrorOverlay),
         ])
@@ -2433,6 +2447,7 @@ mod tests {
     fn base_context() -> OverlayContext {
         OverlayContext {
             resolution: Some((1920, 1080)),
+            comp: None,
             playback: Some(PlaybackPosition::default()),
             document: None,
             selection: None,
@@ -2441,6 +2456,7 @@ mod tests {
             eval_resolution: Some((1920, 1080)),
             show_grid: false,
             show_safe_areas: false,
+            show_guides: false,
             show_geometry_bounds: true,
             show_geometry_points: false,
             show_geometry_paths: false,

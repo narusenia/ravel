@@ -5466,6 +5466,87 @@ mod tests {
         }
     }
 
+    /// The gestures that give Alt a meaning of their own keep snapping while it
+    /// is held: drawing from the centre still lands its corner on a candidate.
+    #[gpui::test]
+    fn alt_and_snapping_coexist_while_drawing_from_the_centre(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            });
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Rect,
+                ..ToolState::default()
+            });
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                let event = MouseMoveEvent {
+                    position: window_point(panel, (955.0, 600.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                };
+                panel.shape_dragged(&event, cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0), "Alt does not suppress");
+                let geo = panel
+                    .shape_drag
+                    .as_ref()
+                    .and_then(|drag| drag.created.as_ref())
+                    .expect("the drag created a shape")
+                    .geo;
+                assert!(
+                    (geo.center.0 - 500.0).abs() < 1e-3,
+                    "and Alt still draws from the press point: {geo:?}"
+                );
+                assert!(
+                    (geo.half.0 - 460.0).abs() < 1e-3,
+                    "the half extent reaches the snapped 960, not the pointer's 955: {geo:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The same for the shell: Alt scales about the anchor and the grabbed grip
+    /// is still pulled onto the candidate.
+    #[gpui::test]
+    fn alt_and_snapping_coexist_while_scaling_about_the_anchor(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (955.0, 210.0));
+                panel.handle_dragged(
+                    to,
+                    DragModifiers {
+                        alt: true,
+                        ..DragModifiers::default()
+                    },
+                    cx,
+                );
+                assert_eq!(panel.snap_guides.x, Some(960.0), "Alt does not suppress");
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Alt pins the anchor at the layer's origin, so a grip landing on 960
+        // is a factor of 960 / 120 rather than the 22 the opposite corner gives.
+        let scaled = shell_scale(&project, comp_id, layer, cx);
+        assert!(
+            (scaled.0 - 8.0).abs() < 1e-3,
+            "the anchor stayed the fixed point: {scaled:?}"
+        );
+    }
+
     /// The suppression key is the platform's primary modifier — Cmd on macOS,
     /// Ctrl elsewhere — and Shift and Alt reach the gesture untouched.
     #[test]

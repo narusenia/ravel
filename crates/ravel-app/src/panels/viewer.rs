@@ -301,7 +301,7 @@ struct OverlayHandleDrag {
     original_document: Document,
     /// Snap candidates and the shell's bbox at press time. `rect` is `None`
     /// for the grips that move a single point — they snap that point instead,
-    /// through [`snap_rect_for_handle`].
+    /// through [`snap_target_for_handle`].
     snap: SnapTarget,
     /// Invalidation the applied edits ask for, committed with the gesture.
     invalidation: InvalidationHint,
@@ -2872,9 +2872,6 @@ fn comp_to_screen(comp: (f32, f32), rect: viewport::Rect, comp_width: u32) -> (f
     (rect.x + comp.0 * zoom, rect.y + comp.1 * zoom)
 }
 
-/// A single composition point as a zero-sized rectangle, which is what a
-/// gesture that moves one point (a drawing pointer, a shell grip) hands to
-/// [`snap::snap_delta`].
 /// The drag modifiers of a pointer event.
 ///
 /// Snapping is suppressed by the platform's primary modifier — Cmd on macOS,
@@ -2889,6 +2886,9 @@ fn drag_modifiers(modifiers: &Modifiers) -> DragModifiers {
     }
 }
 
+/// A single composition point as a zero-sized rectangle, which is what a
+/// gesture that moves one point (a drawing pointer, a shell grip) hands to
+/// [`snap::snap_delta`].
 fn point_rect(point: (f32, f32)) -> CompRect {
     CompRect {
         x: point.0,

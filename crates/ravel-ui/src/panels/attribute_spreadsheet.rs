@@ -310,7 +310,7 @@ pub fn empty_state(
 mod tests {
     use super::*;
     use ravel_core::geometry::Primitive;
-    use ravel_core::types::{Color, Vec2};
+    use ravel_core::types::{Color, Vec2, Vec3, Vec4};
 
     fn grid() -> Geometry {
         let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]);
@@ -416,6 +416,24 @@ mod tests {
                 AttributeArray::Str(vec!["a".to_string(), "b".to_string()]),
             )
             .unwrap();
+        geometry
+            .points_mut()
+            .insert(
+                "velocity",
+                AttributeArray::Vec3(vec![Vec3(1.0, 2.0, 3.0), Vec3(0.0, 0.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert(
+                "bounds",
+                AttributeArray::Vec4(vec![Vec4(1.0, 2.0, 3.0, 4.0), Vec4(0.0, 0.0, 0.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![-12, 7]))
+            .unwrap();
         let columns = columns(&geometry, Domain::Point);
         let text = |row: usize, name: &str| {
             let column = columns.iter().find(|c| c.name == name).unwrap();
@@ -429,6 +447,12 @@ mod tests {
         assert_eq!(text(1, "P"), "(1235, -0.2500)");
         assert_eq!(text(0, "pscale"), "8.000");
         assert_eq!(text(1, "pscale"), "0.01250");
+        // Component order and count are part of the reading, not decoration:
+        // a swapped `Vec3` is a wrong value on screen with no way to notice.
+        assert_eq!(text(0, "velocity"), "(1.000, 2.000, 3.000)");
+        assert_eq!(text(0, "bounds"), "(1.000, 2.000, 3.000, 4.000)");
+        assert_eq!(text(0, "id"), "-12");
+        assert_eq!(text(1, "id"), "7");
         assert_eq!(text(0, "fill"), "true");
         assert_eq!(text(1, "fill"), "false");
         assert_eq!(text(0, "label"), "a");

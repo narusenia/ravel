@@ -21,7 +21,7 @@
 | `Area` | `tabs`（パネルインスタンスの並び。空にならない）と `active`（アクティブタブの添字） |
 
 **タブの 1 枚 1 枚がパネルインスタンス**（`PanelInstance { id, kind }`）。
-同じ `PanelKind` を何枚でも開ける（全 16 種、例外なし）。区別するのは
+同じ `PanelKind` を何枚でも開ける（全 17 種、例外なし）。区別するのは
 `PanelInstanceId` で、ワークスペース全体で一意。
 
 - **ドキュメント状態は共有する**: プロジェクト、選択（`LayerSelection` /
@@ -162,14 +162,14 @@ View メニュー / キーバインドのパネルトグルは、メインウィ
 |---|---|---|
 | `Left` | 最も左のエリア | Outliner, Media Bin |
 | `Right` | 最も右のエリア | Properties, Waveform, Vectorscope, Histogram, Parade, Text Editor |
-| `Bottom` | 最も下のエリア | Timeline, Dopesheet, Curve Editor, Lua Console, Render Queue |
+| `Bottom` | 最も下のエリア | Timeline, Dopesheet, Curve Editor, Lua Console, Render Queue, Attribute Spreadsheet |
 | `Center` | 各分割で大きい側の子を辿った先のエリア | Node Graph, Viewer, Shader Editor |
 
 View メニューのチェック状態は「メインウィンドウにそのパネルのインスタンスが
 1 枚以上あるか」から導出する（分離ウィンドウは数えない）。
 
-挿入・除去はレイアウトモデル側で 16 種すべてに対応し、**View メニューの
-コマンド 13 個が 16 種すべてに届く**（`view.toggle_scopes` が Waveform /
+挿入・除去はレイアウトモデル側で 17 種すべてに対応し、**View メニューの
+コマンド 14 個が 17 種すべてに届く**（`view.toggle_scopes` が Waveform /
 Vectorscope / Histogram / Parade をまとめて動かすので、コマンド数はパネル数より
 3 つ少ない）。プリセットが配置していないパネルもトグルで出せる
 （[パネル一覧](../ui-spec.md#パネル一覧)）。

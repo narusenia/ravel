@@ -371,7 +371,7 @@ gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` へ
 | 項目 | 状態 | 備考 |
 |------|------|------|
 | N ウィンドウ × レイアウトツリー | ✅ | 全ウィンドウが同じホスト（`WindowHost`）。メインは `windows[0]`。論理 `WindowId` ↔ GPUI ハンドルは `WindowRegistry`（Global）1 箇所 |
-| 同一パネルの多重インスタンス | ✅ | 全 16 種。タブ 1 枚 = `PanelInstance`。ビューは `PanelInstanceId` キーのレジストリ（`PanelViews`）がキャッシュ |
+| 同一パネルの多重インスタンス | ✅ | 全 17 種。タブ 1 枚 = `PanelInstance`。ビューは `PanelInstanceId` キーのレジストリ（`PanelViews`）がキャッシュ |
 | 4 プリセットの表示と切替 | ✅ | `Cmd+F1`〜`F4` と Workspace メニュー。メインウィンドウのツリーだけを差し替え、分離ウィンドウは触らない |
 | View トグル（既定スロット挿入） | ✅ | ツリーに無いパネルは `PanelKind::default_slot()` へ挿入。アクティブプリセットに依存しない |
 | タブ切替・タブ D&D | ✅ | エリア端 1/4 = 分割、中央 = 合流、タブバーの帯 = 合流。ドロップ先はアクセント色でハイライト、結果が変わらないドロップは無効（カーソルが `OperationNotAllowed`）。4px でクリックとドラッグを分ける。Escape とボタン喪失でキャンセル |

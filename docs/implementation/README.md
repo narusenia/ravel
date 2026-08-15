@@ -34,7 +34,7 @@ the design behind a unit.
 | `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
 | `viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, plus input-driven adaptive resolution — **the only way to inspect output at full resolution today** | VRES-1 done — 2026-08-06 (no UI to change the factor until VRES-2) | REQ-UI-004 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
-| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | units 1–2 done — 2026-08-15 | REQ-CORE-010, REQ-UI-013 |
+| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | units 1–4 done — 2026-08-15 | REQ-CORE-010, REQ-UI-013 |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
 ## Planned

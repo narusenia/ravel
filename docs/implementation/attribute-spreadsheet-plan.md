@@ -1,16 +1,18 @@
 # 属性スプレッドシート実装計画（REQ-CORE-010 検査 UI）
 
-> **Status**: Planned — 2026-07-27（単位 1 完了: #302。**単位 2 を書き直し:
-> 2026-08-15** — `OVL-2` / `OVL-3` が評価スコープと結果グローバルを先に
-> 入れたので、`SelectedGeometry` の新設をやめて相乗りする形にした）
+> **Status**: Complete — 2026-08-15（単位 1〜4 完了。単位 1: #302。
+> **単位 2 を書き直し: 2026-08-15** — `OVL-2` / `OVL-3` が評価スコープと
+> 結果グローバルを先に入れたので、`SelectedGeometry` の新設をやめて
+> 相乗りする形にした）
 
 対象: ジオメトリ属性を行×列で目視検査するパネル。関連要件:
 REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管理）。
 
 **前提**: `done/free-pane-docking-plan.md` の DOCK-8（カットオーバー）の完了
-（旧前提 `panel-placement-plan.md` は同計画に supersede）。新規パネルはどの
-プリセットのレイアウトツリーにも無いため、それが直るまで View メニューから
-到達できない。
+（旧前提 `panel-placement-plan.md` は同計画に supersede）。**充足済み。**
+DOCK-2 の既定スロット挿入が入ったので、どのプリセットのレイアウトツリーにも
+無い新規パネルでも View メニュー ▸ 属性スプレッドシートで
+`PanelKind::default_slot()`（本パネルは `Bottom`）へ挿入されて開く。
 
 **関連**: `per-instance-modulation-plan.md`。変調グラフは属性名を文字列で
 指定する（`field.attribute` の `name`、`field.apply` の `target`）ため、
@@ -99,8 +101,15 @@ REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管�
 
 `TableDelegate` は `render_td(row_ix, col_ix, ...)` を**可視行だけ**呼ぶ
 仮想スクロール実装なので、10 万インスタンスでも行数の上限を切らずに済む。
-列固定（`ColumnFixed::Left`）で `index` 列をピン留めし、列幅リサイズと
-ソートは組み込みのものを使う。
+列固定（`ColumnFixed::Left`）で行番号列をピン留めし、列幅リサイズは
+組み込みのものを使う。
+
+**ソートと列移動は実装しない**（`sortable(false)` / `col_movable(false)`）。
+`TableDelegate::perform_sort` と `move_column` の既定実装は**本体が空**なので、
+組み込みのものを有効にすると押せるのに何も起きないソート矢印と、掴めるのに
+戻ってくる列ドラッグが出る。動かないものに UI を付けるほうが、UI が無いより
+悪い。v1 が read-only である以上、並べ替えの意味付け（何を基準に、次の評価で
+どうなるか）も決まっていない。
 
 ## 目標構成
 

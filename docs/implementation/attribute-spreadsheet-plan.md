@@ -188,6 +188,21 @@ SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
 - 対象が `Nodes` 以外（`Layer` / `Composition` / `MediaAsset`）のとき、
   および `Geometry` を出さないノードのときの表示（旧案のまま有効）
 
+#### 実装（単位 3 が読む口）
+
+宣言の口は 2 つになった。オーバーレイ側は従来どおり
+`ViewerOverlay::eval_targets`、それ以外は
+`panels::selected_node_eval_target(document, cx)`
+（`crates/ravel-app/src/panels/mod.rs`）で、
+`SelectedPropertiesTarget` の先頭ノードのジオメトリ出力を 1 つ宣言する。
+両者を `project_state::scoped_eval_targets` が畳んで `EvalRequest.scoped`
+に入れるので、重複除去・ネットワーク解決・区間外の除外は宣言元を問わず
+同じように効く。
+
+宣言が無い（＝パネルは「表示するものが無い」を出す）のは 3 つ:
+選択なし、対象が `Nodes` 以外、選択ノードがジオメトリ出力を持たない。
+単位 3 は結果を `EvalResults`（キー `(network.segments(), node)`）から読む。
+
 #### 旧案が成り立たない理由
 
 - **`EvalRequest` は 1 リクエスト = 1 グラフ + 1 パス。**

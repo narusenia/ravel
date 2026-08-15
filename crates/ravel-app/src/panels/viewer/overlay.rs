@@ -110,15 +110,19 @@ pub struct OverlayColors {
     pub error: Hsla,
 }
 
-/// The overlay-target results of the evaluation whose frame the viewer is
+/// The scoped-target results of the evaluation whose frame the viewer is
 /// currently showing.
 ///
 /// Durable state, not an event: it is replaced wholesale, in the same update
-/// that publishes [`crate::panels::ViewerFrame`], so the values an overlay
+/// that publishes [`crate::panels::ViewerFrame`], so the values a consumer
 /// reads always belong to the image underneath them. A target that failed,
 /// was never requested, or has not been evaluated yet is simply absent —
 /// [`OverlayContext::eval_result`] then returns `None` and the overlay draws
 /// nothing rather than guessing.
+///
+/// Overlays are not the only consumers: a target declared from the selection
+/// ([`crate::panels::selected_node_eval_target`]) lands here under the same
+/// key, which is why neither this type nor [`EvalTarget`] is named for them.
 /// Which node, in which network instance, a result belongs to.
 ///
 /// The scope is part of the key because a `NodeId` is not an identity on its
@@ -263,9 +267,14 @@ impl OverlayContext {
     }
 }
 
-/// A node output an overlay needs evaluated before it can draw. Unit 2
-/// aggregates these into the multi-target `EvalRequest`; none of the overlays
-/// ported in unit 1 declare one, because all five read the `Document`.
+/// A node output that has to be evaluated before a consumer can use it.
+///
+/// Declared by an overlay through [`ViewerOverlay::eval_targets`] and by the
+/// selection through [`crate::panels::selected_node_eval_target`];
+/// [`crate::project_state::scoped_eval_targets`] folds both lists into the
+/// viewer's request, where each becomes a
+/// [`ravel_core::runtime::ScopedTarget`] carrying its network's graph and
+/// path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalTarget {
     pub network: NetworkPath,

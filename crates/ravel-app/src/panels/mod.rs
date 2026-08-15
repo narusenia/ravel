@@ -189,6 +189,49 @@ pub struct SelectedPropertiesTarget(pub PropertiesTarget);
 
 impl Global for SelectedPropertiesTarget {}
 
+/// The evaluation target the selection itself declares: the geometry output of
+/// the first selected node.
+///
+/// This is the non-overlay end of the scoped-target mechanism. Overlays
+/// declare theirs from [`viewer::overlay::ViewerOverlay::eval_targets`], which
+/// only panels drawn *inside* the Viewer can implement; an inspection panel
+/// that wants the value a selected node evaluated to declares it here instead.
+/// Both lists are folded into the request by
+/// [`crate::project_state::scoped_eval_targets`], so a target declared here
+/// gets the same treatment as an overlay's: deduplication per node, the
+/// network's own graph and path, and layer-local time with the interval check
+/// that comes with it.
+///
+/// The selection is read from [`SelectedPropertiesTarget`] rather than from
+/// [`CanvasSelection`] because only the former has an order: its `ids` are a
+/// `Vec` published in id order, so "the first selected node" is the same node
+/// the Properties panel inspects, whichever panel published the selection.
+///
+/// `None` — no target requested, hence no result to read — in three cases a
+/// consumer renders as "nothing to inspect": nothing is selected, the target
+/// names something other than nodes (a layer, a composition, a media asset),
+/// or the selected node declares no geometry output at all (`rasterize`, say).
+/// Asking anyway would pay for an evaluation whose result no inspection panel
+/// can display.
+pub(crate) fn selected_node_eval_target(
+    document: &Document,
+    cx: &App,
+) -> Option<viewer::overlay::EvalTarget> {
+    let PropertiesTarget::Nodes { network, ids } = &cx.try_global::<SelectedPropertiesTarget>()?.0
+    else {
+        return None;
+    };
+    let node = *ids.first()?;
+    Some(viewer::overlay::EvalTarget {
+        network: network.clone(),
+        node,
+        // The port the node itself declares, not a guessed index: a
+        // multi-output node's geometry is not necessarily port 0, and the
+        // consumer extracts by port from the record the evaluation returns.
+        output: viewer::geometry::geometry_output_port(document, network, node)?,
+    })
+}
+
 /// Durable shared state: the canvas-level node selection. The node editor
 /// reads and writes this instead of keeping a panel-local set; future
 /// consumers (Viewer tool system, bbox overlay) observe the same global.

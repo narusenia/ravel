@@ -21,7 +21,9 @@
 
 use crate::app_settings;
 use crate::panels::ViewerImage;
-use crate::panels::viewer::overlay::{EvalResultKey, EvalResults, OverlayContext, OverlayRegistry};
+use crate::panels::viewer::overlay::{
+    EvalResultKey, EvalResults, EvalTarget, OverlayContext, OverlayRegistry,
+};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
@@ -1523,11 +1525,24 @@ impl ProjectState {
         let graph = compiled.graph.clone();
         let output = compiled.output;
         // The root scope: this request evaluates the composition's compiled
-        // shell chain. Overlay targets name networks *inside* it and travel in
+        // shell chain. Declared targets name networks *inside* it and travel in
         // `scoped`, each carrying the graph and path it is evaluated under.
         let path = Vec::new();
         let nodes = vec![output];
-        let scoped = scoped_eval_targets(&document, &ctx, overlays, &overlay_context);
+        // Both declarers, in one list: the overlays drawn over the frame, and
+        // the selection, which is what an inspection panel outside the Viewer
+        // follows. `scoped_eval_targets` folds the two together — the selected
+        // node is usually one the geometry overlay already asked for, and it
+        // must not be pulled twice.
+        let scoped = scoped_eval_targets(
+            &document,
+            &ctx,
+            overlays
+                .eval_targets(&overlay_context)
+                .into_iter()
+                .chain(crate::panels::selected_node_eval_target(&document, cx))
+                .collect(),
+        );
         Ok(Some(EvalRequest {
             comp: Some(comp.id),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
@@ -1830,10 +1845,18 @@ impl ProjectState {
 impl EventEmitter<ProjectEvent> for ProjectState {}
 impl EventEmitter<DocumentReplaced> for ProjectState {}
 
-/// The active overlays' evaluation targets, each resolved to the graph and the
+/// The declared evaluation targets, each resolved to the graph and the
 /// ownership path it must be evaluated under.
 ///
-/// Every [`NetworkPath`] names a composition *and* a layer, so no overlay
+/// `targets` is every declaration the request carries, whatever declared it:
+/// the active overlays ([`OverlayRegistry::eval_targets`]) and the selection
+/// ([`crate::panels::selected_node_eval_target`]), which is how a consumer
+/// that is not drawn inside the Viewer — an inspection panel — asks for a
+/// value. Everything below applies to a declaration by virtue of being one, so
+/// a new consumer inherits all of it by adding its list to the call in
+/// [`ProjectState::build_viewer_request`].
+///
+/// Every [`NetworkPath`] names a composition *and* a layer, so no declared
 /// target ever lives in the composition's compiled shell graph: a layer
 /// network is evaluated recursively through its boundary node rather than
 /// inlined. Each target therefore carries its own scope
@@ -1845,22 +1868,23 @@ impl EventEmitter<DocumentReplaced> for ProjectState {}
 /// Membership in the request's graph would have been the wrong test and is not
 /// used anywhere: a hit could only ever be an id collision, because
 /// `deterministic_node_id` (`comp << 32 | layer << 8 | role`) lands in the
-/// ordinary node-id range whenever the composition id is 0, and the overlay
-/// would then be painted from an unrelated compositing node.
+/// ordinary node-id range whenever the composition id is 0, and the consumer
+/// would then be handed an unrelated compositing node's result.
 ///
 /// Two folds happen here. [`OverlayRegistry::eval_targets`] has already
 /// dropped exact duplicates; this drops targets that differ only in output
-/// port, because evaluation is per node. A target whose network or node no
-/// longer resolves is dropped rather than requested — the overlay then reads
-/// no result and draws nothing.
+/// port — and duplicates *across* declarers, which is the common case, because
+/// the geometry overlay already asks for every geometry node of the selected
+/// network — since evaluation is per node. A target whose network or node no
+/// longer resolves is dropped rather than requested: its consumer then reads
+/// no result and shows nothing.
 fn scoped_eval_targets(
     document: &Document,
     ctx: &EvalContext,
-    overlays: &OverlayRegistry,
-    context: &OverlayContext,
+    targets: Vec<EvalTarget>,
 ) -> Vec<ScopedTarget> {
     let mut scoped: Vec<ScopedTarget> = Vec::new();
-    for target in overlays.eval_targets(context) {
+    for target in targets {
         let path = target.network.segments();
         if scoped
             .iter()
@@ -2504,8 +2528,7 @@ mod tests {
             let before_start = scoped_eval_targets(
                 &document,
                 &project.viewer_eval_context(&comp, 0),
-                &overlays,
-                &ctx,
+                overlays.eval_targets(&ctx),
             );
             assert!(
                 before_start.is_empty(),
@@ -2517,8 +2540,7 @@ mod tests {
             let at_start = scoped_eval_targets(
                 &document,
                 &project.viewer_eval_context(&comp, 5),
-                &overlays,
-                &ctx,
+                overlays.eval_targets(&ctx),
             );
             assert_eq!(at_start.len(), 1);
             assert_eq!(at_start[0].ctx.frame, 0);
@@ -2559,7 +2581,7 @@ mod tests {
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
             let eval = project.viewer_eval_context(&comp, 0);
 
-            let scoped = scoped_eval_targets(&document, &eval, &overlays, &ctx);
+            let scoped = scoped_eval_targets(&document, &eval, overlays.eval_targets(&ctx));
 
             assert_eq!(scoped.len(), 1, "the same node was pulled more than once");
             assert_eq!(scoped[0].node, node);
@@ -2602,7 +2624,7 @@ mod tests {
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
             let eval = project.viewer_eval_context(&comp, 0);
 
-            let scoped = scoped_eval_targets(&document, &eval, &overlays, &ctx);
+            let scoped = scoped_eval_targets(&document, &eval, overlays.eval_targets(&ctx));
 
             assert_eq!(scoped.len(), 1, "an unresolvable network was requested");
             assert_eq!(scoped[0].path, network.segments());
@@ -2613,6 +2635,394 @@ mod tests {
             assert!(
                 scoped[0].graph.node(synthetic).is_none(),
                 "the shell graph was handed to a layer-network target",
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Targets declared by the selection rather than by an overlay
+    // -----------------------------------------------------------------
+
+    /// The selection as the node editor publishes it.
+    fn select_nodes(network: &NetworkPath, ids: Vec<NodeId>, cx: &mut App) {
+        cx.set_global(crate::panels::SelectedPropertiesTarget(
+            crate::panels::PropertiesTarget::Nodes {
+                network: network.clone(),
+                ids,
+            },
+        ));
+    }
+
+    /// The node of a seeded layer network that declares a geometry output.
+    fn geometry_node_of(project: &ProjectState, network: &NetworkPath) -> NodeId {
+        ravel_ui::document::resolve_network(project.document(), network)
+            .expect("the seeded layer network")
+            .nodes()
+            .find(|node| {
+                node.outputs
+                    .iter()
+                    .any(|port| port.data_type == DataTypeId::GEOMETRY)
+            })
+            .expect("the content layer's In node declares a geometry output")
+            .id
+    }
+
+    /// A layer network holding `shared` — an id another layer's network holds
+    /// too — plus a node only this network has, so the graph a target was
+    /// paired with can be told from its twin's.
+    fn layer_holding(shared: NodeId, marker: NodeId) -> Layer {
+        let mut layer = content_layer();
+        layer.network = layer
+            .network
+            .clone()
+            .add_node(Node::new(shared, "shape.rect").with_output("geometry", DataTypeId::GEOMETRY))
+            .unwrap()
+            .add_node(
+                Node::new(marker, "shape.ellipse").with_output("geometry", DataTypeId::GEOMETRY),
+            )
+            .unwrap();
+        layer
+    }
+
+    /// A geometry with one point at `x`, as a node result.
+    fn geometry_value(x: f32) -> Arc<dyn ravel_core::types::NodeData> {
+        Arc::new(ravel_core::geometry::Geometry::from_points(vec![
+            ravel_core::types::Vec2(x, 0.0),
+        ]))
+    }
+
+    /// The published result of the target `network`/`node` names.
+    fn published_result(
+        network: &NetworkPath,
+        node: NodeId,
+        cx: &App,
+    ) -> Option<Arc<dyn ravel_core::types::NodeData>> {
+        cx.try_global::<EvalResults>()?
+            .values
+            .get(&(network.segments(), node))
+            .cloned()
+    }
+
+    /// The unit's point: a consumer that is **not** an overlay declares an
+    /// evaluation target, through the selection, and reads the value back from
+    /// the same global the overlays read.
+    ///
+    /// The registry is deliberately empty. The geometry overlay would ask for
+    /// the same node in production — which is why this costs nothing — but a
+    /// panel outside the Viewer cannot depend on an overlay being active, and
+    /// with the overlays taken away the target has to still be there.
+    ///
+    /// The frame is asserted alongside it: the selected node rides in `scoped`
+    /// precisely so that `results[0]` stays the composition output, and a
+    /// regression that displaced it would be invisible in the results map.
+    #[gpui::test]
+    fn the_selected_nodes_result_is_published_beside_the_viewer_frame(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = geometry_node_of(project, &network);
+            select_nodes(&network, vec![node], cx);
+
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.nodes, vec![output], "target 0 is the comp output");
+            assert_eq!(
+                request.scoped.len(),
+                1,
+                "the selection declared no evaluation target",
+            );
+            assert_eq!(request.scoped[0].node, node);
+            assert_eq!(request.scoped[0].path, network.segments());
+            assert!(request.scoped[0].graph.node(node).is_some());
+
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(output, Ok(blank_display_frame(4, 4)))],
+                    timings: Vec::new(),
+                    scoped: vec![ravel_core::runtime::ScopedResult {
+                        path: network.segments(),
+                        node,
+                        output: Ok(geometry_value(7.0)),
+                    }],
+                }),
+                cx,
+            );
+
+            let value = published_result(&network, node, cx)
+                .expect("the selected node's result was not published");
+            let geometry = value
+                .downcast_ref::<ravel_core::geometry::Geometry>()
+                .expect("the value published is the one the target evaluated to");
+            assert_eq!(geometry.point_count(), 1);
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Frame { .. })
+                ),
+                "the composition output stopped reaching the viewer",
+            );
+        });
+    }
+
+    /// The two declarers overlap by design — the geometry overlay asks for
+    /// every geometry node of the selected network, which includes the
+    /// selected one — and the overlap costs one evaluation, not two. This is
+    /// what makes the selection's declaration nearly free in the case that
+    /// actually happens.
+    #[gpui::test]
+    fn the_selection_and_an_overlay_wanting_the_same_node_cost_one_target(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, _, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = geometry_node_of(project, &network);
+            select_nodes(&network, vec![node], cx);
+            let overlays = OverlayRegistry::new(vec![Box::new(TargetOverlay {
+                target: target_in(&network, node),
+            })]);
+
+            let request = project
+                .build_viewer_request(0, &overlays, cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                request.scoped.len(),
+                1,
+                "the same node was pulled once per declarer",
+            );
+            assert_eq!(request.scoped[0].node, node);
+        });
+    }
+
+    /// Deselecting withdraws the target, and the next evaluation — which no
+    /// longer carries it — replaces the map that held its value.
+    #[gpui::test]
+    fn deselecting_withdraws_the_target_and_its_result(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = geometry_node_of(project, &network);
+            select_nodes(&network, vec![node], cx);
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(output, Ok(blank_display_frame(4, 4)))],
+                    timings: Vec::new(),
+                    scoped: vec![ravel_core::runtime::ScopedResult {
+                        path: network.segments(),
+                        node,
+                        output: Ok(geometry_value(7.0)),
+                    }],
+                }),
+                cx,
+            );
+            assert!(published_result(&network, node, cx).is_some());
+
+            cx.set_global(crate::panels::SelectedPropertiesTarget(
+                crate::panels::PropertiesTarget::Empty,
+            ));
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                .unwrap()
+                .unwrap();
+            assert!(
+                request.scoped.is_empty(),
+                "a withdrawn selection kept asking for its node",
+            );
+
+            // The evaluation that request stands for lands with no scoped
+            // results at all, which is what has to clear the value.
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 2,
+                    frame: 0,
+                    results: vec![(output, Ok(blank_display_frame(4, 4)))],
+                    timings: Vec::new(),
+                    scoped: Vec::new(),
+                }),
+                cx,
+            );
+            assert!(
+                published_result(&network, node, cx).is_none(),
+                "the deselected node's result outlived the selection",
+            );
+        });
+    }
+
+    /// A `NodeId` is not an identity: the selection names a network, and the
+    /// target has to be evaluated in **that** network's graph. Two layers here
+    /// hold the very same id, so a declarer that dropped the network would
+    /// have a 50 % chance of publishing the other layer's geometry under this
+    /// layer's key.
+    #[gpui::test]
+    fn the_selected_node_target_carries_the_network_the_selection_names(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let shared = NodeId::next();
+            let (marker_a, marker_b) = (NodeId::next(), NodeId::next());
+            let layer_a = layer_holding(shared, marker_a);
+            let layer_b = layer_holding(shared, marker_b);
+            let (id_a, id_b) = (layer_a.id, layer_b.id);
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, layer_a).unwrap();
+            let document = ravel_ui::document::add_layer(&document, comp_id, layer_b).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            let network_a = NetworkPath::layer(comp_id, id_a);
+            let network_b = NetworkPath::layer(comp_id, id_b);
+            select_nodes(&network_a, vec![shared], cx);
+
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.scoped.len(), 1);
+            assert_eq!(request.scoped[0].node, shared);
+            assert_eq!(request.scoped[0].path, network_a.segments());
+            assert_ne!(network_a.segments(), network_b.segments());
+            assert!(
+                request.scoped[0].graph.node(marker_a).is_some(),
+                "the target was paired with a graph that is not the selected network's",
+            );
+            assert!(
+                request.scoped[0].graph.node(marker_b).is_none(),
+                "the other layer's network was handed to this target",
+            );
+        });
+    }
+
+    /// A node that declares no geometry output — `rasterize`, the network's
+    /// Out node — is not requested at all. There is nothing an attribute
+    /// inspector could show, and the pull would be paid for every frame.
+    #[gpui::test]
+    fn a_selected_node_without_a_geometry_output_is_not_requested(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, _, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = ravel_ui::document::resolve_network(project.document(), &network)
+                .expect("the seeded layer network")
+                .nodes()
+                .find(|node| node.outputs.is_empty())
+                .expect("the content layer's Out node declares no output")
+                .id;
+            select_nodes(&network, vec![node], cx);
+
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                .unwrap()
+                .unwrap();
+
+            assert!(
+                request.scoped.is_empty(),
+                "a node with no geometry output was evaluated anyway",
+            );
+        });
+    }
+
+    /// The other Properties targets name no node, so there is no node output
+    /// to ask for. Each one leaves the request exactly as an empty selection
+    /// does.
+    #[gpui::test]
+    fn properties_targets_other_than_nodes_declare_no_target(cx: &mut TestAppContext) {
+        use crate::panels::PropertiesTarget;
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, _, _) = project_with_a_shell_target(project, cx);
+            let layer = comp.layers.front().unwrap().id;
+            for target in [
+                PropertiesTarget::Empty,
+                PropertiesTarget::Layer {
+                    comp_id: comp.id,
+                    layer_id: layer,
+                },
+                PropertiesTarget::Layers {
+                    comp_id: comp.id,
+                    layer_ids: vec![layer],
+                },
+                PropertiesTarget::Composition { comp_id: comp.id },
+                PropertiesTarget::MediaAsset {
+                    id: "clip".to_string(),
+                },
+                PropertiesTarget::Project,
+            ] {
+                cx.set_global(crate::panels::SelectedPropertiesTarget(target.clone()));
+                let request = project
+                    .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    request.scoped.is_empty(),
+                    "{target:?} asked for a node evaluation",
+                );
+            }
+        });
+    }
+
+    /// The selected node's evaluation is allowed to fail — an inspector shows
+    /// nothing then — but the frame it rides along with is a separate target
+    /// and still reaches the viewer.
+    #[gpui::test]
+    fn a_failed_selected_node_target_keeps_the_viewer_frame(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp, output, _) = project_with_a_shell_target(project, cx);
+            let network = NetworkPath::layer(comp.id, comp.layers.front().unwrap().id);
+            let node = geometry_node_of(project, &network);
+            select_nodes(&network, vec![node], cx);
+
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(output, Ok(blank_display_frame(4, 4)))],
+                    timings: Vec::new(),
+                    scoped: vec![ravel_core::runtime::ScopedResult {
+                        path: network.segments(),
+                        node,
+                        output: Err(ravel_core::eval::EvalError::MissingProcessor(node)),
+                    }],
+                }),
+                cx,
+            );
+
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Frame { .. })
+                ),
+                "a failed inspection target took the viewer frame down with it",
+            );
+            assert!(
+                published_result(&network, node, cx).is_none(),
+                "a failed target published a value",
             );
         });
     }

@@ -774,14 +774,14 @@ GUI で調整した設定がそのまま効くという期待も裏切る。
 ドラッグ経路（`:453`, `:527`）も同じ関数に依存している。
 
 **修正方針**: 評価済み Geometry から bbox を出す。設計と実装単位は
-`docs/implementation/viewer-overlay-manipulator-plan.md` 単位 3
+`docs/implementation/done/viewer-overlay-manipulator-plan.md` 単位 3
 （`shape_node_bounds` の廃止を含む）。**推測値と実測値を並存させない** —
 並存させると評価前後で bbox が飛ぶ。
 
 **検証**: `type_key` を知らないノードで bbox が描かれるテスト。
 `geometry.transform` を経た形状の bbox が変換後になるテスト。
 
-> **解決済み**: `viewer-overlay-manipulator-plan.md` 単位 3。`shape_node_bounds` を
+> **解決済み**: `done/viewer-overlay-manipulator-plan.md` 単位 3。`shape_node_bounds` を
 > 削除し、bbox・点・パス・クリック判定・レイヤードラッグのすべてを**評価済み
 > Geometry** から引くようにした（`crates/ravel-app/src/panels/viewer/geometry.rs`）。
 > 対象ノードの評価は `EvalRequest::scoped` に載せてコンプ要求と同じ

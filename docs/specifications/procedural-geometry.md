@@ -55,7 +55,7 @@ instance ドメインがスタンプする対象は `InstanceSource` の 2 種�
 | `Geometry` | `Arc<Geometry>` | `scatter.*` / `geometry.repeat` ほか |
 | `Image` | FrameBuffer（CPU / GPU 常駐のいずれか）+ ピクセル寸法 | `geometry.from_image` |
 
-画像ソースの規約（`image-instancing-plan.md` 決定 1 / 5 / 7）:
+画像ソースの規約（`done/image-instancing-plan.md` 決定 1 / 5 / 7）:
 
 - **ソースのピクセル寸法がそのままコンポ単位**。矩形は原点中心で、
   アスペクト比は構造上保たれる。

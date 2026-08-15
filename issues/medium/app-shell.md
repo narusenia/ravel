@@ -269,7 +269,7 @@ Timeline に書き込み操作を足すこと**（ホイールを縦ズームに
 `vector.construct.vec4` から駆動できる。残るのは Properties の描画だけ。
 
 **修正方針**: 色かどうかをレジストリのテンプレート側で宣言する
-（`viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に
+（`done/viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に
 `Color` の区別を置くのが素直）。宣言が無い `Channel4` は `Vector` として
 4 成分表示にする。
 
@@ -363,7 +363,7 @@ let names = match components.len() {
 
 **修正方針**: 根は 3 票とも同じで、「このパラメータは色か、ベクタか」が
 テンプレート側で宣言されていないこと。`MED-APP-19` が挙げている方針
-（`viewer-overlay-manipulator-plan.md` の `ParamRole` と同じ層に `Color` の
+（`done/viewer-overlay-manipulator-plan.md` の `ParamRole` と同じ層に `Color` の
 区別を置く）に相乗りさせ、宣言が無い 3 / 4 成分は `X` / `Y` / `Z` / `W` に
 する。**3 票まとめて片付ける**のが素直。
 

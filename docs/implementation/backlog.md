@@ -37,7 +37,7 @@
 | INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
-| SNAP-1 | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | `viewer-snap-guides-plan.md` |
+| SNAP-1 | 既存要素へのスナップ（他レイヤー / コンプ枠 / セーフエリア） | `done/viewer-snap-guides-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -420,7 +420,7 @@ STYLE-5 の「Color 既定マスクを `rgb`」は**既定値の変更**。現�
 
 **VEC-5 は 2 つの計画のゲート**で、両方の前提が満たされた。組み込みノードの
 Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
-`viewer-overlay-manipulator-plan.md` の `ParamRole`（1 パラメータ = 1 つの意味）
+`done/viewer-overlay-manipulator-plan.md` の `ParamRole`（1 パラメータ = 1 つの意味）
 は OVL-5 で宣言できる。Properties の Vector 行（横並び）も実際に到達する
 ようになった。`attribute.set` の `value` も `type` に従うアリティで畳み、
 `type` 変更時の再型付け（値・ポート型・不整合エッジの破棄を 1 コマンドで）を
@@ -592,7 +592,7 @@ DISC-5 も同じ向きで、アイコンの対応表は UI 側に置き `NodeTem
 | OVL-6 | ✅ | ロケール / 文書（#441） | OVL-1〜5, OVL-7〜9 |
 
 OVL-2 は `EvalRequest` を触る 3 つ目の計画。独自経路は作らず
-`attribute-spreadsheet-plan.md` 単位 1 の multi-target 化に乗る。
+`done/attribute-spreadsheet-plan.md` 単位 1 の multi-target 化に乗る。
 
 OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（現状は描画だけで
 スケール・回転のジェスチャーが存在しない）。`VEC-5` には依存しない — 殻は
@@ -1149,7 +1149,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 `GPU-5` は「`instance_sources` は CPU 側メタデータのまま」を前提にしており、
 テクスチャハンドルはその前提に収まらない。`CACHE-3` は画像を抱えた
 `Geometry` を VRAM 層に計上する必要がある。どちらも
-`image-instancing-plan.md` の「未解決の依存」に書いてある。
+`done/image-instancing-plan.md` の「未解決の依存」に書いてある。
 
 ### ジオメトリ破砕（Cell Fracture）
 

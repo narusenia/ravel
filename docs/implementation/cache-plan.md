@@ -415,7 +415,7 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 - `TexturePool` の `LruBudget` を `CacheBudget` に従属させる。
 - `cache_stats()` を追加。
 
-`image-instancing-plan.md` が入ると、画像を抱えた `Geometry` が VRAM を握る
+`done/image-instancing-plan.md` が入ると、画像を抱えた `Geometry` が VRAM を握る
 （instance source が `GpuFrameBuffer` を保持したままになる）。**本単位の層別
 会計はこれを勘定に入れること。** 詳細は同計画書の「未解決の依存」を参照。
 

@@ -501,7 +501,7 @@ ViewerPanel::render()
 - キーフレーム付き `scale` のドラッグがチャネルを平坦化しないテスト
 - 親を持つレイヤーでハンドルが見た目に一致するテスト
 - **ハンドルの見た目が動作を約束するようになったこと**を確認したうえで、
-  `done/pointer-feedback-plan.md` が保留した `Resize*` / 回転カーソルをこの単位で付ける
+  `pointer-feedback-plan.md` が保留した `Resize*` / 回転カーソルをこの単位で付ける
 
 **この単位が見送った範囲**（実装時に判明。別単位で拾うこと）:
 
@@ -669,7 +669,7 @@ ViewerPanel::render()
 | カーソル下のピクセル値読み取り | `viewer-inspection-plan.md` `INSP-3`（表示は本機構のスクリーン空間描画に乗る） |
 | ボックス選択（ラバーバンド）の枠 | `viewer-tool-extensions-plan.md` `TOOLX-2`（枠の描画は本機構に乗る） |
 | プロキシ / 解像度低下 / ドロップフレーム / キャッシュ状態 | `viewer-inspection-plan.md` `INSP-4` |
-| ROI（作業領域）枠 | **見送り**。部分レンダリングの機能が無いので枠だけ描いても使われない。`cache-plan.md` / `done/render-export-plan.md` が部分評価を持った時点で引き取る |
+| ROI（作業領域）枠 | **見送り**。部分レンダリングの機能が無いので枠だけ描いても使われない。`cache-plan.md` / `render-export-plan.md` が部分評価を持った時点で引き取る |
 | 3D 以外で本機構に乗らないもの | チェッカーボードとチャンネル表示の 2 件だけ。それ以外の可視化はすべてこの trait を通す |
 
 ## 検証
@@ -685,7 +685,7 @@ ViewerPanel::render()
 - **3D のマニピュレータ**。`3d-scene-plan.md` 待ち
 - **属性スプレッドシート**。値の一覧は `attribute-spreadsheet-plan.md` の
   担当。本計画は空間上の可視化に限る
-- **ペンツールの直接編集の拡張**。`done/tool-system-plan.md` が担当。
+- **ペンツールの直接編集の拡張**。`tool-system-plan.md` が担当。
   本計画は path overlay を機構に載せ替えるだけで挙動を変えない
 - **オーバーレイのユーザー定義**（スクリプトから追加）。REQ-CODE-001 待ち
 - **モーションパスの空間ベジェ**。軌跡の表示とキー位置のドラッグは単位 9 で

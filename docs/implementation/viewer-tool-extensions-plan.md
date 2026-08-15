@@ -168,8 +168,8 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
   読む必要があり、`viewer-inspection-plan.md` のピクセル読み取りと同じ
   データ経路になるので、そちらが入ってから判断する
 - **殻変換が非恒等なレイヤーでの編集**（REQ-UI-011 の v2）。
-  `viewer-overlay-manipulator-plan.md` の `OVL-7`（殻マニピュレータ）が
+  `done/viewer-overlay-manipulator-plan.md` の `OVL-7`（殻マニピュレータ）が
   殻を直接編集できるようにするので、その後に再検討する
 - **パスアニメーション**（点列の時間変化）。`path-channel-design.md` の設計メモ
   のみで実装は保留
-- **吸着**。`viewer-snap-guides-plan.md` の担当
+- **吸着**。`done/viewer-snap-guides-plan.md` の担当

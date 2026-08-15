@@ -34,7 +34,6 @@ the design behind a unit.
 | `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
 | `viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, plus input-driven adaptive resolution — **the only way to inspect output at full resolution today** | VRES-1 done — 2026-08-06 (no UI to change the factor until VRES-2) | REQ-UI-004 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
-| `attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | units 1–4 done — 2026-08-15 | REQ-CORE-010, REQ-UI-013 |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
 ## Planned
@@ -56,9 +55,7 @@ several plans here wait on its later units rather than on each other.
 | `wrangle-plan.md` | A multi-statement, multi-attribute CPU wrangle node and spare parameters on any node — **post-release, no open gates. `HIGH-30` was closed by #346 and the exposure-model branch settled on plan A (growing a parameter and exposing it stay two steps) on 2026-08-09** | — | REQ-CORE-010, REQ-CORE-015, REQ-PLUGIN-005 |
 | `network-interface-editing-plan.md` | In/Out custom port editing, subnet pin sync, collapse/extract — **prerequisite for `done/exposed-parameters-plan.md`** | — | REQ-LAYER-002, REQ-LAYER-003, REQ-PROJ-006 |
 | `scene-info-nodes-plan.md` | `layer.info` / `comp.info`, `InvalidationHint::Shell`, shell-binding cycles | `network-interface-editing-plan.md` (units 1–3) | REQ-LAYER-002, REQ-LAYER-005, REQ-CORE-007 |
-| `viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | `attribute-spreadsheet-plan.md` (unit 1); `vector-field-plan.md` unit 5 (merged) | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
-| `viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | `viewer-overlay-manipulator-plan.md` (unit 1) | REQ-UI-011, REQ-UI-004 |
-| `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
+| `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | `done/viewer-overlay-manipulator-plan.md` (unit 1, for the box frame) | REQ-UI-011 |
 | `path-shading-plan.md` | The CPU per-pixel path evaluator, vertex-colour interpolation along a stroke, and `stroke_align` — the three things blocked on zeno returning coverage and nothing else | `style-attributes-plan.md` unit 6 (merged) | REQ-MOGRAPH-001, REQ-RENDER-001, REQ-CORE-012 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, the green cache bar, layer-scoped invalidation and idle read-ahead — **the cross-cutting cache charter**; what is left is the disk tier (`CACHE-11`, measurement-gated) and the f16 pixel loops (`CACHE-Y`) | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
@@ -75,7 +72,6 @@ several plans here wait on its later units rather than on each other.
 | `color-management-plan.md` | Linear working space, per-asset input colour space, viewer/export transforms, then the OCIO backend — **`CM-1`–`CM-5` are implemented (the pipeline is linear). `CM-7` (the GPU display transform, OCIO-independent) is ready to start. `CM-6` (`ocio-rs`) was deferred on 2026-08-10 and now opens on demand — when a `.ocio` config or an ACES deliverable is actually asked for — and `CM-9` / `CM-8` sit behind it** | `done/render-export-plan.md` (EXPORT-1 for CM-4) | REQ-RENDER-003, REQ-CORE-009 |
 | `align-panel-plan.md` | Layer align/distribute panel — low priority | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-013 |
 | `3d-scene-plan.md` | `Primitive::Mesh`, the `Scene` type, camera, triangle renderer, primitives, 3D cloning, lighting, extrusion, model import | — (extrusion alone waits on `typography-plan.md`) | REQ-3D-001–009 |
-| `image-instancing-plan.md` | `InstanceSource`, the `geometry.from_image` node, and the rasterize texture path — frame buffers copied through the existing instance mechanism; retires `SceneContent::Image` | — (IMG-1 through IMG-4 merged; IMG-5 — the GPU texture path — is unblocked, and IMG-6 closes the plan) | REQ-3D-001, REQ-MOGRAPH-001, REQ-CORE-010 |
 | `plugin-system-plan.md` | `ProcessorRegistry`, package manifests, WGSL shader plugins, WASM geometry nodes | `done/exposed-parameters-plan.md` (merged), `gpu-backend-plan.md` (GPUBK-1) | REQ-PLUGIN-002, REQ-PLUGIN-004 |
 | `gpu-backend-plan.md` | Hide the backend behind an abstraction, then add Metal/D3D12/Vulkan — unblocks OFX and takes over MED-GPU-01 | — | REQ-INFRA-009, REQ-GPU-001 |
 | `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | `gpu-backend-plan.md` (GPUBK-9), `done/zero-copy-viewer-plan.md` (ZC-8) | REQ-GPU-001 |
@@ -92,7 +88,7 @@ banner for provenance; its PANEL-1〜3 units were withdrawn before any work
 started.
 
 Four Viewer plans land in roadmap phase E and all touch the same input and
-paint paths, so **`viewer-overlay-manipulator-plan.md` unit 1 must go first**.
+paint paths, so **`done/viewer-overlay-manipulator-plan.md` unit 1 must go first**.
 The snap guides, the box-selection frame, and the pixel-value readout are all
 written against its screen-space painting API; without it each plan invents its
 own paint path. That unit also fixes two things the earlier plan text got wrong:
@@ -101,9 +97,9 @@ missing), and the selection bbox's eight handles are decorative — no scale or
 rotate gesture exists anywhere, which is what `OVL-7` adds.
 
 Three plans all change `EvalRequest` / `EvalUpdate`
-(`attribute-spreadsheet-plan.md` unit 1 makes them multi-target;
+(`done/attribute-spreadsheet-plan.md` unit 1 makes them multi-target;
 `stateful-eval-plan.md` unit 3 adds a provisional-result flag;
-`viewer-overlay-manipulator-plan.md` unit 2 rides on the multi-target form to
+`done/viewer-overlay-manipulator-plan.md` unit 2 rides on the multi-target form to
 pull overlay data). **The order settled with the multi-target form landing
 first** (2026-08-06, #302), so the other two now extend a shape that exists
 instead of each inventing one. The overlay plan adds no second evaluation path
@@ -120,7 +116,7 @@ representation per domain. `Ramp` still comes first for the gradient side.
 
 `vector-field-plan.md` unit 5 (folding `_x` / `_y` parameters into `Channel2` /
 `Channel3`, `.ravprj` format v5) is merged, which unblocks what it gated:
-`viewer-overlay-manipulator-plan.md` unit 5 can now declare a `ParamRole` per
+`done/viewer-overlay-manipulator-plan.md` unit 5 can now declare a `ParamRole` per
 position parameter, and the Properties Vector row is reachable.
 `attribute.set`'s `value` is folded too, at the arity its `type` selects;
 changing `type` reshapes the value and re-types its parameter port in one
@@ -176,7 +172,7 @@ particle step at 100k costs about 0.2 ms and a per-frame vertex upload holds to 
 hundred thousand vertices, so neither particles nor 3D need GPU simulation or
 WGSL fields to reach those counts — they need the resident draw path.
 
-`image-instancing-plan.md` decides that a frame buffer is copied by riding the
+`done/image-instancing-plan.md` decides that a frame buffer is copied by riding the
 geometry instance mechanism rather than by a second placement world, and its
 first unit (`IMG-1`) retires `SceneContent::Image` while that is still cheap:
 `scene.render` is unwritten, so nothing reads the image variant today. Two
@@ -200,6 +196,10 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | #302, #448, #450 — 2026-08-15 | REQ-CORE-010, REQ-UI-013 |
+| `done/viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | #255, #429–#441 — 2026-08-15 | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
+| `done/viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | #444, #446 — 2026-08-15 | REQ-UI-011, REQ-UI-004 |
+| `done/image-instancing-plan.md` | `InstanceSource`, the `geometry.from_image` node, and the rasterize texture path — frame buffers copied through the existing instance mechanism; retires `SceneContent::Image` | #309, #418, #426, #430 — 2026-08-14 | REQ-3D-001, REQ-MOGRAPH-001, REQ-CORE-010 |
 | `done/render-export-plan.md` | Render queue, headless CLI (`ravel-cli render`, `list`, `interactive`), audio mixdown, and the export dialog with its render queue panel | #299–#335 — 2026-08-08 | REQ-RENDER-001, REQ-RENDER-005 |
 | `done/exposed-parameters-plan.md` | Declared named inputs — the one mechanism behind CLI `--param`, subgraph templates, network interfaces, and shader manifests | #321 — 2026-08-07 | REQ-PROJ-006, REQ-PLUGIN-005 |
 | `done/expression-language-plan.md` | The loop-free expression language: parameter and field expressions, geometry attribute access, and the Properties expression editor | #320 — 2026-08-07 | REQ-CORE-014/015, REQ-CORE-007/010, REQ-MOGRAPH-001 |

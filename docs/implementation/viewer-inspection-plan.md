@@ -61,7 +61,7 @@ issue: `MED-CORE-09`（本計画が引き受ける）。
 ### 透過表示は「背景の描き方」のオプションで、オーバーレイではない
 
 チェッカーボードは絵の下に敷くもので、絵の上に重ねる
-`viewer-overlay-manipulator-plan.md` の機構には乗らない。背景の描画モード
+`done/viewer-overlay-manipulator-plan.md` の機構には乗らない。背景の描画モード
 （コンプ背景色 / チェッカーボード / 単色）として持つ。
 
 ### チャンネル単独表示は表示経路の変換で行う
@@ -192,5 +192,5 @@ REQ-UI-004 は波形モニタ / ベクトルスコープ / ヒストグラム / 
 - **A/B 比較・差分表示・外部モニタ出力**。REQ-UI-004 の「将来」項目
 - **ROI（作業領域）枠**。部分レンダリングの機能が無いので、枠だけ描いても
   何にも使われない。`cache-plan.md` / `done/render-export-plan.md` が部分評価を
-  持った時点で引き取る（`viewer-overlay-manipulator-plan.md` の棚卸し表に
+  持った時点で引き取る（`done/viewer-overlay-manipulator-plan.md` の棚卸し表に
   見送りとして記録済み）

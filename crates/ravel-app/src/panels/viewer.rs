@@ -1292,19 +1292,31 @@ impl ViewerPanel {
         delta: (f32, f32),
         modifiers: DragModifiers,
     ) -> (f32, f32) {
+        let result = self.snap_result(lines, rect, delta, modifiers);
+        self.snap_guides = result.guides;
+        result.delta
+    }
+
+    /// The correction itself, without recording it. The only place the
+    /// screen-pixel threshold meets the panel's zoom, so every gesture reaches
+    /// the same distance on screen.
+    fn snap_result(
+        &self,
+        lines: &SnapLines,
+        rect: Option<CompRect>,
+        delta: (f32, f32),
+        modifiers: DragModifiers,
+    ) -> snap::SnapResult {
         let Some(rect) = rect else {
-            self.snap_guides = SnapGuides::default();
-            return delta;
+            return snap::SnapResult::unsnapped(delta);
         };
-        let result = snap::snap_delta(
+        snap::snap_delta(
             rect,
             delta,
             lines,
             snap::comp_threshold(self.comp_per_pixel()),
             modifiers,
-        );
-        self.snap_guides = result.guides;
-        result.delta
+        )
     }
 
     /// The snap candidates a gesture over `comp` sees, with the layers it moves
@@ -1711,18 +1723,11 @@ impl ViewerPanel {
                 pointer.0 - drag.pointer_start.0,
                 pointer.1 - drag.pointer_start.1,
             );
-            let snapped = match snap_rect_for_handle(&drag.handle, drag.snap.rect) {
-                Some(rect) => snap::snap_delta(
-                    rect,
-                    raw,
-                    &drag.snap.lines,
-                    snap::comp_threshold(self.comp_per_pixel()),
-                    modifiers,
-                ),
-                None => snap::SnapResult {
-                    delta: raw,
-                    guides: SnapGuides::default(),
-                },
+            let snapped = match snap_target_for_handle(&drag.handle, drag.snap.rect) {
+                Some((rect, axes)) => self
+                    .snap_result(&drag.snap.lines, Some(rect), raw, modifiers)
+                    .restrict(raw, axes),
+                None => snap::SnapResult::unsnapped(raw),
             };
             let edit = registry.overlay(drag.handle.overlay).and_then(|overlay| {
                 overlay.drag(&drag.handle, snapped.delta, modifiers, &drag.press_context)
@@ -2879,19 +2884,25 @@ fn point_rect(point: (f32, f32)) -> CompRect {
     }
 }
 
-/// What a shell handle drag moves, for snapping.
+/// What a shell handle drag moves, for snapping: the rectangle to align, and
+/// the axes the grip's edit actually writes.
 ///
 /// The move grip carries the whole layer, so its bbox is what aligns; the
 /// scale grips and the anchor marker each move one point, so that point is.
 /// Rotation is excluded: an angle has no edge to line up, and pulling the
 /// grabbed corner onto a guide would silently quantise the sweep. Handles that
 /// are not the layer shell's snap nothing.
-fn snap_rect_for_handle(handle: &OverlayHandle, layer_rect: Option<CompRect>) -> Option<CompRect> {
-    match handle.id.shell()? {
-        ShellHandle::Position => layer_rect,
-        ShellHandle::Rotate(_) => None,
-        ShellHandle::Scale(_) | ShellHandle::Anchor => Some(point_rect(handle.position)),
-    }
+fn snap_target_for_handle(
+    handle: &OverlayHandle,
+    layer_rect: Option<CompRect>,
+) -> Option<(CompRect, (bool, bool))> {
+    let shell = handle.id.shell()?;
+    let rect = match shell {
+        ShellHandle::Position => layer_rect?,
+        ShellHandle::Rotate(_) => return None,
+        ShellHandle::Scale(_) | ShellHandle::Anchor => point_rect(handle.position),
+    };
+    Some((rect, shell.driven_axes()))
 }
 
 fn rect_contains(rect: &CompRect, point: (f32, f32)) -> bool {
@@ -5984,6 +5995,57 @@ mod tests {
         );
     }
 
+    /// An edge grip drives one axis; `scale_edits` throws the other one away.
+    /// Snapping the discarded axis would draw a guide for an alignment the edit
+    /// cannot make, and mark the gesture changed for a document that did not
+    /// change — a no-op undo step.
+    #[gpui::test]
+    fn an_edge_grip_snaps_only_the_axis_it_writes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The action-safe rectangle puts a candidate at x = 96, four
+                // units from the grip below.
+                panel.show_safe_areas = true;
+                // The north edge grip, at the middle of the bbox's top edge.
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 190.0)), cx));
+                assert_eq!(
+                    panel
+                        .handle_drag
+                        .as_ref()
+                        .and_then(|drag| drag.handle.id.shell()),
+                    Some(overlay::ShellHandle::Scale(1)),
+                    "the press landed on the north edge grip"
+                );
+                // The pointer does not move at all.
+                let held = window_point(panel, (100.0, 190.0));
+                panel.handle_dragged(held, DragModifiers::default(), cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "this grip writes Y only, so an X candidate is not an alignment it can make"
+                );
+                assert!(
+                    !panel.handle_drag.as_ref().is_some_and(|drag| drag.changed),
+                    "nothing moved, so there is nothing to commit"
+                );
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // `changed` is what decides the commit, so the assertion above is the
+        // undo step; this is the value it would have committed.
+        assert_eq!(
+            shell_scale(&project, comp_id, layer, cx),
+            (1.0, 1.0),
+            "the pull reached neither axis of the edit"
+        );
+    }
+
+    /// The completion criterion, on the real gesture: the pull covers the same
+    /// screen distance at every zoom, which is a different composition distance
+    /// A press starts a gesture that has corrected nothing yet, so the guide of
     /// Rotation has no edge to line up, so its grip snaps nothing — and says so
     /// by reporting no guide.
     #[gpui::test]

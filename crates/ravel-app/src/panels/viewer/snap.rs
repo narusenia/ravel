@@ -138,6 +138,36 @@ pub struct SnapResult {
     pub guides: SnapGuides,
 }
 
+impl SnapResult {
+    /// The delta as the caller gave it, corrected on neither axis.
+    pub fn unsnapped(delta: (f32, f32)) -> Self {
+        Self {
+            delta,
+            guides: SnapGuides::default(),
+        }
+    }
+
+    /// Keep the correction only on the axes the gesture actually writes,
+    /// restoring `raw` on the others.
+    ///
+    /// A gesture whose edit discards an axis — a shell edge grip drives one
+    /// only — must not be pulled along it: the guide would name an alignment
+    /// the edit cannot make, and a delta corrected on a discarded axis reads as
+    /// movement, which is how a gesture that changed nothing ends up committing
+    /// an undo step.
+    pub fn restrict(mut self, raw: (f32, f32), axes: (bool, bool)) -> Self {
+        if !axes.0 {
+            self.delta.0 = raw.0;
+            self.guides.x = None;
+        }
+        if !axes.1 {
+            self.delta.1 = raw.1;
+            self.guides.y = None;
+        }
+        self
+    }
+}
+
 /// Pull `rect + delta` onto the nearest candidate within `threshold`, per axis.
 ///
 /// `rect` is the moving element's rectangle as it stood when the gesture
@@ -152,10 +182,6 @@ pub fn snap_delta(
     threshold: f32,
     modifiers: DragModifiers,
 ) -> SnapResult {
-    let unsnapped = SnapResult {
-        delta,
-        guides: SnapGuides::default(),
-    };
     // A non-finite delta or threshold has no nearest anything: comparisons
     // against NaN are all false, so the answer would be "no candidate" reached
     // by accident rather than on purpose.
@@ -165,7 +191,7 @@ pub fn snap_delta(
         || !delta.0.is_finite()
         || !delta.1.is_finite()
     {
-        return unsnapped;
+        return SnapResult::unsnapped(delta);
     }
     let x = snap_axis(rect.x + delta.0, rect.w, &lines.x, threshold);
     let y = snap_axis(rect.y + delta.1, rect.h, &lines.y, threshold);

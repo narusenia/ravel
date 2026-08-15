@@ -1596,6 +1596,22 @@ impl ShellHandle {
         }
     }
 
+    /// The axes a drag of this grip actually writes.
+    ///
+    /// An edge grip drives one axis and [`ShellState::scale_edits`] collapses
+    /// the other one's ratio to `1.0`, so the discarded axis must not be
+    /// snapped either: a guide there would report an alignment the edit cannot
+    /// make, and the corrected delta would mark the gesture changed for a
+    /// document that did not change.
+    pub fn driven_axes(self) -> (bool, bool) {
+        match self {
+            Self::Scale(index) => Self::scale_axes(index),
+            // The anchor and the move grip both travel freely; rotation snaps
+            // nothing at all and never asks.
+            Self::Rotate(_) | Self::Anchor | Self::Position => (true, true),
+        }
+    }
+
     /// The cursor a scale grip promises, from the diagonal it sits on.
     fn scale_hint(index: u8) -> ViewerPointerHint {
         match index {

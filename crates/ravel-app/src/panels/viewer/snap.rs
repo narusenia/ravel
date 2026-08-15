@@ -437,30 +437,49 @@ mod tests {
     /// swallowing the finite ones beside it.
     #[test]
     fn non_finite_values_do_not_snap() {
+        /// Bit-for-bit equality, so a NaN that came back unchanged still counts
+        /// as unchanged — `==` calls every NaN different from itself.
+        fn unchanged(delta: (f32, f32), from: (f32, f32)) -> bool {
+            delta.0.to_bits() == from.0.to_bits() && delta.1.to_bits() == from.1.to_bits()
+        }
+
         let moving = rect(0.0, 0.0, 100.0, 100.0);
         let candidates = lines(vec![1000.0], vec![1000.0]);
         for delta in [(f32::NAN, 0.0), (0.0, f32::INFINITY)] {
             let result = snap_delta(moving, delta, &candidates, 8.0, plain());
             assert!(result.guides.is_empty(), "{delta:?} produced a guide");
+            assert!(
+                unchanged(result.delta, delta),
+                "{delta:?} was corrected to {:?}",
+                result.delta
+            );
         }
-        assert!(
-            snap_delta(moving, (944.0, 0.0), &candidates, f32::NAN, plain())
-                .guides
-                .is_empty()
-        );
+        let unusable = snap_delta(moving, (944.0, 0.0), &candidates, f32::NAN, plain());
+        assert!(unusable.guides.is_empty());
+        assert_eq!(unusable.delta, (944.0, 0.0), "a NaN reach corrects nothing");
+
         let poisoned = lines(vec![f32::NAN, 1000.0], vec![]);
+        let skipped = snap_delta(moving, (944.0, 0.0), &poisoned, 8.0, plain());
         assert_eq!(
-            snap_delta(moving, (944.0, 0.0), &poisoned, 8.0, plain())
-                .guides
-                .x,
+            skipped.guides.x,
             Some(1000.0),
             "a NaN candidate is skipped, not treated as nearest"
         );
+        assert_eq!(
+            skipped.delta,
+            (950.0, 0.0),
+            "and the finite candidate beside it still pulls"
+        );
+
         let infinite = rect(f32::INFINITY, 0.0, 100.0, 100.0);
+        let unmeasurable = snap_delta(infinite, (1.0, 2.0), &candidates, 8.0, plain());
         assert!(
-            snap_delta(infinite, (0.0, 0.0), &candidates, 8.0, plain())
-                .guides
-                .is_empty()
+            unmeasurable.guides.x.is_none(),
+            "an infinite edge has no distance"
+        );
+        assert_eq!(
+            unmeasurable.delta.0, 1.0,
+            "and its axis keeps the delta it was given"
         );
     }
 

@@ -6055,6 +6055,47 @@ mod tests {
         );
     }
 
+    /// The completion criterion, on the real gesture: the pull covers the same
+    /// screen distance at every zoom, which is a different composition distance
+    /// each time.
+    #[gpui::test]
+    fn the_snap_threshold_is_the_same_screen_distance_at_every_zoom(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _layer) = shell_setup(cx);
+
+        for (percent, comp_per_px) in [(50.0f32, 2.0f32), (200.0, 0.5)] {
+            // The cancel below posts a fresh evaluation, so the bounds the
+            // manipulator reads have to be republished for the next round.
+            publish_geometry_results(&project, cx);
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.set_zoom_percent(percent);
+                    // The south-east grip: one point, so the distance measured
+                    // is the pointer's own rather than an edge of a bbox.
+                    assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                    // Six screen pixels short of the composition centre: inside
+                    // the eight-pixel reach at both zooms, and twelve or three
+                    // composition units depending on which one.
+                    let near = window_point(panel, (960.0 - 6.0 * comp_per_px, SE_GRIP.1));
+                    panel.handle_dragged(near, DragModifiers::default(), cx);
+                    assert_eq!(
+                        panel.snap_guides.x,
+                        Some(960.0),
+                        "six screen pixels pull at {percent}%"
+                    );
+                    // Twelve screen pixels: out of reach at both zooms.
+                    let far = window_point(panel, (960.0 - 12.0 * comp_per_px, SE_GRIP.1));
+                    panel.handle_dragged(far, DragModifiers::default(), cx);
+                    assert_eq!(
+                        panel.snap_guides.x, None,
+                        "twelve screen pixels do not pull at {percent}%"
+                    );
+                    panel.cancel_handle_drag(cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
     /// A press starts a gesture that has corrected nothing yet, so the guide of
     /// the previous one must not be on screen when the first frame renders.
     #[gpui::test]

@@ -15,6 +15,7 @@ pub mod field;
 pub mod geometry;
 pub mod motion_path;
 pub mod overlay;
+pub mod snap;
 mod viewport;
 
 use gpui::*;
@@ -41,8 +42,9 @@ use viewport::ViewerViewport;
 use super::param_edit::edited_vector_param;
 use overlay::{
     ActiveDrag, DragModifiers, LabelPlacement, OverlayColors, OverlayContext, OverlayEdit,
-    OverlayHandle, OverlayPainter, OverlayRegistry, OverlayResults,
+    OverlayHandle, OverlayPainter, OverlayRegistry, OverlayResults, ShellHandle,
 };
+use snap::{SnapGuides, SnapLines};
 
 pub const KEY_CONTEXT: &str = "Viewer";
 
@@ -78,7 +80,22 @@ struct MoveDrag {
     pointer_start: (f32, f32),
     targets: Vec<MoveTarget>,
     original_document: Document,
+    /// Snap candidates and the rectangle the gesture moves, both as they stood
+    /// at press time. Captured once rather than recomputed per move: the
+    /// candidates do not change during a drag, and reading them from the
+    /// previewed document would measure the layer this gesture is moving.
+    snap: SnapTarget,
     changed: bool,
+}
+
+/// What a gesture needs to snap: the candidate lines, and the composition-space
+/// rectangle whose edges and centre are pulled onto them. `rect` is `None` when
+/// the gesture has nothing measurable to align — snapping then stands down
+/// rather than guessing a rectangle.
+#[derive(Clone, Default)]
+struct SnapTarget {
+    lines: SnapLines,
+    rect: Option<CompRect>,
 }
 
 impl MoveDrag {
@@ -144,6 +161,10 @@ struct ShapeDrag {
     /// Selection from before the creation, restored on Escape cancel.
     previous_selection: CanvasSelection,
     original_document: Document,
+    /// Candidates for the drawing pointer. The drawn rectangle is not known
+    /// until the move, so only the lines are captured here and the moving
+    /// "rectangle" is the pointer itself.
+    snap_lines: SnapLines,
     created: Option<CreatedShape>,
 }
 
@@ -278,6 +299,10 @@ struct OverlayHandleDrag {
     press_edit: OverlayEdit,
     pointer_start: (f32, f32),
     original_document: Document,
+    /// Snap candidates and the shell's bbox at press time. `rect` is `None`
+    /// for the grips that move a single point — they snap that point instead,
+    /// through [`snap_target_for_handle`].
+    snap: SnapTarget,
     /// Invalidation the applied edits ask for, committed with the gesture.
     invalidation: InvalidationHint,
     changed: bool,
@@ -300,6 +325,10 @@ pub struct ViewerPanel {
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
     handle_drag: Option<OverlayHandleDrag>,
+    /// The lines the drag in flight is snapped to. Read back only while a
+    /// gesture is live (see [`Self::overlay_context`]), so a guide cannot
+    /// outlive the correction it reports.
+    snap_guides: SnapGuides,
     pointer_hint: ViewerPointerHint,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
@@ -523,6 +552,7 @@ impl ViewerPanel {
             shape_drag: None,
             pen_session: None,
             handle_drag: None,
+            snap_guides: SnapGuides::default(),
             pointer_hint: ViewerPointerHint::default(),
             show_grid: false,
             show_safe_areas: false,
@@ -684,6 +714,19 @@ impl ViewerPanel {
             })
             .collect();
         if !origins.is_empty() {
+            // The nodes being dragged are what moves, so their union is the
+            // rectangle snapping aligns — and the layer holding them is left
+            // out of the candidates, since its bbox travels with them.
+            let snap = SnapTarget {
+                lines: SnapLines::collect(&overlay_ctx, Some(network.comp), &[network.layer]),
+                rect: origins
+                    .iter()
+                    .filter_map(|origin| node_comp_rect(&overlay_ctx, &network, origin.node))
+                    .reduce(union_rect),
+            };
+            // A gesture that has not moved yet has corrected nothing:
+            // the previous one's guide must not survive into this frame.
+            self.snap_guides = SnapGuides::default();
             self.move_drag = Some(MoveDrag {
                 pointer_start: pointer,
                 targets: vec![MoveTarget {
@@ -692,6 +735,7 @@ impl ViewerPanel {
                     local_frame,
                 }],
                 original_document: document,
+                snap,
                 changed: false,
             });
         }
@@ -728,6 +772,7 @@ impl ViewerPanel {
 
         let mut hit = false;
         let mut targets = Vec::new();
+        let mut moved_rect: Option<CompRect> = None;
         for layer_id in selection.layers() {
             let Some(layer) = comp.get_layer(*layer_id) else {
                 continue;
@@ -762,6 +807,10 @@ impl ViewerPanel {
                 continue;
             }
             hit |= rect_contains(&rect, pointer);
+            moved_rect = Some(match moved_rect {
+                Some(union) => union_rect(union, rect),
+                None => rect,
+            });
             targets.push(MoveTarget {
                 network,
                 origins,
@@ -773,15 +822,30 @@ impl ViewerPanel {
         if !hit || targets.is_empty() {
             return;
         }
+        // Every layer taking part is excluded from the candidates, so the
+        // gesture aligns against the layers it is *not* moving.
+        let moving: Vec<LayerId> = targets.iter().map(|target| target.network.layer).collect();
+        // A gesture that has not moved yet has corrected nothing: the
+        // previous one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
         self.move_drag = Some(MoveDrag {
             pointer_start: pointer,
             targets,
             original_document: document,
+            snap: SnapTarget {
+                lines: SnapLines::collect(&overlay_ctx, Some(comp_id), &moving),
+                rect: moved_rect,
+            },
             changed: false,
         });
     }
 
-    fn move_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn move_dragged(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: DragModifiers,
+        cx: &mut Context<Self>,
+    ) {
         let Some(drag) = self.move_drag.clone() else {
             return;
         };
@@ -795,6 +859,9 @@ impl ViewerPanel {
             pointer.0 - drag.pointer_start.0,
             pointer.1 - drag.pointer_start.1,
         );
+        // Snapping only corrects this delta; the preview and the commit below
+        // are untouched, so the gesture stays one undo step.
+        let delta = self.snapped_delta(&drag.snap.lines, drag.snap.rect, delta, modifiers);
         let Some(project) = self.project(cx) else {
             return;
         };
@@ -960,11 +1027,29 @@ impl ViewerPanel {
                 return;
             }
         }
+        // The layer being drawn into is excluded: the node this gesture creates
+        // enters that layer's bbox, so leaving it in would let the shape snap
+        // to itself from the first move onwards.
+        let comp = previous_selection
+            .path
+            .as_ref()
+            .map(|path| path.comp)
+            .or_else(|| crate::panels::active_composition(cx));
+        let drawn_into: Vec<LayerId> = previous_selection
+            .path
+            .as_ref()
+            .map(|path| vec![path.layer])
+            .unwrap_or_default();
+        let snap_lines = self.snap_lines(comp, &drawn_into, cx);
+        // A gesture that has not moved yet has corrected nothing: the
+        // previous one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
         self.shape_drag = Some(ShapeDrag {
             kind,
             start: pointer,
             previous_selection,
             original_document,
+            snap_lines,
             created: None,
         });
     }
@@ -976,6 +1061,18 @@ impl ViewerPanel {
         let Some(pointer) = self.comp_position(event.position) else {
             return;
         };
+        let modifiers = drag_modifiers(&event.modifiers);
+        // The moving corner of the drawn rectangle is the pointer itself, so
+        // that single point is what snapping aligns: the opposite corner is
+        // pinned at the press and never moves.
+        //
+        // Except under Shift: `drag_geometry` then squares the shape off from
+        // the larger of the two deltas, which overwrites whichever axis had
+        // just been snapped — the guide would name a line the drawn corner
+        // misses. A constrained drag snaps nothing.
+        let corner = (!modifiers.shift).then(|| point_rect(pointer));
+        let snapped = self.snapped_delta(&drag.snap_lines, corner, (0.0, 0.0), modifiers);
+        let pointer = (pointer.0 + snapped.0, pointer.1 + snapped.1);
         let geo = drag_geometry(
             drag.start,
             pointer,
@@ -1150,12 +1247,31 @@ impl ViewerPanel {
         }) else {
             return false;
         };
+        // Only the layer shell's grips snap: they move the layer the bboxes are
+        // drawn from. A path point, a parameter mark or a motion key is not
+        // this unit's subject, and pulling one onto a layer edge would move a
+        // value the user is aiming by hand.
+        let snap = match handle.id.shell() {
+            Some(_) => SnapTarget {
+                lines: SnapLines::collect(
+                    &context,
+                    context.layer_selection.comp(),
+                    context.layer_selection.layers(),
+                ),
+                rect: layer_selection_comp_rects(&context).first().copied(),
+            },
+            None => SnapTarget::default(),
+        };
+        // A gesture that has not moved yet has corrected nothing: the
+        // previous one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
         self.handle_drag = Some(OverlayHandleDrag {
             handle,
             press_context: context,
             press_edit,
             pointer_start: pointer,
             original_document,
+            snap,
             invalidation: InvalidationHint::None,
             changed: false,
         });
@@ -1166,6 +1282,57 @@ impl ViewerPanel {
     /// hit radius is measured in.
     fn comp_per_pixel(&self) -> f32 {
         self.comp_hit_radius(1.0).unwrap_or(1.0)
+    }
+
+    /// Whether a document-editing gesture is in flight. Panning is not one:
+    /// it moves the view, not the picture.
+    fn dragging(&self) -> bool {
+        self.move_drag.is_some() || self.shape_drag.is_some() || self.handle_drag.is_some()
+    }
+
+    /// Correct a gesture's composition-space delta so an edge or the centre of
+    /// `rect` lands on a snap candidate, and record the guides that report it.
+    ///
+    /// The one place a gesture's delta meets the snapping rules: the three drag
+    /// paths differ only in what they pass as the moving rectangle.
+    fn snapped_delta(
+        &mut self,
+        lines: &SnapLines,
+        rect: Option<CompRect>,
+        delta: (f32, f32),
+        modifiers: DragModifiers,
+    ) -> (f32, f32) {
+        let result = self.snap_result(lines, rect, delta, modifiers);
+        self.snap_guides = result.guides;
+        result.delta
+    }
+
+    /// The correction itself, without recording it. The only place the
+    /// screen-pixel threshold meets the panel's zoom, so every gesture reaches
+    /// the same distance on screen.
+    fn snap_result(
+        &self,
+        lines: &SnapLines,
+        rect: Option<CompRect>,
+        delta: (f32, f32),
+        modifiers: DragModifiers,
+    ) -> snap::SnapResult {
+        let Some(rect) = rect else {
+            return snap::SnapResult::unsnapped(delta);
+        };
+        snap::snap_delta(
+            rect,
+            delta,
+            lines,
+            snap::comp_threshold(self.comp_per_pixel()),
+            modifiers,
+        )
+    }
+
+    /// The snap candidates a gesture over `comp` sees, with the layers it moves
+    /// left out.
+    fn snap_lines(&self, comp: Option<CompId>, moving: &[LayerId], cx: &App) -> SnapLines {
+        SnapLines::collect(&self.overlay_context(cx), comp, moving)
     }
 
     /// Snapshot the world the overlays are allowed to see. Read-only, and the
@@ -1202,6 +1369,14 @@ impl ViewerPanel {
             field_map: self.field_map,
             field_opacity: self.field_opacity,
             error: self.error.clone(),
+            // Only while a gesture is live. The field keeps the last
+            // correction, and a guide left on screen after the drag ended
+            // would claim an alignment nothing is holding.
+            snap_guides: if self.dragging() {
+                self.snap_guides
+            } else {
+                SnapGuides::default()
+            },
             active_drag: self.handle_drag.as_ref().map(|drag| ActiveDrag {
                 handle: drag.handle.id,
                 press_document: drag.original_document.clone(),
@@ -1547,21 +1722,31 @@ impl ViewerPanel {
         // Borrow the press-time state rather than cloning it: this runs on
         // every mouse move, and the snapshot carries a document and a point
         // list.
-        let Some((edit, delta)) = ({
+        //
+        // Snapping corrects the delta before the edit is derived from it, so
+        // the gesture keeps its single preview / single commit shape.
+        let (edit, snapped) = {
             let Some(drag) = self.handle_drag.as_ref() else {
                 return;
             };
-            let delta = (
+            let raw = (
                 pointer.0 - drag.pointer_start.0,
                 pointer.1 - drag.pointer_start.1,
             );
-            registry
-                .overlay(drag.handle.overlay)
-                .and_then(|overlay| {
-                    overlay.drag(&drag.handle, delta, modifiers, &drag.press_context)
-                })
-                .map(|edit| (edit, delta))
-        }) else {
+            let snapped = match snap_target_for_handle(&drag.handle, drag.snap.rect, modifiers) {
+                Some((rect, axes)) => self
+                    .snap_result(&drag.snap.lines, Some(rect), raw, modifiers)
+                    .restrict(raw, axes),
+                None => snap::SnapResult::unsnapped(raw),
+            };
+            let edit = registry.overlay(drag.handle.overlay).and_then(|overlay| {
+                overlay.drag(&drag.handle, snapped.delta, modifiers, &drag.press_context)
+            });
+            (edit, snapped)
+        };
+        self.snap_guides = snapped.guides;
+        let delta = snapped.delta;
+        let Some(edit) = edit else {
             return;
         };
         if self.apply_overlay_edit(&edit, cx)
@@ -2496,10 +2681,7 @@ impl Render for ViewerPanel {
                         if this.handle_drag.is_some() {
                             this.handle_dragged(
                                 event.position,
-                                DragModifiers {
-                                    shift: event.modifiers.shift,
-                                    alt: event.modifiers.alt,
-                                },
+                                drag_modifiers(&event.modifiers),
                                 cx,
                             );
                         } else if this
@@ -2511,7 +2693,7 @@ impl Render for ViewerPanel {
                         } else if this.shape_drag.is_some() {
                             this.shape_dragged(event, cx);
                         } else {
-                            this.move_dragged(event.position, cx);
+                            this.move_dragged(event.position, drag_modifiers(&event.modifiers), cx);
                         }
                     }
                     _ => {
@@ -2688,6 +2870,59 @@ fn screen_to_comp(
 fn comp_to_screen(comp: (f32, f32), rect: viewport::Rect, comp_width: u32) -> (f32, f32) {
     let zoom = rect.width / comp_width as f32;
     (rect.x + comp.0 * zoom, rect.y + comp.1 * zoom)
+}
+
+/// The drag modifiers of a pointer event.
+///
+/// Snapping is suppressed by the platform's primary modifier — Cmd on macOS,
+/// Ctrl elsewhere — spelled the way the Node Editor and the Timeline already
+/// spell it. Shift and Alt keep the meanings the drawing and shell gestures
+/// gave them.
+fn drag_modifiers(modifiers: &Modifiers) -> DragModifiers {
+    DragModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        primary: modifiers.platform || modifiers.control,
+    }
+}
+
+/// A single composition point as a zero-sized rectangle, which is what a
+/// gesture that moves one point (a drawing pointer, a shell grip) hands to
+/// [`snap::snap_delta`].
+fn point_rect(point: (f32, f32)) -> CompRect {
+    CompRect {
+        x: point.0,
+        y: point.1,
+        w: 0.0,
+        h: 0.0,
+    }
+}
+
+/// What a shell handle drag moves, for snapping: the rectangle to align, and
+/// the axes the grip's edit actually writes.
+///
+/// The move grip carries the whole layer, so its bbox is what aligns; the
+/// scale grips and the anchor marker each move one point, so that point is.
+/// Rotation is excluded: an angle has no edge to line up, and pulling the
+/// grabbed corner onto a guide would silently quantise the sweep. Handles that
+/// are not the layer shell's snap nothing.
+fn snap_target_for_handle(
+    handle: &OverlayHandle,
+    layer_rect: Option<CompRect>,
+    modifiers: DragModifiers,
+) -> Option<(CompRect, (bool, bool))> {
+    let shell = handle.id.shell()?;
+    let rect = match shell {
+        ShellHandle::Position => layer_rect?,
+        ShellHandle::Rotate(_) => return None,
+        // Shift scales uniformly: `scale_edits` takes the larger movement and
+        // applies it to both axes, which overwrites whatever a snapped axis
+        // had landed on. The guide would name a line the grip then misses, so
+        // the constrained gesture snaps nothing at all.
+        ShellHandle::Scale(_) if modifiers.shift => return None,
+        ShellHandle::Scale(_) | ShellHandle::Anchor => point_rect(handle.position),
+    };
+    Some((rect, shell.driven_axes()))
 }
 
 fn rect_contains(rect: &CompRect, point: (f32, f32)) -> bool {
@@ -4926,7 +5161,7 @@ mod tests {
                     Some(2),
                     "every selected layer joins the gesture"
                 );
-                panel.move_dragged(point(px(40.0), px(25.0)), cx);
+                panel.move_dragged(point(px(40.0), px(25.0)), DragModifiers::default(), cx);
                 panel.move_ended(cx);
             })
             .unwrap();
@@ -4973,7 +5208,7 @@ mod tests {
         window
             .update(cx, |panel, _window, cx| {
                 panel.layer_move_mouse_down((0.0, 0.0), cx);
-                panel.move_dragged(point(px(40.0), px(25.0)), cx);
+                panel.move_dragged(point(px(40.0), px(25.0)), DragModifiers::default(), cx);
             })
             .unwrap();
 
@@ -5007,6 +5242,457 @@ mod tests {
             0,
             "the polluted commit was removed rather than left in undo history"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Drag snapping (SNAP-1)
+    // -----------------------------------------------------------------------
+
+    /// Two layers with measurable geometry, and the overlay context that sees
+    /// them: the fixture the snap candidates are enumerated from.
+    fn snap_context() -> (OverlayContext, CompId, Vec<LayerId>) {
+        use ravel_core::id::LayerId;
+
+        let layers: Vec<Layer> = [(0.0, 0.0), (400.0, 200.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, center)| {
+                let graph = Graph::new().add_node(square_node(center, 100.0)).unwrap();
+                Layer::new(LayerId::next(), format!("L{index}"), graph).with_time(0, 0, 300)
+            })
+            .collect();
+        let comp = comp_with_layers(layers);
+        let ids: Vec<LayerId> = comp.layers.iter().map(|layer| layer.id).collect();
+        let mut values = HashMap::new();
+        for layer in &comp.layers {
+            let network = NetworkPath::layer(comp.id, layer.id);
+            values.extend(evaluated_results(&layer.network, &network).values);
+        }
+        let comp_id = comp.id;
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            document: Some(Document::default().with_composition(comp)),
+            results: overlay::OverlayResults::new(values),
+            ..OverlayContext::default()
+        };
+        (ctx, comp_id, ids)
+    }
+
+    /// The candidates: the composition frame first, then every layer's edges
+    /// and centre — except the ones the gesture is moving, whose own edges
+    /// travel with it.
+    #[test]
+    fn snap_candidates_cover_the_frame_and_the_other_layers() {
+        let (ctx, comp, layers) = snap_context();
+
+        let all = SnapLines::collect(&ctx, Some(comp), &[]);
+        assert_eq!(
+            &all.x[..3],
+            &[0.0, 960.0, 1920.0],
+            "the composition frame is enumerated first, so it wins ties"
+        );
+        assert_eq!(&all.y[..3], &[0.0, 540.0, 1080.0]);
+        // The first layer is a 100-square at the origin, the second at
+        // (400, 200): both edges and the centre, per axis.
+        assert!(all.x.contains(&-50.0) && all.x.contains(&50.0));
+        assert!(all.x.contains(&350.0) && all.x.contains(&400.0) && all.x.contains(&450.0));
+        assert!(all.y.contains(&150.0) && all.y.contains(&200.0) && all.y.contains(&250.0));
+
+        let without_first = SnapLines::collect(&ctx, Some(comp), &layers[..1]);
+        assert!(
+            !without_first.x.contains(&-50.0),
+            "a moving layer contributes no candidate of its own"
+        );
+        assert!(
+            without_first.x.contains(&350.0),
+            "the layers it is aligned against are still there"
+        );
+
+        // No composition named: only what the frame itself provides.
+        let frame_only = SnapLines::collect(&ctx, None, &[]);
+        assert_eq!(frame_only.x, vec![0.0, 960.0, 1920.0]);
+    }
+
+    /// The safe areas are candidates exactly while they are drawn, and from the
+    /// same fractions [`overlay::SafeAreaOverlay`] draws them with.
+    #[test]
+    fn safe_areas_are_candidates_only_while_they_are_shown() {
+        let (mut ctx, comp, _) = snap_context();
+        assert!(
+            !SnapLines::collect(&ctx, Some(comp), &[]).x.contains(&96.0),
+            "hidden safe areas pull nothing"
+        );
+
+        ctx.show_safe_areas = true;
+        let shown = SnapLines::collect(&ctx, Some(comp), &[]);
+        for fraction in overlay::SAFE_AREA_FRACTIONS {
+            let inset = 1920.0 * (1.0 - fraction) * 0.5;
+            assert!(shown.x.contains(&inset) && shown.x.contains(&(1920.0 - inset)));
+        }
+    }
+
+    /// The completion criterion, on the real gesture: a layer drag lands on the
+    /// composition centre, the guide reports which line it landed on, and the
+    /// whole gesture is still one undo step.
+    #[gpui::test]
+    fn a_snapped_layer_drag_stays_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let before: Vec<(f32, f32)> = layers
+            .iter()
+            .map(|layer| rect_center(&project, comp_id, *layer, cx))
+            .collect();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                // The two selected layers span x −50..150, so their centre sits
+                // at 50; a 905 drag puts it 5 short of the composition centre.
+                panel.move_dragged(point(px(905.0), px(0.0)), DragModifiers::default(), cx);
+                assert_eq!(
+                    panel.snap_guides.x,
+                    Some(960.0),
+                    "the guide names the line the delta landed on"
+                );
+                panel.move_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        for (layer, origin) in layers.iter().zip(&before) {
+            assert_eq!(
+                rect_center(&project, comp_id, *layer, cx),
+                (origin.0 + 910.0, origin.1),
+                "the drag was pulled the last 5 units onto the composition centre"
+            );
+        }
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        for (layer, origin) in layers.iter().zip(&before) {
+            assert_eq!(
+                rect_center(&project, comp_id, *layer, cx),
+                *origin,
+                "one undo restores the snapped gesture"
+            );
+        }
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layer_count(),
+                2,
+                "the undo step above was the drag, not the layer creation"
+            );
+        });
+    }
+
+    /// The suppression key reaches the gesture: the drag lands where the
+    /// pointer put it, and reports no guide.
+    #[gpui::test]
+    fn the_primary_modifier_turns_snapping_off_for_a_layer_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let before = rect_center(&project, comp_id, layers[0], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                panel.move_dragged(
+                    point(px(905.0), px(0.0)),
+                    DragModifiers {
+                        primary: true,
+                        ..DragModifiers::default()
+                    },
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            rect_center(&project, comp_id, layers[0], cx),
+            (before.0 + 905.0, before.1),
+            "the primary modifier kept the pointer's own delta"
+        );
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.snap_guides.is_empty(), "and drew no guide");
+            })
+            .unwrap();
+    }
+
+    /// Cmd / Ctrl is the suppression key, so the two modifiers that mean
+    /// something else to a gesture keep snapping alive. Shift means nothing to
+    /// a layer move, and Alt means nothing to it either.
+    #[gpui::test]
+    fn shift_and_alt_keep_snapping_on_for_a_layer_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let before = rect_center(&project, comp_id, layers[0], cx);
+
+        for modifiers in [
+            DragModifiers {
+                shift: true,
+                ..DragModifiers::default()
+            },
+            DragModifiers {
+                alt: true,
+                ..DragModifiers::default()
+            },
+        ] {
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.layer_move_mouse_down((0.0, 0.0), cx);
+                    panel.move_dragged(point(px(905.0), px(0.0)), modifiers, cx);
+                    assert_eq!(
+                        panel.snap_guides.x,
+                        Some(960.0),
+                        "{modifiers:?} constrains nothing here, so the pull stays"
+                    );
+                    panel.cancel_move(cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+            publish_geometry_results(&project, cx);
+            assert_eq!(
+                rect_center(&project, comp_id, layers[0], cx),
+                before,
+                "the cancel put the layer back for the next round"
+            );
+        }
+    }
+
+    /// The gestures that give Alt a meaning of their own keep snapping while it
+    /// is held: drawing from the centre still lands its corner on a candidate.
+    #[gpui::test]
+    fn alt_and_snapping_coexist_while_drawing_from_the_centre(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            });
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Rect,
+                ..ToolState::default()
+            });
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                let event = MouseMoveEvent {
+                    position: window_point(panel, (955.0, 600.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                };
+                panel.shape_dragged(&event, cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0), "Alt does not suppress");
+                let geo = panel
+                    .shape_drag
+                    .as_ref()
+                    .and_then(|drag| drag.created.as_ref())
+                    .expect("the drag created a shape")
+                    .geo;
+                assert!(
+                    (geo.center.0 - 500.0).abs() < 1e-3,
+                    "and Alt still draws from the press point: {geo:?}"
+                );
+                assert!(
+                    (geo.half.0 - 460.0).abs() < 1e-3,
+                    "the half extent reaches the snapped 960, not the pointer's 955: {geo:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The same for the shell: Alt scales about the anchor and the grabbed grip
+    /// is still pulled onto the candidate.
+    #[gpui::test]
+    fn alt_and_snapping_coexist_while_scaling_about_the_anchor(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (955.0, 210.0));
+                panel.handle_dragged(
+                    to,
+                    DragModifiers {
+                        alt: true,
+                        ..DragModifiers::default()
+                    },
+                    cx,
+                );
+                assert_eq!(panel.snap_guides.x, Some(960.0), "Alt does not suppress");
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Alt pins the anchor at the layer's origin, so a grip landing on 960
+        // is a factor of 960 / 120 rather than the 22 the opposite corner gives.
+        let scaled = shell_scale(&project, comp_id, layer, cx);
+        assert!(
+            (scaled.0 - 8.0).abs() < 1e-3,
+            "the anchor stayed the fixed point: {scaled:?}"
+        );
+    }
+
+    /// The suppression key is the platform's primary modifier — Cmd on macOS,
+    /// Ctrl elsewhere — and Shift and Alt reach the gesture untouched.
+    #[test]
+    fn drag_modifiers_take_snapping_off_the_platform_primary_key() {
+        let held = |modifiers: Modifiers| drag_modifiers(&modifiers);
+
+        let platform = held(Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        });
+        assert!(platform.primary, "Cmd suppresses the pull");
+        assert!(!platform.shift && !platform.alt);
+
+        assert!(
+            held(Modifiers {
+                control: true,
+                ..Modifiers::default()
+            })
+            .primary,
+            "and so does Ctrl, which is the same key off macOS"
+        );
+
+        // The two that already mean something to a gesture are not it.
+        let alt = held(Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        });
+        assert!(alt.alt && !alt.primary, "Alt draws from the centre");
+        let shift = held(Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        });
+        assert!(shift.shift && !shift.primary, "Shift constrains");
+    }
+
+    /// Shift squares a drawn shape off from the larger of the two deltas, which
+    /// would overwrite a snapped axis — so a constrained drawing drag snaps
+    /// nothing rather than drawing a guide it then misses.
+    #[gpui::test]
+    fn shift_turns_snapping_off_while_drawing(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            });
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Rect,
+                ..ToolState::default()
+            });
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                let event = MouseMoveEvent {
+                    // Five units short of the composition centre: inside the
+                    // reach, and ignored because Shift is down.
+                    position: window_point(panel, (955.0, 600.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                };
+                panel.shape_dragged(&event, cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "the constraint decides the corner, so nothing was aligned"
+                );
+                let geo = panel
+                    .shape_drag
+                    .as_ref()
+                    .and_then(|drag| drag.created.as_ref())
+                    .expect("the drag created a shape")
+                    .geo;
+                // Squared off from the larger delta (455 across, 100 down).
+                assert!(
+                    (geo.half.0 - geo.half.1).abs() < 1e-3,
+                    "Shift still squares the shape off: {geo:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Shift applies one ratio to both axes of a shell scale, which would move
+    /// a snapped grip off the line it landed on. The move grip constrains
+    /// nothing, so it keeps snapping.
+    #[gpui::test]
+    fn shift_turns_snapping_off_for_a_scale_grip_only(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _layer) = shell_setup(cx);
+        let shift = DragModifiers {
+            shift: true,
+            ..DragModifiers::default()
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (955.0, 210.0));
+                panel.handle_dragged(to, shift, cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "a uniform scale overwrites whichever axis was pulled"
+                );
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The move grip, at the bbox centre: Shift does nothing there.
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                let to = window_point(panel, (955.0, 200.0));
+                panel.handle_dragged(to, shift, cx);
+                assert_eq!(
+                    panel.snap_guides.x,
+                    Some(960.0),
+                    "the move grip constrains nothing, so the pull stays"
+                );
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+    }
+
+    /// The guide is a report of a correction in flight, so it reaches the
+    /// overlays only while the gesture is live.
+    #[gpui::test]
+    fn the_snap_guide_does_not_outlive_the_gesture(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _layers) = multi_layer_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                panel.move_dragged(point(px(905.0), px(0.0)), DragModifiers::default(), cx);
+                assert_eq!(panel.overlay_context(cx).snap_guides.x, Some(960.0));
+                panel.move_ended(cx);
+                assert!(
+                    panel.overlay_context(cx).snap_guides.is_empty(),
+                    "the gesture ended, so nothing is holding the alignment"
+                );
+            })
+            .unwrap();
     }
 
     /// With the playhead stopped and the document untouched, changing the
@@ -5227,7 +5913,7 @@ mod tests {
                 panel.viewport_size.set((1920.0, 1080.0));
                 // (100, 100) is the shared rect center.
                 panel.layer_move_mouse_down((100.0, 100.0), cx);
-                panel.move_dragged(point(px(150.0), px(100.0)), cx);
+                panel.move_dragged(point(px(150.0), px(100.0)), DragModifiers::default(), cx);
                 panel.move_ended(cx);
             })
             .unwrap();
@@ -5455,6 +6141,284 @@ mod tests {
                 1
             );
         });
+    }
+
+    /// The drawing tools snap the corner they are dragging, so a shape drawn
+    /// near the composition centre lands on it exactly.
+    #[gpui::test]
+    fn a_drawn_shape_snaps_its_moving_corner(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            });
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Rect,
+                ..ToolState::default()
+            });
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                let event = MouseMoveEvent {
+                    // Five units short of the composition's horizontal centre.
+                    position: window_point(panel, (955.0, 600.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                };
+                panel.shape_dragged(&event, cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0));
+                let geo = panel
+                    .shape_drag
+                    .as_ref()
+                    .and_then(|drag| drag.created.as_ref())
+                    .expect("the drag created a shape")
+                    .geo;
+                // The corner is at 960, not at the pointer's 955: centre
+                // (500 + 960) / 2 and half extent (960 − 500) / 2.
+                assert!(
+                    (geo.center.0 - 730.0).abs() < 1e-3 && (geo.half.0 - 230.0).abs() < 1e-3,
+                    "the drawn corner was not pulled onto 960: {geo:?}"
+                );
+                assert!(
+                    (geo.center.1 - 550.0).abs() < 1e-3 && (geo.half.1 - 50.0).abs() < 1e-3,
+                    "the unsnapped axis kept the pointer's own extent: {geo:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A shell scale grip snaps too: the grabbed grip is the point that lands
+    /// on the candidate, so the layer resizes to meet the line exactly.
+    #[gpui::test]
+    fn a_shell_scale_grip_snaps_the_grabbed_point(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                // Five units short of the composition's horizontal centre.
+                let to = window_point(panel, (955.0, 210.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0));
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // The bbox's fixed corner is x = 80 and the grip started at 120, so a
+        // grip landing on 960 is a factor of (960 − 80) / (120 − 80).
+        let scaled = shell_scale(&project, comp_id, layer, cx);
+        assert!(
+            (scaled.0 - 22.0).abs() < 1e-3,
+            "the grip was pulled onto the composition centre: {scaled:?}"
+        );
+    }
+
+    /// The move grip carries the whole layer, so it is the layer's bounding box
+    /// — not the grabbed point — that lands on the candidate.
+    #[gpui::test]
+    fn the_shell_move_grip_snaps_the_layer_bbox(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The move grip sits at the bbox centre, (100, 200).
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                assert_eq!(
+                    panel
+                        .handle_drag
+                        .as_ref()
+                        .and_then(|drag| drag.handle.id.shell()),
+                    Some(overlay::ShellHandle::Position)
+                );
+                // 855 puts the bbox centre at 955, five short of 960.
+                let to = window_point(panel, (955.0, 200.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0));
+                assert_eq!(panel.snap_guides.y, None, "the vertical axis is clear");
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let position = project.read_with(cx, |project, _| {
+            let transform = &project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .transform;
+            (
+                transform.position[0].evaluate(0.0, &eval_ctx()),
+                transform.position[1].evaluate(0.0, &eval_ctx()),
+            )
+        });
+        assert!(
+            (position.0 - 860.0).abs() < 1e-3 && position.1.abs() < 1e-3,
+            "the layer travelled the extra five units onto the centre: {position:?}"
+        );
+    }
+
+    /// An edge grip drives one axis; `scale_edits` throws the other one away.
+    /// Snapping the discarded axis would draw a guide for an alignment the edit
+    /// cannot make, and mark the gesture changed for a document that did not
+    /// change — a no-op undo step.
+    #[gpui::test]
+    fn an_edge_grip_snaps_only_the_axis_it_writes(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The action-safe rectangle puts a candidate at x = 96, four
+                // units from the grip below.
+                panel.show_safe_areas = true;
+                // The north edge grip, at the middle of the bbox's top edge.
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 190.0)), cx));
+                assert_eq!(
+                    panel
+                        .handle_drag
+                        .as_ref()
+                        .and_then(|drag| drag.handle.id.shell()),
+                    Some(overlay::ShellHandle::Scale(1)),
+                    "the press landed on the north edge grip"
+                );
+                // The pointer does not move at all.
+                let held = window_point(panel, (100.0, 190.0));
+                panel.handle_dragged(held, DragModifiers::default(), cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "this grip writes Y only, so an X candidate is not an alignment it can make"
+                );
+                assert!(
+                    !panel.handle_drag.as_ref().is_some_and(|drag| drag.changed),
+                    "nothing moved, so there is nothing to commit"
+                );
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // `changed` is what decides the commit, so the assertion above is the
+        // undo step; this is the value it would have committed.
+        assert_eq!(
+            shell_scale(&project, comp_id, layer, cx),
+            (1.0, 1.0),
+            "the pull reached neither axis of the edit"
+        );
+    }
+
+    /// The completion criterion, on the real gesture: the pull covers the same
+    /// screen distance at every zoom, which is a different composition distance
+    /// each time.
+    #[gpui::test]
+    fn the_snap_threshold_is_the_same_screen_distance_at_every_zoom(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _layer) = shell_setup(cx);
+
+        for (percent, comp_per_px) in [(50.0f32, 2.0f32), (200.0, 0.5)] {
+            // The cancel below posts a fresh evaluation, so the bounds the
+            // manipulator reads have to be republished for the next round.
+            publish_geometry_results(&project, cx);
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.set_zoom_percent(percent);
+                    // The south-east grip: one point, so the distance measured
+                    // is the pointer's own rather than an edge of a bbox.
+                    assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                    // Six screen pixels short of the composition centre: inside
+                    // the eight-pixel reach at both zooms, and twelve or three
+                    // composition units depending on which one.
+                    let near = window_point(panel, (960.0 - 6.0 * comp_per_px, SE_GRIP.1));
+                    panel.handle_dragged(near, DragModifiers::default(), cx);
+                    assert_eq!(
+                        panel.snap_guides.x,
+                        Some(960.0),
+                        "six screen pixels pull at {percent}%"
+                    );
+                    // Twelve screen pixels: out of reach at both zooms.
+                    let far = window_point(panel, (960.0 - 12.0 * comp_per_px, SE_GRIP.1));
+                    panel.handle_dragged(far, DragModifiers::default(), cx);
+                    assert_eq!(
+                        panel.snap_guides.x, None,
+                        "twelve screen pixels do not pull at {percent}%"
+                    );
+                    panel.cancel_handle_drag(cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    /// A press starts a gesture that has corrected nothing yet, so the guide of
+    /// the previous one must not be on screen when the first frame renders.
+    #[gpui::test]
+    fn a_new_gesture_starts_with_no_guide(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _layers) = multi_layer_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                panel.move_dragged(point(px(905.0), px(0.0)), DragModifiers::default(), cx);
+                panel.move_ended(cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0), "the gesture did snap");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // The layers moved, so their bounds have to be republished before the
+        // next press can land inside one of them.
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((910.0, 0.0), cx);
+                assert!(
+                    panel.move_drag.is_some(),
+                    "the press started a second gesture"
+                );
+                assert!(
+                    panel.overlay_context(cx).snap_guides.is_empty(),
+                    "a press before its first move has no correction to report"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Rotation has no edge to line up, so its grip snaps nothing — and says so
+    /// by reporting no guide.
+    #[gpui::test]
+    fn a_shell_rotation_drag_does_not_snap(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Twelve units diagonally outside the corner grip: past the 8px
+                // scale radius, inside the 18px rotation ring.
+                let press = press_at(panel, (SE_GRIP.0 + 9.0, SE_GRIP.1 + 9.0));
+                assert!(panel.overlay_handle_mouse_down(&press, cx));
+                assert_eq!(
+                    panel
+                        .handle_drag
+                        .as_ref()
+                        .and_then(|drag| drag.handle.id.shell()),
+                    Some(overlay::ShellHandle::Rotate(7)),
+                    "the press landed in the rotation ring"
+                );
+                // The press sits 9 units off the grip it grabbed, so this is
+                // the sweep that puts the grip's own anchor exactly on the
+                // composition centre — a zero distance any snapping candidate
+                // would win.
+                let to = window_point(panel, (969.0, 549.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "a sweep onto the composition centre is not an alignment"
+                );
+            })
+            .unwrap();
     }
 
     /// Escape during a shell drag restores the document the gesture started

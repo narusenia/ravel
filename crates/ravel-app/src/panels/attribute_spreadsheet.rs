@@ -195,22 +195,6 @@ impl TableDelegate for AttributeSheetDelegate {
         };
         SharedString::from(text)
     }
-
-    fn render_empty(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
-        let key = self.empty.unwrap_or(SheetEmpty::NoElements).message_key();
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_xs()
-            .text_color(cx.theme().colors.muted_foreground)
-            .child(SharedString::from(t!(key)))
-    }
 }
 
 pub struct AttributeSpreadsheetGpuiPanel {
@@ -391,17 +375,33 @@ impl Render for AttributeSpreadsheetGpuiPanel {
             tabs = tabs.child(self.render_domain_tab(domain, cx));
         }
 
+        // The message replaces the table rather than being drawn inside it
+        // (`TableDelegate::render_empty`, which would also leave an empty
+        // header strip above it). Nothing to show means nothing to lay out:
+        // the tab bar stays, because the counts on it are how a user finds the
+        // domain that does have elements.
+        let empty = self.table.read(cx).delegate().empty;
         v_flex()
             .size_full()
             .bg(colors.list)
             .track_focus(&self.focus_handle)
             .child(tabs)
-            .child(
-                div()
+            .child(match empty {
+                Some(empty) => div()
+                    .flex_grow()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(SharedString::from(t!(empty.message_key())))
+                    .into_any_element(),
+                None => div()
                     .flex_grow()
                     .overflow_hidden()
-                    .child(DataTable::new(&self.table).stripe(true)),
-            )
+                    .child(DataTable::new(&self.table).stripe(true))
+                    .into_any_element(),
+            })
     }
 }
 

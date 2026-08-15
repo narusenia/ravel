@@ -1,6 +1,6 @@
 # ワークスペース・レイアウト・ウィンドウ 仕様
 
-> 最終更新: 2026-08-01 ／ 索引: [`../ui-spec.md`](../ui-spec.md)
+> 最終更新: 2026-08-15 ／ 索引: [`../ui-spec.md`](../ui-spec.md)
 
 関連要件: REQ-UI-005 (v2)、REQ-UI-009 (v2)、REQ-UI-013。
 実装状況の正は [`../../ui-impl-status.md`](../../ui-impl-status.md)、

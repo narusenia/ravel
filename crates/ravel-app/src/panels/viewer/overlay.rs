@@ -600,6 +600,16 @@ impl OverlayHandleId {
 pub struct DragModifiers {
     pub shift: bool,
     pub alt: bool,
+    /// The platform's primary modifier — Cmd on macOS, Ctrl elsewhere — which
+    /// suppresses snapping ([`super::snap::snap_delta`]).
+    ///
+    /// A key of its own rather than Alt: Alt already means "draw from the
+    /// centre" for the shape tools and "scale about the anchor" for the shell
+    /// grips, so a gesture that wanted either of those could never keep
+    /// snapping. The panels fill it from `modifiers.platform ||
+    /// modifiers.control`, the spelling the Node Editor and the Timeline
+    /// already use.
+    pub primary: bool,
 }
 
 /// A grabbable point an overlay exposes to the pointer.
@@ -3868,7 +3878,7 @@ mod tests {
             (40.0, 5.0),
             DragModifiers {
                 shift: true,
-                alt: false,
+                ..DragModifiers::default()
             },
         );
         let (.., locked_scale, _) = shell_values(&locked, comp, layer);
@@ -3905,8 +3915,8 @@ mod tests {
                 &handle,
                 (40.0, 5.0),
                 DragModifiers {
-                    shift: false,
                     alt: true,
+                    ..DragModifiers::default()
                 },
                 &ctx,
             )

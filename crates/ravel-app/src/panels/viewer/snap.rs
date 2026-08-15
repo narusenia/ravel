@@ -20,11 +20,11 @@
 //!   carries both, so a drawn guide always names the line the delta actually
 //!   landed on.
 //!
-//! Alt suppresses the pull ([`snap_delta`] returns the delta untouched), which
-//! is the plan's decision: no toggle and no setting until one is asked for.
-//! Note that Alt already means "draw from the centre" for the shape tools and
-//! "scale about the anchor" for the shell grips — holding it therefore changes
-//! two things at once in those gestures.
+//! The platform's primary modifier — Cmd on macOS, Ctrl elsewhere — suppresses
+//! the pull ([`snap_delta`] returns the delta untouched), which is the plan's
+//! decision: no toggle and no setting until one is asked for. Not Alt, which
+//! already means "draw from the centre" for the shape tools and "scale about
+//! the anchor" for the shell grips.
 
 use gpui::Hsla;
 use ravel_core::id::{CompId, LayerId};
@@ -185,7 +185,7 @@ pub fn snap_delta(
     // A non-finite delta or threshold has no nearest anything: comparisons
     // against NaN are all false, so the answer would be "no candidate" reached
     // by accident rather than on purpose.
-    if modifiers.alt
+    if modifiers.primary
         || !threshold.is_finite()
         || threshold < 0.0
         || !delta.0.is_finite()
@@ -392,28 +392,42 @@ mod tests {
         assert_eq!(result.guides.x, Some(101.0));
     }
 
-    /// Alt suppresses the pull entirely, including the guide: the drag reports
-    /// nothing because nothing was corrected.
+    /// The platform's primary modifier suppresses the pull entirely, including
+    /// the guide: the drag reports nothing because nothing was corrected.
+    ///
+    /// Alt does not, and that is the point of the split — a shape drawn from
+    /// its centre and a shell scaled about its anchor both hold Alt, and both
+    /// keep snapping.
     #[test]
-    fn alt_suppresses_the_pull() {
+    fn the_primary_modifier_suppresses_the_pull_and_alt_does_not() {
         let moving = rect(0.0, 0.0, 100.0, 100.0);
         let candidates = lines(vec![1000.0], vec![1000.0]);
         let held = DragModifiers {
-            shift: false,
-            alt: true,
+            primary: true,
+            ..DragModifiers::default()
         };
         let result = snap_delta(moving, (944.0, 944.0), &candidates, 8.0, held);
         assert_eq!(result.delta, (944.0, 944.0));
         assert!(result.guides.is_empty());
-        // Shift alone is the constrain modifier and leaves snapping on.
-        let shift = DragModifiers {
-            shift: true,
-            alt: false,
-        };
-        assert_eq!(
-            snap_delta(moving, (944.0, 944.0), &candidates, 8.0, shift).delta,
-            (950.0, 950.0)
-        );
+
+        // The two constrain / reference-point modifiers leave snapping on.
+        // Shift is gated per gesture by the caller, not here.
+        for other in [
+            DragModifiers {
+                alt: true,
+                ..DragModifiers::default()
+            },
+            DragModifiers {
+                shift: true,
+                ..DragModifiers::default()
+            },
+        ] {
+            assert_eq!(
+                snap_delta(moving, (944.0, 944.0), &candidates, 8.0, other).delta,
+                (950.0, 950.0),
+                "{other:?} is not the suppression key"
+            );
+        }
     }
 
     /// The two axes are independent: one can snap while the other does not.

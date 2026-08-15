@@ -1061,19 +1061,17 @@ impl ViewerPanel {
         let Some(pointer) = self.comp_position(event.position) else {
             return;
         };
-        let modifiers = DragModifiers {
-            shift: event.modifiers.shift,
-            alt: event.modifiers.alt,
-        };
+        let modifiers = drag_modifiers(&event.modifiers);
         // The moving corner of the drawn rectangle is the pointer itself, so
         // that single point is what snapping aligns: the opposite corner is
         // pinned at the press and never moves.
-        let snapped = self.snapped_delta(
-            &drag.snap_lines,
-            Some(point_rect(pointer)),
-            (0.0, 0.0),
-            modifiers,
-        );
+        //
+        // Except under Shift: `drag_geometry` then squares the shape off from
+        // the larger of the two deltas, which overwrites whichever axis had
+        // just been snapped — the guide would name a line the drawn corner
+        // misses. A constrained drag snaps nothing.
+        let corner = (!modifiers.shift).then(|| point_rect(pointer));
+        let snapped = self.snapped_delta(&drag.snap_lines, corner, (0.0, 0.0), modifiers);
         let pointer = (pointer.0 + snapped.0, pointer.1 + snapped.1);
         let geo = drag_geometry(
             drag.start,
@@ -2683,10 +2681,7 @@ impl Render for ViewerPanel {
                         if this.handle_drag.is_some() {
                             this.handle_dragged(
                                 event.position,
-                                DragModifiers {
-                                    shift: event.modifiers.shift,
-                                    alt: event.modifiers.alt,
-                                },
+                                drag_modifiers(&event.modifiers),
                                 cx,
                             );
                         } else if this
@@ -2698,14 +2693,7 @@ impl Render for ViewerPanel {
                         } else if this.shape_drag.is_some() {
                             this.shape_dragged(event, cx);
                         } else {
-                            this.move_dragged(
-                                event.position,
-                                DragModifiers {
-                                    shift: event.modifiers.shift,
-                                    alt: event.modifiers.alt,
-                                },
-                                cx,
-                            );
+                            this.move_dragged(event.position, drag_modifiers(&event.modifiers), cx);
                         }
                     }
                     _ => {
@@ -2887,6 +2875,20 @@ fn comp_to_screen(comp: (f32, f32), rect: viewport::Rect, comp_width: u32) -> (f
 /// A single composition point as a zero-sized rectangle, which is what a
 /// gesture that moves one point (a drawing pointer, a shell grip) hands to
 /// [`snap::snap_delta`].
+/// The drag modifiers of a pointer event.
+///
+/// Snapping is suppressed by the platform's primary modifier — Cmd on macOS,
+/// Ctrl elsewhere — spelled the way the Node Editor and the Timeline already
+/// spell it. Shift and Alt keep the meanings the drawing and shell gestures
+/// gave them.
+fn drag_modifiers(modifiers: &Modifiers) -> DragModifiers {
+    DragModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        primary: modifiers.platform || modifiers.control,
+    }
+}
+
 fn point_rect(point: (f32, f32)) -> CompRect {
     CompRect {
         x: point.0,
@@ -5384,10 +5386,10 @@ mod tests {
         });
     }
 
-    /// Alt reaches the gesture: the same drag lands where the pointer put it,
-    /// and reports no guide.
+    /// The suppression key reaches the gesture: the drag lands where the
+    /// pointer put it, and reports no guide.
     #[gpui::test]
-    fn alt_turns_snapping_off_for_a_layer_drag(cx: &mut TestAppContext) {
+    fn the_primary_modifier_turns_snapping_off_for_a_layer_drag(cx: &mut TestAppContext) {
         let (window, project, comp_id, layers) = multi_layer_setup(cx);
         let before = rect_center(&project, comp_id, layers[0], cx);
 
@@ -5397,8 +5399,8 @@ mod tests {
                 panel.move_dragged(
                     point(px(905.0), px(0.0)),
                     DragModifiers {
-                        shift: false,
-                        alt: true,
+                        primary: true,
+                        ..DragModifiers::default()
                     },
                     cx,
                 );
@@ -5409,13 +5411,53 @@ mod tests {
         assert_eq!(
             rect_center(&project, comp_id, layers[0], cx),
             (before.0 + 905.0, before.1),
-            "Alt kept the pointer's own delta"
+            "the primary modifier kept the pointer's own delta"
         );
         window
             .update(cx, |panel, _window, _cx| {
                 assert!(panel.snap_guides.is_empty(), "and drew no guide");
             })
             .unwrap();
+    }
+
+    /// Cmd / Ctrl is the suppression key, so the two modifiers that mean
+    /// something else to a gesture keep snapping alive. Shift means nothing to
+    /// a layer move, and Alt means nothing to it either.
+    #[gpui::test]
+    fn shift_and_alt_keep_snapping_on_for_a_layer_drag(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let before = rect_center(&project, comp_id, layers[0], cx);
+
+        for modifiers in [
+            DragModifiers {
+                shift: true,
+                ..DragModifiers::default()
+            },
+            DragModifiers {
+                alt: true,
+                ..DragModifiers::default()
+            },
+        ] {
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.layer_move_mouse_down((0.0, 0.0), cx);
+                    panel.move_dragged(point(px(905.0), px(0.0)), modifiers, cx);
+                    assert_eq!(
+                        panel.snap_guides.x,
+                        Some(960.0),
+                        "{modifiers:?} constrains nothing here, so the pull stays"
+                    );
+                    panel.cancel_move(cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+            publish_geometry_results(&project, cx);
+            assert_eq!(
+                rect_center(&project, comp_id, layers[0], cx),
+                before,
+                "the cancel put the layer back for the next round"
+            );
+        }
     }
 
     /// The guide is a report of a correction in flight, so it reaches the

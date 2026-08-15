@@ -1,6 +1,8 @@
 # 属性スプレッドシート実装計画（REQ-CORE-010 検査 UI）
 
-> **Status**: Planned — 2026-07-27
+> **Status**: Planned — 2026-07-27（単位 1 完了: #302。**単位 2 を書き直し:
+> 2026-08-15** — `OVL-2` / `OVL-3` が評価スコープと結果グローバルを先に
+> 入れたので、`SelectedGeometry` の新設をやめて相乗りする形にした）
 
 対象: ジオメトリ属性を行×列で目視検査するパネル。関連要件:
 REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管理）。
@@ -103,14 +105,20 @@ REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管�
 ## 目標構成
 
 ```text
-SelectedPropertiesTarget ──→ ProjectState.build_request
-                        │  nodes = [comp_output, selected_node]
+SelectedPropertiesTarget ──→ ProjectState.build_viewer_request
+                        │  nodes  = [comp_output]          ← 位置規約は不変
+                        │  scoped = [(path, graph, node, ctx), ...]
                         ▼
                    EvalService（ワーカー1本 / Evaluator 1個 / キャッシュ共有）
                         │
-      results ──┬──→ FrameBuffer ─→ ViewerFrame グローバル ─→ Viewer
-                └──→ Geometry ────→ SelectedGeometry グローバル ─→ Spreadsheet
+      results[0] ──→ FrameBuffer ─→ ViewerFrame グローバル ─→ Viewer
+      scoped ──────→ 任意の型 ────→ OverlayResults グローバル ─┬→ オーバーレイ
+                                    キー = (path, node)        └→ Spreadsheet
 ```
+
+**この形は `OVL-2`（#429）と `OVL-3`（#437）が入れたもの**で、本計画が
+当初描いていた `nodes = [comp_output, selected_node]` /
+`SelectedGeometry` グローバルは**採らない**。理由は単位 2 に書いた。
 
 パネル本体:
 
@@ -149,26 +157,70 @@ SelectedPropertiesTarget ──→ ProjectState.build_request
 - 1 本目が `Err`、2 本目が `Ok` になるテスト。
 - 既存の `eval_service` テストを新シグネチャへ移行。
 
-### 単位 2: 選択ノードの評価と `SelectedGeometry` グローバル（`ravel-app`）
+### 単位 2: 選択ノードの評価（`ravel-app`）
 
-- `build_viewer_request` を `build_eval_request` に改称し、
-  `PropertiesTarget::Nodes` の `ids` 先頭を 2 本目のターゲットに足す。
-  選択が空 / ネットワーク未オープンなら 1 本だけ。
-- `NetworkPath` → `Vec<PathSegment>` 変換。
-- `on_eval_update` を results ループに書き換え、
-  `FrameBuffer` → `ViewerFrame`、`Geometry` → `SelectedGeometry` を publish。
-  それ以外の型は無視（`viewer_blank` に落とさない）。
-- `SelectedGeometry` グローバル: `Option<(NodeId, Arc<Geometry>)>` + 世代。
-  `Geometry` の列は `Arc<AttributeArray>` なのでクローンは安い。
+> **書き直し（2026-08-15）。** 当初の単位 2 は
+> 「`EvalRequest.path` に選択ノードのネットワークを入れ、`SelectedGeometry`
+> グローバルを新設する」だったが、**そのまま実装すると動かない。**
+> `viewer-overlay-manipulator-plan.md` の `OVL-2`（#429）と `OVL-3`（#437）が
+> 同じ問題を先に解いたので、この単位はその上に乗る。旧案は下の
+> 「旧案が成り立たない理由」に残す。
 
-**完了条件**
+#### やること
 
-- ジオメトリノードを選択 → `SelectedGeometry` が publish され、
-  同時に `ViewerFrame` も従来どおり更新されるテスト。
-- 選択解除で `SelectedGeometry` が `None` になるテスト。
-- **Viewer の表示がコンポジション出力のままであることの回帰テスト**
-  （選択追従で Viewer が乗っ取られていないこと）。
-- 選択ノードの評価が失敗しても Viewer が生き残るテスト。
+**既にある機構に相乗りする。新しいグローバルも新しい評価経路も作らない。**
+
+- `EvalRequest.scoped: Vec<ScopedTarget>` に、選択ノードのターゲットを足す。
+  1 ターゲットが `(path, graph, node, ctx)` を持つので、レイヤーネットワーク
+  内部のノードをレイヤーローカル時間で評価できる（`OVL-3` が入れた形）
+- 結果は `OverlayResults`
+  （`crates/ravel-app/src/panels/viewer/overlay.rs`）から読む。キーは
+  `OverlayResultKey = (Vec<PathSegment>, NodeId)`
+- **この単位の本体は「オーバーレイ以外の消費者がターゲットを宣言する経路」**
+  である。今は `ViewerOverlay::eval_target` →
+  `OverlayRegistry::eval_targets` に閉じており、スプレッドシートは
+  オーバーレイではない。宣言元を一般化する
+  （`OverlayResults` / `OverlayResultKey` は `ravel-app` 内なので、
+  クレートを跨ぐ設計変更にはならない）
+- `PropertiesTarget::Nodes` の `ids` の並びが**決定的であることをテストで
+  固定する**（下記「表示対象はノードエディタの選択に追従する」の未確認事項。
+  ここは旧案のまま有効）
+- 対象が `Nodes` 以外（`Layer` / `Composition` / `MediaAsset`）のとき、
+  および `Geometry` を出さないノードのときの表示（旧案のまま有効）
+
+#### 旧案が成り立たない理由
+
+- **`EvalRequest` は 1 リクエスト = 1 グラフ + 1 パス。**
+  viewer の要求は `path: Vec::new()`（root スコープ）でコンプ出力を
+  target 0 に置く。選択ノードのネットワークをリクエストの `path` に入れると
+  **コンプ出力の評価が壊れる**。`OVL-2` の最初の実装がこの穴を踏み、
+  レビューで「恒偽のスコープ判定」として発見された
+- **`SelectedGeometry` を `Option<(NodeId, Arc<Geometry>)>` にすると
+  `OVL-2` で潰したバグを再導入する。** `NodeId` 単独は同一性ではない —
+  合成ノードの ID は `comp_id << 32 | layer_id << 8 | role`
+  （`crates/ravel-core/src/composition/compile.rs`）なので、`comp_id == 0`
+  では通常のノード ID の範囲に落ちて衝突し、**別ノードの結果を表示する**。
+  `OverlayResultKey` がパスを含むのはこのため
+- **旧完了条件 3 件は既に満たされ、テストで固定済み**（`OVL-2` #429）:
+  `results[0]` はコンプ出力のままなので Viewer が乗っ取られない、
+  target の失敗は `Err` としてスロットを保つので Viewer が生き残る、
+  フレームが `Blank` / `Error` のときは結果を公開しない
+- **`build_viewer_request` の改称は不要。** 複数ターゲットは `scoped` が
+  担い、`results` の位置規約（`results[0]` = コンプ出力）は
+  `ViewerUpdate::from_eval` が依存しているので変えない
+
+#### 完了条件
+
+- ジオメトリノードを選択 → その結果が `OverlayResults` から読め、
+  同時に `ViewerFrame` も従来どおり更新されるテスト
+- 選択解除で結果が消えるテスト
+- **別ネットワーク / 別コンプの同じ `NodeId` を持つノードの結果を
+  読まないテスト**（`OVL-2` の衝突テストと同じ形）
+- `PropertiesTarget::Nodes` の `ids` の並びが決定的であることのテスト。
+  決定的でなければ**書き込み元（ノードエディタ）を直す**。読み手側で
+  回避しない
+- 選択ノードの評価が失敗しても Viewer が生き残るテスト
+  （`OVL-2` が固定済みだが、この単位が足す経路でも成り立つことを確認する）
 
 ### 単位 3: パネル本体（`ravel-app` / `ravel-ui`）
 

@@ -257,6 +257,12 @@ fn format_element(values: &AttributeArray, index: usize) -> String {
 /// A NaN in a column is exactly what an inspection panel exists to show — it is
 /// how a division by zero upstream becomes visible — so it is never formatted
 /// away into `0.000`.
+///
+/// For the same reason a magnitude outside what fixed point can hold at four
+/// significant digits switches to scientific notation instead of being clamped
+/// into it. Clamping prints `1.0e-8` as `0.000000`: a non-zero value reading as
+/// zero is the same lie as a hidden NaN, and at the other end it prints digits
+/// an `f32` never carried.
 pub fn format_f32(value: f32) -> String {
     if !value.is_finite() {
         return value.to_string();
@@ -264,10 +270,18 @@ pub fn format_f32(value: f32) -> String {
     if value == 0.0 {
         return "0.000".to_string();
     }
-    let exponent = value.abs().log10().floor().clamp(-9.0, 9.0) as i32;
-    let decimals = (3 - exponent).clamp(0, 6) as usize;
+    let exponent = value.abs().log10().floor() as i32;
+    if !FIXED_POINT_EXPONENTS.contains(&exponent) {
+        return format!("{value:.3e}");
+    }
+    let decimals = (3 - exponent) as usize;
     format!("{value:.decimals$}")
 }
+
+/// The decimal exponents `format_f32` renders in fixed point: those where
+/// `3 - exponent` decimals land in `0..=6` and so print exactly four
+/// significant digits.
+const FIXED_POINT_EXPONENTS: std::ops::RangeInclusive<i32> = -3..=3;
 
 /// Why the sheet cannot show rows, or `None` when it can.
 ///
@@ -418,6 +432,23 @@ mod tests {
         assert_eq!(text(0, "fill"), "true");
         assert_eq!(text(1, "fill"), "false");
         assert_eq!(text(0, "label"), "a");
+    }
+
+    /// A non-zero value must never read as zero. Padding `1.0e-8` out to
+    /// `0.000000` is the same lie as formatting a NaN away: the panel exists
+    /// to show what the value is, and "0" is not what that value is.
+    #[test]
+    fn values_too_small_or_too_large_for_fixed_point_switch_to_scientific() {
+        assert_eq!(format_f32(0.0), "0.000");
+        assert_eq!(format_f32(1.0e-8), "1.000e-8");
+        assert_eq!(format_f32(-1.0e-8), "-1.000e-8");
+        assert_ne!(format_f32(1.0e-8), format_f32(0.0));
+        assert_eq!(format_f32(1.5e10), "1.500e10");
+        assert_eq!(format_f32(-2.5e7), "-2.500e7");
+        // The band that fixed point can hold at four significant digits is
+        // unchanged.
+        assert_eq!(format_f32(1234.5678), "1235");
+        assert_eq!(format_f32(0.001234), "0.001234");
     }
 
     #[test]

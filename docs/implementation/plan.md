@@ -169,7 +169,7 @@ reconstructed from parameters through a hardcoded `type_key` match rather than
 from evaluated geometry — a node type absent from that match gets no bounding
 box. Overlays therefore cannot visualise anything that has to be evaluated,
 including fields, and no manipulator exists for ordinary position parameters.
-See `viewer-overlay-manipulator-plan.md`. Curves are editable in place:
+See `done/viewer-overlay-manipulator-plan.md`. Curves are editable in place:
 `field.curve_remap`'s control points are a `ParameterValue::Curve` with an
 inline editor in Properties. Ramps are not — `ParameterValue::Ramp` and its
 editor are still open (`properties-parameter-editors-plan.md`).

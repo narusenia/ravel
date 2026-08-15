@@ -221,7 +221,7 @@ field.direction_to(target) ─→ field.angle ─→ field.apply(rot, set)
    `translate_x` / `translate_y` が今は SCALAR ポートで露出できているのに、
    `Channel3` へ統合した途端に露出不能になって**退行する**
 3. **Viewer のマニピュレータが宣言的に書けない**。
-   `viewer-overlay-manipulator-plan.md` の `ParamRole` は 1 パラメータに
+   `done/viewer-overlay-manipulator-plan.md` の `ParamRole` は 1 パラメータに
    1 つの意味を付ける仕組みで、分解されていると名前の組を推測することになる
 
 - 上記ノードの Vec パラメータを `Channel2` / `Channel3` に統合する
@@ -526,5 +526,5 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
 - **Vector 行の成分ラベルとリンクトグル**（`MED-APP-20`）。単位 5 は Vector 行を
   到達可能にしただけ。
 - **`ParamRole` の宣言とマニピュレータ**。
-  `viewer-overlay-manipulator-plan.md` 単位 5 が担当する（本計画の単位 5 に
+  `done/viewer-overlay-manipulator-plan.md` 単位 5 が担当する（本計画の単位 5 に
   依存する側）。

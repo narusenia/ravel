@@ -172,7 +172,7 @@ pub enum GpuInput<'a> {
 | 境界 | 理由 |
 |---|---|
 | CPU 専用ノード | `attribute.transfer`（近傍探索）、`attribute.path_sample` |
-| 属性スプレッドシート | 構造上 CPU で値を読む（`attribute-spreadsheet-plan.md`） |
+| 属性スプレッドシート | 構造上 CPU で値を読む（`done/attribute-spreadsheet-plan.md`） |
 | ゴールデンテスト | CPU 参照経路が検証のオラクル |
 | エクスポート | 決定的出力 |
 
@@ -266,7 +266,7 @@ REQ-GPU-003 の「フィールドの WGSL 評価」に相当。
   インスタンスを後にする分割が安い（点の `flatten` は 10 万で 2.29 ms、
   インスタンスは 8.75 ms）。
 
-**`image-instancing-plan.md` が入ると本単位の前提が変わる。** instance source に
+**`done/image-instancing-plan.md` が入ると本単位の前提が変わる。** instance source に
 テクスチャという新種が混ざり、「属性列だけを GPU に送る / トポロジは CPU 残留」
 では説明できなくなる。詳細は同計画書の「未解決の依存」を参照。
 

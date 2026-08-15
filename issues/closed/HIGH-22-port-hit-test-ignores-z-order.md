@@ -81,6 +81,6 @@ for node in graph.nodes() {
 
 - [HIGH-21](HIGH-21-node-editor-repaints-every-playback-frame.md) — 同じパネルの
   再描画コスト問題
-- `docs/implementation/viewer-overlay-manipulator-plan.md` 単位 1 —
+- `docs/implementation/done/viewer-overlay-manipulator-plan.md` 単位 1 —
   Viewer 側のオーバーレイ機構では同じ罠を避けるため、ハンドルのヒットテストを
   優先度宣言で解決する設計にしている

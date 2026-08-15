@@ -79,7 +79,7 @@ UI で示す。
 
 ### 単位 2: パネルと配線
 
-- `PanelKind::Align` を追加（`attribute-spreadsheet-plan.md` 単位 3 の
+- `PanelKind::Align` を追加（`done/attribute-spreadsheet-plan.md` 単位 3 の
   登録先一覧と同じ手順）。
 - レイヤー選択を読み、`LayerTransform` の position チャネルをオフセット。
 - 1 undo ステップ。

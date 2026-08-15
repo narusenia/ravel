@@ -59,7 +59,7 @@ mesh.box ──────┘                        ├─ scene.render ─→
 - 変換の階層は Scene の入れ子で表す（子の Scene を親の `scene.add` に渡す）
 
 **シーンのオブジェクトは常にジオメトリ**である。画像は
-`image-instancing-plan.md` が `instance_sources` を `Vec<InstanceSource>` へ
+`done/image-instancing-plan.md` が `instance_sources` を `Vec<InstanceSource>` へ
 一般化して載せる側に回り（下記「逃げ道 B」）、`scene.add` は FrameBuffer を
 受けない。よって複製は `scatter.*` の既存のインスタンス機構がそのまま担い、
 ビデオウォール的な表現も**同計画の完了後は 2D / 3D の両方で組める**。
@@ -94,7 +94,7 @@ mesh.box ──────┘                        ├─ scene.render ─→
 ならない。ただし A で同じ絵が出る（テクスチャ付き平面を複製する）ので、
 **A を確保しておけば B は不要**になる見込み。
 
-> **2026-08-06 に B を採ることが決まった**（`image-instancing-plan.md` の決定 3）。
+> **2026-08-06 に B を採ることが決まった**（`done/image-instancing-plan.md` の決定 3）。
 > 見込みが外れた理由は 2D 側にある — A（Mesh + UV + テクスチャ）は三角形を要求し、
 > `rasterize` は analytic かつ planar で頂点バッファを持たないので **A では 2D の
 > リピーターが実装できない**。B は 3D のためではなく 2D のために必要になった。
@@ -282,7 +282,7 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 
 - `DataTypeId::SCENE`、`Scene` の `NodeData` 実装、ポート色
 - `scene.add`（Geometry + 3D 変換 → Scene）、`scene.merge`（Scene 結合）。
-  **画像は `scene.add` に直接繋げない** — `image-instancing-plan.md` の
+  **画像は `scene.add` に直接繋げない** — `done/image-instancing-plan.md` の
   決定 4 により、FrameBuffer はジオメトリの instance source として運ぶ
 - `scene.camera`（パース / オルソ。位置・注視点・画角・near/far）
 - カメラパラメータは統一アニメーションチャネルに乗せる
@@ -321,7 +321,7 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - 2 パス描画（不透明 Mesh → 半透明と Path）
 - Path オブジェクトは既存の解析的経路を Scene 内で使う
 - 画像を持つ instance source をテクスチャ付き矩形として描く（`InstanceSource`
-  は `image-instancing-plan.md` が入れる。Scene 側に画像オブジェクトは無い）
+  は `done/image-instancing-plan.md` が入れる。Scene 側に画像オブジェクトは無い）
 - CPU リファレンス経路（三角形の塗りはスキャンライン）
 
 **完了条件**
@@ -353,7 +353,7 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - `mesh.box` / `mesh.sphere` / `mesh.cylinder` / `mesh.plane`
 - 分割数パラメータ、法線と UV 相当の属性
 - `ParamRole` を宣言して Viewer のマニピュレータで掴めるようにする
-  （`viewer-overlay-manipulator-plan.md` 単位 5）
+  （`done/viewer-overlay-manipulator-plan.md` 単位 5）
 
 **完了条件**
 
@@ -493,5 +493,5 @@ REQ-3D の非対象節を参照。実装計画としての追加は次のとお�
 - **Mesh のブーリアン**（`mesh.boolean`）。破砕は半平面クリップで足りる
   （`geometry-fracture-plan.md`）。任意 Mesh 同士の boolean は需要が
   固まってから
-- **3D の Viewer マニピュレータ**。`viewer-overlay-manipulator-plan.md` の
+- **3D の Viewer マニピュレータ**。`done/viewer-overlay-manipulator-plan.md` の
   非対象。2D のマニピュレータが入ってから

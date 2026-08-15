@@ -460,7 +460,7 @@ impl NodeProcessor for GeometryConnectProcessor {
 ///
 /// Feeding the result to `scatter.*` nests it one level deep and repeats the
 /// picture; that is the whole point (`REQ-MOGRAPH-001`, decision 3 of
-/// `docs/implementation/image-instancing-plan.md`).
+/// `docs/implementation/done/image-instancing-plan.md`).
 ///
 /// The frame is wrapped in whichever representation it arrived in, CPU or
 /// GPU-resident: no conversion, and therefore no readback (decision 6). The

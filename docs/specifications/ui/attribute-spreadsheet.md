@@ -5,7 +5,7 @@
 選択ノードが評価したジオメトリの属性を、行×列で目視検査するパネルの
 **意図した挙動**。実装状況の正は
 [`../../ui-impl-status.md`](../../ui-impl-status.md)、設計の根拠は
-[`../../implementation/attribute-spreadsheet-plan.md`](../../implementation/attribute-spreadsheet-plan.md)。
+[`../../implementation/done/attribute-spreadsheet-plan.md`](../../implementation/done/attribute-spreadsheet-plan.md)。
 
 関連要件: REQ-CORE-010（ジオメトリ属性システム）、REQ-UI-013（パネル管理）。
 

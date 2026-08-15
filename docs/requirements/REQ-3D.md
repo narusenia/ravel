@@ -29,7 +29,7 @@ REQ-MOGRAPH-003 が概要を定めていたが、実装に入れる粒度まで�
 
   **画像はオブジェクトの種別ではない。** 動画や画像を 3D 空間のカードとして
   置くときは、FrameBuffer をジオメトリの instance source として運ぶ
-  （`image-instancing-plan.md` の決定 4）。矩形のサイズは画像解像度由来で
+  （`done/image-instancing-plan.md` の決定 4）。矩形のサイズは画像解像度由来で
   アスペクト比を保ち、`scatter.*` の既存の複製機構がそのまま効く。
   レンダラは UV と**単一テクスチャのサンプリング**を持つが、マテリアル
   （複数マップ、シェーダグラフ）は非対象のまま。
@@ -59,14 +59,14 @@ REQ-MOGRAPH-003 が概要を定めていたが、実装に入れる粒度まで�
 - **既知の制約**: **画像を Scene に置くには変換ノードを 1 つ挟む。**
   `scene.add` は FrameBuffer を受けず、画像はジオメトリの instance source
   として運ぶ。変換ノード（`geometry.from_image`）と、それを描く経路は
-  `image-instancing-plan.md` が入れるまで存在しないので、**それまで画像を
+  `done/image-instancing-plan.md` が入れるまで存在しないので、**それまで画像を
   Scene に置く手段は無い**。複製そのものは同計画の完了後、`scatter.*` の
   既存のインスタンス機構でジオメトリと同じように効く（ビデオウォールは
   そこで組める）。変形（コーナーピン、ワープ）は別で、Mesh + UV への
   テクスチャ割り当てが要る — 条件は `3d-scene-plan.md` 単位 4 の制約
   （テクスチャサンプリングを画像専用の暗黙 quad に作らない）を守ること。
 - **依存**: REQ-CORE-010, REQ-3D-002, REQ-3D-003
-- **関連計画**: `docs/implementation/image-instancing-plan.md`。FrameBuffer を
+- **関連計画**: `docs/implementation/done/image-instancing-plan.md`。FrameBuffer を
   ジオメトリの instance source として持ち、既存の複製機構で並べる計画。
   その決定 4 に合わせて本項の説明・受入条件・既知の制約を書き換え済み
   （オブジェクトは常にジオメトリ）。

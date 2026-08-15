@@ -146,4 +146,4 @@ scale = outer.scale * local.scale   （成分ごと）
 - CPU と GPU の一致ゴールデン（`RESP3-12` 以降）が両側を同時に見るので、
   **片側だけ直すと一致が壊れる**
 
-**関連**: `image-instancing-plan.md`（`IMG-4` / `IMG-5`）、`MED-GPU-08`
+**関連**: `done/image-instancing-plan.md`（`IMG-4` / `IMG-5`）、`MED-GPU-08`

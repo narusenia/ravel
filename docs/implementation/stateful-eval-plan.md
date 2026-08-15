@@ -99,7 +99,7 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
 1 評価なので、**充填の途中経過を返す仕組みが要る**。
 `EvalUpdate` に「暫定値」フラグを足す。
 
-なお `attribute-spreadsheet-plan.md` の単位 1 が `EvalRequest` /
+なお `done/attribute-spreadsheet-plan.md` の単位 1 が `EvalRequest` /
 `EvalUpdate` を複数ターゲット化する。**どちらが先でも構わないが、
 両方が同じ型を触る**ので実施順を決めてから着手する。
 

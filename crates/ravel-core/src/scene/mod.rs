@@ -13,7 +13,7 @@
 //! An image is not a content kind of its own: a frame buffer reaches a scene
 //! as a [`Geometry`] whose instance source carries it, so one placement
 //! mechanism serves both the 2D repeater and the 3D renderer
-//! (`docs/implementation/image-instancing-plan.md`).
+//! (`docs/implementation/done/image-instancing-plan.md`).
 //!
 //! Lights are not part of a scene yet; they arrive with `scene.light`.
 //!
@@ -115,7 +115,7 @@ impl Transform3D {
 ///
 /// There is no image variant: a frame buffer becomes a [`Geometry`] that
 /// carries it as an instance source, so the scene never has to know how a
-/// picture is held (`docs/implementation/image-instancing-plan.md`).
+/// picture is held (`docs/implementation/done/image-instancing-plan.md`).
 #[derive(Clone, Debug)]
 pub enum SceneContent {
     /// A geometry — `Primitive::Path` or `Primitive::Mesh`, with a `P` column
@@ -298,7 +298,7 @@ impl Scene {
     /// A `Geometry` reports `false` today — it holds attribute columns in
     /// host memory and does not override the flag. The recursion is what
     /// makes that answer follow the content once a geometry can carry a
-    /// resident frame (`docs/implementation/image-instancing-plan.md`);
+    /// resident frame (`docs/implementation/done/image-instancing-plan.md`);
     /// nothing here needs to change then.
     fn holds_gpu_resident(&self) -> bool {
         self.objects.iter().any(|object| match &object.content {
@@ -684,7 +684,7 @@ mod tests {
     /// `Geometry` holds host columns, and a nested scene can only hold more
     /// of the same. Residency becomes reachable again when a geometry can
     /// carry a resident frame
-    /// (`docs/implementation/image-instancing-plan.md`), which is why
+    /// (`docs/implementation/done/image-instancing-plan.md`), which is why
     /// `holds_gpu_resident` still recurses.
     #[test]
     fn a_cpu_scene_is_not_gpu_resident() {

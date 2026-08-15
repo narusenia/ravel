@@ -333,7 +333,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `SET-1〜7` | 設定の適用と設定画面（`settings-screen-plan.md`）。済み |
 | `DISC-1〜5` | ノードのロケールキー化 + ホバー Popover + 検索パレット + ノードアイコン（`done/node-discoverability-plan.md`）。済み |
 | `SHELL-5` | `parent` の設定 UI（Properties の Parent ドロップダウン）。済み（#303） |
-| `IMG-1` | `SceneContent::Image` の退場（`image-instancing-plan.md`。消費者ゼロのうちに畳む）。済み（#309） |
+| `IMG-1` | `SceneContent::Image` の退場（`done/image-instancing-plan.md`。消費者ゼロのうちに畳む）。済み（#309） |
 | クラスタ: View トグルの欠落 | `MED-APP-23`。済み（#286） |
 | クラスタ: i18n の穴 | `LOW-APP-11`（ハードコードされたユーザー向け英語）。済み（#308） |
 
@@ -410,7 +410,7 @@ dropdown を付けるだけで、実装量に対して得られるものが大�
 （カテゴリ既定フォールバック付き）が入った。仕様・ステータス文書と
 REQ-UI-002 の受入条件も実装に揃えてある。
 
-`IMG-1` をこのフェーズに置くのは**基準 3**。`image-instancing-plan.md` は
+`IMG-1` をこのフェーズに置くのは**基準 3**。`done/image-instancing-plan.md` は
 FrameBuffer をジオメトリのインスタンスソースとして複製できるようにする計画で、
 本体（`IMG-2` 以降）はフェーズ C4 の後に回す（基準 0 — 書き出しが開くまで
 他の投資が回収されない）。**ただし `SceneContent::Image` の退場だけは今が最も
@@ -784,7 +784,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `OVL-7` | レイヤー殻のマニピュレータ（scale / rotation / anchor）+ HUD + 親子リンク線 |
 | `OVL-8` | ジオメトリ属性の空間可視化（矢印 / index / group 色分け） |
 | `OVL-9` | モーションパス（軌跡表示 + キー位置のドラッグ） |
-| `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`viewer-snap-guides-plan.md`） |
+| `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`done/viewer-snap-guides-plan.md`） |
 | `TOOLX-1〜5` | Hand / Zoom の実装、矩形選択、点編集、polygon / star（`viewer-tool-extensions-plan.md`） |
 | `INSP-2〜5` | チャンネル単独表示・ピクセル値読み取り・状態表示・スコープの判断（`viewer-inspection-plan.md`） |
 | `VRES-2〜5` | プレビュー解像度の係数の UI・永続化と適応解像度（`viewer-preview-resolution-plan.md`）。**`VRES-1`（係数モデルと評価経路）は前倒しして完了済み** — 下記 |

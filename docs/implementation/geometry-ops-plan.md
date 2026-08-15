@@ -277,7 +277,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
 - `shape.line`: 分割数 1 で 2 点、n で n+1 点になるテスト。
 - `shape.line`: 始点 = 終点（退化）でエラーにならないテスト。
 - `shape.grid`: 行数 × 列数 に対する primitive 数が定義どおりであるテスト。
-- 両ノードが `ParamRole`（`viewer-overlay-manipulator-plan.md` 単位 5）を
+- 両ノードが `ParamRole`（`done/viewer-overlay-manipulator-plan.md` 単位 5）を
   宣言していることのテスト。
   **この条件は `OVL-5` が `ParamRole` を入れるまで満たせない。** 型そのものが
   まだ存在せず（`registry/builtin.rs` の doc コメントに名前が出るだけ）、

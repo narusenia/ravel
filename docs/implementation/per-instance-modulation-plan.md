@@ -411,7 +411,7 @@ Lua 式を除く 6 条件が満たされ、REQ-MOGRAPH-001 は
   `vector-field-plan.md`。
 - **フィールドの GPU 評価**。`gpu-resident-geometry-plan.md` の単位 2。
   本計画は境界を開けておくだけで、WGSL は書かない。
-- **属性スプレッドシート UI**。`attribute-spreadsheet-plan.md` に分離。
+- **属性スプレッドシート UI**。`done/attribute-spreadsheet-plan.md` に分離。
   変調結果の目視検査はそちらが担う。
 - REQ-MOGRAPH-002（パーティクル）以降。004 プロシージャルタイポグラフィが
   本計画の直後の対象。

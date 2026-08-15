@@ -124,7 +124,7 @@ Outliner は親子を表示するが「表示のみ、D&D 不可」（`ui-spec.m
 - 親の付け替えは既存の殻編集経路（Document 変更 + `InvalidationHint::Structural`）
   に乗せ、1 操作 1 undo
 - 親を持つレイヤーの表示（Outliner のインデント）は既存のまま変えない
-- Viewer の親子リンク線は `viewer-overlay-manipulator-plan.md` の単位 7 が持つ。
+- Viewer の親子リンク線は `done/viewer-overlay-manipulator-plan.md` の単位 7 が持つ。
   **この単位は設定手段だけ**
 
 **完了条件**

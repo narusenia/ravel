@@ -181,7 +181,7 @@ impl<'a> Positions<'a> {
 /// crate that owns the GPU one can name it. The resolution is captured
 /// alongside, which is what lets `ravel-core` size the rectangle without
 /// knowing which representation it holds
-/// (`docs/implementation/image-instancing-plan.md`, decisions 5 and 6).
+/// (`docs/implementation/done/image-instancing-plan.md`, decisions 5 and 6).
 #[derive(Clone)]
 pub struct InstanceImage {
     frame: Arc<dyn NodeData>,
@@ -831,7 +831,7 @@ mod tests {
 
     /// The rectangle an image source occupies is its pixel resolution, centred
     /// on the origin, so its aspect ratio is the source's (decision 5 of
-    /// `docs/implementation/image-instancing-plan.md`).
+    /// `docs/implementation/done/image-instancing-plan.md`).
     #[test]
     fn an_image_source_is_sized_by_its_pixel_resolution() {
         let wide = image(1920, 1080);

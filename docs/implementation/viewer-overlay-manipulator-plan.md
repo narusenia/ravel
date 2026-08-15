@@ -104,7 +104,7 @@ trait ViewerOverlay {
     fn is_active(&self, ctx: &OverlayContext) -> bool;
 
     /// 評価結果を要求する場合の pull 対象。None なら Document だけで描ける。
-    fn eval_target(&self, ctx: &OverlayContext) -> Option<OverlayTarget>;
+    fn eval_target(&self, ctx: &OverlayContext) -> Option<EvalTarget>;
 
     /// コンプ空間で描く。window への paint はここだけ。
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter<'_>);
@@ -216,7 +216,7 @@ ViewerPanel::render()
              ↓ eval_target() を集約
        EvalRequest (multi-target)
              ↓ 結果はグローバル経由
-       OverlayResults グローバル → paint / handles
+       EvalResults グローバル → paint / handles
              ↓ ハンドルのドラッグ
        OverlayEdit = Document への変更（ノードパラメータ | 殻チャネル）
 ```
@@ -263,7 +263,7 @@ ViewerPanel::render()
 
 **前提 — 単位 2 の実装で判明した制約（解決済み。下記「実装」節）。**
 
-単位 2 が載せた相乗りは、**要求が評価するスコープと `OverlayTarget.network`
+単位 2 が載せた相乗りは、**要求が評価するスコープと `EvalTarget.network`
 が一致するターゲットだけ**を対象にできる。`EvalRequest` は 1 リクエスト =
 1 グラフ + 1 パスだからである。viewer の `EvalRequest` は `graph` にシェルの
 コンパイル済みグラフ、`path` に空（root スコープ）を入れる。一方

@@ -21,9 +21,7 @@
 
 use crate::app_settings;
 use crate::panels::ViewerImage;
-use crate::panels::viewer::overlay::{
-    OverlayContext, OverlayRegistry, OverlayResultKey, OverlayResults,
-};
+use crate::panels::viewer::overlay::{EvalResultKey, EvalResults, OverlayContext, OverlayRegistry};
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::composition::compile::{CompileError, compile_composition};
@@ -383,7 +381,7 @@ pub(crate) struct ViewerUpdate {
     frame: u64,
     timings: Vec<(NodeId, Duration)>,
     output: ViewerOutput,
-    overlay_results: Vec<(OverlayResultKey, Arc<dyn ravel_core::types::NodeData>)>,
+    scoped_results: Vec<(EvalResultKey, Arc<dyn ravel_core::types::NodeData>)>,
 }
 
 /// Whether an evaluation result is an image the viewer would have drawn had
@@ -434,7 +432,7 @@ impl ViewerUpdate {
             Some((_, Err(err))) => ViewerOutput::Failed(err.to_string()),
             None => ViewerOutput::NotAFrame,
         };
-        let overlay_results = update
+        let scoped_results = update
             .scoped
             .into_iter()
             .filter_map(|scoped| {
@@ -449,7 +447,7 @@ impl ViewerUpdate {
             frame: update.frame,
             timings: update.timings,
             output,
-            overlay_results,
+            scoped_results,
         }
     }
 }
@@ -1464,7 +1462,7 @@ impl ProjectState {
                     // No evaluation follows, so nothing would replace the overlay
                     // snapshot: drop it here or the overlays keep drawing over a
                     // blank viewer.
-                    cx.set_global(OverlayResults::default());
+                    cx.set_global(EvalResults::default());
                     // Nothing will be evaluated, so nothing will republish the
                     // band: it has to be cleared on the way out or an emptied
                     // composition keeps the band of the one before it forever.
@@ -1483,7 +1481,7 @@ impl ProjectState {
                     cx.set_global(frame);
                     // Same reason as the blank path above: no evaluation follows
                     // a composition that does not compile.
-                    cx.set_global(OverlayResults::default());
+                    cx.set_global(EvalResults::default());
                     self.clear_cache_band(cx);
                     return;
                 }
@@ -1495,7 +1493,7 @@ impl ProjectState {
             // No worker (tests): the hint stays pending, and no result will
             // arrive to replace the snapshot.
             self.pending_hint = hint;
-            cx.set_global(OverlayResults::default());
+            cx.set_global(EvalResults::default());
         }
     }
 
@@ -1505,7 +1503,7 @@ impl ProjectState {
     ///
     /// `overlays` is a parameter rather than a call to
     /// [`OverlayRegistry::builtin`] so a test can supply overlays that
-    /// actually declare an [`OverlayTarget`] — no built-in one does yet — and
+    /// actually declare an [`EvalTarget`] — no built-in one does yet — and
     /// still go through this, the production assembly path.
     fn build_viewer_request(
         &mut self,
@@ -1529,7 +1527,7 @@ impl ProjectState {
         // `scoped`, each carrying the graph and path it is evaluated under.
         let path = Vec::new();
         let nodes = vec![output];
-        let scoped = overlay_scoped_targets(&document, &ctx, overlays, &overlay_context);
+        let scoped = scoped_eval_targets(&document, &ctx, overlays, &overlay_context);
         Ok(Some(EvalRequest {
             comp: Some(comp.id),
             // The composition output stays target 0: `ViewerUpdate::from_eval`
@@ -1577,10 +1575,7 @@ impl ProjectState {
             tool: cx
                 .try_global::<crate::panels::ToolState>()
                 .map(|state| state.active),
-            results: cx
-                .try_global::<OverlayResults>()
-                .cloned()
-                .unwrap_or_default(),
+            results: cx.try_global::<EvalResults>().cloned().unwrap_or_default(),
             registry: Some(self.registry.clone()),
             ..OverlayContext::default()
         }
@@ -1723,7 +1718,7 @@ impl ProjectState {
             );
             return;
         }
-        let overlay_results: HashMap<_, _> = update.overlay_results.into_iter().collect();
+        let scoped_results: HashMap<_, _> = update.scoped_results.into_iter().collect();
         // Nothing here touches pixels: the worker already produced the
         // display image (HIGH-08), so publishing is a move.
         let frame = match update.output {
@@ -1759,14 +1754,14 @@ impl ProjectState {
         // mistake as painting a result that has not arrived. Replacing the
         // whole map is what makes a target that failed or was dropped read as
         // absent instead of keeping the value it had two frames ago.
-        let overlay_results = match &frame {
+        let scoped_results = match &frame {
             crate::panels::ViewerFrame::Frame { .. }
-            | crate::panels::ViewerFrame::GpuFrame { .. } => overlay_results,
+            | crate::panels::ViewerFrame::GpuFrame { .. } => scoped_results,
             crate::panels::ViewerFrame::Blank { .. } | crate::panels::ViewerFrame::Error { .. } => {
                 HashMap::new()
             }
         };
-        cx.set_global(OverlayResults::new(overlay_results));
+        cx.set_global(EvalResults::new(scoped_results));
         tracing::debug!(
             generation = update.generation,
             frame = update.frame,
@@ -1858,7 +1853,7 @@ impl EventEmitter<DocumentReplaced> for ProjectState {}
 /// port, because evaluation is per node. A target whose network or node no
 /// longer resolves is dropped rather than requested — the overlay then reads
 /// no result and draws nothing.
-fn overlay_scoped_targets(
+fn scoped_eval_targets(
     document: &Document,
     ctx: &EvalContext,
     overlays: &OverlayRegistry,
@@ -1933,7 +1928,7 @@ fn unique_asset_id(doc: &Document, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panels::viewer::overlay::{OverlayId, OverlayTarget, ViewerOverlay};
+    use crate::panels::viewer::overlay::{EvalTarget, OverlayId, ViewerOverlay};
     use gpui::{AppContext as _, TestAppContext};
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
@@ -1947,7 +1942,7 @@ mod tests {
     use ravel_ui::document::NetworkPath;
 
     struct TargetOverlay {
-        target: OverlayTarget,
+        target: EvalTarget,
     }
 
     impl ViewerOverlay for TargetOverlay {
@@ -1963,7 +1958,7 @@ mod tests {
             true
         }
 
-        fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<OverlayTarget> {
+        fn eval_targets(&self, _ctx: &OverlayContext) -> Vec<EvalTarget> {
             vec![self.target.clone()]
         }
     }
@@ -2353,8 +2348,8 @@ mod tests {
         }
     }
 
-    fn target_in(network: &NetworkPath, node: NodeId) -> OverlayTarget {
-        OverlayTarget {
+    fn target_in(network: &NetworkPath, node: NodeId) -> EvalTarget {
+        EvalTarget {
             network: network.clone(),
             node,
             output: OutputPortIndex(0),
@@ -2506,7 +2501,7 @@ mod tests {
             let document = project.document().clone();
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
 
-            let before_start = overlay_scoped_targets(
+            let before_start = scoped_eval_targets(
                 &document,
                 &project.viewer_eval_context(&comp, 0),
                 &overlays,
@@ -2519,7 +2514,7 @@ mod tests {
 
             // The very first frame the layer *is* on screen still asks, at the
             // layer-local frame the compositing chain enters the network with.
-            let at_start = overlay_scoped_targets(
+            let at_start = scoped_eval_targets(
                 &document,
                 &project.viewer_eval_context(&comp, 5),
                 &overlays,
@@ -2564,7 +2559,7 @@ mod tests {
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
             let eval = project.viewer_eval_context(&comp, 0);
 
-            let scoped = overlay_scoped_targets(&document, &eval, &overlays, &ctx);
+            let scoped = scoped_eval_targets(&document, &eval, &overlays, &ctx);
 
             assert_eq!(scoped.len(), 1, "the same node was pulled more than once");
             assert_eq!(scoped[0].node, node);
@@ -2607,7 +2602,7 @@ mod tests {
             let ctx = project.overlay_context_for_request(&document, &comp, 0, cx);
             let eval = project.viewer_eval_context(&comp, 0);
 
-            let scoped = overlay_scoped_targets(&document, &eval, &overlays, &ctx);
+            let scoped = scoped_eval_targets(&document, &eval, &overlays, &ctx);
 
             assert_eq!(scoped.len(), 1, "an unresolvable network was requested");
             assert_eq!(scoped[0].path, network.segments());
@@ -3999,7 +3994,7 @@ mod tests {
         let project = cx.new(ProjectState::new);
         let stale = NodeId::new(9001);
         cx.update(|cx| {
-            cx.set_global(OverlayResults::new(HashMap::from([(
+            cx.set_global(EvalResults::new(HashMap::from([(
                 (
                     vec![PathSegment::Layer(CompId::new(1), LayerId::new(1))],
                     stale,
@@ -4016,7 +4011,7 @@ mod tests {
 
         cx.update(|cx| {
             assert!(
-                cx.global::<OverlayResults>().values.is_empty(),
+                cx.global::<EvalResults>().values.is_empty(),
                 "the blank path kept the results of the composition before it"
             );
         });
@@ -4034,7 +4029,7 @@ mod tests {
         let frame = blank_display_frame(4, 4);
         let scalar: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::types::Scalar(2.0));
         let overlay_values = |cx: &App| {
-            cx.try_global::<OverlayResults>()
+            cx.try_global::<EvalResults>()
                 .map(|results| {
                     results
                         .values
@@ -4112,7 +4107,7 @@ mod tests {
         let overlay_node = NodeId::new(9001);
         let scalar: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::types::Scalar(2.0));
         let overlay_is_empty = |cx: &App| {
-            cx.try_global::<OverlayResults>()
+            cx.try_global::<EvalResults>()
                 .is_none_or(|results| results.values.is_empty())
         };
 

@@ -31,7 +31,7 @@ use ravel_ui::document::NetworkPath;
 
 use super::CompRect;
 use super::overlay::{
-    OverlayContext, OverlayId, OverlayPainter, OverlayTarget, ViewerOverlay, priority,
+    EvalTarget, OverlayContext, OverlayId, OverlayPainter, ViewerOverlay, priority,
 };
 
 /// Hard ceiling on grid points sampled per frame, whatever the zoom.
@@ -387,10 +387,10 @@ impl ViewerOverlay for FieldOverlay {
         ctx.resolution.is_some() && selected_field_node(ctx).is_some()
     }
 
-    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<OverlayTarget> {
+    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget> {
         selected_field_node(ctx)
             .map(|(network, node, output)| {
-                vec![OverlayTarget {
+                vec![EvalTarget {
                     network,
                     node,
                     output,
@@ -409,7 +409,7 @@ impl ViewerOverlay for FieldOverlay {
         let Some((document, resolution, _)) = ctx.resolved() else {
             return;
         };
-        let Some(value) = ctx.eval_result(&OverlayTarget {
+        let Some(value) = ctx.eval_result(&EvalTarget {
             network: network.clone(),
             node,
             output,
@@ -458,7 +458,7 @@ impl ViewerOverlay for FieldOverlay {
 /// rather than `local_frame` on purpose: the clamped form reports `in_frame`
 /// for every composition frame before the layer starts, and the two frames have
 /// to agree with the interval check that decided to request this field
-/// (`ProjectState::overlay_scoped_targets`) or the overlay samples one frame and
+/// (`ProjectState::scoped_eval_targets`) or the overlay samples one frame and
 /// draws the value of another.
 fn field_eval_context(
     ctx: &OverlayContext,
@@ -579,7 +579,7 @@ fn cell_rect(grid: &FieldGrid, index: usize) -> CompRect {
 
 #[cfg(test)]
 mod tests {
-    use super::super::overlay::OverlayResults;
+    use super::super::overlay::EvalResults;
     use super::*;
 
     /// A field whose value is the x coordinate, so a sampled grid has a value
@@ -1049,7 +1049,7 @@ mod tests {
         let network = ctx.selection.as_ref().unwrap().path.clone().unwrap();
         // A half-resolution preview of a 100x100 composition.
         ctx.eval_resolution = Some((50, 50));
-        ctx.results = OverlayResults::new(std::collections::HashMap::from([(
+        ctx.results = EvalResults::new(std::collections::HashMap::from([(
             (network.segments(), node.id),
             std::sync::Arc::new(FieldValue::new(WidthField))
                 as std::sync::Arc<dyn ravel_core::types::NodeData>,
@@ -1075,7 +1075,7 @@ mod tests {
     /// A layer that has not started composites as transparent, so the field
     /// overlay must not draw over it — even handed a result, which is a state
     /// only a stale snapshot could produce, because
-    /// `ProjectState::overlay_scoped_targets` refuses to request one.
+    /// `ProjectState::scoped_eval_targets` refuses to request one.
     ///
     /// Defence in depth on purpose: the sampling frame and the interval check
     /// that decided to request the field have to agree, and the clamped
@@ -1086,7 +1086,7 @@ mod tests {
         // Playhead at composition frame 0, layer starting at 5.
         let mut ctx = context_starting_at(vec![node.clone()], vec![node.id], 5);
         let network = ctx.selection.as_ref().unwrap().path.clone().unwrap();
-        ctx.results = OverlayResults::new(std::collections::HashMap::from([(
+        ctx.results = EvalResults::new(std::collections::HashMap::from([(
             (network.segments(), node.id),
             std::sync::Arc::new(FieldValue::new(RampField))
                 as std::sync::Arc<dyn ravel_core::types::NodeData>,

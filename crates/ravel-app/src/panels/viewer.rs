@@ -43,8 +43,8 @@ use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
 use overlay::{
-    ActiveDrag, DragModifiers, LabelPlacement, OverlayColors, OverlayContext, OverlayEdit,
-    OverlayHandle, OverlayPainter, OverlayRegistry, OverlayResults, ShellHandle,
+    ActiveDrag, DragModifiers, EvalResults, LabelPlacement, OverlayColors, OverlayContext,
+    OverlayEdit, OverlayHandle, OverlayPainter, OverlayRegistry, ShellHandle,
 };
 use snap::{SnapGuides, SnapLines};
 
@@ -1455,10 +1455,7 @@ impl ViewerPanel {
             // Written by `ProjectState` in the same update as `ViewerFrame`,
             // which this panel already observes — so reading it here needs no
             // observer of its own.
-            results: cx
-                .try_global::<OverlayResults>()
-                .cloned()
-                .unwrap_or_default(),
+            results: cx.try_global::<EvalResults>().cloned().unwrap_or_default(),
             registry: self
                 .project(cx)
                 .map(|project| project.read(cx).shared_registry()),
@@ -4225,7 +4222,7 @@ mod tests {
 
     /// Evaluate every node of `graph` in `network`'s scope and index the
     /// results the way the request → publish path does.
-    fn evaluated_results(graph: &Graph, network: &NetworkPath) -> overlay::OverlayResults {
+    fn evaluated_results(graph: &Graph, network: &NetworkPath) -> overlay::EvalResults {
         let mut evaluator = ravel_core::eval::Evaluator::new();
         register_geometry_processors(&mut evaluator, graph);
         let ctx = eval_ctx();
@@ -4236,7 +4233,7 @@ mod tests {
                 values.insert((path.clone(), node.id), value);
             }
         }
-        overlay::OverlayResults::new(values)
+        overlay::EvalResults::new(values)
     }
 
     /// Publish the overlay snapshot a real evaluation would have produced for
@@ -4254,7 +4251,7 @@ mod tests {
                 values.extend(evaluated_results(&layer.network, &network).values);
             }
         }
-        cx.update(|cx| cx.set_global(overlay::OverlayResults::new(values)));
+        cx.update(|cx| cx.set_global(overlay::EvalResults::new(values)));
     }
 
     /// A one-layer document holding `network`, plus the overlay context an
@@ -4438,7 +4435,7 @@ mod tests {
         let (mut ctx, network) = geometry_context(graph, &[id]);
         assert!(node_comp_rect(&ctx, &network, id).is_some());
 
-        ctx.results = overlay::OverlayResults::default();
+        ctx.results = overlay::EvalResults::default();
         assert_eq!(node_comp_rect(&ctx, &network, id), None);
         assert!(selection_comp_rects(&ctx).is_empty());
         assert_eq!(hit_test_shape_nodes(&ctx, &network, (0.0, 0.0)), None);
@@ -5758,7 +5755,7 @@ mod tests {
                 fps: FrameRate::new(30, 1),
             }),
             document: Some(Document::default().with_composition(comp)),
-            results: overlay::OverlayResults::new(values),
+            results: overlay::EvalResults::new(values),
             ..OverlayContext::default()
         };
         (ctx, comp_id, ids)
@@ -6676,7 +6673,7 @@ mod tests {
         });
         let snapshot_present = |cx: &mut TestAppContext| {
             cx.update(|cx| {
-                cx.try_global::<overlay::OverlayResults>()
+                cx.try_global::<overlay::EvalResults>()
                     .is_some_and(|results| !results.values.is_empty())
             })
         };
@@ -6729,7 +6726,7 @@ mod tests {
         cx.run_until_parked();
 
         let present = cx.update(|cx| {
-            cx.try_global::<overlay::OverlayResults>()
+            cx.try_global::<overlay::EvalResults>()
                 .is_some_and(|results| !results.values.is_empty())
         });
         assert!(

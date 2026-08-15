@@ -5466,6 +5466,41 @@ mod tests {
         }
     }
 
+    /// The suppression key is the platform's primary modifier — Cmd on macOS,
+    /// Ctrl elsewhere — and Shift and Alt reach the gesture untouched.
+    #[test]
+    fn drag_modifiers_take_snapping_off_the_platform_primary_key() {
+        let held = |modifiers: Modifiers| drag_modifiers(&modifiers);
+
+        let platform = held(Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        });
+        assert!(platform.primary, "Cmd suppresses the pull");
+        assert!(!platform.shift && !platform.alt);
+
+        assert!(
+            held(Modifiers {
+                control: true,
+                ..Modifiers::default()
+            })
+            .primary,
+            "and so does Ctrl, which is the same key off macOS"
+        );
+
+        // The two that already mean something to a gesture are not it.
+        let alt = held(Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        });
+        assert!(alt.alt && !alt.primary, "Alt draws from the centre");
+        let shift = held(Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        });
+        assert!(shift.shift && !shift.primary, "Shift constrains");
+    }
+
     /// Shift squares a drawn shape off from the larger of the two deltas, which
     /// would overwrite a snapped axis — so a constrained drawing drag snaps
     /// nothing rather than drawing a guide it then misses.

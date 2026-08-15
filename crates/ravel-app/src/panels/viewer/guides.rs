@@ -89,19 +89,36 @@ pub fn ruler_axis(local: (f32, f32), panel: (f32, f32)) -> Option<GuideAxis> {
 /// The index of the guide `pointer` grabs, within `threshold` composition
 /// units.
 ///
+/// `resolution` is the composition's, in composition units: [`GuideOverlay`]
+/// draws each line across that rectangle and no further, so a press in the
+/// letterbox around the picture — level with a guide but nowhere near a drawn
+/// line — grabs nothing. The reach extends by `threshold` past the frame for
+/// the same reason it does across the line: the end of a line is as grabbable
+/// as its middle.
+///
 /// The nearest one wins, and ties keep the earlier guide, so a press between two
 /// coincident guides picks the same one every time instead of alternating.
-pub fn guide_at(guides: &[Guide], pointer: (f32, f32), threshold: f32) -> Option<usize> {
+pub fn guide_at(
+    guides: &[Guide],
+    pointer: (f32, f32),
+    threshold: f32,
+    resolution: (f32, f32),
+) -> Option<usize> {
     if !threshold.is_finite() || threshold < 0.0 {
         return None;
     }
     let mut best: Option<(f32, usize)> = None;
     for (index, guide) in guides.iter().enumerate() {
-        let along = match guide.axis {
-            GuideAxis::Vertical => pointer.0,
-            GuideAxis::Horizontal => pointer.1,
+        // `across` is measured against the guide's position; `along` runs down
+        // the drawn line and is bounded by how far the line is drawn.
+        let (across, along, extent) = match guide.axis {
+            GuideAxis::Vertical => (pointer.0, pointer.1, resolution.1),
+            GuideAxis::Horizontal => (pointer.1, pointer.0, resolution.0),
         };
-        let distance = (guide.position - along).abs();
+        if !(-threshold..=extent + threshold).contains(&along) {
+            continue;
+        }
+        let distance = (guide.position - across).abs();
         if !distance.is_finite() || distance > threshold {
             continue;
         }
@@ -333,32 +350,67 @@ mod tests {
             Guide::horizontal(50.0),
             Guide::vertical(104.0),
         ];
-        assert_eq!(guide_at(&guides, (103.0, 300.0), 8.0), Some(2));
-        assert_eq!(guide_at(&guides, (101.0, 300.0), 8.0), Some(0));
+        let frame = (1920.0, 1080.0);
+        assert_eq!(guide_at(&guides, (103.0, 300.0), 8.0, frame), Some(2));
+        assert_eq!(guide_at(&guides, (101.0, 300.0), 8.0, frame), Some(0));
         assert_eq!(
-            guide_at(&guides, (300.0, 52.0), 8.0),
+            guide_at(&guides, (300.0, 52.0), 8.0, frame),
             Some(1),
             "a horizontal guide is measured along y"
         );
         assert_eq!(
-            guide_at(&guides, (100.0, 300.0), 0.0),
+            guide_at(&guides, (100.0, 300.0), 0.0, frame),
             Some(0),
             "a zero threshold still grabs an exact hit"
         );
-        assert_eq!(guide_at(&guides, (120.0, 300.0), 8.0), None);
-        assert_eq!(guide_at(&[], (0.0, 0.0), 8.0), None);
+        assert_eq!(guide_at(&guides, (120.0, 300.0), 8.0, frame), None);
+        assert_eq!(guide_at(&[], (0.0, 0.0), 8.0, frame), None);
         assert_eq!(
-            guide_at(&guides, (f32::NAN, 0.0), 8.0),
+            guide_at(&guides, (f32::NAN, 0.0), 8.0, frame),
             None,
             "a non-finite pointer is nowhere, not everywhere"
         );
+    }
+
+    /// A guide is drawn across the composition rectangle and no further, so it
+    /// is grabbable there and no further: the letterbox holds no line.
+    #[test]
+    fn a_guide_is_grabbable_only_where_it_is_drawn() {
+        let frame = (1920.0, 1080.0);
+        let vertical = [Guide::vertical(100.0)];
+        assert_eq!(guide_at(&vertical, (100.0, 540.0), 8.0, frame), Some(0));
+        assert_eq!(
+            guide_at(&vertical, (100.0, 1085.0), 8.0, frame),
+            Some(0),
+            "the end of a line is as grabbable as its middle, within the reach"
+        );
+        assert_eq!(
+            guide_at(&vertical, (100.0, 1200.0), 8.0, frame),
+            None,
+            "below the frame there is nothing drawn to grab"
+        );
+        assert_eq!(guide_at(&vertical, (100.0, -200.0), 8.0, frame), None);
+        assert_eq!(
+            guide_at(&vertical, (100.0, f32::NAN), 8.0, frame),
+            None,
+            "a pointer that is nowhere along the line grabs nothing"
+        );
+
+        // The horizontal guide is bounded the other way round.
+        let horizontal = [Guide::horizontal(100.0)];
+        assert_eq!(guide_at(&horizontal, (960.0, 100.0), 8.0, frame), Some(0));
+        assert_eq!(guide_at(&horizontal, (2100.0, 100.0), 8.0, frame), None);
+        assert_eq!(guide_at(&horizontal, (-30.0, 100.0), 8.0, frame), None);
     }
 
     /// Ties keep the earlier guide, so the choice is stable.
     #[test]
     fn coincident_guides_resolve_to_the_first_one() {
         let guides = [Guide::vertical(100.0), Guide::vertical(100.0)];
-        assert_eq!(guide_at(&guides, (100.0, 0.0), 8.0), Some(0));
+        assert_eq!(
+            guide_at(&guides, (100.0, 0.0), 8.0, (1920.0, 1080.0)),
+            Some(0)
+        );
     }
 
     /// The ruler draws two strips and places its ticks at the composition

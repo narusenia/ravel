@@ -1558,6 +1558,14 @@ impl ViewerPanel {
         )
     }
 
+    /// The composition rectangle in composition units — the very extent
+    /// [`OverlayPainter`] is handed, so the length of a drawn guide and the
+    /// length of its hit region come from one value.
+    fn comp_extent(&self) -> Option<(f32, f32)> {
+        self.composition_resolution
+            .map(|(width, height)| (width as f32, height as f32))
+    }
+
     /// Which way the guide under `pointer` runs, if one is in reach. The same
     /// hit test the press uses, so the cursor promises exactly what a press
     /// would grab.
@@ -1567,7 +1575,7 @@ impl ViewerPanel {
         let document = project.read(cx).document();
         let composition = document.get_composition(comp)?;
         let threshold = guides::GUIDE_HIT_PX * self.comp_per_pixel();
-        let index = guides::guide_at(&composition.guides, pointer, threshold)?;
+        let index = guides::guide_at(&composition.guides, pointer, threshold, self.comp_extent()?)?;
         Some(composition.guides[index].axis)
     }
 
@@ -1960,7 +1968,11 @@ impl ViewerPanel {
             }
             None => {
                 let threshold = guides::GUIDE_HIT_PX * self.comp_per_pixel();
-                let Some(index) = guides::guide_at(&composition.guides, pointer, threshold) else {
+                let Some(extent) = self.comp_extent() else {
+                    return false;
+                };
+                let Some(index) = guides::guide_at(&composition.guides, pointer, threshold, extent)
+                else {
                     return false;
                 };
                 let guide = composition.guides[index];
@@ -2144,7 +2156,14 @@ impl ViewerPanel {
     }
 
     /// Drop every guide of the composition on screen, as one undo step.
+    ///
+    /// Refused while the guides are locked: clearing is a deletion, and the
+    /// lock forbids deletions however they are reached — the menu is not a way
+    /// around the pointer's refusal.
     fn clear_guides(&mut self, cx: &mut Context<Self>) {
+        if self.guides_locked {
+            return;
+        }
         let Some(comp) = self.active_comp(cx) else {
             return;
         };
@@ -2391,6 +2410,9 @@ impl ViewerPanel {
                         let entity = guide_entity.clone();
                         menu.separator().item(
                             PopupMenuItem::new(SharedString::from(t!("viewer.guides_clear")))
+                                // Clearing is a deletion, so the lock greys it
+                                // out; `clear_guides` refuses it anyway.
+                                .disabled(guides_locked)
                                 .on_click(move |_, _window, cx| {
                                     entity.update(cx, |this, cx| this.clear_guides(cx)).ok();
                                 }),
@@ -6141,6 +6163,82 @@ mod tests {
                     Some(ViewerPointerHint::ResizeLeftRight),
                     "unlocked, the cursor names the axis the drag writes"
                 );
+            })
+            .unwrap();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(500.0)]
+        );
+    }
+
+    /// "Clear guides" is a deletion, and locking forbids deletions: it leaves
+    /// the guides alone and pushes no undo step.
+    #[gpui::test]
+    fn clearing_the_guides_is_refused_while_they_are_locked(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(
+            &project,
+            comp_id,
+            vec![Guide::vertical(500.0), Guide::horizontal(300.0)],
+            cx,
+        );
+        let placed = guides_of(&project, comp_id, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.guides_locked = true;
+                panel.clear_guides(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            placed,
+            "a locked guide is not deleted"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "and no undo step was pushed: the next undo is the one that placed them"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.guides_locked = false;
+                panel.clear_guides(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "unlocked, clearing works"
+        );
+    }
+
+    /// A guide is drawn across the composition frame only, so it is grabbable
+    /// there only: the letterbox around the picture holds no line to pick up.
+    #[gpui::test]
+    fn a_guide_is_not_grabbable_outside_the_composition_frame(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(&project, comp_id, vec![Guide::vertical(500.0)], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // On the line, inside the 1920x1080 frame.
+                assert_eq!(
+                    panel.guide_axis_at((500.0, 400.0), cx),
+                    Some(GuideAxis::Vertical)
+                );
+                // On the same line, below the frame: nothing is drawn here.
+                assert_eq!(panel.guide_axis_at((500.0, 1200.0), cx), None);
+                assert_eq!(panel.guide_axis_at((500.0, -200.0), cx), None);
+
+                let outside = press_at(panel, (500.0, 1200.0));
+                assert!(
+                    !panel.guide_mouse_down(&outside, cx),
+                    "and the press is not taken there"
+                );
+                assert!(panel.guide_drag.is_none());
             })
             .unwrap();
         assert_eq!(

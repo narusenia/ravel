@@ -1733,7 +1733,7 @@ impl ViewerPanel {
                 pointer.0 - drag.pointer_start.0,
                 pointer.1 - drag.pointer_start.1,
             );
-            let snapped = match snap_target_for_handle(&drag.handle, drag.snap.rect) {
+            let snapped = match snap_target_for_handle(&drag.handle, drag.snap.rect, modifiers) {
                 Some((rect, axes)) => self
                     .snap_result(&drag.snap.lines, Some(rect), raw, modifiers)
                     .restrict(raw, axes),
@@ -2909,11 +2909,17 @@ fn point_rect(point: (f32, f32)) -> CompRect {
 fn snap_target_for_handle(
     handle: &OverlayHandle,
     layer_rect: Option<CompRect>,
+    modifiers: DragModifiers,
 ) -> Option<(CompRect, (bool, bool))> {
     let shell = handle.id.shell()?;
     let rect = match shell {
         ShellHandle::Position => layer_rect?,
         ShellHandle::Rotate(_) => return None,
+        // Shift scales uniformly: `scale_edits` takes the larger movement and
+        // applies it to both axes, which overwrites whatever a snapped axis
+        // had landed on. The guide would name a line the grip then misses, so
+        // the constrained gesture snaps nothing at all.
+        ShellHandle::Scale(_) if modifiers.shift => return None,
         ShellHandle::Scale(_) | ShellHandle::Anchor => point_rect(handle.position),
     };
     Some((rect, shell.driven_axes()))
@@ -5458,6 +5464,99 @@ mod tests {
                 "the cancel put the layer back for the next round"
             );
         }
+    }
+
+    /// Shift squares a drawn shape off from the larger of the two deltas, which
+    /// would overwrite a snapped axis — so a constrained drawing drag snaps
+    /// nothing rather than drawing a guide it then misses.
+    #[gpui::test]
+    fn shift_turns_snapping_off_while_drawing(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            });
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Rect,
+                ..ToolState::default()
+            });
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                let event = MouseMoveEvent {
+                    // Five units short of the composition centre: inside the
+                    // reach, and ignored because Shift is down.
+                    position: window_point(panel, (955.0, 600.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                };
+                panel.shape_dragged(&event, cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "the constraint decides the corner, so nothing was aligned"
+                );
+                let geo = panel
+                    .shape_drag
+                    .as_ref()
+                    .and_then(|drag| drag.created.as_ref())
+                    .expect("the drag created a shape")
+                    .geo;
+                // Squared off from the larger delta (455 across, 100 down).
+                assert!(
+                    (geo.half.0 - geo.half.1).abs() < 1e-3,
+                    "Shift still squares the shape off: {geo:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Shift applies one ratio to both axes of a shell scale, which would move
+    /// a snapped grip off the line it landed on. The move grip constrains
+    /// nothing, so it keeps snapping.
+    #[gpui::test]
+    fn shift_turns_snapping_off_for_a_scale_grip_only(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _layer) = shell_setup(cx);
+        let shift = DragModifiers {
+            shift: true,
+            ..DragModifiers::default()
+        };
+
+        window
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, SE_GRIP), cx));
+                let to = window_point(panel, (955.0, 210.0));
+                panel.handle_dragged(to, shift, cx);
+                assert!(
+                    panel.snap_guides.is_empty(),
+                    "a uniform scale overwrites whichever axis was pulled"
+                );
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The move grip, at the bbox centre: Shift does nothing there.
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                let to = window_point(panel, (955.0, 200.0));
+                panel.handle_dragged(to, shift, cx);
+                assert_eq!(
+                    panel.snap_guides.x,
+                    Some(960.0),
+                    "the move grip constrains nothing, so the pull stays"
+                );
+                panel.cancel_handle_drag(cx);
+            })
+            .unwrap();
     }
 
     /// The guide is a report of a correction in flight, so it reaches the

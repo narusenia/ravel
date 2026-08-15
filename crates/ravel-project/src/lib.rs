@@ -797,6 +797,67 @@ mod tests {
         archive
     }
 
+    /// The composition's guides survive a save/load cycle, and the format
+    /// version does not move: they are an additive field with a `serde`
+    /// default, the treatment `Layer.audio` had (SNAP-2).
+    #[test]
+    fn the_archive_round_trips_the_composition_guides() {
+        use ravel_core::composition::Guide;
+
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        let placed = vec![Guide::vertical(960.0), Guide::horizontal(120.5)];
+        project.document = ravel_ui::document::update_composition(&project.document, root, {
+            let placed = placed.clone();
+            |mut comp| {
+                comp.guides = placed;
+                comp
+            }
+        })
+        .expect("the root composition");
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            back.document.get_composition(root).unwrap().guides,
+            placed,
+            "the guides come back in the order they were placed"
+        );
+        assert_eq!(back.document, project.document);
+    }
+
+    /// An archive written before guides existed carries no `guides` field. It
+    /// is a current-version archive — no migration was added for the additive
+    /// field — so it has to load as it stands, with no guides.
+    #[test]
+    fn a_current_archive_without_the_guides_field_loads() {
+        let project = demo_project();
+        let ron = document_to_ron(&project.document).unwrap();
+        assert!(ron.contains("guides:"), "the field was there to strip");
+        // By line rather than by substring: the serializer ends its lines the
+        // platform's way, so a pattern carrying `\n` strips nothing on Windows
+        // and the test would pass while proving the opposite.
+        let stripped: String = ron
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("guides:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(
+            !stripped.contains("guides:"),
+            "every composition lost the field"
+        );
+
+        let mut archive = archive_without_optional_entries(&project);
+        archive.insert(container::entry::DOCUMENT, stripped.into_bytes());
+
+        let back = ProjectFile::from_archive(&archive).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(back.document, project.document, "nothing else moved");
+        for comp in back.document.compositions.values() {
+            assert!(comp.guides.is_empty());
+        }
+    }
+
     /// The active composition survives a save/load cycle (REQ-UI-013).
     #[test]
     fn archive_roundtrip_restores_the_active_composition() {

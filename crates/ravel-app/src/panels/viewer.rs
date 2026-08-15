@@ -13,6 +13,7 @@
 
 pub mod field;
 pub mod geometry;
+pub mod guides;
 pub mod motion_path;
 pub mod overlay;
 pub mod snap;
@@ -33,6 +34,7 @@ use crate::assets::RavelIcon;
 use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
 use crate::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::transform::{Affine, world_matrix};
+use ravel_core::composition::{Guide, GuideAxis};
 use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
 use ravel_gpu::GpuFrameBuffer;
@@ -236,6 +238,15 @@ impl ViewerPointerHint {
     }
 }
 
+/// The cursor a guide promises: it moves across itself and nowhere else, so the
+/// glyph names the one axis the drag writes.
+fn guide_hint(axis: GuideAxis) -> ViewerPointerHint {
+    match axis {
+        GuideAxis::Vertical => ViewerPointerHint::ResizeLeftRight,
+        GuideAxis::Horizontal => ViewerPointerHint::ResizeUpDown,
+    }
+}
+
 fn viewer_pointer_hint_transition(
     current: ViewerPointerHint,
     next: ViewerPointerHint,
@@ -250,12 +261,12 @@ fn viewer_drag_cursor(
     drawing_shape: bool,
     drawing_pen: bool,
     path_handle: Option<PathHandleKind>,
-    shell_handle: Option<ViewerPointerHint>,
+    held_hint: Option<ViewerPointerHint>,
 ) -> Option<CursorStyle> {
-    // A shell grip keeps the cursor the pointer showed before the press: the
-    // gesture is the one the hover promised, so changing the glyph mid-drag
-    // would only unsay it.
-    if let Some(hint) = shell_handle {
+    // A shell grip and a guide both keep the cursor the pointer showed before
+    // the press: the gesture is the one the hover promised, so changing the
+    // glyph mid-drag would only unsay it.
+    if let Some(hint) = held_hint {
         return Some(hint.cursor());
     }
     if pan || moving || path_handle == Some(PathHandleKind::Point) {
@@ -308,6 +319,31 @@ struct OverlayHandleDrag {
     changed: bool,
 }
 
+/// A guide being dragged out of a ruler or moved.
+///
+/// Creating and moving are the same gesture: a guide dragged out of a ruler is
+/// inserted into the preview document at press time, so from the first move on
+/// there is only ever "the guide at this index is being placed".
+#[derive(Clone)]
+struct GuideDrag {
+    comp: CompId,
+    /// Index into `Composition::guides`.
+    index: usize,
+    axis: GuideAxis,
+    /// The guide's position when the gesture pressed.
+    origin: f32,
+    pointer_start: (f32, f32),
+    /// Candidates, with this guide left out — a line is always within zero of
+    /// itself, so leaving it in would pin the drag to its start.
+    lines: SnapLines,
+    original_document: Document,
+    /// Whether this gesture created the guide. A new guide released back over
+    /// the ruler leaves the document exactly as it was rather than committing
+    /// an undo step for a guide the user put back.
+    created: bool,
+    changed: bool,
+}
+
 pub struct ViewerPanel {
     /// The current frame converted for GPUI rendering. Rebuilt only when
     /// [`ViewerFrame`] changes, never during `render()`.
@@ -325,6 +361,7 @@ pub struct ViewerPanel {
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
     handle_drag: Option<OverlayHandleDrag>,
+    guide_drag: Option<GuideDrag>,
     /// The lines the drag in flight is snapped to. Read back only while a
     /// gesture is live (see [`Self::overlay_context`]), so a guide cannot
     /// outlive the correction it reports.
@@ -334,6 +371,18 @@ pub struct ViewerPanel {
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
     show_safe_areas: bool,
+    /// Ruler strips along the panel's top and left edges. Off by default, like
+    /// every other piece of measuring chrome — and the only place a guide is
+    /// dragged out of, so turning them on is what makes guides reachable.
+    show_rulers: bool,
+    /// Whether the composition's guides are drawn and snapped to. Session
+    /// state, not document state: it is a view of the guides, the same class as
+    /// the grid and safe-area toggles.
+    show_guides: bool,
+    /// Whether guides refuse to be dragged. Locking says "do not move these",
+    /// so a locked guide is still drawn and still snapped to — it just cannot
+    /// be created, moved or deleted with the pointer.
+    guides_locked: bool,
     /// Selection bounding-box overlay toggle. On by default — the outline is
     /// what tells the user which shape a gesture will act on.
     show_geometry_bounds: bool,
@@ -552,10 +601,14 @@ impl ViewerPanel {
             shape_drag: None,
             pen_session: None,
             handle_drag: None,
+            guide_drag: None,
             snap_guides: SnapGuides::default(),
             pointer_hint: ViewerPointerHint::default(),
             show_grid: false,
             show_safe_areas: false,
+            show_rulers: false,
+            show_guides: true,
+            guides_locked: false,
             show_geometry_bounds: true,
             show_geometry_points: false,
             show_geometry_paths: false,
@@ -718,7 +771,7 @@ impl ViewerPanel {
             // rectangle snapping aligns — and the layer holding them is left
             // out of the candidates, since its bbox travels with them.
             let snap = SnapTarget {
-                lines: SnapLines::collect(&overlay_ctx, Some(network.comp), &[network.layer]),
+                lines: SnapLines::collect(&overlay_ctx, Some(network.comp), &[network.layer], None),
                 rect: origins
                     .iter()
                     .filter_map(|origin| node_comp_rect(&overlay_ctx, &network, origin.node))
@@ -833,7 +886,7 @@ impl ViewerPanel {
             targets,
             original_document: document,
             snap: SnapTarget {
-                lines: SnapLines::collect(&overlay_ctx, Some(comp_id), &moving),
+                lines: SnapLines::collect(&overlay_ctx, Some(comp_id), &moving, None),
                 rect: moved_rect,
             },
             changed: false,
@@ -1040,7 +1093,7 @@ impl ViewerPanel {
             .as_ref()
             .map(|path| vec![path.layer])
             .unwrap_or_default();
-        let snap_lines = self.snap_lines(comp, &drawn_into, cx);
+        let snap_lines = self.snap_lines(comp, &drawn_into, None, cx);
         // A gesture that has not moved yet has corrected nothing: the
         // previous one's guide must not survive into this frame.
         self.snap_guides = SnapGuides::default();
@@ -1257,6 +1310,7 @@ impl ViewerPanel {
                     &context,
                     context.layer_selection.comp(),
                     context.layer_selection.layers(),
+                    None,
                 ),
                 rect: layer_selection_comp_rects(&context).first().copied(),
             },
@@ -1287,7 +1341,10 @@ impl ViewerPanel {
     /// Whether a document-editing gesture is in flight. Panning is not one:
     /// it moves the view, not the picture.
     fn dragging(&self) -> bool {
-        self.move_drag.is_some() || self.shape_drag.is_some() || self.handle_drag.is_some()
+        self.move_drag.is_some()
+            || self.shape_drag.is_some()
+            || self.handle_drag.is_some()
+            || self.guide_drag.is_some()
     }
 
     /// Correct a gesture's composition-space delta so an edge or the centre of
@@ -1329,10 +1386,16 @@ impl ViewerPanel {
         )
     }
 
-    /// The snap candidates a gesture over `comp` sees, with the layers it moves
-    /// left out.
-    fn snap_lines(&self, comp: Option<CompId>, moving: &[LayerId], cx: &App) -> SnapLines {
-        SnapLines::collect(&self.overlay_context(cx), comp, moving)
+    /// The snap candidates a gesture over `comp` sees, with the layers and the
+    /// guide it moves left out.
+    fn snap_lines(
+        &self,
+        comp: Option<CompId>,
+        moving: &[LayerId],
+        moving_guide: Option<usize>,
+        cx: &App,
+    ) -> SnapLines {
+        SnapLines::collect(&self.overlay_context(cx), comp, moving, moving_guide)
     }
 
     /// Snapshot the world the overlays are allowed to see. Read-only, and the
@@ -1350,6 +1413,7 @@ impl ViewerPanel {
                     .map(|project| project.read(cx).viewer_resolution().apply(resolution))
                     .unwrap_or(resolution)
             }),
+            comp: self.active_comp(cx),
             playback: cx.try_global::<super::PlaybackPosition>().copied(),
             document: self
                 .project(cx)
@@ -1359,6 +1423,7 @@ impl ViewerPanel {
             tool: cx.try_global::<ToolState>().map(|state| state.active),
             show_grid: self.show_grid,
             show_safe_areas: self.show_safe_areas,
+            show_guides: self.show_guides,
             show_geometry_bounds: self.show_geometry_bounds,
             show_geometry_points: self.show_geometry_points,
             show_geometry_paths: self.show_geometry_paths,
@@ -1462,6 +1527,21 @@ impl ViewerPanel {
             return Some(handle.hint);
         }
 
+        // Only where a press would actually do something: hidden or locked
+        // guides promise nothing, and neither does a ruler strip that cannot
+        // drag one out.
+        if tool == ravel_ui::ToolKind::Select && self.show_guides && !self.guides_locked {
+            if self.show_rulers
+                && let Some(axis) =
+                    guides::ruler_axis(self.local_position(position), self.viewport_size.get())
+            {
+                return Some(guide_hint(axis));
+            }
+            if let Some(axis) = self.guide_axis_at(pointer, cx) {
+                return Some(guide_hint(axis));
+            }
+        }
+
         if tool == ravel_ui::ToolKind::Select && self.selected_body_contains(pointer, cx) {
             return Some(ViewerPointerHint::MovableBody);
         }
@@ -1476,6 +1556,27 @@ impl ViewerPanel {
                 ViewerPointerHint::Empty
             },
         )
+    }
+
+    /// The composition rectangle in composition units — the very extent
+    /// [`OverlayPainter`] is handed, so the length of a drawn guide and the
+    /// length of its hit region come from one value.
+    fn comp_extent(&self) -> Option<(f32, f32)> {
+        self.composition_resolution
+            .map(|(width, height)| (width as f32, height as f32))
+    }
+
+    /// Which way the guide under `pointer` runs, if one is in reach. The same
+    /// hit test the press uses, so the cursor promises exactly what a press
+    /// would grab.
+    fn guide_axis_at(&self, pointer: (f32, f32), cx: &App) -> Option<GuideAxis> {
+        let comp = self.active_comp(cx)?;
+        let project = self.project(cx)?;
+        let document = project.read(cx).document();
+        let composition = document.get_composition(comp)?;
+        let threshold = guides::GUIDE_HIT_PX * self.comp_per_pixel();
+        let index = guides::guide_at(&composition.guides, pointer, threshold, self.comp_extent()?)?;
+        Some(composition.guides[index].axis)
     }
 
     fn selected_body_contains(&self, pointer: (f32, f32), cx: &App) -> bool {
@@ -1804,6 +1905,293 @@ impl ViewerPanel {
         cx.notify();
     }
 
+    /// The composition the Viewer is showing.
+    fn active_comp(&self, cx: &App) -> Option<CompId> {
+        self.project(cx)?
+            .read(cx)
+            .active_composition(cx)
+            .map(|c| c.id)
+    }
+
+    /// Press on a ruler strip (drag out a new guide) or on a guide (move it).
+    ///
+    /// Returns whether the press was taken. Guides are a `Select`-tool gesture:
+    /// the ruler strips lie over the canvas area, and a drawing tool's press
+    /// there belongs to the drawing tool.
+    ///
+    /// This is a panel branch rather than an [`OverlayHandle`] because neither
+    /// half fits one: a ruler is panel chrome outside the composition rectangle
+    /// the overlay painter knows, and a guide is a line, which the registry's
+    /// radius-around-a-point hit test cannot express.
+    fn guide_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.show_guides || self.guides_locked || self.pen_session.is_some() {
+            return false;
+        }
+        if cx
+            .try_global::<ToolState>()
+            .map(|state| state.active)
+            .unwrap_or_default()
+            != ravel_ui::ToolKind::Select
+        {
+            return false;
+        }
+        let Some(pointer) = self.comp_position(event.position) else {
+            return false;
+        };
+        let Some(comp_id) = self.active_comp(cx) else {
+            return false;
+        };
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let document = project.read(cx).document().clone();
+        let Some(composition) = document.get_composition(comp_id) else {
+            return false;
+        };
+        let existing = composition.guides.len();
+
+        // The ruler wins over the guides under it: it is drawn on top, and it
+        // is the only way to make a new one.
+        let ruler = self.show_rulers.then(|| {
+            guides::ruler_axis(
+                self.local_position(event.position),
+                self.viewport_size.get(),
+            )
+        });
+        let (index, axis, origin, created) = match ruler.flatten() {
+            Some(axis) => {
+                let origin = match axis {
+                    GuideAxis::Vertical => pointer.0,
+                    GuideAxis::Horizontal => pointer.1,
+                };
+                (existing, axis, origin, true)
+            }
+            None => {
+                let threshold = guides::GUIDE_HIT_PX * self.comp_per_pixel();
+                let Some(extent) = self.comp_extent() else {
+                    return false;
+                };
+                let Some(index) = guides::guide_at(&composition.guides, pointer, threshold, extent)
+                else {
+                    return false;
+                };
+                let guide = composition.guides[index];
+                (index, guide.axis, guide.position, false)
+            }
+        };
+
+        // A gesture that has not moved yet has corrected nothing: the previous
+        // one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
+        self.guide_drag = Some(GuideDrag {
+            comp: comp_id,
+            index,
+            axis,
+            origin,
+            pointer_start: pointer,
+            lines: self.snap_lines(Some(comp_id), &[], Some(index), cx),
+            original_document: document,
+            created,
+            changed: false,
+        });
+        if created && let Some(drag) = self.guide_drag.clone() {
+            self.write_guide(
+                &drag,
+                Some(Guide {
+                    axis,
+                    position: origin,
+                }),
+                cx,
+            );
+        }
+        true
+    }
+
+    fn guide_dragged(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: DragModifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.guide_drag.clone() else {
+            return;
+        };
+        let Some(pointer) = self.comp_position(position) else {
+            return;
+        };
+        let raw = (
+            pointer.0 - drag.pointer_start.0,
+            pointer.1 - drag.pointer_start.1,
+        );
+        // A guide moves across itself and nowhere else, so the correction on the
+        // other axis is discarded — and with it the guide line that would
+        // otherwise name an alignment this gesture cannot make.
+        let (rect, axes) = match drag.axis {
+            GuideAxis::Vertical => (point_rect((drag.origin, 0.0)), (true, false)),
+            GuideAxis::Horizontal => (point_rect((0.0, drag.origin)), (false, true)),
+        };
+        let snapped = self
+            .snap_result(&drag.lines, Some(rect), raw, modifiers)
+            .restrict(raw, axes);
+        self.snap_guides = snapped.guides;
+        let delta = match drag.axis {
+            GuideAxis::Vertical => snapped.delta.0,
+            GuideAxis::Horizontal => snapped.delta.1,
+        };
+        let position = drag.origin + delta;
+        if !self.write_guide(
+            &drag,
+            Some(Guide {
+                axis: drag.axis,
+                position,
+            }),
+            cx,
+        ) {
+            return;
+        }
+        if let Some(active) = &mut self.guide_drag {
+            active.changed = position != drag.origin;
+        }
+    }
+
+    /// Release: a guide dropped back over a ruler is deleted, and one dropped on
+    /// the picture stays. Either way the whole gesture is one undo step, and a
+    /// gesture that changed nothing commits none.
+    fn guide_drag_ended(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.guide_drag.take() else {
+            return;
+        };
+        let over_ruler = self.show_rulers
+            && guides::ruler_axis(self.local_position(position), self.viewport_size.get())
+                .is_some();
+        if over_ruler {
+            // A guide that never existed outside this gesture leaves nothing
+            // behind: restore rather than commit a create-then-delete pair.
+            if drag.created {
+                self.restore_document(drag.original_document, cx);
+                return;
+            }
+            if !self.write_guide(&drag, None, cx) {
+                return;
+            }
+        } else if !drag.created && !drag.changed {
+            // A guide put back where it started is not an undo step. The
+            // preview already matches the committed snapshot, but applying it
+            // marked the store dirty, so drop that — committing it would push
+            // an identical version, and leaving it would cost the next undo on
+            // nothing. Reverting keeps whatever another panel committed
+            // meanwhile, which rolling back to the press-time snapshot would
+            // discard.
+            if let Some(project) = self.project(cx) {
+                project.update(cx, |project, cx| {
+                    project.revert_document(cx);
+                });
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.commit_document(project.document().clone(), InvalidationHint::None, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn cancel_guide_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.guide_drag.take() else {
+            return;
+        };
+        self.restore_document(drag.original_document, cx);
+    }
+
+    /// Write the dragged guide into the preview document, or remove it when
+    /// `guide` is `None`. Guides drive no evaluation, so the hint is `None`.
+    fn write_guide(
+        &mut self,
+        drag: &GuideDrag,
+        guide: Option<Guide>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let mut applied = false;
+        project.update(cx, |project, cx| {
+            let Some(document) = ravel_ui::document::update_composition(
+                project.document(),
+                drag.comp,
+                |mut comp| {
+                    match guide {
+                        Some(guide) if drag.index < comp.guides.len() => {
+                            comp.guides[drag.index] = guide;
+                        }
+                        Some(guide) => comp.guides.push(guide),
+                        None if drag.index < comp.guides.len() => {
+                            comp.guides.remove(drag.index);
+                        }
+                        None => {}
+                    }
+                    comp
+                },
+            ) else {
+                return;
+            };
+            project.apply_document(document, InvalidationHint::None, cx);
+            applied = true;
+        });
+        if applied {
+            cx.notify();
+        }
+        applied
+    }
+
+    fn restore_document(&mut self, snapshot: Document, cx: &mut Context<Self>) {
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.restore_document_snapshot(snapshot, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Drop every guide of the composition on screen, as one undo step.
+    ///
+    /// Refused while the guides are locked: clearing is a deletion, and the
+    /// lock forbids deletions however they are reached — the menu is not a way
+    /// around the pointer's refusal.
+    fn clear_guides(&mut self, cx: &mut Context<Self>) {
+        if self.guides_locked {
+            return;
+        }
+        let Some(comp) = self.active_comp(cx) else {
+            return;
+        };
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            // Nothing to clear is not an undo step.
+            if project
+                .document()
+                .get_composition(comp)
+                .is_none_or(|composition| composition.guides.is_empty())
+            {
+                return;
+            }
+            let Some(document) =
+                ravel_ui::document::update_composition(project.document(), comp, |mut comp| {
+                    comp.guides.clear();
+                    comp
+                })
+            else {
+                return;
+            };
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+        cx.notify();
+    }
+
     fn tool_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let active = cx
             .try_global::<ToolState>()
@@ -1864,6 +2252,9 @@ impl ViewerPanel {
         let field_entity = entity.clone();
         let (field_display, field_map, field_opacity) =
             (self.field_display, self.field_map, self.field_opacity);
+        let guide_entity = entity.clone();
+        let (show_rulers, show_guides, guides_locked) =
+            (self.show_rulers, self.show_guides, self.guides_locked);
         let attr_entity = entity.clone();
         let arrow_attr = self.geometry_arrow_attr.clone();
         let (show_indices, show_groups) = (self.show_geometry_indices, self.show_geometry_groups);
@@ -1975,6 +2366,58 @@ impl ViewerPanel {
                         this.show_safe_areas = !this.show_safe_areas;
                         cx.notify();
                     })),
+            )
+            .child(
+                // One menu rather than four buttons: rulers, guides, the lock
+                // and "clear" all answer "what do I want the guides to do", and
+                // only the first two are ever visible state.
+                Button::new("viewer-rulers")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.show_rulers)
+                    .icon(Icon::new(RavelIcon::Rulers))
+                    .tooltip(t!("viewer.rulers"))
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let mut menu = menu;
+                        for (key, checked, apply) in [
+                            (
+                                "viewer.rulers",
+                                show_rulers,
+                                (|this: &mut ViewerPanel| this.show_rulers = !this.show_rulers)
+                                    as fn(&mut ViewerPanel),
+                            ),
+                            ("viewer.guides", show_guides, |this| {
+                                this.show_guides = !this.show_guides
+                            }),
+                            ("viewer.guides_lock", guides_locked, |this| {
+                                this.guides_locked = !this.guides_locked
+                            }),
+                        ] {
+                            let entity = guide_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(key)))
+                                    .checked(checked)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                apply(this);
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        let entity = guide_entity.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new(SharedString::from(t!("viewer.guides_clear")))
+                                // Clearing is a deletion, so the lock greys it
+                                // out; `clear_guides` refuses it anyway.
+                                .disabled(guides_locked)
+                                .on_click(move |_, _window, cx| {
+                                    entity.update(cx, |this, cx| this.clear_guides(cx)).ok();
+                                }),
+                        )
+                    }),
             )
             .child(
                 Button::new("viewer-geometry-bounds")
@@ -2451,7 +2894,8 @@ impl Render for ViewerPanel {
             self.handle_drag
                 .as_ref()
                 .filter(|drag| drag.handle.id.shell().is_some())
-                .map(|drag| drag.handle.hint),
+                .map(|drag| drag.handle.hint)
+                .or_else(|| self.guide_drag.as_ref().map(|drag| guide_hint(drag.axis))),
         );
         let composition_background = (|| {
             let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
@@ -2465,6 +2909,15 @@ impl Render for ViewerPanel {
         })()
         .unwrap_or_else(|| rgb(0x000000).into());
 
+        // The ruler is the one mark that is not an overlay: it is pinned to the
+        // panel's edges, which the composition rectangle leaves entirely as
+        // soon as the view is zoomed in.
+        let rulers = self.show_rulers.then(|| {
+            (
+                cx.theme().colors.secondary,
+                cx.theme().colors.muted_foreground,
+            )
+        });
         // One snapshot feeds paint, labels and hit-testing, so an overlay can
         // never see a different world than the pointer does.
         let overlay_context = self.overlay_context(cx);
@@ -2561,6 +3014,21 @@ impl Render for ViewerPanel {
                     let mut painter = OverlayPainter::new(frame_bounds, resolution);
                     overlays.paint(&overlay_context, &mut painter);
                     overlay::paint_primitives(&painter.finish(), window);
+                    // Over the overlays: the strips are chrome the guides are
+                    // dragged out of, and a mark that slid under the picture
+                    // would be a target the pointer cannot reach.
+                    if let Some((background, tick)) = rulers {
+                        overlay::paint_primitives(
+                            &guides::ruler_primitives(
+                                bounds,
+                                frame_bounds,
+                                resolution,
+                                background,
+                                tick,
+                            ),
+                            window,
+                        );
+                    }
                     if let Some(cursor) = active_drag_cursor {
                         window.set_window_cursor_style(cursor);
                     }
@@ -2636,7 +3104,9 @@ impl Render for ViewerPanel {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    if !this.overlay_handle_mouse_down(event, cx) {
+                    if !this.overlay_handle_mouse_down(event, cx)
+                        && !this.guide_mouse_down(event, cx)
+                    {
                         this.select_mouse_down(event, cx);
                         this.shape_mouse_down(event, cx);
                         this.pen_mouse_down(event, cx);
@@ -2653,11 +3123,12 @@ impl Render for ViewerPanel {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
                     this.move_ended(cx);
                     this.shape_ended(cx);
                     this.pen_point_ended(cx);
                     this.handle_drag_ended(cx);
+                    this.guide_drag_ended(event.position, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -2666,6 +3137,7 @@ impl Render for ViewerPanel {
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
+                        this.cancel_guide_drag(cx);
                         let Some(drag) = this.pan_drag else {
                             return;
                         };
@@ -2678,7 +3150,13 @@ impl Render for ViewerPanel {
                     }
                     Some(MouseButton::Left) => {
                         this.pan_drag = None;
-                        if this.handle_drag.is_some() {
+                        if this.guide_drag.is_some() {
+                            this.guide_dragged(
+                                event.position,
+                                drag_modifiers(&event.modifiers),
+                                cx,
+                            );
+                        } else if this.handle_drag.is_some() {
                             this.handle_dragged(
                                 event.position,
                                 drag_modifiers(&event.modifiers),
@@ -2702,6 +3180,7 @@ impl Render for ViewerPanel {
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
+                        this.cancel_guide_drag(cx);
                         let Some(next) = this.pointer_hint_at(event.position, cx) else {
                             return;
                         };
@@ -2759,6 +3238,9 @@ impl Render for ViewerPanel {
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.handle_drag.is_some() {
                     this.cancel_handle_drag(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "escape" && this.guide_drag.is_some() {
+                    this.cancel_guide_drag(cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.pen_session.is_some() {
                     this.finalize_pen_session(false, cx);
@@ -5289,7 +5771,7 @@ mod tests {
     fn snap_candidates_cover_the_frame_and_the_other_layers() {
         let (ctx, comp, layers) = snap_context();
 
-        let all = SnapLines::collect(&ctx, Some(comp), &[]);
+        let all = SnapLines::collect(&ctx, Some(comp), &[], None);
         assert_eq!(
             &all.x[..3],
             &[0.0, 960.0, 1920.0],
@@ -5302,7 +5784,7 @@ mod tests {
         assert!(all.x.contains(&350.0) && all.x.contains(&400.0) && all.x.contains(&450.0));
         assert!(all.y.contains(&150.0) && all.y.contains(&200.0) && all.y.contains(&250.0));
 
-        let without_first = SnapLines::collect(&ctx, Some(comp), &layers[..1]);
+        let without_first = SnapLines::collect(&ctx, Some(comp), &layers[..1], None);
         assert!(
             !without_first.x.contains(&-50.0),
             "a moving layer contributes no candidate of its own"
@@ -5313,7 +5795,7 @@ mod tests {
         );
 
         // No composition named: only what the frame itself provides.
-        let frame_only = SnapLines::collect(&ctx, None, &[]);
+        let frame_only = SnapLines::collect(&ctx, None, &[], None);
         assert_eq!(frame_only.x, vec![0.0, 960.0, 1920.0]);
     }
 
@@ -5323,16 +5805,491 @@ mod tests {
     fn safe_areas_are_candidates_only_while_they_are_shown() {
         let (mut ctx, comp, _) = snap_context();
         assert!(
-            !SnapLines::collect(&ctx, Some(comp), &[]).x.contains(&96.0),
+            !SnapLines::collect(&ctx, Some(comp), &[], None)
+                .x
+                .contains(&96.0),
             "hidden safe areas pull nothing"
         );
 
         ctx.show_safe_areas = true;
-        let shown = SnapLines::collect(&ctx, Some(comp), &[]);
+        let shown = SnapLines::collect(&ctx, Some(comp), &[], None);
         for fraction in overlay::SAFE_AREA_FRACTIONS {
             let inset = 1920.0 * (1.0 - fraction) * 0.5;
             assert!(shown.x.contains(&inset) && shown.x.contains(&(1920.0 - inset)));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rulers and user guides (SNAP-2)
+    // -----------------------------------------------------------------------
+
+    /// The same context with these guides on its composition.
+    fn with_guides(ctx: &OverlayContext, comp: CompId, guides: Vec<Guide>) -> OverlayContext {
+        let document = ravel_ui::document::update_composition(
+            ctx.document.as_ref().expect("a document"),
+            comp,
+            |mut composition| {
+                composition.guides = guides;
+                composition
+            },
+        )
+        .expect("the fixture composition");
+        OverlayContext {
+            document: Some(document),
+            show_guides: true,
+            ..ctx.clone()
+        }
+    }
+
+    /// A guide is a candidate exactly while the guides are shown, on the axis it
+    /// runs along, and ahead of the layers so a deliberate mark beats an
+    /// accidental edge.
+    #[test]
+    fn guides_are_candidates_only_while_they_are_shown() {
+        let (ctx, comp, _) = snap_context();
+        let placed = vec![Guide::vertical(700.0), Guide::horizontal(300.0)];
+
+        let hidden = OverlayContext {
+            show_guides: false,
+            ..with_guides(&ctx, comp, placed.clone())
+        };
+        let hidden = SnapLines::collect(&hidden, Some(comp), &[], None);
+        assert!(
+            !hidden.x.contains(&700.0) && !hidden.y.contains(&300.0),
+            "a hidden guide pulls nothing"
+        );
+
+        let shown = SnapLines::collect(&with_guides(&ctx, comp, placed), Some(comp), &[], None);
+        assert!(shown.x.contains(&700.0), "the vertical guide is on x");
+        assert!(shown.y.contains(&300.0), "the horizontal guide is on y");
+        assert!(
+            shown.x.iter().position(|line| *line == 700.0)
+                < shown.x.iter().position(|line| *line == 350.0),
+            "guides are enumerated before the layer edges, so they win ties"
+        );
+    }
+
+    /// The guide a gesture is moving is left out of its own candidates: a line
+    /// is always within zero of itself, so leaving it in would pin the drag to
+    /// its start.
+    #[test]
+    fn a_moving_guide_is_not_its_own_candidate() {
+        let (ctx, comp, _) = snap_context();
+        let ctx = with_guides(
+            &ctx,
+            comp,
+            vec![Guide::vertical(700.0), Guide::vertical(710.0)],
+        );
+
+        let moving = SnapLines::collect(&ctx, Some(comp), &[], Some(0));
+        assert!(!moving.x.contains(&700.0), "the dragged guide is left out");
+        assert!(
+            moving.x.contains(&710.0),
+            "the guide it is aligned against is still there"
+        );
+        assert!(
+            SnapLines::collect(&ctx, Some(comp), &[], None)
+                .x
+                .contains(&700.0)
+        );
+    }
+
+    /// A guide pulls under exactly the rule every other candidate does: the
+    /// screen-pixel threshold converted through the zoom, and nothing at all
+    /// while the primary modifier is held.
+    #[test]
+    fn a_guide_pulls_under_the_same_threshold_as_every_other_candidate() {
+        let (ctx, comp, _) = snap_context();
+        let ctx = with_guides(&ctx, comp, vec![Guide::vertical(700.0)]);
+        let lines = SnapLines::collect(&ctx, Some(comp), &[], None);
+        let point = CompRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        let held = DragModifiers {
+            primary: true,
+            ..DragModifiers::default()
+        };
+
+        // 1:1 — six units is six pixels, inside the eight-pixel reach.
+        let near = snap::snap_delta(
+            point,
+            (694.0, 0.0),
+            &lines,
+            snap::comp_threshold(1.0),
+            Default::default(),
+        );
+        assert_eq!(near.delta, (700.0, 0.0));
+        assert_eq!(near.guides.x, Some(700.0));
+        // The same gap at 4x zoom is 24 pixels: out of reach.
+        assert_eq!(
+            snap::snap_delta(
+                point,
+                (694.0, 0.0),
+                &lines,
+                snap::comp_threshold(0.25),
+                Default::default()
+            )
+            .delta,
+            (694.0, 0.0)
+        );
+        // And the suppression key applies to a guide like to anything else.
+        assert_eq!(
+            snap::snap_delta(point, (694.0, 0.0), &lines, snap::comp_threshold(1.0), held).delta,
+            (694.0, 0.0)
+        );
+    }
+
+    /// The composition's guides, in order.
+    fn guides_of(
+        project: &Entity<ProjectState>,
+        comp: ravel_core::id::CompId,
+        cx: &mut TestAppContext,
+    ) -> Vec<Guide> {
+        project.read_with(cx, |project, _| {
+            project
+                .document()
+                .get_composition(comp)
+                .expect("the composition")
+                .guides
+                .clone()
+        })
+    }
+
+    fn set_guides(
+        project: &Entity<ProjectState>,
+        comp: ravel_core::id::CompId,
+        guides: Vec<Guide>,
+        cx: &mut TestAppContext,
+    ) {
+        project.update(cx, |project, cx| {
+            let document =
+                ravel_ui::document::update_composition(project.document(), comp, |mut c| {
+                    c.guides = guides;
+                    c
+                })
+                .expect("the composition");
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+    }
+
+    /// Dragging out of a ruler creates a guide where the pointer let go, and the
+    /// whole gesture is one undo step.
+    #[gpui::test]
+    fn a_guide_dragged_out_of_the_ruler_is_one_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.show_rulers = true;
+                // The top strip: composition y 8 is inside the 16px band.
+                let press = press_at(panel, (600.0, 8.0));
+                assert!(panel.guide_mouse_down(&press, cx), "the ruler took it");
+                let release = window_point(panel, (600.0, 300.0));
+                panel.guide_dragged(release, DragModifiers::default(), cx);
+                panel.guide_drag_ended(release, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::horizontal(300.0)],
+            "the top ruler drags out a horizontal guide at the pointer"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "one undo took the whole gesture"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::horizontal(300.0)],
+            "and one redo puts the created guide back"
+        );
+    }
+
+    /// A guide moves across itself and nowhere else. The delta on the other
+    /// axis is discarded, and so is the guide line that would otherwise name an
+    /// alignment this gesture cannot make.
+    #[gpui::test]
+    fn a_guide_drag_writes_only_the_axis_it_runs_across(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(&project, comp_id, vec![Guide::vertical(500.0)], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_at(panel, (500.0, 400.0));
+                assert!(panel.guide_mouse_down(&press, cx), "the guide took it");
+                // y lands exactly on the composition's horizontal centre line,
+                // which a vertical guide has no way of reaching.
+                let to = window_point(panel, (620.0, 940.0));
+                panel.guide_dragged(to, DragModifiers::default(), cx);
+                assert!(
+                    panel.snap_guides.y.is_none(),
+                    "no guide on the axis the gesture cannot write"
+                );
+                panel.guide_drag_ended(to, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(620.0)],
+            "only the guide's own axis moved"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(500.0)],
+            "one undo returns the guide to where the drag picked it up"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(620.0)],
+            "and one redo replays the move"
+        );
+    }
+
+    /// Dropping a guide back on the ruler deletes it, and a guide that never
+    /// left the ruler leaves no undo step behind.
+    #[gpui::test]
+    fn a_guide_dropped_back_on_the_ruler_is_deleted(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(&project, comp_id, vec![Guide::horizontal(300.0)], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.show_rulers = true;
+                // Created and released without leaving the strip.
+                let press = press_at(panel, (600.0, 4.0));
+                assert!(panel.guide_mouse_down(&press, cx));
+                let release = window_point(panel, (600.0, 6.0));
+                panel.guide_dragged(release, DragModifiers::default(), cx);
+                panel.guide_drag_ended(release, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::horizontal(300.0)],
+            "a guide put straight back leaves the document as it was"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "and adds no undo step: the next undo is the one before it"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_at(panel, (600.0, 300.0));
+                assert!(panel.guide_mouse_down(&press, cx));
+                let release = window_point(panel, (600.0, 6.0));
+                panel.guide_dragged(release, DragModifiers::default(), cx);
+                panel.guide_drag_ended(release, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "an existing guide dropped on the ruler is deleted"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::horizontal(300.0)],
+            "and the deletion is one undo step"
+        );
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "and one redo deletes it again"
+        );
+    }
+
+    /// A guide pressed and released where it stood costs nothing: the very next
+    /// undo is the step before the gesture, not a wasted press on an identical
+    /// document.
+    #[gpui::test]
+    fn a_guide_released_where_it_started_is_not_an_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(&project, comp_id, vec![Guide::vertical(500.0)], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_at(panel, (500.0, 400.0));
+                assert!(panel.guide_mouse_down(&press, cx));
+                let same = window_point(panel, (500.0, 400.0));
+                panel.guide_dragged(same, DragModifiers::default(), cx);
+                panel.guide_drag_ended(same, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(500.0)],
+            "the guide stayed where it was"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "one undo reached the state before the guide was placed"
+        );
+    }
+
+    /// Locking says "do not move these": the pointer is refused and promises
+    /// nothing, while the line stays drawn and stays a snap candidate.
+    #[gpui::test]
+    fn a_locked_guide_refuses_the_pointer_and_still_snaps(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(&project, comp_id, vec![Guide::vertical(500.0)], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.show_rulers = true;
+                panel.guides_locked = true;
+                let press = press_at(panel, (500.0, 400.0));
+                assert!(!panel.guide_mouse_down(&press, cx), "a locked guide holds");
+                let ruler = press_at(panel, (600.0, 8.0));
+                assert!(!panel.guide_mouse_down(&ruler, cx), "and so does the ruler");
+                assert!(panel.guide_drag.is_none());
+                assert_eq!(
+                    panel.pointer_hint_at(window_point(panel, (500.0, 400.0)), cx),
+                    Some(ViewerPointerHint::Empty),
+                    "a mark that cannot be grabbed promises no cursor"
+                );
+
+                // The line is still drawn and still pulls.
+                let ctx = panel.overlay_context(cx);
+                assert!(overlay::ViewerOverlay::is_active(
+                    &guides::GuideOverlay,
+                    &ctx
+                ));
+                assert!(
+                    SnapLines::collect(&ctx, Some(comp_id), &[], None)
+                        .x
+                        .contains(&500.0),
+                    "locking withdraws no candidate"
+                );
+
+                panel.guides_locked = false;
+                assert_eq!(
+                    panel.pointer_hint_at(window_point(panel, (500.0, 400.0)), cx),
+                    Some(ViewerPointerHint::ResizeLeftRight),
+                    "unlocked, the cursor names the axis the drag writes"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(500.0)]
+        );
+    }
+
+    /// "Clear guides" is a deletion, and locking forbids deletions: it leaves
+    /// the guides alone and pushes no undo step.
+    #[gpui::test]
+    fn clearing_the_guides_is_refused_while_they_are_locked(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(
+            &project,
+            comp_id,
+            vec![Guide::vertical(500.0), Guide::horizontal(300.0)],
+            cx,
+        );
+        let placed = guides_of(&project, comp_id, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.guides_locked = true;
+                panel.clear_guides(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            placed,
+            "a locked guide is not deleted"
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "and no undo step was pushed: the next undo is the one that placed them"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.guides_locked = false;
+                panel.clear_guides(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            guides_of(&project, comp_id, cx).is_empty(),
+            "unlocked, clearing works"
+        );
+    }
+
+    /// A guide is drawn across the composition frame only, so it is grabbable
+    /// there only: the letterbox around the picture holds no line to pick up.
+    #[gpui::test]
+    fn a_guide_is_not_grabbable_outside_the_composition_frame(cx: &mut TestAppContext) {
+        let (window, project, comp_id, _layer) = shell_setup(cx);
+        set_guides(&project, comp_id, vec![Guide::vertical(500.0)], cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // On the line, inside the 1920x1080 frame.
+                assert_eq!(
+                    panel.guide_axis_at((500.0, 400.0), cx),
+                    Some(GuideAxis::Vertical)
+                );
+                // On the same line, below the frame: nothing is drawn here.
+                assert_eq!(panel.guide_axis_at((500.0, 1200.0), cx), None);
+                assert_eq!(panel.guide_axis_at((500.0, -200.0), cx), None);
+
+                let outside = press_at(panel, (500.0, 1200.0));
+                assert!(
+                    !panel.guide_mouse_down(&outside, cx),
+                    "and the press is not taken there"
+                );
+                assert!(panel.guide_drag.is_none());
+            })
+            .unwrap();
+        assert_eq!(
+            guides_of(&project, comp_id, cx),
+            vec![Guide::vertical(500.0)]
+        );
+    }
+
+    /// The ruler is a `Select` gesture: a drawing tool's press over the strip
+    /// belongs to the drawing tool.
+    #[gpui::test]
+    fn another_tool_keeps_its_press_over_the_ruler(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _layer) = shell_setup(cx);
+        cx.update(|cx| {
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Rect,
+                ..ToolState::default()
+            })
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.show_rulers = true;
+                let press = press_at(panel, (600.0, 8.0));
+                assert!(!panel.guide_mouse_down(&press, cx));
+                assert!(panel.guide_drag.is_none());
+            })
+            .unwrap();
     }
 
     /// The completion criterion, on the real gesture: a layer drag lands on the

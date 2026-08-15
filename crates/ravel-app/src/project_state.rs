@@ -2911,6 +2911,121 @@ mod tests {
         });
     }
 
+    /// A selection made in another composition is not evaluated for the one on
+    /// screen.
+    ///
+    /// `PropertiesTarget::Nodes` deliberately survives a composition switch —
+    /// `drop_stale_layer_properties_target` only withdraws the layer-selection
+    /// writers' targets — and the node editor republishes later, through a
+    /// global observer. In between, `set_active_composition` re-requests the
+    /// evaluation, so without a gate the request built for composition B
+    /// carries a scoped target from A: an evaluation nothing on screen can
+    /// consume, published under A's key while B is shown.
+    #[gpui::test]
+    fn a_selection_from_another_composition_is_not_evaluated(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let (comp_a, _, _) = project_with_a_shell_target(project, cx);
+            let network_a = NetworkPath::layer(comp_a.id, comp_a.layers.front().unwrap().id);
+            let node = geometry_node_of(project, &network_a);
+            select_nodes(&network_a, vec![node], cx);
+
+            // A second composition, made active and given something to render.
+            let other = project.create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            );
+            let document =
+                ravel_ui::document::add_layer(project.document(), other, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            // The precondition this test exists for: the node target is still
+            // the one made in composition A.
+            assert!(
+                matches!(
+                    &cx.global::<crate::panels::SelectedPropertiesTarget>().0,
+                    crate::panels::PropertiesTarget::Nodes { network, .. } if network == &network_a
+                ),
+                "the switch withdrew the node target, so this test proves nothing",
+            );
+
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                .unwrap()
+                .unwrap();
+
+            assert!(
+                request.scoped.is_empty(),
+                "a node of the composition that is no longer shown was evaluated",
+            );
+        });
+    }
+
+    /// The same id in two **compositions**, which is where the collision risk
+    /// is highest: `deterministic_node_id` packs `comp << 32 | layer << 8 |
+    /// role`, so with composition id 0 a synthetic node lands in the ordinary
+    /// node-id range. A target that travelled without its composition would
+    /// publish under a key another composition's node also owns.
+    #[gpui::test]
+    fn the_selected_node_target_carries_the_composition_the_selection_names(
+        cx: &mut TestAppContext,
+    ) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let shared = NodeId::next();
+            let (marker_root, marker_other) = (NodeId::next(), NodeId::next());
+            let root = project.document().root_comp.unwrap();
+            let layer_root = layer_holding(shared, marker_root);
+            let id_root = layer_root.id;
+            let document =
+                ravel_ui::document::add_layer(project.document(), root, layer_root).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            // A second composition holding the *same* node id.
+            let other = project.create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            );
+            let layer_other = layer_holding(shared, marker_other);
+            let id_other = layer_other.id;
+            let document =
+                ravel_ui::document::add_layer(project.document(), other, layer_other).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            // `create_composition` left `other` active, which is the one the
+            // selection is made in.
+            let network_other = NetworkPath::layer(other, id_other);
+            let network_root = NetworkPath::layer(root, id_root);
+            select_nodes(&network_other, vec![shared], cx);
+
+            let request = project
+                .build_viewer_request(0, &OverlayRegistry::new(Vec::new()), cx)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(request.scoped.len(), 1);
+            assert_eq!(request.scoped[0].node, shared);
+            assert_eq!(request.scoped[0].path, network_other.segments());
+            assert_ne!(
+                network_other.segments(),
+                network_root.segments(),
+                "the two compositions' scopes must differ for this to prove anything",
+            );
+            assert!(
+                request.scoped[0].graph.node(marker_other).is_some(),
+                "the target was paired with a graph that is not the selected composition's",
+            );
+            assert!(
+                request.scoped[0].graph.node(marker_root).is_none(),
+                "the other composition's network was handed to this target",
+            );
+        });
+    }
+
     /// A node that declares no geometry output — `rasterize`, the network's
     /// Out node — is not requested at all. There is nothing an attribute
     /// inspector could show, and the pull would be paid for every frame.

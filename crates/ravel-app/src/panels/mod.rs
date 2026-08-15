@@ -207,12 +207,21 @@ impl Global for SelectedPropertiesTarget {}
 /// `Vec` published in id order, so "the first selected node" is the same node
 /// the Properties panel inspects, whichever panel published the selection.
 ///
-/// `None` — no target requested, hence no result to read — in three cases a
+/// `None` — no target requested, hence no result to read — in four cases a
 /// consumer renders as "nothing to inspect": nothing is selected, the target
 /// names something other than nodes (a layer, a composition, a media asset),
+/// the selection was made in a composition that is no longer the active one,
 /// or the selected node declares no geometry output at all (`rasterize`, say).
 /// Asking anyway would pay for an evaluation whose result no inspection panel
 /// can display.
+///
+/// The composition check is not redundant with the resolution
+/// `scoped_eval_targets` does. A node target *survives* a composition switch on
+/// purpose — [`drop_stale_layer_properties_target`] withdraws only the targets
+/// the layer selection owns, and the node editor republishes later through its
+/// global observer — so the request built the moment the active composition
+/// changes still names a network of the previous one. That network resolves
+/// perfectly well; it just belongs to a composition nobody is looking at.
 pub(crate) fn selected_node_eval_target(
     document: &Document,
     cx: &App,
@@ -221,6 +230,9 @@ pub(crate) fn selected_node_eval_target(
     else {
         return None;
     };
+    if active_composition(cx) != Some(network.comp) {
+        return None;
+    }
     let node = *ids.first()?;
     Some(viewer::overlay::EvalTarget {
         network: network.clone(),

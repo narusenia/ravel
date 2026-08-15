@@ -724,6 +724,9 @@ impl ViewerPanel {
                     .filter_map(|origin| node_comp_rect(&overlay_ctx, &network, origin.node))
                     .reduce(union_rect),
             };
+            // A gesture that has not moved yet has corrected nothing:
+            // the previous one's guide must not survive into this frame.
+            self.snap_guides = SnapGuides::default();
             self.move_drag = Some(MoveDrag {
                 pointer_start: pointer,
                 targets: vec![MoveTarget {
@@ -822,6 +825,9 @@ impl ViewerPanel {
         // Every layer taking part is excluded from the candidates, so the
         // gesture aligns against the layers it is *not* moving.
         let moving: Vec<LayerId> = targets.iter().map(|target| target.network.layer).collect();
+        // A gesture that has not moved yet has corrected nothing: the
+        // previous one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
         self.move_drag = Some(MoveDrag {
             pointer_start: pointer,
             targets,
@@ -1035,6 +1041,9 @@ impl ViewerPanel {
             .map(|path| vec![path.layer])
             .unwrap_or_default();
         let snap_lines = self.snap_lines(comp, &drawn_into, cx);
+        // A gesture that has not moved yet has corrected nothing: the
+        // previous one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
         self.shape_drag = Some(ShapeDrag {
             kind,
             start: pointer,
@@ -1255,6 +1264,9 @@ impl ViewerPanel {
             },
             None => SnapTarget::default(),
         };
+        // A gesture that has not moved yet has corrected nothing: the
+        // previous one's guide must not survive into this frame.
+        self.snap_guides = SnapGuides::default();
         self.handle_drag = Some(OverlayHandleDrag {
             handle,
             press_context: context,
@@ -6043,9 +6055,40 @@ mod tests {
         );
     }
 
-    /// The completion criterion, on the real gesture: the pull covers the same
-    /// screen distance at every zoom, which is a different composition distance
     /// A press starts a gesture that has corrected nothing yet, so the guide of
+    /// the previous one must not be on screen when the first frame renders.
+    #[gpui::test]
+    fn a_new_gesture_starts_with_no_guide(cx: &mut TestAppContext) {
+        let (window, project, _comp_id, _layers) = multi_layer_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((0.0, 0.0), cx);
+                panel.move_dragged(point(px(905.0), px(0.0)), DragModifiers::default(), cx);
+                panel.move_ended(cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0), "the gesture did snap");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // The layers moved, so their bounds have to be republished before the
+        // next press can land inside one of them.
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.layer_move_mouse_down((910.0, 0.0), cx);
+                assert!(
+                    panel.move_drag.is_some(),
+                    "the press started a second gesture"
+                );
+                assert!(
+                    panel.overlay_context(cx).snap_guides.is_empty(),
+                    "a press before its first move has no correction to report"
+                );
+            })
+            .unwrap();
+    }
+
     /// Rotation has no edge to line up, so its grip snaps nothing — and says so
     /// by reporting no guide.
     #[gpui::test]

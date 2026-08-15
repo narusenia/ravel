@@ -511,6 +511,39 @@ mod tests {
         assert_eq!(painter.finish().len(), 2, "one rule per snapped axis");
     }
 
+    /// The guide reaches the screen through the registry, not through a
+    /// painting path of its own.
+    #[test]
+    fn the_guide_is_registered_with_the_builtin_overlays() {
+        use crate::panels::viewer::overlay::OverlayRegistry;
+        use gpui::{Bounds, point, px, size};
+
+        let registry = OverlayRegistry::builtin();
+        assert!(registry.overlay(SnapGuideOverlay::ID).is_some());
+
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            snap_guides: SnapGuides {
+                x: Some(960.0),
+                y: None,
+            },
+            ..OverlayContext::default()
+        };
+        let mut painter = OverlayPainter::new(
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(960.0), px(540.0)),
+            },
+            (1920, 1080),
+        );
+        registry.paint(&ctx, &mut painter);
+        assert_eq!(
+            painter.finish().len(),
+            1,
+            "the registry painted the guide, and nothing else was active"
+        );
+    }
+
     #[test]
     fn no_candidates_means_no_correction() {
         let moving = rect(0.0, 0.0, 100.0, 100.0);

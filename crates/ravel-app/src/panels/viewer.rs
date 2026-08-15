@@ -5938,6 +5938,52 @@ mod tests {
         );
     }
 
+    /// The move grip carries the whole layer, so it is the layer's bounding box
+    /// — not the grabbed point — that lands on the candidate.
+    #[gpui::test]
+    fn the_shell_move_grip_snaps_the_layer_bbox(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The move grip sits at the bbox centre, (100, 200).
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                assert_eq!(
+                    panel
+                        .handle_drag
+                        .as_ref()
+                        .and_then(|drag| drag.handle.id.shell()),
+                    Some(overlay::ShellHandle::Position)
+                );
+                // 855 puts the bbox centre at 955, five short of 960.
+                let to = window_point(panel, (955.0, 200.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                assert_eq!(panel.snap_guides.x, Some(960.0));
+                assert_eq!(panel.snap_guides.y, None, "the vertical axis is clear");
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let position = project.read_with(cx, |project, _| {
+            let transform = &project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .transform;
+            (
+                transform.position[0].evaluate(0.0, &eval_ctx()),
+                transform.position[1].evaluate(0.0, &eval_ctx()),
+            )
+        });
+        assert!(
+            (position.0 - 860.0).abs() < 1e-3 && position.1.abs() < 1e-3,
+            "the layer travelled the extra five units onto the centre: {position:?}"
+        );
+    }
+
     /// Rotation has no edge to line up, so its grip snaps nothing — and says so
     /// by reporting no guide.
     #[gpui::test]
@@ -5958,7 +6004,11 @@ mod tests {
                     Some(overlay::ShellHandle::Rotate(7)),
                     "the press landed in the rotation ring"
                 );
-                let to = window_point(panel, (960.0, 540.0));
+                // The press sits 9 units off the grip it grabbed, so this is
+                // the sweep that puts the grip's own anchor exactly on the
+                // composition centre — a zero distance any snapping candidate
+                // would win.
+                let to = window_point(panel, (969.0, 549.0));
                 panel.handle_dragged(to, DragModifiers::default(), cx);
                 assert!(
                     panel.snap_guides.is_empty(),

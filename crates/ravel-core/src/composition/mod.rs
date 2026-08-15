@@ -367,6 +367,48 @@ fn remap_layer_channel_node_outputs(
 }
 
 // ===========================================================================
+// Guides
+// ===========================================================================
+
+/// Which way a [`Guide`] runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuideAxis {
+    /// A vertical line, positioned along composition x.
+    Vertical,
+    /// A horizontal line, positioned along composition y.
+    Horizontal,
+}
+
+/// A user-placed alignment line, in composition coordinates.
+///
+/// Owned by the [`Composition`] rather than by a layer or a network: a guide is
+/// a working mark on the frame, and every layer in the composition is aligned
+/// against the same one.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guide {
+    pub axis: GuideAxis,
+    /// Composition x for a [`GuideAxis::Vertical`] guide, y for a horizontal
+    /// one.
+    pub position: f32,
+}
+
+impl Guide {
+    pub fn vertical(position: f32) -> Self {
+        Self {
+            axis: GuideAxis::Vertical,
+            position,
+        }
+    }
+
+    pub fn horizontal(position: f32) -> Self {
+        Self {
+            axis: GuideAxis::Horizontal,
+            position,
+        }
+    }
+}
+
+// ===========================================================================
 // Composition
 // ===========================================================================
 
@@ -383,6 +425,13 @@ pub struct Composition {
     pub duration_frames: u64,
     pub layers: im::Vector<Layer>,
     pub background_color: Color,
+    /// User-placed alignment lines, in the order they were created.
+    ///
+    /// An additive field with a `serde` default, so an archive written before
+    /// guides existed still loads and the `.ravprj` format version stays where
+    /// it is — the same treatment `Layer.audio` had.
+    #[serde(default)]
+    pub guides: Vec<Guide>,
 }
 
 impl Composition {
@@ -401,6 +450,7 @@ impl Composition {
             duration_frames,
             layers: im::Vector::new(),
             background_color: Color::BLACK,
+            guides: Vec::new(),
         }
     }
 

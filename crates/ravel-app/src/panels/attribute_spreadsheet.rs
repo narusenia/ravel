@@ -209,6 +209,8 @@ pub struct AttributeSpreadsheetGpuiPanel {
     selection_sub: Subscription,
     #[allow(dead_code)]
     results_sub: Subscription,
+    #[allow(dead_code)]
+    composition_sub: Subscription,
 }
 
 impl AttributeSpreadsheetGpuiPanel {
@@ -239,6 +241,17 @@ impl AttributeSpreadsheetGpuiPanel {
         let results_sub = cx.observe_global::<EvalResults>(|this: &mut Self, cx| {
             this.refresh(cx);
         });
+        // A composition switch withdraws the node target without touching
+        // either global above: `set_active_composition` writes
+        // `ActiveComposition` and the layer selection, and
+        // `selected_node_for_inspection` then refuses a target whose network
+        // belongs to the composition nobody is looking at. Without this the
+        // sheet keeps the previous composition's rows on screen until the next
+        // evaluation happens to republish `EvalResults`.
+        let composition_sub =
+            cx.observe_global::<super::ActiveComposition>(|this: &mut Self, cx| {
+                this.refresh(cx);
+            });
 
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
@@ -250,6 +263,7 @@ impl AttributeSpreadsheetGpuiPanel {
             focus_subscriptions,
             selection_sub,
             results_sub,
+            composition_sub,
         };
         // A panel opened while something is already selected has to show it:
         // the observers above only fire on later writes.

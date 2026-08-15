@@ -120,6 +120,12 @@ observe-global crates/ravel-app/src/panels/node_editor.rs NodeEvalTimings
 # lifecycle as `ViewerFrame`, not one-shot events.
 observe-global crates/ravel-app/src/panels/attribute_spreadsheet.rs SelectedPropertiesTarget
 observe-global crates/ravel-app/src/panels/attribute_spreadsheet.rs EvalResults
+# Same panel, same taxonomy: `ActiveComposition` is the durable "which
+# composition is on screen" state. A switch withdraws the node target without
+# writing either global above, so without this observer the sheet keeps the
+# previous composition's rows until an evaluation happens to republish
+# `EvalResults`.
+observe-global crates/ravel-app/src/panels/attribute_spreadsheet.rs ActiveComposition
 
 # Test probe, not a signal path: the RESP-2 regression test asserts that the
 # Node Editor stops republishing an unchanged `CanvasSelection` on every graph

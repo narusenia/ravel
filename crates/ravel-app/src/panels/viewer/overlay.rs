@@ -85,6 +85,10 @@ pub mod priority {
     /// move grip land on the same point.
     pub const PARAM_MANIPULATOR: i32 = 37;
     pub const PATH_EDIT: i32 = 40;
+    /// Above every mark a gesture can be aligned against: a guide reports what
+    /// the drag in flight has snapped to, so it has to be readable over the
+    /// bbox, the grips and the safe areas it lands on.
+    pub const SNAP_GUIDES: i32 = 45;
     pub const EVAL_ERROR: i32 = 50;
 }
 
@@ -188,6 +192,11 @@ pub struct OverlayContext {
     pub field_opacity: f32,
     /// The latest evaluation error message, if any.
     pub error: Option<SharedString>,
+    /// The lines the drag in flight is currently snapped to, or none. Written
+    /// by the gesture that computed them and read back by
+    /// [`super::snap::SnapGuideOverlay`], so the guide is drawn by the same
+    /// mechanism as every other mark instead of a painting path of its own.
+    pub snap_guides: super::snap::SnapGuides,
     /// The gesture the pointer currently holds, or `None` when it is idle.
     /// Only the drag HUD reads it.
     pub active_drag: Option<ActiveDrag>,
@@ -853,6 +862,7 @@ impl OverlayRegistry {
             Box::new(super::motion_path::MotionPathOverlay),
             Box::new(ParamManipulator),
             Box::new(PathEditOverlay),
+            Box::new(super::snap::SnapGuideOverlay),
             Box::new(EvalErrorOverlay),
         ])
     }
@@ -992,6 +1002,12 @@ impl ViewerOverlay for GridOverlay {
     }
 }
 
+/// Action-safe (90%) and title-safe (80%) fractions of the composition, in the
+/// order they are drawn. The single definition: the snap candidates
+/// ([`super::snap::SnapLines`]) are built from the same numbers, so a gesture
+/// cannot be pulled onto a rectangle that is not the one drawn.
+pub const SAFE_AREA_FRACTIONS: [f32; 2] = [0.9, 0.8];
+
 /// Action-safe (90%) and title-safe (80%) rectangles, centered.
 pub struct SafeAreaOverlay;
 
@@ -1015,7 +1031,7 @@ impl ViewerOverlay for SafeAreaOverlay {
     fn paint(&self, _ctx: &OverlayContext, painter: &mut OverlayPainter) {
         let (width, height) = painter.resolution();
         let (width, height) = (width as f32, height as f32);
-        for fraction in [0.9f32, 0.8] {
+        for fraction in SAFE_AREA_FRACTIONS {
             let (w, h) = (width * fraction, height * fraction);
             painter.stroke_comp_rect(
                 CompRect {
@@ -2409,6 +2425,7 @@ mod tests {
             field_map: crate::panels::viewer::field::FieldColorMap::default(),
             field_opacity: crate::panels::viewer::field::DEFAULT_FIELD_OPACITY,
             error: None,
+            snap_guides: crate::panels::viewer::snap::SnapGuides::default(),
             active_drag: None,
             colors: colors(),
             results: OverlayResults::default(),

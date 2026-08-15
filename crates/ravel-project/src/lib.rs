@@ -833,8 +833,15 @@ mod tests {
     fn a_current_archive_without_the_guides_field_loads() {
         let project = demo_project();
         let ron = document_to_ron(&project.document).unwrap();
-        let stripped = ron.replace("guides: [],\n", "");
-        assert_ne!(stripped, ron, "the field was there to strip");
+        assert!(ron.contains("guides:"), "the field was there to strip");
+        // By line rather than by substring: the serializer ends its lines the
+        // platform's way, so a pattern carrying `\n` strips nothing on Windows
+        // and the test would pass while proving the opposite.
+        let stripped: String = ron
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("guides:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
         assert!(
             !stripped.contains("guides:"),
             "every composition lost the field"

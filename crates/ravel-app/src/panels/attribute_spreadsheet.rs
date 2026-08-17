@@ -191,6 +191,23 @@ impl TableDelegate for AttributeSheetDelegate {
             })
     }
 
+    /// The column name, vertically centred and at the cell text size.
+    ///
+    /// The default `render_th` hands back `div().size_full()`, which fills the
+    /// header row — so the `items_center` its wrapper applies has nothing left
+    /// to centre and the name sits against the top edge. Returning an element
+    /// that only takes the height of its text lets that wrapper do its job.
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .text_size(px(CELL_TEXT))
+            .child(self.column(col_ix, cx).name.clone())
+    }
+
     fn render_td(
         &mut self,
         row_ix: usize,

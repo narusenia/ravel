@@ -25,7 +25,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::table::{Column, ColumnFixed, DataTable, TableDelegate, TableState};
-use gpui_component::{ActiveTheme, v_flex};
+use gpui_component::{ActiveTheme, Sizable as _, Size, v_flex};
 use ravel_core::geometry::{AttributeType, Domain, Geometry};
 use ravel_core::types::NodeData;
 use ravel_i18n::t;
@@ -42,6 +42,17 @@ use super::viewer::geometry::as_geometry;
 use super::viewer::overlay::EvalResults;
 
 const HEADER_HEIGHT: f32 = 24.0;
+
+/// Row height, matching the Timeline's rows — the application's existing answer
+/// to "a dense row". The table's own size presets stop at 26px, so this is
+/// handed over as an explicit size.
+const ROW_HEIGHT: f32 = 22.0;
+
+/// Cell text, a step below the 14px UI font. An explicit size rather than the
+/// inherited one because [`Size::Size`] keeps the default 4px vertical cell
+/// padding, so 14px type in a 22px row would have nowhere to sit; 12px leaves
+/// the row taller than its content by construction.
+const CELL_TEXT: f32 = 12.0;
 
 /// What one resolution of the globals found. Assembled in one place so the
 /// three questions the empty states ask are answered from a single reading of
@@ -185,15 +196,24 @@ impl TableDelegate for AttributeSheetDelegate {
         row_ix: usize,
         col_ix: usize,
         _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let text = match (self.geometry(), self.columns.get(col_ix)) {
+        let column = self.columns.get(col_ix);
+        let text = match (self.geometry(), column) {
             (Some(geometry), Some(column)) => {
                 cell_text(geometry, self.sheet.domain(), row_ix, column)
             }
             _ => String::new(),
         };
-        SharedString::from(text)
+        // Numbers in the monospace family so digits line up down the column:
+        // scanning a coordinate for the one that is out of place is what this
+        // panel is for, and a proportional font moves the decimal point on
+        // every row. Text and booleans keep the UI family.
+        let numeric = column.is_some_and(|column| is_numeric(column.ty));
+        div()
+            .text_size(px(CELL_TEXT))
+            .when(numeric, |cell| cell.font(crate::fonts::mono_font(cx)))
+            .child(SharedString::from(text))
     }
 }
 
@@ -413,7 +433,16 @@ impl Render for AttributeSpreadsheetGpuiPanel {
                 None => div()
                     .flex_grow()
                     .overflow_hidden()
-                    .child(DataTable::new(&self.table).stripe(true))
+                    // Dense rows: a spreadsheet is read by scanning many
+                    // elements at once, so how many fit on screen matters more
+                    // than the breathing room a form wants. `ROW_HEIGHT` is the
+                    // Timeline's row height, which is what a dense row looks
+                    // like everywhere else in this application.
+                    .child(
+                        DataTable::new(&self.table)
+                            .stripe(true)
+                            .with_size(Size::Size(px(ROW_HEIGHT))),
+                    )
                     .into_any_element(),
             })
     }

@@ -92,14 +92,21 @@ variant を位置で索引するので、途中に挿入すると既存 journal 
 新しい variant を含む entry に出会う**側は壊れるので、版を上げて捨てさせる
 （`docs/dev/persistence.md` の規則が正）。
 
-`IntChannel` は `.ravprj` の `format_version` も上げた（v9）。旧ビルドは
-`document/main.ron` の `IntChannel` をパースできず、その失敗は切り詰めた
-ファイルと区別できない — `load_with_backup` が `.bak` の**古いリビジョン**を
-開いてしまうため、版印で `MigrationError::TooNew` に倒す。
+`IntChannel` は `.ravprj` の `format_version` も上げた（v9）。**上げなければ**
+どうなるかが理由で、旧ビルドは `document/main.ron` の `IntChannel` を
+パースできず、その失敗は切り詰めたファイルと区別できない —
+`load_with_backup` が破損とみなして `.bak` の**古いリビジョン**を開き、
+次の保存がそれを上書きする。版印があるので旧ビルドは
+`document/main.ron` に到達する前に manifest の版で `MigrationError::TooNew` になり、
+`load_with_backup` はその失敗をバックアップで取り繕わない（`ProjectError::is_too_new`）。
 
 - ネットワーク内の**任意のノードパラメータ**がチャネルを持てる（キーフレーム、
   ノード出力バインド、ブレンド。Expression / AudioReactive は placeholder）。
-- Int / Bool は v1 では定数のみ（step キーは v2）。PathPoints も定数のみ
+- **Int はアニメーション可能**（`IntChannel`、journal v9 / `.ravprj` v9）:
+  中身は f32 チャンネルそのもので、読み出しで `round()` して `i32` にする。
+  定数の `Int` はそのまま残り（`Float` と `Channel` と同じ「2 つの綴り」の関係）、
+  キーフレームを打った瞬間に再型付けされる。**Bool は定数のみ**（step キーは
+  別単位）。PathPoints も定数のみ
   （journal v6 で追加。`in_tan`/`out_tan` 点属性として Geometry に展開
   され、曲線区間は rasterize が共有フラット化で消費する）。
 - `Curve` も定数のみ（journal v7 で追加）。`CurveParam` は `KeyframeCurve` と

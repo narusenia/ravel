@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-08-13
+最終更新: 2026-08-20
 
 ## 凡例
 
@@ -45,6 +45,7 @@
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
+| STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | PARAM-8 | `color.ramp`（値ドメインのカラーランプ） | `properties-parameter-editors-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
@@ -82,6 +83,11 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
+| VIS-2 | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | `panel-visibility-plan.md` |
+| 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
+| FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
+| FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
+| GPULOSS-2 | epoch-aware な評価 worker の停止・再生成（`GPULOSS-1` ✅ で依存が解けた） | `gpu-device-loss-recovery-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -206,9 +212,9 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 | ZC-3 | ✅ #384 | 出力テクスチャを GPUI のカスタム要素で描く（マージ時点では既定オフ） | ZC-2 ✅ |
 | ZC-4 | ✅ #386 | 同期と寿命（フレーム跨ぎの取り違えを防ぐ。**既定オフを外した**） | ZC-3 ✅ |
 | ZC-5 | ✅ #388 | Linux の経路（描画側のみ。**配線は ZC-8**） | ZC-3 ✅ |
-| ZC-6 | 🟡 | 文書更新（`HIGH-09` の現在地。**クローズは ZC-7/8 の後**） | ZC-4 ✅, ZC-5 ✅ |
-| ZC-7 | 🟡 | Windows の経路（実機あり。**確認は push して手動**） | ZC-5 ✅ |
-| ZC-8 | 🟡 | 起動時に GPUI のデバイスを採用する（`REQ-GPU-001` の配線） | ZC-5 ✅ |
+| ZC-6 | ✅ #389 | 文書更新（`HIGH-09` の現在地。**クローズは ZC-7/8 の後**） | ZC-4 ✅, ZC-5 ✅ |
+| ZC-7 | ✅ #391 | Windows の経路（実機あり。**確認は push して手動**） | ZC-5 ✅ |
+| ZC-8 | ✅ #391 | 起動時に GPUI のデバイスを採用する（`REQ-GPU-001` の配線） | ZC-5 ✅ |
 
 `CM-7`（#367）が表示変換を GPU へ移し、CPU の per-pixel 処理が経路から消えた。
 **`ZC-1`（#373）が内訳を測り、ゲートは開いた。** リードバックと CPU 側の
@@ -368,7 +374,7 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | STYLE-1 | ✅ | スタイル属性の読み出し（CPU / GPU）（#403） | — |
 | STYLE-2 | ✅ | `style.fill` / `style.stroke` ノード（#417） | STYLE-1 |
 | STYLE-3 | ✅ | ダッシュ・キャップ・ジョイン（#417。`stroke_align` は `PSHADE-3` へ移動） | STYLE-1 |
-| STYLE-4 | ⬜ | 変調との結合検証と文書 | STYLE-2 ✅, MOD-1 |
+| STYLE-4 | 🟡 | 変調との結合検証と文書 | STYLE-2 ✅, MOD-1 |
 | STYLE-5 | ✅ | `field.apply` の属性自動作成 + Color 既定マスクを `rgb` へ（#403） | — |
 | STYLE-6 | ✅ | `field.ramp`（位置 → 色のランプ）（#408） | STYLE-5, VEC-1 |
 
@@ -887,7 +893,7 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | GPULOSS-1 | ✅ | `ravel-gpu` の device state（epoch + lost）と自前 wgpu device の loss callback、喪失の一度だけのユーザー通知 | ZC-8 ✅, GPUBK-9 ✅ |
-| GPULOSS-2 | ⬜ | epoch-aware な評価 worker の停止・再生成と cache budget 維持 | GPULOSS-1 |
+| GPULOSS-2 | 🟡 | epoch-aware な評価 worker の停止・再生成と cache budget 維持 | GPULOSS-1 |
 | GPULOSS-3 | ⬜ | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows） | GPULOSS-1, GPULOSS-2 |
 | GPULOSS-4 | ⬜ | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | GPULOSS-1, GPULOSS-2 |
 | GPULOSS-5 | ⬜ | window lifecycle、export、Viewer lease、テスト、実機確認 | GPULOSS-2, GPULOSS-3, GPULOSS-4 |
@@ -1156,7 +1162,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 |---|---|---|---|
 | FRAC-1 | ✅ | 多角形の三角形分割器（`earcut` を採用、#306） | PATH-0b |
 | FRAC-2 | 🟡 | `geometry.cell_fracture`（2D。三角形分割 + 半平面クリップ） | FRAC-1 |
-| FRAC-3 | ⬜ | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1a, 3D-1b |
+| FRAC-3 | 🟡 | `geometry.cell_fracture_3d`（Mesh を平面で bisect） | FRAC-1, 3D-1a, 3D-1b |
 | FRAC-4 | ⬜ | アルゴリズム選択式と実行時列挙（boolean 経路） | FRAC-2, PATH-1 |
 | FRAC-5 | ⬜ | レジストリ / ロケール / 文書 | FRAC-2〜4 |
 

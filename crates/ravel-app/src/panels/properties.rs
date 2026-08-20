@@ -2038,6 +2038,11 @@ pub struct PropertiesGpuiPanel {
     /// (see [`super::on_became_visible`]).
     #[allow(dead_code)]
     visibility_sub: Subscription,
+    /// Folding a group writes the Global; a second Properties panel has to
+    /// repaint from it rather than wait for an unrelated refresh
+    /// (`CollapsedParamGroupsState`).
+    #[allow(dead_code)]
+    collapsed_groups_sub: Subscription,
 }
 
 impl PropertiesGpuiPanel {
@@ -2050,6 +2055,8 @@ impl PropertiesGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
 
+        let collapsed_groups_sub =
+            cx.observe_global::<super::CollapsedParamGroupsState>(|_this, cx| cx.notify());
         let selection_sub =
             cx.observe_global::<SelectedPropertiesTarget>(move |this: &mut Self, cx| {
                 let target = cx
@@ -2243,6 +2250,7 @@ impl PropertiesGpuiPanel {
             focus_handle,
             focus_subscriptions,
             selection_sub,
+            collapsed_groups_sub,
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             playhead_sensitive: true,

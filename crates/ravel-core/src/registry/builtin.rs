@@ -2609,6 +2609,27 @@ mod tests {
         }
     }
 
+    /// The threshold `PGRP-2` set: a built-in template with **six or more**
+    /// parameters declares groups. Below it a flat list still reads fine, so
+    /// grouping is optional; above it the panel is the wall of rows the plan
+    /// exists to break up. Without this test the next node with a dozen
+    /// parameters would simply not be grouped and nothing would say so.
+    #[test]
+    fn every_built_in_with_six_or_more_parameters_declares_groups() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let ungrouped: Vec<(&str, usize)> = reg
+            .all_templates()
+            .filter(|tmpl| tmpl.default_params.len() >= 6)
+            .filter(|tmpl| tmpl.param_group_declarations().is_empty())
+            .map(|tmpl| (tmpl.type_key.as_str(), tmpl.default_params.len()))
+            .collect();
+        assert!(
+            ungrouped.is_empty(),
+            "these templates are past the grouping threshold and declare none: {ungrouped:?}"
+        );
+    }
+
     /// A key may appear in at most one group of a template. A repeat is not a
     /// crash — the first declaration wins where the sections are built — but
     /// it always means one of the two declarations was meant to say something

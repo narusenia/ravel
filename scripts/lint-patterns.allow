@@ -43,6 +43,12 @@ observe-global crates/ravel-app/src/panels/timeline.rs BpmGridState
 # this Timeline instance did not make, so it observes the state for the same
 # reason as the entry above.
 observe-global crates/ravel-app/src/panels/timeline.rs LoopRangeState
+# Durable shared UI state (parameter-groups-plan PGRP-3): which parameter
+# groups are folded is written by whichever Properties panel the user clicked
+# in, by a project load and by File ▸ New. A second Properties panel shows the
+# same node type, so it has to repaint from a fold it did not perform — the
+# same lifecycle and the same reason as BpmGridState above.
+observe-global crates/ravel-app/src/panels/properties.rs CollapsedParamGroupsState
 # The Node Editor opens the network of the shared layer selection (REQ-UI-013
 # unit 3). Timeline and Outliner both write that selection, so observing the
 # durable state replaces per-writer pushes into this panel.

@@ -623,7 +623,8 @@ pub fn remove_custom_port(
                 },
             )?;
             let mut graph = graph.remove_output_port(node_id, OutputPortIndex(index as u32))?;
-            if node.parameters.iter().any(|p| p.key == name) {
+            if node.parameters.iter().any(|p| p.key == name) || node.param_groups.contains_key(name)
+            {
                 let updated = {
                     let node = graph
                         .node(node_id)
@@ -903,6 +904,11 @@ pub fn set_custom_port_type(
                 (Some(at), Some(value)) => updated.parameters[at].value = value,
                 (Some(at), None) => {
                     updated.parameters.remove(at);
+                    // A wire-only port carries no value, so its display group
+                    // entry names nothing. Leaving it would put the port back
+                    // into its old group the moment the type changes back —
+                    // the same reason `remove_custom_port` drops the entry.
+                    updated.param_groups.remove(name);
                 }
                 (None, Some(value)) => updated.parameters.push(Parameter {
                     key: name.to_string(),
@@ -4596,6 +4602,46 @@ mod tests {
         assert!(
             node_of(&graph, in_id()).param_groups.is_empty(),
             "a re-added port starts ungrouped"
+        );
+    }
+
+    /// Changing a grouped port to a wire-only type drops its group with its
+    /// parameter. The group names a value, and a wire-only port has none —
+    /// keeping the entry would put the port back into its old group the
+    /// moment the type changes back, which no gesture asked for.
+    #[test]
+    fn retyping_a_grouped_port_to_a_wire_only_type_drops_its_group() {
+        let graph = in_graph_with_two_custom_params();
+        let graph = set_custom_port_group(graph, in_id(), "width", "Size").expect("assign");
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "width",
+            CustomPortType::Geometry,
+            NetworkContext::Subnet,
+        )
+        .expect("retype to a wire-only type");
+        let node = node_of(&graph, in_id());
+        assert!(
+            !node.parameters.iter().any(|p| p.key == "width"),
+            "a wire-only port carries no parameter"
+        );
+        assert!(
+            node.param_groups.is_empty(),
+            "and so it carries no group either"
+        );
+
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "width",
+            CustomPortType::Float,
+            NetworkContext::Subnet,
+        )
+        .expect("retype back");
+        assert!(
+            node_of(&graph, in_id()).param_groups.is_empty(),
+            "the old group does not come back with the parameter"
         );
     }
 }

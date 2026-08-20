@@ -2247,6 +2247,12 @@ mod tests {
             "comp_id",
             ParameterValue::IntChannel(AnimationChannel::keyframes(curve_0_to_10())),
         );
+        // The third identifier is a `StringSteps`, not an `IntChannel`: the
+        // media reference is a string holding an `AssetId`, so leaving it out
+        // of this test would let the row rule regress for the one identifier
+        // whose animated spelling differs from the other two.
+        let media = Node::new(NodeId::new(42), "media")
+            .with_param("asset_id", ParameterValue::StringSteps(steps_ten_twenty()));
         let mut layer = test_layer();
         layer.network = layer
             .network
@@ -2254,13 +2260,16 @@ mod tests {
             .add_node(layer_ref)
             .unwrap()
             .add_node(precomp)
+            .unwrap()
+            .add_node(media)
             .unwrap();
 
         let rows = property_rows(&layer);
         assert!(
             !rows.iter().any(|row| matches!(
                 &row.id,
-                PropertyRowId::Network { key, .. } if key == "layer" || key == "comp_id"
+                PropertyRowId::Network { key, .. }
+                    if key == "layer" || key == "comp_id" || key == "asset_id"
             )),
             "the reference parameters are not animatable, so they get no row"
         );

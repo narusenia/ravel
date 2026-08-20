@@ -1097,6 +1097,54 @@ mod tests {
 
     /// An int curve is a staircase: every vertex sits on an integer value,
     /// and each level change is a corner (hold) followed by a riser, so the
+    /// The staircase's accuracy is bounded by the sampler, not by rounding.
+    ///
+    /// When the visible range is wider than the sample budget,
+    /// `visit_curve_samples_for_view` decimates the smooth spans, so a riser
+    /// can only land on a frame that was sampled — the boundary is late by up
+    /// to one sampling step. That is the same approximation the float curve
+    /// has always been drawn with (a Bézier stroked as a polyline), and at the
+    /// painter's own budget of two samples per pixel a step is under half a
+    /// pixel wide, so the lateness is not visible. What must stay true is the
+    /// invariant: **every drawn riser sits on a sampled frame and every level
+    /// is an integer** — the staircase never invents a boundary of its own.
+    #[test]
+    fn a_decimated_int_staircase_keeps_its_risers_on_sampled_frames() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(100, 100.0, Interpolation::Linear);
+
+        let mut sampled = Vec::new();
+        visit_curve_samples_for_view(&curve, 0, 0.0, 100.0, 6, |frame, _| sampled.push(frame));
+        // The budget really did bite: a per-frame walk would be 101 samples.
+        assert!(
+            sampled.len() < 12,
+            "expected a decimated sample set, got {sampled:?}"
+        );
+
+        let points = curve_polyline_points(&curve, 0, 0.0, 100.0, 6, true);
+        for point in &points {
+            assert_eq!(
+                point.y,
+                point.y.round(),
+                "{point:?} is not an integer level"
+            );
+            assert!(
+                sampled.contains(&(point.x as i64)),
+                "{point:?} sits on a frame the sampler never visited"
+            );
+        }
+        // Treads and risers only: no sloped segment survives decimation.
+        for pair in points.windows(2) {
+            assert!(
+                pair[0].x == pair[1].x || pair[0].y == pair[1].y,
+                "sloped segment between {:?} and {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
     /// segment between two frames is never sloped.
     #[test]
     fn an_int_polyline_is_a_staircase_on_the_round_boundaries() {

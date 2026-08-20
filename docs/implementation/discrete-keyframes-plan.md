@@ -1,6 +1,6 @@
 # Int / String のキーフレーム 実装計画
 
-> **Status**: Planned — 2026-08-08
+> **Status**: `DISK-1`〜`DISK-6` 実装済み — 2026-08-21（`.ravprj` v10 / v11）
 
 対象: `ravel-core` の `ParameterValue` と解決層、`ravel-ui` のキーフレームモデル、
 `ravel-app` の Timeline とカーブエディタ。要件は `REQ-CORE-010` の周辺
@@ -155,6 +155,26 @@ Timeline には行が出て、キーの打ち直しと移動と削除だけが�
   `StringSteps` は別の行種別にする（`Vec<&AnimationChannel>` に載らない）
 - String の行は Step のみ。補間の切り替えメニューを出さない
 
+**実装**: 行種別は `PropertyRow` のフィールドではなく述語
+`keyframes::row_value_kind(layer, id) -> RowValueKind::{Float, Integer,
+Steps}` にした。行の形（`channel_names` が 1 要素で `CHANNEL_VALUE`）は
+f32 の単成分パラメータと同一で、描画・ヒットテスト・高さ計算はどれも
+`channel_names.len()` を数えたままなので、**パネル側に行種別の分岐が
+1 つも増えない**。パネルが `ChannelSource::Keyframes` を剥がしていた
+箇所は 2 つのアクセサへ集約した — キーの列挙は
+`row_key_frames(layer, id, component)`、レーン数は
+`row_component_count(layer, id)`。`insert_keyframe` /
+`remove_keyframe` / `move_keyframe` / `has_keyframe_at` は
+`StringSteps` を内部でディスパッチする（String の insert は
+「そのフレームの `sample()` を打ち直す」、最後のキーを消すと
+`ParameterValue::String(default_value)` へ戻る）。ドラッグの
+プレビューは基準線の型を `RowKeys::{Curve, Steps}` に広げ、
+`preview_row_key_moves` が振り分ける。`RowKeys::curve()` が `None` を
+返すことがカーブエディタの値軸と接線ジェスチャの出口を閉じ、
+`RowValueKind::is_stepped()` が補間切り替え（ツールバーと
+コンテキストメニューの両方）の出口を閉じる。識別子パラメータは
+`property_rows` の側でも弾く（`is_identifier_parameter`）。
+
 **完了条件**
 
 - Int / String のキーフレームが Timeline に出て、移動・削除・追加ができる
@@ -166,12 +186,26 @@ Timeline には行が出て、キーの打ち直しと移動と削除だけが�
 - Int のカーブを**丸めた値**でプロットする。制御点は f32 のまま掴める
 - String はカーブエディタに出さない
 
+**実装**: サンプラー（`visit_curve_samples_for_view`）は無改変で、
+**頂点列の生成を描画側の純粋関数** `curve_polyline_points(curve,
+frame_offset, min_x, max_x, max_samples, integral)` に切り出した。
+`integral` が立っているときだけ、丸めた値が変わるフレームで
+「前の段を保持する角 → 立ち上がり」の 2 頂点を打つので、隣接フレーム間が
+斜線にならず、段の境界が `round()` の境界と一致する。旗は
+`CurveSeries::integral` として item が持ち、`TimelineCurveData::integral`
+が `row_value_kind(...).is_integral()` から埋める。`integral = false` の
+頂点列はサンプル 1 つに頂点 1 つで、f32 の描画は 1 ピクセルも変わらない。
+
 **完了条件**
 
 - Int のカーブが階段に見え、制御点のドラッグで段が動く
 - 段の境界が `round()` の境界と一致する
 
 ### 単位 6: ロケール / 文書
+
+**実装**: 新しいユーザー可視文字列は無い — Int / String の行は既存の
+`timeline.channel.value` を使い、閉じた UI（補間切り替え）は文字列ではなく
+出口が消える。したがってロケール資産の変更は無い。
 
 **完了条件**
 

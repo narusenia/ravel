@@ -2245,7 +2245,30 @@ Unknown type keys are skipped silently (plugin space).
   `row_channels`, `has_keyframe_at`, `channel_value_at` (the read side of
   `set_channel_value`: `None` where that write path would refuse — an
   expression, a blend, a node-output binding — so a caller never offers an
-  editing control over a value it cannot write). `RevealFilter::{Animated, Group,
+  editing control over a value it cannot write).
+  **Discrete rows** (`DISK-4`): a keyframed `ParameterValue::IntChannel`
+  earns a row like any single-component float parameter (it *is* an f32
+  channel), and a non-empty `ParameterValue::StringSteps` earns one lane of
+  held keys even though it has no `AnimationChannel` at all. Hosts therefore
+  enumerate keys through **`row_key_frames(layer, id, component)`** and count
+  lanes through **`row_component_count(layer, id)`** rather than unwrapping
+  `ChannelSource::Keyframes` themselves — the sites that peel the channel
+  apart are exactly the sites that would silently drop a step row and
+  desynchronize a painter from its hit test. `insert_keyframe` (re-keys the
+  string the frame already holds), `remove_keyframe` (an emptied step curve
+  re-types the parameter back to `ParameterValue::String` holding the curve's
+  **default**, the same round trip the Properties toggle performs),
+  `move_keyframe` and `has_keyframe_at` dispatch internally, so a gesture
+  needs no branch. `row_value_kind(layer, id) -> RowValueKind::{Float,
+  Integer, Steps}` answers the two things a channel cannot: `is_stepped()`
+  closes the interpolation menu and tangent editing, `is_integral()` tells
+  the curve editor to draw the staircase. Drag previews snapshot a lane as
+  `row_keys(layer, id, component) -> RowKeys::{Curve, Steps}` and move it
+  with `preview_row_key_moves`; `RowKeys::curve()` is `None` for a step row,
+  which is what closes the value-axis and tangent gestures. An **identifier
+  parameter** (`validate::is_identifier_parameter`) gets no row at all,
+  matching the Properties toggle that refuses to key one.
+  `RevealFilter::{Animated, Group,
   Modified, Expression}` with `matches(layer, row)` is the reveal predicate
   the Timeline filters rows by (`TimelinePanel::visible_property_rows`).
   `PropertyRow::channel_names` mixes two
@@ -2926,7 +2949,13 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `comp_frame_for_key` (REQ-LAYER-004). Graph view reuses that channel and
   keyframe selection, paints a toggleable time/value grid with a value
   ruler, and exposes fit, add/select/delete, and Bezier/Linear/Step
-  interpolation controls through both its toolbar and context menu. Graph
+  interpolation controls through both its toolbar and context menu — the
+  interpolation controls close when the selection contains a step key
+  (`keyframes::row_value_kind`), and an `IntChannel` row is plotted as the
+  staircase evaluation resolves (`widgets::curve_editor::CurveSeries::integral`
+  expands the sampled polyline through `curve_polyline_points`, while its
+  control points stay on the float grid). A `StringSteps` row never enters the
+  graph view at all: it has no float curve to plot. Graph
   points drag in time/value space (Shift constrains the dominant axis), and
   dragging one Bezier handle applies the same delta to the corresponding
   handle of every selected key (Shift snaps its screen angle to 45-degree

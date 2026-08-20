@@ -21,14 +21,32 @@ CLI は成功終了し、真っ黒なフレームを書き出し、レポート�
 音声側は同じ状況を `AudioSourceSkipped` で「絵は残す、しかし無言にはしない」と
 扱っている。**映像側だけが無言**という非対称。
 
-### 2. 参照 ID のパラメータをワイヤで動かせる（`HIGH-35`）
+### 2. 参照 ID のパラメータをフレームごとに動かせる（`HIGH-35`）
 
 `composition::validate::is_identifier_parameter` が列挙する 3 つ
 （`layer.ref` の `layer`、`precomp` の `comp_id`、`media` の `asset_id`）は
-参照先の**生の ID** であって数値ではない。にもかかわらず
+参照先の**生の ID** であって数値ではない。にもかかわらず、
+**フレームごとに違う参照先を指す状態を作れる。** 経路は 2 つあり、
+`HIGH-35` の個票はうち 1 つしか書いていない（着手時に実測して分かった）。
+
+**(a) ワイヤ経由（`layer.ref` の `layer` と `precomp` の `comp_id`）。**
 `Graph::expose_param_port` はこれを普通の `SCALAR` 入力として受け、
-Scalar を繋ぐと `param_port_overlay` が `ResolvedValue::Int` に変換するので
-**評価のたびに参照先 ID が変わる**。
+Scalar を繋ぐと `param_port_overlay`（`eval.rs`）が `ResolvedValue::Int` に
+変換するので、評価のたびに参照先 ID が変わる。
+
+**(b) `StringSteps` 経由（`media` の `asset_id`）。** `asset_id` は
+`ParameterValue::String`（`AssetId` の 10 進表記を持つ文字列）で、
+`param_port_overlay` は `String` / `StringSteps` に `None` を返すので
+**ワイヤでは動かない** — 個票の「3 つとも Scalar で駆動できる」は誤り。
+代わりに `DISK-2` が足した `StringSteps` が同じ状態を作る:
+`eval.rs` は `StringSteps` をフレームごとに `sample` して
+`ResolvedValue::Str` にし、`media` プロセッサは `str_or("asset_id", "")` で
+それを読む。一方 `composition::node_asset_reference` は
+`ParameterValue::String` **だけ**を読むので、`id_watermarks` は
+`StringSteps` の中の ID を 1 つも予約しない。UI からは `DISK-3` が
+トグルを塞いでいるので、到達するのは手編集した `.ravprj` だけ。
+
+どちらも同じ形の欠陥で、同じ 1 つの規約で閉じる。
 
 一方 `Document::id_watermarks` は `ParameterValue::static_identifier` 経由で
 **保存された静的な値しか走査しない**。よって動的に駆動される ID は予約されず、
@@ -53,12 +71,15 @@ UI 経路は `DISK-3`（#462）が塞いだが、塞いだのは公開する側�
 **`id_watermarks` が予約できるものだけが、評価から見える識別子である。**
 これを不変条件にする。具体的には:
 
-- 識別子パラメータの読み出しは `ParameterValue::static_identifier` を通る
-  **1 つの経路**に集約する
+- 識別子パラメータの読み出しを**1 つの経路**に集約する。今は 2 つの綴りに
+  分かれている（`ParameterValue::static_identifier` が Int 系の
+  `layer.ref` / `precomp`、`composition::node_asset_reference` が
+  `media` の `asset_id`）。どちらも「静的な保存値だけを読む」という同じ規約なので、
+  その規約を名前のある 1 つの口にして、評価もそこを通す
 - `param_port_overlay` は識別子パラメータのとき**ワイヤを無視して保存値を使う**
-- 保存値が静的でない（キーフレーム / 式 / ブレンド）ときは
-  **「参照無し」として扱う** — `layer.ref` は何も参照せず、`media` はオフライン、
-  `precomp` は空
+- 保存値が静的でない（ワイヤ / キーフレーム / `StringSteps` / 式 / ブレンド）
+  ときは **「参照無し」として扱う** — `layer.ref` は何も参照せず、
+  `media` はオフライン、`precomp` は空
 
 この形にすると、**予約と評価が構造的に一致する**。「予約されていない ID が
 評価から見える」状態が存在しなくなるので、`HIGH-35` の 3 段の連鎖
@@ -85,8 +106,9 @@ UI 経路は `DISK-3`（#462）が塞いだが、塞いだのは公開する側�
   検査項目と正面から衝突する
 
 そして**上の決定によって、静的な走査で十分になる**。
-「評価しないと分からないオフライン」（時間依存で素材が変わる経路）は
-`asset_id` を動的に駆動できることに由来していたが、それが無くなるので
+`HIGH-34` が「評価しないと分からないオフライン」と書いた経路
+（時間依存で素材が変わる）は、`asset_id` を `StringSteps` にできることに
+由来していた。`WARN-1` がそれを「参照無し」に落とすので、
 **オフラインは文書から完全に決まる**。2 件を一緒に設計する利点がここに出る。
 
 `media` プロセッサの `tracing::warn!` は**そのまま残す**（GUI とライブラリの
@@ -108,21 +130,24 @@ Outliner / Timeline のレイヤー行にオフライン印を出すのは
 
 ### 単位 1: 識別子パラメータの解決を 1 経路に畳む
 
-- 識別子パラメータの読み出しを 1 つの関数に集約する
-  （`is_identifier_parameter` と `static_identifier` の組を、
-  「ノードの型 + パラメータキー + 値」から `Option<u64>` を返す 1 つの口にする）
+- 識別子パラメータの読み出しを 1 つの口に集約する。
+  `is_identifier_parameter` / `static_identifier`（Int 系）と
+  `node_asset_reference`（`asset_id`）が同じ規約の 2 つの綴りなので、
+  **どちらも「静的でなければ参照無し」を返す**ことを型か関数で 1 度だけ言う
 - `param_port_overlay` が識別子パラメータのとき**ワイヤを無視する**
-- 静的でない保存値を「参照無し」に落とす。`layer.ref` / `precomp` / `media` の
-  3 経路が同じ扱いになることを確認する
+  （到達するのは `layer.ref` の `layer` と `precomp` の `comp_id`）
+- `asset_id` が `StringSteps` のとき**オフラインとして扱う**
+  （`eval.rs` の `StringSteps` 解決から識別子パラメータを外す）
 - **`Document::validate` は何も拒否しない。** 既存文書は開ける
 
 **完了条件**
 
-- 識別子パラメータにワイヤを繋いだ文書で、評価が**保存値**を使う
-  （ヘッドレステスト。3 つの識別子それぞれ）
-- 識別子パラメータがキーフレームを持つ手編集文書が**開ける**。
-  参照は解決せず（`media` はオフライン、`layer.ref` は無参照）、
-  **パニックしない**
+- `layer.ref` の `layer` と `precomp` の `comp_id` にワイヤを繋いだ文書で、
+  評価が**保存値**を使う（ヘッドレステスト）
+- `asset_id` が `StringSteps`（キーが 2 つ以上）の手編集文書が**開け**、
+  評価が**オフライン**として扱い、**パニックしない**
+- 識別子パラメータが `IntChannel` のキーフレームを持つ手編集文書が
+  **開ける**。参照は解決しない
 - `id_watermarks` が予約する集合と、評価から見える識別子の集合が
   **一致する**ことのテスト（この単位の要点。両方を同じ文書から取って比べる）
 - 既存の識別子ポートを持つ文書のラウンドトリップ（ポートは残る）

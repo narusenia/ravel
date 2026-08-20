@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 4 | 31 | [high/](high/) — 1件1ファイル |
+| high | 2 | 33 | [high/](high/) — 1件1ファイル |
 | medium | 28 | 45 | [medium/](medium/) — 領域別5ファイル |
 | low | 32 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -279,17 +279,12 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
 [low/backlog.md](low/backlog.md) の `LOW-APP-16`（Timeline の壊れやすい
 panic 箇所）、そして下の `HIGH-33`。
 
-- **[HIGH-35](high/HIGH-35-identifier-parameters-can-be-driven-by-a-wire.md)**
-  参照 ID のパラメータ（`layer.ref.layer` / `precomp.comp_id` / `media.asset_id`）を
-  パラメータポートとして公開でき、Scalar を繋ぐと**フレームごとに参照先が変わる**。
-  `id_watermarks` は保存値しか見ないので**予約が外れ、新しい ID が参照を
-  横取りする**。UI 経路は #462 で塞いだが、API / 手編集文書からは到達する。
-  **`HIGH-34` と警告経路の設計を共有するので 2 件まとめて扱うのが素直**
-- **[HIGH-34](high/HIGH-34-offline-media-renders-silently-transparent.md)**
-  オフラインの素材がレンダー結果を黙って透明にする。`Warning` に映像側の
-  variant が無いので、`ravel-cli render` は**成功終了して真っ黒なフレームを
-  書く**（音声側は `AudioSourceSkipped` で言うのに、映像だけ無言）。
-  `AID-1` / `AID-2` でオフラインへの到達経路が増えたので頻度が上がっている
+`HIGH-34`（オフラインの素材が黙って透明になる）と `HIGH-35`（参照 ID の
+パラメータをフレームごとに動かせる）は**解決済み** — `WARN-1` / `WARN-2` が
+1 つの設計で閉じた（個票は
+[closed/HIGH-34-offline-media-renders-silently-transparent.md](closed/HIGH-34-offline-media-renders-silently-transparent.md) /
+[closed/HIGH-35-identifier-parameters-can-be-driven-by-a-wire.md](closed/HIGH-35-identifier-parameters-can-be-driven-by-a-wire.md)）。
+
 - **[HIGH-33](high/HIGH-33-no-gpu-device-loss-recovery.md)**
   GPU デバイス喪失から復帰できない。`ravel-gpu` に復旧経路が無く、`ZC-8` で
   ウィンドウのレンダラとデバイスを共有するようになったため、GPUI が新しい

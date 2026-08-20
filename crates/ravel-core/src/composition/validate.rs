@@ -34,29 +34,34 @@ pub const LAYER_REF_LAYER_PARAM: &str = "layer";
 /// Whether the parameter `param_key` on a node of type `type_key` names an
 /// **identifier** rather than a value of its own — a reference read back
 /// through
-/// [`ParameterValue::static_identifier`](crate::graph::ParameterValue::static_identifier)
-/// or [`node_asset_reference`](super::node_asset_reference).
+/// [`ParameterValue::identifier`](crate::graph::ParameterValue::identifier),
+/// which is the one mouth every reader of one goes through
+/// ([`node_asset_reference`](super::node_asset_reference) and evaluation
+/// included).
 ///
-/// Such a parameter must never be animated, whatever its kind. The value
-/// between two keys is as real as the keys, so a keyframed reference gives no
-/// finite answer to which ids
+/// Such a parameter cannot be animated, whatever its kind: a value that does
+/// not stand still names **nothing**. The value between two keys is as real as
+/// the keys, so a keyframed reference gives no finite answer to which ids
 /// [`Document::id_watermarks`](crate::composition::Document::id_watermarks)
 /// must reserve (REQ-LAYER-009), nor to which referencing scopes to invalidate
-/// when a referenced layer's shell changes.
+/// when a referenced layer's shell changes. Rather than refuse such a
+/// document — one that saved and then cannot be opened is data loss — the
+/// reference is dropped and
+/// [`Document::dynamic_identifiers`](crate::composition::Document::dynamic_identifiers)
+/// hands it to `ravel-cli render` to report.
 ///
-/// Three parameters qualify, and the third is the one that bites hardest:
+/// Three parameters qualify, in the two spellings a raw id has:
 ///
 /// - `precomp`'s `comp_id` and `layer.ref`'s `layer` are `Int`s holding a raw
 ///   [`CompId`] / [`LayerId`].
 /// - a media node's `asset_id` is a **`String`** holding a raw
 ///   [`AssetId`](crate::id::AssetId). Re-typing it to
-///   `ParameterValue::StringSteps` would make
-///   [`node_asset_reference`](super::node_asset_reference) answer `None` — it
-///   reads a plain `String` and nothing else — so the watermark scan would
-///   stop seeing the reference and the next minted `AssetId` could reuse an id
-///   a key still names. That is the reference-reconnects-to-unrelated-footage
-///   bug the v9 asset-identity format exists to have killed, and it would come
-///   back through the keyframe toggle.
+///   `ParameterValue::StringSteps` used to make the watermark scan stop seeing
+///   the reference while evaluation still sampled it per frame, so the next
+///   minted `AssetId` could reuse an id a key still named — the
+///   reference-reconnects-to-unrelated-footage bug the v9 asset-identity
+///   format exists to have killed. Both sides read the same mouth now, so the
+///   step curve names no asset anywhere: the node is simply offline.
 ///
 /// It lives here — one predicate beside the constants it is made of — because
 /// the same question asked in three places is a question that gets a different

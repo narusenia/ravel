@@ -1,5 +1,17 @@
 # [HIGH-35] 参照 ID のパラメータをワイヤで動かせる — フレームごとに参照先が変わり、ID の予約が外れる
 
+**解決済み**: `WARN-1`（`render-warning-channel-plan.md`）。案 3（評価時に無視
+する）。識別子の読み口を `ParameterValue::identifier` の 1 つに畳み、
+**静的な保存値だけが参照**という規約をそこで 1 度だけ言うようにした。
+`static_identifier` と `node_asset_reference` はその綴りになり、評価も同じ口を
+通るので、`id_watermarks` が予約する集合と評価から見える集合が構造的に一致する。
+ワイヤは無視され（ポートは残り、解除もできる）、`IntChannel` のキーフレーム・式・
+ブレンド・`StringSteps` はどれも「参照無し」— `layer.ref` は対象なし、`media` は
+`AssetId::UNSET` でオフライン。**`Document::validate` は何も拒否していない**ので
+既存文書と手編集した `.ravprj` は開ける。無視した事実は
+`Document::dynamic_identifiers` から取れ、`ravel-cli render` が
+`identifier-not-static` として**パラメータごとに 1 行**報告する（`WARN-2`）。
+
 | 項目 | 内容 |
 | --- | --- |
 | 深刻度 | high |

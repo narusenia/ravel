@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 31 | 1件1ファイル |
+| high | 33 | 1件1ファイル |
 | medium | 44 | 領域別5ファイル（`medium-*.md`） |
 | low | 9 | [low.md](low.md) 1ファイル |
 
@@ -26,7 +26,7 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（31件）
+## high（33件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
@@ -61,6 +61,8 @@
 | [HIGH-32](HIGH-32-linear-ingest-powf-per-pixel.md) | 線形 ingest が画素ごとに f64 の transfer function を評価し、デコードが 1 フレーム数十 ms に落ちる | #378 |
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 | [HIGH-26](HIGH-26-ravprj-saves-deeper-than-it-loads.md) | 保存できた `.ravprj` が二度と開けない（保存側と読み込み側で上限が違う） | 上限の一本化（`MAX_SUBNET_DEPTH` 16 + `RON_RECURSION_LIMIT`） |
+| [HIGH-34](HIGH-34-offline-media-renders-silently-transparent.md) | オフラインの素材がレンダー結果を黙って透明にする（機械可読な警告が無い） | `WARN-2`（`media-offline` / `media-unreadable`） |
+| [HIGH-35](HIGH-35-identifier-parameters-can-be-driven-by-a-wire.md) | 参照 ID のパラメータをフレームごとに動かせ、ID の予約が外れる | `WARN-1`（読み口を `ParameterValue::identifier` へ集約） |
 
 ## medium（45件）
 

@@ -2719,6 +2719,43 @@ impl PropertiesGpuiPanel {
         // The document observer refreshes the displayed toggle state.
     }
 
+    /// Record which parameter groups are folded after a click in the section
+    /// accordion (PGRP-3).
+    ///
+    /// `keys` is the `(type_key, group)` fold identity of each section in
+    /// order (`None` for a section that cannot be folded away) and `open` the
+    /// indices the accordion reports as open. The accordion hands over the
+    /// whole open set rather than the header that moved, and it fires on any
+    /// click that bubbles out of the list — a scrub, a checkbox, a text field
+    /// — so every fold is written through
+    /// [`crate::panels::set_param_group_collapsed`], which reports whether it
+    /// changed anything, and only a real change repaints.
+    ///
+    /// The fold is UI state: it never reaches the document, so it records no
+    /// undo step, and the project save path carries it to `ui_state.json`.
+    fn apply_param_group_folds(
+        &mut self,
+        keys: &[Option<(String, String)>],
+        open: &[usize],
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for (index, key) in keys.iter().enumerate() {
+            let Some((type_key, group)) = key else {
+                continue;
+            };
+            changed |= crate::panels::set_param_group_collapsed(
+                type_key,
+                group,
+                !open.contains(&index),
+                cx,
+            );
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     /// Open or close the inline curve editor of the row `key`.
     ///
     /// Expansion is view state only: nothing here touches the document, so
@@ -4666,12 +4703,42 @@ impl Render for PropertiesGpuiPanel {
             // declared, `bound_to` what already is. The panel only draws them.
             let exposed_states = self.exposed_states(&sections, cx);
 
+            // Which sections are node-parameter groups the user may fold away,
+            // and under which `(type_key, group)` the fold is remembered
+            // (PGRP-3). `None` for every other section — the info, ports,
+            // declarations and description sections stay open, as they always
+            // were.
+            let param_group_keys: Vec<Option<(String, String)>> = match &resolved_nodes {
+                Some((nodes, ..)) => {
+                    let node = nodes.first().expect("resolved nodes are non-empty");
+                    let groups =
+                        ravel_ui::properties::node::param_group_titles(node, &self.registry);
+                    sections
+                        .iter()
+                        .map(|section| {
+                            groups
+                                .iter()
+                                .find(|(_, title)| title == &section.title)
+                                .map(|(group, _)| (node.type_key.clone(), group.clone()))
+                        })
+                        .collect()
+                }
+                None => vec![None; sections.len()],
+            };
+
             let mut accordion = Accordion::new("properties-accordion")
                 .multiple(true)
                 .small();
-            for section in sections {
+            for (index, section) in sections.into_iter().enumerate() {
                 let fields = section.fields.clone();
                 let title: SharedString = ravel_i18n::translate(&section.title).into();
+                // A section with no fold identity is always open.
+                let open = !param_group_keys
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|(type_key, group)| {
+                        crate::panels::is_param_group_collapsed(type_key, group, cx)
+                    });
                 let scrubs = scrub_entities.clone();
                 let strings = string_entities.clone();
                 let selects = select_entities.clone();
@@ -4827,9 +4894,23 @@ impl Render for PropertiesGpuiPanel {
                             container = container.child(body);
                         }
                     }
-                    item.title(title.clone()).open(true).child(container)
+                    item.title(title.clone()).open(open).child(container)
                 });
             }
+            // The Accordion reports the whole open set rather than the header
+            // that moved, and it fires on any click that bubbles out of the
+            // list — including the property rows. So this writes each fold
+            // through `set_param_group_collapsed`, which returns whether it
+            // changed anything, and only a real change repaints.
+            accordion = accordion.on_toggle_click({
+                let keys = param_group_keys.clone();
+                let editor = editor.clone();
+                move |open, _window, cx| {
+                    editor
+                        .update(cx, |this, cx| this.apply_param_group_folds(&keys, open, cx))
+                        .ok();
+                }
+            });
             // The Accordion fills its parent (`size_full` with `flex_1`
             // items whose content is `overflow_hidden`), so as a direct
             // child of the scroll container it would squash the sections
@@ -6680,6 +6761,81 @@ mod tests {
                     x as f64, y as f64,
                 ))
         })
+    }
+
+    /// A folded parameter group is remembered under `(type_key, group)` — not
+    /// per node — and unfolding forgets it again. The project save path reads
+    /// the same global into `ui_state.json`, which is what carries the fold
+    /// across a restart; the default (nothing recorded) is all-expanded.
+    ///
+    /// Sections that are not parameter groups (the info section here) are
+    /// never recorded: they have no fold identity, so a click that reports
+    /// them closed must not put anything in the set.
+    #[gpui::test]
+    fn folding_a_parameter_group_records_it_by_node_type(cx: &mut TestAppContext) {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let node = registry
+            .create_node("scatter.grid", NodeId::next())
+            .expect("scatter.grid is registered");
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(cx, node.clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let groups = ravel_ui::properties::node::param_group_titles(&node, &panel.registry);
+                assert_eq!(
+                    groups.iter().map(|(g, _)| g.as_str()).collect::<Vec<_>>(),
+                    vec!["layout", "source"],
+                    "scatter.grid declares both groups and leaves nothing ungrouped"
+                );
+                // The fold identity of each section, exactly as `render`
+                // builds it.
+                let keys: Vec<Option<(String, String)>> = panel
+                    .sections
+                    .iter()
+                    .map(|section| {
+                        groups
+                            .iter()
+                            .find(|(_, title)| title == &section.title)
+                            .map(|(group, _)| (node.type_key.clone(), group.clone()))
+                    })
+                    .collect();
+                let source = keys
+                    .iter()
+                    .position(|key| key.as_ref().is_some_and(|(_, g)| g == "source"))
+                    .expect("the Source section is foldable");
+
+                assert!(
+                    crate::panels::collapsed_param_groups(cx).is_empty(),
+                    "nothing is folded before the first click"
+                );
+
+                // Every section open but Source — and the info section
+                // reported closed too, which must record nothing.
+                let open: Vec<usize> = (0..keys.len()).filter(|i| *i != source).collect();
+                panel.apply_param_group_folds(&keys, &open, cx);
+                assert!(crate::panels::is_param_group_collapsed(
+                    "scatter.grid",
+                    "source",
+                    cx
+                ));
+                assert!(!crate::panels::is_param_group_collapsed(
+                    "scatter.grid",
+                    "layout",
+                    cx
+                ));
+                assert_eq!(
+                    crate::panels::collapsed_param_groups(cx).len(),
+                    1,
+                    "only the parameter group is recorded"
+                );
+
+                // Unfolding it forgets the entry rather than storing "open".
+                let open: Vec<usize> = (0..keys.len()).collect();
+                panel.apply_param_group_folds(&keys, &open, cx);
+                assert!(crate::panels::collapsed_param_groups(cx).is_empty());
+            })
+            .unwrap();
     }
 
     /// Curve parameters reach the panel as curve rows with a curve editor

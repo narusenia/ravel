@@ -12,7 +12,7 @@
 | `manifest.json` | `format_version` とプロジェクト情報。**マイグレーション連鎖の起点** |
 | `document/main.ron` | Composition・レイヤー・ネットワーク（Subnet 入れ子含む）・キーフレーム・`media_assets`（v9 で `AssetId` キー）・`exposed_parameters`（公開パラメータ宣言、v7 で追加）。決定的 RON |
 | `settings.toml` | プロジェクト設定 |
-| `ui_state.json` | UI 状態（アクティブコンポジション、Timeline の BPM グリッド、コンポジションごとのループ範囲）。**任意エントリ**で、欠落時はアクティブコンポジションが `root_comp` に、BPM グリッドが既定に、ループ範囲が 0 件にフォールバック |
+| `ui_state.json` | UI 状態（アクティブコンポジション、Timeline の BPM グリッド、コンポジションごとのループ範囲、Properties で畳んだパラメータグループ）。**任意エントリ**で、欠落時はアクティブコンポジションが `root_comp` に、BPM グリッドが既定に、ループ範囲が 0 件に、パラメータグループが全展開にフォールバック |
 | `workspace_layout.toml` | ワークスペースレイアウト。**任意エントリ**かつ**オプトイン**（既定 OFF）で、トグルが OFF のときは書かれない |
 
 保存時は前のリビジョンを `.bak` にする。書き込みはアトミック
@@ -188,7 +188,10 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 `MediaAssetEntry.exposed_owner`（公開宣言が作った素材の所有者、`AID-3`）も v9 の
 まま同じ形。旧ビルドが捨てて失われるのは所有関係だけで、症状は「同じ露出値を
 もう一度適用すると素材が 1 つ増える」— 素材表に見えるので気づける。
-`ui_state.json` も format_version 3 のまま追加された。
+`ui_state.json` も format_version 3 のまま追加された。同じエントリへ後から
+足した `bpm_grid` / `loop_ranges` / `collapsed_param_groups`（Properties で
+畳んだパラメータグループ、`PGRP-3`）も版を据え置いている — 既定が
+「off / 0 件 / 全展開」なので、旧ビルドが捨てても**画面を見れば分かる**。
 
 この判断は `docs/implementation/roadmap.md` の基準 1（移行コストが時間で
 増える単位を先に）にも影響する。**フィールド追加だけなら後回しのコストは

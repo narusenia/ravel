@@ -969,6 +969,23 @@ mod tests {
         );
     }
 
+    /// The folded parameter groups ride the same optional entry: a project
+    /// saved with a group folded away comes back with it, and the format
+    /// version stays put (an additive optional field, `docs/dev/persistence.md`).
+    #[test]
+    fn the_archive_round_trips_the_folded_parameter_groups() {
+        let mut project = demo_project();
+        project.ui_state.collapsed_param_groups =
+            vec![("scatter.grid".to_string(), "source".to_string())];
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            back.ui_state.collapsed_param_groups(),
+            std::collections::BTreeSet::from([("scatter.grid".to_string(), "source".to_string())])
+        );
+    }
+
     /// A current-format archive may omit `ui_state.json`; it must still load,
     /// falling back to the document root. The optional entry never requires a
     /// format migration.

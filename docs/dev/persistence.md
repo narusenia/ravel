@@ -168,7 +168,7 @@ variant を位置で索引するので途中挿入は旧 journal を壊す。`.r
 `format_version` は、既存パラメータの表現を変えるとき（v6 のカーブ）と、
 **新しい variant が実際に文書へ書かれるとき**に上げる。
 
-後者は v9 の `IntChannel`（アニメーション可能な整数）が実例。判断基準は上の
+後者は v10 の `IntChannel`（アニメーション可能な整数）が実例。判断基準は上の
 表と同じ「黙って消えたときに気づけるか」で、答えは**気づけない**:
 旧ビルドは `document/main.ron` の `IntChannel` をパースできず
 `ProjectError::DocumentParse` を返すが、これは切り詰めた / 手編集で壊れた

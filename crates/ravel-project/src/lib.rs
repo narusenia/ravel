@@ -6,7 +6,7 @@
 //! A project is a zip container (see [`container`]) holding four logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
-//! - [`Document`] serialized as RON (`document/main.ron`, format v9)
+//! - [`Document`] serialized as RON (`document/main.ron`, format v10)
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
 //! - an optional [`LayoutDocument`] — the workspace layout the project opted

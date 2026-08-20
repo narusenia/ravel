@@ -456,13 +456,13 @@ mod tests {
         }
     }
 
-    /// `v8 → v9` adds the `IntChannel` parameter variant, which lives in
+    /// `v9 → v10` adds the `IntChannel` parameter variant, which lives in
     /// `document/main.ron`; the manifest must come through byte-identical
     /// apart from the stamp.
     #[test]
-    fn v8_migration_changes_only_the_version_stamp() {
+    fn v9_migration_changes_only_the_version_stamp() {
         let mut m = serde_json::json!({
-            "format_version": 8,
+            "format_version": 9,
             "ravel_version": "0.1.0",
             "project_name": "Ints",
             "created_at": "t",

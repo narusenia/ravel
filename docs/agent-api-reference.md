@@ -191,7 +191,7 @@ ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
     // bincode indexes variants positionally, so a new one may only go at the
     // end, and every addition bumps JOURNAL_FORMAT_VERSION (an old binary
     // meeting the new index is what the version discards). IntChannel also
-    // bumped the .ravprj format (v9): an old build cannot parse it out of
+    // bumped the .ravprj format (v10): an old build cannot parse it out of
     // document/main.ron, and that failure looks like corruption, so
     // load_with_backup would open a stale .bak instead of refusing.
 ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters

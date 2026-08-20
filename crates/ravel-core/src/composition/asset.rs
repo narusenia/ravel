@@ -450,6 +450,25 @@ pub struct MediaAssetEntry {
     /// must be able to say so (`CM-2`; the UI to set it is `CM-8`).
     #[serde(default)]
     pub color_space: Option<ColorSpace>,
+    /// The exposed declaration that created this entry, by declaration name
+    /// (`ravel_core::exposed::apply`). `None` for everything else — every
+    /// asset the import path mints.
+    ///
+    /// Ownership is this field and **never the name**: applying the same media
+    /// value twice has to land on the same entry, and since `name` became
+    /// editable and repeatable (`AID-3`) a derived name can neither be looked
+    /// up reliably nor trusted. A user who renames an asset to `exposed:foo`
+    /// must not thereby hand the declaration `foo` the right to overwrite that
+    /// asset's path.
+    ///
+    /// Added after `.ravprj` v9 without a format bump, like [`Layer::audio`]
+    /// and [`Composition::guides`](super::Composition::guides): an older file
+    /// has no declaration-owned entries except the pre-v9 ones the v8 → v9
+    /// upgrade recognises by their `exposed:` name.
+    ///
+    /// [`Layer::audio`]: super::Layer::audio
+    #[serde(default)]
+    pub exposed_owner: Option<String>,
     #[serde(skip)]
     pub resolved: Option<PathBuf>,
 }
@@ -497,6 +516,8 @@ struct MediaAssetEntryRepr {
     metadata: AssetMetadata,
     #[serde(default)]
     color_space: Option<ColorSpace>,
+    #[serde(default)]
+    exposed_owner: Option<String>,
 }
 
 /// Read a **bare** [`AssetKind`] into `Some`.
@@ -526,6 +547,7 @@ impl<'de> Deserialize<'de> for MediaAssetEntry {
             kind,
             metadata: repr.metadata,
             color_space: repr.color_space,
+            exposed_owner: repr.exposed_owner,
             // Never persisted: the host re-injects it after the load.
             resolved: None,
         })
@@ -543,6 +565,7 @@ impl MediaAssetEntry {
             kind: AssetKind::infer_from_path(&path),
             metadata: AssetMetadata::default(),
             color_space: None,
+            exposed_owner: None,
             resolved: Some(path.clone()),
             path: AssetPath::Absolute(path),
         }
@@ -886,6 +909,7 @@ mod tests {
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
             color_space: None,
+            exposed_owner: None,
             resolved: Some(PathBuf::from("/proj/a.mov")),
         };
         assert_eq!(
@@ -899,6 +923,7 @@ mod tests {
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
             color_space: None,
+            exposed_owner: None,
             resolved: None,
         };
         assert_eq!(
@@ -975,6 +1000,7 @@ mod tests {
                 }],
                 file_size: 1234,
             },
+            exposed_owner: None,
             resolved: Some(PathBuf::from("/proj/footage/clip.mov")),
         };
         let text = ron::to_string(&entry).unwrap();
@@ -985,6 +1011,7 @@ mod tests {
         assert_eq!(
             back,
             MediaAssetEntry {
+                exposed_owner: None,
                 resolved: None,
                 ..entry
             }

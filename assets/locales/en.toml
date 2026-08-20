@@ -356,6 +356,7 @@ audio = "Audio"
 [media_bin.menu]
 add_as_layer = "Add as Layer"
 new_composition = "New Composition from Asset"
+rename = "Rename"
 delete = "Remove from Project"
 
 [media_bin.delete]

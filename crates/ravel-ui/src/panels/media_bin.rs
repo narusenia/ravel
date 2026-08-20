@@ -75,8 +75,8 @@ pub fn classify(entry: &MediaAssetEntry) -> MediaBinRowKind {
 pub struct MediaBinRow {
     /// Key of [`Document::media_assets`] — the asset's identity, never shown.
     pub asset_id: AssetId,
-    /// Display name: the file name of the persisted path (the asset's own
-    /// [`MediaAssetEntry::name`] when the path yields none).
+    /// Display name: the asset's own editable [`MediaAssetEntry::name`], with
+    /// the file name of the persisted path as the fallback.
     pub name: String,
     pub kind: MediaBinRowKind,
     /// Probed duration in seconds, when the import recorded one.
@@ -153,23 +153,28 @@ impl MediaBinPanel {
     }
 }
 
-/// The display name of an asset: the file name of its persisted path. The
-/// persisted form is one string for every variant (`AssetPath` Display), and
-/// a leading `${VAR}` component still leaves a usable file name; the asset's
-/// own [`MediaAssetEntry::name`] is the fallback when the path has no real
-/// file name (empty, trailing separator, or a bare variable token).
+/// The display name of an asset: its own [`MediaAssetEntry::name`], which the
+/// import path seeds from the file stem and the MediaBin lets the user edit
+/// (`AID-3`). Every label an asset appears under reads this one function, so a
+/// rename shows up wherever the asset does.
 ///
-/// The fallback is the name and never the id: an [`AssetId`] is a number the
-/// user has no way to connect to a file, so showing it would be worse than
-/// showing nothing. Making `name` the *primary* label — and letting it be
-/// edited — is `AID-3`.
+/// The fallback — for an entry whose name was cleared by a hand-edited
+/// document, since the rename UI refuses a blank one — is the file name of the
+/// persisted path: the persisted form is one string for every variant
+/// (`AssetPath` Display), and a leading `${VAR}` component still leaves a
+/// usable file name. Never the id: an [`AssetId`] is a number the user has no
+/// way to connect to a file, so showing it would be worse than showing
+/// nothing.
 fn asset_name(entry: &MediaAssetEntry) -> String {
+    if !entry.name.trim().is_empty() {
+        return entry.name.clone();
+    }
     let text = entry.path.to_string();
     Path::new(&text)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty() && !name.starts_with("${"))
-        .unwrap_or_else(|| entry.name.clone())
+        .unwrap_or_default()
 }
 
 /// One layer referencing an asset, named by its composition for the delete
@@ -320,7 +325,7 @@ mod tests {
         let rows = MediaBinPanel::new().rows(&doc);
         assert_eq!(
             rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
-            ["clip.mov", "gone.mov", "plate.png", "voice.wav"],
+            ["clip", "gone", "plate", "voice"],
         );
         let clip = &rows[0];
         assert_eq!(
@@ -342,13 +347,13 @@ mod tests {
         let mut panel = MediaBinPanel::new();
 
         panel.set_filter(MediaBinFilter::Video);
-        assert_eq!(row_names(&panel, &doc), ["clip.mov", "gone.mov"]);
+        assert_eq!(row_names(&panel, &doc), ["clip", "gone"]);
 
         panel.set_filter(MediaBinFilter::Still);
-        assert_eq!(row_names(&panel, &doc), ["plate.png"]);
+        assert_eq!(row_names(&panel, &doc), ["plate"]);
 
         panel.set_filter(MediaBinFilter::Audio);
-        assert_eq!(row_names(&panel, &doc), ["voice.wav"]);
+        assert_eq!(row_names(&panel, &doc), ["voice"]);
     }
 
     #[test]
@@ -356,9 +361,10 @@ mod tests {
         let doc = bin_document();
         let mut panel = MediaBinPanel::new();
         panel.set_query("CLIP");
-        assert_eq!(row_names(&panel, &doc), ["clip.mov"]);
+        assert_eq!(row_names(&panel, &doc), ["clip"]);
 
-        panel.set_query("  .mov ");
+        // `gone` and `voice`, so the match is a substring and not a prefix.
+        panel.set_query("  o ");
         assert_eq!(
             panel.rows(&doc).len(),
             2,
@@ -375,7 +381,7 @@ mod tests {
         let mut panel = MediaBinPanel::new();
         panel.set_filter(MediaBinFilter::Video);
         panel.set_query("gone");
-        assert_eq!(row_names(&panel, &doc), ["gone.mov"]);
+        assert_eq!(row_names(&panel, &doc), ["gone"]);
     }
 
     #[test]
@@ -383,15 +389,32 @@ mod tests {
         assert!(MediaBinPanel::new().rows(&Document::default()).is_empty());
     }
 
-    /// A path with no usable file name leaves the entry's own display name as
-    /// the label — never the id, which the user cannot connect to a file.
+    /// The row shows the asset's own editable name and not the file name of
+    /// its path: a rename in the MediaBin is what makes a list of
+    /// `clip_0001_v3.mov` readable (`AID-3`).
     #[test]
-    fn the_name_falls_back_to_the_entrys_own_name() {
-        let mut entry = container_entry(Some(1920), 0, None);
-        entry.path = ravel_core::composition::AssetPath::Variable("${MEDIA}".into());
-        let doc = document_with(vec![("my-asset", entry)]);
-        let rows = MediaBinPanel::new().rows(&doc);
-        assert_eq!(rows[0].name, "my-asset");
+    fn the_row_shows_the_editable_name_over_the_file_name() {
+        let doc = document_with(vec![(
+            "Background plate",
+            MediaAssetEntry::from_absolute("/media/clip_0001_v3.mov"),
+        )]);
+        assert_eq!(
+            MediaBinPanel::new().rows(&doc)[0].name,
+            "Background plate",
+            "the row is labelled by the name, not by the path"
+        );
+    }
+
+    /// A nameless asset can only come from a hand-edited document — the rename
+    /// UI refuses a blank name — and falls back to the file name of the path,
+    /// never to the id, which the user cannot connect to a file.
+    #[test]
+    fn a_nameless_asset_falls_back_to_the_file_name() {
+        let doc = document_with(vec![(
+            "  ",
+            MediaAssetEntry::from_absolute("/media/clip.mov"),
+        )]);
+        assert_eq!(MediaBinPanel::new().rows(&doc)[0].name, "clip.mov");
     }
 
     // ----- asset_references -------------------------------------------------

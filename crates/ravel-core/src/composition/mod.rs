@@ -2730,6 +2730,7 @@ mod tests {
             .with_media_asset_entry(
                 AssetId::new(1),
                 MediaAssetEntry {
+                    exposed_owner: None,
                     resolved: None,
                     ..MediaAssetEntry::from_absolute("/tmp/media/plate.mov")
                 },
@@ -3156,6 +3157,7 @@ mod tests {
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
                 color_space: None,
+                exposed_owner: None,
                 resolved: None,
             },
         );

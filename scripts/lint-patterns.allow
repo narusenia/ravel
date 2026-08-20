@@ -83,6 +83,11 @@ panel-on-key-down crates/ravel-app/src/panels/viewer.rs on_key_down
 # field behaves the same), so the row confirms/cancels the edit itself.
 panel-on-key-down crates/ravel-app/src/panels/outliner.rs on_key_down
 
+# Inline asset rename in the MediaBin (`AID-3`): the same text-entry case as
+# the Outliner row above, for the same reason — Escape has no event and the
+# row's Enter never reaches a subscriber.
+panel-on-key-down crates/ravel-app/src/panels/media_bin.rs on_key_down
+
 # Viewer toolbar repaints when the active tool changes (durable shared state,
 # same lifecycle as FocusedPanelGlobal / PlaybackPosition).
 observe-global crates/ravel-app/src/panels/viewer.rs ToolState

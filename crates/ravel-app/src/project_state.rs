@@ -1197,10 +1197,10 @@ impl ProjectState {
                     // A fresh id every time, so a file imported after an
                     // earlier asset was deleted is a *different* asset and
                     // cannot inherit the deleted one's references. The
-                    // readable string is the display name now, and it is the
-                    // only thing `unique_asset_id` still numbers.
+                    // readable string is the display name only, and numbering
+                    // it just keeps two same-named imports apart on screen.
                     let id = AssetId::next();
-                    let name = unique_asset_id(&doc, &asset.path);
+                    let name = unique_display_name(&doc, &asset.path);
                     doc = doc.with_media_asset_entry(
                         id,
                         MediaAssetEntry {
@@ -1209,6 +1209,7 @@ impl ProjectState {
                             path: AssetPath::for_project_root(&asset.path, project_root.as_deref()),
                             kind: asset.kind.clone(),
                             metadata: asset.metadata.clone(),
+                            exposed_owner: None,
                             resolved: Some(asset.path.clone()),
                         },
                     );
@@ -1939,12 +1940,13 @@ fn scoped_eval_targets(
 /// A readable display name for an imported file, distinct from the names the
 /// document already uses.
 ///
-/// Since `.ravprj` v9 this is a *name*, not an id: nothing references an asset
-/// by it, so two assets sharing one would be merely confusing rather than
-/// broken. The numbering is kept because two clips both called `plate` in the
-/// MediaBin are confusing — making it display-only (and the name editable) is
-/// `AID-3`.
-fn unique_asset_id(doc: &Document, path: &Path) -> String {
+/// This is a *name*, not an id: nothing references an asset by it, so two
+/// assets sharing one would be merely confusing rather than broken. The
+/// numbering is kept for exactly that reason — two clips both called `plate`
+/// in the MediaBin are hard to tell apart — and it is only a starting point,
+/// since the MediaBin lets the user rename an asset to anything non-blank,
+/// including a name another asset already has.
+fn unique_display_name(doc: &Document, path: &Path) -> String {
     let base = ravel_core::composition::name_from_path(path);
     let taken = |name: &str| doc.media_assets.values().any(|entry| entry.name == name);
     if !taken(&base) {

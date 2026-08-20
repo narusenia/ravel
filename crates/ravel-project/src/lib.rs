@@ -2298,6 +2298,7 @@ mod tests {
                     metadata: AssetMetadata::default(),
                     // A stale absolute location must not overwrite the
                     // variable form on save.
+                    exposed_owner: None,
                     resolved: Some(PathBuf::from("/stale/plate.mov")),
                 },
             );
@@ -2593,6 +2594,31 @@ mod tests {
         );
     }
 
+    /// A pre-v9 exposed swap recorded which declaration had created an entry
+    /// only in the name it derived. The upgrade turns that into the explicit
+    /// claim (`MediaAssetEntry::exposed_owner`), so applying the declaration
+    /// again replaces that entry instead of adding a second one beside it —
+    /// and an asset the import path created stays unclaimed no matter what it
+    /// is called.
+    #[test]
+    fn a_v8_entry_an_exposed_declaration_created_keeps_belonging_to_it() {
+        let project = ProjectFile::from_archive(&v8_archive()).unwrap();
+        let document = &project.document;
+        let owner_of = |name: &str| {
+            let id = document
+                .media_asset_id_by_name(name)
+                .unwrap_or_else(|| panic!("{name} is in the table"));
+            document
+                .get_media_asset(id)
+                .expect("the id came from the table")
+                .exposed_owner
+                .clone()
+        };
+        assert_eq!(owner_of("exposed:tint").as_deref(), Some("tint"));
+        assert_eq!(owner_of("plate"), None);
+        assert_eq!(owner_of("voice"), None);
+    }
+
     /// A reference the v8 table could not answer — what deleting an asset used
     /// to leave behind — becomes permanently unresolvable instead of keeping
     /// the name and re-attaching to the next import that claims it.
@@ -2674,6 +2700,7 @@ mod tests {
                     path: AssetPath::Variable("${MISSING_VAR}/a.mov".into()),
                     kind: AssetKind::Container,
                     metadata: AssetMetadata::default(),
+                    exposed_owner: None,
                     resolved: None,
                 },
             );

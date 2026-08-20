@@ -79,18 +79,22 @@
 //! `asset_id` at that entry's [`AssetId`].
 //!
 //! Since `.ravprj` v9 the id is **minted**, so it cannot be derived from the
-//! declaration; the *name* is what is derived, and that is what makes applying
-//! the same value twice the same document — a re-apply looks the name up
-//! ([`Document::media_asset_id_by_name`]) and reuses the entry it left last
-//! time. The name also says where the entry came from.
+//! declaration. What makes applying the same value twice the same document is
+//! the entry's own record of which declaration created it
+//! ([`MediaAssetEntry::exposed_owner`]): a re-apply finds that entry and
+//! reuses its id. The derived *name* ([`asset_name_for`]) is a label only —
+//! the user may rename the asset in the MediaBin, and a re-apply keeps the
+//! name it finds rather than resetting it. Ownership is never read out of the
+//! name: names are editable and repeatable, so an asset renamed to
+//! `exposed:foo` would otherwise be handed to the declaration `foo`.
 //!
 //! The entry the node used to reference is **left in the table**: another node,
 //! or a layer's audio source, may still reference it, and apply is not a
 //! garbage collector. By the same argument an entry the bound node does not
 //! already reference is never reused
 //! ([`ExposedApplyError::AssetIdTaken`]) — re-applying to one declaration is
-//! a swap, but taking over whatever else happens to carry that name would swap
-//! media nobody asked about.
+//! a swap, but taking over an entry the node has moved off would swap media
+//! nobody asked about.
 //!
 //! Three consequences worth stating exactly:
 //!
@@ -266,16 +270,25 @@ pub enum ExposedApplyError {
     MediaUnresolved { name: String, path: AssetPath },
 
     #[error(
-        "exposed parameter {name:?} would register its media under the asset name {asset:?}, which already names {existing}"
+        "exposed parameter {name:?} already owns the media asset {asset:?} ({existing}), which the node it is bound to does not reference"
     )]
     AssetIdTaken {
         name: String,
-        /// The display name the declaration registers its asset under
-        /// ([`asset_name_for`]), not the asset's id: the id is minted here
-        /// and would tell the caller nothing about which declaration clashed.
+        /// The display name of the entry in the way, not its id: the id is
+        /// minted here and would tell the caller nothing about which asset it
+        /// has to sort out.
         asset: String,
         existing: AssetPath,
     },
+
+    /// Two entries claim the same declaration
+    /// ([`MediaAssetEntry::exposed_owner`]) — a state only a hand-edited or
+    /// hand-merged document can reach. Picking one silently would overwrite
+    /// media the caller never named.
+    #[error(
+        "exposed parameter {name:?} owns {count} media assets, so which one it would replace is undecidable"
+    )]
+    AssetOwnerAmbiguous { name: String, count: usize },
 
     #[error(
         "exposed parameter {name:?} was given the media reference {path}, and there is no file at {resolved}"
@@ -508,9 +521,6 @@ enum Write {
     Media {
         node: NodeId,
         key: String,
-        /// The display name to register the asset under
-        /// ([`asset_name_for`]).
-        name: String,
         /// The asset the node references today, if it references one at all.
         /// An entry the declaration does not already own is not overwritten:
         /// doing so would take an unrelated asset with it.
@@ -587,21 +597,22 @@ fn inspect(
                 unapplied: None,
             });
         };
-        let name = asset_name_for(declaration.name());
         return Ok(Inspected {
             write: Write::Media {
                 node: binding.node,
                 key: binding.key.clone(),
                 current: references_today,
                 entry: Box::new(MediaAssetEntry {
-                    name: name.clone(),
+                    name: asset_name_for(declaration.name()),
                     path: path.clone(),
                     kind: AssetKind::infer_from_path(resolved),
                     metadata: Default::default(),
                     color_space: None,
+                    // What makes the entry this declaration's, and the only
+                    // thing `apply` reads to find it again.
+                    exposed_owner: Some(declaration.name().to_string()),
                     resolved: Some(resolved.to_path_buf()),
                 }),
-                name,
             },
             unapplied: None,
         });
@@ -635,25 +646,27 @@ fn inspect(
     }
 }
 
-/// The display name a media declaration registers its asset under.
+/// The display name a media declaration gives an asset it creates.
 ///
-/// Since `.ravprj` v9 an asset's identity is a minted
-/// [`AssetId`](crate::id::AssetId), which by construction cannot be derived
-/// from a declaration name — so the thing that *is* derived, and that makes
-/// applying the same value twice produce the same document, is this name. A
-/// re-apply finds the entry it left last time by looking the name up
-/// ([`Document::media_asset_id_by_name`]) and reuses that entry's id.
-///
-/// An entry is only ever written when this name is free or when the
-/// declaration's own node already references the entry holding it
-/// ([`ExposedApplyError::AssetIdTaken`]): replacing an entry some other node —
-/// or a layer's audio source — reads would swap media nobody asked to swap.
+/// A label, and nothing else: which entry a declaration owns is recorded on
+/// the entry itself ([`MediaAssetEntry::exposed_owner`]), because a name can
+/// be edited in the MediaBin and two assets can carry the same one. Nothing
+/// here is looked up, and a re-apply leaves whatever name the entry now has
+/// alone — only a freshly minted entry is named from this.
 ///
 /// The prefix keeps it clear of the file-stem names the import path mints, and
 /// says which declaration put the entry in a saved project.
 fn asset_name_for(name: &str) -> String {
-    format!("exposed:{name}")
+    format!("{EXPOSED_ASSET_NAME_PREFIX}{name}")
 }
+
+/// The prefix [`asset_name_for`] puts in front of the declaration name.
+///
+/// Named because the v8 → v9 upgrade has to read it: before
+/// [`MediaAssetEntry::exposed_owner`] existed, that name was the *only* record
+/// of which declaration had created an entry
+/// (`super::super::composition::asset_upgrade`).
+pub(crate) const EXPOSED_ASSET_NAME_PREFIX: &str = "exposed:";
 
 // ===========================================================================
 // Application
@@ -755,13 +768,33 @@ pub fn apply(
                     Write::Media {
                         node,
                         key,
-                        name,
                         current,
                         entry,
                     } => {
                         // The entry this declaration left on an earlier apply,
-                        // found by the name it derives (see `asset_name_for`).
-                        let owned = document.media_asset_id_by_name(&name);
+                        // found by the declaration it records
+                        // (`MediaAssetEntry::exposed_owner`) and never by its
+                        // name: the name is the user's to edit, so a document
+                        // can hold two assets called the same thing and any
+                        // asset can be renamed to look like a declaration's.
+                        let owned: Vec<(AssetId, &MediaAssetEntry)> = document
+                            .media_assets
+                            .iter()
+                            .filter(|(_, entry)| {
+                                entry.exposed_owner.as_deref() == Some(declaration.name())
+                            })
+                            .map(|(id, entry)| (*id, entry))
+                            .collect();
+                        if owned.len() > 1 {
+                            // Only a hand-edited document reaches this, and
+                            // choosing between the claimants would overwrite
+                            // an asset on a coin toss.
+                            return Err(ExposedApplyError::AssetOwnerAmbiguous {
+                                name: declaration.name().to_string(),
+                                count: owned.len(),
+                            });
+                        }
+                        let mut entry = *entry;
                         // Reusing an entry the bound node does not already
                         // reference would replace media that node has nothing
                         // to do with — and take every other node and audio
@@ -769,27 +802,30 @@ pub fn apply(
                         // declaration is the one case where the entry is
                         // legitimately in use: the node references it because
                         // a previous apply put it there.
-                        let asset = match owned {
-                            Some(id) if current == Some(id) => id,
-                            Some(id) => {
-                                let existing = document
-                                    .get_media_asset(id)
-                                    .expect("the id came from the asset table");
+                        let asset = match owned.first() {
+                            Some((id, existing)) if current == Some(*id) => {
+                                // The path is the declaration's to write; the
+                                // display name is the user's. A rename made in
+                                // the MediaBin survives every later apply.
+                                entry.name = existing.name.clone();
+                                *id
+                            }
+                            Some((_, existing)) => {
                                 return Err(ExposedApplyError::AssetIdTaken {
                                     name: declaration.name().to_string(),
-                                    asset: name,
+                                    asset: existing.name.clone(),
                                     existing: existing.path.clone(),
                                 });
                             }
-                            // Nothing of that name yet, so this declaration
-                            // has never been applied to this document: mint.
+                            // Nothing claims this declaration yet, so it has
+                            // never been applied to this document: mint.
                             None => AssetId::next(),
                         };
                         writes.entry(node).or_default().push(Parameter {
                             key,
                             value: ParameterValue::String(asset.to_param_value()),
                         });
-                        assets.push((asset, *entry));
+                        assets.push((asset, entry));
                     }
                     Write::Nothing => {}
                 }
@@ -1840,8 +1876,9 @@ mod tests {
 
     /// Applying the same reference twice is the same document. The id *is*
     /// minted, so idempotence rests on the second apply finding the entry the
-    /// first one registered — by the name the declaration derives — and
-    /// reusing its id instead of minting a second one.
+    /// first one registered — by the declaration recorded on it
+    /// (`MediaAssetEntry::exposed_owner`) — and reusing its id instead of
+    /// minting a second one beside it.
     #[test]
     fn swapping_the_same_media_twice_is_idempotent() {
         let root = project_with_footage();
@@ -1856,22 +1893,69 @@ mod tests {
             .unwrap()
             .document;
         assert_eq!(once, twice);
+        // Spelled out because document equality would also hold if *both*
+        // applies had grown the table by one.
+        assert_eq!(
+            twice.media_assets.len(),
+            2,
+            "the original entry and the one this declaration owns, and nothing else"
+        );
     }
 
-    /// The **name** the declaration registers under is derived, so it can
-    /// already be taken by an entry the bound node does not reference. Reusing
-    /// that entry would swap the media under every other node and audio source
-    /// reading it, so the swap is refused instead.
+    /// A user may name an asset anything, `exposed:plate` included. Since
+    /// ownership is recorded on the entry and never read out of its name, such
+    /// an asset is not the declaration's: the swap goes to a fresh entry and
+    /// leaves the impostor exactly as it was.
     #[test]
-    fn a_swap_that_would_overwrite_an_unrelated_asset_is_refused() {
+    fn an_asset_merely_named_like_the_declaration_is_not_taken_over() {
         let root = project_with_footage();
-        // An unrelated asset already carrying the name this declaration
-        // derives — a hand-edited project, or one saved after a declaration
-        // was renamed.
-        let occupant = AssetId::new(77);
-        let document = media_document().with_media_asset_entry(occupant, {
+        // Minted, not a fixed number: every test in this binary shares the
+        // id counter, so a hand-picked id can collide with one an `apply`
+        // elsewhere mints.
+        let impostor = AssetId::next();
+        let document = media_document().with_media_asset_entry(impostor, {
             let mut entry = MediaAssetEntry::from_absolute("/footage/somebody_elses.mov");
-            entry.name = "exposed:plate".to_string();
+            entry.name = asset_name_for("plate");
+            entry
+        });
+
+        let applied = apply(
+            document,
+            &given([(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage/replacement.mov".into())),
+            )]),
+            AssetContext::rooted(root.path()),
+        )
+        .expect("a name is not a claim");
+
+        let (asset, resolved) = media_source(&applied.document);
+        assert_ne!(asset, Some(impostor), "the impostor was not adopted");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(root.path().join("footage/replacement.mov").as_path())
+        );
+        assert_eq!(
+            applied
+                .document
+                .get_media_asset(impostor)
+                .map(|entry| entry.path.clone()),
+            Some(AssetPath::Absolute("/footage/somebody_elses.mov".into())),
+            "and it still points where it did"
+        );
+    }
+
+    /// The entry a declaration owns can stop being the one its node reads —
+    /// the user pointed that node somewhere else. Overwriting it then would
+    /// swap the media under whatever *does* read it, so the swap is refused.
+    #[test]
+    fn a_swap_whose_owned_asset_the_node_no_longer_reads_is_refused() {
+        let root = project_with_footage();
+        let owned = AssetId::next();
+        let document = media_document().with_media_asset_entry(owned, {
+            let mut entry = MediaAssetEntry::from_absolute("/footage/earlier_swap.mov");
+            entry.name = asset_name_for("plate");
+            entry.exposed_owner = Some("plate".to_string());
             entry
         });
 
@@ -1883,7 +1967,7 @@ mod tests {
             )]),
             AssetContext::rooted(root.path()),
         )
-        .expect_err("the name is taken by an asset this node does not reference");
+        .expect_err("the node this declaration binds reads a different asset");
         assert!(matches!(
             err,
             ExposedApplyError::AssetIdTaken { ref name, ref asset, .. }
@@ -1891,14 +1975,99 @@ mod tests {
         ));
 
         assert_eq!(
-            document.get_media_asset(occupant).map(|e| e.path.clone()),
-            Some(AssetPath::Absolute("/footage/somebody_elses.mov".into())),
-            "the occupant is untouched"
+            document.get_media_asset(owned).map(|e| e.path.clone()),
+            Some(AssetPath::Absolute("/footage/earlier_swap.mov".into())),
+            "the owned entry is untouched"
         );
         assert_eq!(
             media_source(&document).0,
             Some(original_asset()),
             "and so is the node"
+        );
+    }
+
+    /// Only a hand-edited document can have two entries claiming one
+    /// declaration. Replacing either would be a coin toss over somebody's
+    /// media, so the call is refused before anything is written.
+    #[test]
+    fn two_entries_claiming_one_declaration_are_refused() {
+        let root = project_with_footage();
+        let mut document = media_document();
+        for (id, path) in [(AssetId::next(), "/a.mov"), (AssetId::next(), "/b.mov")] {
+            document = document.with_media_asset_entry(id, {
+                let mut entry = MediaAssetEntry::from_absolute(path);
+                entry.exposed_owner = Some("plate".to_string());
+                entry
+            });
+        }
+
+        let err = apply(
+            document,
+            &given([(
+                "plate",
+                ExposedValue::Media(AssetPath::Relative("./footage/replacement.mov".into())),
+            )]),
+            AssetContext::rooted(root.path()),
+        )
+        .expect_err("which of the two would be replaced is undecidable");
+        assert!(matches!(
+            err,
+            ExposedApplyError::AssetOwnerAmbiguous { ref name, count }
+                if name == "plate" && count == 2
+        ));
+    }
+
+    /// The MediaBin can rename an asset a declaration owns (`AID-3`). The
+    /// declaration owns the *file reference*, not the label, so a later apply
+    /// finds the same entry, writes the new path into it, and leaves the name
+    /// the user chose alone.
+    #[test]
+    fn a_reapply_keeps_the_name_the_user_gave_an_owned_asset() {
+        let root = project_with_footage();
+        std::fs::write(root.path().join("footage/second.mov"), b"another one").unwrap();
+        let swap = |document, file: &str| {
+            apply(
+                document,
+                &given([(
+                    "plate",
+                    ExposedValue::Media(AssetPath::Relative(format!("./footage/{file}"))),
+                )]),
+                AssetContext::rooted(root.path()),
+            )
+            .expect("the file is there")
+            .document
+        };
+
+        let once = swap(media_document(), "replacement.mov");
+        let owned = media_source(&once).0.expect("the node references an asset");
+
+        // The rename the MediaBin commits: the entry, with a new name.
+        let renamed = {
+            let mut entry = once.get_media_asset(owned).unwrap().clone();
+            entry.name = "Backdrop".to_string();
+            once.with_media_asset_entry(owned, entry)
+        };
+
+        let again = swap(renamed, "second.mov");
+        assert_eq!(
+            media_source(&again).0,
+            Some(owned),
+            "the same entry was reused"
+        );
+        assert_eq!(
+            media_asset_name(&again).as_deref(),
+            Some("Backdrop"),
+            "and the user's name survived the apply"
+        );
+        assert_eq!(
+            media_source(&again).1.as_deref(),
+            Some(root.path().join("footage/second.mov").as_path()),
+            "while the path it points at is the declaration's to write"
+        );
+        assert_eq!(
+            again.media_assets.len(),
+            2,
+            "a rename does not cost the declaration its entry"
         );
     }
 

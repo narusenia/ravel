@@ -328,8 +328,11 @@ solo / mute はマージチェーンのみに作用し、Layer Ref の解決に�
 実行時にも遮断する。
 
 **メディアアセット**（REQ-LAYER-008 / REQ-PROJ-001）: `Document.media_assets:
-im::HashMap<String, MediaAssetEntry>` が評価時のアセット表
-（`ravel-core::composition::asset`）。
+im::HashMap<AssetId, MediaAssetEntry>` が評価時のアセット表
+（`ravel-core::composition::asset`）。キーは採番される `AssetId` で、
+表示名（`MediaAssetEntry::name`）とは別物 — 参照は ID なので MediaBin から
+自由に改名でき、同名の素材が 2 つあってもよい
+（`docs/implementation/asset-identity-plan.md`）。
 `media` ノードは `asset_id` パラメータでこの表を引き、`AssetKind` に応じて
 3 経路でフレームを得る。`Container` はレイヤーローカル時間（秒）から
 `media_frame = floor(t · media_fps)`（ストリーム末尾に clamp）でフレームを
@@ -417,11 +420,16 @@ NodeData (trait)
 
 ```rust
 struct MediaAssetEntry {
+    name: String,                 // 永続。UI の表示名。編集可・一意でない。
+                                  // **何もこれで参照しない**（キーは AssetId）
     path: AssetPath,              // 永続。相対 / 絶対 / 変数
     kind: AssetKind,              // 永続
     metadata: AssetMetadata,      // 永続。probe で埋まる
     color_space: Option<ColorSpace>,  // 永続。ユーザーの明示指定のみ。
                                   // None = 推定する（メタデータ → 拡張子）
+    exposed_owner: Option<String>,    // 永続。このエントリを作った公開宣言の名前。
+                                  // None = インポート由来（v9 の後に
+                                  // `#[serde(default)]` で追加、format は上げない）
     #[serde(skip)]
     resolved: Option<PathBuf>,    // 実行時のみ。app が注入。None = オフライン
 }
@@ -474,7 +482,18 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 
 **責務の分離**:
 
-- 永続化されるのは `path` / `kind` / `metadata`。`resolved` は保存しない。
+- 永続化されるのは `name` / `path` / `kind` / `metadata` / `color_space` /
+  `exposed_owner`。`resolved` は保存しない。
+- **表示名は編集できる。** インポートは `AssetId::next()` で ID を採り、
+  `name` にはファイルステムを入れる（同名は画面上だけ `" 2"` を付ける）。
+  MediaBin の行から改名でき（1 ジェスチャ = 1 undo）、素材から作るレイヤーの
+  名前もこの表示名から取る。参照は 3 系統すべて `AssetId` なので改名では
+  切れない。
+- **公開宣言が作った素材は `exposed_owner` で見分ける。** 名前ではない:
+  ユーザーが素材を `exposed:foo` に改名しても宣言はそれを自分のものと
+  見なさないし、同名の素材が 2 つあっても同じ値の再適用が素材を増やさない
+  （`ravel-core::exposed::apply`。同じ宣言を名乗るエントリが 2 つある
+  手編集文書は適用を拒否する）。
 - **保存時**、`resolved`（絶対パス）を基準に `path` を書き直す:
   プロジェクトルート配下なら `Relative`、それ以外は `Absolute`。
   ユーザーが明示設定した `Variable` と、オフライン（`resolved == None`）の

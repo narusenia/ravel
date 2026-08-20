@@ -3007,6 +3007,58 @@ mod tests {
         assert_eq!(doc.id_watermarks().comp, 88_000);
     }
 
+    /// An identifier parameter that has been retyped to `IntChannel` still
+    /// reserves its target. Reading it through
+    /// [`ParameterValue::static_identifier`] is what keeps that true: a
+    /// scanner that only accepted `Int` would stop seeing the reference, and
+    /// a fresh `LayerId` could then land on the layer it names
+    /// (REQ-LAYER-009).
+    ///
+    /// An **animated** identifier is deliberately not a reference: a curve
+    /// names no single id, so there is nothing to reserve. `DISK-3` owns
+    /// keeping the keyframe toggle off these parameters.
+    #[test]
+    fn id_watermarks_see_a_constant_int_channel_identifier() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation;
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::{CompId, DataTypeId, NodeId};
+
+        let document = |value: ParameterValue| {
+            let node = Node::new(NodeId::new(1), "layer.ref")
+                .with_param("layer", value)
+                .with_output("out", DataTypeId::SCALAR);
+            let network = Graph::new().add_node(node).unwrap();
+            let comp = Composition::new(CompId::new(7), "c", (16, 16), FrameRate::new(30, 1), 10)
+                .add_layer(Layer::new(LayerId::new(2), "L", network));
+            Document::default().with_composition(comp)
+        };
+
+        assert_eq!(
+            document(ParameterValue::IntChannel(AnimationChannel::constant(
+                99_000.0
+            )))
+            .id_watermarks()
+            .layer,
+            99_000,
+            "a constant int channel names the same layer a constant Int does"
+        );
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 99_000.0, Interpolation::Linear);
+        curve.insert(24, 1.0, Interpolation::Linear);
+        assert_eq!(
+            document(ParameterValue::IntChannel(AnimationChannel::keyframes(
+                curve
+            )))
+            .id_watermarks()
+            .layer,
+            2,
+            "an animated identifier reserves nothing but the layer that holds it"
+        );
+    }
+
     #[test]
     fn validate_rejects_structural_violations() {
         use crate::graph::Node;

@@ -4822,6 +4822,60 @@ mod tests {
         assert!((out.downcast_ref::<Scalar>().unwrap().0 - 132.6).abs() < 1e-4);
     }
 
+    /// A wire into an **animatable** int port converts the same way a wire
+    /// into a constant `Int` does. The parameter's own channel is not read
+    /// while a wire drives it, but the port has to accept the reading in the
+    /// first place: without `IntChannel` in `param_port_overlay`, the wire is
+    /// silently ignored and the processor sees the keyframed value instead.
+    #[test]
+    fn a_wire_into_an_int_channel_port_still_rounds() {
+        use crate::animation::channel::AnimationChannel;
+
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(0.0))
+            .with_param(
+                "count",
+                ParameterValue::IntChannel(AnimationChannel::constant(7.0)),
+            )
+            .with_param("enabled", ParameterValue::Bool(false));
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "count")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 2.6,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(MultiParamEcho));
+
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        // value 0.0 + count 3 (2.6 rounded, from the wire — not the channel's
+        // 7) * 10 + enabled false = 30.0
+        assert!(
+            (out.downcast_ref::<Scalar>().unwrap().0 - 30.0).abs() < 1e-4,
+            "the wire drove the port, rounded: {}",
+            out.downcast_ref::<Scalar>().unwrap().0
+        );
+    }
+
     #[test]
     fn vec2_and_color_param_ports_convert_componentwise() {
         struct Vec2Source;

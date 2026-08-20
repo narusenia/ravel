@@ -321,6 +321,32 @@ impl ParameterValue {
         }
     }
 
+    /// The non-negative integer this parameter names as an **identifier** — a
+    /// `layer.ref` target, a `precomp` composition — or `None` if it names
+    /// none.
+    ///
+    /// `IntChannel` counts only while its source is a constant. An identifier
+    /// that changed over time would have to reserve every id it could ever
+    /// take ([`Document::id_watermarks`](crate::composition::Document::id_watermarks),
+    /// REQ-LAYER-009) and invalidate the scope of every layer it could ever
+    /// point at, and a curve gives no finite answer to either — the values
+    /// between two keys are as real as the keys. So keyframing an identifier
+    /// is not supported, and the unit that puts a keyframe toggle on `Int`
+    /// rows (`DISK-3`) owns keeping it off these parameters. Reading it here
+    /// rather than in each caller is what makes that one decision instead of
+    /// three.
+    pub fn static_identifier(&self) -> Option<u64> {
+        let raw = match self {
+            ParameterValue::Int(v) => *v,
+            ParameterValue::IntChannel(channel) => match channel.source {
+                crate::animation::channel::ChannelSource::Constant(v) => v.round() as i32,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        u64::try_from(raw).ok()
+    }
+
     /// Static float value, if this is a `Float`.
     pub fn as_float(&self) -> Option<f32> {
         match self {

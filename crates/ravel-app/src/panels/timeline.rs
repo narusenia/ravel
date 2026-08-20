@@ -620,6 +620,10 @@ pub struct TimelineGpuiPanel {
     mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     active_comp_sub: Subscription,
+    /// Pays off the syncs skipped while the panel was behind another tab
+    /// (see [`super::on_became_visible`]).
+    #[allow(dead_code)]
+    visibility_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
     /// The beat grid is written by this panel's toolbar, by a project load and
@@ -647,7 +651,14 @@ impl TimelineGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, project, cx| {
+            cx.observe(project, move |this: &mut Self, project, cx| {
+                // Behind another tab the mirror has no reader, so the update
+                // waits for the panel to come back. This has to come *before*
+                // the epoch gate: an epoch recorded while hidden would tell
+                // the panel it is already up to date (`visibility_sub` below).
+                if !super::is_instance_visible(instance, cx) {
+                    return;
+                }
                 // `ProjectState` also notifies for things this panel does not
                 // mirror (a completed save moves the window title). Comparing
                 // the mirror epoch keeps the `Composition` deep compare and the
@@ -678,7 +689,14 @@ impl TimelineGpuiPanel {
         // A composition switch replaces everything this panel shows; the
         // selection global is written by the Outliner as well as by this
         // panel, so the row highlighting has to repaint from it.
-        let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
+        let active_comp_sub = cx.observe_global::<super::ActiveComposition>(move |this, cx| {
+            // Hidden: return before the comparison below adopts the new
+            // composition, so the switch is still outstanding when the tab
+            // comes back. Recording it here and skipping the sync is what
+            // would leave the panel showing a composition the user left.
+            if !super::is_instance_visible(instance, cx) {
+                return;
+            }
             // The global wakes its observers on every write, identical values
             // included, and one switch arrives here *and* as a `ProjectState`
             // notify — `MED-UI-06`. Comparing the mirror's own composition is
@@ -728,6 +746,16 @@ impl TimelineGpuiPanel {
         let release_sub = cx.on_release(|this: &mut Self, cx| {
             this.end_loop_range_gesture(true, cx);
             this.end_channel_scrubs(|_| true, cx);
+        });
+        // Coming back into view pays off both observers above at once:
+        // `sync_from_project` reads the active composition itself, so one call
+        // covers a document edit and a composition switch alike.
+        let visibility_sub = super::on_became_visible(instance, cx, |this, cx| {
+            this.sync_from_project(cx);
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
         });
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
@@ -782,6 +810,7 @@ impl TimelineGpuiPanel {
             audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             active_comp_sub,
+            visibility_sub,
             selection_sub,
             bpm_grid_sub,
             loop_range_sub,

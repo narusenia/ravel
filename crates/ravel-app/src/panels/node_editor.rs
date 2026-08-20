@@ -718,6 +718,10 @@ pub struct NodeEditorPanel {
     mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     timings_sub: Subscription,
+    /// Pays off the sync skipped while the panel was behind another tab
+    /// (see [`super::on_became_visible`]).
+    #[allow(dead_code)]
+    visibility_sub: Subscription,
 }
 
 impl NodeEditorPanel {
@@ -733,7 +737,13 @@ impl NodeEditorPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, project, cx| {
+            cx.observe(project, move |this: &mut Self, project, cx| {
+                // Behind another tab nobody sees the graph, so the resolve
+                // waits for the panel to come back. Before the epoch gate, so
+                // that what was skipped stays owed (`visibility_sub` below).
+                if !super::is_instance_visible(instance, cx) {
+                    return;
+                }
                 // Re-resolving the display graph clones the document and deep
                 // compares the network; skip it when the document has not moved
                 // since the last sync.
@@ -767,6 +777,22 @@ impl NodeEditorPanel {
                     cx.notify();
                 }
             });
+        // Coming back into view resolves whatever the observer above skipped.
+        //
+        // The layer-selection observer is deliberately *not* gated: it decides
+        // *which* network this panel shows, and a hidden panel that ignored a
+        // selection change would have to keep a second copy of the pending
+        // selection to reconstruct it here. Opening a network is also bounded
+        // by the user's clicks, not by a notification stream.
+        let visibility_sub = super::on_became_visible(instance, cx, |this, cx| {
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
+            this.refresh_from_document(cx);
+            cx.notify();
+        });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
@@ -813,6 +839,7 @@ impl NodeEditorPanel {
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             timings_sub,
+            visibility_sub,
         }
     }
 
@@ -1025,6 +1052,7 @@ impl NodeEditorPanel {
     /// network vanished (deleted layer / subnet, undo) pops to the nearest
     /// surviving ancestor, or to no context at all.
     fn refresh_from_document(&mut self, cx: &mut Context<Self>) {
+        super::sync_probe::record(super::sync_probe::PanelSync::NodeEditorRefresh);
         let Some(project) = self.project.clone() else {
             return;
         };

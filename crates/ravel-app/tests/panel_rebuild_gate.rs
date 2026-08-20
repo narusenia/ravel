@@ -296,6 +296,10 @@ fn sync_counts(scenario: &str) -> Vec<(&'static str, u64)> {
         ("timeline.sync_from_project", count(PanelSync::TimelineSync)),
         ("outliner.rebuild_rows", count(PanelSync::OutlinerRows)),
         ("media_bin.rebuild_rows", count(PanelSync::MediaBinRows)),
+        (
+            "node_editor.refresh_from_document",
+            count(PanelSync::NodeEditorRefresh),
+        ),
     ];
     println!("sync counts [{scenario}]:");
     for (name, value) in &counts {
@@ -1315,5 +1319,208 @@ fn a_hidden_properties_panel_ignores_the_playhead(cx: &mut TestAppContext) {
         count_of(&counts, "properties.refresh_values"),
         FRAMES,
         "a panel back at the front must follow the playhead again"
+    );
+}
+
+/// The gate's two halves for one panel: while `instance` is behind another tab
+/// `edit` costs it nothing, and bringing it back resolves what it missed
+/// exactly once. The third step is the epoch hazard — a catch-up that recorded
+/// more than it synced would leave the gate shut for the next real edit.
+#[cfg(debug_assertions)]
+fn assert_the_gate_delays_and_catches_up(
+    harness: &Harness,
+    instance: PanelInstanceId,
+    counter: &str,
+    cx: &mut TestAppContext,
+    mut edit: impl FnMut(&Harness, &mut TestAppContext),
+) {
+    set_visible(&all_but(instance), cx);
+    reset_syncs();
+    edit(harness, cx);
+    edit(harness, cx);
+    let counts = sync_counts(&format!("{counter}, hidden"));
+    assert_eq!(
+        count_of(&counts, counter),
+        0,
+        "{counter} must not run for a panel behind another tab"
+    );
+
+    reset_syncs();
+    set_visible(&ALL_PANELS, cx);
+    let counts = sync_counts(&format!("{counter}, back at the front"));
+    assert_eq!(
+        count_of(&counts, counter),
+        1,
+        "{counter} must resolve the skipped edits exactly once on return"
+    );
+
+    reset_syncs();
+    edit(harness, cx);
+    let counts = sync_counts(&format!("{counter}, edit after the return"));
+    assert_eq!(
+        count_of(&counts, counter),
+        1,
+        "{counter}: the next edit must reach a panel that is back at the front"
+    );
+}
+
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn the_timeline_delays_its_mirror_while_hidden(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    assert_the_gate_delays_and_catches_up(
+        &harness,
+        TIMELINE,
+        "timeline.sync_from_project",
+        cx,
+        |harness, cx| {
+            add_layer(harness, cx);
+        },
+    );
+}
+
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn the_outliner_delays_its_rows_while_hidden(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    assert_the_gate_delays_and_catches_up(
+        &harness,
+        OUTLINER,
+        "outliner.rebuild_rows",
+        cx,
+        |harness, cx| {
+            add_layer(harness, cx);
+        },
+    );
+}
+
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn the_media_bin_delays_its_rows_while_hidden(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let mut imported = 0;
+    assert_the_gate_delays_and_catches_up(
+        &harness,
+        MEDIA_BIN,
+        "media_bin.rebuild_rows",
+        cx,
+        move |harness, cx| {
+            imported += 1;
+            import_still(harness, &format!("/tmp/ravel_vis_{imported}.png"), cx);
+        },
+    );
+}
+
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn the_node_editor_delays_its_graph_while_hidden(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let (path, node) = open_layer_network(&harness, layer, cx);
+    let mut value = 0.0;
+    assert_the_gate_delays_and_catches_up(
+        &harness,
+        NODE_EDITOR,
+        "node_editor.refresh_from_document",
+        cx,
+        move |harness, cx| {
+            value += 1.0;
+            drag_tick(harness, &path, node, value, cx);
+        },
+    );
+}
+
+/// The global-driven path, and the trap in it: a composition switch that
+/// arrives while the panel is hidden must be *outstanding*, not recorded.
+///
+/// The last step is what pins that. After the return, writing the same
+/// composition again has to be a no-op — which it can only be if the catch-up
+/// adopted the composition it synced for. A gate that recorded the switch on
+/// the way past would leave both mirrors on the composition the user left.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_composition_switch_behind_a_tab_is_taken_up_on_the_return(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    add_layer(&harness, cx);
+    let root = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    let other = harness.project.update(cx, |project, cx| {
+        project.create_composition(
+            ravel_ui::document::CompositionSettings::fallback("Other"),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| panels::active_composition(cx)),
+        Some(other),
+        "creating a composition opens it"
+    );
+
+    let mirrors = ["timeline.sync_from_project", "outliner.rebuild_rows"];
+    set_visible(&[NODE_EDITOR, MEDIA_BIN, PROPERTIES], cx);
+    reset_syncs();
+    harness.project.update(cx, |project, cx| {
+        project.set_active_composition(Some(root), cx)
+    });
+    cx.run_until_parked();
+    let counts = sync_counts("composition switch, both mirrors hidden");
+    for name in mirrors {
+        assert_eq!(
+            count_of(&counts, name),
+            0,
+            "{name} must not follow a switch it cannot show"
+        );
+    }
+
+    reset_syncs();
+    set_visible(&ALL_PANELS, cx);
+    let counts = sync_counts("both mirrors return to the front");
+    for name in mirrors {
+        assert_eq!(
+            count_of(&counts, name),
+            1,
+            "{name} must take up the switch it missed"
+        );
+    }
+
+    reset_syncs();
+    cx.update(|cx| panels::set_active_composition_for_tests(Some(root), cx));
+    cx.run_until_parked();
+    let counts = sync_counts("bare write of the composition already caught up to");
+    for name in mirrors {
+        assert_eq!(
+            count_of(&counts, name),
+            0,
+            "{name}: the catch-up must have adopted the composition it synced for"
+        );
+    }
+}
+
+/// The whole point, in one number: a drag with every panel behind a tab costs
+/// the mirrors nothing at all.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_drag_behind_the_tabs_costs_every_mirror_nothing(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let (path, node) = open_layer_network(&harness, layer, cx);
+    drag_tick(&harness, &path, node, -2.0, cx);
+    drag_tick(&harness, &path, node, -1.0, cx);
+
+    const MOVES: u64 = 10;
+    set_visible(&[], cx);
+    reset_syncs();
+    for step in 0..MOVES {
+        drag_tick(&harness, &path, node, step as f32, cx);
+    }
+    let counts = sync_counts("node parameter drag, 10 moves, every panel hidden");
+
+    let total: u64 = counts.iter().map(|(_, value)| *value).sum();
+    assert_eq!(
+        total, 0,
+        "no mirror may sync while every panel is behind a tab: {counts:?}"
     );
 }

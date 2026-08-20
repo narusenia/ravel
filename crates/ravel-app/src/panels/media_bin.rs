@@ -41,6 +41,16 @@ const ROW_HEIGHT: f32 = 28.0;
 const THUMB_WIDTH: f32 = 40.0;
 const THUMB_HEIGHT: f32 = 24.0;
 
+/// Inline rename of a MediaBin row. The subscription commits the edited name
+/// on Enter or blur and is dropped with the rename (the Outliner's layer
+/// rename, same shape).
+struct AssetRename {
+    asset: AssetId,
+    input: Entity<InputState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
 pub struct MediaBinGpuiPanel {
     state: MediaBinPanel,
     /// The app-wide document state; `None` only when the panel outlives it.
@@ -66,6 +76,8 @@ pub struct MediaBinGpuiPanel {
     /// image is stale and must be regenerated.
     thumb_images: HashMap<AssetId, (ThumbnailIdentity, Arc<RenderImage>)>,
     search: Entity<InputState>,
+    /// In-flight inline rename, `None` when no row is being renamed.
+    rename: Option<AssetRename>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
     focus_subscriptions: [Subscription; 2],
@@ -152,6 +164,7 @@ impl MediaBinGpuiPanel {
             thumbnails,
             thumb_images: HashMap::new(),
             search,
+            rename: None,
             focus_handle,
             focus_subscriptions,
             project_sub,
@@ -209,7 +222,22 @@ impl MediaBinGpuiPanel {
             }
         });
         let thumbnails_changed = self.refresh_thumbnails(cx);
-        if rows_changed || thumbnails_changed {
+        // An inline rename whose asset left the document (deleted, undone) has
+        // no row to render into: drop it instead of keeping an invisible
+        // editor whose blur would name an asset that is no longer there. It
+        // has to happen even when the rows did not move, so it gets its own
+        // notify reason.
+        let mut dropped_rename = false;
+        if let Some(rename) = &self.rename {
+            let alive = document
+                .as_ref()
+                .is_some_and(|document| document.media_assets.contains_key(&rename.asset));
+            if !alive {
+                self.rename = None;
+                dropped_rename = true;
+            }
+        }
+        if rows_changed || thumbnails_changed || dropped_rename {
             cx.notify();
         }
     }
@@ -355,6 +383,88 @@ impl MediaBinGpuiPanel {
         cx.notify();
     }
 
+    /// Start renaming a row in place. The caller focuses the input — a panel
+    /// never grabs focus on its own (`.agents/rules/gpui.md`).
+    fn begin_rename(
+        &mut self,
+        asset: AssetId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<InputState>> {
+        let name = self
+            .rows
+            .iter()
+            .find(|row| row.asset_id == asset)?
+            .name
+            .clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, state, event: &InputEvent, _window, cx| match event {
+                // Enter and blur both commit: leaving the field is the same
+                // intent as confirming it (the Outliner's rule).
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    let name = state.read(cx).value().to_string();
+                    this.commit_rename(name, cx);
+                }
+                _ => {}
+            },
+        );
+        self.rename = Some(AssetRename {
+            asset,
+            input: input.clone(),
+            sub,
+        });
+        cx.notify();
+        Some(input)
+    }
+
+    /// Apply an edited asset name as **one** undo step. A blank or unchanged
+    /// name just closes the editor: a blank name falls back to the file name
+    /// of the path, which would leave the row showing something the user did
+    /// not type.
+    ///
+    /// Two assets are allowed to share a name — nothing references an asset by
+    /// it since `.ravprj` v9 — so no numbering is imposed on what the user
+    /// typed.
+    fn commit_rename(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        cx.notify();
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            let Some(mut entry) = project.document().get_media_asset(rename.asset).cloned() else {
+                return;
+            };
+            if entry.name == name {
+                return;
+            }
+            entry.name = name;
+            // A name is a label: no evaluation, no compiled chain and no
+            // decode depends on it.
+            let document = project
+                .document()
+                .clone()
+                .with_media_asset_entry(rename.asset, entry);
+            project.commit_document(document, InvalidationHint::None, cx);
+        });
+    }
+
+    /// Abandon an inline rename, keeping the asset's current name.
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.rename.take().is_some() {
+            cx.notify();
+        }
+    }
+
     // ----- rendering --------------------------------------------------------
 
     fn filter_button(
@@ -494,16 +604,45 @@ impl MediaBinGpuiPanel {
         };
         content = content.child(thumb);
 
-        content = content.child(
-            // A file name is one line: `min_w_0` allows the shrink that
-            // `truncate` needs, so the name ellipsizes instead of wrapping and
-            // the trailing duration/offline badges keep their place.
-            div()
-                .flex_grow()
-                .min_w_0()
-                .truncate()
-                .child(SharedString::from(row.name.clone())),
-        );
+        let renaming = match &self.rename {
+            Some(rename) if rename.asset == row.asset_id => Some(rename.input.clone()),
+            _ => None,
+        };
+        content = match renaming {
+            Some(input) => {
+                // Raw key handling, the approved exception for text entry
+                // (`.agents/rules/gpui.md`): `InputState` emits no event for
+                // Escape and its Enter action does not reach a subscriber
+                // here, so the row confirms and cancels the edit itself. Blur
+                // still commits.
+                let commit_input = input.clone();
+                content
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                        match event.keystroke.key.as_str() {
+                            // GPUI names the key "enter"; "return" is accepted
+                            // too so a platform reporting the physical key
+                            // name still confirms.
+                            "enter" | "return" => {
+                                let name = commit_input.read(cx).value().to_string();
+                                this.commit_rename(name, cx);
+                            }
+                            "escape" => this.cancel_rename(cx),
+                            _ => {}
+                        }
+                    }))
+                    .child(div().flex_grow().child(Input::new(&input).xsmall()))
+            }
+            None => content.child(
+                // A file name is one line: `min_w_0` allows the shrink that
+                // `truncate` needs, so the name ellipsizes instead of wrapping
+                // and the trailing duration/offline badges keep their place.
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(row.name.clone())),
+            ),
+        };
 
         if row.offline {
             content = content.child(
@@ -542,9 +681,11 @@ impl MediaBinGpuiPanel {
             .context_menu(move |menu, _window, _cx| {
                 let layer_entity = entity.clone();
                 let comp_entity = entity.clone();
+                let rename_entity = entity.clone();
                 let delete_entity = entity.clone();
                 let layer_asset = asset_id;
                 let comp_asset = asset_id;
+                let rename_asset = asset_id;
                 let delete_asset = asset_id;
                 menu.item(
                     PopupMenuItem::new(t!("media_bin.menu.add_as_layer"))
@@ -563,6 +704,22 @@ impl MediaBinGpuiPanel {
                                 new_composition_from_asset(comp_asset, cx);
                             });
                         }),
+                )
+                .item(
+                    // Renaming an offline asset is exactly how a project full
+                    // of moved footage gets readable again, so this one is
+                    // never disabled.
+                    PopupMenuItem::new(t!("media_bin.menu.rename")).on_click(
+                        move |_, window, cx| {
+                            let _ = rename_entity.update(cx, |this, cx| {
+                                // Focus belongs to the click, not to the
+                                // panel's own construction.
+                                if let Some(input) = this.begin_rename(rename_asset, window, cx) {
+                                    input.update(cx, |state, cx| state.focus(window, cx));
+                                }
+                            });
+                        },
+                    ),
                 )
                 .item(PopupMenuItem::new(t!("media_bin.menu.delete")).on_click(
                     move |_, window, cx| {
@@ -915,7 +1072,9 @@ mod tests {
     // No `use super::*;` here: that glob (re-importing the file's `gpui::*`)
     // combined with the `#[gpui::test]` macro makes rustc 1.95.0 crash with
     // SIGBUS. Import explicitly instead.
-    use super::{InvalidationHint, MediaBinGpuiPanel, ProjectState, ThumbnailCache};
+    use super::{
+        InvalidationHint, MediaBinGpuiPanel, ProjectState, ThumbnailCache, asset_references,
+    };
     use crate::media::import::ProbedAsset;
     use crate::media::thumbnail::ThumbnailGenerator;
     use crate::project_state::ProjectStateHandle;
@@ -952,6 +1111,131 @@ mod tests {
                 file_size: 100,
             },
         }
+    }
+
+    /// The globals a MediaBin panel reads, plus a fresh project registered as
+    /// the app's document state.
+    fn init(cx: &mut gpui::TestAppContext) -> gpui::Entity<ProjectState> {
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(super::super::FocusedPanelGlobal(None));
+            cx.set_global(super::super::SelectedPropertiesTarget::default());
+            cx.set_global(super::super::MediaSelection::default());
+            cx.set_global(super::super::PlaybackPosition::default());
+            let project = cx.new(ProjectState::new);
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            project
+        })
+    }
+
+    /// Renaming a row commits the trimmed name as **one** undo step, and a
+    /// blank name is not an edit at all. The name is a label: the asset keeps
+    /// its id, so the layer that references it is untouched (`AID-3`).
+    #[gpui::test]
+    fn renaming_an_asset_commits_once_and_ignores_a_blank_name(cx: &mut gpui::TestAppContext) {
+        let project = init(cx);
+        let window = cx.add_window(|window, cx| {
+            MediaBinGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        project.update(cx, |project, cx| {
+            project.import_media(vec![probed_clip("/media/clip_0001_v3.mov")], vec![], cx);
+        });
+        cx.run_until_parked();
+
+        let asset = window
+            .read_with(cx, |panel, _| panel.rows[0].asset_id)
+            .unwrap();
+        // The asset is referenced by a layer, so a rename that touched the
+        // identity would show up as a broken reference below.
+        cx.update(|cx| super::add_asset_as_layer(asset, cx));
+        cx.run_until_parked();
+        let references = |cx: &mut gpui::TestAppContext| {
+            project.read_with(cx, |project, _| {
+                asset_references(project.document(), asset).len()
+            })
+        };
+        assert_eq!(references(cx), 1, "the layer reads the asset");
+
+        let names = |cx: &mut gpui::TestAppContext| {
+            window
+                .read_with(cx, |panel, _| {
+                    panel
+                        .rows
+                        .iter()
+                        .map(|row| row.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+        };
+        assert_eq!(names(cx), ["clip_0001_v3"]);
+
+        window
+            .update(cx, |panel, window, cx| {
+                assert!(panel.begin_rename(asset, window, cx).is_some());
+                assert!(panel.rename.is_some());
+                panel.commit_rename("  Background plate  ".into(), cx);
+                assert!(panel.rename.is_none(), "committing closes the editor");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            names(cx),
+            ["Background plate"],
+            "the trimmed name reaches the row"
+        );
+        assert_eq!(references(cx), 1, "and the reference still lands");
+
+        // A blank name closes the editor without touching the document.
+        window
+            .update(cx, |panel, window, cx| {
+                panel.begin_rename(asset, window, cx);
+                panel.commit_rename("   ".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            names(cx),
+            ["Background plate"],
+            "a blank name is not an edit"
+        );
+
+        project.update(cx, |project, cx| project.undo(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            names(cx),
+            ["clip_0001_v3"],
+            "one undo restores the imported name"
+        );
+    }
+
+    /// An asset that leaves the document while its row is being renamed takes
+    /// the editor with it: a blur commit against a missing asset would
+    /// otherwise be a no-op nobody can see.
+    #[gpui::test]
+    fn deleting_the_asset_being_renamed_drops_the_editor(cx: &mut gpui::TestAppContext) {
+        let project = init(cx);
+        let window = cx.add_window(|window, cx| {
+            MediaBinGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        project.update(cx, |project, cx| {
+            project.import_media(vec![probed_clip("/media/clip.mov")], vec![], cx);
+        });
+        cx.run_until_parked();
+        let asset = window
+            .read_with(cx, |panel, _| panel.rows[0].asset_id)
+            .unwrap();
+        window
+            .update(cx, |panel, window, cx| {
+                panel.begin_rename(asset, window, cx);
+            })
+            .unwrap();
+
+        cx.update(|cx| super::delete_asset(asset, cx));
+        cx.run_until_parked();
+        window
+            .read_with(cx, |panel, _| assert!(panel.rename.is_none()))
+            .unwrap();
     }
 
     /// A stored thumbnail must not survive a change of the asset's resolved

@@ -350,6 +350,7 @@ audio = "音声"
 [media_bin.menu]
 add_as_layer = "レイヤーとして追加"
 new_composition = "素材からコンポジションを作成"
+rename = "名前を変更"
 delete = "プロジェクトから削除"
 
 [media_bin.delete]

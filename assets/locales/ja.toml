@@ -983,6 +983,15 @@ brightness = "全チャネルに加算する量（-1〜1）。"
 contrast = "中間グレーからの距離の倍率（1 で変化なし）。"
 saturation = "輝度からの距離の倍率（1 で変化なし、0 でグレー）。"
 
+[node."color.ramp"]
+label = "カラーランプ"
+description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"
+[node."color.ramp".params]
+value = "ランプ上で引く値。"
+in_min = "ランプの始点に対応する入力値。"
+in_max = "ランプの終点に対応する入力値。"
+stops = "ランプのカラーストップと、その間の補間方法。"
+
 [node."rasterize"]
 label = "ラスタライズ"
 description = "ジオメトリを画像に描画する。"

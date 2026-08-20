@@ -992,6 +992,15 @@ brightness = "Added to every channel (-1 to 1)."
 contrast = "Scales the distance from mid gray (1 is unchanged)."
 saturation = "Scales the distance from luminance (1 is unchanged, 0 is gray)."
 
+[node."color.ramp"]
+label = "Color Ramp"
+description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."
+[node."color.ramp".params]
+value = "The value to look up in the ramp."
+in_min = "Input value that maps to the start of the ramp."
+in_max = "Input value that maps to the end of the ramp."
+stops = "Colour stops of the ramp, with the interpolation between them."
+
 [node."rasterize"]
 label = "Rasterize"
 description = "Draws geometry into an image."

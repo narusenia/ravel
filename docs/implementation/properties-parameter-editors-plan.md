@@ -417,7 +417,7 @@ Fit もズームも意味を持たない。
 - 同じ制御点に対して `field.curve_remap` と同じ値を返すテスト
 - カーブエディタが単位 2 と同じ行として出るテスト
 
-### 単位 8: `color.ramp`（値ドメインのカラーランプ）
+### 単位 8: `color.ramp`（値ドメインのカラーランプ）✅
 
 Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消費者。
 
@@ -429,14 +429,34 @@ Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消�
 - アルファも出す（ストップは RGBA を持つ）。Color 型が α を含むので
   別ポートにはしない
 
+> 実装済み。プロセッサは `crates/ravel-nodes/src/color.rs` の
+> `ColorRampProcessor`、テンプレートは `registry::builtin::color_ramp`
+> （`NodeCategory::Color`、パラメータは `value` / `in_min` / `in_max` /
+> `stops`）。色は共有の `RampParam::evaluate` が答える。
+> **`extrapolation` パラメータは持たない** — カーブは端が傾きなので
+> `repeat` / `extend` が定義できるが、ランプの端は色なのでクランプ以外に
+> 意味が無い。値 → ランプ位置の正規化は `RampField::normalized` と同じ規約
+> （幅が有限非零でなければ `in_min` での硬いステップ、`in_max < in_min` で
+> 反転）で、両者が一致することをテストが固定している
+
 **完了条件**
 
-- 既知のストップで特定入力値の色が期待値になるテスト
-- 同じストップに対して `field.ramp` と同じ色を返すテスト
-- 入力が範囲外のとき両端にクランプされるテスト
+- 既知のストップで特定入力値の色が期待値になるテスト ✅
+  （`known_stops_map_an_input_to_the_expected_colour`。α も同じ `Color` に
+  乗ることを含む）
+- 同じストップに対して `field.ramp` と同じ色を返すテスト ✅
+  （`the_value_ramp_and_the_field_ramp_agree`。`field.ramp` のプロセッサが
+  組み立てる `RampField` と突き合わせ、退化した範囲も含めて一致を見る）
+- 入力が範囲外のとき両端にクランプされるテスト ✅
+  （`out_of_range_input_clamps_to_the_end_stops`）
 - `layer.info(index) → color.ramp` でレイヤーごとに色が変わる結合テスト
   （`layer.info` は `scene-info-nodes-plan.md` 単位 2 が追加する）
-- グラデーションエディタが単位 4 と同じ行として出るテスト
+  → **`layer.info` 版は `INFO-2` で追加する。** `layer.info` が未実装のため、
+  駆動源を `math.scalar` に差し替えた結合テストで代替した
+  （`a_driven_value_changes_the_colour`: 上流のスカラーが変われば出力色が
+  変わることを、パラメータポート経由のノード 2 つで固定する）
+- グラデーションエディタが単位 4 と同じ行として出るテスト ✅
+  （`the_color_ramp_template_produces_the_same_ramp_row`）
 
 ### 単位 5: 縦ズームの共有 ✅
 

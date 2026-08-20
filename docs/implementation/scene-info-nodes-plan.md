@@ -194,6 +194,10 @@ InvalidationHint::Shell { comp, layer }
 - 対象が表示区間外のとき型ゼロを返すテスト
 - 殻の transform を変更したとき、`Shell` ヒント経由で値が更新されるテスト
 - 対象レイヤーが存在しないときのエラーメッセージが対象 id を含むテスト
+- `layer.info(index) → color.ramp` でレイヤーごとに色が変わる結合テスト
+  （`properties-parameter-editors-plan.md` 単位 8 の完了条件からの借り。
+  `color.ramp` は実装済みで、当時は `layer.info` が無かったため駆動源を
+  `math.scalar` に差し替えて通してある）
 
 ### 単位 3: `comp.info`
 

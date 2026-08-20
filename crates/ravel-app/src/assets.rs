@@ -256,7 +256,8 @@ pub enum RavelIcon {
     NodeFieldFalloff,
     /// Node header/menu: `field.curve_remap`.
     NodeFieldCurveRemap,
-    /// Node header/menu: `field.ramp`.
+    /// Node header/menu: `field.ramp` and `color.ramp` — one icon for the
+    /// ramp family, the way the vector arities share theirs.
     NodeFieldRamp,
     /// Node header/menu: `field.expression`.
     NodeFieldExpression,
@@ -430,7 +431,7 @@ impl RavelIcon {
             "field.radial" => Self::NodeFieldRadial,
             "field.falloff" => Self::NodeFieldFalloff,
             "field.curve_remap" => Self::NodeFieldCurveRemap,
-            "field.ramp" => Self::NodeFieldRamp,
+            "field.ramp" | "color.ramp" => Self::NodeFieldRamp,
             "field.expression" => Self::NodeFieldExpression,
             "field.add" => Self::NodeFieldAdd,
             "field.multiply" => Self::NodeFieldMultiply,

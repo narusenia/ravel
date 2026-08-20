@@ -593,7 +593,8 @@ colour) is the floor rather than an empty one. `insert_stop`, `move_stop` and
 `set_stop_color` refuse non-finite input for the same reason `Deserialize`
 drops it.
 
-Consumed through `ParameterValue::Ramp` (`field.ramp` today) and read in a
+Consumed through `ParameterValue::Ramp` (`field.ramp` in the field domain,
+`color.ramp` in the value domain) and read in a
 processor with `params.ramp(key)`. Properties renders it as a
 `PropertyField::Ramp` row — a gradient band that expands
 `widgets::param_ramp_editor` inline, the same shape a curve row has.
@@ -1980,6 +1981,7 @@ Current keys:
 | `math.scalar` | CPU | `op` enum (add/subtract/multiply/divide/min/max/mod/pow + unary abs/negate/floor/ceil/round/sqrt/sin/cos); `a`/`b` are Float params (drive via exposed param ports; `a` ships already exposed as a port, removable like any other); div/mod-by-zero and sqrt(<0) → 0; mod is `rem_euclid`; radians |
 | `math.remap` | CPU | linear fit `value`: `[in_min,in_max]` → `[out_min,out_max]`, optional `clamp`; degenerate in-range → `out_min` |
 | `math.curve` | CPU | normalizes `value` through `[in_min,in_max]`, evaluates the shared `CurveParam`, then maps to `[out_min,out_max]`; `extrapolation` is `clamp`, `repeat`, or endpoint-tangent `extend` |
+| `color.ramp` | CPU | Scalar → `Color`. Normalizes `value` through `[in_min,in_max]` and looks it up in a `Ramp` parameter (`stops`) with the shared `RampParam::evaluate` — the value-domain twin of `field.ramp`, agreeing with it stop for stop, degenerate ranges included. Alpha rides in the same `Color`, so there is no second port. Out-of-range input clamps to the end stops and there is **no `extrapolation` parameter**: a ramp ends in a colour, not a slope |
 | `vector.construct.vec2` / `.vec3` / `.vec4` | CPU | Scalar components → `Vec2` / `Vec3` / `Vec4` output. `x`/`y`/`z`/`w` are Float params (drive via exposed param ports, like `math.scalar`); unset components are 0. Arity is a separate `type_key`, not a `type` param, because port types live on the node instance (`VECTOR_CONSTRUCT_VEC2` and friends in `registry::builtin`) |
 | `vector.split.vec2` / `.vec3` / `.vec4` | CPU | one vector input of that arity → one Scalar output per component (`x`/`y`/`z`/`w`). Multi-output, so the value is a `PortRecord` in output-port order (the `net.in` / `subnet` convention); an unconnected input splits into zeros. Arity is a separate `type_key` because the *number* of output ports follows it, and port lists live on the node instance — narrowing means `Graph::remove_output_port` (which drops that port's edges and re-indexes the rest), not a parameter edit |
 | `vector.swizzle.vec2` / `.vec3` / `.vec4` | CPU | any vector arity in → a vector of *this* template's arity out, components picked by the `pattern` String param (`"xy"`, `"zyx"`, `"xxx"`). The `type_key` fixes the output arity — the output port type lives on the node instance — so `pattern` must name exactly that many components; naming a component the wired vector lacks, or a name outside `x`/`y`/`z`/`w`, is an evaluation error. An unconnected input reads as a zero Vec4, so a fresh node evaluates |

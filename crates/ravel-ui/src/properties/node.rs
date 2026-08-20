@@ -549,6 +549,26 @@ mod tests {
         );
     }
 
+    /// `color.ramp` gets the same gradient row `field.ramp` gets, out of the
+    /// template alone — the ramp editor is a `ParameterValue::Ramp` row, not a
+    /// per-node arrangement.
+    #[test]
+    fn the_color_ramp_template_produces_the_same_ramp_row() {
+        let registry = registry();
+        let node = registry
+            .create_node("color.ramp", NodeId::new(1))
+            .expect("color.ramp is registered");
+        let section = node_params_section(&node, &registry, 0, &eval(), &[]);
+        assert!(
+            section
+                .fields
+                .iter()
+                .any(|field| matches!(field, PropertyField::Ramp { key, .. } if key == "stops")),
+            "color.ramp must offer the same editable ramp row: {:?}",
+            section.fields
+        );
+    }
+
     #[test]
     fn driven_params_render_read_only_with_source() {
         let node = Node::new(NodeId::new(1), "blur")

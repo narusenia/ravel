@@ -66,6 +66,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use ravel_core::composition::asset_legacy::{self, LegacyAssetKeys};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::id::CompId;
 use ravel_core::registry::NodeRegistry;
@@ -276,6 +277,9 @@ impl ProjectFile {
         // archive without one is corrupt, not legacy). v1/v2 archives carry
         // only the legacy flat graph (graph/main.ron), which is wrapped in a
         // fresh Document (the archive-level half of the v2→v3 migration).
+        // Filled by the document parse below; stays empty for the v1/v2 path,
+        // which has no `document/main.ron` and therefore no asset table.
+        let mut legacy = LegacyAssetKeys::default();
         let document = if source_version >= 3 {
             let text = archive.require_text(container::entry::DOCUMENT)?;
             let mut registry = NodeRegistry::new();
@@ -295,9 +299,18 @@ impl ProjectFile {
             // `sync_subnet_pins`: a subnet's pins are derived from its inner
             // In / Out, so they run last — after the two normalizations above
             // have finished moving those very ports around.
-            let document = ron_options()
-                .from_str::<Document>(text)
-                .map_err(ProjectError::DocumentParse)?;
+            // The parse is wrapped because a pre-v9 archive identifies its
+            // assets by name: `AssetId`'s deserializer mints an id for each
+            // name it meets and records the pairing here, which is the only
+            // place those names are visible (`ravel_core::composition::
+            // asset_legacy`). `legacy` is empty for a v9 archive.
+            //
+            // It still goes through `ron_options()`: the recursion budget is
+            // what keeps "a document that saves opens again" true (`HIGH-26`),
+            // and a second reader on RON's default would put that back.
+            let (parsed, keys) = asset_legacy::scoped(|| ron_options().from_str::<Document>(text));
+            legacy = keys;
+            let document = parsed.map_err(ProjectError::DocumentParse)?;
             // Reject hostile nesting before the recursive compatibility
             // normalizers below get a chance to consume the process stack.
             document.validate_subnet_depth()?;
@@ -366,6 +379,21 @@ impl ProjectFile {
             let (upgraded, report) = document.linearize_colors(&registry);
             upgraded.validate()?;
             report_color_migration(&report);
+            upgraded
+        } else {
+            document
+        };
+        // v8 → v9: an asset is identified by a minted `AssetId` rather than by
+        // its display name, so each of the three reference systems is pointed
+        // at the id its name interned to and the name moves to
+        // `MediaAssetEntry::name`. Mints no ids of its own — the ids were
+        // minted during the parse above, from a counter no stored document has
+        // ever written — so its position relative to `advance_id_counters` is
+        // free. Gated on the source version because a reference naming a
+        // missing asset is deliberately taken offline, which must happen once.
+        let document = if source_version < 9 {
+            let upgraded = document.upgrade_asset_references(&legacy);
+            upgraded.validate()?;
             upgraded
         } else {
             document
@@ -632,7 +660,9 @@ mod tests {
         ExposedBinding, ExposedParameter, ExposedParameters, ExposedType, ExposedValue,
     };
     use ravel_core::graph::{Graph, Node, ParameterValue};
-    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
+    use ravel_core::id::{
+        AssetId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
+    };
     use ravel_core::network as net;
     use ravel_core::runtime::playback::LoopRange;
     use std::collections::BTreeMap;
@@ -718,7 +748,7 @@ mod tests {
         let hero = Layer {
             opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
             audio: Some(AudioSource {
-                asset_id: "plate".into(),
+                asset_id: demo_asset(),
                 stream_index: 1,
                 gain: keyframed_channel(&[(0, 1.0), (30, 0.75)]),
                 fade_in_frames: 4,
@@ -759,9 +789,15 @@ mod tests {
 
         Document::new(flat)
             .with_composition(comp)
-            .with_media_asset("plate", "/tmp/media/plate.mov")
+            .with_media_asset(demo_asset(), "/tmp/media/plate.mov")
             // The project's external contract (REQ-PROJ-006, format v7).
             .with_exposed_parameters(demo_declarations())
+    }
+
+    /// The one asset [`demo_document`] registers. A fixed id so a test can
+    /// name it without walking the table.
+    fn demo_asset() -> AssetId {
+        AssetId::new(1)
     }
 
     /// Declarations covering the three shapes an [`ExposedValue`] takes: a
@@ -2109,7 +2145,7 @@ mod tests {
                 FrameRate::new(24, 1),
                 120,
             ))
-            .with_media_asset("plate", &clip);
+            .with_media_asset(demo_asset(), &clip);
         let project = ProjectFile::from_document("Relocatable", "2026-07-26T00:00:00Z", document);
 
         let project_path = original.path().join("demo.ravprj");
@@ -2118,7 +2154,7 @@ mod tests {
         // Stored form is relative to the project root.
         let stored =
             ProjectFile::from_archive(&container::read_file(&project_path).unwrap()).unwrap();
-        let entry = stored.document.get_media_asset("plate").unwrap();
+        let entry = stored.document.get_media_asset(demo_asset()).unwrap();
         assert_eq!(
             entry.path,
             AssetPath::Relative("./footage/plate.mov".into())
@@ -2131,7 +2167,11 @@ mod tests {
         // Loading through the path resolves it.
         let loaded = ProjectFile::load(&project_path).unwrap();
         assert_eq!(
-            loaded.document.get_media_asset("plate").unwrap().resolved,
+            loaded
+                .document
+                .get_media_asset(demo_asset())
+                .unwrap()
+                .resolved,
             Some(clip.clone())
         );
 
@@ -2144,7 +2184,11 @@ mod tests {
         let reopened = ProjectFile::load(&moved_path).unwrap();
         let moved_clip = moved.path().join("footage/plate.mov");
         assert_eq!(
-            reopened.document.get_media_asset("plate").unwrap().resolved,
+            reopened
+                .document
+                .get_media_asset(demo_asset())
+                .unwrap()
+                .resolved,
             Some(moved_clip.clone())
         );
         assert!(moved_clip.exists(), "the resolved path names a real file");
@@ -2163,13 +2207,13 @@ mod tests {
                 FrameRate::new(24, 1),
                 120,
             ))
-            .with_media_asset("plate", "/elsewhere/plate.mov");
+            .with_media_asset(demo_asset(), "/elsewhere/plate.mov");
         let project = ProjectFile::from_document("Outside", "2026-07-26T00:00:00Z", document);
 
         let path = root.path().join("demo.ravprj");
         project.save(&path).unwrap();
         let loaded = ProjectFile::load(&path).unwrap();
-        let entry = loaded.document.get_media_asset("plate").unwrap();
+        let entry = loaded.document.get_media_asset(demo_asset()).unwrap();
         assert_eq!(
             entry.path,
             AssetPath::Absolute(PathBuf::from("/elsewhere/plate.mov"))
@@ -2191,8 +2235,9 @@ mod tests {
                 120,
             ))
             .with_media_asset_entry(
-                "plate",
+                demo_asset(),
                 MediaAssetEntry {
+                    name: "plate".into(),
                     color_space: None,
                     path: AssetPath::Variable("${PROJECT_ROOT}/footage/plate.mov".into()),
                     kind: AssetKind::Container,
@@ -2207,7 +2252,7 @@ mod tests {
         let path = root.path().join("demo.ravprj");
         project.save(&path).unwrap();
         let loaded = ProjectFile::load(&path).unwrap();
-        let entry = loaded.document.get_media_asset("plate").unwrap();
+        let entry = loaded.document.get_media_asset(demo_asset()).unwrap();
         assert_eq!(
             entry.path,
             AssetPath::Variable("${PROJECT_ROOT}/footage/plate.mov".into())
@@ -2229,8 +2274,8 @@ mod tests {
                 FrameRate::new(24, 1),
                 120,
             ))
-            .with_media_asset("inside", &inside)
-            .with_media_asset("outside", "/elsewhere/b.mov");
+            .with_media_asset(AssetId::new(1), &inside)
+            .with_media_asset(AssetId::new(2), "/elsewhere/b.mov");
         let mut project = ProjectFile::from_document("Stable", "2026-07-26T00:00:00Z", document);
         project.manifest.modified_at = "2026-07-26T00:00:00Z".into();
 
@@ -2245,8 +2290,10 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    /// A format-v3 document stores bare absolute `PathBuf`s. It must open as
-    /// v4 with those paths intact and a kind inferred from the extension.
+    /// A format-v3 document stores bare absolute `PathBuf`s **and keys its
+    /// asset table by the display string**. It must open with those paths
+    /// intact, a kind inferred from the extension, and each former key kept as
+    /// the asset's name (`.ravprj` v9).
     #[test]
     fn v3_media_assets_upgrade_to_absolute_references() {
         let document_ron = r#"(
@@ -2279,7 +2326,13 @@ mod tests {
         let project = ProjectFile::from_archive(&archive).unwrap();
         assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
 
-        let plate = project.document.get_media_asset("plate").unwrap();
+        // The former string key is the display name now, so nothing the user
+        // sees moved; the key itself is a minted id.
+        let plate_id = project
+            .document
+            .media_asset_id_by_name("plate")
+            .expect("the v3 key became the name");
+        let plate = project.document.get_media_asset(plate_id).unwrap();
         assert_eq!(
             plate.path,
             AssetPath::Absolute(PathBuf::from("/legacy/footage/plate.mov"))
@@ -2287,16 +2340,262 @@ mod tests {
         assert_eq!(plate.kind, AssetKind::Container);
         assert_eq!(plate.metadata, AssetMetadata::default());
 
-        let still = project.document.get_media_asset("still").unwrap();
-        assert_eq!(still.kind, AssetKind::Still);
+        let still_id = project
+            .document
+            .media_asset_id_by_name("still")
+            .expect("the v3 key became the name");
+        assert_ne!(plate_id, still_id, "two keys, two assets");
+        assert_eq!(
+            project.document.get_media_asset(still_id).unwrap().kind,
+            AssetKind::Still
+        );
 
         // Absolute references resolve to themselves regardless of the root.
         let resolved = project
             .document
             .with_resolved_assets(Some(Path::new("/somewhere/else")), &HashMap::new());
         assert_eq!(
-            resolved.get_media_asset("plate").unwrap().resolved,
+            resolved.get_media_asset(plate_id).unwrap().resolved,
             Some(PathBuf::from("/legacy/footage/plate.mov"))
+        );
+    }
+
+    // ----- v8 -> v9: asset identity ---------------------------------------
+
+    /// A `.ravprj` v8 document, as RON text: the asset table keyed by the
+    /// display string, entries without a `name`, and all three reference
+    /// systems holding that string.
+    ///
+    /// Built by writing a current document whose references already hold the
+    /// *names* and rewriting the two spellings v9 changed, rather than pasting
+    /// two hundred lines of RON that no longer corresponds to any type. The
+    /// assertions below check the result really is v8-shaped, so a rewrite that
+    /// stopped matching cannot let the test pass without testing anything.
+    ///
+    /// Contents: one composition, one layer, three `media` nodes referencing
+    /// `plate`, `ghost` (an asset the table does **not** hold — the state a
+    /// pre-v9 delete left behind) and `exposed:tint` (the entry an exposed
+    /// media declaration registered), and an `AudioSource` on `voice`.
+    fn v8_document_ron() -> String {
+        use ravel_core::composition::{AudioSource, Layer};
+        use ravel_core::exposed::{ExposedBinding, ExposedParameter, ExposedValue};
+        use ravel_core::graph::{Node, ParameterValue};
+
+        let media_node = |id: u64, asset: &str| {
+            Node::new(NodeId::new(id), "media")
+                .with_output("frame", DataTypeId::FRAME_BUFFER)
+                .with_param("asset_id", ParameterValue::String(asset.into()))
+        };
+        let network = Graph::new()
+            .add_node(media_node(1, "plate"))
+            .unwrap()
+            .add_node(media_node(2, "ghost"))
+            .unwrap()
+            .add_node(media_node(3, "exposed:tint"))
+            .unwrap();
+        let mut layer = Layer::new(LayerId::new(1), "Plate", network).with_time(0, 0, 100);
+        layer.audio = Some(AudioSource::new(AssetId::new(2), 1));
+        let comp = Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 100)
+            .add_layer(layer);
+        let document = Document::default()
+            .with_composition(comp)
+            .with_media_asset(AssetId::new(1), "/legacy/plate.mov")
+            .with_media_asset(AssetId::new(2), "/legacy/voice.wav")
+            .with_media_asset(AssetId::new(3), "/legacy/backdrop.png")
+            .with_exposed_parameters(
+                ExposedParameters::from_declarations([ExposedParameter::inferred(
+                    "tint",
+                    ExposedValue::Media(AssetPath::Absolute("/legacy/backdrop.png".into())),
+                    ExposedBinding::new(NodeId::new(3), "asset_id"),
+                )
+                .unwrap()])
+                .unwrap(),
+            );
+
+        // **Line endings are normalized before the rewrites below.** RON's
+        // pretty printer emits the platform's newline (`PrettyConfig` defaults
+        // `new_line` to `\r\n` on Windows), so a pattern written with `\n`
+        // matches nothing there — the fixture would keep its v9 keys, and only
+        // the Windows CI job would ever say so.
+        let text = document_to_ron(&document).unwrap().replace("\r\n", "\n");
+        // `(AssetId(n), MediaAssetEntry(\n  name: "x",` -> `("x", MediaAssetEntry(`
+        let text = text
+            .replace(
+                "(AssetId(1), MediaAssetEntry(\n      name: \"plate\",",
+                "(\"plate\", MediaAssetEntry(",
+            )
+            .replace(
+                "(AssetId(2), MediaAssetEntry(\n      name: \"voice\",",
+                "(\"voice\", MediaAssetEntry(",
+            )
+            // An `AudioSource` names its asset by the same display string.
+            .replace("asset_id: AssetId(2),", "asset_id: \"voice\",")
+            .replace(
+                // The file stem is `backdrop`; a pre-v9 exposed swap keyed
+                // its entry `exposed:<declaration>`, which is what the bound
+                // node's parameter above names. Distinct from the declaration
+                // name so the checks below cannot confuse the two.
+                "(AssetId(3), MediaAssetEntry(\n      name: \"backdrop\",",
+                "(\"exposed:tint\", MediaAssetEntry(",
+            );
+        assert!(
+            !text.contains("AssetId("),
+            "the fixture must carry no v9 asset key: {text}"
+        );
+        for name in ["name: \"plate\"", "name: \"voice\"", "name: \"backdrop\""] {
+            // `name:` also spells a composition, a layer and a port, so only
+            // the three the rewrite consumed are checked.
+            assert!(!text.contains(name), "a v8 entry carries no {name}");
+        }
+        for key in ["(\"plate\", ", "(\"voice\", ", "(\"exposed:tint\", "] {
+            assert!(text.contains(key), "the v8 table is keyed by {key}");
+        }
+        text
+    }
+
+    /// A v8 archive around [`v8_document_ron`].
+    fn v8_archive() -> container::RawArchive {
+        let mut archive = container::RawArchive::new();
+        archive.insert(
+            container::entry::MANIFEST,
+            br#"{
+  "format_version": 8,
+  "ravel_version": "0.1.0",
+  "project_name": "Legacy assets",
+  "created_at": "2026-01-01T00:00:00Z",
+  "modified_at": "2026-01-02T00:00:00Z",
+  "frame_rate": { "num": 30, "den": 1 },
+  "resolution": { "width": 16, "height": 16 }
+}"#
+            .to_vec(),
+        );
+        archive.insert(container::entry::DOCUMENT, v8_document_ron().into_bytes());
+        archive
+    }
+
+    /// The asset reference a `media` node holds, as an id.
+    fn node_reference(document: &Document, node: u64) -> Option<AssetId> {
+        let comp = document.compositions.values().next().expect("one comp");
+        let layer = comp.layers.head().expect("one layer");
+        ravel_core::composition::node_asset_reference(
+            layer.network.node(NodeId::new(node)).expect("the node"),
+        )
+    }
+
+    /// Opening a v8 project keys its assets by a minted id and keeps the
+    /// former key as the display name, so **nothing the user reads changes**.
+    #[test]
+    fn v8_asset_keys_become_ids_and_keep_their_names() {
+        let project = ProjectFile::from_archive(&v8_archive()).unwrap();
+        assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
+
+        let mut names: Vec<&str> = project
+            .document
+            .media_assets
+            .values()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["exposed:tint", "plate", "voice"]);
+
+        let plate = project
+            .document
+            .media_asset_id_by_name("plate")
+            .expect("the key became the name");
+        assert_eq!(
+            project.document.get_media_asset(plate).map(|e| &e.path),
+            Some(&AssetPath::Absolute(PathBuf::from("/legacy/plate.mov"))),
+            "and the entry is otherwise untouched"
+        );
+    }
+
+    /// All three reference systems follow the asset they named: the `media`
+    /// node's parameter, the layer's audio source, and the entry an exposed
+    /// media declaration registered.
+    #[test]
+    fn v8_references_follow_their_assets_through_the_upgrade() {
+        let project = ProjectFile::from_archive(&v8_archive()).unwrap();
+        let document = &project.document;
+        let id_of = |name: &str| document.media_asset_id_by_name(name);
+
+        // 1. The `media` node's `asset_id` parameter.
+        assert_eq!(node_reference(document, 1), id_of("plate"));
+
+        // 2. The layer's audio source — the *same* table, so a muxed clip's
+        //    picture and sound keep pointing at one asset.
+        let comp = document.compositions.values().next().unwrap();
+        let audio = comp.layers.head().unwrap().audio.as_ref().expect("audio");
+        assert_eq!(
+            Some(audio.asset_id),
+            id_of("voice"),
+            "the audio source names the asset it always named"
+        );
+
+        // 3. The node an exposed media declaration is bound to.
+        assert_eq!(node_reference(document, 3), id_of("exposed:tint"));
+        assert!(
+            ravel_core::exposed::apply::resolve(document).is_empty(),
+            "the declaration still lands on a live asset reference"
+        );
+    }
+
+    /// A reference the v8 table could not answer — what deleting an asset used
+    /// to leave behind — becomes permanently unresolvable instead of keeping
+    /// the name and re-attaching to the next import that claims it.
+    #[test]
+    fn a_v8_reference_to_a_missing_asset_becomes_offline() {
+        let project = ProjectFile::from_archive(&v8_archive()).unwrap();
+        let reference = node_reference(&project.document, 2);
+        assert_eq!(reference, Some(AssetId::UNSET));
+        assert!(
+            project.document.get_media_asset(AssetId::UNSET).is_none(),
+            "and no asset can ever carry that id, so it stays offline"
+        );
+    }
+
+    /// The upgrade lands in the document, not just in memory: saving the
+    /// opened project and reading it back yields the same document.
+    #[test]
+    fn an_upgraded_v8_project_round_trips() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("legacy.ravprj");
+        let opened = ProjectFile::from_archive(&v8_archive()).unwrap();
+        opened.save(&path).unwrap();
+
+        let reloaded = ProjectFile::load(&path).unwrap();
+        assert_eq!(reloaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+        // `resolved` is runtime-only and the fixture's paths do not exist, so
+        // both sides are offline; everything persisted must match.
+        assert_eq!(reloaded.document, opened.document);
+    }
+
+    /// The upgrade must not damage a document it has already run over: a
+    /// reference that is a live id is left alone, so a second pass — over an
+    /// upgraded document, with no legacy keys to offer — changes nothing.
+    #[test]
+    fn upgrading_an_already_upgraded_document_changes_nothing() {
+        let once = ProjectFile::from_archive(&v8_archive()).unwrap().document;
+        let twice = once
+            .clone()
+            .upgrade_asset_references(&LegacyAssetKeys::default());
+        assert_eq!(once, twice);
+    }
+
+    /// The ids minted for a v8 table must be behind the allocation counter, or
+    /// the next import would be handed an id a stored reference already names.
+    #[test]
+    fn loading_a_v8_project_advances_the_asset_counter() {
+        let project = ProjectFile::from_archive(&v8_archive()).unwrap();
+        let highest = project
+            .document
+            .media_assets
+            .keys()
+            .map(|id| id.raw())
+            .max()
+            .expect("three assets");
+        assert!(
+            AssetId::next().raw() > highest,
+            "a fresh id must not collide with a loaded one"
         );
     }
 
@@ -2314,8 +2613,9 @@ mod tests {
                 120,
             ))
             .with_media_asset_entry(
-                "gone",
+                demo_asset(),
                 MediaAssetEntry {
+                    name: "gone".into(),
                     color_space: None,
                     path: AssetPath::Variable("${MISSING_VAR}/a.mov".into()),
                     kind: AssetKind::Container,
@@ -2331,7 +2631,7 @@ mod tests {
         assert!(
             loaded
                 .document
-                .get_media_asset("gone")
+                .get_media_asset(demo_asset())
                 .unwrap()
                 .is_offline()
         );

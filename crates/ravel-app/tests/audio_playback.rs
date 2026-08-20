@@ -28,7 +28,7 @@ use ravel_audio::mixdown::{AudioMixdown, CacheKey, DecodedAudio};
 use ravel_audio::{AudioCommand, AudioError, SyncClock};
 use ravel_core::composition::{AudioSource, Composition, Layer};
 use ravel_core::graph::Graph;
-use ravel_core::id::{CompId, LayerId};
+use ravel_core::id::{AssetId, CompId, LayerId};
 use ravel_core::media::VideoStreamInfo;
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::runtime::playback::PlaybackState;
@@ -99,7 +99,13 @@ fn decoded(frames: usize, channels: u32, sample_rate: u32) -> DecodedAudio {
     }
 }
 
-fn audio_layer(id: u64, start: i64, asset_id: &str) -> Layer {
+/// The single media asset every test below names. Only its id matters here —
+/// nothing in these tests reads a display name.
+fn asset() -> AssetId {
+    AssetId::new(1)
+}
+
+fn audio_layer(id: u64, start: i64, asset_id: AssetId) -> Layer {
     let mut layer =
         Layer::new(LayerId::new(id), format!("audio {id}"), Graph::new()).with_time(start, 0, 300);
     layer.audio = Some(AudioSource::new(asset_id, 0));
@@ -154,7 +160,7 @@ fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
     audio.update(cx, |service, _| {
         service.cache_decoded(
             CacheKey {
-                asset_id: "music".into(),
+                asset_id: asset(),
                 stream_index: 0,
             },
             decoded(48_000, 2, 48_000),
@@ -162,7 +168,7 @@ fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
     });
 
     // Layer starts at comp frame 30 = 1s at 30fps.
-    commit_layer(&project, audio_layer(1, 30, "music"), cx);
+    commit_layer(&project, audio_layer(1, 30, asset()), cx);
 
     assert_eq!(
         recording.commands(),
@@ -184,13 +190,13 @@ fn layer_moves_send_minimal_diffs(cx: &mut TestAppContext) {
     audio.update(cx, |service, _| {
         service.cache_decoded(
             CacheKey {
-                asset_id: "music".into(),
+                asset_id: asset(),
                 stream_index: 0,
             },
             decoded(48_000, 2, 48_000),
         );
     });
-    commit_layer(&project, audio_layer(1, 0, "music"), cx);
+    commit_layer(&project, audio_layer(1, 0, asset()), cx);
     assert_eq!(recording.commands().len(), 1);
 
     // Move the layer to comp frame 60 (= 2s): one replacing SetTrack.
@@ -229,13 +235,13 @@ fn removing_the_layer_removes_the_track(cx: &mut TestAppContext) {
     audio.update(cx, |service, _| {
         service.cache_decoded(
             CacheKey {
-                asset_id: "music".into(),
+                asset_id: asset(),
                 stream_index: 0,
             },
             decoded(48_000, 2, 48_000),
         );
     });
-    commit_layer(&project, audio_layer(1, 0, "music"), cx);
+    commit_layer(&project, audio_layer(1, 0, asset()), cx);
 
     project.update(cx, |project, cx| {
         let comp = project.document().root_comp.unwrap();
@@ -255,14 +261,14 @@ fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
     audio.update(cx, |service, _| {
         service.cache_decoded(
             CacheKey {
-                asset_id: "a".into(),
+                asset_id: asset(),
                 stream_index: 0,
             },
             decoded(48_000, 2, 48_000),
         );
     });
 
-    commit_layer(&project, audio_layer(1, 0, "a"), cx);
+    commit_layer(&project, audio_layer(1, 0, asset()), cx);
     assert!(matches!(
         recording.commands()[0],
         Recorded::SetTrack { muted: false, .. }
@@ -325,14 +331,14 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
     audio.update(cx, |service, _| {
         service.cache_decoded(
             CacheKey {
-                asset_id: "clip".into(),
+                asset_id: asset(),
                 stream_index: 1,
             },
             decoded(48_000, 2, 48_000),
         );
         service.cache_decoded(
             CacheKey {
-                asset_id: "clip".into(),
+                asset_id: asset(),
                 stream_index: 2,
             },
             decoded(48_000, 1, 48_000),
@@ -340,7 +346,7 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
     });
 
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(0, 0, 300);
-    layer.audio = Some(AudioSource::new("clip", 1));
+    layer.audio = Some(AudioSource::new(asset(), 1));
     commit_layer(&project, layer, cx);
     assert_eq!(
         recording.commands(),
@@ -407,7 +413,7 @@ fn picture_and_sound_share_the_layer_local_time_axis() {
 
     // A clip placed at comp frame 30, trimmed to source frames 10..100.
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(30, 10, 100);
-    layer.audio = Some(AudioSource::new("clip", 1));
+    layer.audio = Some(AudioSource::new(asset(), 1));
     let mut comp = Composition::new(CompId::new(1), "comp", (640, 480), FPS, 300);
     comp.layers = vec![layer.clone()].into();
 
@@ -451,7 +457,7 @@ fn picture_and_sound_share_the_layer_local_time_axis() {
 fn the_layer_trim_bounds_the_audible_range() {
     const OUTPUT_RATE: u32 = 48_000;
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(30, 10, 100);
-    layer.audio = Some(AudioSource::new("clip", 1));
+    layer.audio = Some(AudioSource::new(asset(), 1));
     let mut comp = Composition::new(CompId::new(1), "comp", (640, 480), FPS, 300);
     comp.layers = vec![layer].into();
 
@@ -484,13 +490,13 @@ fn clock_switches_only_with_tracks_and_engine(cx: &mut TestAppContext) {
     audio.update(cx, |service, _| {
         service.cache_decoded(
             CacheKey {
-                asset_id: "music".into(),
+                asset_id: asset(),
                 stream_index: 0,
             },
             decoded(48_000, 2, 48_000),
         );
     });
-    commit_layer(&project, audio_layer(1, 0, "music"), cx);
+    commit_layer(&project, audio_layer(1, 0, asset()), cx);
 
     let clock = audio.read_with(cx, |service, _| service.audio_clock());
     assert!(clock.is_some(), "audio tracks + engine ⇒ audio clock");

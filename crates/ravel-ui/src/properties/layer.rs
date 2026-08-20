@@ -1400,7 +1400,10 @@ mod tests {
         }
 
         let mut audio_layer = Layer::new(LayerId::new(7), "A", Graph::new());
-        audio_layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 0));
+        audio_layer.audio = Some(ravel_core::composition::AudioSource::new(
+            ravel_core::id::AssetId::next(),
+            0,
+        ));
         let source = super::info_section(&audio_layer)
             .fields
             .into_iter()
@@ -1423,7 +1426,7 @@ mod tests {
         );
 
         layer.audio = Some(ravel_core::composition::AudioSource {
-            asset_id: "dialogue".into(),
+            asset_id: ravel_core::id::AssetId::next(),
             stream_index: 2,
             gain: AnimationChannel::constant(0.75),
             fade_in_frames: 3,
@@ -1525,7 +1528,10 @@ mod tests {
     #[test]
     fn stream_picker_lists_the_assets_audio_streams() {
         let mut layer = test_layer();
-        layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 2));
+        layer.audio = Some(ravel_core::composition::AudioSource::new(
+            ravel_core::id::AssetId::next(),
+            2,
+        ));
         let asset = asset_with_streams();
 
         let PropertyField::Enum { value, options, .. } = stream_field(&layer, Some(&asset)) else {
@@ -1542,7 +1548,10 @@ mod tests {
     #[test]
     fn picking_a_stream_applies_its_container_index() {
         let mut layer = test_layer();
-        layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 1));
+        layer.audio = Some(ravel_core::composition::AudioSource::new(
+            ravel_core::id::AssetId::next(),
+            1,
+        ));
         assert!(apply_layer_field(
             &mut layer,
             "stream_index",
@@ -1568,7 +1577,10 @@ mod tests {
     #[test]
     fn stream_picker_falls_back_to_the_stored_index() {
         let mut layer = test_layer();
-        layer.audio = Some(ravel_core::composition::AudioSource::new("clip", 3));
+        layer.audio = Some(ravel_core::composition::AudioSource::new(
+            ravel_core::id::AssetId::next(),
+            3,
+        ));
 
         let PropertyField::Enum { value, options, .. } = stream_field(&layer, None) else {
             panic!("expected a picker");

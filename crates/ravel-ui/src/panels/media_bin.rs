@@ -14,9 +14,9 @@
 //! The panel holds no selection — that is the host's `MediaSelection` global,
 //! the same split as the Outliner's `LayerSelection` (REQ-UI-013).
 
-use ravel_core::composition::{AssetKind, Document, MediaAssetEntry};
-use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::id::{CompId, LayerId};
+use ravel_core::composition::{AssetKind, Document, MediaAssetEntry, node_asset_reference};
+use ravel_core::graph::Node;
+use ravel_core::id::{AssetId, CompId, LayerId};
 use std::path::Path;
 
 use crate::panel::PanelKind;
@@ -73,10 +73,10 @@ pub fn classify(entry: &MediaAssetEntry) -> MediaBinRowKind {
 /// One visible line of the MediaBin list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaBinRow {
-    /// Key of [`Document::media_assets`].
-    pub asset_id: String,
-    /// Display name: the file name of the persisted path (the asset id when
-    /// the path yields none).
+    /// Key of [`Document::media_assets`] — the asset's identity, never shown.
+    pub asset_id: AssetId,
+    /// Display name: the file name of the persisted path (the asset's own
+    /// [`MediaAssetEntry::name`] when the path yields none).
     pub name: String,
     pub kind: MediaBinRowKind,
     /// Probed duration in seconds, when the import recorded one.
@@ -125,8 +125,8 @@ impl MediaBinPanel {
             .media_assets
             .iter()
             .map(|(id, entry)| MediaBinRow {
-                asset_id: id.clone(),
-                name: asset_name(id, entry),
+                asset_id: *id,
+                name: asset_name(entry),
                 kind: classify(entry),
                 duration: entry.metadata.duration_secs,
                 offline: entry.is_offline(),
@@ -155,16 +155,21 @@ impl MediaBinPanel {
 
 /// The display name of an asset: the file name of its persisted path. The
 /// persisted form is one string for every variant (`AssetPath` Display), and
-/// a leading `${VAR}` component still leaves a usable file name; the asset
-/// id is the fallback when the path has no real file name (empty, trailing
-/// separator, or a bare variable token).
-fn asset_name(id: &str, entry: &MediaAssetEntry) -> String {
+/// a leading `${VAR}` component still leaves a usable file name; the asset's
+/// own [`MediaAssetEntry::name`] is the fallback when the path has no real
+/// file name (empty, trailing separator, or a bare variable token).
+///
+/// The fallback is the name and never the id: an [`AssetId`] is a number the
+/// user has no way to connect to a file, so showing it would be worse than
+/// showing nothing. Making `name` the *primary* label — and letting it be
+/// edited — is `AID-3`.
+fn asset_name(entry: &MediaAssetEntry) -> String {
     let text = entry.path.to_string();
     Path::new(&text)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty() && !name.starts_with("${"))
-        .unwrap_or_else(|| id.to_string())
+        .unwrap_or_else(|| entry.name.clone())
 }
 
 /// One layer referencing an asset, named by its composition for the delete
@@ -179,7 +184,7 @@ pub struct AssetReference {
 /// it in the layer network, or the layer shell's audio source — in
 /// composition display order (comps by id, layers in stack order). A layer
 /// appears once even when both paths reference the asset.
-pub fn asset_references(document: &Document, asset_id: &str) -> Vec<AssetReference> {
+pub fn asset_references(document: &Document, asset_id: AssetId) -> Vec<AssetReference> {
     let mut comps: Vec<_> = document.compositions.values().collect();
     comps.sort_by_key(|comp| comp.id);
 
@@ -205,21 +210,19 @@ pub fn asset_references(document: &Document, asset_id: &str) -> Vec<AssetReferen
     references
 }
 
-/// Whether `node` is a media node bound to `asset_id` (the binding
+/// Whether `node` is a media node referencing `asset_id` (the binding
 /// `add_media_layer` writes; `video` is the persisted alias of `media`).
-fn node_uses_asset(node: &Node, asset_id: &str) -> bool {
-    matches!(node.type_key.as_str(), "media" | "video")
-        && node.parameters.iter().any(|param| {
-            param.key == "asset_id"
-                && matches!(&param.value, ParameterValue::String(value) if value == asset_id)
-        })
+fn node_uses_asset(node: &Node, asset_id: AssetId) -> bool {
+    node_asset_reference(node) == Some(asset_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::composition::{AssetMetadata, AudioSource, Composition, Layer};
-    use ravel_core::graph::Graph;
+    use ravel_core::composition::{
+        AssetMetadata, AudioSource, Composition, Layer, MEDIA_ASSET_PARAM_KEY,
+    };
+    use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::NodeId;
     use ravel_core::types::FrameRate;
     use std::path::PathBuf;
@@ -237,12 +240,21 @@ mod tests {
         entry
     }
 
+    /// Register each entry under a fresh id, keeping the given display name.
+    /// The names are what the rows show and sort by; the ids are what a
+    /// reference holds, and the tests below never need to spell them.
     fn document_with(assets: Vec<(&str, MediaAssetEntry)>) -> Document {
         let mut doc = Document::default();
-        for (id, entry) in assets {
-            doc = doc.with_media_asset_entry(id, entry);
+        for (name, mut entry) in assets {
+            entry.name = name.to_string();
+            doc = doc.with_media_asset_entry(AssetId::next(), entry);
         }
         doc
+    }
+
+    /// The display names of the panel's rows, in row order.
+    fn row_names(panel: &MediaBinPanel, doc: &Document) -> Vec<String> {
+        panel.rows(doc).iter().map(|row| row.name.clone()).collect()
     }
 
     #[test]
@@ -311,7 +323,11 @@ mod tests {
             ["clip.mov", "gone.mov", "plate.png", "voice.wav"],
         );
         let clip = &rows[0];
-        assert_eq!(clip.asset_id, "clip");
+        assert_eq!(
+            doc.get_media_asset(clip.asset_id).map(|e| e.name.as_str()),
+            Some("clip"),
+            "the row's id is the key of the entry it was built from"
+        );
         assert_eq!(clip.kind, MediaBinRowKind::Video);
         assert_eq!(clip.duration, Some(2.5));
         assert!(!clip.offline);
@@ -326,34 +342,13 @@ mod tests {
         let mut panel = MediaBinPanel::new();
 
         panel.set_filter(MediaBinFilter::Video);
-        assert_eq!(
-            panel
-                .rows(&doc)
-                .iter()
-                .map(|row| row.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            ["clip", "gone"],
-        );
+        assert_eq!(row_names(&panel, &doc), ["clip.mov", "gone.mov"]);
 
         panel.set_filter(MediaBinFilter::Still);
-        assert_eq!(
-            panel
-                .rows(&doc)
-                .iter()
-                .map(|row| row.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            ["plate"],
-        );
+        assert_eq!(row_names(&panel, &doc), ["plate.png"]);
 
         panel.set_filter(MediaBinFilter::Audio);
-        assert_eq!(
-            panel
-                .rows(&doc)
-                .iter()
-                .map(|row| row.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            ["voice"],
-        );
+        assert_eq!(row_names(&panel, &doc), ["voice.wav"]);
     }
 
     #[test]
@@ -361,14 +356,7 @@ mod tests {
         let doc = bin_document();
         let mut panel = MediaBinPanel::new();
         panel.set_query("CLIP");
-        assert_eq!(
-            panel
-                .rows(&doc)
-                .iter()
-                .map(|row| row.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            ["clip"],
-        );
+        assert_eq!(row_names(&panel, &doc), ["clip.mov"]);
 
         panel.set_query("  .mov ");
         assert_eq!(
@@ -387,14 +375,7 @@ mod tests {
         let mut panel = MediaBinPanel::new();
         panel.set_filter(MediaBinFilter::Video);
         panel.set_query("gone");
-        assert_eq!(
-            panel
-                .rows(&doc)
-                .iter()
-                .map(|row| row.asset_id.as_str())
-                .collect::<Vec<_>>(),
-            ["gone"],
-        );
+        assert_eq!(row_names(&panel, &doc), ["gone.mov"]);
     }
 
     #[test]
@@ -402,8 +383,10 @@ mod tests {
         assert!(MediaBinPanel::new().rows(&Document::default()).is_empty());
     }
 
+    /// A path with no usable file name leaves the entry's own display name as
+    /// the label — never the id, which the user cannot connect to a file.
     #[test]
-    fn the_name_falls_back_to_the_asset_id() {
+    fn the_name_falls_back_to_the_entrys_own_name() {
         let mut entry = container_entry(Some(1920), 0, None);
         entry.path = ravel_core::composition::AssetPath::Variable("${MEDIA}".into());
         let doc = document_with(vec![("my-asset", entry)]);
@@ -413,13 +396,13 @@ mod tests {
 
     // ----- asset_references -------------------------------------------------
 
-    fn media_network(asset_id: &str) -> Graph {
+    fn media_network(asset_id: AssetId) -> Graph {
         let node = Node::new(NodeId::next(), "media")
             .with_output("frame", ravel_core::id::DataTypeId::FRAME_BUFFER);
         let mut node = node;
         node.parameters.push(ravel_core::graph::Parameter {
-            key: "asset_id".to_string(),
-            value: ParameterValue::String(asset_id.to_string()),
+            key: MEDIA_ASSET_PARAM_KEY.to_string(),
+            value: ParameterValue::String(asset_id.to_param_value()),
         });
         Graph::new().add_node(node).unwrap()
     }
@@ -440,25 +423,27 @@ mod tests {
 
     #[test]
     fn references_cover_media_nodes_and_audio_sources_once_per_layer() {
-        let by_node = Layer::new(LayerId::next(), "Node layer", media_network("clip"));
+        let clip = AssetId::next();
+        let other = AssetId::next();
+        let by_node = Layer::new(LayerId::next(), "Node layer", media_network(clip));
         let mut by_audio = Layer::new(LayerId::next(), "Audio layer", Graph::new());
         by_audio.audio = Some(AudioSource {
-            asset_id: "clip".to_string(),
+            asset_id: clip,
             ..AudioSource::default()
         });
-        let mut by_both = Layer::new(LayerId::next(), "Both layer", media_network("clip"));
+        let mut by_both = Layer::new(LayerId::next(), "Both layer", media_network(clip));
         by_both.audio = Some(AudioSource {
-            asset_id: "clip".to_string(),
+            asset_id: clip,
             ..AudioSource::default()
         });
-        let by_other = Layer::new(LayerId::next(), "Other layer", media_network("other"));
+        let by_other = Layer::new(LayerId::next(), "Other layer", media_network(other));
         let comp = comp_with_layers("Comp 1", vec![by_node, by_audio, by_both, by_other]);
         let comp_id = comp.id;
         let layer_ids: Vec<LayerId> = comp.layers.iter().map(|layer| layer.id).collect();
         let mut doc = Document::default();
         doc.compositions.insert(comp_id, Arc::new(comp));
 
-        let references = asset_references(&doc, "clip");
+        let references = asset_references(&doc, clip);
         assert_eq!(
             references
                 .iter()
@@ -469,6 +454,6 @@ mod tests {
         );
         assert!(references.iter().all(|reference| reference.comp == comp_id));
 
-        assert!(asset_references(&doc, "unused").is_empty());
+        assert!(asset_references(&doc, AssetId::next()).is_empty());
     }
 }

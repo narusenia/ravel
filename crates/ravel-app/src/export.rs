@@ -158,7 +158,9 @@ pub fn silent_render(
 pub struct SkippedAudioSource {
     /// The layer's name, or its id when the layer is gone.
     pub layer: String,
-    /// The media asset it names.
+    /// The **display name** of the media asset it names — the render report
+    /// is read by a person, and an `AssetId` is a number they cannot connect
+    /// to a file. Empty when the asset has left the document.
     pub asset: String,
     /// Why it could not be loaded.
     pub detail: String,
@@ -594,9 +596,14 @@ fn write_soundtrack(
     };
     let mut skipped_sources = Vec::with_capacity(mix.skipped.len());
     for skipped in &mix.skipped {
+        let asset_name = document
+            .get_media_asset(skipped.asset_id)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
         tracing::warn!(
             layer = skipped.layer_id.raw(),
             asset = %skipped.asset_id,
+            asset_name,
             reason = %skipped.reason,
             "an audio source was left out of the render"
         );
@@ -608,7 +615,7 @@ fn write_soundtrack(
                 .and_then(|comp| comp.layers.iter().find(|l| l.id == skipped.layer_id))
                 .map(|layer| layer.name.clone())
                 .unwrap_or_else(|| skipped.layer_id.raw().to_string()),
-            asset: skipped.asset_id.clone(),
+            asset: asset_name,
             detail: skipped.reason.clone(),
         });
     }
@@ -733,7 +740,7 @@ mod tests {
     use gpui::AppContext as _;
     use ravel_core::composition::{AudioSource, Composition, Document, Layer};
     use ravel_core::graph::Graph;
-    use ravel_core::id::{CompId, LayerId};
+    use ravel_core::id::{AssetId, CompId, LayerId};
     use ravel_core::types::FrameRate;
     use ravel_ui::export::{ExportRequest, ExportSettings};
     use std::sync::Arc;
@@ -749,7 +756,7 @@ mod tests {
     fn document(with_audio: bool) -> Arc<Document> {
         let mut layer = Layer::new(LayerId::new(1), "voice over", Graph::new());
         if with_audio {
-            layer.audio = Some(AudioSource::new("voice", 0));
+            layer.audio = Some(AudioSource::new(AssetId::new(1), 0));
         }
         let mut comp = Composition::new(comp_id(), "shot 010", (32, 18), FPS, DURATION);
         comp.layers.push_back(layer);

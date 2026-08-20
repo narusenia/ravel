@@ -109,7 +109,9 @@ pub enum Warning {
     AudioSourceSkipped {
         /// The layer's name, or its id when the layer is gone.
         layer: String,
-        /// The media asset it names.
+        /// The media asset's display name, or the reference itself when the
+        /// document no longer has the asset to take a name from. Never the
+        /// bare id of an asset that does exist: the reader knows it by name.
         asset: String,
         /// Why it could not be loaded.
         detail: String,
@@ -307,7 +309,7 @@ mod tests {
     use super::*;
     use ravel_core::composition::{Composition, Layer};
     use ravel_core::graph::Graph;
-    use ravel_core::id::LayerId;
+    use ravel_core::id::{AssetId, LayerId};
     use ravel_core::media::encode::{EncodeRoute, EncodeTarget, PngDepth, UnavailableReason};
     use ravel_core::media::{ImageFormat, VideoCodec};
     use ravel_core::types::FrameRate;
@@ -527,7 +529,7 @@ mod tests {
         let mut composition = comp(1, "Main");
         let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
         layer.audio = Some(AudioSource {
-            asset_id: "a".into(),
+            asset_id: AssetId::next(),
             stream_index: 0,
             ..Default::default()
         });
@@ -557,7 +559,7 @@ mod tests {
 
         let mut composition = comp(1, "Main");
         let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
-        layer.audio = Some(AudioSource::new("a", 0));
+        layer.audio = Some(AudioSource::new(AssetId::next(), 0));
         composition = composition.add_layer(layer);
 
         let document = Document::default().with_composition(composition);

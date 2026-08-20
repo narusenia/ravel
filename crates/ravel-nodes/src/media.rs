@@ -36,9 +36,10 @@
 //! graph bug, not missing footage.
 
 use ravel_core::color::ColorSpace;
-use ravel_core::composition::{AssetKind, ColorSpaceSource};
+use ravel_core::composition::{AssetKind, ColorSpaceSource, MediaAssetEntry};
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
+use ravel_core::id::AssetId;
 use ravel_core::media::{MediaReader, MediaResult, VideoStreamInfo};
 use ravel_core::types::{FrameBuffer, NodeData};
 use ravel_media::frame_cache::{FrameKey, MediaFrameCache};
@@ -140,15 +141,19 @@ impl MediaProcessor {
     /// the surrounding composition (`docs/implementation/media-import-plan.md`,
     /// decision 7); the warn-once set keeps per-frame evaluations from
     /// flooding the log.
+    ///
+    /// `label` is [`asset_label`]'s output: it identifies the asset in the log
+    /// and is the warn-once key, so it has to be stable for a given asset
+    /// across frames.
     fn fallback_frame(
         &self,
-        asset_id: &str,
+        label: &str,
         ctx: &EvalContext,
         detail: impl FnOnce() -> String,
     ) -> Arc<dyn NodeData> {
         let mut warned = self.warned.lock().expect("media warn lock poisoned");
-        if warned.insert(asset_id.to_string()) {
-            tracing::warn!("media: asset {asset_id:?}: {}", detail());
+        if warned.insert(label.to_string()) {
+            tracing::warn!("media: asset {label}: {}", detail());
         }
         Arc::new(FrameBuffer::new_zeroed(ctx.resolution.0, ctx.resolution.1))
     }
@@ -157,16 +162,11 @@ impl MediaProcessor {
     /// Shares the warn-once set with [`Self::fallback_frame`]: both are
     /// per-asset notices, and per-frame evaluation would otherwise repeat
     /// them for every frame of the clip.
-    fn note_inferred_color_space(
-        &self,
-        asset_id: &str,
-        space: ColorSpace,
-        source: ColorSpaceSource,
-    ) {
+    fn note_inferred_color_space(&self, label: &str, space: ColorSpace, source: ColorSpaceSource) {
         let mut warned = self.warned.lock().expect("media warn lock poisoned");
-        if warned.insert(format!("colour-space:{asset_id}")) {
+        if warned.insert(format!("colour-space:{label}")) {
             tracing::info!(
-                "media: asset {asset_id:?}: input colour space {} inferred from {}",
+                "media: asset {label}: input colour space {} inferred from {}",
                 space.name().unwrap_or("custom"),
                 match source {
                     ColorSpaceSource::Metadata => "file metadata",
@@ -243,6 +243,22 @@ impl MediaProcessor {
     }
 }
 
+/// How an asset is named in this node's log lines: the display name a user
+/// would recognise, plus the reference the document stores.
+///
+/// Both halves earn their place. A support question is asked in terms of the
+/// name ("why is the plate blank?"), while the reference is what has to be
+/// found in `document/main.ron` — and since v9 the two are independent, so
+/// neither implies the other. It doubles as the warn-once key, which is why it
+/// is derived from the reference rather than from the name alone: two assets
+/// may share a name.
+fn asset_label(reference: &str, entry: Option<&MediaAssetEntry>) -> String {
+    match entry {
+        Some(entry) if !entry.name.is_empty() => format!("{:?} ({reference})", entry.name),
+        _ => reference.to_string(),
+    }
+}
+
 impl NodeProcessor for MediaProcessor {
     fn process(
         &self,
@@ -252,21 +268,38 @@ impl NodeProcessor for MediaProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let asset_id = params.str_or("asset_id", "");
-        anyhow::ensure!(!asset_id.is_empty(), "media: asset_id is not set");
+        // The reference is the decimal spelling of an `AssetId`
+        // (`AssetId::to_param_value`). Empty is the template default: a node
+        // nobody has pointed at an asset, which is a mistake to report rather
+        // than a picture to degrade.
+        let reference = params.str_or("asset_id", "");
+        anyhow::ensure!(!reference.is_empty(), "media: asset_id is not set");
 
         let document = _scope
             .document()
             .ok_or_else(|| anyhow::anyhow!("media: no document set on the evaluator"))?;
-        let asset = document
-            .get_media_asset(asset_id)
-            .ok_or_else(|| anyhow::anyhow!("media: unknown asset id {asset_id:?}"))?;
+        // A reference the asset table does not answer is **offline**, not an
+        // error. Since `.ravprj` v9 an `AssetId` is never reused, so deleting
+        // an asset — or copying a layer out of another project — leaves
+        // exactly this state behind by design, and the composition around it
+        // still has to render (`docs/implementation/asset-identity-plan.md`).
+        // A reference that is not a decimal id at all lands here too: it names
+        // no asset either way, and refusing to draw would turn a hand edit
+        // into a failed render.
+        let asset =
+            AssetId::from_param_value(reference).and_then(|id| document.get_media_asset(id));
+        let label = asset_label(reference, asset);
+        let Some(asset) = asset else {
+            return Ok(self.fallback_frame(&label, ctx, || {
+                "the project has no such asset (offline), transparent frame".to_string()
+            }));
+        };
         // `resolved` is the only path evaluation may use: the persisted
         // `path` can be project-relative or variable-prefixed, and only the
         // host knows the project root that anchors it. `None` means the
         // asset is offline — degrade to transparent, never fail.
         let Some(path) = asset.resolved.as_ref() else {
-            return Ok(self.fallback_frame(asset_id, ctx, || {
+            return Ok(self.fallback_frame(&label, ctx, || {
                 format!(
                     "offline (unresolved path {}), transparent frame",
                     asset.path
@@ -280,7 +313,7 @@ impl NodeProcessor for MediaProcessor {
         // so a clip that looks wrong can be traced back to the guess.
         let (color_space, source) = asset.input_color_space();
         if source != ColorSpaceSource::Explicit {
-            self.note_inferred_color_space(asset_id, color_space, source);
+            self.note_inferred_color_space(&label, color_space, source);
         }
 
         let decoded: anyhow::Result<Arc<FrameBuffer>> = match &asset.kind {
@@ -315,7 +348,7 @@ impl NodeProcessor for MediaProcessor {
         match decoded {
             Ok(frame) => Ok(frame),
             Err(err) => {
-                Ok(self.fallback_frame(asset_id, ctx, || format!("{err:#}, transparent frame")))
+                Ok(self.fallback_frame(&label, ctx, || format!("{err:#}, transparent frame")))
             }
         }
     }
@@ -452,10 +485,20 @@ mod tests {
         })
     }
 
+    /// The asset every fixture in this module registers and every
+    /// [`media_node`] references. Fixed so both halves of the reference can be
+    /// written without threading a value through each helper.
+    fn test_asset() -> AssetId {
+        AssetId::new(1)
+    }
+
     fn media_node(id: u64) -> Node {
         Node::new(NodeId::new(id), "media")
             .with_output("frame", DataTypeId::FRAME_BUFFER)
-            .with_param("asset_id", ParameterValue::String("clip".into()))
+            .with_param(
+                "asset_id",
+                ParameterValue::String(test_asset().to_param_value()),
+            )
     }
 
     fn decode_at(
@@ -468,7 +511,7 @@ mod tests {
         let graph = Graph::new().add_node(node).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(
-            Document::default().with_media_asset("clip", "/fake/clip.mov"),
+            Document::default().with_media_asset(test_asset(), "/fake/clip.mov"),
         ));
         ev.register(
             NodeId::new(1),
@@ -518,9 +561,46 @@ mod tests {
         assert!((frame - 24.0).abs() < 0.5, "got media frame {frame}");
     }
 
+    /// A reference the asset table cannot answer yields a transparent frame,
+    /// not an error.
+    ///
+    /// This **reverses** the pre-v9 behaviour, where an unknown asset id
+    /// failed the evaluation. Since v9 an `AssetId` is never reused, so a
+    /// deleted asset — or a layer pasted from another project — leaves a
+    /// reference that resolves to nothing *by design*
+    /// (`docs/implementation/asset-identity-plan.md`). Failing the render for
+    /// the designed outcome would make deleting one clip break the whole
+    /// composite, so it degrades exactly like an offline asset.
     #[test]
-    fn missing_asset_is_an_error() {
+    fn a_reference_to_a_missing_asset_yields_a_transparent_frame() {
         let node = media_node(1);
+        let graph = Graph::new().add_node(node).unwrap();
+        let mut ev = Evaluator::new();
+        ev.set_document(Arc::new(Document::default()));
+        ev.register(
+            NodeId::new(1),
+            Arc::new(MediaProcessor::with_reader_factory(fake_factory(
+                FrameRate::new(24, 1),
+                None,
+            ))),
+        );
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
+        let out = ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap();
+        let frame = out.downcast_ref::<FrameBuffer>().expect("a frame");
+        assert_eq!((frame.width, frame.height), (4, 4));
+        assert!(
+            frame.as_f32().iter().all(|value| *value == 0.0),
+            "an unresolvable reference is offline, so the frame is transparent"
+        );
+    }
+
+    /// A node nobody has pointed at an asset yet is a mistake to report, not a
+    /// picture to degrade: it is the template default, not a broken reference.
+    #[test]
+    fn an_unset_asset_reference_is_an_error() {
+        let node = Node::new(NodeId::new(1), "media")
+            .with_output("frame", DataTypeId::FRAME_BUFFER)
+            .with_param("asset_id", ParameterValue::String(String::new()));
         let graph = Graph::new().add_node(node).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(Document::default()));
@@ -556,8 +636,9 @@ mod tests {
         let graph = Graph::new().add_node(media_node(1)).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
-            "clip",
+            test_asset(),
             MediaAssetEntry {
+                name: String::new(),
                 color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
@@ -590,6 +671,7 @@ mod tests {
         let factory: ReaderFactory =
             Arc::new(|_path, _color_space| Err(MediaError::Other("cannot open".into())));
         let entry = MediaAssetEntry {
+            name: String::new(),
             color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/clip.mov")),
             kind: AssetKind::Container,
@@ -626,8 +708,9 @@ mod tests {
         let graph = Graph::new().add_node(media_node(1)).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(Document::default().with_media_asset_entry(
-            "clip",
+            test_asset(),
             MediaAssetEntry {
+                name: String::new(),
                 color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
@@ -662,7 +745,7 @@ mod tests {
         let graph = Graph::new().add_node(media_node(1)).unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(
-            Document::default().with_media_asset_entry("clip", entry),
+            Document::default().with_media_asset_entry(test_asset(), entry),
         ));
         ev.register(NodeId::new(1), Arc::new(processor));
         (ev, graph)
@@ -688,6 +771,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            name: String::new(),
             color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/plate.png")),
             kind: AssetKind::Still,
@@ -751,6 +835,7 @@ mod tests {
 
         fn still(name: &str) -> MediaAssetEntry {
             MediaAssetEntry {
+                name: String::new(),
                 color_space: None,
                 path: AssetPath::Absolute(PathBuf::from(format!("/fake/{name}"))),
                 kind: AssetKind::Still,
@@ -795,6 +880,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            name: String::new(),
             color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
             kind: AssetKind::Sequence {
@@ -855,6 +941,7 @@ mod tests {
             image_factory,
         );
         let entry = MediaAssetEntry {
+            name: String::new(),
             color_space: None,
             path: AssetPath::Absolute(PathBuf::from("/fake/seq/f_0100.png")),
             kind: AssetKind::Sequence {
@@ -928,6 +1015,7 @@ mod tests {
 
     fn container(path: &str) -> MediaAssetEntry {
         MediaAssetEntry {
+            name: String::new(),
             color_space: None,
             path: AssetPath::Absolute(PathBuf::from(path)),
             kind: AssetKind::Container,
@@ -1027,7 +1115,7 @@ mod tests {
             .unwrap();
         let mut ev = Evaluator::new();
         ev.set_document(Arc::new(
-            Document::default().with_media_asset_entry("clip", container("/fake/clip.mov")),
+            Document::default().with_media_asset_entry(test_asset(), container("/fake/clip.mov")),
         ));
         ev.register(NodeId::new(1), Arc::new(processor(Arc::clone(&factory))));
         ev.register(NodeId::new(2), Arc::new(processor(factory)));
@@ -1168,9 +1256,10 @@ mod tests {
         );
 
         // Relink: the same asset id now resolves elsewhere.
-        ev.set_document(Arc::new(
-            Document::default().with_media_asset_entry("clip", still("/fake/new/plate_0002.png")),
-        ));
+        ev.set_document(Arc::new(Document::default().with_media_asset_entry(
+            test_asset(),
+            still("/fake/new/plate_0002.png"),
+        )));
         ev.invalidate_all();
 
         assert_eq!(

@@ -34,7 +34,7 @@ use ravel_core::eval::{
 use ravel_core::exposed::{ExposedBinding, ExposedParameter, ExposedParameters, ExposedValue};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{
-    CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
+    AssetId, CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
 };
 use ravel_core::network;
 use ravel_core::runtime::JobProgress;
@@ -101,7 +101,9 @@ fn document(with_audio: bool) -> Document {
         let mut layer =
             Layer::new(LayerId::new(2), "voice", layer_network(100)).with_time(0, 0, DURATION);
         layer.audio = Some(AudioSource {
-            asset_id: "voice".into(),
+            // No asset table behind it: this document only has to *have*
+            // audio for the "your render will be silent" warning.
+            asset_id: AssetId::next(),
             ..Default::default()
         });
         comp = comp.add_layer(layer);
@@ -936,6 +938,13 @@ mod sound {
     /// resampling as an unmistakable peak, short enough to locate.
     const MARKER_FRAMES: usize = 441;
 
+    /// Identity of the fixture's one asset. A fixed value rather than a fresh
+    /// [`AssetId::next`] so a test can reach back into `media_assets` for the
+    /// entry `document_with_sound` put there.
+    fn voice_asset() -> AssetId {
+        AssetId::new(1)
+    }
+
     // -----------------------------------------------------------------------
     // Fixture
     // -----------------------------------------------------------------------
@@ -985,13 +994,13 @@ mod sound {
             0,
             (FPS * SECONDS) as u64,
         );
-        voice.audio = Some(AudioSource::new("voice", 0));
+        voice.audio = Some(AudioSource::new(voice_asset(), 0));
         comp = comp.add_layer(voice);
 
         let mut document = Document::default().with_composition(comp);
         document
             .media_assets
-            .insert("voice".into(), MediaAssetEntry::from_absolute(asset));
+            .insert(voice_asset(), MediaAssetEntry::from_absolute(asset));
         document
     }
 
@@ -1330,7 +1339,7 @@ mod sound {
         // decode refusal reaches the CLI in.
         document
             .media_assets
-            .get_mut("voice")
+            .get_mut(&voice_asset())
             .expect("the fixture asset")
             .resolved = None;
         let project = project_file(dir.path(), document);

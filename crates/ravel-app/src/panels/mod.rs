@@ -20,7 +20,7 @@ use gpui_component::{ActiveTheme, Icon};
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
-use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::id::{AssetId, CompId, LayerId, NodeId};
 use ravel_core::network::NetworkError;
 use ravel_core::runtime::playback::LoopRange;
 use ravel_dock::PaneContent;
@@ -171,7 +171,7 @@ pub enum PropertiesTarget {
     /// Written by the MediaBin selection; `id` is the `media_assets` key and
     /// only identifies the subject — the full inspector (metadata, path
     /// editing, relink) is unit 6.
-    MediaAsset { id: String },
+    MediaAsset { id: AssetId },
     /// The project's exposed parameter declarations (REQ-PROJ-006), reached
     /// through `CommandId::ProjectExposedParameters`.
     ///
@@ -282,25 +282,25 @@ impl Global for CanvasSelection {}
 /// Asset ids are the keys of [`Document::media_assets`], kept in click order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MediaSelection {
-    assets: Vec<String>,
+    assets: Vec<AssetId>,
 }
 
 impl Global for MediaSelection {}
 
 impl MediaSelection {
     /// The selected asset ids, in click order.
-    pub fn assets(&self) -> &[String] {
+    pub fn assets(&self) -> &[AssetId] {
         &self.assets
     }
 
     /// The single asset that one-asset views follow (Properties): the first
     /// of the selection.
-    pub fn primary(&self) -> Option<&str> {
-        self.assets.first().map(String::as_str)
+    pub fn primary(&self) -> Option<AssetId> {
+        self.assets.first().copied()
     }
 
-    pub fn contains(&self, asset_id: &str) -> bool {
-        self.assets.iter().any(|id| id == asset_id)
+    pub fn contains(&self, asset_id: AssetId) -> bool {
+        self.assets.contains(&asset_id)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -320,9 +320,9 @@ pub fn media_selection(cx: &App) -> MediaSelection {
 /// none or several leave the panel empty (a multi-asset inspector is unit 6
 /// territory). This is the selection's only writer, so the two globals can
 /// never disagree.
-pub fn set_media_selection(assets: Vec<String>, cx: &mut App) {
+pub fn set_media_selection(assets: Vec<AssetId>, cx: &mut App) {
     let target = match assets.as_slice() {
-        [id] => PropertiesTarget::MediaAsset { id: id.clone() },
+        [id] => PropertiesTarget::MediaAsset { id: *id },
         _ => PropertiesTarget::Empty,
     };
     cx.set_global(MediaSelection { assets });
@@ -339,11 +339,11 @@ pub fn set_media_selection(assets: Vec<String>, cx: &mut App) {
 pub(crate) fn prune_media_selection(document: &Document, cx: &mut App) -> bool {
     let mut changed = false;
     let selection = media_selection(cx);
-    let surviving: Vec<String> = selection
+    let surviving: Vec<AssetId> = selection
         .assets()
         .iter()
         .filter(|id| document.media_assets.contains_key(*id))
-        .cloned()
+        .copied()
         .collect();
     if surviving.len() != selection.assets().len() {
         set_media_selection(surviving, cx);

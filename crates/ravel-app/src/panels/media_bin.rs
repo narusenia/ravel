@@ -20,6 +20,7 @@ use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
 use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, MediaAssetEntry, MediaAssets};
+use ravel_core::id::AssetId;
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
@@ -63,7 +64,7 @@ pub struct MediaBinGpuiPanel {
     /// identity records what the image was generated from: same id but a new
     /// path, decode source, or resolved input colour space means the stored
     /// image is stale and must be regenerated.
-    thumb_images: HashMap<String, (ThumbnailIdentity, Arc<RenderImage>)>,
+    thumb_images: HashMap<AssetId, (ThumbnailIdentity, Arc<RenderImage>)>,
     search: Entity<InputState>,
     focus_handle: FocusHandle,
     #[allow(dead_code)]
@@ -187,12 +188,12 @@ impl MediaBinGpuiPanel {
         // Kick thumbnail generation for the visible rows here (not in
         // `render()`): `get_or_request` is a cheap in-memory lookup that
         // spawns background work on a miss.
-        let entries: Vec<(String, MediaAssetEntry)> = self
+        let entries: Vec<(AssetId, MediaAssetEntry)> = self
             .rows
             .iter()
             .filter_map(|row| {
                 let entry = document.as_ref()?.media_assets.get(&row.asset_id)?.clone();
-                Some((row.asset_id.clone(), entry))
+                Some((row.asset_id, entry))
             })
             .collect();
         self.thumbnails.update(cx, |cache, cx| {
@@ -234,7 +235,7 @@ impl MediaBinGpuiPanel {
     /// Decode whatever the cache has ready into renderable images. Runs on
     /// cache notifications and rebuilds — never in `render()`.
     fn refresh_thumbnails(&mut self, cx: &mut Context<Self>) -> bool {
-        let entries: Vec<(String, ThumbnailIdentity)> = self
+        let entries: Vec<(AssetId, ThumbnailIdentity)> = self
             .rows
             .iter()
             .filter_map(|row| {
@@ -258,13 +259,13 @@ impl MediaBinGpuiPanel {
                 {
                     return None;
                 }
-                Some((row.asset_id.clone(), identity))
+                Some((row.asset_id, identity))
             })
             .collect();
         if entries.is_empty() {
             return false;
         }
-        let ready: Vec<(String, ThumbnailIdentity, Arc<[u8]>)> =
+        let ready: Vec<(AssetId, ThumbnailIdentity, Arc<[u8]>)> =
             self.thumbnails.update(cx, |cache, cx| {
                 entries
                     .iter()
@@ -275,9 +276,7 @@ impl MediaBinGpuiPanel {
                             identity.input_color_space,
                             cx,
                         ) {
-                            ThumbnailState::Ready(bytes) => {
-                                Some((id.clone(), identity.clone(), bytes))
-                            }
+                            ThumbnailState::Ready(bytes) => Some((*id, identity.clone(), bytes)),
                             ThumbnailState::Pending | ThumbnailState::Unavailable => None,
                         }
                     })
@@ -291,8 +290,9 @@ impl MediaBinGpuiPanel {
             }
         }
         // Assets can leave the document (delete, undo): drop their images so
-        // a re-imported id cannot inherit a stale frame — the cache keys by
-        // path and regenerates, but the id mapping must not outlive the asset.
+        // the map does not grow without bound. Since `.ravprj` v9 a
+        // re-imported file takes a fresh `AssetId`, so it could not inherit a
+        // stale frame even if the entry stayed.
         if let Some(project) = &self.project {
             let document = project.read(cx).document();
             let before = self.thumb_images.len();
@@ -327,17 +327,17 @@ impl MediaBinGpuiPanel {
         };
         let mut assets = super::media_selection(cx).assets().to_vec();
         if toggle {
-            if let Some(position) = assets.iter().position(|id| id == &row.asset_id) {
+            if let Some(position) = assets.iter().position(|id| *id == row.asset_id) {
                 assets.remove(position);
             } else {
-                assets.push(row.asset_id.clone());
+                assets.push(row.asset_id);
             }
         } else {
-            assets = vec![row.asset_id.clone()];
+            assets = vec![row.asset_id];
         }
         super::set_media_selection(assets, cx);
         if click_count >= 2 {
-            add_asset_as_layer(&row.asset_id, cx);
+            add_asset_as_layer(row.asset_id, cx);
         }
         cx.notify();
     }
@@ -349,7 +349,7 @@ impl MediaBinGpuiPanel {
         let Some(row) = self.rows.get(index).cloned() else {
             return;
         };
-        if !super::media_selection(cx).contains(&row.asset_id) {
+        if !super::media_selection(cx).contains(row.asset_id) {
             super::set_media_selection(vec![row.asset_id], cx);
         }
         cx.notify();
@@ -419,13 +419,13 @@ impl MediaBinGpuiPanel {
 
     fn render_row(&self, index: usize, row: &MediaBinRow, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors;
-        let selected = super::media_selection(cx).contains(&row.asset_id);
+        let selected = super::media_selection(cx).contains(row.asset_id);
         let can_layer = !row.offline && super::active_composition(cx).is_some();
         let preparing = self
             .audio
             .as_ref()
-            .is_some_and(|audio| audio.read(cx).is_asset_preparing(&row.asset_id));
-        let asset_id = row.asset_id.clone();
+            .is_some_and(|audio| audio.read(cx).is_asset_preparing(row.asset_id));
+        let asset_id = row.asset_id;
 
         let mut content = div()
             .id(SharedString::from(format!("media-bin-row-{index}")))
@@ -458,7 +458,7 @@ impl MediaBinGpuiPanel {
         if can_layer {
             content = content.on_drag(
                 DraggedAsset {
-                    asset_id: row.asset_id.clone(),
+                    asset_id: row.asset_id,
                     name: row.name.clone(),
                 },
                 |drag, _offset, _window, cx| {
@@ -543,15 +543,15 @@ impl MediaBinGpuiPanel {
                 let layer_entity = entity.clone();
                 let comp_entity = entity.clone();
                 let delete_entity = entity.clone();
-                let layer_asset = asset_id.clone();
-                let comp_asset = asset_id.clone();
-                let delete_asset = asset_id.clone();
+                let layer_asset = asset_id;
+                let comp_asset = asset_id;
+                let delete_asset = asset_id;
                 menu.item(
                     PopupMenuItem::new(t!("media_bin.menu.add_as_layer"))
                         .disabled(!can_layer)
                         .on_click(move |_, _window, cx| {
                             let _ = layer_entity.update(cx, |_this, cx| {
-                                add_asset_as_layer(&layer_asset, cx);
+                                add_asset_as_layer(layer_asset, cx);
                             });
                         }),
                 )
@@ -560,14 +560,14 @@ impl MediaBinGpuiPanel {
                         .disabled(offline)
                         .on_click(move |_, _window, cx| {
                             let _ = comp_entity.update(cx, |_this, cx| {
-                                new_composition_from_asset(&comp_asset, cx);
+                                new_composition_from_asset(comp_asset, cx);
                             });
                         }),
                 )
                 .item(PopupMenuItem::new(t!("media_bin.menu.delete")).on_click(
                     move |_, window, cx| {
                         let _ = delete_entity.update(cx, |_this, cx| {
-                            request_delete_asset(&delete_asset, window, cx);
+                            request_delete_asset(delete_asset, window, cx);
                         });
                     },
                 ))
@@ -587,7 +587,7 @@ impl MediaBinGpuiPanel {
 /// follows.
 #[derive(Clone)]
 pub struct DraggedAsset {
-    pub asset_id: String,
+    pub asset_id: AssetId,
     /// Display name, for the preview that follows the pointer.
     pub name: String,
 }
@@ -610,12 +610,12 @@ impl Render for DraggedAsset {
 
 /// The assets a drop of `drag` should place: the whole media selection when
 /// the dragged row is part of it, otherwise just that row.
-pub fn dropped_asset_ids(drag: &DraggedAsset, cx: &App) -> Vec<String> {
+pub fn dropped_asset_ids(drag: &DraggedAsset, cx: &App) -> Vec<AssetId> {
     let selection = super::media_selection(cx);
-    if selection.contains(&drag.asset_id) {
+    if selection.contains(drag.asset_id) {
         selection.assets().to_vec()
     } else {
-        vec![drag.asset_id.clone()]
+        vec![drag.asset_id]
     }
 }
 
@@ -630,7 +630,8 @@ fn thumbnail_source(kind: &AssetKind) -> ThumbnailSource {
 
 /// What an asset's thumbnail is generated from. The disk cache keys on the
 /// same triple; keeping it beside the decoded image lets the panel spot a
-/// stale thumbnail when any part changes underneath an unchanged asset id.
+/// stale thumbnail when any part changes underneath an unchanged asset id
+/// (a relink, or the user setting the input colour space).
 #[derive(Clone, Debug, PartialEq)]
 struct ThumbnailIdentity {
     path: PathBuf,
@@ -670,15 +671,14 @@ fn format_duration(secs: f64) -> String {
 }
 
 /// The asset the delete/add operations resolve, or `None` when it is gone.
-fn asset_entry(asset_id: &str, cx: &App) -> Option<(Entity<ProjectState>, MediaAssetEntry)> {
+fn asset_entry(asset_id: AssetId, cx: &App) -> Option<(Entity<ProjectState>, MediaAssetEntry)> {
     let project = cx
         .try_global::<crate::project_state::ProjectStateHandle>()
         .and_then(|handle| handle.0.upgrade())?;
     let entry = project
         .read(cx)
         .document()
-        .media_assets
-        .get(asset_id)?
+        .get_media_asset(asset_id)?
         .clone();
     Some((project, entry))
 }
@@ -686,18 +686,14 @@ fn asset_entry(asset_id: &str, cx: &App) -> Option<(Entity<ProjectState>, MediaA
 /// Add the asset to the active composition as a layer at the playhead — one
 /// undo step. A no-op for offline assets (nothing would resolve) and without
 /// an active composition.
-pub fn add_asset_as_layer(asset_id: &str, cx: &mut App) {
-    add_assets_as_layers(
-        &[asset_id.to_string()],
-        ProjectState::playhead_frame(cx),
-        cx,
-    );
+pub fn add_asset_as_layer(asset_id: AssetId, cx: &mut App) {
+    add_assets_as_layers(&[asset_id], ProjectState::playhead_frame(cx), cx);
 }
 
 /// [`add_asset_as_layer`] for a whole set at a chosen frame — the drop
 /// handlers of the Timeline and the Viewer. One `commit_document` covers the
 /// batch, so dropping a multi-selection is a single undo step.
-pub fn add_assets_as_layers(asset_ids: &[String], start_frame: i64, cx: &mut App) {
+pub fn add_assets_as_layers(asset_ids: &[AssetId], start_frame: i64, cx: &mut App) {
     let Some(project) = cx
         .try_global::<crate::project_state::ProjectStateHandle>()
         .and_then(|handle| handle.0.upgrade())
@@ -709,16 +705,16 @@ pub fn add_assets_as_layers(asset_ids: &[String], start_frame: i64, cx: &mut App
     }
     // Offline assets have no file to decode; the menu item is disabled for
     // them and a drag must not smuggle one in.
-    let online: Vec<String> = asset_ids
+    let online: Vec<AssetId> = asset_ids
         .iter()
         .filter(|id| {
             project
                 .read(cx)
                 .document()
-                .get_media_asset(id)
+                .get_media_asset(**id)
                 .is_some_and(|entry| entry.resolved.is_some())
         })
-        .cloned()
+        .copied()
         .collect();
     if online.is_empty() {
         return;
@@ -733,7 +729,7 @@ pub fn add_assets_as_layers(asset_ids: &[String], start_frame: i64, cx: &mut App
 /// active, and place the asset as its one layer. Missing metadata falls back
 /// to the project defaults. A no-op for offline assets (their layer could
 /// not resolve).
-pub fn new_composition_from_asset(asset_id: &str, cx: &mut App) {
+pub fn new_composition_from_asset(asset_id: AssetId, cx: &mut App) {
     let Some((project, entry)) = asset_entry(asset_id, cx) else {
         return;
     };
@@ -745,7 +741,7 @@ pub fn new_composition_from_asset(asset_id: &str, cx: &mut App) {
         .frame_rate
         .unwrap_or(CompositionSettings::FALLBACK_FRAME_RATE);
     let settings = CompositionSettings {
-        name: composition_name_for(asset_id, &entry),
+        name: composition_name_for(&entry),
         resolution: match (metadata.width, metadata.height) {
             (Some(width), Some(height)) => (width, height),
             _ => CompositionSettings::FALLBACK_RESOLUTION,
@@ -767,13 +763,16 @@ pub fn new_composition_from_asset(asset_id: &str, cx: &mut App) {
 
 /// The new composition's name: the asset's file stem, uniquified against the
 /// document by `create_composition`'s caller side (the Outliner renames).
-fn composition_name_for(asset_id: &str, entry: &MediaAssetEntry) -> String {
+///
+/// The asset's own display name is the fallback when the path yields no stem;
+/// never the id, which would name the composition after a number.
+fn composition_name_for(entry: &MediaAssetEntry) -> String {
     let text = entry.path.to_string();
     std::path::Path::new(&text)
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .filter(|stem| !stem.is_empty() && !stem.starts_with("${"))
-        .unwrap_or_else(|| asset_id.to_string())
+        .unwrap_or_else(|| entry.name.clone())
 }
 
 /// The confirmation message for deleting an in-use asset: the localized lead
@@ -781,7 +780,7 @@ fn composition_name_for(asset_id: &str, entry: &MediaAssetEntry) -> String {
 /// when nothing references the asset — the caller deletes without asking.
 pub fn delete_confirmation(
     document: &ravel_core::composition::Document,
-    asset_id: &str,
+    asset_id: AssetId,
 ) -> Option<String> {
     let references = asset_references(document, asset_id);
     if references.is_empty() {
@@ -818,7 +817,7 @@ pub fn delete_confirmation(
 /// (the confirmation names the referencing compositions and layers, like the
 /// composition delete guard). One undo step; the selection and Properties
 /// target are pruned by `ProjectState`'s document-change hook.
-pub fn request_delete_asset(asset_id: &str, window: &mut Window, cx: &mut App) {
+pub fn request_delete_asset(asset_id: AssetId, window: &mut Window, cx: &mut App) {
     let Some(project) = cx
         .try_global::<crate::project_state::ProjectStateHandle>()
         .and_then(|handle| handle.0.upgrade())
@@ -830,16 +829,14 @@ pub fn request_delete_asset(asset_id: &str, window: &mut Window, cx: &mut App) {
         return;
     };
 
-    let asset_id = asset_id.to_string();
     window.open_alert_dialog(cx, move |alert, _window, _cx| {
-        let asset_id = asset_id.clone();
         alert
             .confirm()
             .title(SharedString::from(t!("media_bin.delete.title")))
             .description(SharedString::from(message.clone()))
             .show_cancel(true)
             .on_ok(move |_event, _window, cx| {
-                delete_asset(&asset_id, cx);
+                delete_asset(asset_id, cx);
                 true
             })
     });
@@ -848,7 +845,7 @@ pub fn request_delete_asset(asset_id: &str, window: &mut Window, cx: &mut App) {
 /// The document edit behind asset deletion: drop the entry and commit.
 /// Layers that referenced it go offline (the `media` node renders a
 /// transparent frame, decision 7) rather than failing evaluation.
-fn delete_asset(asset_id: &str, cx: &mut App) {
+fn delete_asset(asset_id: AssetId, cx: &mut App) {
     let Some(project) = cx
         .try_global::<crate::project_state::ProjectStateHandle>()
         .and_then(|handle| handle.0.upgrade())
@@ -857,7 +854,7 @@ fn delete_asset(asset_id: &str, cx: &mut App) {
     };
     project.update(cx, |project, cx| {
         let mut doc = project.document().clone();
-        if doc.media_assets.remove(asset_id).is_some() {
+        if doc.media_assets.remove(&asset_id).is_some() {
             project.commit_document(doc, InvalidationHint::Structural, cx);
         }
     });
@@ -1032,7 +1029,7 @@ mod tests {
         // would do the same on the real cache's notification.
         panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
 
-        let asset_id = panel.read_with(cx, |panel, _| panel.rows[0].asset_id.clone());
+        let asset_id = panel.read_with(cx, |panel, _| panel.rows[0].asset_id);
         // Untagged .mov: the extension default resolves to sRGB.
         assert_eq!(
             *calls.lock().unwrap(),

@@ -3,7 +3,7 @@
 
 //! Type-safe newtype identifiers for nodes, edges, and data types.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,6 +18,11 @@ static COMP_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Monotonically increasing counter shared across all [`LayerId`] allocations.
 static LAYER_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Monotonically increasing counter shared across all [`AssetId`] allocations.
+///
+/// Starts at 1 so that 0 is free to mean [`AssetId::UNSET`].
+static ASSET_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -188,6 +193,157 @@ impl fmt::Debug for LayerId {
 impl fmt::Display for LayerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "layer:{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AssetId
+// ---------------------------------------------------------------------------
+
+/// A unique, type-safe identifier for one media asset of a document
+/// (`Document::media_assets`).
+///
+/// Separate from the asset's display name so that the name can be edited and
+/// the identity cannot. An id is **never reused**: deleting an asset and
+/// importing another file with the same name mints a fresh id, so references
+/// left behind by the deletion surface as offline instead of silently
+/// attaching to the new file. The same property is what makes a layer copied
+/// between projects fail to resolve rather than resolve to something else
+/// (`docs/implementation/asset-identity-plan.md`).
+///
+/// Before `.ravprj` v9 an asset was keyed by that display string directly;
+/// [`Deserialize`] still accepts the old form, which is what makes the v8 → v9
+/// upgrade possible (see [`crate::composition::asset_legacy`]).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub struct AssetId(u64);
+
+impl AssetId {
+    /// The id no asset ever has: a reference that resolves to nothing. Also
+    /// [`Default`], so `#[serde(default)]` on a reference field means "names
+    /// nothing" rather than "names asset 1".
+    ///
+    /// [`Self::next`] starts at 1, so this is not merely unused today but
+    /// unreachable by allocation. It is what an audio source with no asset
+    /// holds, and what the v8 → v9 upgrade writes for a reference that named
+    /// an asset the document does not contain.
+    pub const UNSET: Self = Self(0);
+
+    /// Create an `AssetId` from a raw `u64` value.
+    ///
+    /// Prefer [`AssetId::next`] for production code; use this constructor for
+    /// tests and deserialization.
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Allocate the next globally unique `AssetId`.
+    pub fn next() -> Self {
+        Self(ASSET_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Advance the allocation counter past `raw` (idempotent; used after
+    /// deserializing documents so fresh ids never collide with loaded ones).
+    pub fn advance_counter_past(raw: u64) {
+        ASSET_ID_COUNTER.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Return the inner `u64` value.
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// The spelling a `media` node's `asset_id` parameter holds.
+    ///
+    /// That parameter is a [`ParameterValue::String`](crate::graph::ParameterValue),
+    /// and stays one: giving `ParameterValue` an asset variant would reach the
+    /// property editors, the expression language, the undo journal's
+    /// positional variant indexes, and every parameter migration, for a
+    /// reference the processor immediately turns back into an id. Plain
+    /// decimal — not the `Display` form — so the value stays readable in
+    /// `document/main.ron` and parses with one `str::parse`.
+    pub fn to_param_value(self) -> String {
+        self.0.to_string()
+    }
+
+    /// Read back [`Self::to_param_value`]. `None` when the text is not a
+    /// decimal id, which is how a reference left by an older build — or by a
+    /// hand edit — is told apart from one that merely points at a missing
+    /// asset.
+    pub fn from_param_value(text: &str) -> Option<Self> {
+        text.parse().ok().map(Self)
+    }
+}
+
+impl fmt::Debug for AssetId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AssetId({})", self.0)
+    }
+}
+
+impl fmt::Display for AssetId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "asset:{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AssetId {
+    /// Accept both the current numeric form and the pre-v9 display string.
+    ///
+    /// A hand-written visitor rather than `#[serde(untagged)]`: untagged
+    /// buffers the value and reports "data did not match any variant" for
+    /// anything unexpected, which is the wrong message for a document whose
+    /// asset table has been hand-edited.
+    ///
+    /// It has to be `deserialize_any` — only the input can say whether this is
+    /// a number or a name — and that costs the newtype spelling the derived
+    /// deserializers of the ids beside this one get for free: RON writes a
+    /// newtype struct as `(1)` (or `AssetId(1)` with `struct_names`), which
+    /// arrives here as a one-element sequence rather than an integer. Hence
+    /// [`Visitor::visit_seq`] and [`Visitor::visit_newtype_struct`]: all four
+    /// spellings are the same id.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AssetIdVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AssetIdVisitor {
+            type Value = AssetId;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an asset id (a u64, or a pre-v9 asset key string)")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<AssetId, E> {
+                Ok(AssetId(value))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<AssetId, E> {
+                u64::try_from(value)
+                    .map(AssetId)
+                    .map_err(|_| E::custom(format!("asset id {value} is negative")))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<AssetId, E> {
+                Ok(crate::composition::asset_legacy::intern(value))
+            }
+
+            fn visit_newtype_struct<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<AssetId, D::Error> {
+                AssetId::deserialize(deserializer)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<AssetId, A::Error> {
+                let id = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("an asset id holds one value"))?;
+                Ok(id)
+            }
+        }
+
+        deserializer.deserialize_any(AssetIdVisitor)
     }
 }
 

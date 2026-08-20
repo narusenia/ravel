@@ -154,7 +154,7 @@ fn timings_publication_repaints_the_node_editor(cx: &mut TestAppContext) {
 
     // A global the panel does not follow must not wake it: without this the
     // assertion below could pass on unrelated churn.
-    cx.update(|cx| panels::set_media_selection(vec!["asset".to_string()], cx));
+    cx.update(|cx| panels::set_media_selection(vec![ravel_core::id::AssetId::next()], cx));
     cx.run_until_parked();
     assert_eq!(
         harness.probe.read_with(cx, |probe, _| probe.repaints),

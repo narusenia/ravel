@@ -15,6 +15,8 @@
 //! enabling structural sharing for undo.
 
 pub mod asset;
+pub mod asset_legacy;
+mod asset_upgrade;
 mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
@@ -27,15 +29,15 @@ pub mod validate;
 pub use color_upgrade::{ColorMigrationNote, ColorMigrationReport, is_color_param};
 
 pub use asset::{
-    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource, MediaAssetEntry,
-    expand_variables,
+    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource,
+    MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS, MediaAssetEntry, expand_variables, name_from_path,
 };
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
 use crate::exposed::ExposedParameters;
-use crate::graph::{Graph, InputPort, Parameter, PortSide};
-use crate::id::{CompId, DataTypeId, EdgeId, LayerId, NodeId};
+use crate::graph::{Graph, InputPort, Node, Parameter, ParameterValue, PortSide};
+use crate::id::{AssetId, CompId, DataTypeId, EdgeId, LayerId, NodeId};
 use crate::network;
 use crate::registry::NodeRegistry;
 use crate::types::{Color, FrameRate};
@@ -131,9 +133,18 @@ impl Default for LayerTransform {
 /// Timing comes exclusively from the owning [`Layer`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioSource {
-    /// Key into [`Document::media_assets`].
+    /// The asset this source plays — a key of [`Document::media_assets`].
+    ///
+    /// [`AssetId::UNSET`] means the shell has an audio source but no asset
+    /// behind it yet (the `audio` layer template's starting state), and so does
+    /// an id the table no longer holds; both are silent rather than an error.
+    ///
+    /// `default` because the field arrived after format v4, and because
+    /// [`AssetId`]'s deserializer also accepts the **pre-v9 display string** a
+    /// v8 document stored here — that is what lets such a document load at all
+    /// (see [`asset_legacy`]).
     #[serde(default)]
-    pub asset_id: String,
+    pub asset_id: AssetId,
     /// Audio stream number inside the media container.
     #[serde(default)]
     pub stream_index: usize,
@@ -156,7 +167,7 @@ fn default_audio_gain() -> AnimationChannel {
 impl Default for AudioSource {
     fn default() -> Self {
         Self {
-            asset_id: String::new(),
+            asset_id: AssetId::UNSET,
             stream_index: 0,
             gain: default_audio_gain(),
             fade_in_frames: 0,
@@ -167,9 +178,9 @@ impl Default for AudioSource {
 }
 
 impl AudioSource {
-    pub fn new(asset_id: impl Into<String>, stream_index: usize) -> Self {
+    pub fn new(asset_id: AssetId, stream_index: usize) -> Self {
         Self {
-            asset_id: asset_id.into(),
+            asset_id,
             stream_index,
             ..Self::default()
         }
@@ -544,7 +555,12 @@ impl Composition {
 /// the whole [`Document`] for that would pin a snapshot's compositions and
 /// layer graphs alive. Crates outside `ravel-core` cannot spell `im::HashMap`
 /// (it is not their dependency), so the alias is what makes that possible.
-pub type MediaAssets = im::HashMap<String, MediaAssetEntry>;
+///
+/// Keyed by [`AssetId`] since `.ravprj` v9. The display string that used to be
+/// the key lives on [`MediaAssetEntry::name`], so renaming an asset breaks no
+/// reference and a re-imported file is a different asset rather than the same
+/// one (`docs/implementation/asset-identity-plan.md`).
+pub type MediaAssets = im::HashMap<AssetId, MediaAssetEntry>;
 
 /// Unified document snapshot containing the node graph and all compositions.
 ///
@@ -609,31 +625,57 @@ mod compositions_serde {
     }
 }
 
-/// Serde adapter for `im::HashMap<String, MediaAssetEntry>`: serialized as a
-/// key-sorted `Vec<(String, MediaAssetEntry)>` so the output is deterministic
-/// and diff-friendly.
+/// Serde adapter for [`MediaAssets`]: serialized as an [`AssetId`]-sorted
+/// `Vec<(AssetId, MediaAssetEntry)>` so the output is deterministic and
+/// diff-friendly.
+///
+/// Reading a pre-v9 document — whose keys are the display strings — needs
+/// nothing here: [`AssetId`]'s own deserializer accepts a string and mints an
+/// id for it (see [`asset_legacy`]). Sorting by id rather than by that string
+/// changes the *order* entries are written in for an upgraded project, not
+/// their content.
 mod media_assets_serde {
-    use super::MediaAssetEntry;
+    use super::{AssetId, MediaAssetEntry};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(
-        value: &im::HashMap<String, MediaAssetEntry>,
+        value: &im::HashMap<AssetId, MediaAssetEntry>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let mut entries: Vec<(&str, &MediaAssetEntry)> = value
-            .iter()
-            .map(|(id, entry)| (id.as_str(), entry))
-            .collect();
+        let mut entries: Vec<(AssetId, &MediaAssetEntry)> =
+            value.iter().map(|(id, entry)| (*id, entry)).collect();
         entries.sort_by_key(|(id, _)| *id);
         entries.serialize(serializer)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<im::HashMap<String, MediaAssetEntry>, D::Error> {
-        let entries = Vec::<(String, MediaAssetEntry)>::deserialize(deserializer)?;
+    ) -> Result<im::HashMap<AssetId, MediaAssetEntry>, D::Error> {
+        let entries = Vec::<(AssetId, MediaAssetEntry)>::deserialize(deserializer)?;
         Ok(entries.into_iter().collect())
     }
+}
+
+/// The [`AssetId`] a `media` node's parameter references, or `None` when the
+/// node is not a media node, has no reference parameter, or holds something
+/// that is not an id (the template default `""`, or a pre-v9 name in a
+/// document the v8 → v9 upgrade has not run over yet).
+///
+/// An id this returns need **not** be in the document's asset table: an
+/// offline reference is a real, persisted state, and every caller — the
+/// processor, the watermark scan, the "which layers use this asset?" query —
+/// has to see it.
+pub fn node_asset_reference(node: &Node) -> Option<AssetId> {
+    if !MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) {
+        return None;
+    }
+    node.parameters
+        .iter()
+        .find(|param| param.key == MEDIA_ASSET_PARAM_KEY)
+        .and_then(|param| match &param.value {
+            ParameterValue::String(text) => AssetId::from_param_value(text),
+            _ => None,
+        })
 }
 
 /// The largest raw id of each kind used in a [`Document`], as reported by
@@ -644,6 +686,7 @@ pub struct IdWatermarks {
     pub edge: u64,
     pub comp: u64,
     pub layer: u64,
+    pub asset: u64,
 }
 
 /// A structural invariant violation found by [`Document::validate`]
@@ -673,6 +716,8 @@ pub enum DocumentValidationError {
     ParamPortWithoutParameter { node: NodeId, key: String },
     #[error("subnet nesting exceeds the supported depth of {limit}")]
     SubnetDepthExceeded { limit: usize },
+    #[error("the media asset table is keyed by the unset asset id")]
+    UnsetAssetKey,
 }
 
 /// Maximum number of nested subnet ownership boundaries in a document.
@@ -1162,6 +1207,21 @@ impl Document {
         self.map_graphs(curve_upgrade::upgrade_graph)
     }
 
+    /// Point every `.ravprj` v8 asset reference at the [`AssetId`] its display
+    /// string was interned to while the document was read — a `media` node's
+    /// parameter in every graph, and every layer's [`AudioSource`].
+    ///
+    /// `legacy` comes from
+    /// [`asset_legacy::scoped`](asset_legacy::scoped), which must wrap the
+    /// deserialization this document came out of. Mints no ids: they were all
+    /// minted during that deserialization, from a counter no stored document
+    /// has ever used, so its position relative to
+    /// [`Self::advance_id_counters`] is free. See
+    /// [`asset_upgrade`](self) for the reference that resolves to nothing.
+    pub fn upgrade_asset_references(self, legacy: &asset_legacy::LegacyAssetKeys) -> Self {
+        asset_upgrade::upgrade(self, legacy)
+    }
+
     /// Reinterpret every authored colour for the linear working space
     /// (`.ravprj` v7 → v8), in every graph of the document — the flat graph,
     /// each layer network, and nested subnets.
@@ -1264,17 +1324,13 @@ impl Document {
     /// Register a media asset that already has a known absolute location
     /// (import, `Relink`, and every test fixture). The persisted form starts
     /// out absolute and narrows to project-relative at save time.
-    pub fn with_media_asset(
-        self,
-        id: impl Into<String>,
-        path: impl Into<std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_media_asset(self, id: AssetId, path: impl Into<std::path::PathBuf>) -> Self {
         self.with_media_asset_entry(id, MediaAssetEntry::from_absolute(path))
     }
 
     /// Register a fully-described media asset.
-    pub fn with_media_asset_entry(mut self, id: impl Into<String>, entry: MediaAssetEntry) -> Self {
-        self.media_assets.insert(id.into(), entry);
+    pub fn with_media_asset_entry(mut self, id: AssetId, entry: MediaAssetEntry) -> Self {
+        self.media_assets.insert(id, entry);
         self
     }
 
@@ -1304,7 +1360,7 @@ impl Document {
         self.media_assets = self
             .media_assets
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.resolved_against(project_root, vars)))
+            .map(|(id, entry)| (*id, entry.resolved_against(project_root, vars)))
             .collect();
         self
     }
@@ -1316,7 +1372,7 @@ impl Document {
         self.media_assets = self
             .media_assets
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.relativized(project_root)))
+            .map(|(id, entry)| (*id, entry.relativized(project_root)))
             .collect();
         self
     }
@@ -1325,8 +1381,32 @@ impl Document {
         self.compositions.get(&id)
     }
 
-    pub fn get_media_asset(&self, id: &str) -> Option<&MediaAssetEntry> {
-        self.media_assets.get(id)
+    pub fn get_media_asset(&self, id: AssetId) -> Option<&MediaAssetEntry> {
+        self.media_assets.get(&id)
+    }
+
+    /// The id of the asset called `name`, or `None` when no asset is.
+    ///
+    /// A linear scan, and deliberately not an index: names are **not unique**
+    /// — two imports of the same file stem are two assets with one name — so
+    /// there is nothing to index by. `Some` means exactly one entry carries
+    /// the name; two or more is reported as `None` rather than picking one,
+    /// because picking one is how a lookup silently touches the wrong asset.
+    /// Callers that hold an id use [`Self::get_media_asset`]; this exists for
+    /// the paths that only ever had a name (the v8 → v9 upgrade, and the
+    /// exposed-parameter contract, whose declarations name assets rather than
+    /// numbering them).
+    pub fn media_asset_id_by_name(&self, name: &str) -> Option<AssetId> {
+        let mut found = None;
+        for (id, entry) in &self.media_assets {
+            if entry.name == name {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(*id);
+            }
+        }
+        found
     }
 
     /// Network ownership paths whose contents changed between `old` and
@@ -1380,6 +1460,13 @@ impl Document {
     /// fresh allocation can never retarget a persisted reference
     /// (REQ-LAYER-009). No node parameter carries a `CompId` yet (PreComp
     /// is v2), so there is nothing composition-valued to scan.
+    ///
+    /// Asset references are scanned for the same reason, and it matters more
+    /// than for layers: a `media` node or an `AudioSource` may name an
+    /// [`AssetId`] the asset table no longer holds — that is what an offline
+    /// reference *is* after v9 — and a fresh id landing on that number would
+    /// reconnect the reference to an unrelated import, the exact silent
+    /// mis-link v9 exists to prevent.
     pub fn id_watermarks(&self) -> IdWatermarks {
         fn scan_graph(graph: &Graph, watermarks: &mut IdWatermarks) {
             for node in graph.nodes() {
@@ -1398,6 +1485,12 @@ impl Document {
             for target in targets {
                 watermarks.layer = watermarks.layer.max(target.raw());
             }
+            // `media` node parameters reference assets by id, in any graph.
+            for node in graph.nodes() {
+                if let Some(asset) = node_asset_reference(node) {
+                    watermarks.asset = watermarks.asset.max(asset.raw());
+                }
+            }
         }
 
         let mut watermarks = IdWatermarks::default();
@@ -1405,10 +1498,16 @@ impl Document {
         if let Some(root) = self.root_comp {
             watermarks.comp = watermarks.comp.max(root.raw());
         }
+        for (id, _) in &self.media_assets {
+            watermarks.asset = watermarks.asset.max(id.raw());
+        }
         for (comp_id, comp) in &self.compositions {
             watermarks.comp = watermarks.comp.max(comp_id.raw()).max(comp.id.raw());
             for layer in &comp.layers {
                 watermarks.layer = watermarks.layer.max(layer.id.raw());
+                if let Some(audio) = &layer.audio {
+                    watermarks.asset = watermarks.asset.max(audio.asset_id.raw());
+                }
                 if let Some(parent) = layer.parent {
                     watermarks.layer = watermarks.layer.max(parent.raw());
                 }
@@ -1429,6 +1528,7 @@ impl Document {
         EdgeId::advance_counter_past(watermarks.edge);
         CompId::advance_counter_past(watermarks.comp);
         LayerId::advance_counter_past(watermarks.layer);
+        AssetId::advance_counter_past(watermarks.asset);
     }
 
     /// Structural validation of a deserialized document: the invariants
@@ -1502,12 +1602,22 @@ impl Document {
                 check_param_ports(&layer.network)?;
             }
         }
+        // `AssetId::UNSET` is what a reference that resolves to nothing holds
+        // — an `AudioSource` naming no asset, a `media` node whose asset was
+        // deleted. An entry keyed by it would give every one of those a real
+        // asset to resolve to, which is the silent mis-link v9 removed. The
+        // allocator never mints it, so only a hand-edited or crafted file can
+        // carry one.
+        if self.media_assets.contains_key(&AssetId::UNSET) {
+            return Err(DocumentValidationError::UnsetAssetKey);
+        }
         let watermarks = self.id_watermarks();
         for (kind, raw) in [
             ("node", watermarks.node),
             ("edge", watermarks.edge),
             ("comp", watermarks.comp),
             ("layer", watermarks.layer),
+            ("asset", watermarks.asset),
         ] {
             if raw == u64::MAX {
                 return Err(DocumentValidationError::IdExhausted { kind });
@@ -1667,9 +1777,10 @@ mod tests {
         layer.transform.position[0] =
             AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0)));
         layer.opacity = keyframed_channel(&[(0, 0.25), (10, 0.75)]);
+        let audio_asset = AssetId::next();
         layer.audio = Some(AudioSource {
             gain: AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0))),
-            ..AudioSource::new("audio", 1)
+            ..AudioSource::new(audio_asset, 1)
         });
         layer.locked = true;
         let duplicate_id = LayerId::next();
@@ -1687,7 +1798,7 @@ mod tests {
             duplicate.audio.as_ref().unwrap().gain.source,
             ChannelSource::NodeOutput(bound, OutputPortIndex(0)) if bound == duplicate_node
         ));
-        assert_eq!(duplicate.audio.as_ref().unwrap().asset_id, "audio");
+        assert_eq!(duplicate.audio.as_ref().unwrap().asset_id, audio_asset);
         assert_eq!(duplicate.audio.as_ref().unwrap().stream_index, 1);
         assert_eq!(duplicate.start_frame, 12);
         assert_eq!((duplicate.in_frame, duplicate.out_frame), (3, 90));
@@ -2573,7 +2684,7 @@ mod tests {
             },
             opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
             audio: Some(AudioSource {
-                asset_id: "audio".into(),
+                asset_id: AssetId::new(9),
                 stream_index: 2,
                 gain: keyframed_channel(&[(0, 1.0), (30, 0.5)]),
                 fade_in_frames: 3,
@@ -2617,14 +2728,14 @@ mod tests {
         let doc = Document::new(flat)
             .with_composition(comp)
             .with_media_asset_entry(
-                "plate",
+                AssetId::new(1),
                 MediaAssetEntry {
                     resolved: None,
                     ..MediaAssetEntry::from_absolute("/tmp/media/plate.mov")
                 },
             )
             .with_media_asset_entry(
-                "audio",
+                AssetId::new(2),
                 MediaAssetEntry {
                     resolved: None,
                     ..MediaAssetEntry::from_absolute("/tmp/media/mix.wav")
@@ -2714,8 +2825,8 @@ mod tests {
 
     #[test]
     fn audio_source_missing_fields_use_forward_compatible_defaults() {
-        let source: AudioSource = ron::from_str(r#"AudioSource(asset_id: "clip")"#).unwrap();
-        assert_eq!(source.asset_id, "clip");
+        let source: AudioSource = ron::from_str(r#"AudioSource(asset_id: 4)"#).unwrap();
+        assert_eq!(source.asset_id, AssetId::new(4));
         assert_eq!(source.stream_index, 0);
         assert_eq!(source.fade_in_frames, 0);
         assert_eq!(source.fade_out_frames, 0);
@@ -2724,10 +2835,35 @@ mod tests {
         assert!((source.gain.evaluate(0.0, &ctx) - 1.0).abs() < f32::EPSILON);
     }
 
+    /// A `.ravprj` v8 audio source names its asset by the **display string**.
+    /// It must still load — the id is minted for the string and matched with
+    /// the asset table entry of that name (`asset_legacy`) — because that is
+    /// the only chance the v8 → v9 upgrade gets to see the name.
+    #[test]
+    fn a_v8_audio_source_reads_its_asset_key_as_an_id() {
+        let (source, keys) = asset_legacy::scoped(|| {
+            ron::from_str::<AudioSource>(r#"AudioSource(asset_id: "clip")"#).unwrap()
+        });
+        assert_ne!(source.asset_id, AssetId::UNSET, "the key names an asset");
+        assert_eq!(keys.id_of("clip"), Some(source.asset_id));
+    }
+
+    /// An audio source with no asset behind it — the `audio` layer template's
+    /// starting state, and the pre-v9 empty-string spelling of the same thing.
+    #[test]
+    fn an_audio_source_without_an_asset_is_unset() {
+        assert_eq!(AudioSource::default().asset_id, AssetId::UNSET);
+        let (source, keys) = asset_legacy::scoped(|| {
+            ron::from_str::<AudioSource>(r#"AudioSource(asset_id: "")"#).unwrap()
+        });
+        assert_eq!(source.asset_id, AssetId::UNSET);
+        assert!(keys.is_empty(), "\"no asset\" consumes no id");
+    }
+
     #[test]
     fn layer_audio_ron_uses_the_struct_named_option_shape() {
         let mut layer = empty_layer(1);
-        layer.audio = Some(AudioSource::new("dialogue", 3));
+        layer.audio = Some(AudioSource::new(AssetId::new(3), 3));
         let text =
             ron::ser::to_string_pretty(&layer, ron::ser::PrettyConfig::new().struct_names(true))
                 .unwrap();
@@ -2949,6 +3085,29 @@ mod tests {
             doc.validate(),
             Err(DocumentValidationError::IdExhausted { kind: "node" })
         );
+    }
+
+    /// The asset table may not be keyed by [`AssetId::UNSET`]. That id is what
+    /// a reference resolving to nothing holds, so an entry under it would hand
+    /// every unset reference in the document a real asset — the silent
+    /// mis-link the minted id exists to remove. Only a hand-edited file can
+    /// contain one, which is why the load path is where it is refused.
+    #[test]
+    fn validate_rejects_the_unset_id_as_an_asset_key() {
+        use crate::composition::{AssetKind, AssetMetadata, AssetPath};
+
+        let doc = Document::default().with_media_asset_entry(
+            AssetId::UNSET,
+            MediaAssetEntry {
+                path: AssetPath::Absolute("/media/plate.mov".into()),
+                name: "plate".into(),
+                kind: AssetKind::Container,
+                metadata: AssetMetadata::default(),
+                color_space: None,
+                resolved: None,
+            },
+        );
+        assert_eq!(doc.validate(), Err(DocumentValidationError::UnsetAssetKey));
     }
 
     /// Node ids are document-globally unique (REQ-LAYER-009): the same id

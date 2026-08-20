@@ -106,7 +106,7 @@ pub struct ImportFailure {
 /// composition — see [`crate::project_state::ProjectState::import_media`].
 #[derive(Clone, Debug, Default)]
 pub struct ImportSummary {
-    pub imported: Vec<(String, PathBuf)>,
+    pub imported: Vec<(ravel_core::id::AssetId, PathBuf)>,
     pub skipped: Vec<ImportFailure>,
 }
 

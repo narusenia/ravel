@@ -1035,7 +1035,10 @@ mod tests {
                 .any(|row| { row.id == PropertyRowId::Shell(PropertyGroup::AudioGain) })
         );
 
-        layer.audio = Some(ravel_core::composition::AudioSource::new("music", 0));
+        layer.audio = Some(ravel_core::composition::AudioSource::new(
+            ravel_core::id::AssetId::next(),
+            0,
+        ));
         let row = PropertyRowId::Shell(PropertyGroup::AudioGain);
         assert!(
             property_rows(&layer)

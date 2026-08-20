@@ -33,6 +33,7 @@ use ravel_app::panels::{
 };
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::{AssetKind, AssetMetadata};
+use ravel_core::id::AssetId;
 use ravel_core::runtime::InvalidationHint;
 
 const WINDOW_SIZE: Size<Pixels> = Size {
@@ -227,19 +228,24 @@ fn add_layer(harness: &Harness, cx: &mut TestAppContext) -> ravel_core::id::Laye
     layer
 }
 
-fn import_still(harness: &Harness, path: &str, cx: &mut TestAppContext) {
-    harness.project.update(cx, |project, cx| {
-        project.import_media(
-            vec![ProbedAsset {
-                path: path.into(),
-                kind: AssetKind::Still,
-                metadata: AssetMetadata::default(),
-            }],
-            vec![],
-            cx,
-        );
+/// Import one still and hand back the id it was minted with.
+fn import_still(harness: &Harness, path: &str, cx: &mut TestAppContext) -> AssetId {
+    let id = harness.project.update(cx, |project, cx| {
+        project
+            .import_media(
+                vec![ProbedAsset {
+                    path: path.into(),
+                    kind: AssetKind::Still,
+                    metadata: AssetMetadata::default(),
+                }],
+                vec![],
+                cx,
+            )
+            .imported[0]
+            .0
     });
     cx.run_until_parked();
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,7 +1039,7 @@ fn a_media_asset_change_rebuilds_media_bin_rows(cx: &mut TestAppContext) {
     let harness = open_panels(cx);
 
     reset_syncs();
-    import_still(&harness, "/media/plate.png", cx);
+    let plate = import_still(&harness, "/media/plate.png", cx);
     let counts = sync_counts("media asset import");
     assert_eq!(
         count_of(&counts, "media_bin.rebuild_rows"),
@@ -1047,7 +1053,7 @@ fn a_media_asset_change_rebuilds_media_bin_rows(cx: &mut TestAppContext) {
     reset_syncs();
     harness.project.update(cx, |project, cx| {
         let mut document = project.document().clone();
-        assert!(document.media_assets.remove("plate").is_some());
+        assert!(document.media_assets.remove(&plate).is_some());
         project.commit_document(document, InvalidationHint::Structural, cx);
     });
     cx.run_until_parked();

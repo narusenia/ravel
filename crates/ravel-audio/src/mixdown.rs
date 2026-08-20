@@ -32,7 +32,7 @@ use ravel_core::animation::AnimationChannel;
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::composition::Composition;
 use ravel_core::eval::EvalContext;
-use ravel_core::id::LayerId;
+use ravel_core::id::{AssetId, LayerId};
 use ravel_core::types::FrameRate;
 use std::sync::Arc;
 
@@ -46,10 +46,13 @@ pub const MAX_DECODE_BYTES: usize = 128 * 1024 * 1024;
 /// its container. The resolved path is recorded in [`DecodedAudio`] for
 /// diagnostics; identity stays the asset id so a relink does not silently
 /// swap content under a playing track (the spec diff re-sends on change).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// The id, not the asset's display name: renaming an asset must not evict the
+/// buffer decoded from the file it still points at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    /// Key into `Document::media_assets`.
-    pub asset_id: String,
+    /// Identity of the asset in `Document::media_assets`.
+    pub asset_id: AssetId,
     /// Audio stream number inside the container.
     pub stream_index: usize,
 }
@@ -136,8 +139,13 @@ pub fn prepare_audio_at_rate(
 pub struct TrackSpec {
     /// Owning layer; also the `TrackId` (`layer_id.raw()`).
     pub layer_id: LayerId,
-    /// Key into `Document::media_assets`.
-    pub asset_id: String,
+    /// Identity of the asset in `Document::media_assets`.
+    ///
+    /// [`AssetId::UNSET`] when the layer's `AudioSource` names nothing this
+    /// build can read — an empty reference, or one an older format left as a
+    /// display name. The consumer resolves it against the document and
+    /// reports the miss, exactly as it does for an asset that is simply gone.
+    pub asset_id: AssetId,
     /// Audio stream number inside the container.
     pub stream_index: usize,
     /// Output-timeline sample frame where the track starts playing.
@@ -166,7 +174,7 @@ impl TrackSpec {
     /// Cache key for this spec's source audio.
     pub fn cache_key(&self) -> CacheKey {
         CacheKey {
-            asset_id: self.asset_id.clone(),
+            asset_id: self.asset_id,
             stream_index: self.stream_index,
         }
     }
@@ -174,9 +182,9 @@ impl TrackSpec {
     /// The parts of the spec that decide the expensive build products (the
     /// sample slice and the gain curve). Placement/mute/fade changes reuse
     /// the previously built track; a build-key change rebuilds it.
-    fn build_key(&self) -> (&str, usize, u64, u64, &AnimationChannel) {
+    fn build_key(&self) -> (AssetId, usize, u64, u64, &AnimationChannel) {
         (
-            self.asset_id.as_str(),
+            self.asset_id,
             self.stream_index,
             self.source_in_frames,
             self.source_out_frames,
@@ -215,7 +223,7 @@ impl AudioMixdown {
                 let timeline_start = layer.start_frame.max(0) as u64;
                 Some(TrackSpec {
                     layer_id: layer.id,
-                    asset_id: audio.asset_id.clone(),
+                    asset_id: audio.asset_id,
                     stream_index: audio.stream_index,
                     start_frame: comp_frames_to_rate(timeline_start, fps, output_rate),
                     source_in_frames: layer.in_frame + head_skip,
@@ -405,6 +413,12 @@ mod tests {
     const FPS_30: FrameRate = FrameRate { num: 30, den: 1 };
     const OUTPUT_RATE: u32 = 48_000;
 
+    /// An `AudioSource` naming `asset`, spelled the way a document spells it:
+    /// the id's decimal form, which is what `desired_tracks` parses.
+    fn source(asset: AssetId) -> AudioSource {
+        AudioSource::new(asset, 0)
+    }
+
     fn audio_layer(id: u64, start: i64, audio: AudioSource) -> Layer {
         let mut layer = Layer::new(LayerId::new(id), format!("layer {id}"), Graph::new())
             .with_time(start, 0, 300);
@@ -463,7 +477,7 @@ mod tests {
     fn start_frame_is_converted_to_output_rate() {
         // Layer starts at comp frame 30 = 1s at 30fps → 48 000 output frames.
         let spec = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, 30, AudioSource::new("a", 0))]),
+            &comp(vec![audio_layer(1, 30, source(AssetId::next()))]),
             OUTPUT_RATE,
         );
         assert_eq!(spec.len(), 1);
@@ -476,7 +490,7 @@ mod tests {
         // Layer starts 15 comp frames before the origin: the track starts at
         // output frame 0 and the first 15 source frames are skipped.
         let spec = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, -15, AudioSource::new("a", 0))]),
+            &comp(vec![audio_layer(1, -15, source(AssetId::next()))]),
             OUTPUT_RATE,
         );
         assert_eq!(spec[0].start_frame, 0);
@@ -485,12 +499,12 @@ mod tests {
 
     #[test]
     fn solo_mute_matches_the_compositor_rule() {
-        let mut quiet = audio_layer(1, 0, AudioSource::new("a", 0));
+        let mut quiet = audio_layer(1, 0, source(AssetId::next()));
         quiet.muted = true;
         let mut soloed_video = Layer::new(LayerId::new(2), "video", Graph::new());
         soloed_video.solo = true; // no audio: still silences every other layer
-        let audible = audio_layer(3, 0, AudioSource::new("b", 0));
-        let mut audio_muted = audio_layer(4, 0, AudioSource::new("c", 0));
+        let audible = audio_layer(3, 0, source(AssetId::next()));
+        let mut audio_muted = audio_layer(4, 0, source(AssetId::next()));
         audio_muted.audio.as_mut().unwrap().audio_muted = true;
 
         let specs = AudioMixdown::desired_tracks(
@@ -512,7 +526,7 @@ mod tests {
 
     #[test]
     fn fades_are_converted_to_output_rate() {
-        let mut audio = AudioSource::new("a", 0);
+        let mut audio = source(AssetId::next());
         audio.fade_in_frames = 15; // 0.5s at 30fps
         audio.fade_out_frames = 30; // 1s
         let spec = AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
@@ -522,7 +536,7 @@ mod tests {
 
     #[test]
     fn constant_gain_stays_constant() {
-        let mut audio = AudioSource::new("a", 0);
+        let mut audio = source(AssetId::next());
         audio.gain = AnimationChannel::constant(0.25);
         let specs =
             AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
@@ -541,7 +555,7 @@ mod tests {
         let mut curve = KeyframeCurve::new();
         curve.insert(0, 0.0, Interpolation::Linear);
         curve.insert(30, 1.0, Interpolation::Linear);
-        let mut audio = AudioSource::new("a", 0);
+        let mut audio = source(AssetId::next());
         audio.gain = AnimationChannel::keyframes(curve);
 
         let specs =
@@ -572,7 +586,7 @@ mod tests {
     #[test]
     fn trimmed_source_is_sliced() {
         let mut layer = Layer::new(LayerId::new(1), "a", Graph::new()).with_time(0, 30, 60);
-        layer.audio = Some(AudioSource::new("a", 0));
+        layer.audio = Some(source(AssetId::next()));
         let specs = AudioMixdown::desired_tracks(&comp(vec![layer]), OUTPUT_RATE);
         assert_eq!(specs[0].source_in_frames, 30);
         assert_eq!(specs[0].source_out_frames, 60);
@@ -590,7 +604,7 @@ mod tests {
     #[test]
     fn empty_trim_range_builds_nothing() {
         let mut spec = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, 0, AudioSource::new("a", 0))]),
+            &comp(vec![audio_layer(1, 0, source(AssetId::next()))]),
             OUTPUT_RATE,
         )[0]
         .clone();
@@ -605,7 +619,7 @@ mod tests {
     #[test]
     fn build_key_sharing_ignores_placement_and_mute() {
         let base = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, 0, AudioSource::new("a", 0))]),
+            &comp(vec![audio_layer(1, 0, source(AssetId::next()))]),
             OUTPUT_RATE,
         )[0]
         .clone();

@@ -388,15 +388,57 @@ impl AssetMetadata {
 // MediaAssetEntry
 // ===========================================================================
 
+/// The parameter a `media` node holds its asset reference in.
+///
+/// Named once, here, because three places have to agree on it: the node
+/// template that declares it, the processor that reads it, and the exposed
+/// parameter contract that is allowed to write it. A fourth — the "which
+/// layers use this asset?" query behind the delete confirmation — has to find
+/// it too.
+pub const MEDIA_ASSET_PARAM_KEY: &str = "asset_id";
+
+/// The node type keys whose [`MEDIA_ASSET_PARAM_KEY`] parameter is an asset
+/// reference.
+///
+/// `"video"` is the pre-normalization alias
+/// (`Document::normalize_node_type_aliases`): a loaded document only holds
+/// `"media"`, but a document assembled in memory can still carry the old key.
+pub const MEDIA_TYPE_KEYS: [&str; 2] = ["media", "video"];
+
+/// The display name a freshly imported file starts out with: its file stem.
+///
+/// Shared with the import path so the name an asset is created with and the
+/// name uniqueness is checked against are derived the same way. A path with no
+/// usable stem still has to be called something, and `"asset"` is what the
+/// import path has always fallen back to.
+pub fn name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "asset".to_string())
+}
+
 /// One entry of [`Document::media_assets`](crate::composition::Document).
 ///
-/// `path`, `kind`, and `metadata` are persisted; `resolved` is not. The host
-/// injects `resolved` whenever the mapping from persisted path to disk
-/// location can change — after a load, an import, or a `Save As`. A `None`
-/// `resolved` means **offline**: the `media` node yields a transparent frame
-/// instead of failing the whole evaluation.
+/// `name`, `path`, `kind`, and `metadata` are persisted; `resolved` is not.
+/// The host injects `resolved` whenever the mapping from persisted path to
+/// disk location can change — after a load, an import, or a `Save As`. A
+/// `None` `resolved` means **offline**: the `media` node yields a transparent
+/// frame instead of failing the whole evaluation.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MediaAssetEntry {
+    /// What the asset is called in the UI. **Nothing references an asset by
+    /// this**: the map key is an
+    /// [`AssetId`](crate::id::AssetId), so the name can be edited and can
+    /// repeat without any reference changing meaning
+    /// (`docs/implementation/asset-identity-plan.md`).
+    ///
+    /// Added in `.ravprj` v9, where it took over the string that used to be
+    /// the key. `default` so a v8 entry still deserializes; the v8 → v9
+    /// upgrade then fills it with that former key, which is why the upgrade
+    /// renames nothing.
+    #[serde(default)]
+    pub name: String,
     pub path: AssetPath,
     pub kind: AssetKind,
     pub metadata: AssetMetadata,
@@ -446,6 +488,8 @@ const LINEAR_EXTENSIONS: &[&str] = &["exr", "hdr"];
 #[derive(Deserialize)]
 #[serde(rename = "MediaAssetEntry")]
 struct MediaAssetEntryRepr {
+    #[serde(default)]
+    name: String,
     path: AssetPath,
     #[serde(default, deserialize_with = "deserialize_present_kind")]
     kind: Option<AssetKind>,
@@ -477,6 +521,7 @@ impl<'de> Deserialize<'de> for MediaAssetEntry {
             }
         });
         Ok(MediaAssetEntry {
+            name: repr.name,
             path: repr.path,
             kind,
             metadata: repr.metadata,
@@ -494,6 +539,7 @@ impl MediaAssetEntry {
     pub fn from_absolute(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         Self {
+            name: name_from_path(&path),
             kind: AssetKind::infer_from_path(&path),
             metadata: AssetMetadata::default(),
             color_space: None,
@@ -835,6 +881,7 @@ mod tests {
     #[test]
     fn relativize_preserves_variable_paths_and_offline_entries() {
         let variable = MediaAssetEntry {
+            name: "a".into(),
             path: AssetPath::Variable("${MEDIA}/a.mov".into()),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
@@ -847,6 +894,7 @@ mod tests {
         );
 
         let offline = MediaAssetEntry {
+            name: "gone".into(),
             path: AssetPath::Relative("./gone.mov".into()),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
@@ -901,6 +949,7 @@ mod tests {
     #[test]
     fn entry_round_trips_through_ron() {
         let entry = MediaAssetEntry {
+            name: "clip".into(),
             color_space: None,
             path: AssetPath::Relative("./footage/clip.mov".into()),
             kind: AssetKind::Sequence {

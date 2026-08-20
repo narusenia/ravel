@@ -31,6 +31,14 @@ code and fix this file in the same change. Paths are workspace-relative.
 
 ```rust
 NodeId / EdgeId / CompId / LayerId   // u64 newtypes; ::new(raw), ::next(), .raw()
+AssetId                               // same shape; ::UNSET (0) = references nothing
+    // Identity of one Document::media_assets entry, NEVER reused (v9,
+    // asset-identity-plan). Its own Deserialize also accepts a pre-v9 asset
+    // key STRING and mints an id for it (composition::asset_legacy), which is
+    // what the v8 -> v9 upgrade runs on.
+    // .to_param_value() -> bare decimal, the spelling a media node's
+    // `asset_id` ParameterValue::String holds; ::from_param_value(&str) reads
+    // it back (None = not a reference).
 DataTypeId(u32)                       // port type tag; ::new(raw), .raw()
 InputPortIndex(pub u32) / OutputPortIndex(pub u32)
 ```
@@ -722,17 +730,21 @@ broken" are different answers. `ravel-project` loads a `.ravprj` without
 
 A **media** declaration is the one value that is not a parameter value: it
 registers a `MediaAssetEntry` for the caller's `AssetPath` under the
-deterministic id `exposed:<name>` and points the bound media node's `asset_id`
-at it, in one document. The path resolves through `AssetPath::resolve`
+**display name** `exposed:<name>` and points the bound media node's `asset_id`
+at the `AssetId` minted for it, in one document. The name is derived and the id
+is not, so re-applying the same value finds the entry it left last time by name
+(`Document::media_asset_id_by_name`) and reuses its id — that is what makes the
+call idempotent since v9. The path resolves through `AssetPath::resolve`
 (absolute / `./relative` / `${VAR}`, REQ-PROJ-005) and **must exist** — an
 absent file is `MediaNotFound` before anything is written, never a silently
 blank render. The binding must name a `media` node **and its `asset_id` parameter**
 (`NotAMediaNode` / `NotAnAssetReference` otherwise). Being a string is not
 enough: an asset id written into some other string parameter — on a media node
 or not — would report a swap the processor never reads, leaving the picture
-unchanged and that parameter corrupt. The id is written only when it is free or when the bound node already names it
-(re-application); anything else is `AssetIdTaken`, because overwriting would
-swap the media under every other node and audio source reading that id. A swap
+unchanged and that parameter corrupt. The entry is written only when that name
+is free or when the bound node already references the entry holding it
+(re-application); anything else is `AssetIdTaken`, because reusing it would
+swap the media under every other node and audio source reading that entry. A swap
 changes the reference and nothing else — no composition resize, no duration
 change, no metadata carried over (probing needs a decoder `ravel-core` does not
 have), and an image **sequence** is not declarable because its `AssetKind`
@@ -824,7 +836,7 @@ Layer::new(id, name, network: Graph) .with_time(start, in, out)
     // transform (rotation in DEGREES), opacity, blend_mode, adjustment,
     // parent, audio: Option<AudioSource>; reserved v2: time_remap, track_matte
     // LayerSource is REMOVED — kinds are creation templates (REQ-LAYER-008)
-AudioSource::new(asset_id, stream_index)
+AudioSource::new(asset_id: AssetId, stream_index)   // AssetId::UNSET = no asset
     // gain defaults to a constant 1.0; fade frames default to 0;
     // audio_muted defaults to false. gain is sampled in layer-local frames.
     // stream_index is the CONTAINER stream index (what the decoder seeks by),
@@ -834,12 +846,30 @@ layer.has_frame_output() -> bool   // false = frameless layer (Null or Audio)
 
 Composition::new(id, name, (w, h), FrameRate, duration).add_layer(layer)
 Document::{with_composition, get_composition, changed_network_paths(&old)}
-Document::{with_media_asset(id, path), get_media_asset(&str)}
-    // media_assets: MediaAssets (= im::HashMap<String, MediaAssetEntry>) —
-    // the evaluation-time asset table indexed by the media node's asset_id.
+Document::{with_media_asset(AssetId, path), with_media_asset_entry(AssetId, entry),
+           get_media_asset(AssetId), media_asset_id_by_name(&str) -> Option<AssetId>}
+    // media_assets: MediaAssets (= im::HashMap<AssetId, MediaAssetEntry>) —
+    // the evaluation-time asset table the media node's asset_id indexes.
     // The alias exists so a crate that cannot spell `im::HashMap` can hold
     // the map on its own and answer "did the asset list change?" with
     // `ptr_eq`, instead of retaining a whole Document snapshot for it.
+    // Keyed by AssetId since v9; MediaAssetEntry::name carries the display
+    // string that used to be the key. NOTHING references an asset by name, so
+    // a name may repeat and be edited — which is why
+    // media_asset_id_by_name returns None for an ambiguous match instead of
+    // picking one. A reference whose AssetId is absent from the table is
+    // OFFLINE, not an error: the media node yields a transparent frame.
+    // composition::node_asset_reference(&Node) -> Option<AssetId> reads a
+    // media node's reference; MEDIA_ASSET_PARAM_KEY / MEDIA_TYPE_KEYS name the
+    // parameter and the node types that carry it. AudioSource::asset_id is a
+    // typed AssetId, so a v8 document's audio reference is resolved by
+    // AssetId's own deserializer and needs no upgrade step.
+Document::upgrade_asset_references(&LegacyAssetKeys)   // v8 -> v9 typed pass
+    // Names each asset after the key it had, then repoints all three
+    // reference systems (media node parameter, AudioSource, the node an
+    // exposed declaration binds) at ids. A reference naming an asset the
+    // table lacks becomes AssetId::UNSET — permanently offline rather than
+    // re-attaching to a later import. Gate on source_version < 9.
 Document::with_exposed_parameters(ExposedParameters)
     // exposed_parameters: the project's external contract (`exposed` above);
     // #[serde(default)], so a pre-v7 document reads as zero declarations
@@ -848,8 +878,11 @@ Document::with_exposed_parameters(ExposedParameters)
 // A deserialized Document must pass `doc.validate()` (structural invariants:
 // root/comp-id/frame-rate/layer-ref integrity, DocumentValidationError),
 // then `doc.advance_id_counters()` (REQ-LAYER-009) moves every
-// NodeId/EdgeId/CompId/LayerId counter past `doc.id_watermarks()` so fresh
-// ids never collide with loaded ones.
+// NodeId/EdgeId/CompId/LayerId/AssetId counter past `doc.id_watermarks()` so
+// fresh ids never collide with loaded ones. The watermarks scan REFERENCES as
+// well as definitions (layer.ref targets, media node asset_id, AudioSource):
+// an AssetId no entry carries is a live offline reference, and minting it
+// again would re-attach that reference to an unrelated import.
 Document::sync_subnet_pins()   // load-time DRIFT REPAIR, not a format upgrade
     // Re-derives every subnet node's pins from its own inner In/Out
     // (`network::sync_subnet_pins`) in the flat graph, each layer network and
@@ -2034,7 +2067,7 @@ Unknown type keys are skipped silently (plugin space).
   `audio_stream_index: Some(i)` also gives the shell an `AudioSource` for the
   same asset id, which is how a video layer's sound is wired — audio-plan
   unit 4),
-  `add_media_layers(doc, comp, &registry, &asset_ids, start_frame)
+  `add_media_layers(doc, comp, &registry, &[AssetId], start_frame)
   -> (Document, Vec<LayerId>)` (the caller-facing one: template choice,
   length, and name derived from each already-imported asset; the whole batch
   is **one** document, so a multi-asset drop is one undo step. Importing
@@ -2137,11 +2170,14 @@ Unknown type keys are skipped silently (plugin space).
   into `Vec<MediaBinRow>` for the MediaBin list (REQ-UI-008, media-import plan
   unit 4): `MediaBinPanel::rows(document)` applies the kind filter
   (`MediaBinFilter::{All, Video, Still, Audio}`) and a case-insensitive
-  substring name search, sorted by name. `MediaBinRow { asset_id, name, kind,
-  duration, offline }` carries everything the row paints. `classify(entry)`
+  substring name search, sorted by name. `MediaBinRow { asset_id: AssetId,
+  name, kind, duration, offline }` carries everything the row paints — the id
+  is identity and is never shown; `name` is the persisted path's file name,
+  falling back to `MediaAssetEntry::name` (never the id, which names no file
+  the user could recognise). `classify(entry)`
   decides the `MediaBinRowKind::{Video, Still, Audio}` category (a container
   is audio only with audio streams and no probed video stream; a sequence is
-  video). `asset_references(document, asset_id)` lists every layer still
+  video). `asset_references(document, AssetId)` lists every layer still
   using an asset (media node binding or shell audio source) for the delete
   confirmation. The panel holds no selection — that is the host's
   `MediaSelection`.
@@ -2410,7 +2446,7 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   selection is republished. No panel has to exist for that to hold — the `motion`
   and `node` workspaces have no Timeline.
 - `MediaSelection` (panels/mod.rs) holds the selected media assets
-  (`media_assets` keys, click order) for the MediaBin (REQ-UI-008);
+  (`Vec<AssetId>`, click order) for the MediaBin (REQ-UI-008);
   `panels::{media_selection, set_media_selection}` are the accessors, and
   `set_media_selection` is the only writer — it also publishes the Properties
   subject (`PropertiesTarget::MediaAsset { id }` for one asset, `Empty`
@@ -2423,9 +2459,14 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   outside `render()`, kicks `ThumbnailCache::get_or_request` on rebuild and
   decodes ready PNGs on cache notification (kind-icon fallback otherwise),
   and routes row operations through free functions:
-  `add_asset_as_layer` / `new_composition_from_asset` (both reuse the unit-3
-  `ProjectState::import_media` path) and `request_delete_asset` /
-  `delete_confirmation` (in-use assets confirm with the reference count).
+  `add_asset_as_layer(AssetId, cx)` / `new_composition_from_asset(AssetId, cx)`
+  (both reuse the unit-3 `ProjectState::import_media` path) and
+  `request_delete_asset(AssetId, …)` / `delete_confirmation(&Document, AssetId)`
+  (in-use assets confirm with the reference count). Deleting an asset leaves
+  its references OFFLINE and can never be undone by re-importing the same file:
+  the new import takes a fresh `AssetId` (v9). `ProjectState::import_media`
+  mints one per newly registered path and keeps `unique_asset_id`'s `" 2"`
+  numbering as a **display-name** uniquifier only; the rename UI is `AID-3`.
 - Multi-selection (REQ-UI-013 unit 6): a modified click's meaning is headless in
   `ravel_ui::panels::layer_selection` —
   `LayerClickMode::from_modifiers(shift, platform)` (Shift ranges, the platform
@@ -2756,10 +2797,15 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   **opt-in**: it is written only while the user turned the toggle on, so an
   ordinary save produces the archive it always did. Unreadable or
   future-versioned content reads as `None`.
-  Asset references (REQ-PROJ-001): `Document.media_assets` holds
-  `ravel_core::composition::MediaAssetEntry { path: AssetPath, kind:
-  AssetKind, metadata: AssetMetadata, #[serde(skip)] resolved:
-  Option<PathBuf> }`. `AssetPath` (`Absolute`/`Relative`/`Variable`)
+  Asset references (REQ-PROJ-001): `Document.media_assets` maps `AssetId` to
+  `ravel_core::composition::MediaAssetEntry { name: String, path: AssetPath,
+  kind: AssetKind, metadata: AssetMetadata, #[serde(skip)] resolved:
+  Option<PathBuf> }`. The key was the display string until v9, which split
+  identity (`AssetId`, never reused) from the name (`name`, editable, not
+  unique); `#[serde(default)]` on `name` plus a lenient `AssetId` deserializer
+  is what lets a v8 document load at all, and
+  `Document::upgrade_asset_references` then repoints its three reference
+  systems. `AssetPath` (`Absolute`/`Relative`/`Variable`)
   persists as one string, so a v3 entry (`{ path: PathBuf }`) reads back as
   `Absolute` with its kind inferred from the extension — v4 needs no
   document rewrite, and it dropped `assets/refs.json` (always written
@@ -2903,8 +2949,12 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `media_frame_for(local_secs, stream)` and the track's
   `start_frame`/`source_in_frames`/`source_out_frames`.
   `AudioService` notifies Timeline and MediaBin while a requested asset is
-  preparing; both render a localized preparation label and preparation
-  failures become non-auto-hiding workspace notifications.
+  preparing (`is_asset_preparing(AssetId)`); both render a localized
+  preparation label and preparation failures become non-auto-hiding workspace
+  notifications. `CacheKey`/`TrackSpec`/`SkippedSource` carry the `AssetId`,
+  never the name — but `AudioServiceEvent::PreparationFailed { asset, error }`
+  carries the display name, resolved from the live document at emit time, so
+  the notification names a file rather than a number.
 - Export (`src/export.rs`, `src/export_dialog.rs`, `panels/render_queue.rs`,
   `EXPORT-5`): `RenderService` (entity, registered as the
   `RenderServiceHandle` global, strongly owned by `RavelWorkspace`, reached
@@ -2932,7 +2982,9 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `NoDecoder`, the layer count for the sentence's `{count}`, and
   `message_key()` for the sentence), and every source the mix could not decode
   comes back as a `SkippedAudioSource { layer, asset, detail }` and becomes one
-  more warning. The dialog's picker carries `CompChoice { id, name, has_audio
+  more warning (`asset` is the asset's display **name**, resolved at the
+  reporting site — a render report is read by a person, and an `AssetId` is a
+  number they cannot connect to a file). The dialog's picker carries `CompChoice { id, name, has_audio
   }` per composition, so the soundtrack checkbox follows the *selected*
   composition rather than the one the dialog opened on; `ExportForm::new` takes
   `AUDIO_DECODE_AVAILABLE` and asks `audio_possible(cx)` at read time.

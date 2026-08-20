@@ -2353,7 +2353,7 @@ impl PropertiesGpuiPanel {
                 .as_ref()?
                 .read(cx)
                 .document()
-                .get_media_asset(&audio.asset_id)?
+                .get_media_asset(audio.asset_id)?
                 .metadata
                 .clone(),
         )
@@ -5207,7 +5207,7 @@ mod tests {
         let (window, project, comp_id, lid) = setup(cx);
         project.update(cx, |project, cx| {
             let doc = update_layer(project.document(), comp_id, lid, |layer| {
-                layer.audio = Some(AudioSource::new("music", 0));
+                layer.audio = Some(AudioSource::new(ravel_core::id::AssetId::next(), 0));
             })
             .unwrap();
             project.commit_document(doc, InvalidationHint::None, cx);
@@ -5249,8 +5249,10 @@ mod tests {
     #[gpui::test]
     fn audio_stream_picker_lists_and_applies_the_container_streams(cx: &mut TestAppContext) {
         use ravel_core::composition::{AudioStreamMetadata, MediaAssetEntry};
+        use ravel_core::id::AssetId;
 
         let (window, project, comp_id, lid) = setup(cx);
+        let clip = AssetId::new(1);
         project.update(cx, |project, cx| {
             let mut entry = MediaAssetEntry::from_absolute("/media/clip.mov");
             entry.metadata.audio_stream_count = 2;
@@ -5271,9 +5273,9 @@ mod tests {
             let doc = project
                 .document()
                 .clone()
-                .with_media_asset_entry("clip".to_string(), entry);
+                .with_media_asset_entry(clip, entry);
             let doc = update_layer(&doc, comp_id, lid, |layer| {
-                layer.audio = Some(AudioSource::new("clip", 1));
+                layer.audio = Some(AudioSource::new(clip, 1));
             })
             .unwrap();
             project.commit_document(doc, InvalidationHint::None, cx);

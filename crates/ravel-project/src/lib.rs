@@ -2412,7 +2412,12 @@ mod tests {
                 .unwrap(),
             );
 
-        let text = document_to_ron(&document).unwrap();
+        // **Line endings are normalized before the rewrites below.** RON's
+        // pretty printer emits the platform's newline (`PrettyConfig` defaults
+        // `new_line` to `\r\n` on Windows), so a pattern written with `\n`
+        // matches nothing there — the fixture would keep its v9 keys, and only
+        // the Windows CI job would ever say so.
+        let text = document_to_ron(&document).unwrap().replace("\r\n", "\n");
         // `(AssetId(n), MediaAssetEntry(\n  name: "x",` -> `("x", MediaAssetEntry(`
         let text = text
             .replace(

@@ -536,16 +536,14 @@ impl TimelinePanel {
                 self.visible_property_rows(layer)
                     .into_iter()
                     .filter(|row| self.is_property_expanded(layer.id, &row.id))
-                    .filter_map(move |row| crate::keyframes::row_channels(layer, &row.id))
-                    .flatten()
-                    .filter_map(|channel| match &channel.source {
-                        ravel_core::animation::ChannelSource::Keyframes(curve) => {
-                            Some(curve.keyframes())
-                        }
-                        _ => None,
+                    .flat_map(move |row| {
+                        (0..row.channel_names.len())
+                            .flat_map(move |component| {
+                                crate::keyframes::row_key_frames(layer, &row.id, component)
+                            })
+                            .collect::<Vec<_>>()
                     })
-                    .flatten()
-                    .map(move |key| crate::keyframes::comp_frame_for_key(layer, key.frame))
+                    .map(move |frame| crate::keyframes::comp_frame_for_key(layer, frame))
             })
             .filter(|frame| (0..self.duration_frames() as i64).contains(frame))
             .collect();
@@ -1384,6 +1382,37 @@ mod tests {
             vec![10, 40],
             "a row the reveal filter hides takes its keys with it"
         );
+    }
+
+    /// A step row's keys are on screen like any other row's, so the playhead
+    /// snaps to them too — the point of routing the enumeration through
+    /// `row_key_frames` instead of unwrapping an `AnimationChannel`.
+    #[test]
+    fn snap_candidates_include_step_row_keys() {
+        use ravel_core::animation::step::StepCurve;
+        use ravel_core::graph::{Node, ParameterValue};
+        use ravel_core::id::NodeId;
+
+        let mut steps = StepCurve::new("a".to_string());
+        steps.insert(30, "b".to_string());
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(7), "text")
+                    .with_param("body", ParameterValue::StringSteps(steps)),
+            )
+            .unwrap();
+        let lid = LayerId::new(1);
+        let comp = Composition::new(CompId::new(1), "C", (16, 16), FrameRate::new(30, 1), 200)
+            .add_layer(Layer::new(lid, "L", network).with_time(0, 0, 200));
+        let mut p = panel();
+        p.set_composition(Some(comp));
+        let row = crate::keyframes::PropertyRowId::Network {
+            node: NodeId::new(7),
+            key: "body".into(),
+        };
+        p.toggle_layer_expanded(lid);
+        p.toggle_property_expanded(lid, row);
+        assert_eq!(p.visible_keyframe_frames(), vec![30]);
     }
 
     /// Keys pushed before composition frame 0 by a negative `start_frame` are

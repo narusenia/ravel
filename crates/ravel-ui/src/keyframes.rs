@@ -35,6 +35,7 @@ use std::sync::Arc;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
+use ravel_core::animation::step::StepCurve;
 use ravel_core::composition::Layer;
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::NodeId;
@@ -284,6 +285,17 @@ fn network_rows(
             if promoted_by_owner(&param.key) {
                 continue;
             }
+            // An identifier parameter must never be animated (the Properties
+            // keyframe toggle refuses it), so it has no keys for a row to
+            // show. Refusing it here too means a document that carries one
+            // anyway — hand-edited, or written by a future path that forgets
+            // the rule — offers no Timeline gesture to grow it further.
+            if ravel_core::composition::validate::is_identifier_parameter(
+                &node.type_key,
+                &param.key,
+            ) {
+                continue;
+            }
             let Some(names) = keyframed_channel_names(&param.value) else {
                 continue;
             };
@@ -324,8 +336,181 @@ pub fn row_channels<'a>(layer: &'a Layer, id: &PropertyRowId) -> Option<Vec<&'a 
     }
 }
 
-/// Whether the channel at `component` has a keyframe exactly at `frame`.
+/// How the keys of a property row behave — the two questions the shared
+/// Timeline gesture code cannot answer from an `AnimationChannel` alone.
+///
+/// It is deliberately not a second row list: every row is painted and hit
+/// tested the same way, one lane of keys per component, and this only decides
+/// which *affordances* a host offers on top of that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowValueKind {
+    /// Continuous f32 channels. Interpolation modes and Bézier tangents apply.
+    Float,
+    /// f32 channels read back as rounded integers
+    /// ([`ParameterValue::IntChannel`]). Editing is identical to `Float` —
+    /// control points stay on the float grid — but the value a frame resolves
+    /// to is rounded, which is why the curve editor draws it as a staircase.
+    Integer,
+    /// Held keys with no midpoint ([`ParameterValue::StringSteps`]). There is
+    /// no interpolation to choose and no tangent to drag, and the curve editor
+    /// never sees one (`ParameterValue::channels` answers `None`).
+    Steps,
+}
+
+impl RowValueKind {
+    /// Whether the row's keys are held steps, so interpolation and tangent
+    /// editing do not apply to them.
+    pub fn is_stepped(self) -> bool {
+        self == Self::Steps
+    }
+
+    /// Whether the row's value is read back rounded to an integer, so a host
+    /// that draws it must draw what evaluation resolves, not the float curve
+    /// underneath.
+    pub fn is_integral(self) -> bool {
+        self == Self::Integer
+    }
+}
+
+/// The value kind of a row. Shell rows and rows that no longer resolve are
+/// `Float`: a layer shell holds nothing but f32 channels, and a stale row
+/// offers no gesture for the kind to gate.
+pub fn row_value_kind(layer: &Layer, id: &PropertyRowId) -> RowValueKind {
+    match row_parameter_value(layer, id) {
+        Some(ParameterValue::IntChannel(_)) => RowValueKind::Integer,
+        Some(ParameterValue::StringSteps(_)) => RowValueKind::Steps,
+        _ => RowValueKind::Float,
+    }
+}
+
+/// Number of key lanes under a row — the length
+/// [`PropertyRow::channel_names`] has, answered from a bare row id.
+///
+/// A step row has no `AnimationChannel` to count, so counting
+/// [`row_channels`] would give it zero lanes and desynchronize a painter from
+/// the hit test below the row.
+pub fn row_component_count(layer: &Layer, id: &PropertyRowId) -> usize {
+    if row_value_kind(layer, id).is_stepped() {
+        return 1;
+    }
+    row_channels(layer, id).map_or(0, |channels| channels.len())
+}
+
+/// The layer-local frames carrying a key on one lane of a row, ascending.
+///
+/// Every host that enumerates keys — painter, hit test, navigator,
+/// rubber-band selection, playhead snapping — reads them here instead of
+/// peeling [`ChannelSource::Keyframes`] off itself, because a step row has
+/// keys and no channel: the sites that peel the channel apart are exactly the
+/// sites that would silently drop it.
+pub fn row_key_frames(layer: &Layer, id: &PropertyRowId, component: usize) -> Vec<u64> {
+    if let Some(ParameterValue::StringSteps(steps)) = row_parameter_value(layer, id) {
+        if component != 0 {
+            return Vec::new();
+        }
+        return steps.keys().iter().map(|key| key.frame).collect();
+    }
+    let Some(channels) = row_channels(layer, id) else {
+        return Vec::new();
+    };
+    let Some(channel) = channels.get(component) else {
+        return Vec::new();
+    };
+    match &channel.source {
+        ChannelSource::Keyframes(curve) => curve.keyframes().iter().map(|key| key.frame).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Snapshot of one row lane's keys, taken when a drag gesture starts.
+///
+/// The previews rebuild from the snapshot rather than from the document, so a
+/// transient pass over an occupied frame during a live drag cannot
+/// permanently merge two keys.
+#[derive(Clone, Debug)]
+pub enum RowKeys {
+    Curve(KeyframeCurve),
+    Steps(StepCurve<String>),
+}
+
+impl RowKeys {
+    /// The float curve, for the gestures only a float row has: the value axis
+    /// of a curve-editor drag, and tangent edits. `None` for a step row.
+    pub fn curve(&self) -> Option<&KeyframeCurve> {
+        match self {
+            Self::Curve(curve) => Some(curve),
+            Self::Steps(_) => None,
+        }
+    }
+}
+
+/// Snapshot one row lane's keys for a drag gesture. `None` when the row or
+/// lane does not resolve, or holds no keys to move.
+pub fn row_keys(layer: &Layer, id: &PropertyRowId, component: usize) -> Option<RowKeys> {
+    if let Some(ParameterValue::StringSteps(steps)) = row_parameter_value(layer, id) {
+        return (component == 0).then(|| RowKeys::Steps(steps.clone()));
+    }
+    let channels = row_channels(layer, id)?;
+    match &channels.get(component)?.source {
+        ChannelSource::Keyframes(curve) => Some(RowKeys::Curve(curve.clone())),
+        _ => None,
+    }
+}
+
+/// Gesture preview for moving several keys of one row lane by the same signed
+/// frame delta: [`preview_keyframe_moves`] for a float row, its step-curve
+/// twin for a step row.
+///
+/// Callers must clamp `frame_delta` so no destination frame is negative.
+pub fn preview_row_key_moves(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    component: usize,
+    baseline: &RowKeys,
+    origin_frames: &[u64],
+    frame_delta: i64,
+) -> bool {
+    match baseline {
+        RowKeys::Curve(curve) => {
+            preview_keyframe_moves(layer, id, component, curve, origin_frames, frame_delta)
+        }
+        RowKeys::Steps(steps) => {
+            if component != 0 {
+                return false;
+            }
+            let moving: Option<Vec<String>> = origin_frames
+                .iter()
+                .map(|frame| {
+                    steps
+                        .keys()
+                        .iter()
+                        .find(|key| key.frame == *frame)
+                        .map(|key| key.value.clone())
+                })
+                .collect();
+            let Some(moving) = moving else {
+                return false;
+            };
+            mutate_step_curve(layer, id, |curve| {
+                let mut rebuilt = steps.clone();
+                for frame in origin_frames {
+                    rebuilt.remove(*frame);
+                }
+                for (frame, value) in origin_frames.iter().zip(moving) {
+                    rebuilt.insert((*frame as i64 + frame_delta) as u64, value);
+                }
+                *curve = rebuilt;
+                true
+            })
+        }
+    }
+}
+
+/// Whether the row has a key exactly at `frame` on `component`.
 pub fn has_keyframe_at(layer: &Layer, id: &PropertyRowId, component: usize, frame: u64) -> bool {
+    if let Some(ParameterValue::StringSteps(steps)) = row_parameter_value(layer, id) {
+        return component == 0 && steps.contains_key(frame);
+    }
     let Some(channels) = row_channels(layer, id) else {
         return false;
     };
@@ -338,16 +523,24 @@ pub fn has_keyframe_at(layer: &Layer, id: &PropertyRowId, component: usize, fram
     }
 }
 
-/// Insert (or overwrite) a keyframe at `frame` holding the channel's current
+/// Insert (or overwrite) a keyframe at `frame` holding the row's current
 /// value at `frame`. A constant channel is converted to keyframes, keeping
-/// its value as the curve's default. Returns `false` when the row or
-/// component does not resolve.
+/// its value as the curve's default; a step row re-keys the string it already
+/// holds there. Returns `false` when the row or component does not resolve.
 pub fn insert_keyframe(
     layer: &mut Layer,
     id: &PropertyRowId,
     component: usize,
     frame: u64,
 ) -> bool {
+    if row_value_kind(layer, id).is_stepped() {
+        return component == 0
+            && mutate_step_curve(layer, id, |curve| {
+                let held = curve.sample(frame as f64).clone();
+                curve.insert(frame, held);
+                true
+            });
+    }
     mutate_channel(layer, id, component, |channel| {
         let value = channel_value(channel, frame);
         match &mut channel.source {
@@ -368,14 +561,19 @@ pub fn insert_keyframe(
 
 /// Remove the keyframe at `frame`. When the curve becomes empty the channel
 /// reverts to a constant holding the removed key's value (a fully constant
-/// network parameter then drops out of the property tree). Returns `false`
-/// when no keyframe exists at `frame`.
+/// network parameter then drops out of the property tree); an emptied step
+/// curve re-types the parameter back to a plain `String` holding the curve's
+/// default. Returns `false` when no keyframe exists at `frame`.
 pub fn remove_keyframe(
     layer: &mut Layer,
     id: &PropertyRowId,
     component: usize,
     frame: u64,
 ) -> bool {
+    if row_value_kind(layer, id).is_stepped() {
+        return component == 0
+            && mutate_step_curve(layer, id, |curve| curve.remove(frame).is_some());
+    }
     mutate_channel(layer, id, component, |channel| {
         let ChannelSource::Keyframes(curve) = &mut channel.source else {
             return false;
@@ -400,6 +598,9 @@ pub fn move_keyframe(
     from: u64,
     to: u64,
 ) -> bool {
+    if row_value_kind(layer, id).is_stepped() {
+        return component == 0 && mutate_step_curve(layer, id, |curve| curve.move_key(from, to));
+    }
     mutate_channel(layer, id, component, |channel| {
         let ChannelSource::Keyframes(curve) = &mut channel.source else {
             return false;
@@ -859,15 +1060,15 @@ fn channel_components(value: &ParameterValue) -> Option<Vec<&AnimationChannel>> 
     }
 }
 
-/// Component names when the parameter is a `Channel*` value with at least
-/// one keyframed component (`None` = not part of the property tree).
+/// Component names when the parameter carries keys — a `Channel*` value with
+/// at least one keyframed component, or a non-empty step curve (`None` = not
+/// part of the property tree).
 fn keyframed_channel_names(value: &ParameterValue) -> Option<Vec<String>> {
-    // An animatable int has a channel but no Timeline row yet: the row and its
-    // editing gestures are the next unit of the discrete-keyframes plan
-    // (`DISK-4`), and a row here without them would offer an interpolation
-    // menu over a value that is rounded on read.
-    if matches!(value, ParameterValue::IntChannel(_)) {
-        return None;
+    // A step curve has no float components at all, so it never reaches
+    // `channel_components`; one row with one lane of held keys is its whole
+    // shape ([`RowValueKind::Steps`]).
+    if let ParameterValue::StringSteps(steps) = value {
+        return (!steps.is_empty()).then(|| vec![CHANNEL_VALUE.to_string()]);
     }
     let components = channel_components(value)?;
     if !components
@@ -883,6 +1084,62 @@ fn keyframed_channel_names(value: &ParameterValue) -> Option<Vec<String>> {
         _ => vec!["R", "G", "B", "A"],
     };
     Some(names.into_iter().map(str::to_string).collect())
+}
+
+/// The parameter value behind a network row (`None` for a shell row or a row
+/// that no longer resolves).
+fn row_parameter_value<'a>(layer: &'a Layer, id: &PropertyRowId) -> Option<&'a ParameterValue> {
+    let PropertyRowId::Network { node, key } = id else {
+        return None;
+    };
+    let node_ref = layer.network.find_nested_node(*node)?;
+    node_ref
+        .parameters
+        .iter()
+        .find(|p| p.key == *key)
+        .map(|p| &p.value)
+}
+
+/// Apply `f` to a row's step curve, rebuilding the owning node so the layer's
+/// immutable graph stays consistent — the step-curve twin of
+/// [`mutate_channel`].
+///
+/// A curve `f` leaves empty re-types the parameter back to a plain `String`
+/// holding the curve's **default**, which is the round trip the Properties
+/// keyframe toggle performs: the default is the constant the parameter had
+/// before it was keyed, while the last key removed is whatever the user
+/// happened to edit last.
+fn mutate_step_curve(
+    layer: &mut Layer,
+    id: &PropertyRowId,
+    f: impl FnOnce(&mut StepCurve<String>) -> bool,
+) -> bool {
+    let PropertyRowId::Network { node, key } = id else {
+        return false;
+    };
+    let Some(node_ref) = layer.network.find_nested_node(*node) else {
+        return false;
+    };
+    let mut updated = (**node_ref).clone();
+    let Some(param) = updated.parameters.iter_mut().find(|p| p.key == *key) else {
+        return false;
+    };
+    let ParameterValue::StringSteps(steps) = &mut param.value else {
+        return false;
+    };
+    if !f(steps) {
+        return false;
+    }
+    if steps.is_empty() {
+        param.value = ParameterValue::String(steps.default_value().clone());
+    }
+    // Only a parameter value changed, so no pin moved and the subnets on the
+    // way back up keep the interface they had.
+    let Some(network) = layer.network.replace_nested_node(Arc::new(updated)) else {
+        return false;
+    };
+    layer.network = network;
+    true
 }
 
 /// Apply `f` to the channel at `component`, rebuilding the owning node for
@@ -1730,5 +1987,259 @@ mod tests {
         // The layer's own top-level structure is untouched by all of it.
         assert!(layer.network.node(NodeId::new(11)).is_some());
         assert!(layer.network.node(NodeId::new(20)).is_none());
+    }
+
+    // ----- discrete keyframes: `IntChannel` and `StringSteps` rows ----------
+
+    fn steps_ten_twenty() -> StepCurve<String> {
+        let mut steps = StepCurve::new("fallback".to_string());
+        steps.insert(10, "ten".to_string());
+        steps.insert(20, "twenty".to_string());
+        steps
+    }
+
+    /// `test_layer` plus a node carrying an animatable int (`count`) and an
+    /// animatable string (`text`).
+    fn discrete_layer() -> Layer {
+        let node = Node::new(NodeId::new(30), "repeat")
+            .with_param(
+                "count",
+                ParameterValue::IntChannel(AnimationChannel::keyframes(curve_0_to_10())),
+            )
+            .with_param("text", ParameterValue::StringSteps(steps_ten_twenty()));
+        let mut layer = test_layer();
+        layer.network = layer.network.clone().add_node(node).unwrap();
+        layer
+    }
+
+    fn int_row() -> PropertyRowId {
+        PropertyRowId::Network {
+            node: NodeId::new(30),
+            key: "count".into(),
+        }
+    }
+
+    fn string_row() -> PropertyRowId {
+        PropertyRowId::Network {
+            node: NodeId::new(30),
+            key: "text".into(),
+        }
+    }
+
+    /// Both discrete kinds earn a Timeline row, each with one lane named
+    /// "the value" — the same shape a single-component float parameter has.
+    #[test]
+    fn int_and_string_parameters_get_property_rows() {
+        let rows = property_rows(&discrete_layer());
+        let int = rows
+            .iter()
+            .find(|row| row.id == int_row())
+            .expect("int row");
+        let string = rows
+            .iter()
+            .find(|row| row.id == string_row())
+            .expect("string row");
+        assert_eq!(int.channel_names, vec![CHANNEL_VALUE]);
+        assert_eq!(string.channel_names, vec![CHANNEL_VALUE]);
+        assert_eq!(int.label.as_deref(), Some("repeat · count"));
+        assert_eq!(string.label.as_deref(), Some("repeat · text"));
+    }
+
+    /// A step curve with no keys is a parameter nobody keyed, so it stays out
+    /// of the tree exactly as a constant channel does.
+    #[test]
+    fn an_empty_step_curve_has_no_row() {
+        let node = Node::new(NodeId::new(30), "repeat").with_param(
+            "text",
+            ParameterValue::StringSteps(StepCurve::new("a".to_string())),
+        );
+        let mut layer = test_layer();
+        layer.network = layer.network.clone().add_node(node).unwrap();
+        assert!(
+            !property_rows(&layer)
+                .iter()
+                .any(|row| row.id == string_row())
+        );
+    }
+
+    /// The value kind is what closes interpolation and tangent editing on a
+    /// step row, and what tells the curve editor to draw an int as a
+    /// staircase. A shell row is always float.
+    #[test]
+    fn row_value_kind_separates_float_int_and_steps() {
+        let layer = discrete_layer();
+        assert_eq!(
+            row_value_kind(&layer, &PropertyRowId::Shell(PropertyGroup::Position)),
+            RowValueKind::Float
+        );
+        assert_eq!(
+            row_value_kind(
+                &layer,
+                &PropertyRowId::Network {
+                    node: NodeId::new(20),
+                    key: "radius".into()
+                }
+            ),
+            RowValueKind::Float
+        );
+        assert_eq!(row_value_kind(&layer, &int_row()), RowValueKind::Integer);
+        assert_eq!(row_value_kind(&layer, &string_row()), RowValueKind::Steps);
+
+        assert!(!RowValueKind::Float.is_stepped());
+        assert!(!RowValueKind::Integer.is_stepped());
+        assert!(RowValueKind::Steps.is_stepped());
+        assert!(RowValueKind::Integer.is_integral());
+        assert!(!RowValueKind::Steps.is_integral());
+        assert!(!RowValueKind::Float.is_integral());
+    }
+
+    /// A step row has one lane even though it has no `AnimationChannel`:
+    /// counting channels would give it zero and desynchronize the painter
+    /// from the hit test below it.
+    #[test]
+    fn a_step_row_has_one_lane_and_its_keys_enumerate() {
+        let layer = discrete_layer();
+        assert_eq!(row_component_count(&layer, &string_row()), 1);
+        assert!(row_channels(&layer, &string_row()).is_none());
+        assert_eq!(row_key_frames(&layer, &string_row(), 0), vec![10, 20]);
+        assert!(row_key_frames(&layer, &string_row(), 1).is_empty());
+        assert!(has_keyframe_at(&layer, &string_row(), 0, 10));
+        assert!(!has_keyframe_at(&layer, &string_row(), 0, 11));
+        // The int row keeps the float channel it is made of.
+        assert_eq!(row_component_count(&layer, &int_row()), 1);
+        assert_eq!(row_key_frames(&layer, &int_row(), 0), vec![0, 10]);
+    }
+
+    /// Insert re-keys the string the frame already holds, move preserves the
+    /// value, and remove takes the key away.
+    #[test]
+    fn step_keys_can_be_added_moved_and_removed() {
+        let mut layer = discrete_layer();
+        let row = string_row();
+
+        // Frame 15 holds "ten"; keying it there pins that value.
+        assert!(insert_keyframe(&mut layer, &row, 0, 15));
+        assert_eq!(row_key_frames(&layer, &row, 0), vec![10, 15, 20]);
+
+        assert!(move_keyframe(&mut layer, &row, 0, 15, 17));
+        assert_eq!(row_key_frames(&layer, &row, 0), vec![10, 17, 20]);
+        let ParameterValue::StringSteps(steps) = row_parameter_value(&layer, &row).unwrap() else {
+            panic!("still a step curve");
+        };
+        assert_eq!(steps.sample(17.0), "ten", "the moved key kept its value");
+
+        assert!(remove_keyframe(&mut layer, &row, 0, 17));
+        assert_eq!(row_key_frames(&layer, &row, 0), vec![10, 20]);
+        assert!(!remove_keyframe(&mut layer, &row, 0, 17), "already gone");
+        // Lane 1 does not exist on a step row.
+        assert!(!insert_keyframe(&mut layer, &row, 1, 5));
+    }
+
+    /// Removing the last key returns the parameter to a plain `String`
+    /// holding the curve's **default** — the constant it had before it was
+    /// keyed — and the row drops out of the tree, mirroring the float rule.
+    #[test]
+    fn emptying_a_step_curve_restores_the_constant_string() {
+        let mut layer = discrete_layer();
+        let row = string_row();
+        assert!(remove_keyframe(&mut layer, &row, 0, 10));
+        assert!(remove_keyframe(&mut layer, &row, 0, 20));
+        assert_eq!(
+            row_parameter_value(&layer, &row),
+            Some(&ParameterValue::String("fallback".to_string()))
+        );
+        assert!(!property_rows(&layer).iter().any(|r| r.id == row));
+    }
+
+    /// The drag preview rebuilds from the pre-gesture snapshot, so a
+    /// transient pass over an occupied frame does not merge two keys.
+    #[test]
+    fn a_step_drag_preview_rebuilds_from_its_baseline() {
+        let mut layer = discrete_layer();
+        let row = string_row();
+        let baseline = row_keys(&layer, &row, 0).expect("snapshot");
+        assert!(baseline.curve().is_none(), "a step row has no float curve");
+
+        // Drag the key at 10 right over the key at 20 …
+        assert!(preview_row_key_moves(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            &[10],
+            10
+        ));
+        assert_eq!(row_key_frames(&layer, &row, 0), vec![20]);
+        // … and back off it: the overwritten key returns.
+        assert!(preview_row_key_moves(
+            &mut layer,
+            &row,
+            0,
+            &baseline,
+            &[10],
+            5
+        ));
+        assert_eq!(row_key_frames(&layer, &row, 0), vec![15, 20]);
+        let ParameterValue::StringSteps(steps) = row_parameter_value(&layer, &row).unwrap() else {
+            panic!("still a step curve");
+        };
+        assert_eq!(steps.sample(15.0), "ten");
+        assert_eq!(steps.sample(20.0), "twenty");
+    }
+
+    /// A float row's snapshot still carries its curve, so the value-axis and
+    /// tangent gestures the curve editor drives keep working.
+    #[test]
+    fn a_float_row_snapshot_carries_its_curve() {
+        let layer = discrete_layer();
+        let row = PropertyRowId::Network {
+            node: NodeId::new(20),
+            key: "radius".into(),
+        };
+        let baseline = row_keys(&layer, &row, 0).expect("snapshot");
+        assert!(baseline.curve().is_some());
+        // The int row is a float row for every editing purpose.
+        assert!(row_keys(&layer, &int_row(), 0).unwrap().curve().is_some());
+    }
+
+    /// An identifier parameter must never be animated
+    /// (`is_identifier_parameter`): the Properties toggle refuses it, and the
+    /// Timeline refuses to show a row for one even if a document carries it
+    /// anyway, so no gesture here can grow it further.
+    #[test]
+    fn identifier_parameters_get_no_timeline_row() {
+        let layer_ref = Node::new(NodeId::new(40), "layer.ref")
+            .with_param(
+                "layer",
+                ParameterValue::IntChannel(AnimationChannel::keyframes(curve_0_to_10())),
+            )
+            .with_param("port", ParameterValue::StringSteps(steps_ten_twenty()));
+        let precomp = Node::new(NodeId::new(41), "precomp").with_param(
+            "comp_id",
+            ParameterValue::IntChannel(AnimationChannel::keyframes(curve_0_to_10())),
+        );
+        let mut layer = test_layer();
+        layer.network = layer
+            .network
+            .clone()
+            .add_node(layer_ref)
+            .unwrap()
+            .add_node(precomp)
+            .unwrap();
+
+        let rows = property_rows(&layer);
+        assert!(
+            !rows.iter().any(|row| matches!(
+                &row.id,
+                PropertyRowId::Network { key, .. } if key == "layer" || key == "comp_id"
+            )),
+            "the reference parameters are not animatable, so they get no row"
+        );
+        // A non-identifier parameter on the same node still does.
+        assert!(rows.iter().any(|row| row.id
+            == PropertyRowId::Network {
+                node: NodeId::new(40),
+                key: "port".into()
+            }));
     }
 }

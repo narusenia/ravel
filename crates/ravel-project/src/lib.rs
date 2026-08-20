@@ -2395,29 +2395,75 @@ mod tests {
     /// [`ron_options`]. RON's default budget of 128 recursion levels is one
     /// level short of a layer network nested this deep, which is how a saved
     /// project came to be unopenable (`HIGH-26`).
+    /// The nesting a document came in with, so a round trip can be shown to
+    /// have kept it rather than merely to have produced something valid: a
+    /// load that dropped the inner graphs would satisfy the depth check.
+    fn deepest_nesting(document: &Document) -> usize {
+        use ravel_core::composition::subnet_depth_exceeds;
+
+        let graphs = std::iter::once(&document.graph).chain(
+            document
+                .compositions
+                .values()
+                .flat_map(|comp| comp.layers.iter().map(|layer| &layer.network)),
+        );
+        graphs
+            .map(|graph| {
+                (0..)
+                    .find(|limit| !subnet_depth_exceeds(graph, *limit))
+                    .unwrap()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     #[test]
     fn a_document_nested_to_the_limit_survives_a_save_and_a_load() {
         use ravel_core::composition::MAX_SUBNET_DEPTH;
 
-        for document in [
-            nested_in_a_layer(MAX_SUBNET_DEPTH),
-            // The legacy flat graph carries subnets too, and it is read by a
-            // different parser entry (`GraphDoc::from_ron`).
-            Document::new(subnet_chain(MAX_SUBNET_DEPTH)).with_composition(Composition::new(
-                CompId::next(),
-                "Comp 1",
-                (640, 360),
-                FrameRate::new(24, 1),
-                100,
-            )),
-        ] {
-            assert_eq!(document.validate_subnet_depth(), Ok(()));
-            let project = ProjectFile::from_document("Deep", "2026-08-20T00:00:00Z", document);
-            let archive = project.to_archive().expect("a valid document is written");
-            let back = ProjectFile::from_archive(&archive)
-                .expect("what the writer accepted, the reader accepts");
-            assert_eq!(back.document.validate_subnet_depth(), Ok(()));
-        }
+        let document = nested_in_a_layer(MAX_SUBNET_DEPTH);
+        assert_eq!(document.validate_subnet_depth(), Ok(()));
+        assert_eq!(deepest_nesting(&document), MAX_SUBNET_DEPTH);
+
+        let project = ProjectFile::from_document("Deep", "2026-08-20T00:00:00Z", document);
+        let archive = project.to_archive().expect("a valid document is written");
+        let back = ProjectFile::from_archive(&archive)
+            .expect("what the writer accepted, the reader accepts");
+        assert_eq!(
+            deepest_nesting(&back.document),
+            MAX_SUBNET_DEPTH,
+            "the nesting came back, not just something that validates"
+        );
+    }
+
+    /// The legacy flat graph carries subnets too and is read by a **different**
+    /// parser entry ([`GraphDoc::from_ron`]), which only runs for a pre-v3
+    /// archive — so reaching it needs a hand-built v2 container, not a document
+    /// written by this build.
+    #[test]
+    fn a_legacy_graph_nested_to_the_limit_still_loads() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let archive = legacy_archive(
+            r#"{
+                "format_version": 2,
+                "ravel_version": "0.1.0",
+                "project_name": "Deep",
+                "created_at": "2026-08-20T00:00:00Z",
+                "modified_at": "2026-08-20T00:00:00Z",
+                "frame_rate": { "num": 24, "den": 1 },
+                "resolution": { "width": 640, "height": 360 }
+            }"#,
+            &subnet_chain(MAX_SUBNET_DEPTH),
+        );
+
+        let project = ProjectFile::from_archive(&archive)
+            .expect("a legacy graph at the document's limit still parses");
+        assert_eq!(
+            deepest_nesting(&project.document),
+            MAX_SUBNET_DEPTH,
+            "the legacy graph kept its nesting"
+        );
     }
 
     /// And the other half: nesting the format does not accept is refused

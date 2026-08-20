@@ -165,6 +165,11 @@ pub fn save_new(
     name: &str,
 ) -> Result<PathBuf, SubgraphTemplateFileError> {
     let path = template_path(dir, name)?;
+    // Same invariant the `.ravprj` writer holds: what this writes, `load`
+    // reads. `capture` can produce a template past the limit — the document it
+    // came from is only checked when *it* is saved — and without this the file
+    // would exist and never open again.
+    template.check_nesting()?;
     let text = to_ron(template)?;
     std::fs::create_dir_all(dir)?;
     let mut file = match std::fs::File::create_new(&path) {
@@ -195,6 +200,9 @@ pub fn replace(
     if !path.is_file() {
         return Err(SubgraphTemplateFileError::NotFound(name.to_string()));
     }
+    // As in `save_new`: refused before the atomic write, so the template that
+    // is already there survives a rejected replacement.
+    template.check_nesting()?;
     let text = to_ron(template)?;
     atomic_write::write(&path, text.as_bytes())?;
     Ok(path)
@@ -511,6 +519,40 @@ mod tests {
                 }
             )
         ));
+    }
+
+    /// The writer holds the same line as the reader: a template too deep to
+    /// load is refused **before a file exists**, so the library cannot come to
+    /// hold one that never opens again (the `.ravtpl` half of `HIGH-26`).
+    #[test]
+    fn a_template_nested_past_the_limit_is_refused_by_the_save() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let dir = tempfile::tempdir().unwrap();
+        let template = deeply_nested(MAX_SUBNET_DEPTH);
+
+        assert!(matches!(
+            save_new(&template, dir.path(), "deep"),
+            Err(SubgraphTemplateFileError::Rejected(
+                ravel_core::subgraph_template::SubgraphTemplateError::NestingTooDeep { .. }
+            ))
+        ));
+        assert!(
+            !dir.path().join("deep.ravtpl").exists(),
+            "a refused save leaves no file behind"
+        );
+
+        // And a rejected `replace` leaves the template that is there intact.
+        let shallow = deeply_nested(2);
+        save_new(&shallow, dir.path(), "keep").expect("a shallow template saves");
+        assert!(matches!(
+            replace(&template, dir.path(), "keep"),
+            Err(SubgraphTemplateFileError::Rejected(_))
+        ));
+        assert_eq!(
+            load(&dir.path().join("keep.ravtpl")).expect("it still loads"),
+            shallow
+        );
     }
 
     /// A template at the depth a document does allow still makes the round

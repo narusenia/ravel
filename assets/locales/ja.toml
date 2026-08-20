@@ -716,6 +716,11 @@ audio_not_rendered = "このコンポジションには音声を持つレイヤ�
 audio_no_decoder = "このコンポジションには音声を持つレイヤーが {count} 件あるが、このビルドには FFmpeg が無くデコードできないため書き出しは映像のみ"
 audio_source_skipped = "レイヤー「{layer}」はミックスで無音: メディアアセット「{asset}」を読み込めなかった: {detail}"
 binding_issue = "指定したパラメータがプロジェクトに完全には届いていない: {detail}"
+media_offline = "メディアアセット「{asset}」はオフラインのため、次のレイヤーで透明になる: {layers}"
+media_unreadable = "メディアアセット「{asset}」を開けないため、次のレイヤーで透明になる: {layers} ({detail})"
+# {shape} は翻訳しない。保存値の綴りの名前であり、スクリプトはどのロケールでも
+# 同じ語を探す。
+identifier_not_static = "レイヤー「{layer}」: ノード {node} の「{param}」は {shape} で駆動されているため、何も参照せず無視される"
 
 [cli.result]
 completed = "{count} フレームを {path} に書き出した"

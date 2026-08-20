@@ -143,6 +143,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
+    reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
     reg.register(shape_ellipse());
@@ -1448,6 +1449,28 @@ fn transform() -> NodeTemplate {
         .with_param_range("scale", -100.0..=100.0, 0.0..=4.0)
 }
 
+/// `color.ramp`: one scalar to one colour through a colour ramp.
+///
+/// The value-domain counterpart of `field.ramp`: same `stops` parameter and
+/// same `[in_min, in_max]` normalization, but a single `COLOR` out instead of
+/// a Color field. There is no `extrapolation` parameter the way `math.curve`
+/// has one — a ramp ends in colours, not slopes, so out-of-range input clamps
+/// to the end stops and nothing else is defined.
+fn color_ramp() -> NodeTemplate {
+    NodeTemplate::new("color.ramp", "Color Ramp", NodeCategory::Color)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::COLOR,
+        })
+        .with_param(float_parameter("value", 0.0))
+        .with_param(float_parameter("in_min", 0.0))
+        .with_param(float_parameter("in_max", 1.0))
+        .with_param(ramp_parameter("stops", RampParam::default()))
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_min", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
+}
+
 fn color_correct() -> NodeTemplate {
     NodeTemplate::new("color_correct", "Color Correct", NodeCategory::Color)
         .with_input(InputPort {
@@ -1842,7 +1865,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 79);
+        assert_eq!(reg.all_templates().count(), 80);
     }
 
     #[test]
@@ -1853,7 +1876,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 21);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
-        assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 2);
+        assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 25);
     }
@@ -2081,6 +2104,32 @@ mod tests {
         assert_eq!(
             reg.param_options("math.curve", "extrapolation").unwrap(),
             ["clamp", "repeat", "extend"]
+        );
+    }
+
+    /// `color.ramp` declares the ramp as a `Ramp` parameter and answers a
+    /// `COLOR`, and it declares **no** `extrapolation`: the clamp is the ramp's
+    /// own, so an options list here would promise modes the node does not have.
+    #[test]
+    fn color_ramp_declares_a_ramp_parameter_and_a_color_output() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let template = reg.get("color.ramp").unwrap();
+        assert!(matches!(
+            template
+                .default_params
+                .iter()
+                .find(|parameter| parameter.key == "stops")
+                .map(|parameter| &parameter.value),
+            Some(ParameterValue::Ramp(_))
+        ));
+        assert_eq!(template.outputs.len(), 1);
+        assert_eq!(template.outputs[0].data_type, DataTypeId::COLOR);
+        assert!(
+            template
+                .default_params
+                .iter()
+                .all(|parameter| parameter.key != "extrapolation")
         );
     }
 

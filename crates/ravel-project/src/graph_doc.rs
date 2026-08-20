@@ -63,8 +63,12 @@ impl GraphDoc {
     }
 
     /// Parse a graph document from RON text.
+    ///
+    /// Parsed with the container's shared recursion budget
+    /// ([`crate::ron_options`]), not RON's default: a legacy flat graph can
+    /// carry the same subnet nesting a document does.
     pub fn from_ron(text: &str) -> Result<Self, GraphDocError> {
-        Ok(ron::from_str(text)?)
+        Ok(crate::ron_options().from_str(text)?)
     }
 
     /// Convenience: serialize a live graph straight to RON.

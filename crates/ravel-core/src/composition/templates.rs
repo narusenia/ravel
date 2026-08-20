@@ -180,7 +180,16 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
             include_str!("../../../../assets/layer-templates/null.ron"),
         ]
         .iter()
-        .map(|source| ron::from_str(source).expect("built-in layer template must parse"))
+        .map(|source| {
+            // The same recursion budget every other RON reader uses
+            // (`composition::RON_RECURSION_LIMIT`). These sources are compiled
+            // in and shallow, so this is about having one answer to "what does
+            // a RON reader here allow", not about this input.
+            ron::Options::default()
+                .with_recursion_limit(super::RON_RECURSION_LIMIT)
+                .from_str(source)
+                .expect("built-in layer template must parse")
+        })
         .collect()
     })
 }

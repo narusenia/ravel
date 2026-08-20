@@ -219,6 +219,13 @@ impl ProjectFile {
             serde_json::to_string_pretty(&self.manifest).map_err(ProjectError::JsonSerialize)?;
         archive.insert(container::entry::MANIFEST, manifest_json.into_bytes());
 
+        // "A document that saves opens again" is an invariant of the format,
+        // not a hope: the writer has no recursion limit of its own, so without
+        // this check a nesting depth past `MAX_SUBNET_DEPTH` produces a file
+        // that this very build refuses to parse — a loss the user cannot see
+        // at save time. Refusing here keeps the document in memory, where it
+        // can still be flattened or undone.
+        self.document.validate_subnet_depth()?;
         let stored = self.document.clone().with_relativized_assets(project_root);
         let document_ron = document_to_ron(&stored)?;
         archive.insert(container::entry::DOCUMENT, document_ron.into_bytes());
@@ -288,7 +295,9 @@ impl ProjectFile {
             // `sync_subnet_pins`: a subnet's pins are derived from its inner
             // In / Out, so they run last — after the two normalizations above
             // have finished moving those very ports around.
-            let document = ron::from_str::<Document>(text).map_err(ProjectError::DocumentParse)?;
+            let document = ron_options()
+                .from_str::<Document>(text)
+                .map_err(ProjectError::DocumentParse)?;
             // Reject hostile nesting before the recursive compatibility
             // normalizers below get a chance to consume the process stack.
             document.validate_subnet_depth()?;
@@ -541,6 +550,19 @@ fn report_color_migration(report: &ravel_core::composition::ColorMigrationReport
              undeclared parameter): left unconverted"
         );
     }
+}
+
+/// The RON reader options every entry of a project container is parsed with.
+///
+/// RON's default recursion budget (128) is below what a document nested to
+/// [`MAX_SUBNET_DEPTH`](ravel_core::composition::MAX_SUBNET_DEPTH) costs, so
+/// leaving it at the default made a saved document unreadable at a nesting
+/// depth the writer happily accepted. The budget is stated once, in
+/// `ravel-core` beside the depth limit it has to cover, and every reader here
+/// takes it from there — a second reader on the default would reintroduce the
+/// asymmetry for whichever entry it parses.
+fn ron_options() -> ron::Options {
+    ron::Options::default().with_recursion_limit(ravel_core::composition::RON_RECURSION_LIMIT)
 }
 
 /// Serialize a [`Document`] to pretty RON (same style as [`GraphDoc`]:
@@ -2329,6 +2351,156 @@ mod tests {
         assert_eq!(project.manifest.frame_rate, RationalRate::new(24, 1));
         assert_eq!(project.manifest.resolution, Resolution::new(1280, 720));
         assert_eq!(project.manifest.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    // -----------------------------------------------------------------------
+    // Subnet nesting: what saves must open again
+    // -----------------------------------------------------------------------
+
+    /// A subnet chain `depth` boundaries deep, innermost node last.
+    fn subnet_chain(depth: usize) -> Graph {
+        let mut inner = Graph::new()
+            .add_node(Node::new(NodeId::next(), "constant").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        for _ in 0..depth {
+            inner = Graph::new()
+                .add_node(
+                    Node::new(NodeId::next(), "subnet")
+                        .with_subnet(inner)
+                        .with_output("out", DataTypeId::SCALAR),
+                )
+                .unwrap();
+        }
+        inner
+    }
+
+    /// The nesting sits in a layer network — the deepest path a document has
+    /// into the file, and therefore the one that decides the limit.
+    fn nested_in_a_layer(depth: usize) -> Document {
+        let comp = Composition::new(
+            CompId::next(),
+            "Deep",
+            (640, 360),
+            FrameRate::new(24, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::next(), "Deep", subnet_chain(depth)));
+        Document::default().with_composition(comp)
+    }
+
+    /// The invariant `MAX_SUBNET_DEPTH` exists to hold: a document the format
+    /// accepts is one this build can write and read back.
+    ///
+    /// The guard is not the depth check alone — it is the depth check *and*
+    /// [`ron_options`]. RON's default budget of 128 recursion levels is one
+    /// level short of a layer network nested this deep, which is how a saved
+    /// project came to be unopenable (`HIGH-26`).
+    /// The nesting a document came in with, so a round trip can be shown to
+    /// have kept it rather than merely to have produced something valid: a
+    /// load that dropped the inner graphs would satisfy the depth check.
+    fn deepest_nesting(document: &Document) -> usize {
+        use ravel_core::composition::subnet_depth_exceeds;
+
+        let graphs = std::iter::once(&document.graph).chain(
+            document
+                .compositions
+                .values()
+                .flat_map(|comp| comp.layers.iter().map(|layer| &layer.network)),
+        );
+        graphs
+            .map(|graph| {
+                (0..)
+                    .find(|limit| !subnet_depth_exceeds(graph, *limit))
+                    .unwrap()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_document_nested_to_the_limit_survives_a_save_and_a_load() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let document = nested_in_a_layer(MAX_SUBNET_DEPTH);
+        assert_eq!(document.validate_subnet_depth(), Ok(()));
+        assert_eq!(deepest_nesting(&document), MAX_SUBNET_DEPTH);
+
+        let project = ProjectFile::from_document("Deep", "2026-08-20T00:00:00Z", document);
+        let archive = project.to_archive().expect("a valid document is written");
+        let back = ProjectFile::from_archive(&archive)
+            .expect("what the writer accepted, the reader accepts");
+        assert_eq!(
+            deepest_nesting(&back.document),
+            MAX_SUBNET_DEPTH,
+            "the nesting came back, not just something that validates"
+        );
+    }
+
+    /// The legacy flat graph carries subnets too and is read by a **different**
+    /// parser entry ([`GraphDoc::from_ron`]), which only runs for a pre-v3
+    /// archive — so reaching it needs a hand-built v2 container, not a document
+    /// written by this build.
+    #[test]
+    fn a_legacy_graph_nested_to_the_limit_still_loads() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let archive = legacy_archive(
+            r#"{
+                "format_version": 2,
+                "ravel_version": "0.1.0",
+                "project_name": "Deep",
+                "created_at": "2026-08-20T00:00:00Z",
+                "modified_at": "2026-08-20T00:00:00Z",
+                "frame_rate": { "num": 24, "den": 1 },
+                "resolution": { "width": 640, "height": 360 }
+            }"#,
+            &subnet_chain(MAX_SUBNET_DEPTH),
+        );
+
+        let project = ProjectFile::from_archive(&archive)
+            .expect("a legacy graph at the document's limit still parses");
+        assert_eq!(
+            deepest_nesting(&project.document),
+            MAX_SUBNET_DEPTH,
+            "the legacy graph kept its nesting"
+        );
+    }
+
+    /// And the other half: nesting the format does not accept is refused
+    /// *before* a file exists, not after one that cannot be reopened does.
+    #[test]
+    fn a_document_nested_past_the_limit_is_refused_by_the_save() {
+        use ravel_core::composition::{DocumentValidationError, MAX_SUBNET_DEPTH};
+
+        let project = ProjectFile::from_document(
+            "Too deep",
+            "2026-08-20T00:00:00Z",
+            nested_in_a_layer(MAX_SUBNET_DEPTH + 1),
+        );
+        assert!(matches!(
+            project.to_archive(),
+            Err(ProjectError::InvalidDocument(
+                DocumentValidationError::SubnetDepthExceeded {
+                    limit: MAX_SUBNET_DEPTH
+                }
+            ))
+        ));
+    }
+
+    /// The parser's budget keeps a margin over what the depth limit costs, so
+    /// a format change that adds RON nesting per subnet does not land on the
+    /// boundary unnoticed. Two further levels is one further subnet.
+    #[test]
+    fn the_parser_budget_has_room_above_the_depth_limit() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let text = document_to_ron(&nested_in_a_layer(MAX_SUBNET_DEPTH)).unwrap();
+        let tighter = ron::Options::default()
+            .with_recursion_limit(ravel_core::composition::RON_RECURSION_LIMIT - 16);
+        assert!(
+            tighter.from_str::<Document>(&text).is_ok(),
+            "the budget is within 16 recursion levels of the depth limit's cost"
+        );
     }
 
     #[test]

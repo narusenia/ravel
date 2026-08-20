@@ -108,7 +108,42 @@
   `load_dir` はシンボリックリンクを辿らない
 - **入れ子の深さは `.ravprj` と同じ上限**（`MAX_SUBNET_DEPTH`、判定は
   `composition::subnet_depth_exceeds` の 1 本）。`from_ron` と `instantiate` で
-  掛ける。実際にはこれより浅いところで RON の再帰上限が先に落とす
+  掛ける。RON の再帰上限は `RON_RECURSION_LIMIT` でこの上限の上に置いてあるので、
+  **落とすのは深さの検査のほう**（下の「保存できたものは開ける」）
+
+## 不変条件: 保存できたものは開ける
+
+**書き手が受け付けた文書は、同じビルドが読み直せなければならない。**
+これが破れると、ユーザーには「保存は成功したのに二度と開かない」形で出る
+（`HIGH-26`。実質的なデータ損失で、保存した時点では気づけない）。
+
+`.ravprj` / `.ravtpl` / undo ジャーナルの RON にはこれを支える 2 つの数字がある。
+
+| 定数 | 置き場 | 役目 |
+|---|---|---|
+| `MAX_SUBNET_DEPTH` | `ravel-core::composition` | 文書が許すサブネットの入れ子段数。**書き手側の唯一の上限** |
+| `RON_RECURSION_LIMIT` | 同じ場所 | RON デシリアライザの再帰予算。`MAX_SUBNET_DEPTH` が要求する段数の**上**に置く |
+
+守る手順:
+
+- **RON を読む経路は全部 `RON_RECURSION_LIMIT` を使う。** `ron::from_str` を
+  素で呼ぶと RON 既定の 128 段になり、その経路だけが上限違いになる
+  （`ravel-project` は `ron_options()` 1 本、`ravel-core` の
+  `undo::journal::RonCodec` も同じ定数を引く）
+- **保存側は書く前に `Document::validate_subnet_depth` を通す**
+  （`ProjectFile::to_archive_for_root`）。シリアライザ自身には再帰上限が無いので、
+  検査しなければ「読めないファイル」を書けてしまう
+- **`.ravtpl` も同じ**（`subgraph_template::save_new` / `replace` が
+  `SubgraphTemplate::check_nesting` をファイル作成前に通す）。`capture` は
+  文書側の上限を見ないので、深いサブネットからテンプレートを作れてしまう
+- **`MAX_SUBNET_DEPTH` を上げるときは `RON_RECURSION_LIMIT` も上げる。**
+  サブネット 1 段は RON の約 8 段（レイヤーネットワーク経路の実測）。
+  ただし**再帰予算はスタックの上限でもある**: 実測でサブネット 64 段 =
+  RON 464 段が 2 MiB のスレッドスタックを溢れさせた。だから
+  「読めるように予算を上げる」には天井がある
+- `ravel-project` の `a_document_nested_to_the_limit_survives_a_save_and_a_load`
+  と `a_document_nested_past_the_limit_is_refused_by_the_save` が、上限の
+  両側をテストで固定している。**上限を動かしたらこの 2 本が落ちる**
 
 ## 判断: バージョンを上げるか、上げないか
 

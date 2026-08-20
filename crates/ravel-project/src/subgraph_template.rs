@@ -72,7 +72,8 @@ pub enum SubgraphTemplateFileError {
     NotFound(String),
 
     /// The RON parsed but the template it describes is one no document could
-    /// hold — today, nesting past `MAX_SUBNET_DEPTH`.
+    /// hold — today, nesting past
+    /// [`MAX_SUBNET_DEPTH`](ravel_core::composition::MAX_SUBNET_DEPTH).
     #[error("subgraph template rejected: {0}")]
     Rejected(#[from] ravel_core::subgraph_template::SubgraphTemplateError),
 }
@@ -94,7 +95,7 @@ pub fn to_ron(template: &SubgraphTemplate) -> Result<String, SubgraphTemplateFil
 /// so an entry that violates an invariant is still dropped with the rest of the
 /// template intact.
 pub fn from_ron(text: &str) -> Result<SubgraphTemplate, SubgraphTemplateFileError> {
-    let template: SubgraphTemplate = ron::from_str(text)?;
+    let template: SubgraphTemplate = crate::ron_options().from_str(text)?;
     template.check_nesting()?;
     Ok(template)
 }
@@ -164,6 +165,11 @@ pub fn save_new(
     name: &str,
 ) -> Result<PathBuf, SubgraphTemplateFileError> {
     let path = template_path(dir, name)?;
+    // Same invariant the `.ravprj` writer holds: what this writes, `load`
+    // reads. `capture` can produce a template past the limit — the document it
+    // came from is only checked when *it* is saved — and without this the file
+    // would exist and never open again.
+    template.check_nesting()?;
     let text = to_ron(template)?;
     std::fs::create_dir_all(dir)?;
     let mut file = match std::fs::File::create_new(&path) {
@@ -194,6 +200,9 @@ pub fn replace(
     if !path.is_file() {
         return Err(SubgraphTemplateFileError::NotFound(name.to_string()));
     }
+    // As in `save_new`: refused before the atomic write, so the template that
+    // is already there survives a rejected replacement.
+    template.check_nesting()?;
     let text = to_ron(template)?;
     atomic_write::write(&path, text.as_bytes())?;
     Ok(path)
@@ -479,17 +488,18 @@ mod tests {
     /// `MAX_SUBNET_DEPTH`, and a `.ravtpl` carries a graph on its way into one,
     /// so it must not load one either.
     ///
-    /// **Two limits stand here, and the parser's is by far the tighter one.**
-    /// RON's deserializer has its own recursion limit and a subnet level costs
-    /// it several levels, so a file nested anywhere near the document's limit
-    /// is refused while being parsed — which is also why a deep `.ravtpl`
-    /// cannot exhaust the stack on the way in. [`from_ron`]'s own
-    /// `check_nesting` is the backstop behind it: it holds the invariant "a
-    /// template handed out by this module is one a document can hold" whatever
-    /// the parser's limit happens to be, and it is the check that fires on the
-    /// in-memory path (`capture` → `instantiate`), where no parser is
-    /// involved. This test asserts only that the file does not load, because
-    /// which of the two refuses it is the RON version's business.
+    /// **The nesting check is what refuses this, not the parser.** It used to
+    /// be the other way round: RON's default recursion budget ran out well
+    /// before `MAX_SUBNET_DEPTH` did, so a file nested near the document's
+    /// limit was refused while being parsed. That asymmetry is what made a
+    /// saved `.ravprj` unopenable (`HIGH-26`), and the fix moved the parser's
+    /// budget above the depth limit
+    /// ([`RON_RECURSION_LIMIT`](ravel_core::composition::RON_RECURSION_LIMIT)),
+    /// leaving [`from_ron`]'s `check_nesting` as the single line — the same
+    /// check that fires on the in-memory path (`capture` → `instantiate`),
+    /// where no parser is involved. This test asserts only that the file does
+    /// not load; a deep `.ravtpl` still cannot exhaust the stack on the way
+    /// in, because the budget stays bounded.
     #[test]
     fn a_template_nested_past_the_document_limit_does_not_load() {
         use ravel_core::composition::MAX_SUBNET_DEPTH;
@@ -509,6 +519,40 @@ mod tests {
                 }
             )
         ));
+    }
+
+    /// The writer holds the same line as the reader: a template too deep to
+    /// load is refused **before a file exists**, so the library cannot come to
+    /// hold one that never opens again (the `.ravtpl` half of `HIGH-26`).
+    #[test]
+    fn a_template_nested_past_the_limit_is_refused_by_the_save() {
+        use ravel_core::composition::MAX_SUBNET_DEPTH;
+
+        let dir = tempfile::tempdir().unwrap();
+        let template = deeply_nested(MAX_SUBNET_DEPTH);
+
+        assert!(matches!(
+            save_new(&template, dir.path(), "deep"),
+            Err(SubgraphTemplateFileError::Rejected(
+                ravel_core::subgraph_template::SubgraphTemplateError::NestingTooDeep { .. }
+            ))
+        ));
+        assert!(
+            !dir.path().join("deep.ravtpl").exists(),
+            "a refused save leaves no file behind"
+        );
+
+        // And a rejected `replace` leaves the template that is there intact.
+        let shallow = deeply_nested(2);
+        save_new(&shallow, dir.path(), "keep").expect("a shallow template saves");
+        assert!(matches!(
+            replace(&template, dir.path(), "keep"),
+            Err(SubgraphTemplateFileError::Rejected(_))
+        ));
+        assert_eq!(
+            load(&dir.path().join("keep.ravtpl")).expect("it still loads"),
+            shallow
+        );
     }
 
     /// A template at the depth a document does allow still makes the round

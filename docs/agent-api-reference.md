@@ -375,7 +375,9 @@ CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>
 
 Evaluation rejects a pull branch deeper than `MAX_EVALUATION_DEPTH` (256) with
 `EvalError::DepthLimitExceeded`; persisted documents reject subnet nesting
-deeper than `MAX_SUBNET_DEPTH` (64) before recursive load normalization.
+deeper than `MAX_SUBNET_DEPTH` (16) — on the save path as well as before
+recursive load normalization, because a document that writes must read back
+(`RON_RECURSION_LIMIT`; see `docs/dev/persistence.md`).
 
 Cache/dirty are keyed by ownership path + NodeId; animated (keyframed or
 node-output-bound) parameters make a node time-varying automatically.

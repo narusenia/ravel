@@ -676,7 +676,46 @@ pub enum DocumentValidationError {
 }
 
 /// Maximum number of nested subnet ownership boundaries in a document.
-pub const MAX_SUBNET_DEPTH: usize = 64;
+///
+/// **This is the only limit on nesting the persistence layer has.** It is set
+/// from what the RON parser can read back, because a document that saves and
+/// then refuses to open is data loss with no warning: the invariant is *what
+/// this crate accepts, `ravel-project` can write and read again*, and it is
+/// pinned by tests on both sides of the file.
+///
+/// The number comes from measurement. One subnet level costs the RON
+/// deserializer about 8 recursion levels, and a layer network reaches deeper
+/// into the file than the legacy flat graph does, so the deepest path is a
+/// subnet chain inside `Composition.layers[..].network`:
+///
+/// | subnet depth | RON recursion levels needed (layer network) |
+/// | --- | --- |
+/// | 8 | 80 |
+/// | 14 | 128 |
+/// | 16 | 136 |
+/// | 32 | 248 |
+/// | 64 | 464 — **overflows a 2 MiB thread stack while parsing** |
+///
+/// So raising the parser's budget to cover the former limit of 64 would have
+/// traded "refuses to open" for a crash. The document limit came down to 16
+/// instead, and [`RON_RECURSION_LIMIT`] is set above what 16 needs.
+pub const MAX_SUBNET_DEPTH: usize = 16;
+
+/// Recursion budget for every RON reader in the project (`.ravprj`,
+/// `.ravtpl`, the undo journal's RON codec).
+///
+/// RON's own default is 128, which is *below* what a document nested to
+/// [`MAX_SUBNET_DEPTH`] costs (136 for the layer-network path), and that
+/// mismatch is what let a saved document be unreadable. Stating the budget
+/// here keeps the two numbers in one place: the margin is about 7 further
+/// subnet levels, so a format change that adds a level or two of RON nesting
+/// per subnet does not silently cross the line, and the round-trip test at
+/// exactly [`MAX_SUBNET_DEPTH`] fails if it ever does.
+///
+/// It stays a bounded budget rather than `without_recursion_limit`, because
+/// the parser also reads untrusted files: the limit is the only thing between
+/// a hostile nesting depth and a stack overflow.
+pub const RON_RECURSION_LIMIT: usize = 192;
 
 fn check_subnet_depth(graph: &Graph) -> Result<(), DocumentValidationError> {
     if subnet_depth_exceeds(graph, MAX_SUBNET_DEPTH) {

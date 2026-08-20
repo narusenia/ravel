@@ -130,7 +130,14 @@ impl JournalCodec for RonCodec {
 
     fn decode(&self, data: &[u8]) -> Result<JournalEntry, JournalError> {
         let s = std::str::from_utf8(data).map_err(|e| JournalError::Codec(e.to_string()))?;
-        ron::from_str(s).map_err(|e| JournalError::Codec(e.to_string()))
+        // Same recursion budget as the project container: a journal entry
+        // carries the same nested graphs a document does, so reading one back
+        // must not be tighter than writing it was
+        // ([`crate::composition::RON_RECURSION_LIMIT`]).
+        ron::Options::default()
+            .with_recursion_limit(crate::composition::RON_RECURSION_LIMIT)
+            .from_str(s)
+            .map_err(|e| JournalError::Codec(e.to_string()))
     }
 }
 

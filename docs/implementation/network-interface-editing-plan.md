@@ -19,7 +19,8 @@
 binding 優先 → 同名パラメータ → 型ゼロ）、`net.out` はカスタム入力ポートを
 `PortRecord` に集め（`:115-127`）、`subnet` は外側ピンを内部 In に名前で束縛して
 再帰評価する（`crates/ravel-nodes/src/subnet.rs:56-106`）。入れ子の深さも
-64 段（`MAX_SUBNET_DEPTH`、`composition/mod.rs:570`）までテスト済み。
+`MAX_SUBNET_DEPTH` 段（`composition/mod.rs`。**`HIGH-26` の修正で 64 → 16**）
+までテスト済み。
 上限超過は `validate_subnet_depth` が拒否する（`MED-CORE-04` の対応で入った）。
 
 だが**ポートを生やす経路が無い**。

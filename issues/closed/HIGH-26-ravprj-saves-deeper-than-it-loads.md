@@ -7,6 +7,38 @@
 | 領域 | ravel-project / 永続化 |
 | 該当 | `crates/ravel-project/src/graph_doc.rs:67`, `crates/ravel-core/src/composition/mod.rs:599` |
 
+> **解決済み**: **修正方針 2（保存側を読み込みの実力に合わせる）を採った。**
+> 決め手は実測で、**方針 1 は成立しない**ことが分かった — サブネット 1 段は
+> RON の再帰段数を約 8 段消費し（レイヤーネットワーク経路）、`MAX_SUBNET_DEPTH`
+> = 64 を読むには 464 段が必要で、それは 2 MiB のスレッドスタックを
+> **溢れさせる**（テスト実行時に SIGABRT を確認）。「開けない」を
+> 「クラッシュする」に替えるだけだった。
+>
+> 入ったもの:
+>
+> - `MAX_SUBNET_DEPTH` を **64 → 16**。RON の再帰予算 `RON_RECURSION_LIMIT`
+>   （新規、同じ場所）を **192** に固定し、16 段が要求する 136 段の上に置いた。
+>   予算は既定の 128 より上なので、**今まで開けていた文書はすべて開ける**
+> - **RON を読む経路を 1 本の予算に揃えた**: `ravel-project` の
+>   `ron_options()`（`.ravprj` の `Document`、legacy flat graph の `GraphDoc`、
+>   `.ravtpl`）と `ravel-core::undo::journal::RonCodec`
+> - **保存側に深さの検査を足した**（`ProjectFile::to_archive_for_root`）。
+>   個票が「保存はこの上限で検証される」と書いていたのは**誤り**で、実際には
+>   保存経路に検査は 1 つも無く、シリアライザ自身にも再帰上限が無かった。
+>   つまり深さは無制限に書けていた
+> - **`.ravtpl` 側の同型の穴も塞いだ**（独立レビューの指摘）。`save_new` /
+>   `replace` は `to_ron` しか呼んでおらず、`load` が拒否するテンプレートを
+>   ファイルとして作れた。ファイル作成前に `check_nesting` を通す
+> - 不変条件「**保存できたものは開ける**」を `docs/dev/persistence.md` に明記し、
+>   上限の両側をテストで固定した（`a_document_nested_to_the_limit_survives_a_save_and_a_load`
+>   / `a_document_nested_past_the_limit_is_refused_by_the_save`）。3 本とも
+>   変異（予算を既定へ / 上限を 64 へ / 保存側の検査を外す）で落ちることを確認済み
+>
+> **残した制約**: Collapse to Subnet 自体は上限を超えられる（深さの判定に
+> 文書全体での現在深度が要り、それは NodeEditor 側から渡す必要がある）。
+> 超えた状態で保存すると**書く前に**エラーになり、文書はメモリに残るので
+> 失われはしない。上限に達した Collapse を操作の時点で断るのは別単位。
+
 ## 現状
 
 **保存側と読み込み側で有効な上限が違う。**

@@ -29,7 +29,7 @@
 | C2 | 完了 | 2026-08-10 |
 | C3 | 完了 | 2026-08-20 |
 | UX | 完了 | 2026-08-10 |
-| D | 進行中 | — |
+| D | 完了 | 2026-08-21 |
 | E | 進行中 | — |
 | F | 未着手 | — |
 | G | 未着手 | — |
@@ -321,9 +321,9 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | 単位 | 内容 |
 |---|---|
 | `AID-1` / `AID-2` | `AssetId` 型と `MediaAssetEntry` の分離（`.ravprj` v9）と参照 3 系統の切り替え（`asset-identity-plan.md`）**済**（#456） |
-| `AID-3` / `AID-4` | インポートの採番、MediaBin の改名 UI、ロケール / 文書 |
+| `AID-3` / `AID-4` | インポートの採番、MediaBin の改名 UI、ロケール / 文書 **済**（#460 — 露出宣言の所有権を `MediaAssetEntry::exposed_owner` へ明示化。計画書は `done/`） |
 | `DISK-1` | `IntChannel` と解決層（`.ravprj` v10。`discrete-keyframes-plan.md`）**済**（#457） |
-| `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書 |
+| `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書。`DISK-2` / `DISK-3` **済**（#462 — `.ravprj` v11、識別子パラメータはアニメート不可）。残りは `DISK-4〜6` |
 | `PGRP-4` | In ノードのインスタンスグループ（format +1。`parameter-groups-plan.md`） |
 | `CPO-5` | `layer` の Int → String 移行（format +1。`contextual-parameter-options-plan.md`。依存する `CPO-2` は post-release） |
 | `HIGH-26` | 保存できた `.ravprj` が読み込めない（単位ではないので `backlog.md` には無い）**済**（#455 — `MAX_SUBNET_DEPTH` 64 → 16 と `RON_RECURSION_LIMIT`） |
@@ -612,7 +612,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | ~~メディアデコード~~ | ✅ `HIGH-17`（sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換）は closed | — |
 
 計画書は
-[`responsiveness-stage3-plan.md`](responsiveness-stage3-plan.md)（`RESP3-1`〜`RESP3-14`）。
+[`done/responsiveness-stage3-plan.md`](done/responsiveness-stage3-plan.md)（`RESP3-1`〜`RESP3-14`）。
 上の 3 クラスタがそのままクラスタ A / B / C に対応する。着手できない 2 件
 （`MED-UI-06` は測定不能、`MED-GPU-04` はゴールデンテストに固定）は、
 先行単位（`RESP3-5` の計装、`RESP3-12` の一致テスト化）を C3 の中に置いて解く。
@@ -770,7 +770,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | 単位 | 内容 |
 |---|---|
 | `PARAM-2` / `PARAM-4` | カーブ / グラデーションのインラインエディタ（カーブ側 **済**） |
-| `PARAM-7` / `PARAM-8` | `math.curve` / `color.ramp`（値ドメイン） |
+| `PARAM-7` / `PARAM-8` | `math.curve` / `color.ramp`（値ドメイン）**済**（#404 / #459） |
 | `STYLE-1` | スタイル属性の読み出し（塗りと線で色が分かれる） |
 | `STYLE-5` | `field.apply` の属性自動作成 + Color 既定マスク |
 | `STYLE-6` | `field.ramp`（位置 → 色） |

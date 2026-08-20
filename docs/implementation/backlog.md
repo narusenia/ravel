@@ -47,7 +47,6 @@
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
-| PARAM-8 | `color.ramp`（値ドメインのカラーランプ） | `properties-parameter-editors-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
@@ -61,8 +60,7 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
-| DISK-2 | `StepCurve<String>` と `StringSteps`（String のキーフレーム） | `discrete-keyframes-plan.md` |
-| AID-3 | インポートの採番と MediaBin の改名 UI | `asset-identity-plan.md` |
+| DISK-4 | Timeline の Int / String 行とキーフレーム編集 | `discrete-keyframes-plan.md` |
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
@@ -83,7 +81,6 @@
 | MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
-| VIS-2 | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | `panel-visibility-plan.md` |
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
@@ -150,9 +147,9 @@ MediaBin 側を #400 で片付けて closed になった。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | VIS-1 | ✅ | `VisiblePanels` Global と `WindowHost` からの維持（挙動不変。#409） | — |
-| VIS-2 | 🟡 | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | VIS-1 |
-| VIS-3 | ⬜ | Timeline / Outliner / MediaBin / NodeEditor への適用 | VIS-2 |
-| VIS-4 | ⬜ | 仕様・実装状況・測定手順の文書、フェーズ C3 を閉じる | VIS-3 |
+| VIS-2 | ✅ #461 | 可視性ゲートの共有ヘルパと Properties への適用（MED-UI-02） | VIS-1 |
+| VIS-3 | ✅ #461 | Timeline / Outliner / MediaBin / NodeEditor への適用 | VIS-2 |
+| VIS-4 | ✅ #461 | 仕様・実装状況・測定手順の文書、フェーズ C3 を閉じる | VIS-3 |
 
 ### GPU 合成パイプライン（`issues/README.md` 第2段）
 
@@ -614,7 +611,7 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 | PARAM-4 | ✅ | グラデーションエディタのインライン展開（#414） | PARAM-3 |
 | PARAM-5 | ✅ | カーブエディタの表示範囲を Timeline と共有（`widgets/curve_view.rs`。Timeline 側のホイール縦ズームは `MED-APP-17` に残る） | PARAM-2 |
 | PARAM-7 | ✅ | `math.curve`（値ドメインの curve remap）（#404） | PARAM-2 |
-| PARAM-8 | 🟡 | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
+| PARAM-8 | ✅ #459 | `color.ramp`（値ドメインのカラーランプ。Blender ColorRamp 相当） | PARAM-4 |
 | PARAM-6 | ⬜ | ロケール / 文書 | PARAM-1〜5, PARAM-7〜8 |
 
 `field.curve_remap` の制御点は `PARAM-1` で `ParameterValue::Curve` になり
@@ -710,9 +707,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | DISK-1 | ✅ #457 | `IntChannel` と解決層（フォーマット上げ。`.ravprj` v10） | — |
-| DISK-2 | 🟡 | `StepCurve<String>` と `StringSteps` | DISK-1 ✅ |
-| DISK-3 | ⬜ | Properties のキーフレームトグルと再型付け | DISK-1, DISK-2 |
-| DISK-4 | ⬜ | Timeline の行とキーフレーム編集 | DISK-3 |
+| DISK-2 | ✅ #462 | `StepCurve<String>` と `StringSteps` | DISK-1 ✅ |
+| DISK-3 | ✅ #462 | Properties のキーフレームトグルと再型付け | DISK-1, DISK-2 |
+| DISK-4 | 🟡 | Timeline の行とキーフレーム編集 | DISK-3 ✅ |
 | DISK-5 | ⬜ | カーブエディタの階段描画（Int のみ） | DISK-4 |
 | DISK-6 | ⬜ | ロケール / 文書 | DISK-1〜5 |
 
@@ -722,8 +719,8 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | AID-1 | ✅ #456 | `AssetId` 型と `MediaAssetEntry` の分離（フォーマット上げ + 移行。`.ravprj` v9） | — |
 | AID-2 | ✅ #456 | 参照 3 系統の切り替え | AID-1 ✅ |
-| AID-3 | 🟡 | インポートの採番と MediaBin の改名 UI（**露出宣言の所有権をここで決める** — 計画書参照） | AID-2 ✅ |
-| AID-4 | ⬜ | ロケール / 文書 | AID-1〜3 |
+| AID-3 | ✅ #460 | インポートの採番と MediaBin の改名 UI（**露出宣言の所有権をここで決める** — 計画書参照） | AID-2 ✅ |
+| AID-4 | ✅ #460 | ロケール / 文書 | AID-1〜3 |
 
 ### パラメータのグループ（`parameter-groups-plan.md`）
 

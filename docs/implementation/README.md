@@ -47,7 +47,6 @@ several plans here wait on its later units rather than on each other.
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `discrete-keyframes-plan.md` | Keyframes for Int and String parameters (`IntChannel`, `StringSteps`) — animation stops being f32-only | — | REQ-CORE-010 |
 | `hands-on-findings-handoff.md` | Where the 2026-08-08 hands-on findings landed, and the order to pick the filed bugs up in | — | — |
-| `asset-identity-plan.md` | Stable `AssetId` separate from the display name, so a re-import cannot silently rebind an existing reference | — | REQ-PROJ-001, REQ-UI-008, REQ-UI-010 |
 | `parameter-groups-plan.md` | Parameter groups (Pages) declared by the node type; the shape `OFX-5` reads plugin Group/Page into | — | REQ-PLUGIN-001 |
 | `refactor-plan-0808.md` | Workflow-penetration UX: the instrumentation that counts panel round-trips and re-searches, plus the known Timeline / import / search fixes — **the pre-release UX bucket** | — | REQ-UI-002–004, REQ-UI-013 |
 | `node-graph-readability-plan.md` | Manual auto-layout on undo, the `node_editor` settings section that finally persists `EdgeStyle`, then top-down flow, reroute, edge insertion, and type-coloured edges | — | REQ-UI-002, REQ-UI-003 |
@@ -77,8 +76,6 @@ several plans here wait on its later units rather than on each other.
 | `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | `gpu-backend-plan.md` (GPUBK-9), `done/zero-copy-viewer-plan.md` (ZC-8) | REQ-GPU-001 |
 | `ofx-host-plan.md` | The OpenFX host: an isolated C++ process, the suites, and the GPU interop — **OFX defines no D3D12 path, so Windows has no zero-copy route** | `gpu-backend-plan.md` (GPUBK-8, merged), `plugin-system-plan.md` (PLUG-1) | REQ-PLUGIN-001, REQ-PROJ-002 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
-| `panel-visibility-plan.md` | Tell a panel whether its tab is in front, so a background pane stops rebuilding and catches up when it returns — **implemented: `VIS-1`–`VIS-4` are done, `MED-UI-02` is closed and roadmap phase C3 with it. Moves to `done/` once merged** | `done/free-pane-docking-plan.md` (DOCK-8, merged) | REQ-UI-002, REQ-UI-013 |
-| `responsiveness-stage3-plan.md` | Responsiveness stage 3 (roadmap phase C3): graph adjacency index, layer-level `ptr_eq`, path interning, panel revision gates, GPU rasterize and upload dedup — **cost per call at scale**, after stage 1 (call count) and stage 2 (cost per pixel). **All 14 units are merged (#395 / #396 / #397), and `RESP3-7`'s last criterion — skip `refresh_values` while the panel is hidden — is met by `panel-visibility-plan.md`'s `VIS-2`–`VIS-4`, which closes phase C3. Moves to `done/` once merged** | `cache-plan.md` (CACHE-2–4, merged) | REQ-CORE-002/006/011, REQ-UI-002/003 |
 
 `panel-placement-plan.md` (#181) is **superseded** by
 `done/free-pane-docking-plan.md`: the view-toggle problem is solved by
@@ -196,6 +193,9 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/asset-identity-plan.md` | Stable `AssetId` separate from the display name, so a re-import cannot silently rebind an existing reference; the exposed declaration's claim is recorded on the entry | #456, #460 — 2026-08-21 | REQ-PROJ-001, REQ-UI-008, REQ-UI-010 |
+| `done/panel-visibility-plan.md` | Tell a panel whether its tab is in front, so a background pane stops rebuilding and catches up when it returns | #409, #461 — 2026-08-21 | REQ-UI-002, REQ-UI-013 |
+| `done/responsiveness-stage3-plan.md` | Responsiveness stage 3 (roadmap phase C3): graph adjacency index, layer-level `ptr_eq`, path interning, panel revision gates, GPU rasterize and upload dedup | #395, #396, #397, #461 — 2026-08-21 | REQ-CORE-002/006/011, REQ-UI-002/003 |
 | `done/attribute-spreadsheet-plan.md` | Geometry attribute inspection panel, multi-target evaluation | #302, #448, #450 — 2026-08-15 | REQ-CORE-010, REQ-UI-013 |
 | `done/viewer-overlay-manipulator-plan.md` | Extensible Viewer overlay mechanism, Field/Geometry visualisation, parameter and layer-shell manipulators, motion path | #255, #429–#441 — 2026-08-15 | REQ-UI-011, REQ-UI-013, REQ-CORE-012 |
 | `done/viewer-snap-guides-plan.md` | Snapping to existing geometry, rulers and user guides | #444, #446 — 2026-08-15 | REQ-UI-011, REQ-UI-004 |

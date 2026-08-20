@@ -258,7 +258,7 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 値を変えるより、変わらなかったことを伝える。**
 
 **v8 → v9 の素材 ID 化**（`Document::upgrade_asset_references`、実装計画は
-[`../implementation/asset-identity-plan.md`](../implementation/asset-identity-plan.md)
+[`../implementation/done/asset-identity-plan.md`](../implementation/done/asset-identity-plan.md)
 の `AID-1` / `AID-2`）。v8 までは**素材の表示名がそのまま同一性**で、
 `Document::media_assets` のキーと参照 3 系統（`media` ノードの `asset_id`
 パラメータ・`AudioSource`・公開パラメータ宣言が束縛する `media` ノード）が

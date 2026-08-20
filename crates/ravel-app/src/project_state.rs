@@ -1209,6 +1209,7 @@ impl ProjectState {
                             path: AssetPath::for_project_root(&asset.path, project_root.as_deref()),
                             kind: asset.kind.clone(),
                             metadata: asset.metadata.clone(),
+                            exposed_owner: None,
                             resolved: Some(asset.path.clone()),
                         },
                     );

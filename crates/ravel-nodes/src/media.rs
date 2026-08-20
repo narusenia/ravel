@@ -643,6 +643,7 @@ mod tests {
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
+                exposed_owner: None,
                 resolved: None,
             },
         )));
@@ -676,6 +677,7 @@ mod tests {
             path: AssetPath::Absolute(PathBuf::from("/fake/clip.mov")),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
+            exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/clip.mov")),
         };
         let (mut ev, graph) = media_evaluator(MediaProcessor::with_reader_factory(factory), entry);
@@ -715,6 +717,7 @@ mod tests {
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,
                 metadata: AssetMetadata::default(),
+                exposed_owner: None,
                 resolved: Some(PathBuf::from("/proj/footage/clip.mov")),
             },
         )));
@@ -776,6 +779,7 @@ mod tests {
             path: AssetPath::Absolute(PathBuf::from("/fake/plate.png")),
             kind: AssetKind::Still,
             metadata: AssetMetadata::default(),
+            exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/plate.png")),
         };
         let (mut ev, graph) = media_evaluator(processor, entry);
@@ -840,6 +844,7 @@ mod tests {
                 path: AssetPath::Absolute(PathBuf::from(format!("/fake/{name}"))),
                 kind: AssetKind::Still,
                 metadata: AssetMetadata::default(),
+                exposed_owner: None,
                 resolved: Some(PathBuf::from(format!("/fake/{name}"))),
             }
         }
@@ -894,6 +899,7 @@ mod tests {
                 frame_rate: Some(FrameRate::new(24, 1)),
                 ..AssetMetadata::default()
             },
+            exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/seq/f_0100.png")),
         };
         let (mut ev, graph) = media_evaluator(processor, entry);
@@ -952,6 +958,7 @@ mod tests {
                 end: 200,
             },
             metadata: AssetMetadata::default(),
+            exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/seq/f_0100.png")),
         };
         let (mut ev, graph) = media_evaluator(processor, entry);
@@ -1020,6 +1027,7 @@ mod tests {
             path: AssetPath::Absolute(PathBuf::from(path)),
             kind: AssetKind::Container,
             metadata: AssetMetadata::default(),
+            exposed_owner: None,
             resolved: Some(PathBuf::from(path)),
         }
     }

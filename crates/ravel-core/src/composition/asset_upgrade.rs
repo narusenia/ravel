@@ -19,10 +19,13 @@
 //! for the same reason — the `manifest.json` migration chain never sees
 //! `document/main.ron`.
 //!
-//! Two steps:
+//! Three steps:
 //!
 //! 1. give each asset the name it was keyed by, so nothing on screen changes;
-//! 2. rewrite each `media` node's `asset_id` parameter to the decimal id.
+//! 2. record, on each asset a pre-v9 exposed apply had created, the
+//!    declaration that created it
+//!    ([`MediaAssetEntry::exposed_owner`](super::MediaAssetEntry::exposed_owner));
+//! 3. rewrite each `media` node's `asset_id` parameter to the decimal id.
 //!
 //! An [`AudioSource`](super::AudioSource) needs no step of its own: its
 //! `asset_id` is an [`AssetId`], so the interner resolved it while the document
@@ -59,6 +62,8 @@ use std::sync::Arc;
 use crate::graph::{Graph, ParameterValue};
 use crate::id::AssetId;
 
+use crate::exposed::apply::EXPOSED_ASSET_NAME_PREFIX;
+
 use super::asset_legacy::LegacyAssetKeys;
 use super::{Document, MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
 
@@ -92,6 +97,30 @@ pub(super) fn upgrade(mut document: Document, legacy: &LegacyAssetKeys) -> Docum
     for (id, name) in named {
         if let Some(entry) = document.media_assets.get_mut(&id) {
             entry.name = name;
+        }
+    }
+
+    // Step 2: a pre-v9 apply recorded ownership only in the name it derived
+    // (`exposed::apply::asset_name_for`) — the one document state where that
+    // name is authoritative, because nothing could rename an asset yet. Carry
+    // it into the explicit field, or the next apply of that declaration would
+    // see an unowned entry and add a second one beside it.
+    let owners: Vec<(AssetId, String)> = document
+        .media_assets
+        .iter()
+        .filter(|(_, entry)| entry.exposed_owner.is_none())
+        .filter_map(|(id, entry)| {
+            let declared = entry.name.strip_prefix(EXPOSED_ASSET_NAME_PREFIX)?;
+            document
+                .exposed_parameters
+                .iter()
+                .any(|parameter| parameter.name() == declared)
+                .then(|| (*id, declared.to_string()))
+        })
+        .collect();
+    for (id, owner) in owners {
+        if let Some(entry) = document.media_assets.get_mut(&id) {
+            entry.exposed_owner = Some(owner);
         }
     }
 

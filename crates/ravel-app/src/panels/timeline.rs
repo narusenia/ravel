@@ -220,6 +220,10 @@ struct TimelineCurveData {
     /// Converts a layer-local key frame to a composition frame.
     frame_offset: i64,
     color: Hsla,
+    /// Whether the row reads its value back rounded to an integer, so the
+    /// graph draws the staircase evaluation produces rather than the float
+    /// curve underneath it ([`keyframes::RowValueKind::Integer`]).
+    integral: bool,
 }
 
 /// Zones of a layer bar a drag can grab.
@@ -4401,6 +4405,7 @@ impl TimelineGpuiPanel {
                         color: item.color,
                         frame_offset: item.frame_offset,
                         selected_frames: Arc::new(selected_frames),
+                        integral: item.integral,
                     }
                 })
                 .collect();
@@ -5930,6 +5935,7 @@ fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<T
                 .start_frame
                 .saturating_sub(i64::try_from(layer.in_frame).unwrap_or(i64::MAX)),
             color,
+            integral: keyframes::row_value_kind(layer, &selected.row).is_integral(),
         });
     }
     series
@@ -6740,6 +6746,69 @@ mod tests {
         assert_eq!(resolved[0].color, colors.chart_1);
     }
 
+    /// The graph view plots the int row as a staircase and refuses the step
+    /// row outright: a held string has no float curve to plot, so selecting
+    /// its channel adds no series (`ParameterValue::channels` answers `None`
+    /// and this is where that lands).
+    #[test]
+    fn the_graph_view_takes_int_curves_and_refuses_step_rows() {
+        let layer_id = LayerId::new(7);
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(4, 2.0, Interpolation::Linear);
+        let mut steps = ravel_core::animation::step::StepCurve::new("a".to_string());
+        steps.insert(2, "b".to_string());
+        let node = ravel_core::graph::Node::new(NodeId::new(3), "repeat")
+            .with_param(
+                "count",
+                ravel_core::graph::ParameterValue::IntChannel(AnimationChannel::keyframes(
+                    curve.clone(),
+                )),
+            )
+            .with_param(
+                "text",
+                ravel_core::graph::ParameterValue::StringSteps(steps),
+            );
+        let layer = Layer::new(layer_id, "Animated", Graph::new().add_node(node).unwrap())
+            .with_time(0, 0, 100);
+        let composition = ravel_core::composition::Composition::new(
+            CompId::new(1),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            120,
+        )
+        .add_layer(layer);
+        let mut state = TimelinePanel::with_composition(composition);
+        let int_channel = TimelineChannelRef {
+            layer: layer_id,
+            row: PropertyRowId::Network {
+                node: NodeId::new(3),
+                key: "count".into(),
+            },
+            component: 0,
+        };
+        let step_channel = TimelineChannelRef {
+            layer: layer_id,
+            row: PropertyRowId::Network {
+                node: NodeId::new(3),
+                key: "text".into(),
+            },
+            component: 0,
+        };
+        state.select_channel(int_channel, false);
+        state.select_channel(step_channel, true);
+
+        let colors = ThemeColor::default();
+        let resolved = selected_timeline_curves(&state, &colors);
+        assert_eq!(resolved.len(), 1, "the step row contributes no series");
+        assert_eq!(resolved[0].curve.as_ref(), &curve);
+        assert!(
+            resolved[0].integral,
+            "an int row is drawn as the staircase evaluation resolves"
+        );
+    }
+
     #[test]
     fn curve_value_fit_includes_bezier_controls_and_expands_flat_values() {
         let mut bezier = KeyframeCurve::new();
@@ -6768,6 +6837,7 @@ mod tests {
             curve: Arc::new(bezier),
             frame_offset: 0,
             color: colors.chart_1,
+            integral: false,
         }])
         .unwrap();
         assert!((fitted.0 - -6.2).abs() < 1e-9);
@@ -6780,6 +6850,7 @@ mod tests {
             curve: Arc::new(flat),
             frame_offset: 0,
             color: colors.chart_1,
+            integral: false,
         }])
         .unwrap();
         assert!(flat.0 < 2.0 && flat.1 > 2.0);
@@ -6809,6 +6880,7 @@ mod tests {
                 curve: Arc::new(curve),
                 frame_offset: 10,
                 color: ThemeColor::default().chart_1,
+                integral: false,
             }],
             0.0,
             10.0,

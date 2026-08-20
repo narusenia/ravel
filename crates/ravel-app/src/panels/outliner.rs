@@ -197,6 +197,18 @@ impl OutlinerGpuiPanel {
         panel
     }
 
+    /// The rows the tree currently shows (tests and the debug inspector).
+    pub fn rows(&self) -> &[OutlinerRow] {
+        &self.rows
+    }
+
+    /// The composition this tree last synced for (tests and the debug
+    /// inspector). This is the panel's own copy, not [`super::ActiveComposition`]:
+    /// the two differ exactly while a sync is outstanding.
+    pub fn mirrored_comp(&self) -> Option<ravel_core::id::CompId> {
+        self.active_comp
+    }
+
     /// Bring the tree in step with the document *and* with the active
     /// composition, from whichever observer arrives first.
     ///

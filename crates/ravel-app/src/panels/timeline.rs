@@ -3769,6 +3769,19 @@ impl TimelineGpuiPanel {
     /// Frame rate and duration of the displayed composition, for the
     /// playback clock. `None` while no composition is active — the
     /// transport then has nothing to run over.
+    /// The composition id the mirror currently shows (tests and the debug
+    /// inspector). This is the panel's own mirror, not `ActiveComposition`:
+    /// the two differ exactly while a sync is outstanding.
+    pub fn mirrored_comp(&self) -> Option<CompId> {
+        self.state.comp_id()
+    }
+
+    /// Whether the mirror currently holds `layer` (tests and the debug
+    /// inspector).
+    pub fn mirrors_layer(&self, layer: LayerId) -> bool {
+        self.state.layer(layer).is_some()
+    }
+
     pub fn composition_params(&self) -> Option<(FrameRate, u64)> {
         self.state
             .composition()

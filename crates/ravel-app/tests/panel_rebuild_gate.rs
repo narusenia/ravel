@@ -114,6 +114,13 @@ struct Harness {
     _window: WindowHandle<Root>,
     project: Entity<ProjectState>,
     media_bin: Entity<MediaBinGpuiPanel>,
+    /// The three other mirrors, kept so a test can read what they *display*
+    /// rather than only how often they synced. A sync counter cannot tell a
+    /// rebuild from a counter increment, and the visibility catch-up is
+    /// exactly the code where that difference matters.
+    timeline: Entity<TimelineGpuiPanel>,
+    outliner: Entity<OutlinerGpuiPanel>,
+    node_editor: Entity<NodeEditorPanel>,
     /// Notifications reaching `ProjectState` observers.
     project_probe: Entity<Probe>,
     /// One probe per document-mirroring panel, `(name, probe)`.
@@ -125,6 +132,17 @@ struct Harness {
 }
 
 fn open_panels(cx: &mut TestAppContext) -> Harness {
+    open_panels_with(true, cx)
+}
+
+/// The same window with **no `VisiblePanels` global at all** — the state a
+/// headless host, or the app before its first `show_tree`, is in. Nothing is
+/// known to be hidden there, so every gate has to stay open.
+fn open_panels_without_a_visibility_publisher(cx: &mut TestAppContext) -> Harness {
+    open_panels_with(false, cx)
+}
+
+fn open_panels_with(publish_visibility: bool, cx: &mut TestAppContext) -> Harness {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/locales");
     let _ = ravel_i18n::init(&dir, "en");
     ravel_app::project_state::disable_background_eval_for_tests();
@@ -138,7 +156,9 @@ fn open_panels(cx: &mut TestAppContext) -> Harness {
         cx.set_global(panels::PlaybackPosition::default());
         // Every panel starts at the front of an area: production always has a
         // publisher, and the epoch-gate tests below predate visibility.
-        cx.set_global(panels::VisiblePanels(ALL_PANELS.into_iter().collect()));
+        if publish_visibility {
+            cx.set_global(panels::VisiblePanels(ALL_PANELS.into_iter().collect()));
+        }
         let project = cx.new(ProjectState::new);
         cx.set_global(ProjectStateHandle(project.downgrade()));
         project
@@ -196,6 +216,9 @@ fn open_panels(cx: &mut TestAppContext) -> Harness {
         _window: window,
         project,
         media_bin,
+        timeline,
+        outliner,
+        node_editor,
         project_probe,
         panel_probes,
         selection_probe,
@@ -1322,27 +1345,41 @@ fn a_hidden_properties_panel_ignores_the_playhead(cx: &mut TestAppContext) {
     );
 }
 
-/// The gate's two halves for one panel: while `instance` is behind another tab
-/// `edit` costs it nothing, and bringing it back resolves what it missed
-/// exactly once. The third step is the epoch hazard — a catch-up that recorded
-/// more than it synced would leave the gate shut for the next real edit.
+/// The gate's two halves for one panel, asserted on **what the panel shows**
+/// as well as on how often it synced.
+///
+/// `edit` makes one change and returns whatever names it; `shows` answers
+/// whether the panel's own displayed model contains that change. The counter is
+/// not enough on its own: `sync_probe::record` sits at the top of each sync
+/// function, so a catch-up that increments the counter and rebuilds nothing
+/// would satisfy every count-based assertion here while leaving the panel
+/// stale — which is the exact bug this gate can introduce.
+///
+/// The third step is the epoch hazard: a catch-up that recorded more than it
+/// synced would leave the gate shut for the next real edit.
 #[cfg(debug_assertions)]
-fn assert_the_gate_delays_and_catches_up(
+fn assert_the_gate_delays_and_catches_up<T>(
     harness: &Harness,
     instance: PanelInstanceId,
     counter: &str,
     cx: &mut TestAppContext,
-    mut edit: impl FnMut(&Harness, &mut TestAppContext),
+    mut edit: impl FnMut(&Harness, &mut TestAppContext) -> T,
+    mut shows: impl FnMut(&Harness, &T, &mut TestAppContext) -> bool,
 ) {
     set_visible(&all_but(instance), cx);
     reset_syncs();
-    edit(harness, cx);
-    edit(harness, cx);
+    let first = edit(harness, cx);
+    let second = edit(harness, cx);
     let counts = sync_counts(&format!("{counter}, hidden"));
     assert_eq!(
         count_of(&counts, counter),
         0,
         "{counter} must not run for a panel behind another tab"
+    );
+    assert!(
+        !shows(harness, &first, cx) && !shows(harness, &second, cx),
+        "{counter}: a hidden panel must still be showing the model it had \
+         before — if it already shows the edits, nothing was delayed"
     );
 
     reset_syncs();
@@ -1353,14 +1390,23 @@ fn assert_the_gate_delays_and_catches_up(
         1,
         "{counter} must resolve the skipped edits exactly once on return"
     );
+    assert!(
+        shows(harness, &first, cx) && shows(harness, &second, cx),
+        "{counter}: the panel must display both edits it missed, not merely \
+         count a sync for them"
+    );
 
     reset_syncs();
-    edit(harness, cx);
+    let third = edit(harness, cx);
     let counts = sync_counts(&format!("{counter}, edit after the return"));
     assert_eq!(
         count_of(&counts, counter),
         1,
         "{counter}: the next edit must reach a panel that is back at the front"
+    );
+    assert!(
+        shows(harness, &third, cx),
+        "{counter}: and it must be displayed"
     );
 }
 
@@ -1373,8 +1419,11 @@ fn the_timeline_delays_its_mirror_while_hidden(cx: &mut TestAppContext) {
         TIMELINE,
         "timeline.sync_from_project",
         cx,
-        |harness, cx| {
-            add_layer(harness, cx);
+        add_layer,
+        |harness, layer, cx| {
+            harness
+                .timeline
+                .read_with(cx, |panel, _| panel.mirrors_layer(*layer))
         },
     );
 }
@@ -1388,9 +1437,8 @@ fn the_outliner_delays_its_rows_while_hidden(cx: &mut TestAppContext) {
         OUTLINER,
         "outliner.rebuild_rows",
         cx,
-        |harness, cx| {
-            add_layer(harness, cx);
-        },
+        add_layer,
+        |harness, layer, cx| outliner_shows_layer(harness, *layer, cx),
     );
 }
 
@@ -1406,7 +1454,12 @@ fn the_media_bin_delays_its_rows_while_hidden(cx: &mut TestAppContext) {
         cx,
         move |harness, cx| {
             imported += 1;
-            import_still(harness, &format!("/tmp/ravel_vis_{imported}.png"), cx);
+            import_still(harness, &format!("/tmp/ravel_vis_{imported}.png"), cx)
+        },
+        |harness, asset, cx| {
+            harness.media_bin.read_with(cx, |panel, _| {
+                panel.rows().iter().any(|row| row.asset_id == *asset)
+            })
         },
     );
 }
@@ -1417,6 +1470,7 @@ fn the_node_editor_delays_its_graph_while_hidden(cx: &mut TestAppContext) {
     let harness = open_panels(cx);
     let layer = add_layer(&harness, cx);
     let (path, node) = open_layer_network(&harness, layer, cx);
+    let checked_path = path.clone();
     let mut value = 0.0;
     assert_the_gate_delays_and_catches_up(
         &harness,
@@ -1426,8 +1480,74 @@ fn the_node_editor_delays_its_graph_while_hidden(cx: &mut TestAppContext) {
         move |harness, cx| {
             value += 1.0;
             drag_tick(harness, &path, node, value, cx);
+            value
+        },
+        // A parameter drag *overwrites*: only the newest value is observable,
+        // so "does it show this edit" is asked as "does the displayed graph
+        // agree with the document" rather than as a check per value.
+        |harness, _value, cx| {
+            let displayed = displayed_node_value(harness, node, cx);
+            displayed.is_some()
+                && displayed == document_node_value(harness, &checked_path, node, cx)
         },
     );
+}
+
+/// The `value` parameter of `node` as the **document** holds it, for comparison
+/// against what the panel displays.
+#[cfg(debug_assertions)]
+fn document_node_value(
+    harness: &Harness,
+    path: &ravel_ui::document::NetworkPath,
+    node: ravel_core::id::NodeId,
+    cx: &mut TestAppContext,
+) -> Option<f32> {
+    harness.project.read_with(cx, |project, _| {
+        ravel_ui::document::resolve_network(project.document(), path)?
+            .node(node)?
+            .parameters
+            .iter()
+            .find(|param| param.key == "value")?
+            .value
+            .as_float()
+    })
+}
+
+/// Whether the Outliner's own row model holds a row for `layer`.
+#[cfg(debug_assertions)]
+fn outliner_shows_layer(
+    harness: &Harness,
+    layer: ravel_core::id::LayerId,
+    cx: &mut TestAppContext,
+) -> bool {
+    harness.outliner.read_with(cx, |panel, _| {
+        panel.rows().iter().any(|row| {
+            matches!(
+                row.kind,
+                ravel_ui::panels::outliner::OutlinerRowKind::Layer { layer: id, .. } if id == layer
+            )
+        })
+    })
+}
+
+/// The `value` parameter of `node` **as the Node Editor displays it** — read
+/// from the panel's resolved graph, not from the document.
+#[cfg(debug_assertions)]
+fn displayed_node_value(
+    harness: &Harness,
+    node: ravel_core::id::NodeId,
+    cx: &mut TestAppContext,
+) -> Option<f32> {
+    harness.node_editor.read_with(cx, |panel, _| {
+        panel
+            .displayed_graph()
+            .node(node)?
+            .parameters
+            .iter()
+            .find(|param| param.key == "value")?
+            .value
+            .as_float()
+    })
 }
 
 /// The global-driven path, and the trap in it: a composition switch that
@@ -1441,7 +1561,7 @@ fn the_node_editor_delays_its_graph_while_hidden(cx: &mut TestAppContext) {
 #[cfg(debug_assertions)]
 fn a_composition_switch_behind_a_tab_is_taken_up_on_the_return(cx: &mut TestAppContext) {
     let harness = open_panels(cx);
-    add_layer(&harness, cx);
+    let root_layer = add_layer(&harness, cx);
     let root = harness
         .project
         .read_with(cx, |project, _| project.document().root_comp)
@@ -1474,6 +1594,20 @@ fn a_composition_switch_behind_a_tab_is_taken_up_on_the_return(cx: &mut TestAppC
             "{name} must not follow a switch it cannot show"
         );
     }
+    assert_eq!(
+        harness
+            .timeline
+            .read_with(cx, |panel, _| panel.mirrored_comp()),
+        Some(other),
+        "the hidden Timeline must still mirror the composition it had"
+    );
+    assert_eq!(
+        harness
+            .outliner
+            .read_with(cx, |panel, _| panel.mirrored_comp()),
+        Some(other),
+        "the hidden Outliner must not have adopted the newly active composition"
+    );
 
     reset_syncs();
     set_visible(&ALL_PANELS, cx);
@@ -1485,6 +1619,26 @@ fn a_composition_switch_behind_a_tab_is_taken_up_on_the_return(cx: &mut TestAppC
             "{name} must take up the switch it missed"
         );
     }
+    // The counts above cannot tell a rebuild from a counter increment. These
+    // can: both mirrors have to be *showing* the composition switched to.
+    assert_eq!(
+        harness
+            .timeline
+            .read_with(cx, |panel, _| panel.mirrored_comp()),
+        Some(root),
+        "the Timeline must mirror the composition it caught up to"
+    );
+    assert_eq!(
+        harness
+            .outliner
+            .read_with(cx, |panel, _| panel.mirrored_comp()),
+        Some(root),
+        "the Outliner must have adopted the composition it caught up to"
+    );
+    assert!(
+        outliner_shows_layer(&harness, root_layer, cx),
+        "and its rows must hold that composition's layers"
+    );
 
     reset_syncs();
     cx.update(|cx| panels::set_active_composition_for_tests(Some(root), cx));
@@ -1522,5 +1676,163 @@ fn a_drag_behind_the_tabs_costs_every_mirror_nothing(cx: &mut TestAppContext) {
     assert_eq!(
         total, 0,
         "no mirror may sync while every panel is behind a tab: {counts:?}"
+    );
+}
+
+/// The Node Editor's other input is the shared layer selection, and it is
+/// gated too: selecting a layer in the Outliner or the Timeline must not make
+/// a background editor resolve a graph nobody can see.
+///
+/// `LayerSelection` is durable global state, so nothing is queued for the
+/// catch-up — the selection made while hidden simply *is* the value the global
+/// holds. What the hidden branch still has to do is drop `CanvasSelection`:
+/// the Viewer is never gated and draws its bbox from it, so a selection left
+/// pointing into the network the user walked away from would be a stale gizmo
+/// on screen.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_hidden_node_editor_ignores_a_layer_selection(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let first = add_layer(&harness, cx);
+    let (open_path, _node) = open_layer_network(&harness, first, cx);
+    let second = add_layer(&harness, cx);
+    assert!(
+        !cx.update(|cx| selected_nodes_are_empty(cx)),
+        "the setup must leave a node selected, or the clearing below proves nothing"
+    );
+
+    set_visible(&all_but(NODE_EDITOR), cx);
+    reset_syncs();
+    cx.update(|cx| panels::set_layer_selection(vec![second], cx));
+    cx.run_until_parked();
+    let counts = sync_counts("layer selection while the NodeEditor is hidden");
+
+    assert_eq!(
+        count_of(&counts, "node_editor.refresh_from_document"),
+        0,
+        "a hidden editor must not resolve the graph of a newly selected layer"
+    );
+    assert_eq!(
+        harness
+            .node_editor
+            .read_with(cx, |panel, _| panel.context().cloned()),
+        Some(open_path),
+        "the hidden editor keeps the network it had open"
+    );
+    assert!(
+        cx.update(|cx| selected_nodes_are_empty(cx)),
+        "the node selection belongs to the network the user left: it must be \
+         dropped even while hidden, because the Viewer draws from it"
+    );
+}
+
+/// Whether the published `CanvasSelection` names no nodes.
+#[cfg(debug_assertions)]
+fn selected_nodes_are_empty(cx: &gpui::App) -> bool {
+    cx.try_global::<panels::CanvasSelection>()
+        .cloned()
+        .unwrap_or_default()
+        .nodes
+        .is_empty()
+}
+
+/// The catch-up half: the selection made while hidden is applied on return,
+/// with **one** document resolve rather than two.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_node_editor_returning_to_the_front_opens_the_selected_network(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let first = add_layer(&harness, cx);
+    let (_open_path, _node) = open_layer_network(&harness, first, cx);
+    let second = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+
+    set_visible(&all_but(NODE_EDITOR), cx);
+    cx.update(|cx| panels::set_layer_selection(vec![second], cx));
+    cx.run_until_parked();
+
+    reset_syncs();
+    set_visible(&ALL_PANELS, cx);
+    let counts = sync_counts("NodeEditor returns to a selection made behind the tab");
+
+    assert_eq!(
+        harness
+            .node_editor
+            .read_with(cx, |panel, _| panel.context().cloned()),
+        Some(ravel_ui::document::NetworkPath::layer(comp, second)),
+        "the editor must open the network the selection names now"
+    );
+    assert_eq!(
+        count_of(&counts, "node_editor.refresh_from_document"),
+        1,
+        "opening the network already resolves the document: the catch-up must \
+         not resolve it a second time"
+    );
+}
+
+/// The fallback in `panels::is_instance_visible`: with **no `VisiblePanels`
+/// global at all** nothing is known to be hidden, so every gate stays open.
+///
+/// A headless host and the app before its first `show_tree` are both in that
+/// state, and a panel frozen by the *absence* of a publisher would show
+/// nothing at all.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn without_a_visibility_publisher_every_mirror_still_syncs(cx: &mut TestAppContext) {
+    let harness = open_panels_without_a_visibility_publisher(cx);
+    assert!(
+        cx.update(|cx| cx.try_global::<panels::VisiblePanels>().is_none()),
+        "this test is about the global being absent"
+    );
+
+    reset_syncs();
+    let layer = add_layer(&harness, cx);
+    let counts = sync_counts("document edit with no VisiblePanels global");
+    for name in [
+        "timeline.sync_from_project",
+        "outliner.rebuild_rows",
+        "node_editor.refresh_from_document",
+    ] {
+        assert_eq!(
+            count_of(&counts, name),
+            1,
+            "{name} must follow the document when nobody publishes visibility"
+        );
+    }
+    assert!(
+        harness
+            .timeline
+            .read_with(cx, |panel, _| panel.mirrors_layer(layer)),
+        "and the mirror must actually hold the new layer"
+    );
+    assert!(
+        outliner_shows_layer(&harness, layer, cx),
+        "and the rows must hold it too"
+    );
+
+    // Once a publisher appears, the gate behaves as everywhere else.
+    set_visible(&[], cx);
+    reset_syncs();
+    let hidden_layer = add_layer(&harness, cx);
+    let counts = sync_counts("document edit once a publisher hides everything");
+    let total: u64 = counts.iter().map(|(_, value)| *value).sum();
+    assert_eq!(
+        total, 0,
+        "a publisher that hides everything closes the gates"
+    );
+
+    set_visible(&ALL_PANELS, cx);
+    assert!(
+        harness
+            .timeline
+            .read_with(cx, |panel, _| panel.mirrors_layer(hidden_layer)),
+        "and the borrow taken while hidden is still paid back"
+    );
+    assert!(
+        outliner_shows_layer(&harness, hidden_layer, cx),
+        "for the Outliner too"
     );
 }

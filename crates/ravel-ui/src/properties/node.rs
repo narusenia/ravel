@@ -5,11 +5,13 @@
 
 use ravel_core::animation::channel::AnimationChannel;
 use ravel_core::eval::EvalContext;
-use ravel_core::graph::{Node, ParameterValue, PortSide};
+use ravel_core::graph::{Node, Parameter, ParameterValue, PortSide};
 use ravel_core::network::{
     CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
 };
 use ravel_core::registry::{NodeRegistry, ParamRange};
+
+use std::collections::HashSet;
 
 use super::{DrivenParam, PortRow, PropertyField, PropertySection};
 
@@ -93,130 +95,235 @@ fn string_field(
     }
 }
 
-/// Build a parameters section from the node's parameter list, sampling
-/// animated channels at `frame` (the owning layer's local frame).
+/// Split `node`'s parameters into display sections.
+///
+/// Returns `(group, title, parameters)` in section order. `group` is the
+/// identity the collapse state keys on (`""` for the implicit group) and
+/// `title` is what the host shows — the group's locale key.
+///
+/// The grouping comes from the registry template's
+/// [`NodeTemplate::param_groups`] — what the node *type* declares. A type
+/// that declares nothing gets one section holding every parameter, exactly
+/// as before groups existed.
+///
+/// Parameters no group claims come **first**, in one section titled
+/// `properties.section.parameters`, so a type that declares no groups (or
+/// declares them for only some of its parameters) keeps the order and the
+/// heading it always had.
+///
+/// A declaration naming a parameter the node does not have contributes
+/// nothing, and a group left with no members is dropped rather than rendered
+/// empty: a typo in a template costs that group, never the panel's rows. A
+/// key named by two groups belongs to the **first** one that names it, and a
+/// group name declared twice is one section — the name is the collapse
+/// identity, so two sections under it could not be told apart.
+///
+/// [`NodeTemplate::param_groups`]: ravel_core::registry::NodeTemplate::param_groups
+fn grouped_params<'a>(
+    node: &'a Node,
+    registry: &NodeRegistry,
+) -> Vec<(String, String, Vec<&'a Parameter>)> {
+    let mut groups: Vec<(String, String, Vec<&'a Parameter>)> = Vec::new();
+    let mut claimed: HashSet<&str> = HashSet::new();
+    let push = |groups: &mut Vec<(String, String, Vec<&'a Parameter>)>,
+                group: &str,
+                title: String,
+                param: &'a Parameter| {
+        match groups.iter_mut().find(|(id, ..)| id == group) {
+            Some((.., members)) => members.push(param),
+            None => groups.push((group.to_string(), title, vec![param])),
+        }
+    };
+
+    if let Some(template) = registry.get(&node.type_key) {
+        for (group, keys) in template.param_group_declarations() {
+            for key in keys {
+                if claimed.contains(key.as_str()) {
+                    continue;
+                }
+                let Some(param) = node.parameters.iter().find(|p| &p.key == key) else {
+                    continue;
+                };
+                claimed.insert(param.key.as_str());
+                push(
+                    &mut groups,
+                    group,
+                    crate::node_locale::group_key(&node.type_key, group),
+                    param,
+                );
+            }
+        }
+    }
+
+    let ungrouped: Vec<&'a Parameter> = node
+        .parameters
+        .iter()
+        .filter(|p| !claimed.contains(p.key.as_str()))
+        .collect();
+    if !ungrouped.is_empty() {
+        groups.insert(
+            0,
+            (
+                String::new(),
+                "properties.section.parameters".to_string(),
+                ungrouped,
+            ),
+        );
+    }
+    groups
+}
+
+/// The parameter groups `node` displays: `(group, section title)` in section
+/// order, the same split [`node_params_sections`] renders.
+///
+/// The host needs the pair to key the collapse state on `(type_key, group)`
+/// while showing `title`: `title` alone would put a locale key in
+/// `ui_state.json`.
+pub fn param_group_titles(node: &Node, registry: &NodeRegistry) -> Vec<(String, String)> {
+    grouped_params(node, registry)
+        .into_iter()
+        .map(|(group, title, _)| (group, title))
+        .collect()
+}
+
+/// One property row for the parameter `p` of `node`, sampling animated
+/// channels at `frame` (the owning layer's local frame).
 ///
 /// Each `ParameterValue` variant maps to the corresponding `PropertyField`
 /// variant. Numeric fields pick up hard/UI ranges from the node's registry
 /// template when one is declared. String parameters with a registry-declared
 /// option set (e.g. merge `operation`, math `op`) render as an `Enum`.
-pub fn node_params_section(
+fn param_field(
+    node: &Node,
+    p: &Parameter,
+    registry: &NodeRegistry,
+    frame: u64,
+    eval: &EvalContext,
+    driven: &[DrivenParam],
+) -> PropertyField {
+    // A parameter driven by a connected port is read-only: the
+    // stored value is an inert fallback while the edge exists
+    // (param-input-ports-plan Phase 4).
+    if let Some(driving) = driven.iter().find(|d| d.key == p.key) {
+        let value = driving.value.as_deref().unwrap_or("connected");
+        return PropertyField::ReadOnly {
+            key: p.key.clone(),
+            value: format!("{value} ← {}", driving.source),
+        };
+    }
+    let ranges = registry.param_range(&node.type_key, &p.key);
+    match &p.value {
+        ParameterValue::Float(v) => PropertyField::Float {
+            key: p.key.clone(),
+            value: *v,
+            range: ranges.map(|r| r.hard.clone()),
+            ui_range: ranges.map(|r| r.ui.clone()),
+            step: Some(0.01),
+        },
+        ParameterValue::Int(v) => int_field(p.key.clone(), *v, ranges),
+        ParameterValue::Bool(v) => PropertyField::Bool {
+            key: p.key.clone(),
+            value: *v,
+        },
+        ParameterValue::String(v) => {
+            string_field(p.key.clone(), v.clone(), registry, &node.type_key)
+        }
+        ParameterValue::Channel(ch) => PropertyField::Float {
+            key: p.key.clone(),
+            value: channel_display_value(ch, frame, eval),
+            range: ranges.map(|r| r.hard.clone()),
+            ui_range: ranges.map(|r| r.ui.clone()),
+            step: Some(0.01),
+        },
+        ParameterValue::Channel2(chs) => PropertyField::Vector {
+            key: p.key.clone(),
+            components: chs
+                .iter()
+                .map(|ch| channel_display_value(ch, frame, eval))
+                .collect(),
+            range: ranges.map(|r| r.hard.clone()),
+            ui_range: ranges.map(|r| r.ui.clone()),
+            step: Some(0.01),
+        },
+        ParameterValue::Channel3(chs) => PropertyField::Vector {
+            key: p.key.clone(),
+            components: chs
+                .iter()
+                .map(|ch| channel_display_value(ch, frame, eval))
+                .collect(),
+            range: ranges.map(|r| r.hard.clone()),
+            ui_range: ranges.map(|r| r.ui.clone()),
+            step: Some(0.01),
+        },
+        ParameterValue::Channel4(chs) => PropertyField::Color {
+            key: p.key.clone(),
+            r: channel_display_value(&chs[0], frame, eval),
+            g: channel_display_value(&chs[1], frame, eval),
+            b: channel_display_value(&chs[2], frame, eval),
+            a: channel_display_value(&chs[3], frame, eval),
+        },
+        // Path control points are edited on the canvas (pen tool);
+        // Properties shows a read-only summary (REQ-UI-011).
+        ParameterValue::PathPoints(points) => PropertyField::ReadOnly {
+            key: p.key.clone(),
+            value: format!("{} points", points.len()),
+        },
+        // Curves carry their control points into the row; the host
+        // shows a thumbnail and expands an inline editor under it.
+        ParameterValue::Curve(curve) => PropertyField::Curve {
+            key: p.key.clone(),
+            curve: curve.clone(),
+        },
+        // Ramps carry their stops into the row the same way; the host
+        // shows a gradient band and expands an inline editor under it.
+        ParameterValue::Ramp(ramp) => PropertyField::Ramp {
+            key: p.key.clone(),
+            ramp: ramp.clone(),
+        },
+        // An animatable int is the same row as a constant one: the
+        // spinner edits the int this frame reads, and the write path
+        // keeps the channel (a keyed channel gains a key at the frame,
+        // a constant one has its constant replaced). Anything else
+        // would make the row a display that discards its own edits.
+        ParameterValue::IntChannel(ch) => int_field(
+            p.key.clone(),
+            channel_display_value(ch, frame, eval).round() as i32,
+            ranges,
+        ),
+        // Likewise for an animatable string: the same text box or
+        // dropdown as the constant spelling, showing the string this
+        // frame holds.
+        ParameterValue::StringSteps(steps) => string_field(
+            p.key.clone(),
+            steps.sample(frame as f64).clone(),
+            registry,
+            &node.type_key,
+        ),
+    }
+}
+
+/// Build the parameter sections of a node, sampling animated channels at
+/// `frame` (the owning layer's local frame).
+///
+/// One section per display group ([`grouped_params`]); a node whose type
+/// declares no groups gets the single section it always had.
+pub fn node_params_sections(
     node: &Node,
     registry: &NodeRegistry,
     frame: u64,
     eval: &EvalContext,
     driven: &[DrivenParam],
-) -> PropertySection {
-    let fields = node
-        .parameters
-        .iter()
-        .map(|p| {
-            // A parameter driven by a connected port is read-only: the
-            // stored value is an inert fallback while the edge exists
-            // (param-input-ports-plan Phase 4).
-            if let Some(driving) = driven.iter().find(|d| d.key == p.key) {
-                let value = driving.value.as_deref().unwrap_or("connected");
-                return PropertyField::ReadOnly {
-                    key: p.key.clone(),
-                    value: format!("{value} ← {}", driving.source),
-                };
-            }
-            let ranges = registry.param_range(&node.type_key, &p.key);
-            match &p.value {
-                ParameterValue::Float(v) => PropertyField::Float {
-                    key: p.key.clone(),
-                    value: *v,
-                    range: ranges.map(|r| r.hard.clone()),
-                    ui_range: ranges.map(|r| r.ui.clone()),
-                    step: Some(0.01),
-                },
-                ParameterValue::Int(v) => int_field(p.key.clone(), *v, ranges),
-                ParameterValue::Bool(v) => PropertyField::Bool {
-                    key: p.key.clone(),
-                    value: *v,
-                },
-                ParameterValue::String(v) => {
-                    string_field(p.key.clone(), v.clone(), registry, &node.type_key)
-                }
-                ParameterValue::Channel(ch) => PropertyField::Float {
-                    key: p.key.clone(),
-                    value: channel_display_value(ch, frame, eval),
-                    range: ranges.map(|r| r.hard.clone()),
-                    ui_range: ranges.map(|r| r.ui.clone()),
-                    step: Some(0.01),
-                },
-                ParameterValue::Channel2(chs) => PropertyField::Vector {
-                    key: p.key.clone(),
-                    components: chs
-                        .iter()
-                        .map(|ch| channel_display_value(ch, frame, eval))
-                        .collect(),
-                    range: ranges.map(|r| r.hard.clone()),
-                    ui_range: ranges.map(|r| r.ui.clone()),
-                    step: Some(0.01),
-                },
-                ParameterValue::Channel3(chs) => PropertyField::Vector {
-                    key: p.key.clone(),
-                    components: chs
-                        .iter()
-                        .map(|ch| channel_display_value(ch, frame, eval))
-                        .collect(),
-                    range: ranges.map(|r| r.hard.clone()),
-                    ui_range: ranges.map(|r| r.ui.clone()),
-                    step: Some(0.01),
-                },
-                ParameterValue::Channel4(chs) => PropertyField::Color {
-                    key: p.key.clone(),
-                    r: channel_display_value(&chs[0], frame, eval),
-                    g: channel_display_value(&chs[1], frame, eval),
-                    b: channel_display_value(&chs[2], frame, eval),
-                    a: channel_display_value(&chs[3], frame, eval),
-                },
-                // Path control points are edited on the canvas (pen tool);
-                // Properties shows a read-only summary (REQ-UI-011).
-                ParameterValue::PathPoints(points) => PropertyField::ReadOnly {
-                    key: p.key.clone(),
-                    value: format!("{} points", points.len()),
-                },
-                // Curves carry their control points into the row; the host
-                // shows a thumbnail and expands an inline editor under it.
-                ParameterValue::Curve(curve) => PropertyField::Curve {
-                    key: p.key.clone(),
-                    curve: curve.clone(),
-                },
-                // Ramps carry their stops into the row the same way; the host
-                // shows a gradient band and expands an inline editor under it.
-                ParameterValue::Ramp(ramp) => PropertyField::Ramp {
-                    key: p.key.clone(),
-                    ramp: ramp.clone(),
-                },
-                // An animatable int is the same row as a constant one: the
-                // spinner edits the int this frame reads, and the write path
-                // keeps the channel (a keyed channel gains a key at the frame,
-                // a constant one has its constant replaced). Anything else
-                // would make the row a display that discards its own edits.
-                ParameterValue::IntChannel(ch) => int_field(
-                    p.key.clone(),
-                    channel_display_value(ch, frame, eval).round() as i32,
-                    ranges,
-                ),
-                // Likewise for an animatable string: the same text box or
-                // dropdown as the constant spelling, showing the string this
-                // frame holds.
-                ParameterValue::StringSteps(steps) => string_field(
-                    p.key.clone(),
-                    steps.sample(frame as f64).clone(),
-                    registry,
-                    &node.type_key,
-                ),
-            }
+) -> Vec<PropertySection> {
+    grouped_params(node, registry)
+        .into_iter()
+        .map(|(_, title, params)| PropertySection {
+            title,
+            fields: params
+                .into_iter()
+                .map(|p| param_field(node, p, registry, frame, eval, driven))
+                .collect(),
         })
-        .collect();
-
-    PropertySection {
-        title: "properties.section.parameters".into(),
-        fields,
-    }
+        .collect()
 }
 
 /// Build the Ports section of a network interface node, or `None` for any
@@ -277,9 +384,7 @@ pub fn sections_for_node(
     context: NetworkContext,
 ) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node, registry)];
-    if !node.parameters.is_empty() {
-        sections.push(node_params_section(node, registry, frame, eval, driven));
-    }
+    sections.extend(node_params_sections(node, registry, frame, eval, driven));
     // Last: the ports are the node's shape, and a user reading an In node
     // wants its values before its plumbing.
     sections.extend(node_ports_section(node, context));
@@ -291,6 +396,31 @@ mod tests {
     use super::*;
     use ravel_core::id::{DataTypeId, NodeId};
     use ravel_core::registry::builtin::register_builtins;
+
+    /// The single parameters section of a node whose type declares no groups
+    /// — the shape every test below this line was written against (an empty
+    /// one for a node with no parameters, which is what the pre-split
+    /// builder returned). It shadows the glob-imported plural, so a node that
+    /// *does* declare groups fails here instead of silently having its extra
+    /// sections dropped.
+    fn node_params_section(
+        node: &Node,
+        registry: &NodeRegistry,
+        frame: u64,
+        eval: &EvalContext,
+        driven: &[DrivenParam],
+    ) -> PropertySection {
+        let mut sections = node_params_sections(node, registry, frame, eval, driven);
+        assert!(
+            sections.len() <= 1,
+            "{} declares parameter groups",
+            node.type_key
+        );
+        sections.pop().unwrap_or(PropertySection {
+            title: "properties.section.parameters".into(),
+            fields: Vec::new(),
+        })
+    }
 
     /// Display context for the sections. Only `fps` and the resolutions are
     /// read, and only by an expression-driven channel.
@@ -1016,5 +1146,242 @@ mod tests {
             }
             _ => panic!("expected Float"),
         }
+    }
+    // ----- parameter groups (parameter-groups-plan, PGRP-1) ----------------
+
+    /// A registry holding one template that declares groups over the six
+    /// parameters `grouped_node` creates.
+    fn grouped_registry(groups: &[(&str, &[&str])]) -> NodeRegistry {
+        use ravel_core::registry::{NodeCategory, NodeTemplate};
+        let mut template = NodeTemplate::new("test.grouped", "Grouped", NodeCategory::Utility);
+        for key in ["a", "b", "c", "d", "e", "f"] {
+            template = template.with_param(ravel_core::graph::Parameter {
+                key: key.into(),
+                value: ParameterValue::Float(0.0),
+            });
+        }
+        for (name, keys) in groups {
+            template = template.with_param_group(*name, keys.iter().copied());
+        }
+        let mut registry = NodeRegistry::new();
+        registry.register(template);
+        registry
+    }
+
+    fn grouped_node(registry: &NodeRegistry) -> Node {
+        registry
+            .create_node("test.grouped", NodeId::new(1))
+            .expect("test.grouped is registered")
+    }
+
+    /// The section titles and the field keys under each, which is the whole
+    /// observable output of the split.
+    fn split(node: &Node, registry: &NodeRegistry) -> Vec<(String, Vec<String>)> {
+        node_params_sections(node, registry, 0, &eval(), &[])
+            .into_iter()
+            .map(|section| {
+                (
+                    section.title,
+                    section
+                        .fields
+                        .iter()
+                        .map(|field| field.key().to_string())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// A type that declares no group keeps the single section it always had,
+    /// holding every parameter in declaration order.
+    #[test]
+    fn a_type_without_group_declarations_keeps_one_parameters_section() {
+        let registry = grouped_registry(&[]);
+        assert_eq!(
+            split(&grouped_node(&registry), &registry),
+            vec![(
+                "properties.section.parameters".to_string(),
+                vec!["a", "b", "c", "d", "e", "f"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            )]
+        );
+    }
+
+    /// Declared groups become sections in declaration order, each holding the
+    /// keys it names in the order it names them, and each titled with its
+    /// `node.<type_key>.group.<name>` locale key.
+    #[test]
+    fn declared_groups_split_into_sections_in_declaration_order() {
+        let registry = grouped_registry(&[
+            ("shape", &["c", "a"]),
+            ("paint", &["b", "d"]),
+            ("output", &["f", "e"]),
+        ]);
+        assert_eq!(
+            split(&grouped_node(&registry), &registry),
+            vec![
+                (
+                    "node.test.grouped.group.shape".to_string(),
+                    vec!["c".to_string(), "a".to_string()]
+                ),
+                (
+                    "node.test.grouped.group.paint".to_string(),
+                    vec!["b".to_string(), "d".to_string()]
+                ),
+                (
+                    "node.test.grouped.group.output".to_string(),
+                    vec!["f".to_string(), "e".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// A parameter no declaration names lands in the implicit section, which
+    /// comes **first** so a partially grouped type still opens on the rows it
+    /// always opened on.
+    #[test]
+    fn a_key_no_group_names_falls_into_the_leading_implicit_section() {
+        let registry = grouped_registry(&[("shape", &["c", "d"])]);
+        assert_eq!(
+            split(&grouped_node(&registry), &registry),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["a", "b", "e", "f"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    "node.test.grouped.group.shape".to_string(),
+                    vec!["c".to_string(), "d".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// A declaration naming a key the type does not have drops that key, and
+    /// a group left with nothing is not rendered at all: a typo in a template
+    /// must not cost the panel a row or add an empty heading.
+    #[test]
+    fn a_group_naming_a_missing_parameter_drops_it_and_an_empty_group() {
+        let registry = grouped_registry(&[("shape", &["a", "typo"]), ("ghost", &["nope"])]);
+        assert_eq!(
+            split(&grouped_node(&registry), &registry),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["b", "c", "d", "e", "f"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    "node.test.grouped.group.shape".to_string(),
+                    vec!["a".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// A key named by two groups belongs to the first that names it — one
+    /// parameter is one row, and the alternative (rendering it twice) would
+    /// give the same parameter two widgets writing the same value.
+    #[test]
+    fn a_key_named_by_two_groups_belongs_to_the_first() {
+        let registry = grouped_registry(&[("shape", &["a", "b"]), ("paint", &["b", "c"])]);
+        assert_eq!(
+            split(&grouped_node(&registry), &registry),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["d", "e", "f"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    "node.test.grouped.group.shape".to_string(),
+                    vec!["a".to_string(), "b".to_string()]
+                ),
+                (
+                    "node.test.grouped.group.paint".to_string(),
+                    vec!["c".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// One group name is one section even when declared twice: the name is
+    /// the collapse identity, so two sections under it could not be told
+    /// apart.
+    #[test]
+    fn a_group_name_declared_twice_is_one_section() {
+        let registry = grouped_registry(&[("shape", &["a"]), ("paint", &["b"]), ("shape", &["c"])]);
+        assert_eq!(
+            split(&grouped_node(&registry), &registry),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["d", "e", "f"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    "node.test.grouped.group.shape".to_string(),
+                    vec!["a".to_string(), "c".to_string()]
+                ),
+                (
+                    "node.test.grouped.group.paint".to_string(),
+                    vec!["b".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// The collapse identities the host keys on, paired with what it shows.
+    #[test]
+    fn param_group_titles_pair_the_identity_with_the_heading() {
+        let registry = grouped_registry(&[("shape", &["a"])]);
+        assert_eq!(
+            param_group_titles(&grouped_node(&registry), &registry),
+            vec![
+                (String::new(), "properties.section.parameters".to_string()),
+                (
+                    "shape".to_string(),
+                    "node.test.grouped.group.shape".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Every section the split produces reaches [`sections_for_node`], between
+    /// the info section and the ports section.
+    #[test]
+    fn sections_for_node_carries_every_parameter_group() {
+        let registry = grouped_registry(&[("shape", &["a"]), ("paint", &["b"])]);
+        let titles: Vec<String> = sections_for_node(
+            &grouped_node(&registry),
+            &registry,
+            0,
+            &eval(),
+            &[],
+            NetworkContext::LayerRoot,
+        )
+        .into_iter()
+        .map(|section| section.title)
+        .collect();
+        assert_eq!(
+            titles,
+            vec![
+                "properties.section.node_info",
+                "properties.section.parameters",
+                "node.test.grouped.group.shape",
+                "node.test.grouped.group.paint",
+            ]
+        );
     }
 }

@@ -30,6 +30,16 @@ pub fn param_key(type_key: &str, param: &str) -> String {
     format!("node.{type_key}.params.{param}")
 }
 
+/// Locale key of one parameter group's heading:
+/// `node.<type_key>.group.<group>`.
+///
+/// Only a group the **type** declares gets a key. An In node's instance
+/// groups are the user's own text (`NETIF-2` parameters have no type to
+/// declare them), so those titles are literal and never come through here.
+pub fn group_key(type_key: &str, group: &str) -> String {
+    format!("node.{type_key}.group.{group}")
+}
+
 /// The node's stored label when the user renamed it away from the template
 /// default. `NodeTemplate::create_node` seeds `metadata.label` with the
 /// template's label, so an instance whose label still matches its template

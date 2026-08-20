@@ -108,6 +108,17 @@ pub struct NodeTemplate {
     pub param_options: HashMap<String, Vec<String>>,
     /// Geometric meanings the Viewer's manipulator reads.
     pub param_roles: HashMap<String, ParamRole>,
+    /// Display groups for this type's parameters: a group name (whose locale
+    /// key is `node.<type_key>.group.<name>`) and the parameter keys it
+    /// holds, in the order the Properties sections should appear.
+    ///
+    /// A `Vec` rather than the `HashMap` the metadata above uses because the
+    /// order *is* part of the declaration here — it decides the section
+    /// order, and a hash map has none. Parameters no group names stay
+    /// together in one leading section, so a type that declares nothing
+    /// looks exactly as it did
+    /// (`docs/implementation/parameter-groups-plan.md`, PGRP-1).
+    pub param_groups: Vec<(String, Vec<String>)>,
 }
 
 impl NodeTemplate {
@@ -127,6 +138,7 @@ impl NodeTemplate {
             param_ranges: HashMap::new(),
             param_options: HashMap::new(),
             param_roles: HashMap::new(),
+            param_groups: Vec::new(),
         }
     }
 
@@ -191,6 +203,28 @@ impl NodeTemplate {
 
     pub fn param_role(&self, key: &str) -> Option<ParamRole> {
         self.param_roles.get(key).copied()
+    }
+
+    /// Declares one display group: `name` (the group's locale key is
+    /// `node.<type_key>.group.<name>`) holding `keys`, appended after the
+    /// groups declared before it.
+    ///
+    /// Nothing validates `keys` against [`Self::default_params`]: a key the
+    /// type does not have is dropped where the sections are built, so a typo
+    /// costs the parameter its group rather than the panel its rows.
+    pub fn with_param_group<S: Into<String>>(
+        mut self,
+        name: impl Into<String>,
+        keys: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.param_groups
+            .push((name.into(), keys.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    /// The declared display groups, in section order.
+    pub fn param_group_declarations(&self) -> &[(String, Vec<String>)] {
+        &self.param_groups
     }
 
     /// Instantiate this template as a node with `id`.

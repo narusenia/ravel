@@ -133,6 +133,9 @@
 - **保存側は書く前に `Document::validate_subnet_depth` を通す**
   （`ProjectFile::to_archive_for_root`）。シリアライザ自身には再帰上限が無いので、
   検査しなければ「読めないファイル」を書けてしまう
+- **`.ravtpl` も同じ**（`subgraph_template::save_new` / `replace` が
+  `SubgraphTemplate::check_nesting` をファイル作成前に通す）。`capture` は
+  文書側の上限を見ないので、深いサブネットからテンプレートを作れてしまう
 - **`MAX_SUBNET_DEPTH` を上げるときは `RON_RECURSION_LIMIT` も上げる。**
   サブネット 1 段は RON の約 8 段（レイヤーネットワーク経路の実測）。
   ただし**再帰予算はスタックの上限でもある**: 実測でサブネット 64 段 =

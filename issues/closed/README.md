@@ -66,8 +66,9 @@
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `21` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33` `34` `35`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09` `10`
-  （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した — デシリアライズ経路が
-  無防備。[`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
+  （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した。デシリアライズ経路は
+  `HIGH-26` で閉じたが、評価側の再帰が残るので未解決のまま。
+  [`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07`
 - [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `03` `04` `05` `06`
   （`MED-UI-02` は**部分的に解決**で未解決のまま — 非表示スキップが

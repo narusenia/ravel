@@ -26,6 +26,9 @@
 >   個票が「保存はこの上限で検証される」と書いていたのは**誤り**で、実際には
 >   保存経路に検査は 1 つも無く、シリアライザ自身にも再帰上限が無かった。
 >   つまり深さは無制限に書けていた
+> - **`.ravtpl` 側の同型の穴も塞いだ**（独立レビューの指摘）。`save_new` /
+>   `replace` は `to_ron` しか呼んでおらず、`load` が拒否するテンプレートを
+>   ファイルとして作れた。ファイル作成前に `check_nesting` を通す
 > - 不変条件「**保存できたものは開ける**」を `docs/dev/persistence.md` に明記し、
 >   上限の両側をテストで固定した（`a_document_nested_to_the_limit_survives_a_save_and_a_load`
 >   / `a_document_nested_past_the_limit_is_refused_by_the_save`）。3 本とも

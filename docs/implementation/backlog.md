@@ -61,8 +61,8 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
-| DISK-1 | `IntChannel` と解決層（Int のキーフレーム） | `discrete-keyframes-plan.md` |
-| AID-1 | `AssetId` 型と `MediaAssetEntry` の分離 | `asset-identity-plan.md` |
+| DISK-2 | `StepCurve<String>` と `StringSteps`（String のキーフレーム） | `discrete-keyframes-plan.md` |
+| AID-3 | インポートの採番と MediaBin の改名 UI | `asset-identity-plan.md` |
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
@@ -709,8 +709,8 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| DISK-1 | 🟡 | `IntChannel` と解決層（フォーマット上げ） | — |
-| DISK-2 | ⬜ | `StepCurve<String>` と `StringSteps` | DISK-1 |
+| DISK-1 | ✅ #457 | `IntChannel` と解決層（フォーマット上げ。`.ravprj` v10） | — |
+| DISK-2 | 🟡 | `StepCurve<String>` と `StringSteps` | DISK-1 ✅ |
 | DISK-3 | ⬜ | Properties のキーフレームトグルと再型付け | DISK-1, DISK-2 |
 | DISK-4 | ⬜ | Timeline の行とキーフレーム編集 | DISK-3 |
 | DISK-5 | ⬜ | カーブエディタの階段描画（Int のみ） | DISK-4 |
@@ -720,9 +720,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| AID-1 | 🟡 | `AssetId` 型と `MediaAssetEntry` の分離（フォーマット上げ + 移行） | — |
-| AID-2 | ⬜ | 参照 3 系統の切り替え | AID-1 |
-| AID-3 | ⬜ | インポートの採番と MediaBin の改名 UI | AID-2 |
+| AID-1 | ✅ #456 | `AssetId` 型と `MediaAssetEntry` の分離（フォーマット上げ + 移行。`.ravprj` v9） | — |
+| AID-2 | ✅ #456 | 参照 3 系統の切り替え | AID-1 ✅ |
+| AID-3 | 🟡 | インポートの採番と MediaBin の改名 UI（**露出宣言の所有権をここで決める** — 計画書参照） | AID-2 ✅ |
 | AID-4 | ⬜ | ロケール / 文書 | AID-1〜3 |
 
 ### パラメータのグループ（`parameter-groups-plan.md`）

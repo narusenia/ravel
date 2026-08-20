@@ -56,7 +56,9 @@ use thiserror::Error;
 /// v8: `ParameterValue` gained the `Ramp` variant (colour ramps) — same
 /// reasoning as v6. Appending keeps *older* entries decodable, but an old
 /// binary meeting a `Ramp` entry is the case the version guards.
-pub const JOURNAL_FORMAT_VERSION: u32 = 8;
+/// v9: `ParameterValue` gained the `IntChannel` variant (animatable ints) —
+/// same reasoning as v6 and v8.
+pub const JOURNAL_FORMAT_VERSION: u32 = 9;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
@@ -556,6 +558,38 @@ mod tests {
                 .find(|p| p.key == "stops")
                 .map(|p| &p.value),
             Some(&ParameterValue::Ramp(ramp))
+        );
+    }
+
+    /// The v9 layout change: `ParameterValue::IntChannel` must round-trip
+    /// through the bincode journal codec, keyframes and all.
+    #[test]
+    fn bincode_roundtrip_preserves_int_channels() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::animation::{Interpolation, KeyframeCurve};
+        use crate::graph::ParameterValue;
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 3.0, Interpolation::Linear);
+        curve.insert(12, 9.0, Interpolation::Linear);
+        let value = ParameterValue::IntChannel(AnimationChannel::keyframes(curve));
+        let entry = JournalEntry {
+            sequence: 10,
+            timestamp_secs: 1700000000,
+            mutation: GraphMutation::AddNode(
+                Node::new(NodeId::new(12), "shape.polygon").with_param("sides", value.clone()),
+            ),
+        };
+        let data = BincodeCodec.encode(&entry).unwrap();
+        let decoded = BincodeCodec.decode(&data).unwrap();
+        let GraphMutation::AddNode(node) = decoded.mutation else {
+            panic!("expected AddNode");
+        };
+        assert_eq!(
+            node.parameters
+                .iter()
+                .find(|p| p.key == "sides")
+                .map(|p| &p.value),
+            Some(&value)
         );
     }
 

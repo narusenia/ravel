@@ -77,7 +77,7 @@ enum ParameterValue {
     // （カーブ自体のアニメーションは v1 非対象）。v6 より前は
     // `"0:0,1:1"` 文字列だった
     Curve(CurveParam),                      // CurvePoint { x, y, interpolation, tangents }
-    // カラーランプ（`field.ramp` のストップ列）。定数のみ
+    // カラーランプ（`field.ramp` / `color.ramp` のストップ列）。定数のみ
     Ramp(RampParam),                        // RampStop { position, color } + 補間種別
     // アニメーション可能な整数（繰り返し数、分割数、列挙の選択）。中身は
     // 通常の f32 チャネルで、読み出し時に round() して i32 にする。

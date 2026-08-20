@@ -20,6 +20,11 @@
 //! `*_sync_counts` tests below drive one gesture and assert how many times each
 //! sync function actually ran. `docs/implementation/perf-baseline.md` records
 //! how to run them and what the numbers were.
+//!
+//! The second gate is visibility (`MED-UI-02`): a panel behind another tab
+//! delays its sync and pays it off when it comes back. Those tests are at the
+//! end of this file — the same panels, driven with `panels::VisiblePanels`
+//! published the way `WindowHost::show_tree` publishes it.
 
 use gpui::{
     AppContext as _, Entity, ParentElement as _, Pixels, Size, Styled as _, TestAppContext,
@@ -35,11 +40,39 @@ use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::{AssetKind, AssetMetadata};
 use ravel_core::id::AssetId;
 use ravel_core::runtime::InvalidationHint;
+use ravel_ui::layout::PanelInstanceId;
 
 const WINDOW_SIZE: Size<Pixels> = Size {
     width: px(800.0),
     height: px(600.0),
 };
+
+/// One instance id per panel, so a test can hide one panel and leave the rest
+/// alone. The panels never interpret the id; they only ask whether it is in
+/// `panels::VisiblePanels`.
+const NODE_EDITOR: PanelInstanceId = PanelInstanceId(1);
+const TIMELINE: PanelInstanceId = PanelInstanceId(2);
+const OUTLINER: PanelInstanceId = PanelInstanceId(3);
+const MEDIA_BIN: PanelInstanceId = PanelInstanceId(4);
+const PROPERTIES: PanelInstanceId = PanelInstanceId(5);
+const ALL_PANELS: [PanelInstanceId; 5] = [NODE_EDITOR, TIMELINE, OUTLINER, MEDIA_BIN, PROPERTIES];
+
+/// Publish the front tabs, the way `WindowHost::show_tree` does. Anything not
+/// listed is behind another tab.
+fn set_visible(instances: &[PanelInstanceId], cx: &mut TestAppContext) {
+    let visible = instances.iter().copied().collect();
+    cx.update(|cx| cx.set_global(panels::VisiblePanels(visible)));
+    cx.run_until_parked();
+}
+
+/// The five panels minus `hidden`.
+fn all_but(hidden: PanelInstanceId) -> Vec<PanelInstanceId> {
+    ALL_PANELS
+        .iter()
+        .copied()
+        .filter(|instance| *instance != hidden)
+        .collect()
+}
 
 /// All five panels that observe the document, so a gate removed from any one of
 /// them fails a test.
@@ -103,6 +136,9 @@ fn open_panels(cx: &mut TestAppContext) -> Harness {
         cx.set_global(panels::CanvasSelection::default());
         cx.set_global(panels::LayerSelection::default());
         cx.set_global(panels::PlaybackPosition::default());
+        // Every panel starts at the front of an area: production always has a
+        // publisher, and the epoch-gate tests below predate visibility.
+        cx.set_global(panels::VisiblePanels(ALL_PANELS.into_iter().collect()));
         let project = cx.new(ProjectState::new);
         cx.set_global(ProjectStateHandle(project.downgrade()));
         project
@@ -112,17 +148,11 @@ fn open_panels(cx: &mut TestAppContext) -> Harness {
     let captured_in_window = captured.clone();
     let window = cx.open_window(WINDOW_SIZE, move |window, cx| {
         let panels = Panels {
-            node_editor: cx
-                .new(|cx| NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
-            timeline: cx
-                .new(|cx| TimelineGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
-            outliner: cx
-                .new(|cx| OutlinerGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
-            media_bin: cx
-                .new(|cx| MediaBinGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)),
-            properties: cx.new(|cx| {
-                PropertiesGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
-            }),
+            node_editor: cx.new(|cx| NodeEditorPanel::new(NODE_EDITOR, window, cx)),
+            timeline: cx.new(|cx| TimelineGpuiPanel::new(TIMELINE, window, cx)),
+            outliner: cx.new(|cx| OutlinerGpuiPanel::new(OUTLINER, window, cx)),
+            media_bin: cx.new(|cx| MediaBinGpuiPanel::new(MEDIA_BIN, window, cx)),
+            properties: cx.new(|cx| PropertiesGpuiPanel::new(PROPERTIES, window, cx)),
         };
         *captured_in_window.borrow_mut() = Some((
             panels.node_editor.clone(),
@@ -401,6 +431,54 @@ fn a_parameter_drag_sync_counts(cx: &mut TestAppContext) {
     }
 }
 
+/// Make `layer` the Properties target, the way a click in the Outliner does.
+#[cfg(debug_assertions)]
+fn select_layer_target(
+    comp: ravel_core::id::CompId,
+    layer: ravel_core::id::LayerId,
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(panels::SelectedPropertiesTarget(
+            panels::PropertiesTarget::Layer {
+                comp_id: comp,
+                layer_id: layer,
+            },
+        ));
+    });
+    cx.run_until_parked();
+}
+
+/// Keyframe `layer`'s opacity from 0 to 1 over 30 frames, so what Properties
+/// displays for it is different at every frame.
+#[cfg(debug_assertions)]
+fn animate_opacity(
+    harness: &Harness,
+    comp: ravel_core::id::CompId,
+    layer: ravel_core::id::LayerId,
+    cx: &mut TestAppContext,
+) {
+    harness.project.update(cx, |project, cx| {
+        let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
+        curve.insert(
+            0,
+            0.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        curve.insert(
+            30,
+            1.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        let document = ravel_ui::document::update_layer(project.document(), comp, layer, |layer| {
+            layer.opacity = ravel_core::animation::channel::AnimationChannel::keyframes(curve);
+        })
+        .unwrap();
+        project.commit_document(document, InvalidationHint::None, cx);
+    });
+    cx.run_until_parked();
+}
+
 /// Advance the playhead over `frames` frames at 30 fps, the way the transport
 /// publishes it.
 #[cfg(debug_assertions)]
@@ -496,32 +574,8 @@ fn an_animated_layer_still_follows_the_playhead(cx: &mut TestAppContext) {
     cx.run_until_parked();
     play(2, cx);
 
-    harness.project.update(cx, |project, cx| {
-        let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
-        curve.insert(
-            0,
-            0.0,
-            ravel_core::animation::interpolation::Interpolation::Linear,
-        );
-        curve.insert(
-            30,
-            1.0,
-            ravel_core::animation::interpolation::Interpolation::Linear,
-        );
-        let document = ravel_ui::document::update_layer(project.document(), comp, layer, |layer| {
-            layer.opacity = ravel_core::animation::channel::AnimationChannel::keyframes(curve);
-        })
-        .unwrap();
-        project.commit_document(document, InvalidationHint::None, cx);
-    });
-    cx.update(|cx| {
-        cx.set_global(panels::SelectedPropertiesTarget(
-            panels::PropertiesTarget::Layer {
-                comp_id: comp,
-                layer_id: layer,
-            },
-        ));
-    });
+    animate_opacity(&harness, comp, layer, cx);
+    select_layer_target(comp, layer, cx);
     cx.run_until_parked();
 
     const FRAMES: u64 = 30;
@@ -1131,4 +1185,135 @@ fn an_unchanged_selection_is_not_republished(cx: &mut TestAppContext) {
             .unwrap_or_default()
     });
     assert_eq!(after, opened, "the selection itself must be preserved");
+}
+
+// ---------------------------------------------------------------------------
+// The visibility gate (MED-UI-02)
+// ---------------------------------------------------------------------------
+
+/// A panel behind another tab has no reader, so the document edits that arrive
+/// while it is back there cost it nothing.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_hidden_properties_panel_resolves_nothing(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    select_layer_target(comp, layer, cx);
+
+    set_visible(&all_but(PROPERTIES), cx);
+    reset_syncs();
+    add_layer(&harness, cx);
+    add_layer(&harness, cx);
+    let counts = sync_counts("two document edits, Properties hidden");
+
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        0,
+        "a panel behind another tab must not resolve its sections"
+    );
+    // The gate is per panel, not a global switch: the visible ones still work.
+    for name in ["timeline.sync_from_project", "outliner.rebuild_rows"] {
+        assert!(
+            count_of(&counts, name) > 0,
+            "{name} is still at the front of its area and must follow the edits"
+        );
+    }
+}
+
+/// The other half, and the reason the gate delays instead of dropping: the
+/// edits skipped while hidden are resolved once when the tab comes back. Take
+/// the forced sync out and this fails — the panel would keep showing the
+/// values from before it was hidden until the next unrelated notify.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn properties_returning_to_the_front_resolves_what_it_missed(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    select_layer_target(comp, layer, cx);
+
+    set_visible(&all_but(PROPERTIES), cx);
+    add_layer(&harness, cx);
+    add_layer(&harness, cx);
+
+    reset_syncs();
+    set_visible(&ALL_PANELS, cx);
+    let counts = sync_counts("Properties returns to the front");
+
+    // Once, not twice and not per skipped edit: the debt is one sync however
+    // many notifications it stood for.
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        1,
+        "coming back into view must resolve the skipped edits exactly once"
+    );
+
+    // And the gate is open again afterwards: the epoch adopted by the catch-up
+    // must not swallow the next real edit.
+    reset_syncs();
+    add_layer(&harness, cx);
+    let counts = sync_counts("document edit after Properties returned");
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        1,
+        "the next edit must reach a panel that is back at the front"
+    );
+}
+
+/// Playback is the notification storm `MED-UI-02` is named for: 30 frames a
+/// second, each one re-resolving every section of a panel nobody can see.
+#[gpui::test]
+#[cfg(debug_assertions)]
+fn a_hidden_properties_panel_ignores_the_playhead(cx: &mut TestAppContext) {
+    let harness = open_panels(cx);
+    let layer = add_layer(&harness, cx);
+    let comp = harness
+        .project
+        .read_with(cx, |project, _| project.document().root_comp)
+        .expect("root comp");
+    animate_opacity(&harness, comp, layer, cx);
+    select_layer_target(comp, layer, cx);
+    // One visible frame first, so the panel is known to be playhead-sensitive:
+    // otherwise a zero below could come from the `MED-UI-02` playhead check
+    // rather than from the visibility gate.
+    reset_syncs();
+    play(1, cx);
+    assert_eq!(
+        count_of(
+            &sync_counts("one visible frame"),
+            "properties.refresh_values"
+        ),
+        1,
+        "the animated layer must follow the playhead while the panel is visible"
+    );
+
+    const FRAMES: u64 = 30;
+    set_visible(&all_but(PROPERTIES), cx);
+    reset_syncs();
+    play(FRAMES, cx);
+    let counts = sync_counts("playback, 30 frames, Properties hidden");
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        0,
+        "playback behind another tab must resolve nothing"
+    );
+
+    // Back at the front, it follows the playhead as before — one catch-up
+    // resolve, then one per frame.
+    set_visible(&ALL_PANELS, cx);
+    reset_syncs();
+    play(FRAMES, cx);
+    let counts = sync_counts("playback, 30 frames, Properties visible again");
+    assert_eq!(
+        count_of(&counts, "properties.refresh_values"),
+        FRAMES,
+        "a panel back at the front must follow the playhead again"
+    );
 }

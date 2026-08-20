@@ -167,6 +167,11 @@ impl RevealFilter {
         let channels = || row_channels(layer, &row.id).unwrap_or_default();
         match self {
             Self::Group(group) => row.id == PropertyRowId::Shell(group),
+            // A step row has keys and no channel, so asking the channels
+            // would hide the one row kind that cannot exist *without* keys.
+            Self::Animated if row_value_kind(layer, &row.id).is_stepped() => {
+                !row_key_frames(layer, &row.id, 0).is_empty()
+            }
             Self::Animated => channels()
                 .iter()
                 .any(|channel| matches!(channel.source, ChannelSource::Keyframes(_))),
@@ -2200,6 +2205,30 @@ mod tests {
         assert!(baseline.curve().is_some());
         // The int row is a float row for every editing purpose.
         assert!(row_keys(&layer, &int_row(), 0).unwrap().curve().is_some());
+    }
+
+    /// The `U` reveal keeps both discrete rows: a step row cannot exist
+    /// without keys, so asking its (absent) channels would hide exactly the
+    /// row kind the filter is most certain about.
+    #[test]
+    fn the_animated_reveal_keeps_int_and_step_rows() {
+        let layer = discrete_layer();
+        for row in property_rows(&layer) {
+            if matches!(row.id, PropertyRowId::Network { .. }) {
+                assert!(
+                    RevealFilter::Animated.matches(&layer, &row),
+                    "{:?} earned its row by carrying keys",
+                    row.id
+                );
+            }
+        }
+        // Unfiltered and `U`-filtered network rows are the same set.
+        let unfiltered = property_rows(&layer).len();
+        let animated = property_rows(&layer)
+            .into_iter()
+            .filter(|row| RevealFilter::Animated.matches(&layer, row))
+            .count();
+        assert_eq!(animated, unfiltered - SHELL_GROUPS.len());
     }
 
     /// An identifier parameter must never be animated

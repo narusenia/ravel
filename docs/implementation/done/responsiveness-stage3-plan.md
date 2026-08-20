@@ -42,7 +42,7 @@
 | `ensure_gpu` | 同一フレームを消費 GPU ノード数だけ再アップロード |
 
 `HIGH-17`（sws スケーラの毎フレーム再生成）は第3段の対象だったが
-[closed](../../issues/closed/HIGH-17-sws-scaler-recreated-per-frame.md) 済みで、
+[closed](../../../issues/closed/HIGH-17-sws-scaler-recreated-per-frame.md) 済みで、
 メディアデコードのクラスタはこのフェーズに残っていない。
 
 ### 既にある材料

@@ -197,7 +197,10 @@ pub struct PathPoint {
 /// Scalar static values are stored directly; animatable values are stored as
 /// [`AnimationChannel`]s (per component for vectors/colors) so any parameter
 /// can carry keyframes, expressions, node-output bindings, or blends
-/// (REQ-LAYER-004). `Int` / `Bool` remain constant-only in v1; `PathPoints`,
+/// (REQ-LAYER-004). An animated `Int` is an [`IntChannel`](Self::IntChannel) —
+/// the same f32 channel, rounded on read — while a plain `Int` is the constant
+/// spelling of one, exactly as `Float` is the constant spelling of `Channel`.
+/// `Bool` remains constant-only in v1; `PathPoints`,
 /// `Curve` and `Ramp` are constant-only as well (path animation is the future
 /// PathChannel design, see the tool-system plan; animating a curve's or a
 /// ramp's own shape is out of scope for v1, see the properties
@@ -233,6 +236,16 @@ pub enum ParameterValue {
     /// safe place to grow. No stored value carries it yet, so nothing has to
     /// be migrated.
     Ramp(crate::param_ramp::RampParam),
+    /// An animatable integer (`shape.polygon`'s `sides`, a repeat count, an
+    /// enum selection). The payload is an ordinary f32
+    /// [`AnimationChannel`] — the same keyframes, expressions and bindings
+    /// every other animatable parameter has — and the value is rounded to
+    /// `i32` when it is read, which is what a scalar wire driving an `Int`
+    /// parameter already did. Appended last for the same reason as
+    /// `PathPoints`, `Curve` and `Ramp`: bincode indexes variants by
+    /// position, so only the tail is a safe place to grow, and the layout
+    /// change is covered by the journal format version bump (v9).
+    IntChannel(crate::animation::channel::AnimationChannel),
 }
 
 impl ParameterValue {
@@ -255,12 +268,17 @@ impl ParameterValue {
     /// The animation channels this value is made of, one per component.
     ///
     /// `Float` and `Channel` are 1-component values, so a plain float reads
-    /// as a constant channel. `None` for the kinds that carry no float
-    /// components (`Int`, `Bool`, `String`, `PathPoints`, `Curve`, `Ramp`).
+    /// as a constant channel. `IntChannel` yields the channel underneath it —
+    /// the curve editor and the keyframe model see the f32 curve, and the
+    /// rounding happens where the value is read. `None` for the kinds that
+    /// carry no float components (`Int`, `Bool`, `String`, `PathPoints`,
+    /// `Curve`, `Ramp`). A constant `Int` stays `None`: an int becomes
+    /// channel-backed only when it is re-typed to `IntChannel`, so nothing
+    /// that walks channels mistakes a constant count for an animatable float.
     pub fn channels(&self) -> Option<Vec<AnimationChannel>> {
         match self {
             ParameterValue::Float(v) => Some(vec![AnimationChannel::constant(*v)]),
-            ParameterValue::Channel(ch) => Some(vec![ch.clone()]),
+            ParameterValue::Channel(ch) | ParameterValue::IntChannel(ch) => Some(vec![ch.clone()]),
             ParameterValue::Channel2(chs) => Some(chs.to_vec()),
             ParameterValue::Channel3(chs) => Some(chs.to_vec()),
             ParameterValue::Channel4(chs) => Some(chs.to_vec()),
@@ -268,19 +286,65 @@ impl ParameterValue {
         }
     }
 
-    /// Build a channel-backed value from 1–4 components. `None` for any other
-    /// length: `ParameterValue` has no variant for it.
-    pub fn from_channels(channels: Vec<AnimationChannel>) -> Option<Self> {
+    /// Rebuild a channel-backed value from 1–4 components, re-typed after
+    /// `previous` — the value being replaced, or `None` when the components do
+    /// not come from one.
+    ///
+    /// The component count picks the variant (`Channel` … `Channel4`), with
+    /// one exception: a single channel replacing an `Int` or an `IntChannel`
+    /// stays an integer parameter. That is the whole promotion path for
+    /// discrete keyframes — reading `channels()`, editing them, and writing
+    /// them back must not silently turn a repeat count into a float. Every
+    /// other kind keeps the old behaviour, including `Float`, which becomes a
+    /// `Channel` (`Float` and `Channel` are two spellings of the same value,
+    /// and the channel spelling is the one the keyframe model edits).
+    ///
+    /// `None` for any other length: `ParameterValue` has no variant for it.
+    pub fn from_channels(
+        previous: Option<&ParameterValue>,
+        channels: Vec<AnimationChannel>,
+    ) -> Option<Self> {
         let arity = channels.len();
         let mut it = channels.into_iter();
         let mut next = || it.next().expect("length checked");
+        let is_int = matches!(
+            previous,
+            Some(ParameterValue::Int(_) | ParameterValue::IntChannel(_))
+        );
         match arity {
+            1 if is_int => Some(ParameterValue::IntChannel(next())),
             1 => Some(ParameterValue::Channel(next())),
             2 => Some(ParameterValue::Channel2([next(), next()])),
             3 => Some(ParameterValue::Channel3([next(), next(), next()])),
             4 => Some(ParameterValue::Channel4([next(), next(), next(), next()])),
             _ => None,
         }
+    }
+
+    /// The non-negative integer this parameter names as an **identifier** — a
+    /// `layer.ref` target, a `precomp` composition — or `None` if it names
+    /// none.
+    ///
+    /// `IntChannel` counts only while its source is a constant. An identifier
+    /// that changed over time would have to reserve every id it could ever
+    /// take ([`Document::id_watermarks`](crate::composition::Document::id_watermarks),
+    /// REQ-LAYER-009) and invalidate the scope of every layer it could ever
+    /// point at, and a curve gives no finite answer to either — the values
+    /// between two keys are as real as the keys. So keyframing an identifier
+    /// is not supported, and the unit that puts a keyframe toggle on `Int`
+    /// rows (`DISK-3`) owns keeping it off these parameters. Reading it here
+    /// rather than in each caller is what makes that one decision instead of
+    /// three.
+    pub fn static_identifier(&self) -> Option<u64> {
+        let raw = match self {
+            ParameterValue::Int(v) => *v,
+            ParameterValue::IntChannel(channel) => match channel.source {
+                crate::animation::channel::ChannelSource::Constant(v) => v.round() as i32,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        u64::try_from(raw).ok()
     }
 
     /// Static float value, if this is a `Float`.
@@ -346,7 +410,8 @@ impl ParameterValue {
             ParameterValue::Float(_)
             | ParameterValue::Int(_)
             | ParameterValue::Bool(_)
-            | ParameterValue::Channel(_) => Some(DataTypeId::SCALAR),
+            | ParameterValue::Channel(_)
+            | ParameterValue::IntChannel(_) => Some(DataTypeId::SCALAR),
             ParameterValue::Channel2(_) => Some(DataTypeId::VEC2),
             ParameterValue::Channel3(_) => Some(DataTypeId::VEC3),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
@@ -584,7 +649,9 @@ impl Node {
 
 fn collect_parameter_sources(value: &ParameterValue, out: &mut Vec<(NodeId, OutputPortIndex)>) {
     match value {
-        ParameterValue::Channel(channel) => collect_channel_sources(&channel.source, out),
+        ParameterValue::Channel(channel) | ParameterValue::IntChannel(channel) => {
+            collect_channel_sources(&channel.source, out)
+        }
         ParameterValue::Channel2(channels) => {
             for channel in channels {
                 collect_channel_sources(&channel.source, out);
@@ -1923,7 +1990,9 @@ pub(crate) fn remap_parameter_node_outputs(
     id_map: &HashMap<NodeId, NodeId>,
 ) {
     match value {
-        ParameterValue::Channel(channel) => remap_channel_source(&mut channel.source, id_map),
+        ParameterValue::Channel(channel) | ParameterValue::IntChannel(channel) => {
+            remap_channel_source(&mut channel.source, id_map)
+        }
         ParameterValue::Channel2(channels) => {
             for channel in channels {
                 remap_channel_source(&mut channel.source, id_map);
@@ -1957,7 +2026,7 @@ fn remap_parameter_output_ports(
     remap: &HashMap<usize, usize>,
 ) {
     match value {
-        ParameterValue::Channel(channel) => {
+        ParameterValue::Channel(channel) | ParameterValue::IntChannel(channel) => {
             remap_channel_output_port(&mut channel.source, node_id, remap)
         }
         ParameterValue::Channel2(channels) => {
@@ -3199,6 +3268,65 @@ mod tests {
         assert_eq!(curve.port_data_type(), None);
         assert!(curve.port_accepted_types().is_empty());
         assert!(curve.channels().is_none());
+    }
+
+    /// The promotion path for discrete keyframes: an int that gains a channel
+    /// stays an int. Getting this wrong turns a repeat count into a float the
+    /// moment the keyframe toggle round-trips it, and `i32_or` then falls back
+    /// to the node's default instead of the animated value.
+    #[test]
+    fn from_channels_keeps_an_int_an_int() {
+        let ch = || AnimationChannel::constant(2.0);
+        let one = || vec![ch()];
+        let int = ParameterValue::Int(2);
+
+        assert!(matches!(
+            ParameterValue::from_channels(Some(&int), one()),
+            Some(ParameterValue::IntChannel(_))
+        ));
+        // Already channel-backed: a keyframe edit rebuilds it as itself.
+        let animated = ParameterValue::IntChannel(AnimationChannel::constant(2.0));
+        assert!(matches!(
+            ParameterValue::from_channels(Some(&animated), one()),
+            Some(ParameterValue::IntChannel(_))
+        ));
+        // Every other kind still follows the component count, `Float`
+        // included — `Float` and `Channel` are one value spelled twice.
+        assert!(matches!(
+            ParameterValue::from_channels(Some(&ParameterValue::Float(2.0)), one()),
+            Some(ParameterValue::Channel(_))
+        ));
+        assert!(matches!(
+            ParameterValue::from_channels(None, one()),
+            Some(ParameterValue::Channel(_))
+        ));
+        // An int with more than one component has no int variant to become;
+        // the count wins so the result is still a value the node can hold.
+        assert!(matches!(
+            ParameterValue::from_channels(Some(&int), vec![ch(), ch()]),
+            Some(ParameterValue::Channel2(_))
+        ));
+        assert!(ParameterValue::from_channels(Some(&int), Vec::new()).is_none());
+        assert!(
+            ParameterValue::from_channels(Some(&int), vec![ch(), ch(), ch(), ch(), ch()]).is_none()
+        );
+    }
+
+    /// `IntChannel` exposes the f32 curve underneath it — that is what the
+    /// keyframe model and the curve editor edit — while a constant `Int` does
+    /// not, so nothing walking channels mistakes a plain count for an
+    /// animatable float. Its port type stays `SCALAR`, like `Int`'s.
+    #[test]
+    fn int_channel_reads_as_one_channel_and_a_scalar_port() {
+        let value = ParameterValue::IntChannel(AnimationChannel::constant(3.0));
+        let channels = value.channels().expect("one channel");
+        assert_eq!(channels.len(), 1);
+        assert!(matches!(
+            channels[0].source,
+            crate::animation::channel::ChannelSource::Constant(v) if v == 3.0
+        ));
+        assert_eq!(value.port_data_type(), Some(DataTypeId::SCALAR));
+        assert!(ParameterValue::Int(3).channels().is_none());
     }
 
     #[test]

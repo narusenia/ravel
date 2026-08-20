@@ -334,7 +334,9 @@ pub fn custom_port_type(node: &Node, side: PortSide, name: &str) -> Option<Custo
             if port.data_type == DataTypeId::SCALAR {
                 let param = node.parameters.iter().find(|p| p.key == name);
                 return Some(match param.map(|p| &p.value) {
-                    Some(ParameterValue::Int(_)) => CustomPortType::Int,
+                    Some(ParameterValue::Int(_) | ParameterValue::IntChannel(_)) => {
+                        CustomPortType::Int
+                    }
                     Some(ParameterValue::Bool(_)) => CustomPortType::Bool,
                     _ => CustomPortType::Float,
                 });
@@ -1151,15 +1153,19 @@ pub fn subnet_pins(inner: &Graph) -> Option<(Vec<InputPort>, Vec<OutputPort>)> {
 /// Whether `value` is a parameter of the kind a promotion parameter for `ty`
 /// has to be. `Float` admits both representations: the default is a channel
 /// (custom In parameters are keyframable) but a plain `Float` is a legitimate
-/// value for the same port and must not be reset by a sync.
+/// value for the same port and must not be reset by a sync. `Int` admits both
+/// for the same reason — a keyframed count is still an int port, and a sync
+/// that reset it to the constant default would eat the keyframes.
 fn promote_parameter_matches(value: &ParameterValue, ty: CustomPortType) -> bool {
     matches!(
         (ty, value),
         (
             CustomPortType::Float,
             ParameterValue::Float(_) | ParameterValue::Channel(_)
-        ) | (CustomPortType::Int, ParameterValue::Int(_))
-            | (CustomPortType::Bool, ParameterValue::Bool(_))
+        ) | (
+            CustomPortType::Int,
+            ParameterValue::Int(_) | ParameterValue::IntChannel(_)
+        ) | (CustomPortType::Bool, ParameterValue::Bool(_))
             | (CustomPortType::Vec2, ParameterValue::Channel2(_))
             | (CustomPortType::Vec3, ParameterValue::Channel3(_))
             | (CustomPortType::Color, ParameterValue::Channel4(_))

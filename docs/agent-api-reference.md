@@ -183,11 +183,17 @@ node.subnet: Option<Arc<Graph>>   // None for non-subnet nodes
 ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
     PathPoints(Vec<PathPoint>),   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
     Curve(CurveParam),            // scalar transfer curve (see `param_curve`)
-    Ramp(RampParam)}              // colour ramp (see `param_ramp`)
-    // PathPoints, Curve and Ramp are appended LAST on purpose: bincode indexes
-    // variants positionally, so a new one may only go at the end. A layout
-    // change that moves an existing variant needs a JOURNAL_FORMAT_VERSION
-    // bump; appending does not, and `Ramp` appears in no stored value yet.
+    Ramp(RampParam),              // colour ramp (see `param_ramp`)
+    IntChannel(AnimationChannel)} // animatable int: an f32 channel, round()ed
+                                  // on read. `Int` is its constant spelling,
+                                  // as `Float` is `Channel`'s
+    // PathPoints, Curve, Ramp and IntChannel are appended LAST on purpose:
+    // bincode indexes variants positionally, so a new one may only go at the
+    // end, and every addition bumps JOURNAL_FORMAT_VERSION (an old binary
+    // meeting the new index is what the version discards). IntChannel also
+    // bumped the .ravprj format (v10): an old build cannot parse it out of
+    // document/main.ron, and that failure looks like corruption, so
+    // load_with_backup would open a stale .bak instead of refusing.
 ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // Geometric vectors are ONE Channel2/Channel3, never a `_x` / `_y` pair of
     // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
@@ -198,7 +204,11 @@ ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // is one parameter whose arity follows its `type`. Int pairs
     // (`scatter.grid` `count_x` / `count_y`) stay separate.
 ParameterValue::channels() -> Option<Vec<AnimationChannel>>   // 1..=4 components
-ParameterValue::from_channels(Vec<AnimationChannel>)          // None outside 1..=4
+    // Some for Float / Channel..Channel4 / IntChannel; None for a constant Int
+ParameterValue::from_channels(Option<&ParameterValue>, Vec<AnimationChannel>)
+    // Rebuild from components, re-typed after the value being replaced: one
+    // channel over an Int / IntChannel stays an IntChannel, everything else
+    // follows the count (Float -> Channel). None outside 1..=4.
 
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
@@ -468,8 +478,10 @@ ChannelSource::Expression(ParameterExpression::new("100 * sin(frame * 0.25)"))
 // ChannelSource::AudioReactive is still a placeholder.
 // ChannelSource::NodeOutput(node, port) resolves inside the evaluator
 // (parameter bindings only, same graph/scope).
-// ParameterValue::{Channel, Channel2, Channel3, Channel4} put channels on
-// node parameters (REQ-LAYER-004).
+// ParameterValue::{Channel, Channel2, Channel3, Channel4, IntChannel} put
+// channels on node parameters (REQ-LAYER-004). IntChannel carries the same
+// f32 channel and rounds on read, so the curve editor and the keyframe model
+// see a float curve and the processor sees an i32.
 ```
 
 ### `expression`

@@ -9,7 +9,7 @@
 //! - Layer Ref circular references within a Composition (REQ-LAYER-005)
 
 use crate::composition::Composition;
-use crate::graph::{Graph, ParameterValue};
+use crate::graph::Graph;
 use crate::id::{CompId, LayerId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -60,10 +60,8 @@ fn precomp_references(comp: &Composition) -> Vec<CompId> {
             node.parameters
                 .iter()
                 .find(|p| p.key == PRECOMP_COMP_ID_PARAM)
-                .and_then(|p| match &p.value {
-                    ParameterValue::Int(v) if *v >= 0 => Some(CompId::new(*v as u64)),
-                    _ => None,
-                })
+                .and_then(|p| p.value.static_identifier())
+                .map(CompId::new)
         })
         .collect()
 }
@@ -121,10 +119,8 @@ pub(crate) fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
                 .parameters
                 .iter()
                 .find(|p| p.key == LAYER_REF_LAYER_PARAM)
-                .and_then(|p| match &p.value {
-                    ParameterValue::Int(v) if *v >= 0 => Some(LayerId::new(*v as u64)),
-                    _ => None,
-                })
+                .and_then(|p| p.value.static_identifier())
+                .map(LayerId::new)
         {
             targets.push(id);
         }

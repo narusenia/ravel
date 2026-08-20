@@ -865,6 +865,7 @@ mod tests {
             (
                 "vec4",
                 ParameterValue::from_channels(
+                    None,
                     [4.0, 3.0, 2.0, 1.0]
                         .into_iter()
                         .map(ravel_core::animation::channel::AnimationChannel::constant)
@@ -876,6 +877,7 @@ mod tests {
             (
                 "color",
                 ParameterValue::from_channels(
+                    None,
                     [0.25, 0.5, 0.75, 1.0]
                         .into_iter()
                         .map(ravel_core::animation::channel::AnimationChannel::constant)

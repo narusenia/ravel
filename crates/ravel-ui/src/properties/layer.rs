@@ -727,6 +727,14 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 key,
                 value: format!("{} stops", ramp.len()),
             },
+            // Read-only until the keyframe toggle lands (discrete-keyframes
+            // plan, unit 3): the row shows the int the frame reads as, but
+            // nothing in the shell can re-type an `Int` yet, so an editable
+            // spinner here would drop every edit on the floor.
+            ParameterValue::IntChannel(ch) => PropertyField::ReadOnly {
+                key,
+                value: (ch.evaluate(frame as f64, ctx).round() as i32).to_string(),
+            },
         };
         fields.push(field);
     }

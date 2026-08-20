@@ -79,18 +79,34 @@ enum ParameterValue {
     Curve(CurveParam),                      // CurvePoint { x, y, interpolation, tangents }
     // カラーランプ（`field.ramp` のストップ列）。定数のみ
     Ramp(RampParam),                        // RampStop { position, color } + 補間種別
+    // アニメーション可能な整数（繰り返し数、分割数、列挙の選択）。中身は
+    // 通常の f32 チャネルで、読み出し時に round() して i32 にする。
+    // 定数 `Int` はその定数綴り（`Float` と `Channel` の関係と同じ）
+    IntChannel(AnimationChannel),
 }
 ```
 
-`PathPoints` / `Curve` / `Ramp` は**必ず末尾に足す**。bincode は variant を
-位置で索引するので、途中に挿入すると既存 journal が読めなくなる。追加自体は
-`JOURNAL_FORMAT_VERSION` の更新で覆う — 末尾追加でも**旧ビルドが新しい
-variant を含む entry に出会う**側は壊れるので、版を上げて捨てさせる
+`PathPoints` / `Curve` / `Ramp` / `IntChannel` は**必ず末尾に足す**。bincode は
+variant を位置で索引するので、途中に挿入すると既存 journal が読めなくなる。
+追加自体は `JOURNAL_FORMAT_VERSION` の更新で覆う — 末尾追加でも**旧ビルドが
+新しい variant を含む entry に出会う**側は壊れるので、版を上げて捨てさせる
 （`docs/dev/persistence.md` の規則が正）。
+
+`IntChannel` は `.ravprj` の `format_version` も上げた（v10）。**上げなければ**
+どうなるかが理由で、旧ビルドは `document/main.ron` の `IntChannel` を
+パースできず、その失敗は切り詰めたファイルと区別できない —
+`load_with_backup` が破損とみなして `.bak` の**古いリビジョン**を開き、
+次の保存がそれを上書きする。版印があるので旧ビルドは
+`document/main.ron` に到達する前に manifest の版で `MigrationError::TooNew` になり、
+`load_with_backup` はその失敗をバックアップで取り繕わない（`ProjectError::is_too_new`）。
 
 - ネットワーク内の**任意のノードパラメータ**がチャネルを持てる（キーフレーム、
   ノード出力バインド、ブレンド。Expression / AudioReactive は placeholder）。
-- Int / Bool は v1 では定数のみ（step キーは v2）。PathPoints も定数のみ
+- **Int はアニメーション可能**（`IntChannel`、journal v9 / `.ravprj` v10）:
+  中身は f32 チャンネルそのもので、読み出しで `round()` して `i32` にする。
+  定数の `Int` はそのまま残り（`Float` と `Channel` と同じ「2 つの綴り」の関係）、
+  キーフレームを打った瞬間に再型付けされる。**Bool は定数のみ**（step キーは
+  別単位）。PathPoints も定数のみ
   （journal v6 で追加。`in_tan`/`out_tan` 点属性として Geometry に展開
   され、曲線区間は rasterize が共有フラット化で消費する）。
 - `Curve` も定数のみ（journal v7 で追加）。`CurveParam` は `KeyframeCurve` と
@@ -551,7 +567,7 @@ struct SubgraphTemplate {
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "ravel_version": "0.1.0",
   "project_name": "My Lyric Video",
   "created_at": "2026-06-22T10:00:00Z",
@@ -562,13 +578,14 @@ struct SubgraphTemplate {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v8)
+### document/main.ron (RON形式、フォーマット v9)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
 ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット
 （`MediaAssetEntry`。v4 で相対 / 変数パス対応、v8 で入力色空間の明示指定
 `color_space` を追加）、公開パラメータ宣言（`exposed_parameters`。v7 で追加）。
+**v10 で `ParameterValue::IntChannel`**（アニメーション可能な整数）が入る。
 
 **v8 で色の意味が変わった。** 作者が指定した色（ノードの `COLOR` パラメータ、
 `Composition.background_color`、`exposed_parameters` の `color` 既定値）は

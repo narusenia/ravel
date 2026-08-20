@@ -163,7 +163,11 @@ fn folded_value(node: &Node, components: &[Component]) -> (ParameterValue, Vec<A
                 .unwrap_or_else(|| AnimationChannel::constant(*default))
         })
         .collect();
-    let value = ParameterValue::from_channels(channels.clone())
+    // No `previous`: the folded value is built from the legacy per-component
+    // keys, not re-typed from an existing one, so the component count alone
+    // picks the variant (a 1-component fold of a `Float` becomes a `Channel`,
+    // as `already_folded` documents).
+    let value = ParameterValue::from_channels(None, channels.clone())
         .expect("every fold spec declares 1 to 4 components");
     (value, channels)
 }

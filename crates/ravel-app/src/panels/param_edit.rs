@@ -96,6 +96,15 @@ pub(super) fn edited_param_value(
     local_frame: Option<u64>,
 ) -> Option<ParameterValue> {
     use ravel_ui::properties::PropertyValue;
+    // An animatable int has no editor yet (`DISK-3` adds the toggle and the
+    // row), and the writes below would answer with a constant `Int` or
+    // `Float` — discarding every keyframe on the parameter. Properties
+    // returns `ReadOnly` for these rows, so this is unreachable today; the
+    // refusal is here because the destructive answer is the one this helper
+    // would otherwise give the moment a row becomes editable.
+    if matches!(existing, ParameterValue::IntChannel(_)) {
+        return None;
+    }
     match value {
         PropertyValue::Float(value) => {
             let value = range.map_or(*value, |range| range.clamp(*value));

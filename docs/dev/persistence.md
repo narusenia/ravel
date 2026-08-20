@@ -165,8 +165,19 @@
 `ParameterValue` に variant を足すのは別枠。**必ず末尾に足し**、
 `JOURNAL_FORMAT_VERSION`（`ravel_core::undo::journal`）を上げる。bincode は
 variant を位置で索引するので途中挿入は旧 journal を壊す。`.ravprj` の
-`format_version` は、既存パラメータの表現を変えるとき（v6 のカーブ）だけ
-上げる — variant を足すだけなら上げない。
+`format_version` は、既存パラメータの表現を変えるとき（v6 のカーブ）と、
+**新しい variant が実際に文書へ書かれるとき**に上げる。
+
+後者は v10 の `IntChannel`（アニメーション可能な整数）が実例。判断基準は上の
+表と同じ「黙って消えたときに気づけるか」で、答えは**気づけない**:
+旧ビルドは `document/main.ron` の `IntChannel` をパースできず
+`ProjectError::DocumentParse` を返すが、これは切り詰めた / 手編集で壊れた
+ファイルと**区別できない**。`ProjectFile::load_with_backup` は破損とみなして
+`.bak` を開くので、ユーザーには「開けたが最近の作業が無い**古いリビジョン**」が
+出て、次の保存がそれを書き戻す。版印があれば `MigrationError::TooNew` になり、
+`load_with_backup` は `is_too_new()` でバックアップへ倒すのを拒否する。
+逆に、**まだどの保存値にも現れない** variant（v8 時点の `Ramp`）は
+journal 版だけで足りる。
 
 **追加フィールドでバージョンを上げない**のは前例がある: `Layer.audio` は
 format v4 のまま `#[serde(default)]` の追加フィールドとして入り、

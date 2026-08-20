@@ -74,7 +74,7 @@ use crate::cache_budget::{
 use crate::composition::validate::{PRECOMP_COMP_ID_PARAM, PRECOMP_TYPE_KEY};
 use crate::composition::{Composition, Document, Layer};
 use crate::eval::{CacheMiss, EvalContext, Precision, TimeKey};
-use crate::graph::{Graph, ParameterValue};
+use crate::graph::Graph;
 use crate::id::{CompId, LayerId, NodeId};
 use crate::types::{FrameBuffer, NodeData};
 use std::collections::{HashMap, HashSet};
@@ -628,10 +628,8 @@ fn references_any(network: &Graph, targets: &HashSet<CompId>) -> bool {
                 .parameters
                 .iter()
                 .find(|param| param.key == PRECOMP_COMP_ID_PARAM)
-                .and_then(|param| match &param.value {
-                    ParameterValue::Int(id) if *id >= 0 => Some(CompId::new(*id as u64)),
-                    _ => None,
-                })
+                .and_then(|param| param.value.static_identifier())
+                .map(CompId::new)
                 .is_some_and(|id| targets.contains(&id))
         {
             return true;
@@ -875,6 +873,7 @@ mod tests {
     use super::*;
     use crate::cache_budget::{CacheBudgetConfig, CacheKind};
     use crate::eval::EvalContext;
+    use crate::graph::ParameterValue;
     use crate::id::DataTypeId;
     use crate::types::{FrameRate, PixelFormat};
     use std::sync::atomic::{AtomicUsize, Ordering};

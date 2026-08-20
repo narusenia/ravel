@@ -3005,6 +3005,17 @@ impl Evaluator {
                     any_fresh |= fresh;
                     ResolvedValue::Float(v)
                 }
+                // An animatable int is an f32 channel rounded on read, so it
+                // resolves here with every other channel — keyframes,
+                // expressions and node-output bindings all work, and the
+                // processor still sees a plain `Int` (`i32_or` never learns
+                // the parameter is animated).
+                ParameterValue::IntChannel(ch) => {
+                    let (v, fresh) =
+                        self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
+                    any_fresh |= fresh;
+                    ResolvedValue::Int(v.round() as i32)
+                }
                 ParameterValue::Channel2(chs) => {
                     let mut v = [0.0; 2];
                     for (i, ch) in chs.iter().enumerate() {
@@ -3083,7 +3094,8 @@ impl Evaluator {
                     ParameterValue::Channel(_)
                     | ParameterValue::Channel2(_)
                     | ParameterValue::Channel3(_)
-                    | ParameterValue::Channel4(_) => continue,
+                    | ParameterValue::Channel4(_)
+                    | ParameterValue::IntChannel(_) => continue,
                 },
             };
             values.push((p.key.clone(), value));
@@ -3290,7 +3302,7 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
         ParameterValue::Float(_) | ParameterValue::Channel(_) => data
             .downcast_ref::<Scalar>()
             .map(|s| ResolvedValue::Float(s.0)),
-        ParameterValue::Int(_) => data
+        ParameterValue::Int(_) | ParameterValue::IntChannel(_) => data
             .downcast_ref::<Scalar>()
             .map(|s| ResolvedValue::Int(s.0.round() as i32)),
         ParameterValue::Bool(_) => data
@@ -3409,7 +3421,9 @@ fn node_has_animated_params(node: &Node, skip: &dyn Fn(&str) -> bool) -> bool {
             return false;
         }
         match &p.value {
-            ParameterValue::Channel(ch) => channel_is_time_varying(ch),
+            ParameterValue::Channel(ch) | ParameterValue::IntChannel(ch) => {
+                channel_is_time_varying(ch)
+            }
             ParameterValue::Channel2(chs) => chs.iter().any(channel_is_time_varying),
             ParameterValue::Channel3(chs) => chs.iter().any(channel_is_time_varying),
             ParameterValue::Channel4(chs) => chs.iter().any(channel_is_time_varying),
@@ -3459,7 +3473,9 @@ fn node_expression_digest(node: &Node, skip: &dyn Fn(&str) -> bool) -> u64 {
             continue;
         }
         let channels: &[AnimationChannel] = match &parameter.value {
-            ParameterValue::Channel(channel) => std::slice::from_ref(channel),
+            ParameterValue::Channel(channel) | ParameterValue::IntChannel(channel) => {
+                std::slice::from_ref(channel)
+            }
             ParameterValue::Channel2(channels) => channels,
             ParameterValue::Channel3(channels) => channels,
             ParameterValue::Channel4(channels) => channels,
@@ -4405,6 +4421,113 @@ mod tests {
         assert!((v5.downcast_ref::<Scalar>().unwrap().0 - 5.0).abs() < 1e-4);
     }
 
+    /// An `IntChannel` is read with `i32_or`, which knows nothing about
+    /// animation: the processor sees a different `i32` on every frame while
+    /// its own code stays the code that read a constant `Int`.
+    struct IntParamEcho;
+    impl NodeProcessor for IntParamEcho {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(Scalar(params.i32_or("count", -1) as f32)))
+        }
+    }
+
+    fn int_channel_node(value: ParameterValue) -> Graph {
+        let node = Node::new(NodeId::new(1), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("count", value);
+        Graph::new().add_node(node).unwrap()
+    }
+
+    #[test]
+    fn keyframed_int_parameter_hands_a_new_int_to_the_processor_each_frame() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 10.0, Interpolation::Linear);
+        let g = int_channel_node(ParameterValue::IntChannel(AnimationChannel::keyframes(
+            curve,
+        )));
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(IntParamEcho));
+
+        // Frames 0, 3 and 10 sit on the linear ramp at 0, 3 and 10; frame 4
+        // rounds 4.0 and frame 5 rounds 5.0 — every one arrives as an `Int`,
+        // so `i32_or`'s default (-1) never shows up.
+        for (frame, expected) in [(0u64, 0.0f32), (3, 3.0), (4, 4.0), (5, 5.0), (10, 10.0)] {
+            let v = ev.evaluate(&g, NodeId::new(1), &ctx_at(frame)).unwrap();
+            assert_eq!(
+                v.downcast_ref::<Scalar>().unwrap().0,
+                expected,
+                "frame {frame}"
+            );
+        }
+    }
+
+    /// The rounding is `f32::round` — half away from zero — and these are the
+    /// values it actually produces, not the ones a "round half up" reading
+    /// would predict for the negatives.
+    #[test]
+    fn int_channel_rounding_is_half_away_from_zero() {
+        let mut ev = Evaluator::new();
+        for (stored, expected) in [
+            (0.4f32, 0.0f32),
+            (0.5, 1.0),
+            (1.5, 2.0),
+            (2.5, 3.0),
+            (-0.4, 0.0),
+            (-0.5, -1.0),
+            (-1.5, -2.0),
+            (-2.5, -3.0),
+        ] {
+            let g = int_channel_node(ParameterValue::IntChannel(AnimationChannel::constant(
+                stored,
+            )));
+            ev.invalidate_node(NodeId::new(1));
+            ev.register(NodeId::new(1), Arc::new(IntParamEcho));
+            let v = ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
+            assert_eq!(
+                v.downcast_ref::<Scalar>().unwrap().0,
+                expected,
+                "{stored} must round to {expected}"
+            );
+        }
+    }
+
+    /// A keyframed `IntChannel` makes its node time-varying. Missing it in
+    /// `node_has_animated_params` would serve frame 0's cached value forever —
+    /// the keys would be editable and have no effect.
+    #[test]
+    fn int_channel_keyframes_make_the_node_time_varying() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(10, 10.0, Interpolation::Linear);
+        let node = Node::new(NodeId::new(1), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "count",
+                ParameterValue::IntChannel(AnimationChannel::keyframes(curve)),
+            );
+        assert!(node_has_animated_params(&node, &|_| false));
+
+        let constant = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(
+                "count",
+                ParameterValue::IntChannel(AnimationChannel::constant(3.0)),
+            );
+        assert!(
+            !node_has_animated_params(&constant, &|_| false),
+            "a constant int channel is not time-varying"
+        );
+    }
+
     #[test]
     fn constant_channel_parameter_stays_cached() {
         let node = Node::new(NodeId::new(1), "test")
@@ -4697,6 +4820,60 @@ mod tests {
         let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
         // 2.6 + 3*10 + 100 = 132.6
         assert!((out.downcast_ref::<Scalar>().unwrap().0 - 132.6).abs() < 1e-4);
+    }
+
+    /// A wire into an **animatable** int port converts the same way a wire
+    /// into a constant `Int` does. The parameter's own channel is not read
+    /// while a wire drives it, but the port has to accept the reading in the
+    /// first place: without `IntChannel` in `param_port_overlay`, the wire is
+    /// silently ignored and the processor sees the keyframed value instead.
+    #[test]
+    fn a_wire_into_an_int_channel_port_still_rounds() {
+        use crate::animation::channel::AnimationChannel;
+
+        let source = Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR);
+        let target = Node::new(NodeId::new(2), "test")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("value", ParameterValue::Float(0.0))
+            .with_param(
+                "count",
+                ParameterValue::IntChannel(AnimationChannel::constant(7.0)),
+            )
+            .with_param("enabled", ParameterValue::Bool(false));
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .expose_param_port(NodeId::new(2), "count")
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(CountingConst {
+                value: 2.6,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(NodeId::new(2), Arc::new(MultiParamEcho));
+
+        let out = ev.evaluate(&g, NodeId::new(2), &ctx_at(0)).unwrap();
+        // value 0.0 + count 3 (2.6 rounded, from the wire — not the channel's
+        // 7) * 10 + enabled false = 30.0
+        assert!(
+            (out.downcast_ref::<Scalar>().unwrap().0 - 30.0).abs() < 1e-4,
+            "the wire drove the port, rounded: {}",
+            out.downcast_ref::<Scalar>().unwrap().0
+        );
     }
 
     #[test]

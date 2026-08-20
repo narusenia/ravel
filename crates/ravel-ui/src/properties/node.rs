@@ -177,6 +177,13 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     ramp: ramp.clone(),
                 },
+                // Read-only until the keyframe toggle lands (discrete-keyframes
+                // plan, unit 3), for the same reason as the layer panel's
+                // custom-parameter row.
+                ParameterValue::IntChannel(ch) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: (channel_display_value(ch, frame, eval).round() as i32).to_string(),
+                },
             }
         })
         .collect();

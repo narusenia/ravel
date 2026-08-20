@@ -436,6 +436,9 @@ pub fn seed_value(
         ParameterValue::Bool(v) => ExposedValue::Bool(*v),
         ParameterValue::String(v) => ExposedValue::String(v.clone()),
         ParameterValue::Channel(c) => ExposedValue::Float(at(c)),
+        // An animatable int seeds the int it reads as at this frame, the same
+        // rounding the evaluator applies.
+        ParameterValue::IntChannel(c) => ExposedValue::Int(at(c).round() as i32),
         ParameterValue::Channel2(c) => ExposedValue::Vec2(Vec2(at(&c[0]), at(&c[1]))),
         ParameterValue::Channel3(c) => ExposedValue::Vec3(Vec3(at(&c[0]), at(&c[1]), at(&c[2]))),
         ParameterValue::Channel4(c) => ExposedValue::Color(Color {
@@ -871,6 +874,16 @@ fn assign(value: &ExposedValue, current: &ParameterValue) -> Option<Assignment> 
                 ParameterValue::Channel(written[0].clone())
             }))
         }
+        // Same widening as `Float` → `Channel`, for the same reason: a
+        // constant `Int` and an `IntChannel` are one quantity stored two ways,
+        // so a declaration that reaches the constant must reach the animated
+        // spelling too (a keyframe on the target would otherwise make the
+        // declaration silently stop resolving).
+        (ExposedValue::Int(v), ParameterValue::IntChannel(channel)) => Some(channels(
+            &[*v as f32],
+            std::slice::from_ref(channel),
+            |written| ParameterValue::IntChannel(written[0].clone()),
+        )),
         (ExposedValue::Vec2(Vec2(x, y)), ParameterValue::Channel2(channels_now)) => {
             Some(channels(&[*x, *y], channels_now, |written| {
                 ParameterValue::Channel2([written[0].clone(), written[1].clone()])
@@ -950,6 +963,7 @@ fn parameter_kind(value: &ParameterValue) -> &'static str {
         ParameterValue::PathPoints(_) => "path points",
         ParameterValue::Curve(_) => "curve",
         ParameterValue::Ramp(_) => "ramp",
+        ParameterValue::IntChannel(_) => "int channel",
     }
 }
 

@@ -116,6 +116,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(9)
         }
+        9 => {
+            migrate_v9_to_v10(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 9,
+                to: 10,
+                reason,
+            })?;
+            Ok(10)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -306,6 +314,34 @@ fn migrate_v8_to_v9(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v9 → v10`: `ParameterValue` gained the `IntChannel` variant — an
+/// animatable integer, an f32 channel rounded on read (the discrete-keyframes
+/// plan, unit 1).
+///
+/// **There is no typed pass**, and nothing to convert: an existing `Int` is
+/// still an `Int`, still means the same number, and only becomes an
+/// `IntChannel` when the user puts a keyframe on it. Like v6 → v7, this step
+/// advances the version stamp and nothing else.
+///
+/// **Why the stamp moves at all**, given that `docs/dev/persistence.md` says
+/// adding a `ParameterValue` variant needs only a `JOURNAL_FORMAT_VERSION`
+/// bump: it is what the *absence* of a stamp would cost. Without one, an
+/// older build reads the manifest happily and then cannot parse `IntChannel`
+/// out of `document/main.ron`, and what it does with that failure is worse
+/// than the failure.
+/// [`ProjectError::DocumentParse`](super::ProjectError::DocumentParse) is
+/// indistinguishable from a truncated or hand-mangled file, so
+/// [`ProjectFile::load_with_backup`](super::ProjectFile::load_with_backup)
+/// treats it as corruption and opens the `.bak` revision instead — an older
+/// snapshot of the same project, which the next save writes over. The user
+/// sees a project that opens, with recent work missing. With the stamp, that
+/// build stops at the manifest instead — [`MigrationError::TooNew`], which
+/// `load_with_backup` refuses to paper over with a backup
+/// (`ProjectError::is_too_new`) — and never reaches the document at all.
+fn migrate_v9_to_v10(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +454,29 @@ mod tests {
             let manifest: Manifest = serde_json::from_value(m).unwrap();
             assert_eq!(manifest.format_version, CURRENT_FORMAT_VERSION);
         }
+    }
+
+    /// `v9 → v10` adds the `IntChannel` parameter variant, which lives in
+    /// `document/main.ron`; the manifest must come through byte-identical
+    /// apart from the stamp.
+    #[test]
+    fn v9_migration_changes_only_the_version_stamp() {
+        let mut m = serde_json::json!({
+            "format_version": 9,
+            "ravel_version": "0.1.0",
+            "project_name": "Ints",
+            "created_at": "t",
+            "modified_at": "t",
+            "duration_frames": 120,
+            "frame_rate": { "num": 30, "den": 1 },
+            "resolution": { "width": 1920, "height": 1080 },
+        });
+        let mut expected = m.clone();
+        expected["format_version"] = Value::from(CURRENT_FORMAT_VERSION);
+
+        migrate_to_current(&mut m).unwrap();
+
+        assert_eq!(m, expected);
     }
 
     /// `v6 → v7` must touch nothing but the stamp. Asserting on a handful of

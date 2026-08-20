@@ -271,6 +271,79 @@ pub enum ParameterValue {
     StringSteps(crate::animation::step::StepCurve<String>),
 }
 
+/// Why an identifier parameter names no reference: its value does not stand
+/// still, so there is no finite set of ids to reserve for it (REQ-LAYER-009).
+///
+/// Carried rather than collapsed into "not static" because the CLI reports
+/// which shape was ignored — a wire and a step curve are found and fixed in
+/// different places.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DynamicIdentifier {
+    /// A connected parameter port drives the parameter. Not produced by
+    /// [`ParameterValue::identifier`] — a wire is a property of the graph,
+    /// not of the stored value — but reported by
+    /// [`Document::dynamic_identifiers`](crate::composition::Document::dynamic_identifiers),
+    /// which can see the edges.
+    ParameterPort,
+    /// A keyframe curve (or a placeholder source that will become one).
+    Keyframes,
+    /// An expression.
+    Expression,
+    /// A blend of two channel sources.
+    Blend,
+    /// Another node's output port, bound as the channel's source.
+    NodeOutput,
+    /// A step curve whose keys do not all agree with its default value.
+    StringSteps,
+}
+
+impl DynamicIdentifier {
+    /// Stable, untranslated word for the shape — the `{shape}` a CLI warning
+    /// names, and the same spelling in every locale.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DynamicIdentifier::ParameterPort => "parameter port",
+            DynamicIdentifier::Keyframes => "keyframes",
+            DynamicIdentifier::Expression => "expression",
+            DynamicIdentifier::Blend => "blend",
+            DynamicIdentifier::NodeOutput => "node output",
+            DynamicIdentifier::StringSteps => "string steps",
+        }
+    }
+}
+
+/// What an identifier parameter names, as read by
+/// [`ParameterValue::identifier`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Identifier {
+    /// A static stored id.
+    Static(u64),
+    /// No id at all: an unset default, a negative int, a name from before
+    /// the v9 asset-identity format.
+    Unset,
+    /// No id, because the value does not stand still.
+    Dynamic(DynamicIdentifier),
+}
+
+impl Identifier {
+    /// The id this names, or `None` for both flavours of naming none.
+    pub fn static_raw(self) -> Option<u64> {
+        match self {
+            Identifier::Static(id) => Some(id),
+            Identifier::Unset | Identifier::Dynamic(_) => None,
+        }
+    }
+
+    /// Why this names no id, or `None` when it names one (or names none for
+    /// a reason that is not motion).
+    pub fn dynamic(self) -> Option<DynamicIdentifier> {
+        match self {
+            Identifier::Dynamic(reason) => Some(reason),
+            Identifier::Static(_) | Identifier::Unset => None,
+        }
+    }
+}
+
 impl ParameterValue {
     /// A constant 2-component vector value. Geometric vector parameters are
     /// `Channel2` / `Channel3` rather than a `_x` / `_y` pair of Floats, so
@@ -347,31 +420,82 @@ impl ParameterValue {
         }
     }
 
-    /// The non-negative integer this parameter names as an **identifier** — a
-    /// `layer.ref` target, a `precomp` composition — or `None` if it names
-    /// none.
+    /// What this parameter names when it is read as an **identifier** — a
+    /// `layer.ref` target, a `precomp` composition, a `media` asset.
     ///
-    /// `IntChannel` counts only while its source is a constant. An identifier
+    /// **This is the one mouth every identifier is read through.** Which
+    /// parameters are identifiers is
+    /// [`is_identifier_parameter`](crate::composition::validate::is_identifier_parameter)'s
+    /// question; what one of them names is this one, and the rule it states
+    /// is that *only a static stored value names anything*. An identifier
     /// that changed over time would have to reserve every id it could ever
     /// take ([`Document::id_watermarks`](crate::composition::Document::id_watermarks),
     /// REQ-LAYER-009) and invalidate the scope of every layer it could ever
     /// point at, and a curve gives no finite answer to either — the values
-    /// between two keys are as real as the keys. So keyframing an identifier
-    /// is not supported: the Properties keyframe toggle asks
-    /// [`is_identifier_parameter`](crate::composition::validate::is_identifier_parameter)
-    /// and hides itself on these parameters. Reading the value here rather
-    /// than in each caller is what makes that one decision instead of three,
-    /// and that predicate is the same arrangement for the write side.
-    pub fn static_identifier(&self) -> Option<u64> {
-        let raw = match self {
-            ParameterValue::Int(v) => *v,
-            ParameterValue::IntChannel(channel) => match channel.source {
-                crate::animation::channel::ChannelSource::Constant(v) => v.round() as i32,
-                _ => return None,
-            },
-            _ => return None,
+    /// between two keys are as real as the keys. So a value that is not
+    /// static names **nothing**, and says which shape made it so, which is
+    /// what lets `ravel-cli render` report it instead of rendering a
+    /// silently different picture ([`Document::dynamic_identifiers`](crate::composition::Document::dynamic_identifiers)).
+    ///
+    /// Both spellings of an identifier land here: the `Int` family holds a
+    /// raw [`LayerId`](crate::id::LayerId) / [`CompId`](crate::id::CompId),
+    /// and the `String` family holds an
+    /// [`AssetId`](crate::id::AssetId)'s decimal form
+    /// ([`AssetId::to_param_value`](crate::id::AssetId::to_param_value)).
+    /// Reading them in one place is what keeps the watermark scan and
+    /// evaluation from disagreeing about which ids exist.
+    pub fn identifier(&self) -> Identifier {
+        use crate::animation::channel::ChannelSource;
+        let from_int = |raw: i32| match u64::try_from(raw) {
+            Ok(id) => Identifier::Static(id),
+            Err(_) => Identifier::Unset,
         };
-        u64::try_from(raw).ok()
+        match self {
+            ParameterValue::Int(v) => from_int(*v),
+            ParameterValue::IntChannel(channel) => match &channel.source {
+                ChannelSource::Constant(v) => from_int(v.round() as i32),
+                ChannelSource::Expression(_) => Identifier::Dynamic(DynamicIdentifier::Expression),
+                ChannelSource::Blend(..) => Identifier::Dynamic(DynamicIdentifier::Blend),
+                ChannelSource::NodeOutput(..) => Identifier::Dynamic(DynamicIdentifier::NodeOutput),
+                // Keyframes, and the audio-reactive placeholder that is a
+                // curve in waiting: neither has one value.
+                _ => Identifier::Dynamic(DynamicIdentifier::Keyframes),
+            },
+            ParameterValue::String(text) => match text.parse::<u64>() {
+                Ok(id) => Identifier::Static(id),
+                // The template default `""`, or a pre-v9 name the v8 → v9
+                // upgrade has not run over yet: it names no id, and that is
+                // not the same as naming a moving one.
+                Err(_) => Identifier::Unset,
+            },
+            // A step curve is static exactly when no key can change what it
+            // samples to — which is the shape the keyframe toggle produces
+            // (`StepCurve::keyed` keeps the old constant as the default), so
+            // a curve that was toggled on and never edited still names its
+            // id.
+            ParameterValue::StringSteps(steps) => {
+                if steps
+                    .keys()
+                    .iter()
+                    .all(|key| key.value == *steps.default_value())
+                {
+                    match steps.default_value().parse::<u64>() {
+                        Ok(id) => Identifier::Static(id),
+                        Err(_) => Identifier::Unset,
+                    }
+                } else {
+                    Identifier::Dynamic(DynamicIdentifier::StringSteps)
+                }
+            }
+            _ => Identifier::Unset,
+        }
+    }
+
+    /// The non-negative integer this parameter names as an identifier, or
+    /// `None` if it names none — [`identifier`](Self::identifier) with the
+    /// reason dropped, for the callers that only have to resolve a reference.
+    pub fn static_identifier(&self) -> Option<u64> {
+        self.identifier().static_raw()
     }
 
     /// Static float value, if this is a `Float`.

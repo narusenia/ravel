@@ -55,6 +55,16 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   無制限スクラブになる
 - `param_options` を付けた文字列パラメータは Properties で dropdown になる
   （自由入力にしない）
+- **パラメータが 6 個を超えたら `with_param_group` で意味ごとに切る。**
+  引数はグループ名とキーの並びで、Properties がその順にセクションへ割る
+  （`node.<type_key>.group.<name>` のロケールキーを en / ja 両方に足すこと。
+  `ravel-ui::node_locale` の走査テストが欠落と余りの両方を落とす）。
+  **宣言順が表示順**なので `HashMap` ではなく `Vec` で持っている。宣言しない
+  パラメータは先頭の見出し無しセクションに残るので、**一部だけ切ると
+  中途半端に見える** — `registry/builtin.rs` のテストが「1 つでも切ったら
+  全部切る」を強制する。宣言に無いキーは黙って落ちる（テンプレートの
+  タイポでパネルが壊れない）ので、**キー名を変えたらグループも直す**
+  （`declared_param_groups_name_real_parameters` が落とす）
 - **キャンバス上の意味を持つベクタには `with_param_role` を宣言する。**
   `ParamRole::Position` は点、`Size` は Position からのオフセット（半径など）。
   Viewer のマニピュレータは宣言だけを見てハンドルを出すので、宣言しない限り

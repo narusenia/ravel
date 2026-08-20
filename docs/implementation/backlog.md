@@ -60,7 +60,6 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
-| DISK-4 | Timeline の Int / String 行とキーフレーム編集 | `discrete-keyframes-plan.md` |
 | WARN-1 | 識別子パラメータの解決を 1 経路に畳む | `render-warning-channel-plan.md` |
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
@@ -703,16 +702,16 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
 | CICACHE-2 | ✅ #339 | 効果の計測と設定の詰め（cold/warm 実測、R2 見積もり、`line-tables-only`） | CICACHE-1 ✅ |
 
-### 離散パラメータのキーフレーム（`discrete-keyframes-plan.md`）
+### 離散パラメータのキーフレーム（`done/discrete-keyframes-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | DISK-1 | ✅ #457 | `IntChannel` と解決層（フォーマット上げ。`.ravprj` v10） | — |
 | DISK-2 | ✅ #462 | `StepCurve<String>` と `StringSteps` | DISK-1 ✅ |
 | DISK-3 | ✅ #462 | Properties のキーフレームトグルと再型付け | DISK-1, DISK-2 |
-| DISK-4 | 🟡 | Timeline の行とキーフレーム編集 | DISK-3 ✅ |
-| DISK-5 | ⬜ | カーブエディタの階段描画（Int のみ） | DISK-4 |
-| DISK-6 | ⬜ | ロケール / 文書 | DISK-1〜5 |
+| DISK-4 | ✅ #465 | Timeline の行とキーフレーム編集 | DISK-3 ✅ |
+| DISK-5 | ✅ #465 | カーブエディタの階段描画（Int のみ） | DISK-4 ✅ |
+| DISK-6 | ✅ #465 | ロケール / 文書 | DISK-1〜5 ✅ |
 
 ### レンダーの警告経路（`render-warning-channel-plan.md`）
 

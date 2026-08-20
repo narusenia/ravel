@@ -44,7 +44,6 @@ several plans here wait on its later units rather than on each other.
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
-| `discrete-keyframes-plan.md` | Keyframes for Int and String parameters (`IntChannel`, `StringSteps`) — animation stops being f32-only | — | REQ-CORE-010 |
 | `render-warning-channel-plan.md` | Machine-readable warnings for what a render silently gets wrong: offline or unreadable media, and identifier parameters that are not static — driven by a wire, keyframed, or hand-authored `StringSteps` (`HIGH-34`, `HIGH-35`) | — | — |
 | `hands-on-findings-handoff.md` | Where the 2026-08-08 hands-on findings landed, and the order to pick the filed bugs up in | — | — |
 | `parameter-groups-plan.md` | Parameter groups (Pages) declared by the node type; the shape `OFX-5` reads plugin Group/Page into | — | REQ-PLUGIN-001 |
@@ -194,6 +193,7 @@ textured-rectangle behaviour; only the route to it changes.
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
 | `done/media-import-plan.md` | Media import, asset references, MediaBin, the unified media node, the asset inspector with relink, and the offline marks | #469, #470 — 2026-08-21 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
+| `done/discrete-keyframes-plan.md` | Keyframes for Int and String parameters (`IntChannel`, `StringSteps`) — animation stops being f32-only, and the Timeline / curve editor show them | #457, #462, #465 — 2026-08-21 | REQ-CORE-010 |
 | `done/asset-identity-plan.md` | Stable `AssetId` separate from the display name, so a re-import cannot silently rebind an existing reference; the exposed declaration's claim is recorded on the entry | #456, #460 — 2026-08-21 | REQ-PROJ-001, REQ-UI-008, REQ-UI-010 |
 | `done/panel-visibility-plan.md` | Tell a panel whether its tab is in front, so a background pane stops rebuilding and catches up when it returns | #409, #461 — 2026-08-21 | REQ-UI-002, REQ-UI-013 |
 | `done/responsiveness-stage3-plan.md` | Responsiveness stage 3 (roadmap phase C3): graph adjacency index, layer-level `ptr_eq`, path interning, panel revision gates, GPU rasterize and upload dedup | #395, #396, #397, #461 — 2026-08-21 | REQ-CORE-002/006/011, REQ-UI-002/003 |

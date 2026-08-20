@@ -63,6 +63,16 @@ use super::asset_legacy::LegacyAssetKeys;
 use super::{Document, MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
 
 /// Apply the v8 → v9 asset reference upgrade to `document`.
+///
+/// Runs once, gated on the archive's version by the caller. A **v9** file that
+/// carries a pre-v9 string anyway — hand-edited, or merged by hand from two
+/// projects — is deliberately not repaired here: this pass reads a reference
+/// that is neither a name in the table nor a live id as offline, and re-running
+/// it over a current document would turn a legitimate reference to a *deleted*
+/// asset (`AssetId` present, entry gone — the normal offline state after v9)
+/// into [`AssetId::UNSET`], losing the difference between "named something
+/// that is gone" and "named nothing". The mixed file resolves to offline
+/// instead, which is the safe direction and visible in the log.
 pub(super) fn upgrade(mut document: Document, legacy: &LegacyAssetKeys) -> Document {
     // No early exit on an empty `legacy`: a v8 project whose assets were all
     // deleted still holds references to their names, and leaving those as

@@ -97,13 +97,17 @@ pub(crate) fn intern(name: &str) -> AssetId {
 
 /// Run `f` with an empty legacy-key table, returning its result and the table.
 ///
-/// Wrap the deserialization of one document. The table is cleared on the way
-/// in as well as taken on the way out, so a panic part-way through a parse
-/// cannot leak keys into the next one.
+/// Wrap the deserialization of one document. The table is taken on the way in
+/// as well as on the way out, so a panic part-way through a parse cannot leak
+/// keys into the next one, and **whatever an enclosing scope had collected is
+/// put back**. Nothing nests these today — one document does not deserialize
+/// another — but a scope that silently emptied its caller's table would make
+/// one name intern to two ids, which is the failure this module exists to
+/// prevent.
 pub fn scoped<R>(f: impl FnOnce() -> R) -> (R, LegacyAssetKeys) {
-    LEGACY_KEYS.with_borrow_mut(HashMap::clear);
+    let outer = LEGACY_KEYS.with_borrow_mut(std::mem::take);
     let result = f();
-    let by_name = LEGACY_KEYS.with_borrow_mut(std::mem::take);
+    let by_name = LEGACY_KEYS.with_borrow_mut(|table| std::mem::replace(table, outer));
     (result, LegacyAssetKeys { by_name })
 }
 
@@ -130,6 +134,30 @@ mod tests {
         let (id, keys) = scoped(|| intern(""));
         assert_eq!(id, AssetId::UNSET);
         assert!(keys.is_empty(), "\"no asset\" is not an asset");
+    }
+
+    /// A nested scope leaves the enclosing one exactly as it was. Nothing
+    /// nests these today; the guard is here because the failure would be a
+    /// name interning to two ids, which is silent and is the whole hazard.
+    #[test]
+    fn a_nested_scope_does_not_disturb_the_one_around_it() {
+        let ((outer_first, inner, outer_again), keys) = scoped(|| {
+            let first = intern("plate");
+            let (inner, inner_keys) = scoped(|| intern("plate"));
+            assert_eq!(inner_keys.id_of("plate"), Some(inner));
+            (first, inner, intern("plate"))
+        });
+        assert_eq!(
+            outer_first, outer_again,
+            "the outer scope still knows the key it minted"
+        );
+        assert_ne!(inner, outer_first, "and the inner scope minted its own");
+        assert_eq!(keys.id_of("plate"), Some(outer_first));
+        assert_eq!(
+            keys.by_name.len(),
+            1,
+            "the inner key is not in the outer table"
+        );
     }
 
     /// Two documents naming the same asset must not share its id: the whole

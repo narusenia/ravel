@@ -716,6 +716,8 @@ pub enum DocumentValidationError {
     ParamPortWithoutParameter { node: NodeId, key: String },
     #[error("subnet nesting exceeds the supported depth of {limit}")]
     SubnetDepthExceeded { limit: usize },
+    #[error("the media asset table is keyed by the unset asset id")]
+    UnsetAssetKey,
 }
 
 /// Maximum number of nested subnet ownership boundaries in a document.
@@ -1599,6 +1601,15 @@ impl Document {
                 check_unique_node_ids(&layer.network, &mut node_ids)?;
                 check_param_ports(&layer.network)?;
             }
+        }
+        // `AssetId::UNSET` is what a reference that resolves to nothing holds
+        // — an `AudioSource` naming no asset, a `media` node whose asset was
+        // deleted. An entry keyed by it would give every one of those a real
+        // asset to resolve to, which is the silent mis-link v9 removed. The
+        // allocator never mints it, so only a hand-edited or crafted file can
+        // carry one.
+        if self.media_assets.contains_key(&AssetId::UNSET) {
+            return Err(DocumentValidationError::UnsetAssetKey);
         }
         let watermarks = self.id_watermarks();
         for (kind, raw) in [
@@ -3074,6 +3085,29 @@ mod tests {
             doc.validate(),
             Err(DocumentValidationError::IdExhausted { kind: "node" })
         );
+    }
+
+    /// The asset table may not be keyed by [`AssetId::UNSET`]. That id is what
+    /// a reference resolving to nothing holds, so an entry under it would hand
+    /// every unset reference in the document a real asset — the silent
+    /// mis-link the minted id exists to remove. Only a hand-edited file can
+    /// contain one, which is why the load path is where it is refused.
+    #[test]
+    fn validate_rejects_the_unset_id_as_an_asset_key() {
+        use crate::composition::{AssetKind, AssetMetadata, AssetPath};
+
+        let doc = Document::default().with_media_asset_entry(
+            AssetId::UNSET,
+            MediaAssetEntry {
+                path: AssetPath::Absolute("/media/plate.mov".into()),
+                name: "plate".into(),
+                kind: AssetKind::Container,
+                metadata: AssetMetadata::default(),
+                color_space: None,
+                resolved: None,
+            },
+        );
+        assert_eq!(doc.validate(), Err(DocumentValidationError::UnsetAssetKey));
     }
 
     /// Node ids are document-globally unique (REQ-LAYER-009): the same id

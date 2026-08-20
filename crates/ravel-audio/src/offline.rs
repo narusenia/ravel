@@ -238,7 +238,7 @@ mod tests {
     fn audio_layer(id: u64, asset: AssetId) -> Layer {
         let mut layer =
             Layer::new(LayerId::new(id), format!("layer {id}"), Graph::new()).with_time(0, 0, 300);
-        layer.audio = Some(AudioSource::new(asset.to_param_value(), 0));
+        layer.audio = Some(AudioSource::new(asset, 0));
         layer
     }
 

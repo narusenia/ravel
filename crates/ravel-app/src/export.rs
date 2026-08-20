@@ -756,7 +756,7 @@ mod tests {
     fn document(with_audio: bool) -> Arc<Document> {
         let mut layer = Layer::new(LayerId::new(1), "voice over", Graph::new());
         if with_audio {
-            layer.audio = Some(AudioSource::new(AssetId::new(1).to_param_value(), 0));
+            layer.audio = Some(AudioSource::new(AssetId::new(1), 0));
         }
         let mut comp = Composition::new(comp_id(), "shot 010", (32, 18), FPS, DURATION);
         comp.layers.push_back(layer);

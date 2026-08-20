@@ -223,10 +223,7 @@ impl AudioMixdown {
                 let timeline_start = layer.start_frame.max(0) as u64;
                 Some(TrackSpec {
                     layer_id: layer.id,
-                    // `AudioSource::asset_id` is still the decimal spelling of
-                    // the id. Text that is not one names no asset, which the
-                    // consumer already has a report for.
-                    asset_id: AssetId::from_param_value(&audio.asset_id).unwrap_or(AssetId::UNSET),
+                    asset_id: audio.asset_id,
                     stream_index: audio.stream_index,
                     start_frame: comp_frames_to_rate(timeline_start, fps, output_rate),
                     source_in_frames: layer.in_frame + head_skip,
@@ -419,7 +416,7 @@ mod tests {
     /// An `AudioSource` naming `asset`, spelled the way a document spells it:
     /// the id's decimal form, which is what `desired_tracks` parses.
     fn source(asset: AssetId) -> AudioSource {
-        AudioSource::new(asset.to_param_value(), 0)
+        AudioSource::new(asset, 0)
     }
 
     fn audio_layer(id: u64, start: i64, audio: AudioSource) -> Layer {

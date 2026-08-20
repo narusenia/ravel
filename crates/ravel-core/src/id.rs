@@ -214,11 +214,13 @@ impl fmt::Display for LayerId {
 /// Before `.ravprj` v9 an asset was keyed by that display string directly;
 /// [`Deserialize`] still accepts the old form, which is what makes the v8 → v9
 /// upgrade possible (see [`crate::composition::asset_legacy`]).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct AssetId(u64);
 
 impl AssetId {
-    /// The id no asset ever has: a reference that resolves to nothing.
+    /// The id no asset ever has: a reference that resolves to nothing. Also
+    /// [`Default`], so `#[serde(default)]` on a reference field means "names
+    /// nothing" rather than "names asset 1".
     ///
     /// [`Self::next`] starts at 1, so this is not merely unused today but
     /// unreachable by allocation. It is what an audio source with no asset

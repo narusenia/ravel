@@ -258,6 +258,11 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
   thread-local** に残す。`asset_legacy::scoped` が 1 回のデシリアライズを
   囲み、表を返す。表を**必ず捨てる**こと — 同じ名前を持つ 2 つの旧文書が
   ID を共有すると、片方から貼ったレイヤーが**もう片方のファイルに繋がる**
+- **型付きパスが直すのは `media` ノードのパラメータだけ。**
+  `AudioSource::asset_id` は `AssetId` なので上の interning が読み込み中に
+  解決済みで、素材表の同名エントリと同じ ID になる。`media` ノードの参照は
+  型無しの `ParameterValue::String` で interning の目に入らないので、
+  こちらだけ名前で引き直す
 - **`AssetId` の `Deserialize` は 4 通りの綴りを受ける。** `deserialize_any`
   を使う以上、隣の ID 型が derive で得ている newtype の綴りは自前で扱う:
   RON は newtype を `(1)`（`struct_names` 時は `AssetId(1)`）と書くので、

@@ -409,7 +409,7 @@ fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
         .add_layer(Layer::new(LayerId::new(1), "shape", layer_network()).with_time(0, 0, 24));
     let mut voice = Layer::new(LayerId::new(2), "voice", Graph::new()).with_time(0, 0, 24);
     let voice_asset = AssetId::next();
-    voice.audio = Some(AudioSource::new(voice_asset.to_param_value(), 0));
+    voice.audio = Some(AudioSource::new(voice_asset, 0));
     comp = comp.add_layer(voice);
 
     let mut document = Document::default().with_composition(comp);

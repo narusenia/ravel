@@ -529,7 +529,7 @@ mod tests {
         let mut composition = comp(1, "Main");
         let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
         layer.audio = Some(AudioSource {
-            asset_id: AssetId::next().to_param_value(),
+            asset_id: AssetId::next(),
             stream_index: 0,
             ..Default::default()
         });
@@ -559,7 +559,7 @@ mod tests {
 
         let mut composition = comp(1, "Main");
         let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
-        layer.audio = Some(AudioSource::new(AssetId::next().to_param_value(), 0));
+        layer.audio = Some(AudioSource::new(AssetId::next(), 0));
         composition = composition.add_layer(layer);
 
         let document = Document::default().with_composition(composition);

@@ -11,7 +11,9 @@
 //!   (proved through redo, since `DocumentStore::undo` also reports `true`
 //!   for reverting an uncommitted preview);
 //! - a multi-file batch is one undo step, with probe failures skipped;
-//! - re-importing the same absolute path reuses the existing asset id;
+//! - re-importing the same absolute path reuses the existing asset id, but
+//!   re-importing it after the asset was **deleted** mints a new one, so the
+//!   references the deletion orphaned stay offline (`.ravprj` v9);
 //! - `add_asset_layers` places at the requested frame with
 //!   `ceil(duration × comp_fps)` frames, falling back to the composition
 //!   length when the duration is unknown, and a whole batch is one undo
@@ -334,6 +336,77 @@ fn unknown_duration_falls_back_to_the_composition_length(cx: &mut TestAppContext
     });
 }
 
+/// The failure `.ravprj` v9 exists to remove: delete an asset, import a file
+/// at the same path again, and the layer the deletion orphaned must be
+/// **offline** rather than silently wired to the new file.
+///
+/// Before v9 the asset id was the file stem, so the second import re-minted the
+/// very same id and every reference the delete left behind adopted whatever was
+/// now behind it — with no error and no warning. The id is minted now, so the
+/// re-import is a *different* asset (`docs/implementation/asset-identity-plan.md`).
+#[gpui::test]
+fn deleting_an_asset_and_reimporting_the_same_path_leaves_the_old_reference_offline(
+    cx: &mut TestAppContext,
+) {
+    let project = project(cx);
+
+    let first = project.update(cx, |project, cx| {
+        project.import_media(vec![probed_clip("/media/clip.mov", Some(1.0))], vec![], cx)
+    });
+    let original = first.imported[0].0;
+    add_layers(&project, &[original], 0, cx);
+
+    // The layer's reference, captured before the asset goes away.
+    let referenced = project.read_with(cx, |project, _| {
+        media_reference_of_the_only_layer(project.document())
+    });
+    assert_eq!(referenced, Some(original));
+
+    // Delete the asset the way the MediaBin does: drop the entry, keep the
+    // layer. `ProjectState::commit_document` prunes selection, not references.
+    project.update(cx, |project, cx| {
+        let mut doc = project.document().clone();
+        assert!(doc.media_assets.remove(&original).is_some());
+        project.commit_document(doc, ravel_core::runtime::InvalidationHint::Structural, cx);
+    });
+
+    let second = project.update(cx, |project, cx| {
+        project.import_media(vec![probed_clip("/media/clip.mov", Some(1.0))], vec![], cx)
+    });
+    let reimported = second.imported[0].0;
+
+    assert_ne!(
+        reimported, original,
+        "a re-import is a new asset, never the deleted one's id"
+    );
+    project.read_with(cx, |project, _| {
+        let doc = project.document();
+        assert_eq!(
+            media_reference_of_the_only_layer(doc),
+            Some(original),
+            "the layer still names what it always named"
+        );
+        assert!(
+            doc.get_media_asset(original).is_none(),
+            "and that asset is gone, so the layer is offline rather than \
+             pointing at the file just imported"
+        );
+        assert!(doc.get_media_asset(reimported).is_some());
+    });
+}
+
+/// The asset the document's single layer's `media` node references.
+fn media_reference_of_the_only_layer(
+    document: &ravel_core::composition::Document,
+) -> Option<AssetId> {
+    ravel_ui::document::root_composition(document)?
+        .layers
+        .head()?
+        .network
+        .nodes()
+        .find_map(|node| ravel_core::composition::node_asset_reference(node))
+}
+
 /// Re-importing the same absolute path reuses the asset: the id does not
 /// duplicate and the asset table does not grow.
 #[gpui::test]
@@ -427,9 +500,8 @@ fn a_clip_with_audio_binds_the_shell_audio_source(cx: &mut TestAppContext) {
             .expect("the media node's asset reference");
         assert_eq!(media_asset, clip, "the media node names the imported asset");
         assert_eq!(
-            audio.asset_id,
-            clip.to_param_value(),
-            "same asset id as the media node"
+            audio.asset_id, clip,
+            "the same asset as the media node — one asset, two consumers"
         );
         assert_eq!(audio.stream_index, 1, "the first audio stream, not video");
         assert!(!audio.audio_muted);
@@ -515,7 +587,7 @@ fn an_audio_only_file_becomes_a_frameless_audio_layer(cx: &mut TestAppContext) {
             "no media node is created for a file without video"
         );
         let audio = layer.audio.as_ref().expect("audio source");
-        assert_eq!(audio.asset_id, music_id.to_param_value());
+        assert_eq!(audio.asset_id, music_id);
         assert_eq!(audio.stream_index, 1);
         assert_eq!(layer.out_frame, 120, "4 s at the comp's 30 fps");
     });

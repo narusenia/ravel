@@ -748,7 +748,7 @@ mod tests {
         let hero = Layer {
             opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
             audio: Some(AudioSource {
-                asset_id: "plate".into(),
+                asset_id: demo_asset(),
                 stream_index: 1,
                 gain: keyframed_channel(&[(0, 1.0), (30, 0.75)]),
                 fade_in_frames: 4,
@@ -2394,7 +2394,7 @@ mod tests {
             .add_node(media_node(3, "exposed:tint"))
             .unwrap();
         let mut layer = Layer::new(LayerId::new(1), "Plate", network).with_time(0, 0, 100);
-        layer.audio = Some(AudioSource::new("voice", 1));
+        layer.audio = Some(AudioSource::new(AssetId::new(2), 1));
         let comp = Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 100)
             .add_layer(layer);
         let document = Document::default()
@@ -2423,6 +2423,8 @@ mod tests {
                 "(AssetId(2), MediaAssetEntry(\n      name: \"voice\",",
                 "(\"voice\", MediaAssetEntry(",
             )
+            // An `AudioSource` names its asset by the same display string.
+            .replace("asset_id: AssetId(2),", "asset_id: \"voice\",")
             .replace(
                 // The file stem is `backdrop`; a pre-v9 exposed swap keyed
                 // its entry `exposed:<declaration>`, which is what the bound
@@ -2519,7 +2521,7 @@ mod tests {
         let comp = document.compositions.values().next().unwrap();
         let audio = comp.layers.head().unwrap().audio.as_ref().expect("audio");
         assert_eq!(
-            AssetId::from_param_value(&audio.asset_id),
+            Some(audio.asset_id),
             id_of("voice"),
             "the audio source names the asset it always named"
         );

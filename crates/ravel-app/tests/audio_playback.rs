@@ -108,7 +108,7 @@ fn asset() -> AssetId {
 fn audio_layer(id: u64, start: i64, asset_id: AssetId) -> Layer {
     let mut layer =
         Layer::new(LayerId::new(id), format!("audio {id}"), Graph::new()).with_time(start, 0, 300);
-    layer.audio = Some(AudioSource::new(asset_id.to_param_value(), 0));
+    layer.audio = Some(AudioSource::new(asset_id, 0));
     layer
 }
 
@@ -346,7 +346,7 @@ fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
     });
 
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(0, 0, 300);
-    layer.audio = Some(AudioSource::new(asset().to_param_value(), 1));
+    layer.audio = Some(AudioSource::new(asset(), 1));
     commit_layer(&project, layer, cx);
     assert_eq!(
         recording.commands(),
@@ -413,7 +413,7 @@ fn picture_and_sound_share_the_layer_local_time_axis() {
 
     // A clip placed at comp frame 30, trimmed to source frames 10..100.
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(30, 10, 100);
-    layer.audio = Some(AudioSource::new(asset().to_param_value(), 1));
+    layer.audio = Some(AudioSource::new(asset(), 1));
     let mut comp = Composition::new(CompId::new(1), "comp", (640, 480), FPS, 300);
     comp.layers = vec![layer.clone()].into();
 
@@ -457,7 +457,7 @@ fn picture_and_sound_share_the_layer_local_time_axis() {
 fn the_layer_trim_bounds_the_audible_range() {
     const OUTPUT_RATE: u32 = 48_000;
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(30, 10, 100);
-    layer.audio = Some(AudioSource::new(asset().to_param_value(), 1));
+    layer.audio = Some(AudioSource::new(asset(), 1));
     let mut comp = Composition::new(CompId::new(1), "comp", (640, 480), FPS, 300);
     comp.layers = vec![layer].into();
 

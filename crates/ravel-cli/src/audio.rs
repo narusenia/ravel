@@ -356,7 +356,7 @@ mod tests {
         let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
         if with_audio {
             // The reference a document holds: the asset id's decimal spelling.
-            layer.audio = Some(AudioSource::new(AssetId::next().to_param_value(), 0));
+            layer.audio = Some(AudioSource::new(AssetId::next(), 0));
         }
         comp = comp.add_layer(layer);
         Document::default().with_composition(comp)

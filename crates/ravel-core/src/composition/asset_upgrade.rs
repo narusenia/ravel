@@ -19,11 +19,16 @@
 //! for the same reason — the `manifest.json` migration chain never sees
 //! `document/main.ron`.
 //!
-//! Three steps:
+//! Two steps:
 //!
 //! 1. give each asset the name it was keyed by, so nothing on screen changes;
-//! 2. rewrite each `media` node's `asset_id` parameter to the decimal id;
-//! 3. rewrite each [`AudioSource`](super::AudioSource) the same way.
+//! 2. rewrite each `media` node's `asset_id` parameter to the decimal id.
+//!
+//! An [`AudioSource`](super::AudioSource) needs no step of its own: its
+//! `asset_id` is an [`AssetId`], so the interner resolved it while the document
+//! was being read, to the same id as the table entry of that name. A `media`
+//! node's reference cannot go that way — it is an untyped
+//! [`ParameterValue::String`], which the interner never sees.
 //!
 //! # References that name nothing
 //!
@@ -89,8 +94,8 @@ pub(super) fn upgrade(mut document: Document, legacy: &LegacyAssetKeys) -> Docum
         .map(|(id, entry)| (entry.name.as_str(), *id))
         .collect();
 
-    // Step 2 and step 3 read the same table, so they are collected before
-    // anything is written back.
+    // Collected before anything is written back: every graph resolves against
+    // the same table.
     let graph = upgrade_graph(&document.graph, &by_name);
     let comp_ids: Vec<_> = document.compositions.keys().copied().collect();
     let mut compositions = document.compositions.clone();
@@ -101,11 +106,6 @@ pub(super) fn upgrade(mut document: Document, legacy: &LegacyAssetKeys) -> Docum
         let mut updated = (**comp).clone();
         for layer in updated.layers.iter_mut() {
             layer.network = upgrade_graph(&layer.network, &by_name);
-            if let Some(audio) = layer.audio.as_mut()
-                && !audio.asset_id.is_empty()
-            {
-                audio.asset_id = resolve(&audio.asset_id, &by_name, "an audio source");
-            }
         }
         compositions.insert(comp_id, Arc::new(updated));
     }

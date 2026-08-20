@@ -566,9 +566,9 @@ pub fn add_media_layer(
     // least one frame.
     let mut layer =
         Layer::new(id, name, network).with_time(spec.start_frame, 0, spec.out_frame.max(1));
-    layer.audio = spec.audio_stream_index.map(|stream_index| {
-        ravel_core::composition::AudioSource::new(spec.asset_id.to_param_value(), stream_index)
-    });
+    layer.audio = spec
+        .audio_stream_index
+        .map(|stream_index| ravel_core::composition::AudioSource::new(spec.asset_id, stream_index));
     Ok(add_layer(doc, comp, layer).map(|doc| (doc, id)))
 }
 
@@ -1466,7 +1466,7 @@ mod tests {
             (12, 0, 48)
         );
         let audio = layer.audio.as_ref().expect("audio source");
-        assert_eq!(AssetId::from_param_value(&audio.asset_id), Some(clip));
+        assert_eq!(audio.asset_id, clip);
         assert_eq!(audio.stream_index, 1);
         // The media node points at the same asset — one asset, two consumers.
         let media = layer

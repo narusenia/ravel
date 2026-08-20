@@ -198,7 +198,7 @@ pub fn asset_references(document: &Document, asset_id: AssetId) -> Vec<AssetRefe
             let used_by_audio = layer
                 .audio
                 .as_ref()
-                .is_some_and(|audio| AssetId::from_param_value(&audio.asset_id) == Some(asset_id));
+                .is_some_and(|audio| audio.asset_id == asset_id);
             if used_by_node || used_by_audio {
                 references.push(AssetReference {
                     comp: comp.id,
@@ -428,12 +428,12 @@ mod tests {
         let by_node = Layer::new(LayerId::next(), "Node layer", media_network(clip));
         let mut by_audio = Layer::new(LayerId::next(), "Audio layer", Graph::new());
         by_audio.audio = Some(AudioSource {
-            asset_id: clip.to_param_value(),
+            asset_id: clip,
             ..AudioSource::default()
         });
         let mut by_both = Layer::new(LayerId::next(), "Both layer", media_network(clip));
         by_both.audio = Some(AudioSource {
-            asset_id: clip.to_param_value(),
+            asset_id: clip,
             ..AudioSource::default()
         });
         let by_other = Layer::new(LayerId::next(), "Other layer", media_network(other));

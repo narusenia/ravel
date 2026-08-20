@@ -103,7 +103,7 @@ fn document(with_audio: bool) -> Document {
         layer.audio = Some(AudioSource {
             // No asset table behind it: this document only has to *have*
             // audio for the "your render will be silent" warning.
-            asset_id: AssetId::next().to_param_value(),
+            asset_id: AssetId::next(),
             ..Default::default()
         });
         comp = comp.add_layer(layer);
@@ -994,7 +994,7 @@ mod sound {
             0,
             (FPS * SECONDS) as u64,
         );
-        voice.audio = Some(AudioSource::new(voice_asset().to_param_value(), 0));
+        voice.audio = Some(AudioSource::new(voice_asset(), 0));
         comp = comp.add_layer(voice);
 
         let mut document = Document::default().with_composition(comp);

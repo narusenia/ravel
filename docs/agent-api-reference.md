@@ -836,7 +836,7 @@ Layer::new(id, name, network: Graph) .with_time(start, in, out)
     // transform (rotation in DEGREES), opacity, blend_mode, adjustment,
     // parent, audio: Option<AudioSource>; reserved v2: time_remap, track_matte
     // LayerSource is REMOVED — kinds are creation templates (REQ-LAYER-008)
-AudioSource::new(asset_id, stream_index)   // asset_id: the AssetId in decimal
+AudioSource::new(asset_id: AssetId, stream_index)   // AssetId::UNSET = no asset
     // gain defaults to a constant 1.0; fade frames default to 0;
     // audio_muted defaults to false. gain is sampled in layer-local frames.
     // stream_index is the CONTAINER stream index (what the decoder seeks by),
@@ -861,7 +861,9 @@ Document::{with_media_asset(AssetId, path), with_media_asset_entry(AssetId, entr
     // OFFLINE, not an error: the media node yields a transparent frame.
     // composition::node_asset_reference(&Node) -> Option<AssetId> reads a
     // media node's reference; MEDIA_ASSET_PARAM_KEY / MEDIA_TYPE_KEYS name the
-    // parameter and the node types that carry it.
+    // parameter and the node types that carry it. AudioSource::asset_id is a
+    // typed AssetId, so a v8 document's audio reference is resolved by
+    // AssetId's own deserializer and needs no upgrade step.
 Document::upgrade_asset_references(&LegacyAssetKeys)   // v8 -> v9 typed pass
     // Names each asset after the key it had, then repoints all three
     // reference systems (media node parameter, AudioSource, the node an

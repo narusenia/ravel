@@ -383,7 +383,7 @@ pub fn compile_composition(
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::id::{CompId, LayerId};
+    use crate::id::{AssetId, CompId, LayerId};
 
     fn test_comp() -> Composition {
         Composition::new(
@@ -410,7 +410,7 @@ mod tests {
 
     fn audio_layer(id: u64) -> Layer {
         let mut layer = null_layer(id);
-        layer.audio = Some(crate::composition::AudioSource::new("audio", 0));
+        layer.audio = Some(crate::composition::AudioSource::new(AssetId::next(), 0));
         layer
     }
 

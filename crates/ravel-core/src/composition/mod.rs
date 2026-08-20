@@ -133,9 +133,18 @@ impl Default for LayerTransform {
 /// Timing comes exclusively from the owning [`Layer`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioSource {
-    /// Key into [`Document::media_assets`].
+    /// The asset this source plays — a key of [`Document::media_assets`].
+    ///
+    /// [`AssetId::UNSET`] means the shell has an audio source but no asset
+    /// behind it yet (the `audio` layer template's starting state), and so does
+    /// an id the table no longer holds; both are silent rather than an error.
+    ///
+    /// `default` because the field arrived after format v4, and because
+    /// [`AssetId`]'s deserializer also accepts the **pre-v9 display string** a
+    /// v8 document stored here — that is what lets such a document load at all
+    /// (see [`asset_legacy`]).
     #[serde(default)]
-    pub asset_id: String,
+    pub asset_id: AssetId,
     /// Audio stream number inside the media container.
     #[serde(default)]
     pub stream_index: usize,
@@ -158,7 +167,7 @@ fn default_audio_gain() -> AnimationChannel {
 impl Default for AudioSource {
     fn default() -> Self {
         Self {
-            asset_id: String::new(),
+            asset_id: AssetId::UNSET,
             stream_index: 0,
             gain: default_audio_gain(),
             fade_in_frames: 0,
@@ -169,9 +178,9 @@ impl Default for AudioSource {
 }
 
 impl AudioSource {
-    pub fn new(asset_id: impl Into<String>, stream_index: usize) -> Self {
+    pub fn new(asset_id: AssetId, stream_index: usize) -> Self {
         Self {
-            asset_id: asset_id.into(),
+            asset_id,
             stream_index,
             ..Self::default()
         }
@@ -1494,10 +1503,8 @@ impl Document {
             watermarks.comp = watermarks.comp.max(comp_id.raw()).max(comp.id.raw());
             for layer in &comp.layers {
                 watermarks.layer = watermarks.layer.max(layer.id.raw());
-                if let Some(audio) = &layer.audio
-                    && let Some(asset) = AssetId::from_param_value(&audio.asset_id)
-                {
-                    watermarks.asset = watermarks.asset.max(asset.raw());
+                if let Some(audio) = &layer.audio {
+                    watermarks.asset = watermarks.asset.max(audio.asset_id.raw());
                 }
                 if let Some(parent) = layer.parent {
                     watermarks.layer = watermarks.layer.max(parent.raw());
@@ -1759,9 +1766,10 @@ mod tests {
         layer.transform.position[0] =
             AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0)));
         layer.opacity = keyframed_channel(&[(0, 0.25), (10, 0.75)]);
+        let audio_asset = AssetId::next();
         layer.audio = Some(AudioSource {
             gain: AnimationChannel::new(ChannelSource::NodeOutput(node, OutputPortIndex(0))),
-            ..AudioSource::new("audio", 1)
+            ..AudioSource::new(audio_asset, 1)
         });
         layer.locked = true;
         let duplicate_id = LayerId::next();
@@ -1779,7 +1787,7 @@ mod tests {
             duplicate.audio.as_ref().unwrap().gain.source,
             ChannelSource::NodeOutput(bound, OutputPortIndex(0)) if bound == duplicate_node
         ));
-        assert_eq!(duplicate.audio.as_ref().unwrap().asset_id, "audio");
+        assert_eq!(duplicate.audio.as_ref().unwrap().asset_id, audio_asset);
         assert_eq!(duplicate.audio.as_ref().unwrap().stream_index, 1);
         assert_eq!(duplicate.start_frame, 12);
         assert_eq!((duplicate.in_frame, duplicate.out_frame), (3, 90));
@@ -2665,7 +2673,7 @@ mod tests {
             },
             opacity: keyframed_channel(&[(0, 0.0), (30, 1.0)]),
             audio: Some(AudioSource {
-                asset_id: "audio".into(),
+                asset_id: AssetId::new(9),
                 stream_index: 2,
                 gain: keyframed_channel(&[(0, 1.0), (30, 0.5)]),
                 fade_in_frames: 3,
@@ -2806,8 +2814,8 @@ mod tests {
 
     #[test]
     fn audio_source_missing_fields_use_forward_compatible_defaults() {
-        let source: AudioSource = ron::from_str(r#"AudioSource(asset_id: "clip")"#).unwrap();
-        assert_eq!(source.asset_id, "clip");
+        let source: AudioSource = ron::from_str(r#"AudioSource(asset_id: 4)"#).unwrap();
+        assert_eq!(source.asset_id, AssetId::new(4));
         assert_eq!(source.stream_index, 0);
         assert_eq!(source.fade_in_frames, 0);
         assert_eq!(source.fade_out_frames, 0);
@@ -2816,10 +2824,35 @@ mod tests {
         assert!((source.gain.evaluate(0.0, &ctx) - 1.0).abs() < f32::EPSILON);
     }
 
+    /// A `.ravprj` v8 audio source names its asset by the **display string**.
+    /// It must still load — the id is minted for the string and matched with
+    /// the asset table entry of that name (`asset_legacy`) — because that is
+    /// the only chance the v8 → v9 upgrade gets to see the name.
+    #[test]
+    fn a_v8_audio_source_reads_its_asset_key_as_an_id() {
+        let (source, keys) = asset_legacy::scoped(|| {
+            ron::from_str::<AudioSource>(r#"AudioSource(asset_id: "clip")"#).unwrap()
+        });
+        assert_ne!(source.asset_id, AssetId::UNSET, "the key names an asset");
+        assert_eq!(keys.id_of("clip"), Some(source.asset_id));
+    }
+
+    /// An audio source with no asset behind it — the `audio` layer template's
+    /// starting state, and the pre-v9 empty-string spelling of the same thing.
+    #[test]
+    fn an_audio_source_without_an_asset_is_unset() {
+        assert_eq!(AudioSource::default().asset_id, AssetId::UNSET);
+        let (source, keys) = asset_legacy::scoped(|| {
+            ron::from_str::<AudioSource>(r#"AudioSource(asset_id: "")"#).unwrap()
+        });
+        assert_eq!(source.asset_id, AssetId::UNSET);
+        assert!(keys.is_empty(), "\"no asset\" consumes no id");
+    }
+
     #[test]
     fn layer_audio_ron_uses_the_struct_named_option_shape() {
         let mut layer = empty_layer(1);
-        layer.audio = Some(AudioSource::new("dialogue", 3));
+        layer.audio = Some(AudioSource::new(AssetId::new(3), 3));
         let text =
             ron::ser::to_string_pretty(&layer, ron::ser::PrettyConfig::new().struct_names(true))
                 .unwrap();

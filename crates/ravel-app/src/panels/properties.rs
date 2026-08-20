@@ -58,7 +58,7 @@ use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
 };
 use ravel_core::graph::{Node, ParameterValue};
-use ravel_core::id::{AssetId, CompId, NodeId};
+use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
@@ -2353,7 +2353,7 @@ impl PropertiesGpuiPanel {
                 .as_ref()?
                 .read(cx)
                 .document()
-                .get_media_asset(AssetId::from_param_value(&audio.asset_id)?)?
+                .get_media_asset(audio.asset_id)?
                 .metadata
                 .clone(),
         )
@@ -5207,7 +5207,7 @@ mod tests {
         let (window, project, comp_id, lid) = setup(cx);
         project.update(cx, |project, cx| {
             let doc = update_layer(project.document(), comp_id, lid, |layer| {
-                layer.audio = Some(AudioSource::new("music", 0));
+                layer.audio = Some(AudioSource::new(ravel_core::id::AssetId::next(), 0));
             })
             .unwrap();
             project.commit_document(doc, InvalidationHint::None, cx);
@@ -5275,7 +5275,7 @@ mod tests {
                 .clone()
                 .with_media_asset_entry(clip, entry);
             let doc = update_layer(&doc, comp_id, lid, |layer| {
-                layer.audio = Some(AudioSource::new(clip.to_param_value(), 1));
+                layer.audio = Some(AudioSource::new(clip, 1));
             })
             .unwrap();
             project.commit_document(doc, InvalidationHint::None, cx);

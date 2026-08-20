@@ -900,9 +900,10 @@ mod tests {
         let project = demo_project();
         let ron = document_to_ron(&project.document).unwrap();
         assert!(ron.contains("guides:"), "the field was there to strip");
-        // By line rather than by substring: the serializer ends its lines the
-        // platform's way, so a pattern carrying `\n` strips nothing on Windows
-        // and the test would pass while proving the opposite.
+        // By line rather than by substring. `document_to_ron` pins LF now, so
+        // a `\n` pattern would work — but walking lines says what the strip
+        // means without depending on that, and the dependency is what made
+        // this class of fixture fail on Windows only.
         let stripped: String = ron
             .lines()
             .filter(|line| !line.trim_start().starts_with("guides:"))
@@ -2465,12 +2466,12 @@ mod tests {
                 .unwrap(),
             );
 
-        // **Line endings are normalized before the rewrites below.** RON's
-        // pretty printer emits the platform's newline (`PrettyConfig` defaults
-        // `new_line` to `\r\n` on Windows), so a pattern written with `\n`
-        // matches nothing there — the fixture would keep its v9 keys, and only
-        // the Windows CI job would ever say so.
-        let text = document_to_ron(&document).unwrap().replace("\r\n", "\n");
+        // The `\n` in the patterns below is safe because `document_to_ron`
+        // pins LF on every platform (`the_document_writer_uses_lf_line_endings`
+        // holds that, and fails on Windows if the setting is dropped). Before
+        // it did, this fixture matched nothing there and kept its v9 keys —
+        // green locally, six failures in the Windows CI job only.
+        let text = document_to_ron(&document).unwrap();
         // `(AssetId(n), MediaAssetEntry(\n  name: "x",` -> `("x", MediaAssetEntry(`
         let text = text
             .replace(

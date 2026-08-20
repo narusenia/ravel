@@ -15,7 +15,7 @@
 
 問題は**その警告が機械可読な出力に出ないこと**。`ravel-cli render` の
 `Warning` 列挙には音声側（`AudioNotRendered` / `AudioSourceSkipped`）しか無く、
-**映像側のオフラインに対応する variant が無い**。したがって:
+**映像側のオフラインに対応する variant が無い**。その結果、次の 3 つが起きる。
 
 - `ravel-cli render` は**成功終了し**、真っ黒（透明）のフレームを書き出す
 - レポート（`report.rs`）にも `--json` 出力にも何も出ない

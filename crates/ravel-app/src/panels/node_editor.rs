@@ -26,6 +26,7 @@ use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
+use ravel_core::animation::step::StepCurve;
 use ravel_core::eval::EvalContext;
 use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, PortSide};
@@ -1286,7 +1287,26 @@ impl NodeEditorPanel {
         let Some(node) = self.graph.node(node_id) else {
             return;
         };
-        let result = if node.param_port_index(key).is_some() {
+        let exposed = node.param_port_index(key).is_some();
+        // An identifier parameter must not be *driven* either: a Scalar wire
+        // into `layer.ref`'s `layer` makes the referenced id a function of the
+        // frame (`param_port_overlay` converts it), which is the same hole the
+        // keyframe toggle refuses — the id scan reads stored values, so a
+        // wire-driven reference is invisible to it.
+        //
+        // Only the **exposing** half is refused, and only here, on the UI path.
+        // Removing an existing port stays possible so a document that already
+        // holds one is not stuck with it, and `Graph::expose_param_port` /
+        // `Document::validate` are deliberately left alone: rejecting the port
+        // down there would make an existing document fail to open, which trades
+        // this bug for data loss (`HIGH-26`, "what saved must open"). Closing
+        // the API path is tracked as a separate issue.
+        if !exposed
+            && ravel_core::composition::validate::is_identifier_parameter(&node.type_key, key)
+        {
+            return;
+        }
+        let result = if exposed {
             self.graph.clone().remove_param_port(node_id, key)
         } else {
             self.graph.clone().expose_param_port(node_id, key)
@@ -1732,6 +1752,14 @@ impl NodeEditorPanel {
         let Some(param) = node.parameters.iter().find(|p| p.key == param_key) else {
             return;
         };
+        // An identifier parameter is not animatable, and the Properties row
+        // hides its toggle for that reason. Refusing here as well is what
+        // makes the rule hold for every caller of this method, not just the one
+        // that draws the button (`is_identifier_parameter` is the single place
+        // that says which parameters those are).
+        if ravel_core::composition::validate::is_identifier_parameter(&node.type_key, param_key) {
+            return;
+        }
         let value = match &param.value {
             ParameterValue::Float(v) => {
                 let mut channel = AnimationChannel::constant(*v);
@@ -1771,7 +1799,56 @@ impl NodeEditorPanel {
                 }
                 ParameterValue::Channel4(channels)
             }
-            // Int / Bool / String stay constant-only in v1 (REQ-LAYER-004).
+            // Keying an `Int` re-types it to an `IntChannel` — the same
+            // channel a `Float` gets, so the curve is editable the same way —
+            // and keeps it one when the last key goes, exactly as a `Channel`
+            // stays a `Channel` holding a constant.
+            ParameterValue::Int(v) => {
+                let mut channel = AnimationChannel::constant(*v as f32);
+                insert_channel_key(&mut channel, local_frame);
+                ParameterValue::IntChannel(channel)
+            }
+            ParameterValue::IntChannel(channel) => {
+                let mut channel = channel.clone();
+                let toggled = if channel_has_key(&channel, local_frame) {
+                    remove_channel_key(&mut channel, local_frame)
+                } else {
+                    insert_channel_key(&mut channel, local_frame)
+                };
+                if !toggled {
+                    return;
+                }
+                ParameterValue::IntChannel(channel)
+            }
+            // A string has no channel to hold a constant, so the round trip is
+            // one variant wider: keying re-types to `StringSteps` and removing
+            // the last key returns to a plain `String`. `StepCurve::keyed`
+            // seeds the curve's **default** with the constant the parameter
+            // had, and that default is what the return reads — not the key
+            // that happened to be removed last. Reading the removed key
+            // instead loses the original the moment a second key is edited to
+            // something else: key A then key B, remove both, and the parameter
+            // would come back holding B.
+            ParameterValue::String(v) => {
+                ParameterValue::StringSteps(StepCurve::keyed(local_frame, v.clone()))
+            }
+            ParameterValue::StringSteps(steps) => {
+                let mut steps = steps.clone();
+                if steps.contains_key(local_frame) {
+                    steps.remove(local_frame).expect("key checked above");
+                    if steps.is_empty() {
+                        ParameterValue::String(steps.default_value().clone())
+                    } else {
+                        ParameterValue::StringSteps(steps)
+                    }
+                } else {
+                    let held = steps.sample(local_frame as f64).clone();
+                    steps.insert(local_frame, held);
+                    ParameterValue::StringSteps(steps)
+                }
+            }
+            // Bool stays constant-only in v1 (REQ-LAYER-004), and so do
+            // PathPoints / Curve / Ramp.
             _ => return,
         };
         let mut updated = (**node).clone();
@@ -5629,6 +5706,329 @@ mod tests {
             assert!(project.undo(cx));
         });
         assert!((blur_radius(&project, &path, blur, cx) - original).abs() < f32::EPSILON);
+    }
+
+    /// Add a registry node of `type_key` to the layer's open network and
+    /// return its id, so a toggle test can reach a parameter kind the blur
+    /// node does not have.
+    fn add_node_of(
+        window: &gpui::WindowHandle<NodeEditorPanel>,
+        project: &Entity<ProjectState>,
+        path: &NetworkPath,
+        type_key: &str,
+        cx: &mut TestAppContext,
+    ) -> NodeId {
+        let id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let node = registry.create_node(type_key, id).expect("registry node");
+            let graph = resolve_network(project.document(), path)
+                .expect("network")
+                .clone()
+                .add_node(node)
+                .unwrap();
+            let doc = replace_network(project.document(), path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+            })
+            .unwrap();
+        id
+    }
+
+    fn param_of(
+        project: &Entity<ProjectState>,
+        path: &NetworkPath,
+        node: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> ParameterValue {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .expect("network")
+                .node(node)
+                .expect("node")
+                .parameters
+                .iter()
+                .find(|p| p.key == key)
+                .expect("parameter")
+                .value
+                .clone()
+        })
+    }
+
+    /// The key toggle re-types a constant `Int` to an `IntChannel` holding the
+    /// same number, and toggling the last key back off leaves the channel
+    /// holding it as a constant — the same round trip a `Float` makes, and the
+    /// number survives both halves of it. One Document undo per click.
+    #[gpui::test]
+    fn toggle_param_keyframe_round_trips_an_int_param(cx: &mut TestAppContext) {
+        let (window, project, path, _) = setup(cx);
+        let polygon = add_node_of(&window, &project, &path, "shape.polygon", cx);
+        assert_eq!(
+            param_of(&project, &path, polygon, "sides", cx),
+            ParameterValue::Int(6)
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(polygon, "sides", cx);
+            })
+            .unwrap();
+        let ParameterValue::IntChannel(channel) = param_of(&project, &path, polygon, "sides", cx)
+        else {
+            panic!("sides re-typed to an int channel");
+        };
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            panic!("keyed at the current frame: {:?}", channel.source);
+        };
+        assert_eq!(curve.len(), 1);
+        assert_eq!(curve.sample(0.0), 6.0, "the key holds the number it had");
+
+        // Off again: the last key goes and the value is still 6.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(polygon, "sides", cx);
+            })
+            .unwrap();
+        let ParameterValue::IntChannel(channel) = param_of(&project, &path, polygon, "sides", cx)
+        else {
+            panic!("an unkeyed int channel stays an int channel");
+        };
+        assert!(matches!(channel.source, ChannelSource::Constant(v) if v == 6.0));
+
+        // One click, one undo step: the first undo restores the keyed channel,
+        // the second the constant `Int`.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(matches!(
+            param_of(&project, &path, polygon, "sides", cx),
+            ParameterValue::IntChannel(_)
+        ));
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            param_of(&project, &path, polygon, "sides", cx),
+            ParameterValue::Int(6)
+        );
+    }
+
+    /// The same round trip for a string, which has one variant more to travel:
+    /// keying re-types it to `StringSteps` and removing the last key returns a
+    /// plain `String` holding the text that key had.
+    #[gpui::test]
+    fn toggle_param_keyframe_round_trips_a_string_param(cx: &mut TestAppContext) {
+        let (window, project, path, _) = setup(cx);
+        let layer_ref = add_node_of(&window, &project, &path, "layer.ref", cx);
+        assert_eq!(
+            param_of(&project, &path, layer_ref, "port", cx),
+            ParameterValue::String("frame".into())
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(layer_ref, "port", cx);
+            })
+            .unwrap();
+        let ParameterValue::StringSteps(steps) = param_of(&project, &path, layer_ref, "port", cx)
+        else {
+            panic!("port re-typed to a step curve");
+        };
+        assert_eq!(steps.len(), 1);
+        assert!(steps.contains_key(0));
+        assert_eq!(steps.sample(0.0), "frame", "the key holds the text it had");
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(layer_ref, "port", cx);
+            })
+            .unwrap();
+        assert_eq!(
+            param_of(&project, &path, layer_ref, "port", cx),
+            ParameterValue::String("frame".into()),
+            "the last key removed returns the constant spelling"
+        );
+    }
+
+    /// The value the parameter had before it was keyed is what removing the
+    /// last key restores — not whichever key happened to go last.
+    ///
+    /// Two keys, edited to two different strings, then both removed: the
+    /// parameter must come back holding the original constant. Returning the
+    /// removed key's value instead passes the single-key round trip above and
+    /// fails here, which is the whole reason this test exists separately.
+    #[gpui::test]
+    fn removing_the_last_string_key_restores_the_original_constant(cx: &mut TestAppContext) {
+        let (window, project, path, _) = setup(cx);
+        let layer_ref = add_node_of(&window, &project, &path, "layer.ref", cx);
+        assert_eq!(
+            param_of(&project, &path, layer_ref, "port", cx),
+            ParameterValue::String("frame".into()),
+            "the original constant"
+        );
+
+        // Key at frame 0, then edit that key to something else, so the curve
+        // no longer holds the original anywhere among its keys.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(layer_ref, "port", cx);
+                panel.apply_property_change(
+                    &[layer_ref],
+                    "port",
+                    &ravel_ui::properties::PropertyValue::String("edited".into()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        let ParameterValue::StringSteps(steps) = param_of(&project, &path, layer_ref, "port", cx)
+        else {
+            panic!("still a step curve");
+        };
+        assert_eq!(steps.sample(0.0), "edited");
+        assert_eq!(
+            steps.default_value(),
+            "frame",
+            "the default still carries the original"
+        );
+
+        // Remove the only key: the original comes back, not "edited".
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(layer_ref, "port", cx);
+            })
+            .unwrap();
+        assert_eq!(
+            param_of(&project, &path, layer_ref, "port", cx),
+            ParameterValue::String("frame".into()),
+            "removing the last key restores the constant the parameter was keyed from"
+        );
+    }
+
+    /// A media node's `asset_id` holds a raw `AssetId` as a **string**, and
+    /// `node_asset_reference` reads a plain `String` and nothing else — so
+    /// animating it would hide the reference from the id watermark scan and let
+    /// a later mint reuse an id a key still names. The row carries no toggle
+    /// and the toggle refuses the parameter when called directly.
+    #[gpui::test]
+    fn toggle_param_keyframe_refuses_a_media_asset_reference(cx: &mut TestAppContext) {
+        let (window, project, path, _) = setup(cx);
+        let media = add_node_of(&window, &project, &path, "media", cx);
+        let before = param_of(&project, &path, media, "asset_id", cx);
+        assert!(matches!(before, ParameterValue::String(_)));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(media, "asset_id", cx);
+            })
+            .unwrap();
+        assert_eq!(
+            param_of(&project, &path, media, "asset_id", cx),
+            before,
+            "an asset reference is left exactly as it was"
+        );
+    }
+
+    /// The same rule for the *port* half: a Scalar wire into an identifier
+    /// parameter makes the referenced id a function of the frame, which the id
+    /// scan cannot see either. Exposing is refused; removing a port that
+    /// already exists is not, so a document holding one is never stuck.
+    #[gpui::test]
+    fn toggle_param_port_refuses_to_expose_an_identifier(cx: &mut TestAppContext) {
+        let (window, project, path, _) = setup(cx);
+        let layer_ref = add_node_of(&window, &project, &path, "layer.ref", cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_port(layer_ref, "layer", cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert!(
+                resolve_network(project.document(), &path)
+                    .expect("network")
+                    .node(layer_ref)
+                    .expect("layer.ref node")
+                    .param_port_index("layer")
+                    .is_none(),
+                "an identifier parameter cannot be exposed as a port"
+            );
+        });
+
+        // A plain `Int` on another node still exposes, so the refusal is the
+        // parameter's identity and not "ints cannot be driven".
+        let polygon = add_node_of(&window, &project, &path, "shape.polygon", cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_port(polygon, "sides", cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert!(
+                resolve_network(project.document(), &path)
+                    .expect("network")
+                    .node(polygon)
+                    .expect("polygon node")
+                    .param_port_index("sides")
+                    .is_some(),
+                "an ordinary animatable count is still exposable"
+            );
+        });
+
+        // A port that already exists — put there through the graph API, which
+        // this fix deliberately leaves open — can still be removed from the UI.
+        // Refusing that half too would strand a document holding one.
+        project.update(cx, |project, cx| {
+            let graph = resolve_network(project.document(), &path)
+                .expect("network")
+                .clone()
+                .expose_param_port(layer_ref, "layer")
+                .expect("the graph API still allows it");
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+                panel.toggle_param_port(layer_ref, "layer", cx);
+            })
+            .unwrap();
+        project.read_with(cx, |project, _| {
+            assert!(
+                resolve_network(project.document(), &path)
+                    .expect("network")
+                    .node(layer_ref)
+                    .expect("layer.ref node")
+                    .param_port_index("layer")
+                    .is_none(),
+                "an existing identifier port is still removable"
+            );
+        });
+    }
+
+    /// An identifier parameter is not animatable: `layer.ref`'s `layer` names a
+    /// layer, not a number, and a curve through it would leave
+    /// `Document::id_watermarks` with no finite set of ids to reserve. The
+    /// toggle refuses it even when called directly, not only when the row
+    /// hides the button.
+    #[gpui::test]
+    fn toggle_param_keyframe_refuses_an_identifier_param(cx: &mut TestAppContext) {
+        let (window, project, path, _) = setup(cx);
+        let layer_ref = add_node_of(&window, &project, &path, "layer.ref", cx);
+        let before = param_of(&project, &path, layer_ref, "layer", cx);
+        assert!(matches!(before, ParameterValue::Int(_)));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.toggle_param_keyframe(layer_ref, "layer", cx);
+            })
+            .unwrap();
+        assert_eq!(
+            param_of(&project, &path, layer_ref, "layer", cx),
+            before,
+            "an identifier parameter is left exactly as it was"
+        );
     }
 
     /// Expose and unexpose each commit exactly one structural Document

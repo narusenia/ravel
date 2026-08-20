@@ -200,6 +200,8 @@ pub struct PathPoint {
 /// (REQ-LAYER-004). An animated `Int` is an [`IntChannel`](Self::IntChannel) —
 /// the same f32 channel, rounded on read — while a plain `Int` is the constant
 /// spelling of one, exactly as `Float` is the constant spelling of `Channel`.
+/// An animated `String` is a [`StringSteps`](Self::StringSteps), a step curve
+/// whose keys are held because a string has no midpoint to interpolate to.
 /// `Bool` remains constant-only in v1; `PathPoints`,
 /// `Curve` and `Ramp` are constant-only as well (path animation is the future
 /// PathChannel design, see the tool-system plan; animating a curve's or a
@@ -245,7 +247,28 @@ pub enum ParameterValue {
     /// `PathPoints`, `Curve` and `Ramp`: bincode indexes variants by
     /// position, so only the tail is a safe place to grow, and the layout
     /// change is covered by the journal format version bump (v9).
+    ///
+    /// **The channel is `f32`, so integers past 2^24 are not exact**: a
+    /// keyframe on `16_777_217` reads back as `16_777_216`. That is the price
+    /// of reusing the f32 keyframe model rather than making
+    /// `AnimationChannel` generic (382 references — see
+    /// `docs/implementation/done/…discrete-keyframes` decision notes), and it
+    /// is a ceiling no builtin parameter reaches: these are counts, divisions
+    /// and enum-like selections. A parameter that needs the full `i32` range
+    /// animated needs an integer channel, not this one.
     IntChannel(crate::animation::channel::AnimationChannel),
+    /// An animatable string (a text layer's content, an enum selection). A
+    /// string has no midpoint, so this is a
+    /// [`StepCurve`](crate::animation::StepCurve) rather than an
+    /// [`AnimationChannel`]: its keys are held, never blended, and
+    /// [`channels`](Self::channels) keeps answering `None` so the curve editor
+    /// never sees one. A plain `String` is the constant spelling of it, the
+    /// same relation `Int` has to `IntChannel`. Appended last for the same
+    /// reason as `PathPoints`, `Curve`, `Ramp` and `IntChannel`: bincode
+    /// indexes variants by position, so only the tail is a safe place to
+    /// grow, and the layout change is covered by the journal format version
+    /// bump (v10).
+    StringSteps(crate::animation::step::StepCurve<String>),
 }
 
 impl ParameterValue {
@@ -275,6 +298,9 @@ impl ParameterValue {
     /// `Curve`, `Ramp`). A constant `Int` stays `None`: an int becomes
     /// channel-backed only when it is re-typed to `IntChannel`, so nothing
     /// that walks channels mistakes a constant count for an animatable float.
+    /// `StringSteps` stays `None` too, animated or not — a step curve is not
+    /// made of float components, so the curve editor and everything else that
+    /// walks channels must not see it.
     pub fn channels(&self) -> Option<Vec<AnimationChannel>> {
         match self {
             ParameterValue::Float(v) => Some(vec![AnimationChannel::constant(*v)]),
@@ -331,10 +357,11 @@ impl ParameterValue {
     /// REQ-LAYER-009) and invalidate the scope of every layer it could ever
     /// point at, and a curve gives no finite answer to either — the values
     /// between two keys are as real as the keys. So keyframing an identifier
-    /// is not supported, and the unit that puts a keyframe toggle on `Int`
-    /// rows (`DISK-3`) owns keeping it off these parameters. Reading it here
-    /// rather than in each caller is what makes that one decision instead of
-    /// three.
+    /// is not supported: the Properties keyframe toggle asks
+    /// [`is_identifier_parameter`](crate::composition::validate::is_identifier_parameter)
+    /// and hides itself on these parameters. Reading the value here rather
+    /// than in each caller is what makes that one decision instead of three,
+    /// and that predicate is the same arrangement for the write side.
     pub fn static_identifier(&self) -> Option<u64> {
         let raw = match self {
             ParameterValue::Int(v) => *v,
@@ -416,6 +443,7 @@ impl ParameterValue {
             ParameterValue::Channel3(_) => Some(DataTypeId::VEC3),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
             ParameterValue::String(_)
+            | ParameterValue::StringSteps(_)
             | ParameterValue::PathPoints(_)
             | ParameterValue::Curve(_)
             | ParameterValue::Ramp(_) => None,
@@ -673,7 +701,8 @@ fn collect_parameter_sources(value: &ParameterValue, out: &mut Vec<(NodeId, Outp
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
-        | ParameterValue::Ramp(_) => {}
+        | ParameterValue::Ramp(_)
+        | ParameterValue::StringSteps(_) => {}
     }
 }
 
@@ -2014,7 +2043,8 @@ pub(crate) fn remap_parameter_node_outputs(
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
-        | ParameterValue::Ramp(_) => {}
+        | ParameterValue::Ramp(_)
+        | ParameterValue::StringSteps(_) => {}
     }
 }
 
@@ -2050,7 +2080,8 @@ fn remap_parameter_output_ports(
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
-        | ParameterValue::Ramp(_) => {}
+        | ParameterValue::Ramp(_)
+        | ParameterValue::StringSteps(_) => {}
     }
 }
 

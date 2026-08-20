@@ -1197,8 +1197,16 @@ enum KeyTarget {
 /// Whether the node parameter `key` has a keyframe at `local_frame` (all
 /// components for multi-component parameters). Without a local frame a
 /// keyframed source counts as keyed. `None` when the parameter is missing
-/// or not animatable (`Int` / `Bool` / `String` are constant-only in v1,
-/// REQ-LAYER-004).
+/// or not animatable (`Bool` is constant-only in v1, REQ-LAYER-004; so are
+/// `PathPoints`, `Curve` and `Ramp`).
+///
+/// `None` for an **identifier** parameter too, whatever its kind: a
+/// `layer.ref` target or a `precomp` composition is a raw id, and animating
+/// one has no meaning to give
+/// (`ravel_core::composition::validate::is_identifier_parameter` is the single
+/// place that decides which those are). This is what keeps the toggle off
+/// those rows — hiding it here rather than refusing the click is the honest
+/// answer, because a toggle that does nothing is worse than no toggle.
 fn node_param_keyed(node: &Node, key: &str, local_frame: Option<u64>) -> Option<bool> {
     fn has_key(channel: &AnimationChannel, local_frame: Option<u64>) -> bool {
         match (&channel.source, local_frame) {
@@ -1209,10 +1217,25 @@ fn node_param_keyed(node: &Node, key: &str, local_frame: Option<u64>) -> Option<
             _ => false,
         }
     }
+    if ravel_core::composition::validate::is_identifier_parameter(&node.type_key, key) {
+        return None;
+    }
     let param = node.parameters.iter().find(|p| p.key == key)?;
     match &param.value {
         ParameterValue::Float(_) => Some(false),
         ParameterValue::Channel(channel) => Some(has_key(channel, local_frame)),
+        // An animatable int is the same channel with the same keys; a constant
+        // `Int` is its unkeyed spelling, so the row offers the toggle.
+        ParameterValue::Int(_) => Some(false),
+        ParameterValue::IntChannel(channel) => Some(has_key(channel, local_frame)),
+        // A step curve keeps its own keys, so it answers directly. Without a
+        // local frame any key at all counts as keyed, matching the
+        // keyframed-source reading above.
+        ParameterValue::String(_) => Some(false),
+        ParameterValue::StringSteps(steps) => Some(match local_frame {
+            Some(frame) => steps.contains_key(frame),
+            None => !steps.is_empty(),
+        }),
         ParameterValue::Channel2(channels) => {
             Some(channels.iter().all(|ch| has_key(ch, local_frame)))
         }
@@ -1809,6 +1832,9 @@ fn animated_parameter(value: &ParameterValue) -> bool {
         ParameterValue::Channel2(channels) => channels.iter().any(animated_channel),
         ParameterValue::Channel3(channels) => channels.iter().any(animated_channel),
         ParameterValue::Channel4(channels) => channels.iter().any(animated_channel),
+        // A step curve needs two keys to show a different string from one
+        // frame to the next; one key or none is the same value everywhere.
+        ParameterValue::StringSteps(steps) => steps.len() > 1,
         ParameterValue::Float(_)
         | ParameterValue::Int(_)
         | ParameterValue::Bool(_)
@@ -4599,6 +4625,19 @@ impl Render for PropertiesGpuiPanel {
                             node.parameters
                                 .iter()
                                 .filter(|p| p.value.port_data_type().is_some())
+                                // An identifier parameter cannot be exposed as
+                                // a port (a wire would make the reference a
+                                // function of the frame), so it carries no
+                                // toggle — unless a port already exists, where
+                                // the toggle is the only way to remove it. Same
+                                // split as `toggle_param_port`, which refuses
+                                // the exposing half and nothing else.
+                                .filter(|p| {
+                                    !ravel_core::composition::validate::is_identifier_parameter(
+                                        &node.type_key,
+                                        &p.key,
+                                    ) || node.param_port_index(&p.key).is_some()
+                                })
                                 .map(|p| {
                                     let state = if driven.iter().any(|d| d.key == p.key) {
                                         PortToggleState::Connected
@@ -4827,6 +4866,63 @@ mod tests {
     use ravel_core::network as net;
     use ravel_core::param_curve::CurveParam;
     use ravel_ui::properties::layer::{PARENT_NONE, parse_parent_option};
+
+    /// The key toggle appears on `Int` and `String` rows — those parameters
+    /// are animatable now — and on the animated spellings of both, reporting
+    /// whether a key sits at the frame.
+    #[test]
+    fn int_and_string_rows_offer_the_key_toggle() {
+        use ravel_core::animation::{AnimationChannel, Interpolation, KeyframeCurve, StepCurve};
+        let mut curve = KeyframeCurve::new();
+        curve.insert(4, 6.0, Interpolation::Linear);
+        let mut steps = StepCurve::new("a".to_string());
+        steps.insert(4, "b".to_string());
+        let node = Node::new(NodeId::new(1), "shape.polygon")
+            .with_param("sides", ParameterValue::Int(6))
+            .with_param("label", ParameterValue::String("hi".into()))
+            .with_param(
+                "keyed_sides",
+                ParameterValue::IntChannel(AnimationChannel::keyframes(curve)),
+            )
+            .with_param("keyed_label", ParameterValue::StringSteps(steps));
+
+        assert_eq!(node_param_keyed(&node, "sides", Some(4)), Some(false));
+        assert_eq!(node_param_keyed(&node, "label", Some(4)), Some(false));
+        assert_eq!(node_param_keyed(&node, "keyed_sides", Some(4)), Some(true));
+        assert_eq!(node_param_keyed(&node, "keyed_sides", Some(5)), Some(false));
+        assert_eq!(node_param_keyed(&node, "keyed_label", Some(4)), Some(true));
+        assert_eq!(node_param_keyed(&node, "keyed_label", Some(5)), Some(false));
+        // Without a local frame, any key at all counts as keyed.
+        assert_eq!(node_param_keyed(&node, "keyed_label", None), Some(true));
+    }
+
+    /// An identifier parameter carries no toggle whatever its kind: the row
+    /// must not offer to animate a reference (`layer.ref`'s `layer`, `precomp`'s
+    /// `comp_id`). A same-named parameter on any other node type is unaffected.
+    #[test]
+    fn identifier_rows_carry_no_key_toggle() {
+        let layer_ref = Node::new(NodeId::new(1), "layer.ref")
+            .with_param("layer", ParameterValue::Int(3))
+            .with_param("port", ParameterValue::String("frame".into()));
+        assert_eq!(node_param_keyed(&layer_ref, "layer", Some(0)), None);
+        assert_eq!(
+            node_param_keyed(&layer_ref, "port", Some(0)),
+            Some(false),
+            "only the identifier is excluded, not the whole node"
+        );
+
+        let precomp =
+            Node::new(NodeId::new(2), "precomp").with_param("comp_id", ParameterValue::Int(1));
+        assert_eq!(node_param_keyed(&precomp, "comp_id", Some(0)), None);
+
+        let unrelated =
+            Node::new(NodeId::new(3), "scatter.grid").with_param("layer", ParameterValue::Int(3));
+        assert_eq!(
+            node_param_keyed(&unrelated, "layer", Some(0)),
+            Some(false),
+            "the key alone does not make a parameter an identifier"
+        );
+    }
 
     fn network_with_custom_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;

@@ -9,7 +9,7 @@ use ravel_core::graph::{Node, ParameterValue, PortSide};
 use ravel_core::network::{
     CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
 };
-use ravel_core::registry::NodeRegistry;
+use ravel_core::registry::{NodeRegistry, ParamRange};
 
 use super::{DrivenParam, PortRow, PropertyField, PropertySection};
 
@@ -61,6 +61,38 @@ pub fn node_info_section(node: &Node, registry: &NodeRegistry) -> PropertySectio
     }
 }
 
+/// One int row, shared by the constant `Int` and the animatable `IntChannel`:
+/// the two are one quantity stored two ways, and a row that differed between
+/// them would change shape under the user the moment they keyed it.
+fn int_field(key: String, value: i32, ranges: Option<&ParamRange>) -> PropertyField {
+    PropertyField::Int {
+        key,
+        value,
+        range: ranges.map(|r| (*r.hard.start() as i32)..=(*r.hard.end() as i32)),
+        ui_range: ranges.map(|r| (*r.ui.start() as i32)..=(*r.ui.end() as i32)),
+        step: Some(1),
+    }
+}
+
+/// One string row, shared by the constant `String` and the animatable
+/// `StringSteps` for the same reason. A registry-declared closed option set
+/// renders as an enum dropdown; free-form strings stay editable text.
+fn string_field(
+    key: String,
+    value: String,
+    registry: &NodeRegistry,
+    type_key: &str,
+) -> PropertyField {
+    match registry.param_options(type_key, &key) {
+        Some(options) => PropertyField::Enum {
+            key,
+            value,
+            options: options.to_vec(),
+        },
+        None => PropertyField::String { key, value },
+    }
+}
+
 /// Build a parameters section from the node's parameter list, sampling
 /// animated channels at `frame` (the owning layer's local frame).
 ///
@@ -98,32 +130,13 @@ pub fn node_params_section(
                     ui_range: ranges.map(|r| r.ui.clone()),
                     step: Some(0.01),
                 },
-                ParameterValue::Int(v) => PropertyField::Int {
-                    key: p.key.clone(),
-                    value: *v,
-                    range: ranges.map(|r| (*r.hard.start() as i32)..=(*r.hard.end() as i32)),
-                    ui_range: ranges.map(|r| (*r.ui.start() as i32)..=(*r.ui.end() as i32)),
-                    step: Some(1),
-                },
+                ParameterValue::Int(v) => int_field(p.key.clone(), *v, ranges),
                 ParameterValue::Bool(v) => PropertyField::Bool {
                     key: p.key.clone(),
                     value: *v,
                 },
                 ParameterValue::String(v) => {
-                    // A registry-declared closed option set renders as an
-                    // enum dropdown; free-form strings stay editable text.
-                    if let Some(options) = registry.param_options(&node.type_key, &p.key) {
-                        PropertyField::Enum {
-                            key: p.key.clone(),
-                            value: v.clone(),
-                            options: options.to_vec(),
-                        }
-                    } else {
-                        PropertyField::String {
-                            key: p.key.clone(),
-                            value: v.clone(),
-                        }
-                    }
+                    string_field(p.key.clone(), v.clone(), registry, &node.type_key)
                 }
                 ParameterValue::Channel(ch) => PropertyField::Float {
                     key: p.key.clone(),
@@ -177,13 +190,25 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     ramp: ramp.clone(),
                 },
-                // Read-only until the keyframe toggle lands (discrete-keyframes
-                // plan, unit 3), for the same reason as the layer panel's
-                // custom-parameter row.
-                ParameterValue::IntChannel(ch) => PropertyField::ReadOnly {
-                    key: p.key.clone(),
-                    value: (channel_display_value(ch, frame, eval).round() as i32).to_string(),
-                },
+                // An animatable int is the same row as a constant one: the
+                // spinner edits the int this frame reads, and the write path
+                // keeps the channel (a keyed channel gains a key at the frame,
+                // a constant one has its constant replaced). Anything else
+                // would make the row a display that discards its own edits.
+                ParameterValue::IntChannel(ch) => int_field(
+                    p.key.clone(),
+                    channel_display_value(ch, frame, eval).round() as i32,
+                    ranges,
+                ),
+                // Likewise for an animatable string: the same text box or
+                // dropdown as the constant spelling, showing the string this
+                // frame holds.
+                ParameterValue::StringSteps(steps) => string_field(
+                    p.key.clone(),
+                    steps.sample(frame as f64).clone(),
+                    registry,
+                    &node.type_key,
+                ),
             }
         })
         .collect();

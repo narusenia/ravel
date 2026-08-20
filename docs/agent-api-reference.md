@@ -184,16 +184,22 @@ ParameterValue::{Float, Int, Bool, String, Channel..Channel4,
     PathPoints(Vec<PathPoint>),   // PathPoint { p, in_tan, out_tan } (pen, REQ-UI-011)
     Curve(CurveParam),            // scalar transfer curve (see `param_curve`)
     Ramp(RampParam),              // colour ramp (see `param_ramp`)
-    IntChannel(AnimationChannel)} // animatable int: an f32 channel, round()ed
-                                  // on read. `Int` is its constant spelling,
-                                  // as `Float` is `Channel`'s
-    // PathPoints, Curve, Ramp and IntChannel are appended LAST on purpose:
-    // bincode indexes variants positionally, so a new one may only go at the
-    // end, and every addition bumps JOURNAL_FORMAT_VERSION (an old binary
-    // meeting the new index is what the version discards). IntChannel also
-    // bumped the .ravprj format (v10): an old build cannot parse it out of
-    // document/main.ron, and that failure looks like corruption, so
-    // load_with_backup would open a stale .bak instead of refusing.
+    IntChannel(AnimationChannel),  // animatable int: an f32 channel, round()ed
+                                   // on read. `Int` is its constant spelling,
+                                   // as `Float` is `Channel`'s
+    StringSteps(StepCurve<String>)}// animatable string: held keys, never
+                                   // interpolated (a string has no midpoint).
+                                   // `String` is its constant spelling.
+                                   // channels() stays None, so the curve
+                                   // editor never sees one
+    // PathPoints, Curve, Ramp, IntChannel and StringSteps are appended LAST on
+    // purpose: bincode indexes variants positionally, so a new one may only go
+    // at the end, and every addition bumps JOURNAL_FORMAT_VERSION (an old
+    // binary meeting the new index is what the version discards). IntChannel
+    // also bumped the .ravprj format (v10) and StringSteps bumped it again
+    // (v11): an old build cannot parse them out of document/main.ron, and that
+    // failure looks like corruption, so load_with_backup would open a stale
+    // .bak instead of refusing.
 ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // Geometric vectors are ONE Channel2/Channel3, never a `_x` / `_y` pair of
     // Floats: `shape.*` `center`, `shape.ellipse` `radius`, `scatter.grid`
@@ -205,6 +211,7 @@ ParameterValue::vec2(x, y) / ::vec3(x, y, z)   // constant vector parameters
     // (`scatter.grid` `count_x` / `count_y`) stay separate.
 ParameterValue::channels() -> Option<Vec<AnimationChannel>>   // 1..=4 components
     // Some for Float / Channel..Channel4 / IntChannel; None for a constant Int
+    // and for StringSteps (a step curve has no float components)
 ParameterValue::from_channels(Option<&ParameterValue>, Vec<AnimationChannel>)
     // Rebuild from components, re-typed after the value being replaced: one
     // channel over an Int / IntChannel stays an IntChannel, everything else
@@ -482,6 +489,10 @@ ChannelSource::Expression(ParameterExpression::new("100 * sin(frame * 0.25)"))
 // channels on node parameters (REQ-LAYER-004). IntChannel carries the same
 // f32 channel and rounds on read, so the curve editor and the keyframe model
 // see a float curve and the processor sees an i32.
+// ParameterValue::StringSteps is the exception: animation::StepCurve<String>,
+// not a channel. sample(frame) -> &T answers with the last key at or before
+// the frame (before the first key: the first key; no keys: the default), and
+// the processor still reads it with str_or.
 ```
 
 ### `expression`

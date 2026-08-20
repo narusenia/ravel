@@ -58,7 +58,9 @@ use thiserror::Error;
 /// binary meeting a `Ramp` entry is the case the version guards.
 /// v9: `ParameterValue` gained the `IntChannel` variant (animatable ints) —
 /// same reasoning as v6 and v8.
-pub const JOURNAL_FORMAT_VERSION: u32 = 9;
+/// v10: `ParameterValue` gained the `StringSteps` variant (animatable strings,
+/// a held step curve) — same reasoning as v6, v8 and v9.
+pub const JOURNAL_FORMAT_VERSION: u32 = 10;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
@@ -588,6 +590,37 @@ mod tests {
             node.parameters
                 .iter()
                 .find(|p| p.key == "sides")
+                .map(|p| &p.value),
+            Some(&value)
+        );
+    }
+
+    /// The v10 layout change: `ParameterValue::StringSteps` must round-trip
+    /// through the bincode journal codec, keys and default alike.
+    #[test]
+    fn bincode_roundtrip_preserves_string_steps() {
+        use crate::animation::StepCurve;
+        use crate::graph::ParameterValue;
+        let mut steps = StepCurve::new("idle".to_string());
+        steps.insert(0, "one".to_string());
+        steps.insert(12, "two".to_string());
+        let value = ParameterValue::StringSteps(steps);
+        let entry = JournalEntry {
+            sequence: 11,
+            timestamp_secs: 1700000000,
+            mutation: GraphMutation::AddNode(
+                Node::new(NodeId::new(13), "text").with_param("content", value.clone()),
+            ),
+        };
+        let data = BincodeCodec.encode(&entry).unwrap();
+        let decoded = BincodeCodec.decode(&data).unwrap();
+        let GraphMutation::AddNode(node) = decoded.mutation else {
+            panic!("expected AddNode");
+        };
+        assert_eq!(
+            node.parameters
+                .iter()
+                .find(|p| p.key == "content")
                 .map(|p| &p.value),
             Some(&value)
         );

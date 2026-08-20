@@ -727,13 +727,25 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 key,
                 value: format!("{} stops", ramp.len()),
             },
-            // Read-only until the keyframe toggle lands (discrete-keyframes
-            // plan, unit 3): the row shows the int the frame reads as, but
-            // nothing in the shell can re-type an `Int` yet, so an editable
-            // spinner here would drop every edit on the floor.
-            ParameterValue::IntChannel(ch) => PropertyField::ReadOnly {
+            // The same spinner as a constant `Int`: the two are one quantity
+            // stored two ways, and `apply_custom_parameter` routes the edit
+            // through the keyframe model so a keyed channel gains a key at the
+            // local frame instead of being flattened.
+            ParameterValue::IntChannel(ch) => PropertyField::Int {
                 key,
-                value: (ch.evaluate(frame as f64, ctx).round() as i32).to_string(),
+                value: ch.evaluate(frame as f64, ctx).round() as i32,
+                range: None,
+                ui_range: None,
+                step: None,
+            },
+            // Unreachable through the shell: a custom In port is one of the
+            // six value types (`CustomPortType::allowed_for_in`), none of
+            // which is a string. Read-only rather than a `panic!` because a
+            // hand-built network can still hold one, and a row is a better
+            // answer than a crash.
+            ParameterValue::StringSteps(steps) => PropertyField::ReadOnly {
+                key,
+                value: steps.sample(frame as f64).clone(),
             },
         };
         fields.push(field);
@@ -877,15 +889,22 @@ pub fn apply_layer_field(
 
 /// The animatable components backing a field key, for the key-toggle button:
 /// the shell transform/opacity channels and `custom.*` In-node parameters
-/// (`Float` converts to a channel on first key; `Int` / `Bool` / `String`
-/// stay constant-only in v1, REQ-LAYER-004). Multi-component parameters
+/// (`Float` and `Int` convert to a channel on first key; `Bool` stays
+/// constant-only in v1, REQ-LAYER-004). Multi-component parameters
 /// (vec/color) key all components together.
+///
+/// A custom In port is one of six value types
+/// (`CustomPortType::allowed_for_in`), none of which is a string, so there is
+/// no `StringSteps` case to answer here.
 fn keyframe_components(layer: &Layer, key: &str) -> Option<(PropertyRowId, Vec<usize>)> {
     if let Some(name) = key.strip_prefix(CUSTOM_FIELD_PREFIX) {
         let in_node = net::find_in_node(&layer.network)?;
         let param = in_node.parameters.iter().find(|p| p.key == name)?;
         let count = match &param.value {
-            ParameterValue::Float(_) | ParameterValue::Channel(_) => 1,
+            ParameterValue::Float(_)
+            | ParameterValue::Channel(_)
+            | ParameterValue::Int(_)
+            | ParameterValue::IntChannel(_) => 1,
             ParameterValue::Channel2(_) => 2,
             ParameterValue::Channel3(_) => 3,
             ParameterValue::Channel4(_) => 4,
@@ -954,9 +973,10 @@ pub fn toggle_layer_keyframe(layer: &mut Layer, key: &str, local_frame: u64) -> 
     }
 }
 
-/// Convert an In-node `Float` parameter to a constant channel so it can
-/// carry keyframes. No-op for parameters that already are channels (or are
-/// not key-editable at all).
+/// Convert an In-node `Float` or `Int` parameter to a constant channel so it
+/// can carry keyframes — `Float` to a `Channel`, `Int` to an `IntChannel`, so
+/// keying a count does not quietly turn it into a float. No-op for parameters
+/// that already are channels (or are not key-editable at all).
 fn ensure_channel_parameter(layer: &mut Layer, node: NodeId, key: &str) {
     let Some(node_ref) = layer.network.node(node) else {
         return;
@@ -964,8 +984,12 @@ fn ensure_channel_parameter(layer: &mut Layer, node: NodeId, key: &str) {
     let Some(param) = node_ref.parameters.iter().find(|p| p.key == key) else {
         return;
     };
-    let ParameterValue::Float(value) = param.value else {
-        return;
+    let retyped = match param.value {
+        ParameterValue::Float(value) => ParameterValue::Channel(AnimationChannel::constant(value)),
+        ParameterValue::Int(value) => {
+            ParameterValue::IntChannel(AnimationChannel::constant(value as f32))
+        }
+        _ => return,
     };
     let mut updated = (**node_ref).clone();
     let param = updated
@@ -973,7 +997,7 @@ fn ensure_channel_parameter(layer: &mut Layer, node: NodeId, key: &str) {
         .iter_mut()
         .find(|p| p.key == key)
         .expect("parameter checked above");
-    param.value = ParameterValue::Channel(AnimationChannel::constant(value));
+    param.value = retyped;
     layer.network = layer
         .network
         .clone()
@@ -1009,6 +1033,12 @@ fn apply_custom_parameter(
     match (&param_value, value) {
         (Some(ParameterValue::Channel(_)), PropertyValue::Float(v)) => {
             return set_channel_value(layer, &row, 0, local_frame, *v);
+        }
+        // An animatable int stores an f32 channel, so the write is the float
+        // write with the int widened into it — the rounding back to `i32`
+        // happens where the value is read (`ParameterValue::IntChannel`).
+        (Some(ParameterValue::IntChannel(_)), PropertyValue::Int(v)) => {
+            return set_channel_value(layer, &row, 0, local_frame, *v as f32);
         }
         (Some(ParameterValue::Channel2(_)), PropertyValue::Vector(components))
             if components.len() == 2 =>
@@ -1696,6 +1726,102 @@ mod tests {
             .add_node(out)
             .unwrap();
         Layer::new(LayerId::new(2), "Custom", network).with_time(0, 0, 300)
+    }
+
+    fn layer_with_custom_int_param() -> Layer {
+        use ravel_core::id::DataTypeId;
+        let in_node = Node::new(NodeId::new(10), ravel_core::network::NET_IN_TYPE_KEY)
+            .with_output(
+                ravel_core::network::PORT_BASE_GEOMETRY,
+                DataTypeId::GEOMETRY,
+            )
+            .with_output(ravel_core::network::PORT_TIME, DataTypeId::SCALAR)
+            .with_output("count", DataTypeId::SCALAR)
+            .with_param("count", ParameterValue::Int(4));
+        let out = Node::new(NodeId::new(11), ravel_core::network::NET_OUT_TYPE_KEY)
+            .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let network = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out)
+            .unwrap();
+        Layer::new(LayerId::new(2), "Custom", network).with_time(0, 0, 300)
+    }
+
+    fn custom_param_value(layer: &Layer, key: &str) -> ParameterValue {
+        ravel_core::network::find_in_node(&layer.network)
+            .expect("in node")
+            .parameters
+            .iter()
+            .find(|p| p.key == key)
+            .expect("parameter")
+            .value
+            .clone()
+    }
+
+    /// A custom `Int` port carries the key toggle: the first key re-types it to
+    /// an `IntChannel` holding the number it had, and removing the last key
+    /// leaves the channel holding that number as a constant. The row stays an
+    /// editable spinner throughout, and an edit keys the channel instead of
+    /// flattening it.
+    #[test]
+    fn a_custom_int_parameter_keys_and_round_trips() {
+        let mut layer = layer_with_custom_int_param();
+        assert_eq!(
+            layer_field_keyframed(&layer, "custom.count", 0),
+            Some(false)
+        );
+
+        assert_eq!(
+            toggle_layer_keyframe(&mut layer, "custom.count", 0),
+            Some(true)
+        );
+        let ParameterValue::IntChannel(channel) = custom_param_value(&layer, "count") else {
+            panic!("re-typed to an int channel, not a float channel");
+        };
+        let ravel_core::animation::channel::ChannelSource::Keyframes(curve) = &channel.source
+        else {
+            panic!("keyed at frame 0: {:?}", channel.source);
+        };
+        assert_eq!(curve.len(), 1);
+        assert_eq!(curve.sample(0.0), 4.0);
+
+        // The row is still an editable spinner showing the number.
+        let sections = solo_sections(&layer, &ctx(), None);
+        let field = sections
+            .iter()
+            .flat_map(|s| &s.fields)
+            .find(|f| f.key() == "custom.count")
+            .expect("the row survives re-typing");
+        assert!(
+            matches!(field, PropertyField::Int { value: 4, .. }),
+            "expected an editable int row: {field:?}"
+        );
+
+        // An edit keys the channel rather than replacing it with a constant.
+        assert!(apply_layer_field(
+            &mut layer,
+            "custom.count",
+            &PropertyValue::Int(9),
+            0
+        ));
+        let ParameterValue::IntChannel(channel) = custom_param_value(&layer, "count") else {
+            panic!("the edit keeps the int channel");
+        };
+        assert_eq!(channel.evaluate(0.0, &ctx()), 9.0);
+
+        // Toggling off removes the last key and holds the value as a constant.
+        assert_eq!(
+            toggle_layer_keyframe(&mut layer, "custom.count", 0),
+            Some(false)
+        );
+        let ParameterValue::IntChannel(channel) = custom_param_value(&layer, "count") else {
+            panic!("an unkeyed int channel stays an int channel");
+        };
+        assert!(matches!(
+            channel.source,
+            ravel_core::animation::channel::ChannelSource::Constant(v) if v == 9.0
+        ));
     }
 
     #[test]

@@ -124,6 +124,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(10)
         }
+        10 => {
+            migrate_v10_to_v11(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 10,
+                to: 11,
+                reason,
+            })?;
+            Ok(11)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -342,6 +350,31 @@ fn migrate_v9_to_v10(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v10 → v11`: `ParameterValue` gained the `StringSteps` variant — an
+/// animatable string, a step curve whose keys are held (the
+/// discrete-keyframes plan, unit 2).
+///
+/// **There is no typed pass**, exactly as in v9 → v10: an existing `String` is
+/// still a `String`, still means the same text, and only becomes a
+/// `StringSteps` when the user puts a keyframe on it. This step advances the
+/// version stamp and nothing else.
+///
+/// **Why the stamp moves at all** is the same argument v9 → v10 makes, and it
+/// is worth stating once more because the cost is the same: without a stamp,
+/// an older build reads the manifest happily, fails to parse `StringSteps` out
+/// of `document/main.ron`, and
+/// [`ProjectError::DocumentParse`](super::ProjectError::DocumentParse) is
+/// indistinguishable from a truncated file — so
+/// [`ProjectFile::load_with_backup`](super::ProjectFile::load_with_backup)
+/// opens the `.bak` revision instead and the next save writes over the real
+/// work. The user sees a project that opens with recent work missing. With the
+/// stamp, that build stops at the manifest with
+/// [`MigrationError::TooNew`], which `load_with_backup` refuses to paper over
+/// (`ProjectError::is_too_new`), and never reaches the document.
+fn migrate_v10_to_v11(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,15 +489,38 @@ mod tests {
         }
     }
 
-    /// `v9 → v10` adds the `IntChannel` parameter variant, which lives in
-    /// `document/main.ron`; the manifest must come through byte-identical
-    /// apart from the stamp.
+    /// `v9 → v10` adds the `IntChannel` parameter variant and `v10 → v11` the
+    /// `StringSteps` one; both live in `document/main.ron`, so the manifest
+    /// must come through byte-identical apart from the stamp.
     #[test]
     fn v9_migration_changes_only_the_version_stamp() {
         let mut m = serde_json::json!({
             "format_version": 9,
             "ravel_version": "0.1.0",
             "project_name": "Ints",
+            "created_at": "t",
+            "modified_at": "t",
+            "duration_frames": 120,
+            "frame_rate": { "num": 30, "den": 1 },
+            "resolution": { "width": 1920, "height": 1080 },
+        });
+        let mut expected = m.clone();
+        expected["format_version"] = Value::from(CURRENT_FORMAT_VERSION);
+
+        migrate_to_current(&mut m).unwrap();
+
+        assert_eq!(m, expected);
+    }
+
+    /// `v10 → v11` adds the `StringSteps` parameter variant, which lives in
+    /// `document/main.ron`; the manifest must come through byte-identical
+    /// apart from the stamp.
+    #[test]
+    fn v10_migration_changes_only_the_version_stamp() {
+        let mut m = serde_json::json!({
+            "format_version": 10,
+            "ravel_version": "0.1.0",
+            "project_name": "Strings",
             "created_at": "t",
             "modified_at": "t",
             "duration_frames": 120,

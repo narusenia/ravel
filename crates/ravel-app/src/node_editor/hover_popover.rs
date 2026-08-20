@@ -224,6 +224,9 @@ fn param_value_display(value: &ParameterValue, frame: u64, eval: &EvalContext) -
             })
         }
         ParameterValue::String(v) => v.clone(),
+        // An animatable string shows the string the frame reads, the same way
+        // an animatable int shows the int it reads.
+        ParameterValue::StringSteps(steps) => steps.sample(frame as f64).clone(),
         ParameterValue::Channel(ch) => format_float(channel_display_value(ch, frame, eval)),
         // An animatable int shows the int the frame reads as, not the f32
         // underneath it: the rounding is the value the processor gets.

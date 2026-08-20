@@ -39,6 +39,14 @@
   `CanvasSelection`、コンプは `ActiveComposition`、メディアは `MediaSelection`
   の各 Global が正。パネルは同じ Global を読み書きするので、パネル間の
   双方向同期プロトコルを持たない
+- **裏のタブでは更新を遅らせ、表に戻ったときに追いつく**: ドキュメントを鏡に
+  するパネル（Outliner / Timeline / Node Graph Editor / Properties Inspector /
+  Media Bin）は、自分のタブがエリアの手前にない間は同期を走らせない。
+  飛ばした更新は**捨てるのではなく借りとして残り**、表に戻った瞬間に 1 回で
+  まとめて追いつくので、タブを切り替えた直後に古い値が見えることはない。
+  可視集合は Global（`panels::VisiblePanels`）で、書き手はレイアウトツリーを
+  適用する 1 箇所だけ。**Viewer は対象外** — 裏でも評価要求を出し続けないと
+  再生とキャッシュの先読みが止まる（`MED-UI-02`）
 - **コマンド経路の単一性**: キーバインド / メニュー / ボタンはすべて GPUI Action
   を経由し、`RavelWorkspace::dispatch_command()` が唯一の実行点
   （`.agents/rules/gpui.md`）

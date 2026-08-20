@@ -1961,6 +1961,10 @@ pub struct PropertiesGpuiPanel {
     playhead_sensitive: bool,
     #[allow(dead_code)]
     playback_sub: Subscription,
+    /// Pays off the syncs skipped while the panel was behind another tab
+    /// (see [`super::on_became_visible`]).
+    #[allow(dead_code)]
+    visibility_sub: Subscription,
 }
 
 impl PropertiesGpuiPanel {
@@ -1973,77 +1977,90 @@ impl PropertiesGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
 
-        let selection_sub = cx.observe_global::<SelectedPropertiesTarget>(|this: &mut Self, cx| {
-            let target = cx
-                .try_global::<SelectedPropertiesTarget>()
-                .cloned()
-                .unwrap_or_default();
-            let same = same_target(&this.target, &target.0);
-            if same {
-                this.target = target.0;
-                // Same target, new values (undo, timeline drag, playhead
-                // move): refresh in place so scrub gestures survive —
-                // unless the field shape changed (a parameter became
-                // driven or editable again), where stale widget bindings
-                // would edit through a read-only row.
-                //
-                // Gated on the document epoch, which is what makes a node
-                // parameter drag cost one re-resolve per mouse move instead of
-                // two (`MED-UI-06`): the node editor republishes this identical
-                // target from `refresh_from_document` on every move, and the
-                // `ProjectState` notify of the same move asks for the same work.
-                // Whichever arrives first resolves the sections and records the
-                // epoch; the other finds it recorded and returns. A republish
-                // with no document change behind it cannot have new values —
-                // the playhead has its own observer below.
-                let epoch = this
-                    .project
-                    .as_ref()
-                    .map(|project| project.read(cx).mirror_epoch());
-                match epoch {
-                    Some(epoch) if !this.mirror_epoch.advanced(epoch) => {}
-                    _ => this.refresh_values_checked(cx),
+        let selection_sub =
+            cx.observe_global::<SelectedPropertiesTarget>(move |this: &mut Self, cx| {
+                let target = cx
+                    .try_global::<SelectedPropertiesTarget>()
+                    .cloned()
+                    .unwrap_or_default();
+                let same = same_target(&this.target, &target.0);
+                if same {
+                    this.target = target.0;
+                    // Same target, new values (undo, timeline drag, playhead
+                    // move): refresh in place so scrub gestures survive —
+                    // unless the field shape changed (a parameter became
+                    // driven or editable again), where stale widget bindings
+                    // would edit through a read-only row.
+                    //
+                    // Gated on the document epoch, which is what makes a node
+                    // parameter drag cost one re-resolve per mouse move instead of
+                    // two (`MED-UI-06`): the node editor republishes this identical
+                    // target from `refresh_from_document` on every move, and the
+                    // `ProjectState` notify of the same move asks for the same work.
+                    // Whichever arrives first resolves the sections and records the
+                    // epoch; the other finds it recorded and returns. A republish
+                    // with no document change behind it cannot have new values —
+                    // the playhead has its own observer below.
+                    //
+                    // A hidden panel resolves nothing and records no epoch, so
+                    // the values it did not resolve stay owed until
+                    // `visibility_sub` below brings it back.
+                    if super::is_instance_visible(instance, cx) {
+                        let epoch = this
+                            .project
+                            .as_ref()
+                            .map(|project| project.read(cx).mirror_epoch());
+                        match epoch {
+                            Some(epoch) if !this.mirror_epoch.advanced(epoch) => {}
+                            _ => this.refresh_values_checked(cx),
+                        }
+                    }
+                } else {
+                    // An in-flight gesture belongs to the target being left and
+                    // its live value is already in the document: end it here,
+                    // while `self.target` still names the row it came from,
+                    // instead of dropping it into an unrelated undo step — or,
+                    // worse, onto the target being switched to.
+                    this.end_gestures(cx);
+                    this.target = target.0;
+                    // A refusal names a port on the target that is going away,
+                    // and a rename record names a row that is going with it.
+                    this.port_error = None;
+                    this.committed_port_rename = None;
+                    this.exposed_error = None;
+                    this.committed_exposed_rename = None;
+                    // Curve expansion is per-target view state (see the field
+                    // docs): a new target starts with every curve row collapsed,
+                    // so returning to a node shows it collapsed again.
+                    this.expanded_rows.clear();
+                    this.row_heights.clear();
+                    this.row_resize = None;
+                    this.needs_rebuild = true;
+                    // This branch rebuilds the widgets in `render` rather than
+                    // calling `refresh_values`, so nothing here recomputes the
+                    // playhead gate. Reopening it is what keeps a switch from a
+                    // static target to an animated one from inheriting "nothing
+                    // follows the playhead" and freezing the new target's values:
+                    // the next playhead move refreshes once and settles the flag on
+                    // what is actually on screen.
+                    this.playhead_sensitive = true;
                 }
-            } else {
-                // An in-flight gesture belongs to the target being left and
-                // its live value is already in the document: end it here,
-                // while `self.target` still names the row it came from,
-                // instead of dropping it into an unrelated undo step — or,
-                // worse, onto the target being switched to.
-                this.end_gestures(cx);
-                this.target = target.0;
-                // A refusal names a port on the target that is going away,
-                // and a rename record names a row that is going with it.
-                this.port_error = None;
-                this.committed_port_rename = None;
-                this.exposed_error = None;
-                this.committed_exposed_rename = None;
-                // Curve expansion is per-target view state (see the field
-                // docs): a new target starts with every curve row collapsed,
-                // so returning to a node shows it collapsed again.
-                this.expanded_rows.clear();
-                this.row_heights.clear();
-                this.row_resize = None;
-                this.needs_rebuild = true;
-                // This branch rebuilds the widgets in `render` rather than
-                // calling `refresh_values`, so nothing here recomputes the
-                // playhead gate. Reopening it is what keeps a switch from a
-                // static target to an animated one from inheriting "nothing
-                // follows the playhead" and freezing the new target's values:
-                // the next playhead move refreshes once and settles the flag on
-                // what is actually on screen.
-                this.playhead_sensitive = true;
-            }
-            cx.notify();
-        });
+                cx.notify();
+            });
 
         // Any document change (edit, undo/redo, live gesture update)
         // re-resolves the current target's values in place — the same
         // semantics as a same-target republish, so an in-flight scrub
         // gesture is never destroyed.
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, project, cx| {
+            cx.observe(project, move |this: &mut Self, project, cx| {
                 if matches!(this.target, PropertiesTarget::Empty) {
+                    return;
+                }
+                // Behind another tab nobody can read these values, so the
+                // resolve waits for the panel to come back — *before* the
+                // epoch gate below, so the skipped change stays owed.
+                if !super::is_instance_visible(instance, cx) {
                     return;
                 }
                 // Re-resolving every section is what makes this expensive, and
@@ -2061,18 +2078,42 @@ impl PropertiesGpuiPanel {
         // Sections sample animated channels at the playhead's layer-local
         // frame; follow it so displayed values and the ◆/◇ state track
         // playback — for node and layer targets alike.
-        let playback_sub = cx.observe_global::<super::PlaybackPosition>(|this: &mut Self, cx| {
+        let playback_sub =
+            cx.observe_global::<super::PlaybackPosition>(move |this: &mut Self, cx| {
+                if matches!(this.target, PropertiesTarget::Empty) {
+                    return;
+                }
+                // Playback behind another tab paints nothing here. Unlike the
+                // document paths there is no epoch to leave alone: the forced
+                // sync on the way back re-samples at whatever frame the playhead
+                // has reached by then.
+                if !super::is_instance_visible(instance, cx) {
+                    return;
+                }
+                // Nothing on display is sampled at the playhead, so moving it
+                // cannot change a value, a ◆/◇ state or a string. Re-resolving the
+                // target here is what made a paused-looking panel cost a full
+                // section rebuild on every playback frame (`MED-UI-02`).
+                if !this.playhead_sensitive {
+                    return;
+                }
+                this.refresh_values(cx);
+                cx.notify();
+            });
+
+        // Coming back into view pays off everything the three observers above
+        // skipped while hidden, in one resolve.
+        let visibility_sub = super::on_became_visible(instance, cx, |this, cx| {
             if matches!(this.target, PropertiesTarget::Empty) {
                 return;
             }
-            // Nothing on display is sampled at the playhead, so moving it
-            // cannot change a value, a ◆/◇ state or a string. Re-resolving the
-            // target here is what made a paused-looking panel cost a full
-            // section rebuild on every playback frame (`MED-UI-02`).
-            if !this.playhead_sensitive {
-                return;
+            // Adopt the epoch of what is being resolved now, so the next
+            // document notify is gated as usual instead of resolving twice.
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
             }
-            this.refresh_values(cx);
+            this.refresh_values_checked(cx);
             cx.notify();
         });
 
@@ -2132,6 +2173,7 @@ impl PropertiesGpuiPanel {
             mirror_epoch: super::MirrorEpoch::default(),
             playhead_sensitive: true,
             playback_sub,
+            visibility_sub,
         }
     }
 
@@ -6075,6 +6117,68 @@ mod tests {
         window
             .update(cx, |panel, _window, _cx| {
                 assert_eq!(displayed_float(panel, "position_x"), Some(42.0));
+            })
+            .unwrap();
+    }
+
+    /// Publish which panel instances are at the front of a tab area, the way
+    /// `WindowHost::show_tree` does.
+    fn set_visible(instances: &[ravel_ui::layout::PanelInstanceId], cx: &mut TestAppContext) {
+        let visible = instances.iter().copied().collect();
+        cx.update(|cx| cx.set_global(crate::panels::VisiblePanels(visible)));
+        cx.run_until_parked();
+    }
+
+    /// The visibility gate delays work, it does not drop it (`MED-UI-02`): an
+    /// edit made while the panel sits behind another tab is not resolved
+    /// there, and *is* resolved the moment the tab comes back.
+    ///
+    /// Both halves are one test because the second is only meaningful after
+    /// the first: a panel that never skipped anything has nothing to catch up
+    /// on, so a passing catch-up assertion would prove nothing on its own.
+    #[gpui::test]
+    fn a_hidden_panel_catches_up_when_it_returns(cx: &mut TestAppContext) {
+        let panel_instance = ravel_ui::layout::PanelInstanceId(0);
+        let (window, project, comp_id, lid) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| panel.refresh_values(cx))
+            .unwrap();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(displayed_float(panel, "position_x"), Some(0.0));
+            })
+            .unwrap();
+
+        // Behind another tab: nothing is published for this instance.
+        set_visible(&[], cx);
+        project.update(cx, |project, cx| {
+            let doc = update_layer(project.document(), comp_id, lid, |l| {
+                l.transform.position[0] = AnimationChannel::constant(42.0);
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    displayed_float(panel, "position_x"),
+                    Some(0.0),
+                    "a hidden panel must not resolve the edit"
+                );
+            })
+            .unwrap();
+
+        // Back at the front. The skipped edit is owed, and this is where it is
+        // paid: the epoch was deliberately left unrecorded while hidden.
+        set_visible(&[panel_instance], cx);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(
+                    displayed_float(panel, "position_x"),
+                    Some(42.0),
+                    "returning to the front must show the edit made while hidden"
+                );
             })
             .unwrap();
     }

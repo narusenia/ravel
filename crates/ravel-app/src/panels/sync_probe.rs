@@ -32,10 +32,12 @@ pub enum PanelSync {
     OutlinerRows,
     /// `MediaBinGpuiPanel::rebuild_rows`.
     MediaBinRows,
+    /// `NodeEditorPanel::refresh_from_document`.
+    NodeEditorRefresh,
 }
 
 #[cfg(debug_assertions)]
-const SYNC_KINDS: usize = 4;
+const SYNC_KINDS: usize = 5;
 
 #[cfg(debug_assertions)]
 impl PanelSync {
@@ -45,6 +47,7 @@ impl PanelSync {
             Self::TimelineSync => 1,
             Self::OutlinerRows => 2,
             Self::MediaBinRows => 3,
+            Self::NodeEditorRefresh => 4,
         }
     }
 }
@@ -96,6 +99,7 @@ mod tests {
         assert_eq!(count(PanelSync::OutlinerRows), 1);
         assert_eq!(count(PanelSync::PropertiesRefresh), 0);
         assert_eq!(count(PanelSync::MediaBinRows), 0);
+        assert_eq!(count(PanelSync::NodeEditorRefresh), 0);
         reset();
         assert_eq!(count(PanelSync::TimelineSync), 0);
     }

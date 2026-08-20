@@ -89,6 +89,10 @@ pub struct MediaBinGpuiPanel {
     mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     selection_sub: Subscription,
+    /// Pays off the rebuild skipped while the panel was behind another tab
+    /// (see [`super::on_became_visible`]).
+    #[allow(dead_code)]
+    visibility_sub: Subscription,
     #[allow(dead_code)]
     thumbnails_sub: Subscription,
     #[allow(dead_code)]
@@ -105,7 +109,13 @@ impl MediaBinGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, project, cx| {
+            cx.observe(project, move |this: &mut Self, project, cx| {
+                // Behind another tab the rows have no reader, so the rebuild
+                // waits for the panel to come back — before the epoch gate, so
+                // the skipped import stays owed (`visibility_sub` below).
+                if !super::is_instance_visible(instance, cx) {
+                    return;
+                }
                 // The asset list changes on import and undo, not on the stream
                 // of notifications a drag or a save produces.
                 if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
@@ -152,6 +162,18 @@ impl MediaBinGpuiPanel {
             },
         );
 
+        // Coming back into view rebuilds the rows if the media map moved while
+        // the panel was away. `last_media_assets` is the record of what the
+        // rows were built from, so the check that decides it is the same one
+        // the observer above uses.
+        let visibility_sub = super::on_became_visible(instance, cx, |this, cx| {
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
+            this.rebuild_rows_if_media_changed(cx);
+        });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
@@ -170,6 +192,7 @@ impl MediaBinGpuiPanel {
             project_sub,
             audio_sub,
             mirror_epoch: super::MirrorEpoch::default(),
+            visibility_sub,
             selection_sub,
             thumbnails_sub,
             search_sub,

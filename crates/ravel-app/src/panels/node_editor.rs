@@ -718,6 +718,10 @@ pub struct NodeEditorPanel {
     mirror_epoch: super::MirrorEpoch,
     #[allow(dead_code)]
     timings_sub: Subscription,
+    /// Pays off the sync skipped while the panel was behind another tab
+    /// (see [`super::on_became_visible`]).
+    #[allow(dead_code)]
+    visibility_sub: Subscription,
 }
 
 impl NodeEditorPanel {
@@ -733,7 +737,13 @@ impl NodeEditorPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, project, cx| {
+            cx.observe(project, move |this: &mut Self, project, cx| {
+                // Behind another tab nobody sees the graph, so the resolve
+                // waits for the panel to come back. Before the epoch gate, so
+                // that what was skipped stays owed (`visibility_sub` below).
+                if !super::is_instance_visible(instance, cx) {
+                    return;
+                }
                 // Re-resolving the display graph clones the document and deep
                 // compares the network; skip it when the document has not moved
                 // since the last sync.
@@ -750,7 +760,28 @@ impl NodeEditorPanel {
         // are both writers, and a composition switch resets the selection, so
         // observing it is the single path that covers all three.
         let layer_selection_sub =
-            cx.observe_global::<super::LayerSelection>(Self::follow_layer_selection);
+            cx.observe_global::<super::LayerSelection>(move |this: &mut Self, cx| {
+                if super::is_instance_visible(instance, cx) {
+                    Self::follow_layer_selection(this, cx);
+                    return;
+                }
+                // Hidden: opening the newly selected network (a document
+                // resolve, the caches, the view fit) waits for the panel to
+                // come back. Nothing has to be queued for that —
+                // `LayerSelection` is durable shared state, so the catch-up
+                // below reads whatever it holds *then*.
+                //
+                // What cannot wait is the selection this panel publishes.
+                // `CanvasSelection` names nodes of the network still open
+                // here, and the Viewer — never gated — draws its bbox and
+                // resolves its gesture targets from it. Leaving it pointed
+                // into a network the user has left would put a stale gizmo on
+                // screen in a panel that is *not* hidden, so dropping it is
+                // the one thing this branch still does.
+                if !this.selection_names_open_network(cx) && !Self::selected_nodes(cx).is_empty() {
+                    this.clear_selected_nodes(cx);
+                }
+            });
         // The per-node load readout is the one thing this panel draws from
         // evaluation output rather than from the document, so it follows the
         // timings global directly. `ProjectState` deliberately does not notify
@@ -767,6 +798,27 @@ impl NodeEditorPanel {
                     cx.notify();
                 }
             });
+        // Coming back into view pays off both observers above, and does it
+        // with exactly one document resolve.
+        //
+        // `LayerSelection` is durable shared state, so the selection made
+        // while this panel was hidden is simply the value it holds now — there
+        // is no pending-selection queue to keep. `open_network` re-resolves
+        // the graph itself, so the extra `refresh_from_document` is for the
+        // other case only: the selection did not move and the document did.
+        let visibility_sub = super::on_became_visible(instance, cx, |this, cx| {
+            if let Some(project) = this.project.clone() {
+                let epoch = project.read(cx).mirror_epoch();
+                this.mirror_epoch.advanced(epoch);
+            }
+            let already_open = this.selection_names_open_network(cx);
+            this.follow_layer_selection(cx);
+            if already_open {
+                this.refresh_from_document(cx);
+                cx.notify();
+            }
+        });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
@@ -813,6 +865,7 @@ impl NodeEditorPanel {
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             timings_sub,
+            visibility_sub,
         }
     }
 
@@ -841,14 +894,29 @@ impl NodeEditorPanel {
             cx.notify();
             return;
         };
-        if self
-            .context
-            .as_ref()
-            .is_some_and(|open| open.comp == comp && open.layer == layer)
-        {
+        if self.selection_names_open_network(cx) {
             return;
         }
         self.open_network(NetworkPath::layer(comp, layer), cx);
+    }
+
+    /// Whether the shared layer selection names exactly the network this panel
+    /// already has open.
+    ///
+    /// Both the "nothing to do" guard above and the visibility gate ask this,
+    /// and they have to agree: the gate uses it to decide whether the pending
+    /// selection is a real switch, and the catch-up uses it to avoid resolving
+    /// the document twice (once through `open_network`, once on its own).
+    fn selection_names_open_network(&self, cx: &App) -> bool {
+        let selection = super::layer_selection(cx);
+        let [layer] = selection.layers() else {
+            return false;
+        };
+        selection.comp().is_some_and(|comp| {
+            self.context
+                .as_ref()
+                .is_some_and(|open| open.comp == comp && open.layer == *layer)
+        })
     }
 
     // ----- canvas selection (CanvasSelection Global) -------------------------
@@ -915,6 +983,14 @@ impl NodeEditorPanel {
     /// The ownership path of the network currently being edited.
     pub fn context(&self) -> Option<&NetworkPath> {
         self.context.as_ref()
+    }
+
+    /// The graph this panel currently displays (tests and the debug
+    /// inspector). Resolved from the document by
+    /// [`Self::refresh_from_document`], so it is what the canvas draws — not
+    /// the live document.
+    pub fn displayed_graph(&self) -> &Graph {
+        &self.graph
     }
 
     /// Open the network at `path` (layer selection, subnet dive, breadcrumb
@@ -1025,6 +1101,7 @@ impl NodeEditorPanel {
     /// network vanished (deleted layer / subnet, undo) pops to the nearest
     /// surviving ancestor, or to no context at all.
     fn refresh_from_document(&mut self, cx: &mut Context<Self>) {
+        super::sync_probe::record(super::sync_probe::PanelSync::NodeEditorRefresh);
         let Some(project) = self.project.clone() else {
             return;
         };

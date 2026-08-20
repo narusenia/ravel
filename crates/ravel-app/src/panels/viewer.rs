@@ -423,6 +423,21 @@ pub struct ViewerPanel {
 }
 
 impl ViewerPanel {
+    /// **Deliberately outside the panel visibility gate** (`MED-UI-02`,
+    /// `docs/implementation/panel-visibility-plan.md`).
+    ///
+    /// The other document-mirroring panels delay their sync while their tab is
+    /// behind another one, because a rebuilt row model nobody can see is pure
+    /// cost. This panel is the exception: what it does on a notification is
+    /// post evaluation requests, and those are what keep playback fed and the
+    /// frame cache warm. Stopping them while the tab is in the background is
+    /// not a saving, it is a feature that stops — the playhead would run
+    /// against an empty cache and the first frame after a tab switch would
+    /// have to be evaluated from scratch.
+    ///
+    /// The scopes (Waveform / Vectorscope / Histogram) are outside it for the
+    /// opposite reason: they do not mirror the document at all yet. When one of
+    /// them grows a mirror, it belongs on the gate.
     pub fn new(
         instance: ravel_ui::layout::PanelInstanceId,
         window: &mut Window,

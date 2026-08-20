@@ -1068,6 +1068,48 @@ impl MirrorEpoch {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Panel visibility gate
+// ---------------------------------------------------------------------------
+
+/// Whether `instance`'s tab is at the front of its area in some open window.
+///
+/// An absent [`VisiblePanels`] global means nobody publishes visibility yet —
+/// a headless test, or startup before the first `WindowHost::show_tree`. Then
+/// nothing is *known* to be hidden, so everything counts as visible: the
+/// gates below stay open and no panel is frozen by the absence of the writer.
+pub(crate) fn is_instance_visible(instance: PanelInstanceId, cx: &App) -> bool {
+    cx.try_global::<VisiblePanels>()
+        .is_none_or(|visible| visible.0.contains(&instance))
+}
+
+/// Calls `on_visible` when `instance` goes from hidden to visible.
+///
+/// The gate *delays* work rather than dropping it. A hidden panel returns
+/// before it records the [`MirrorEpoch`] of what it skipped, so the skipped
+/// syncs stay owed; one sync from here pays the whole debt off, however many
+/// notifications it stood for. That is the whole reason the gate must return
+/// early *before* touching the epoch: an epoch recorded while hidden erases
+/// the debt and the panel stays stale after it comes back.
+///
+/// The callback runs from a global observer, never from `render`, so a panel
+/// coming back into view is brought up to date before it is painted.
+pub(crate) fn on_became_visible<T: 'static>(
+    instance: PanelInstanceId,
+    cx: &mut Context<T>,
+    mut on_visible: impl FnMut(&mut T, &mut Context<T>) + 'static,
+) -> Subscription {
+    let mut was_visible = is_instance_visible(instance, cx);
+    cx.observe_global::<VisiblePanels>(move |this, cx| {
+        let visible = is_instance_visible(instance, cx);
+        let became_visible = visible && !was_visible;
+        was_visible = visible;
+        if became_visible {
+            on_visible(this, cx);
+        }
+    })
+}
+
 /// Stand-in for a [`PanelKind`] whose real panel does not exist yet.
 ///
 /// It is focusable and tab-titled like every other pane, so an unimplemented

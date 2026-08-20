@@ -372,6 +372,7 @@ gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` へ
 |------|------|------|
 | N ウィンドウ × レイアウトツリー | ✅ | 全ウィンドウが同じホスト（`WindowHost`）。メインは `windows[0]`。論理 `WindowId` ↔ GPUI ハンドルは `WindowRegistry`（Global）1 箇所 |
 | 同一パネルの多重インスタンス | ✅ | 全 17 種。タブ 1 枚 = `PanelInstance`。ビューは `PanelInstanceId` キーのレジストリ（`PanelViews`）がキャッシュ |
+| 裏のタブでは更新を遅らせる | ✅ | 各エリアの手前のタブを `WindowHost::show_tree` が `panels::VisiblePanels`（Global。**書き手はここ 1 箇所**）へ置き、ドキュメントを鏡にする 5 パネル（Properties / Timeline / Outliner / MediaBin / NodeEditor）が読む。裏にいる間は sync 関数を呼ばず、**`MirrorEpoch` も記録しない** — 飛ばした更新が借りとして残るので、表に戻った瞬間の 1 回で追いつく（`panels::on_became_visible`）。エンティティは破棄しないのでスクロール位置・展開状態・進行中のジェスチャーは残る。5 パネルすべてを裏に置いたドラッグ 10 move で sync 合計 **40 → 0 回**、Properties を裏に置いた再生 30 フレームで **30 → 0 回**（`tests/panel_rebuild_gate.rs`、数字は `docs/implementation/perf-baseline.md`）。**Viewer は対象外** — 裏でも評価要求を出し続けないと再生とキャッシュの先読みが止まる。スコープ 4 種はまだドキュメントを鏡にしていないので対象外 |
 | 4 プリセットの表示と切替 | ✅ | `Cmd+F1`〜`F4` と Workspace メニュー。メインウィンドウのツリーだけを差し替え、分離ウィンドウは触らない |
 | View トグル（既定スロット挿入） | ✅ | ツリーに無いパネルは `PanelKind::default_slot()` へ挿入。アクティブプリセットに依存しない |
 | タブ切替・タブ D&D | ✅ | エリア端 1/4 = 分割、中央 = 合流、タブバーの帯 = 合流。ドロップ先はアクセント色でハイライト、結果が変わらないドロップは無効（カーソルが `OperationNotAllowed`）。4px でクリックとドラッグを分ける。Escape とボタン喪失でキャンセル |

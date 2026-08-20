@@ -73,6 +73,14 @@ observe-global crates/ravel-app/src/panels/viewer.rs ViewerFrame
 # the playhead's layer-local frame when it moves (REQ-LAYER-004).
 observe-global crates/ravel-app/src/panels/properties.rs PlaybackPosition
 
+# The visibility gate (MED-UI-02): `VisiblePanels` is durable shared state —
+# which panel instances are at the front of a tab area — written only by
+# `WindowHost::show_tree`, exactly like `FocusedPanelGlobal`. The shared
+# `on_became_visible` helper is the single observer of it, so every panel that
+# delays its sync while hidden goes through this one subscription rather than
+# declaring its own.
+observe-global crates/ravel-app/src/panels/mod.rs VisiblePanels
+
 # H-hold temporary hand tool (REQ-UI-011): raw key handling is the approved
 # pattern for transient drag modes per .agents/rules/gpui.md.
 panel-on-key-down crates/ravel-app/src/panels/viewer.rs on_key_down

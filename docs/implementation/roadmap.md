@@ -27,7 +27,7 @@
 | C4 | 完了 | 2026-08-13 |
 | CM | 進行中 | — |
 | C2 | 完了 | 2026-08-10 |
-| C3 | 進行中 | — |
+| C3 | 完了 | 2026-08-20 |
 | UX | 完了 | 2026-08-10 |
 | D | 進行中 | — |
 | E | 進行中 | — |
@@ -607,7 +607,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | クラスタ | 内容 | 結果 |
 |---|---|---|
 | 評価器のアルゴリズム（第3段） | `HIGH-01`（隣接インデックスが無く 1 pull が O(N·E)）、`HIGH-02`（編集ごとに全ネットワークを deep compare）、`MED-CORE-01`（`NodeKey` のパス clone が訪問ごとに 3〜4 回）、`MED-CORE-05`（`attribute_transfer` が O(source×target)） | ✅ #395（4 件すべて closed） |
-| パネル 1 回あたりのコスト | `MED-UI-01`〜`MED-UI-06`（毎編集の再コンパイル、Properties のフレーム 2 回再構築、Timeline の行仮想化なし・deep compare、Outliner / MediaBin の全行再構築、2 経路重複 sync） | #397 / #400（`MED-UI-01` / `03` / `04` / `05` / `06` は closed。**`MED-UI-02` だけ部分的に解決で未解決のまま**） |
+| パネル 1 回あたりのコスト | `MED-UI-01`〜`MED-UI-06`（毎編集の再コンパイル、Properties のフレーム 2 回再構築、Timeline の行仮想化なし・deep compare、Outliner / MediaBin の全行再構築、2 経路重複 sync） | ✅ #397 / #400 / `VIS-*`（6 件すべて closed。`MED-UI-02` は `VIS-2`〜`VIS-4` の可視性ゲートで閉じた） |
 | GPU ディスパッチ | `MED-GPU-04`（CPU ラスタライズが全画面カバレッジを毎回確保）、`MED-GPU-05`（`ensure_gpu` が同一フレームを消費ノードごとに再アップロード） | ✅ #396（2 件とも closed） |
 | ~~メディアデコード~~ | ✅ `HIGH-17`（sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換）は closed | — |
 
@@ -625,7 +625,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 `HIGH-01` / `HIGH-02` は依存が無く**いつでも着手できる**。体感が痛いときは
 フェーズ A に割り込ませてよい（基準 0 の対象ではないので優先はしない）。
 
-### 実施結果（2026-08-13 時点、**進行中**）
+### 実施結果（2026-08-20 時点、**完了**）
 
 14 単位すべてが 3 本の PR でマージされた — `RESP3-1`〜`4`（#395）、
 `RESP3-5`〜`11`（#397）、`RESP3-12`〜`14`（#396）。入ったものは次のとおり。
@@ -651,19 +651,21 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
   （ドラッグ 1 move あたりの Properties 再解決 **16 → 10 = 1 回 / move**、
   コンポジション切替の Timeline / Outliner **2 → 1**）
 
-**`完了` にしない理由**: フェーズ完了の定義は「フェーズ内の全単位が完了条件を
-満たした時点」で、`RESP3-7` の完了条件のうち**「パネルが非表示のとき
-`refresh_values` を走らせない」が未達**。タブの可視性がパネルへ届く仕組みが
-無く（`ravel-dock` は `active: usize` を持つがパネルへ伝えない）、配線は
-設計ゲート規模になる。**計画書は
-[`panel-visibility-plan.md`](panel-visibility-plan.md)（`VIS-1`〜`VIS-4`）で、
-`VIS-4` がこのフェーズを閉じる。** `RESP3-7` で入ったのは「プレイヘッドで再サンプルされる
-ものが何も無いときスキップ」で、静的ターゲットの再生は 30 → 1 回になったが、
-アニメーション有りのターゲットは 30 回のまま（削ると値が止まるので正しい）。
+- **可視性（`VIS-1`〜`VIS-4`）**: フェーズを閉じた最後の 1 枚。`RESP3-7` の
+  完了条件のうち唯一未達だった「パネルが非表示のとき `refresh_values` を
+  走らせない」を、パネルへ可視性を届ける経路ごと入れた。
+  `WindowHost::show_tree` が各エリアの手前のタブを `panels::VisiblePanels`
+  （Global、書き手はここ 1 箇所）へ置き、Properties / Timeline / Outliner /
+  MediaBin / NodeEditor が `is_instance_visible` で読む。**ゲートは飛ばすの
+  ではなく遅らせる** — 裏では `MirrorEpoch` を記録しないので借りが残り、
+  `on_became_visible` が表に戻った瞬間に 1 回で返す。5 パネルすべてを裏に
+  置いたドラッグ 10 move で **sync 合計 40 → 0 回**、Properties を裏に置いた
+  再生 30 フレームで **30 → 0 回**（測定手順は
+  [`perf-baseline.md`](perf-baseline.md)）。Viewer は対象外 — 裏でも評価要求を
+  出し続けないと再生とキャッシュの先読みが止まる
 
-**残った issue は 1 件**、部分的に解決した状態で `issues/medium/` に残っている。
-
-- `MED-UI-02` — 上記の非表示スキップが未達
+**残った issue は無い。** `MED-UI-02` は `RESP3-7`（プレイヘッドの空振り）と
+`VIS-2`〜`VIS-4`（非表示スキップ）の二段で閉じ、`issues/closed/` へ移した。
 
 `MED-UI-05` は **#400 で closed**（2026-08-13）。Outliner 側は #397 の
 `network_has_rows` で片付いており、残っていた MediaBin のドラッグ 1 move
@@ -673,7 +675,9 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 （MediaBin が映すのは media 資産で、`add_layer` はそれを変えない）。抜けた
 カバレッジは `a_media_asset_change_rebuilds_media_bin_rows` が埋めている。
 
-計画書（`responsiveness-stage3-plan.md`）は同じ理由で `done/` へ移していない。
+計画書 2 本（`responsiveness-stage3-plan.md` と `panel-visibility-plan.md`）は
+まだ最上位にある。どちらも全単位が完了条件を満たしているので、`VIS-*` が
+マージされた時点で `done/` へ移せる。
 
 ## フェーズ UX: リリース前の使い勝手
 

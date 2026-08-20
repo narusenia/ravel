@@ -100,6 +100,10 @@ pub struct OutlinerGpuiPanel {
     active_comp: Option<ravel_core::id::CompId>,
     #[allow(dead_code)]
     active_comp_sub: Subscription,
+    /// Pays off the syncs skipped while the panel was behind another tab
+    /// (see [`super::on_became_visible`]).
+    #[allow(dead_code)]
+    visibility_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
@@ -118,7 +122,13 @@ impl OutlinerGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
         let project_sub = project.as_ref().map(|project| {
-            cx.observe(project, |this: &mut Self, project, cx| {
+            cx.observe(project, move |this: &mut Self, project, cx| {
+                // Behind another tab there is no tree to look at, so the walk
+                // waits for the panel to come back — before the epoch gate, so
+                // the skipped change stays owed (`visibility_sub` below).
+                if !super::is_instance_visible(instance, cx) {
+                    return;
+                }
                 // Rebuilding walks every composition, layer, and node, so it
                 // only runs when what the tree shows actually moved.
                 if !this.mirror_epoch.advanced(project.read(cx).mirror_epoch()) {
@@ -130,7 +140,13 @@ impl OutlinerGpuiPanel {
 
         // A composition switch changes which rows are interactive, and the
         // newly active composition opens so its layers are reachable.
-        let active_comp_sub = cx.observe_global::<super::ActiveComposition>(|this, cx| {
+        let active_comp_sub = cx.observe_global::<super::ActiveComposition>(move |this, cx| {
+            // Hidden: return before `sync_tree` adopts the composition and
+            // records the epoch, so the switch is still outstanding when the
+            // tab comes back.
+            if !super::is_instance_visible(instance, cx) {
+                return;
+            }
             // Unlike an epoch check, this still runs for a global write that
             // carried no `ProjectState` notify.
             if super::active_composition(cx) == this.active_comp {
@@ -147,6 +163,13 @@ impl OutlinerGpuiPanel {
         // anywhere replaces that target and un-highlights the row).
         let properties_target_sub =
             cx.observe_global::<super::SelectedPropertiesTarget>(|_this, cx| cx.notify());
+
+        // Coming back into view pays off both observers above at once:
+        // `sync_tree` adopts the active composition, rebuilds the rows and
+        // records the epoch, which is exactly what each of them does.
+        let visibility_sub = super::on_became_visible(instance, cx, |this, cx| {
+            this.sync_tree(cx);
+        });
 
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
@@ -165,12 +188,25 @@ impl OutlinerGpuiPanel {
             // the first switch it sees is a real one.
             active_comp: super::active_composition(cx),
             active_comp_sub,
+            visibility_sub,
             selection_sub,
             canvas_selection_sub,
             properties_target_sub,
         };
         panel.rebuild_rows(cx);
         panel
+    }
+
+    /// The rows the tree currently shows (tests and the debug inspector).
+    pub fn rows(&self) -> &[OutlinerRow] {
+        &self.rows
+    }
+
+    /// The composition this tree last synced for (tests and the debug
+    /// inspector). This is the panel's own copy, not [`super::ActiveComposition`]:
+    /// the two differ exactly while a sync is outstanding.
+    pub fn mirrored_comp(&self) -> Option<ravel_core::id::CompId> {
+        self.active_comp
     }
 
     /// Bring the tree in step with the document *and* with the active

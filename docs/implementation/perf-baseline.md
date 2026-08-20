@@ -1720,6 +1720,7 @@ UI スレッドで走り、`#[gpui::test]` ではそれがテスト自身のス�
 | `PanelSync::TimelineSync` | `TimelineGpuiPanel::sync_from_project` |
 | `PanelSync::OutlinerRows` | `OutlinerGpuiPanel::rebuild_rows` |
 | `PanelSync::MediaBinRows` | `MediaBinGpuiPanel::rebuild_rows` |
+| `PanelSync::NodeEditorRefresh` | `NodeEditorPanel::refresh_from_document` |
 
 ### 測り方
 
@@ -1729,8 +1730,12 @@ cargo test -p ravel-app --test panel_rebuild_gate -- --nocapture
 
 `crates/ravel-app/tests/panel_rebuild_gate.rs` の `*_sync_counts` 3 本が、
 5 パネルを実際に開いた 1 ウィンドウに対して 1 ジェスチャーを流し、
-`sync counts [シナリオ名]:` の見出しで 4 つのカウンタを印字したうえで
+`sync counts [シナリオ名]:` の見出しで 5 つのカウンタを印字したうえで
 assert する。数字を変える変更は、印字を読んで assert を更新すること。
+
+`PanelSync::NodeEditorRefresh` は可視性ゲート（`VIS-3`）で足した。それまでは
+4 カウンタで、NodeEditor だけ計装が無かった — 「5 パネルすべてを裏に置くと
+sync 合計が 0」を測るには 5 つ目が必要になる。
 
 | シナリオ | テスト | 内容 |
 |---|---|---|
@@ -1831,3 +1836,56 @@ assert する。数字を変える変更は、印字を読んで assert を更�
   `on_eval_update` から `ProjectState` observer への notify を外した時点で
   解消しており、個票の記述（「再生中の評価結果ごとにも走る」）は
   その修正前の状態を指している。
+
+### 可視性ゲート適用後（`VIS-2`〜`VIS-4`、`MED-UI-02` を閉じた分）
+
+記録日: 2026-08-20。計画: `panel-visibility-plan.md`。
+上の 3 シナリオは**すべてのパネルが手前にある**前提で測っている。ここで測るのは
+その逆 — 裏のタブにいるパネルが払っている分である。
+
+#### どのテストが何を測るか
+
+いずれも `crates/ravel-app/tests/panel_rebuild_gate.rs`。`--nocapture` を付けると
+同じ `sync counts [シナリオ名]:` の形で印字する。
+
+```bash
+cargo test -p ravel-app --test panel_rebuild_gate -- --nocapture
+```
+
+| テスト | 測るもの |
+|---|---|
+| `a_drag_behind_the_tabs_costs_every_mirror_nothing` | 5 パネル全部を裏に置いたドラッグ 10 move の**合計** |
+| `a_parameter_drag_sync_counts` | 同じドラッグを全部表に置いたときの各カウンタ（比較用の before） |
+| `a_hidden_properties_panel_ignores_the_playhead` | 裏の Properties に再生 30 フレーム。表に戻したあと 30 フレームも同じテストが測る |
+| `a_hidden_properties_panel_resolves_nothing` | 裏の Properties にドキュメント編集 2 回。同時に**他の 4 パネルは動いている**ことも確認する（ゲートはパネル単位） |
+| `properties_returning_to_the_front_resolves_what_it_missed` | 表に戻した瞬間の回数（借りの返済が 1 回であること） |
+| `the_{timeline,outliner,media_bin,node_editor}_delays_..._while_hidden` | 4 パネルそれぞれの「裏で 0 / 戻して 1 / 次の編集も 1」 |
+| `a_composition_switch_behind_a_tab_is_taken_up_on_the_return` | グローバル駆動（`ActiveComposition`）の切替が裏で**失われない**こと |
+
+#### before / after
+
+| シナリオ | 対象 | before | after |
+|---|---|---|---|
+| ドラッグ 10 move、5 パネル全部が裏 | 5 カウンタの合計 | 40 | **0** |
+| 再生 30 フレーム（アニメーション有り）、Properties が裏 | `properties.refresh_values` | 30 | **0** |
+| ドキュメント編集 2 回、Properties が裏 | `properties.refresh_values` | 2 | **0** |
+| 裏 → 表に戻した瞬間 | `properties.refresh_values` | 0 | **1**（借りの返済） |
+
+before は同じテストを可視性ゲートの前のコードで走らせた値ではなく、**同じ
+ジェスチャーを全部表に置いて測った値**である（`a_parameter_drag_sync_counts`
+の 10 + 10 + 10 + 0 + 10 = 40、再生は
+`an_animated_layer_still_follows_the_playhead` の 30）。ゲートが変えるのは
+「見えていないときの回数」だけなので、可視のときの数字は上の表から動いていない。
+
+- **裏で 0 は「飛ばした」ではなく「遅らせた」。** 借りは `MirrorEpoch` を
+  記録しないことで表現されるので、表に戻したときの 1 回が何回分の通知を
+  まとめたものであっても 1 回で済む。`0 → 1` の行を落とすと（`on_became_visible`
+  のコールバックを外すと）`properties_returning_to_the_front_resolves_what_it_missed`
+  と `panels::properties::tests::a_hidden_panel_catches_up_when_it_returns` が
+  落ちる。**これがこのゲートの歯**である
+- **MediaBin のドラッグは表でも 0**（`MED-UI-05` / #400 の `ptr_eq` 判定）。
+  合計 40 のうち MediaBin の寄与は 0 で、可視性ゲートで消えるのは残り 4 パネルの
+  40 回である
+- **Viewer は測っていない。** ゲートの対象外で、裏でも評価要求を出し続ける
+  （理由は `ViewerPanel::new` のコメント）
+

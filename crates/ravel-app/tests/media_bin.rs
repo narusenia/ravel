@@ -162,7 +162,9 @@ fn document_assets_become_rows(cx: &mut TestAppContext) {
 
     harness.panel.read_with(cx, |panel, _| {
         assert_eq!(panel.rows().len(), 1);
-        assert_eq!(panel.rows()[0].name, "clip.mov");
+        // The asset's own editable name (the file stem the import minted),
+        // not the file name of its path (`AID-3`).
+        assert_eq!(panel.rows()[0].name, "clip");
         assert_eq!(panel.rows()[0].duration, Some(2.0));
     });
 }

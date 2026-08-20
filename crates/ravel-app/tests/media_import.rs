@@ -407,6 +407,47 @@ fn media_reference_of_the_only_layer(
         .find_map(|node| ravel_core::composition::node_asset_reference(node))
 }
 
+/// Two different files that happen to share a file stem are two assets. The
+/// id is minted, so nothing about them is shared; only the *display name* is
+/// numbered apart, so the MediaBin can tell them apart until the user renames
+/// one (`AID-3`).
+#[gpui::test]
+fn two_files_with_the_same_name_import_as_two_assets(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let (first, second) = project.update(cx, |project, cx| {
+        let summary = project.import_media(
+            vec![
+                probed_clip("/media/a/plate.mov", Some(1.0)),
+                probed_clip("/media/b/plate.mov", Some(1.0)),
+            ],
+            vec![],
+            cx,
+        );
+        (summary.imported[0].0, summary.imported[1].0)
+    });
+    assert_ne!(
+        first, second,
+        "same stem, different files, different assets"
+    );
+
+    project.read_with(cx, |project, _| {
+        let doc = project.document();
+        assert_eq!(doc.media_assets.len(), 2);
+        let entry = |id| doc.get_media_asset(id).expect("the asset is registered");
+        assert_eq!(entry(first).name, "plate");
+        assert_eq!(
+            entry(second).name,
+            "plate 2",
+            "the second one is numbered apart on screen"
+        );
+        assert_ne!(
+            entry(first).path,
+            entry(second).path,
+            "and each keeps its own file"
+        );
+    });
+}
+
 /// Re-importing the same absolute path reuses the asset: the id does not
 /// duplicate and the asset table does not grow.
 #[gpui::test]

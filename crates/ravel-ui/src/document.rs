@@ -687,19 +687,25 @@ fn is_audio_only(entry: &ravel_core::composition::MediaAssetEntry) -> bool {
     entry.kind == ravel_core::composition::AssetKind::Container && entry.metadata.width.is_none()
 }
 
-/// Base name of a media layer: the asset's file stem, or the asset's own
-/// [`MediaAssetEntry::name`](ravel_core::composition::MediaAssetEntry::name)
-/// when the persisted path yields none (a bare `${VAR}` token, a trailing
-/// separator).
+/// Base name of a media layer: the asset's own
+/// [`MediaAssetEntry::name`](ravel_core::composition::MediaAssetEntry::name),
+/// which the import seeds from the file stem and the MediaBin lets the user
+/// edit (`AID-3`) — so a layer made from a renamed asset carries the name the
+/// user chose, the same string the MediaBin row shows.
 ///
-/// Never the id: a layer called `7` tells the user nothing.
+/// The fallback, for a nameless asset only a hand-edited document can hold, is
+/// the file stem of the persisted path. Never the id: a layer called `7` tells
+/// the user nothing.
 fn media_layer_name_base(entry: &ravel_core::composition::MediaAssetEntry) -> String {
+    if !entry.name.trim().is_empty() {
+        return entry.name.clone();
+    }
     let path = entry.path.to_string();
     std::path::Path::new(&path)
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .filter(|stem| !stem.is_empty() && !stem.starts_with("${"))
-        .unwrap_or_else(|| entry.name.clone())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,6 +1024,22 @@ mod tests {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         reg
+    }
+
+    /// A media layer is named after the asset's editable name, so a layer made
+    /// from an asset renamed in the MediaBin carries that name (`AID-3`). The
+    /// path is only the fallback, for a name a hand-edited document cleared.
+    #[test]
+    fn a_media_layer_is_named_after_the_assets_editable_name() {
+        let mut entry =
+            ravel_core::composition::MediaAssetEntry::from_absolute("/media/clip_0001_v3.mov");
+        assert_eq!(media_layer_name_base(&entry), "clip_0001_v3");
+
+        entry.name = "Background plate".to_string();
+        assert_eq!(media_layer_name_base(&entry), "Background plate");
+
+        entry.name = "  ".to_string();
+        assert_eq!(media_layer_name_base(&entry), "clip_0001_v3");
     }
 
     fn doc_with_layers(n: u64) -> (Document, CompId) {

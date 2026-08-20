@@ -72,7 +72,8 @@ pub enum SubgraphTemplateFileError {
     NotFound(String),
 
     /// The RON parsed but the template it describes is one no document could
-    /// hold — today, nesting past `MAX_SUBNET_DEPTH`.
+    /// hold — today, nesting past
+    /// [`MAX_SUBNET_DEPTH`](ravel_core::composition::MAX_SUBNET_DEPTH).
     #[error("subgraph template rejected: {0}")]
     Rejected(#[from] ravel_core::subgraph_template::SubgraphTemplateError),
 }
@@ -94,7 +95,7 @@ pub fn to_ron(template: &SubgraphTemplate) -> Result<String, SubgraphTemplateFil
 /// so an entry that violates an invariant is still dropped with the rest of the
 /// template intact.
 pub fn from_ron(text: &str) -> Result<SubgraphTemplate, SubgraphTemplateFileError> {
-    let template: SubgraphTemplate = ron::from_str(text)?;
+    let template: SubgraphTemplate = crate::ron_options().from_str(text)?;
     template.check_nesting()?;
     Ok(template)
 }
@@ -479,17 +480,18 @@ mod tests {
     /// `MAX_SUBNET_DEPTH`, and a `.ravtpl` carries a graph on its way into one,
     /// so it must not load one either.
     ///
-    /// **Two limits stand here, and the parser's is by far the tighter one.**
-    /// RON's deserializer has its own recursion limit and a subnet level costs
-    /// it several levels, so a file nested anywhere near the document's limit
-    /// is refused while being parsed — which is also why a deep `.ravtpl`
-    /// cannot exhaust the stack on the way in. [`from_ron`]'s own
-    /// `check_nesting` is the backstop behind it: it holds the invariant "a
-    /// template handed out by this module is one a document can hold" whatever
-    /// the parser's limit happens to be, and it is the check that fires on the
-    /// in-memory path (`capture` → `instantiate`), where no parser is
-    /// involved. This test asserts only that the file does not load, because
-    /// which of the two refuses it is the RON version's business.
+    /// **The nesting check is what refuses this, not the parser.** It used to
+    /// be the other way round: RON's default recursion budget ran out well
+    /// before `MAX_SUBNET_DEPTH` did, so a file nested near the document's
+    /// limit was refused while being parsed. That asymmetry is what made a
+    /// saved `.ravprj` unopenable (`HIGH-26`), and the fix moved the parser's
+    /// budget above the depth limit
+    /// ([`RON_RECURSION_LIMIT`](ravel_core::composition::RON_RECURSION_LIMIT)),
+    /// leaving [`from_ron`]'s `check_nesting` as the single line — the same
+    /// check that fires on the in-memory path (`capture` → `instantiate`),
+    /// where no parser is involved. This test asserts only that the file does
+    /// not load; a deep `.ravtpl` still cannot exhaust the stack on the way
+    /// in, because the budget stays bounded.
     #[test]
     fn a_template_nested_past_the_document_limit_does_not_load() {
         use ravel_core::composition::MAX_SUBNET_DEPTH;

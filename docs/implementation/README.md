@@ -46,7 +46,7 @@ several plans here wait on its later units rather than on each other.
 |---|---|---|---|
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `discrete-keyframes-plan.md` | Keyframes for Int and String parameters (`IntChannel`, `StringSteps`) — animation stops being f32-only | — | REQ-CORE-010 |
-| `render-warning-channel-plan.md` | Machine-readable warnings for what a render silently gets wrong: offline media and identifier parameters driven by a wire (`HIGH-34`, `HIGH-35`) | — | — |
+| `render-warning-channel-plan.md` | Machine-readable warnings for what a render silently gets wrong: offline or unreadable media, and identifier parameters that are not static — driven by a wire, keyframed, or hand-authored `StringSteps` (`HIGH-34`, `HIGH-35`) | — | — |
 | `hands-on-findings-handoff.md` | Where the 2026-08-08 hands-on findings landed, and the order to pick the filed bugs up in | — | — |
 | `parameter-groups-plan.md` | Parameter groups (Pages) declared by the node type; the shape `OFX-5` reads plugin Group/Page into | — | REQ-PLUGIN-001 |
 | `refactor-plan-0808.md` | Workflow-penetration UX: the instrumentation that counts panel round-trips and re-searches, plus the known Timeline / import / search fixes — **the pre-release UX bucket** | — | REQ-UI-002–004, REQ-UI-013 |

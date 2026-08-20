@@ -13,9 +13,10 @@
 
 該当するのは `composition::validate::is_identifier_parameter` が列挙する 3 つ:
 
-- `layer.ref` の `layer`（`LayerId` の生値）
-- `precomp` の `comp_id`（`CompId` の生値）
-- `media` の `asset_id`（`AssetId` の 10 進表記）
+- `layer.ref` の `layer`（`LayerId` の生値）— ワイヤで駆動できる
+- `precomp` の `comp_id`（`CompId` の生値）— ワイヤで駆動できる
+- `media` の `asset_id`（`AssetId` の 10 進表記）— **ワイヤでは駆動できない**
+  が、`StringSteps` で同じ状態になる（下記の訂正）
 
 `Graph::expose_param_port` はこれらを**普通の `SCALAR` 入力として受ける**。
 Scalar を繋ぐと `param_port_overlay` が `ResolvedValue::Int` に変換するので、

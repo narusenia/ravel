@@ -220,6 +220,10 @@ struct TimelineCurveData {
     /// Converts a layer-local key frame to a composition frame.
     frame_offset: i64,
     color: Hsla,
+    /// Whether the row reads its value back rounded to an integer, so the
+    /// graph draws the staircase evaluation produces rather than the float
+    /// curve underneath it ([`keyframes::RowValueKind::Integer`]).
+    integral: bool,
 }
 
 /// Zones of a layer bar a drag can grab.
@@ -319,7 +323,10 @@ struct KeyframeChannelBaseline {
     layer: LayerId,
     row: PropertyRowId,
     component: usize,
-    curve: ravel_core::animation::curve::KeyframeCurve,
+    /// The lane's keys as they were when the gesture started. A step row's
+    /// keys travel here too, which is why this is not a bare `KeyframeCurve`:
+    /// the frame axis is the one gesture both row kinds share.
+    keys: keyframes::RowKeys,
     origin_frames: Vec<u64>,
 }
 
@@ -1503,6 +1510,21 @@ impl TimelineGpuiPanel {
         self.delete_selected_keyframes(cx);
     }
 
+    /// Whether the interpolation controls apply to the current selection.
+    ///
+    /// A step row has no interpolation to choose — the value it holds has no
+    /// midpoint — so one selected step key closes the controls for the whole
+    /// selection rather than letting a mode be applied to the keys that do
+    /// have one.
+    fn can_edit_selected_interpolation(&self) -> bool {
+        !self.selected_keyframes.is_empty()
+            && self.selected_keyframes.iter().all(|keyframe| {
+                self.state.layer(keyframe.layer).is_some_and(|layer| {
+                    !keyframes::row_value_kind(layer, &keyframe.row).is_stepped()
+                })
+            })
+    }
+
     fn selected_interpolation(&self) -> Option<Interpolation> {
         let mut selected = self.selected_keyframes.iter();
         let first = selected.next()?;
@@ -1651,21 +1673,16 @@ impl TimelineGpuiPanel {
             let Some(layer) = self.state.layer(channel.layer) else {
                 continue;
             };
-            let Some(channels) = keyframes::row_channels(layer, &channel.row) else {
-                continue;
-            };
-            let Some(channel_value) = channels.get(channel.component) else {
-                continue;
-            };
-            let ChannelSource::Keyframes(curve) = &channel_value.source else {
-                continue;
-            };
-            selected.extend(curve.keyframes().iter().map(|keyframe| KeyframeRef {
-                layer: channel.layer,
-                row: channel.row.clone(),
-                component: channel.component,
-                frame: keyframe.frame,
-            }));
+            selected.extend(
+                keyframes::row_key_frames(layer, &channel.row, channel.component)
+                    .into_iter()
+                    .map(|frame| KeyframeRef {
+                        layer: channel.layer,
+                        row: channel.row.clone(),
+                        component: channel.component,
+                        frame,
+                    }),
+            );
         }
         self.selected_keyframes = selected;
         cx.notify();
@@ -1878,20 +1895,14 @@ impl TimelineGpuiPanel {
                 existing.origin_frames.push(keyframe.frame);
                 continue;
             }
-            let Some(curve) = keyframes::row_channels(layer, &keyframe.row)
-                .and_then(|channels| channels.get(keyframe.component).cloned())
-                .and_then(|channel| match &channel.source {
-                    ChannelSource::Keyframes(curve) => Some(curve.clone()),
-                    _ => None,
-                })
-            else {
+            let Some(keys) = keyframes::row_keys(layer, &keyframe.row, keyframe.component) else {
                 continue;
             };
             baselines.push(KeyframeChannelBaseline {
                 layer: keyframe.layer,
                 row: keyframe.row.clone(),
                 component: keyframe.component,
-                curve,
+                keys,
                 origin_frames: vec![keyframe.frame],
             });
         }
@@ -1917,11 +1928,11 @@ impl TimelineGpuiPanel {
             let mut doc = project.document().clone();
             for baseline in baselines {
                 let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
-                    keyframes::preview_keyframe_moves(
+                    keyframes::preview_row_key_moves(
                         layer,
                         &baseline.row,
                         baseline.component,
-                        &baseline.curve,
+                        &baseline.keys,
                         &baseline.origin_frames,
                         delta,
                     );
@@ -1950,12 +1961,18 @@ impl TimelineGpuiPanel {
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             for baseline in baselines {
+                // The value axis needs a float curve; a step row never reaches
+                // the graph view (it has no curve to plot), so there is nothing
+                // to move here.
+                let Some(curve) = baseline.keys.curve() else {
+                    continue;
+                };
                 let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
                     keyframes::preview_keyframe_moves_with_value_delta(
                         layer,
                         &baseline.row,
                         baseline.component,
-                        &baseline.curve,
+                        curve,
                         &baseline.origin_frames,
                         frame_delta,
                         value_delta,
@@ -1986,12 +2003,16 @@ impl TimelineGpuiPanel {
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             for baseline in baselines {
+                // Only a float row has tangents to edit.
+                let Some(curve) = baseline.keys.curve() else {
+                    continue;
+                };
                 let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
                     keyframes::preview_keyframe_tangents_with_delta(
                         layer,
                         &baseline.row,
                         baseline.component,
-                        &baseline.curve,
+                        curve,
                         keyframes::KeyframeTangentDeltaEdit {
                             frames: &baseline.origin_frames,
                             handle,
@@ -2633,19 +2654,13 @@ impl TimelineGpuiPanel {
         content_x: f64,
     ) -> Option<u64> {
         let layer = state.layer(lid)?;
-        let channels = keyframes::row_channels(layer, row)?;
-        let channel = channels.get(component)?;
-        let ChannelSource::Keyframes(curve) = &channel.source else {
-            return None;
-        };
         let ppf = state.pixels_per_frame();
         let scroll = state.scroll_offset();
-        curve
-            .keyframes()
-            .iter()
-            .map(|kf| {
-                let x = (keyframes::comp_frame_for_key(layer, kf.frame) as f64 - scroll) * ppf;
-                (kf.frame, (x - content_x).abs())
+        keyframes::row_key_frames(layer, row, component)
+            .into_iter()
+            .map(|frame| {
+                let x = (keyframes::comp_frame_for_key(layer, frame) as f64 - scroll) * ppf;
+                (frame, (x - content_x).abs())
             })
             .filter(|(_, distance)| *distance <= KEYFRAME_HIT_PX)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -2673,24 +2688,18 @@ impl TimelineGpuiPanel {
                 if !self.state.is_property_expanded(layer.id, &row.id) {
                     continue;
                 }
-                let channels = keyframes::row_channels(layer, &row.id).unwrap_or_default();
-                for (component, channel) in channels.iter().enumerate() {
+                for component in 0..row.channel_names.len() {
                     let center_y = y + PROPERTY_ROW_HEIGHT / 2.0;
-                    if center_y >= min_y
-                        && center_y <= max_y
-                        && let ChannelSource::Keyframes(curve) = &channel.source
-                    {
-                        for keyframe in curve.keyframes() {
-                            let center_x = (keyframes::comp_frame_for_key(layer, keyframe.frame)
-                                as f64
-                                - scroll)
-                                * ppf;
+                    if center_y >= min_y && center_y <= max_y {
+                        for frame in keyframes::row_key_frames(layer, &row.id, component) {
+                            let center_x =
+                                (keyframes::comp_frame_for_key(layer, frame) as f64 - scroll) * ppf;
                             if center_x >= min_x && center_x <= max_x {
                                 hits.insert(KeyframeRef {
                                     layer: layer.id,
                                     row: row.id.clone(),
                                     component,
-                                    frame: keyframe.frame,
+                                    frame,
                                 });
                             }
                         }
@@ -2847,17 +2856,9 @@ impl TimelineGpuiPanel {
         let Some(layer) = self.state.layer(lid) else {
             return Vec::new();
         };
-        let Some(channels) = keyframes::row_channels(layer, row) else {
-            return Vec::new();
-        };
-        let mut frames: Vec<i64> = channels
-            .iter()
-            .filter_map(|channel| match &channel.source {
-                ChannelSource::Keyframes(curve) => Some(curve.keyframes()),
-                _ => None,
-            })
-            .flatten()
-            .map(|kf| keyframes::comp_frame_for_key(layer, kf.frame))
+        let mut frames: Vec<i64> = (0..keyframes::row_component_count(layer, row))
+            .flat_map(|component| keyframes::row_key_frames(layer, row, component))
+            .map(|frame| keyframes::comp_frame_for_key(layer, frame))
             .collect();
         frames.sort_unstable();
         frames.dedup();
@@ -2900,15 +2901,12 @@ impl TimelineGpuiPanel {
         let Some(layer) = self.state.layer(lid) else {
             return false;
         };
-        let Some(channels) = keyframes::row_channels(layer, row) else {
-            return false;
-        };
-        if channels.is_empty() {
+        let components = keyframes::row_component_count(layer, row);
+        if components == 0 {
             return false;
         }
         let local = keyframes::layer_local_frame(layer, self.state.playhead());
-        (0..channels.len())
-            .all(|component| keyframes::has_keyframe_at(layer, row, component, local))
+        (0..components).all(|component| keyframes::has_keyframe_at(layer, row, component, local))
     }
 
     /// Navigator ◆: toggle keys at the playhead across the row's channels
@@ -2934,10 +2932,7 @@ impl TimelineGpuiPanel {
             if layer.locked {
                 return;
             }
-            let Some(channels) = keyframes::row_channels(layer, row) else {
-                return;
-            };
-            let components = channels.len();
+            let components = keyframes::row_component_count(layer, row);
             if components == 0 {
                 return;
             }
@@ -3471,7 +3466,7 @@ impl TimelineGpuiPanel {
         let duration_frames = self.state.duration_frames();
         let graph_mode = self.state.view_mode() == TimelineViewMode::Graph;
         let interpolation = self.selected_interpolation();
-        let can_edit_interpolation = !self.selected_keyframes.is_empty();
+        let can_edit_interpolation = self.can_edit_selected_interpolation();
 
         let graph_controls = if graph_mode {
             div()
@@ -4256,9 +4251,7 @@ impl TimelineGpuiPanel {
 
                             // Channel sub-rows with keyframe diamonds
                             if state.is_property_expanded(layer.id, &row.id) {
-                                let channels =
-                                    keyframes::row_channels(layer, &row.id).unwrap_or_default();
-                                for (component, channel) in channels.iter().enumerate() {
+                                for component in 0..row.channel_names.len() {
                                     // Channel row border
                                     let ch_border = Bounds::new(
                                         point(
@@ -4275,35 +4268,34 @@ impl TimelineGpuiPanel {
                                         },
                                     ));
 
-                                    if let ChannelSource::Keyframes(curve) = &channel.source {
-                                        for kf in curve.keyframes() {
-                                            // Keyframe frames are layer-local;
-                                            // the diamond sits at the comp
-                                            // frame (in_frame offset included).
-                                            let kf_x =
-                                                (keyframes::comp_frame_for_key(layer, kf.frame)
-                                                    as f64
-                                                    - scroll)
-                                                    * ppf;
-                                            if kf_x >= 0.0 && kf_x < area_width as f64 {
-                                                let is_selected =
-                                                    selected_keyframes.contains(&KeyframeRef {
-                                                        layer: layer.id,
-                                                        row: row.id.clone(),
-                                                        component,
-                                                        frame: kf.frame,
-                                                    });
-                                                paint_diamond(
-                                                    bounds.origin.x + px(kf_x as f32),
-                                                    y + px(PROPERTY_ROW_HEIGHT / 2.0),
-                                                    if is_selected {
-                                                        colors.foreground
-                                                    } else {
-                                                        colors.primary
-                                                    },
-                                                    window,
-                                                );
-                                            }
+                                    for frame in
+                                        keyframes::row_key_frames(layer, &row.id, component)
+                                    {
+                                        // Keyframe frames are layer-local; the
+                                        // diamond sits at the comp frame
+                                        // (in_frame offset included).
+                                        let kf_x = (keyframes::comp_frame_for_key(layer, frame)
+                                            as f64
+                                            - scroll)
+                                            * ppf;
+                                        if kf_x >= 0.0 && kf_x < area_width as f64 {
+                                            let is_selected =
+                                                selected_keyframes.contains(&KeyframeRef {
+                                                    layer: layer.id,
+                                                    row: row.id.clone(),
+                                                    component,
+                                                    frame,
+                                                });
+                                            paint_diamond(
+                                                bounds.origin.x + px(kf_x as f32),
+                                                y + px(PROPERTY_ROW_HEIGHT / 2.0),
+                                                if is_selected {
+                                                    colors.foreground
+                                                } else {
+                                                    colors.primary
+                                                },
+                                                window,
+                                            );
                                         }
                                     }
 
@@ -4413,6 +4405,7 @@ impl TimelineGpuiPanel {
                         color: item.color,
                         frame_offset: item.frame_offset,
                         selected_frames: Arc::new(selected_frames),
+                        integral: item.integral,
                     }
                 })
                 .collect();
@@ -5517,76 +5510,76 @@ impl Render for TimelineGpuiPanel {
                                         let live_interpolation =
                                             entity.read(cx).selected_interpolation();
                                         if !live_selection.is_empty() {
-                                            menu = menu
-                                                .item(
-                                                    PopupMenuItem::new(t!(
-                                                        "timeline.menu.delete_selected_keyframes"
-                                                    ))
-                                                    .on_click(|_, window, cx| {
-                                                        window.dispatch_action(
-                                                            Box::new(EditDelete),
-                                                            cx,
-                                                        );
-                                                    }),
-                                                )
-                                                .submenu(
-                                                    t!("timeline.menu.interpolation"),
-                                                    window,
-                                                    cx,
-                                                    move |sub, _window, _cx| {
-                                                        sub.item(
-                                                            PopupMenuItem::new(t!(
-                                                                "timeline.interpolation.bezier"
-                                                            ))
-                                                            .checked(
-                                                                live_interpolation
-                                                                    == Some(Interpolation::Bezier),
-                                                            )
-                                                            .on_click(|_, window, cx| {
-                                                                window.dispatch_action(
-                                                                    Box::new(
-                                                                        KeyframeInterpolationBezier,
-                                                                    ),
-                                                                    cx,
-                                                                );
-                                                            }),
+                                            menu = menu.item(
+                                                PopupMenuItem::new(t!(
+                                                    "timeline.menu.delete_selected_keyframes"
+                                                ))
+                                                .on_click(|_, window, cx| {
+                                                    window
+                                                        .dispatch_action(Box::new(EditDelete), cx);
+                                                }),
+                                            );
+                                        }
+                                        // A step key has no interpolation to
+                                        // choose, so the submenu is absent
+                                        // rather than present and inert.
+                                        if entity.read(cx).can_edit_selected_interpolation() {
+                                            menu = menu.submenu(
+                                                t!("timeline.menu.interpolation"),
+                                                window,
+                                                cx,
+                                                move |sub, _window, _cx| {
+                                                    sub.item(
+                                                        PopupMenuItem::new(t!(
+                                                            "timeline.interpolation.bezier"
+                                                        ))
+                                                        .checked(
+                                                            live_interpolation
+                                                                == Some(Interpolation::Bezier),
                                                         )
-                                                        .item(
-                                                            PopupMenuItem::new(t!(
-                                                                "timeline.interpolation.linear"
-                                                            ))
-                                                            .checked(
-                                                                live_interpolation
-                                                                    == Some(Interpolation::Linear),
-                                                            )
-                                                            .on_click(|_, window, cx| {
-                                                                window.dispatch_action(
-                                                                    Box::new(
-                                                                        KeyframeInterpolationLinear,
-                                                                    ),
-                                                                    cx,
-                                                                );
-                                                            }),
+                                                        .on_click(|_, window, cx| {
+                                                            window.dispatch_action(
+                                                                Box::new(
+                                                                    KeyframeInterpolationBezier,
+                                                                ),
+                                                                cx,
+                                                            );
+                                                        }),
+                                                    )
+                                                    .item(
+                                                        PopupMenuItem::new(t!(
+                                                            "timeline.interpolation.linear"
+                                                        ))
+                                                        .checked(
+                                                            live_interpolation
+                                                                == Some(Interpolation::Linear),
                                                         )
-                                                        .item(
-                                                            PopupMenuItem::new(t!(
-                                                                "timeline.interpolation.step"
-                                                            ))
-                                                            .checked(
-                                                                live_interpolation
-                                                                    == Some(Interpolation::Step),
-                                                            )
-                                                            .on_click(|_, window, cx| {
-                                                                window.dispatch_action(
-                                                                    Box::new(
-                                                                        KeyframeInterpolationStep,
-                                                                    ),
-                                                                    cx,
-                                                                );
-                                                            }),
+                                                        .on_click(|_, window, cx| {
+                                                            window.dispatch_action(
+                                                                Box::new(
+                                                                    KeyframeInterpolationLinear,
+                                                                ),
+                                                                cx,
+                                                            );
+                                                        }),
+                                                    )
+                                                    .item(
+                                                        PopupMenuItem::new(t!(
+                                                            "timeline.interpolation.step"
+                                                        ))
+                                                        .checked(
+                                                            live_interpolation
+                                                                == Some(Interpolation::Step),
                                                         )
-                                                    },
-                                                );
+                                                        .on_click(|_, window, cx| {
+                                                            window.dispatch_action(
+                                                                Box::new(KeyframeInterpolationStep),
+                                                                cx,
+                                                            );
+                                                        }),
+                                                    )
+                                                },
+                                            );
                                         }
 
                                         if let Some(channel) =
@@ -5942,6 +5935,7 @@ fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<T
                 .start_frame
                 .saturating_sub(i64::try_from(layer.in_frame).unwrap_or(i64::MAX)),
             color,
+            integral: keyframes::row_value_kind(layer, &selected.row).is_integral(),
         });
     }
     series
@@ -6752,6 +6746,69 @@ mod tests {
         assert_eq!(resolved[0].color, colors.chart_1);
     }
 
+    /// The graph view plots the int row as a staircase and refuses the step
+    /// row outright: a held string has no float curve to plot, so selecting
+    /// its channel adds no series (`ParameterValue::channels` answers `None`
+    /// and this is where that lands).
+    #[test]
+    fn the_graph_view_takes_int_curves_and_refuses_step_rows() {
+        let layer_id = LayerId::new(7);
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(4, 2.0, Interpolation::Linear);
+        let mut steps = ravel_core::animation::step::StepCurve::new("a".to_string());
+        steps.insert(2, "b".to_string());
+        let node = ravel_core::graph::Node::new(NodeId::new(3), "repeat")
+            .with_param(
+                "count",
+                ravel_core::graph::ParameterValue::IntChannel(AnimationChannel::keyframes(
+                    curve.clone(),
+                )),
+            )
+            .with_param(
+                "text",
+                ravel_core::graph::ParameterValue::StringSteps(steps),
+            );
+        let layer = Layer::new(layer_id, "Animated", Graph::new().add_node(node).unwrap())
+            .with_time(0, 0, 100);
+        let composition = ravel_core::composition::Composition::new(
+            CompId::new(1),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            120,
+        )
+        .add_layer(layer);
+        let mut state = TimelinePanel::with_composition(composition);
+        let int_channel = TimelineChannelRef {
+            layer: layer_id,
+            row: PropertyRowId::Network {
+                node: NodeId::new(3),
+                key: "count".into(),
+            },
+            component: 0,
+        };
+        let step_channel = TimelineChannelRef {
+            layer: layer_id,
+            row: PropertyRowId::Network {
+                node: NodeId::new(3),
+                key: "text".into(),
+            },
+            component: 0,
+        };
+        state.select_channel(int_channel, false);
+        state.select_channel(step_channel, true);
+
+        let colors = ThemeColor::default();
+        let resolved = selected_timeline_curves(&state, &colors);
+        assert_eq!(resolved.len(), 1, "the step row contributes no series");
+        assert_eq!(resolved[0].curve.as_ref(), &curve);
+        assert!(
+            resolved[0].integral,
+            "an int row is drawn as the staircase evaluation resolves"
+        );
+    }
+
     #[test]
     fn curve_value_fit_includes_bezier_controls_and_expands_flat_values() {
         let mut bezier = KeyframeCurve::new();
@@ -6780,6 +6837,7 @@ mod tests {
             curve: Arc::new(bezier),
             frame_offset: 0,
             color: colors.chart_1,
+            integral: false,
         }])
         .unwrap();
         assert!((fitted.0 - -6.2).abs() < 1e-9);
@@ -6792,6 +6850,7 @@ mod tests {
             curve: Arc::new(flat),
             frame_offset: 0,
             color: colors.chart_1,
+            integral: false,
         }])
         .unwrap();
         assert!(flat.0 < 2.0 && flat.1 > 2.0);
@@ -6821,6 +6880,7 @@ mod tests {
                 curve: Arc::new(curve),
                 frame_offset: 10,
                 color: ThemeColor::default().chart_1,
+                integral: false,
             }],
             0.0,
             10.0,
@@ -7694,6 +7754,101 @@ mod tests {
         });
     }
 
+    /// Commit a `StringSteps` parameter (keys at layer-local frames 10 and 20)
+    /// on a node of the layer's network, and return the row it produces.
+    fn add_string_step_keys(
+        project: &Entity<ProjectState>,
+        comp: CompId,
+        lid: LayerId,
+        cx: &mut TestAppContext,
+    ) -> PropertyRowId {
+        let node_id = NodeId::next();
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::update_layer(project.document(), comp, lid, |l| {
+                let mut steps = ravel_core::animation::step::StepCurve::new("a".to_string());
+                steps.insert(10, "b".to_string());
+                steps.insert(20, "c".to_string());
+                let node = ravel_core::graph::Node::new(node_id, "text").with_param(
+                    "body",
+                    ravel_core::graph::ParameterValue::StringSteps(steps),
+                );
+                l.network = l.network.clone().add_node(node).unwrap();
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        PropertyRowId::Network {
+            node: node_id,
+            key: "body".into(),
+        }
+    }
+
+    /// The completion criterion for a step row: its diamonds are hit testable
+    /// and draggable like any other row's, but the interpolation controls are
+    /// closed — a held string has no midpoint to interpolate towards.
+    #[gpui::test]
+    fn string_step_row_is_editable_without_interpolation(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let step_row = add_string_step_keys(&project, comp_id, layer_id, cx);
+        let float_row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+
+                // The row exists, and its keys are where the painter draws
+                // them: a hit test at the key's x finds it.
+                let ppf = panel.state.pixels_per_frame();
+                assert_eq!(
+                    panel.keyframe_at_content_x(layer_id, &step_row, 0, 20.0 * ppf),
+                    Some(20)
+                );
+
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(layer_id, &step_row, 0, 20)]);
+                assert!(
+                    !panel.can_edit_selected_interpolation(),
+                    "a step key offers no interpolation mode"
+                );
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(layer_id, &float_row, 0, 0)]);
+                assert!(
+                    panel.can_edit_selected_interpolation(),
+                    "a float key still does"
+                );
+                // One step key in a mixed selection closes the controls rather
+                // than applying a mode to half of it.
+                panel.selected_keyframes = HashSet::from([
+                    keyframe_ref(layer_id, &float_row, 0, 0),
+                    keyframe_ref(layer_id, &step_row, 0, 20),
+                ]);
+                assert!(!panel.can_edit_selected_interpolation());
+
+                // Dragging the step key moves it, as one document change.
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(layer_id, &step_row, 0, 20)]);
+                let baselines = panel.move_keyframe_baselines();
+                assert_eq!(baselines.len(), 1, "the step lane produced a baseline");
+                panel.apply_keyframe_move_preview(&baselines, 5, cx);
+            })
+            .unwrap();
+
+        project.read_with(cx, |project, _| {
+            let layer = project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer_id)
+                .unwrap();
+            assert_eq!(
+                keyframes::row_key_frames(layer, &step_row, 0),
+                vec![10, 25],
+                "the dragged step key landed five frames later"
+            );
+        });
+    }
+
     #[gpui::test]
     fn graph_keyframe_drag_moves_time_and_value_in_one_undo_step(cx: &mut TestAppContext) {
         let (window, project, comp_id, layer_id, _b) = setup(cx);
@@ -7916,7 +8071,7 @@ mod tests {
             layer,
             row: row.clone(),
             component: 0,
-            curve: KeyframeCurve::new(),
+            keys: keyframes::RowKeys::Curve(KeyframeCurve::new()),
             origin_frames: vec![0, 10],
         }];
 

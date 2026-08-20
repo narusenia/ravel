@@ -142,6 +142,54 @@ pub fn sample_curve(
         .collect()
 }
 
+/// The data-space polyline one curve is stroked as over the view
+/// `[min_x, max_x]`, in composition frames on x.
+///
+/// A float curve is one vertex per sample, which is exactly what the painter
+/// drew before this function existed. An **integral** curve — an
+/// `IntChannel`, whose value a frame resolves to is `round()`ed — is expanded
+/// into a staircase instead: rounding the samples alone leaves a sloped line
+/// between two frames that resolve to different integers, which is not what
+/// evaluation does. Each change of the rounded value therefore emits the
+/// corner first (the previous level, held to the frame where it ends) and then
+/// the riser, so a step's boundary sits exactly on the frame whose `round()`
+/// differs from its predecessor's.
+///
+/// Sampling still goes through [`visit_curve_samples_for_view`] — there is one
+/// Bézier evaluation path and this is not a second one.
+pub fn curve_polyline_points(
+    curve: &KeyframeCurve,
+    frame_offset: i64,
+    min_x: f64,
+    max_x: f64,
+    max_samples: usize,
+    integral: bool,
+) -> Vec<CurvePoint> {
+    let mut points: Vec<CurvePoint> = Vec::new();
+    visit_curve_samples_for_view(
+        curve,
+        frame_offset,
+        min_x,
+        max_x,
+        max_samples,
+        |composition_frame, sample| {
+            let value = if integral {
+                sample.value.round() as f64
+            } else {
+                sample.value as f64
+            };
+            if integral
+                && let Some(previous) = points.last().copied()
+                && previous.y != value
+            {
+                points.push(CurvePoint::new(composition_frame as f64, previous.y));
+            }
+            points.push(CurvePoint::new(composition_frame as f64, value));
+        },
+    );
+    points
+}
+
 fn visit_curve_samples_for_view(
     curve: &KeyframeCurve,
     frame_offset: i64,
@@ -672,6 +720,12 @@ pub struct CurveSeries {
     pub frame_offset: i64,
     /// Layer-local keyframes selected by the host.
     pub selected_frames: Arc<HashSet<u64>>,
+    /// Whether the value a frame resolves to is rounded to an integer
+    /// (`ParameterValue::IntChannel`). The curve is then drawn as a staircase
+    /// of the rounded values, while its **control points stay on the float
+    /// grid** — the anchors and handles are the underlying `KeyframeCurve`'s
+    /// and are dragged in float space exactly as any other curve's are.
+    pub integral: bool,
 }
 
 /// Builds a minimal, reusable GPUI canvas for one or more curves.
@@ -766,31 +820,27 @@ fn paint_curve_editor(
         ((transform.widget_size.x.ceil() as usize).saturating_mul(2)).clamp(2, MAX_PAINT_SAMPLES);
     for (curve_index, item) in series.iter().enumerate() {
         let mut path = PathBuilder::stroke(px(1.5));
-        let mut sample_count = 0;
-        visit_curve_samples_for_view(
+        let vertices = curve_polyline_points(
             &item.curve,
             item.frame_offset,
             transform.data_min.x,
             transform.data_max.x,
             sample_budget,
-            |composition_frame, sample| {
-                let local = transform.data_to_widget(CurvePoint::new(
-                    composition_frame as f64,
-                    sample.value as f64,
-                ));
-                let position = point(
-                    bounds.origin.x + px(local.x as f32),
-                    bounds.origin.y + px(local.y as f32),
-                );
-                if sample_count == 0 {
-                    path.move_to(position);
-                } else {
-                    path.line_to(position);
-                }
-                sample_count += 1;
-            },
+            item.integral,
         );
-        if sample_count > 0
+        for (index, vertex) in vertices.iter().enumerate() {
+            let local = transform.data_to_widget(*vertex);
+            let position = point(
+                bounds.origin.x + px(local.x as f32),
+                bounds.origin.y + px(local.y as f32),
+            );
+            if index == 0 {
+                path.move_to(position);
+            } else {
+                path.line_to(position);
+            }
+        }
+        if !vertices.is_empty()
             && let Ok(path) = path.build()
         {
             window.paint_path(path, item.color);
@@ -1028,6 +1078,138 @@ mod tests {
         });
         assert!(samples.contains(&(-5, 0, curve.sample(0.0))));
         assert!(samples.contains(&(5, 10, curve.sample(10.0))));
+    }
+
+    /// A float curve's polyline is what the painter always drew: one vertex
+    /// per sample, at the unrounded value.
+    #[test]
+    fn a_float_polyline_is_one_vertex_per_sample() {
+        let curve = curve();
+        let mut samples = Vec::new();
+        visit_curve_samples_for_view(&curve, 0, 0.0, 10.0, 64, |frame, sample| {
+            samples.push(CurvePoint::new(frame as f64, sample.value as f64));
+        });
+        assert_eq!(
+            curve_polyline_points(&curve, 0, 0.0, 10.0, 64, false),
+            samples
+        );
+    }
+
+    /// An int curve is a staircase: every vertex sits on an integer value,
+    /// and each level change is a corner (hold) followed by a riser, so the
+    /// The staircase's accuracy is bounded by the sampler, not by rounding.
+    ///
+    /// When the visible range is wider than the sample budget,
+    /// `visit_curve_samples_for_view` decimates the smooth spans, so a riser
+    /// can only land on a frame that was sampled — the boundary is late by up
+    /// to one sampling step. That is the same approximation the float curve
+    /// has always been drawn with (a Bézier stroked as a polyline), and at the
+    /// painter's own budget of two samples per pixel a step is under half a
+    /// pixel wide, so the lateness is not visible. What must stay true is the
+    /// invariant: **every drawn riser sits on a sampled frame and every level
+    /// is an integer** — the staircase never invents a boundary of its own.
+    #[test]
+    fn a_decimated_int_staircase_keeps_its_risers_on_sampled_frames() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(100, 100.0, Interpolation::Linear);
+
+        let mut sampled = Vec::new();
+        visit_curve_samples_for_view(&curve, 0, 0.0, 100.0, 6, |frame, _| sampled.push(frame));
+        // The budget really did bite: a per-frame walk would be 101 samples.
+        assert!(
+            sampled.len() < 12,
+            "expected a decimated sample set, got {sampled:?}"
+        );
+
+        let points = curve_polyline_points(&curve, 0, 0.0, 100.0, 6, true);
+        for point in &points {
+            assert_eq!(
+                point.y,
+                point.y.round(),
+                "{point:?} is not an integer level"
+            );
+            assert!(
+                sampled.contains(&(point.x as i64)),
+                "{point:?} sits on a frame the sampler never visited"
+            );
+        }
+        // Treads and risers only: no sloped segment survives decimation.
+        for pair in points.windows(2) {
+            assert!(
+                pair[0].x == pair[1].x || pair[0].y == pair[1].y,
+                "sloped segment between {:?} and {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// segment between two frames is never sloped.
+    #[test]
+    fn an_int_polyline_is_a_staircase_on_the_round_boundaries() {
+        // Values 0.0, 0.5, 1.0, 1.5, 2.0 over frames 0..=4, so `round()`
+        // steps up at frame 1 (0.5 → 1) and frame 3 (1.5 → 2).
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(4, 2.0, Interpolation::Linear);
+
+        let points = curve_polyline_points(&curve, 0, 0.0, 4.0, 64, true);
+        assert_eq!(
+            points,
+            vec![
+                CurvePoint::new(0.0, 0.0),
+                CurvePoint::new(1.0, 0.0),
+                CurvePoint::new(1.0, 1.0),
+                CurvePoint::new(2.0, 1.0),
+                CurvePoint::new(3.0, 1.0),
+                CurvePoint::new(3.0, 2.0),
+                CurvePoint::new(4.0, 2.0),
+            ]
+        );
+        // Every riser is vertical and every tread horizontal: consecutive
+        // vertices share either their x or their y.
+        for pair in points.windows(2) {
+            assert!(
+                pair[0].x == pair[1].x || pair[0].y == pair[1].y,
+                "sloped segment between {:?} and {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        // The step boundaries are exactly `round()`'s: the drawn level at a
+        // frame is the integer evaluation resolves there.
+        for frame in 0..=4 {
+            let drawn = points
+                .iter()
+                .filter(|point| point.x == frame as f64)
+                .map(|point| point.y)
+                .next_back()
+                .expect("a vertex per sampled frame");
+            assert_eq!(drawn, curve.sample(frame as f64).round() as f64);
+        }
+    }
+
+    /// The frame offset a layer's placement introduces applies to the
+    /// staircase too, and dragging a control point moves the steps because
+    /// they are derived from the same curve the anchors are.
+    #[test]
+    fn an_int_staircase_follows_its_control_points() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 0.0, Interpolation::Linear);
+        curve.insert(4, 2.0, Interpolation::Linear);
+        let before = curve_polyline_points(&curve, 7, 7.0, 11.0, 64, true);
+        assert_eq!(before.first(), Some(&CurvePoint::new(7.0, 0.0)));
+        assert_eq!(before.last(), Some(&CurvePoint::new(11.0, 2.0)));
+
+        // Drag the second anchor down to 0: the staircase flattens.
+        curve.modify(4, 0.0, None);
+        let after = curve_polyline_points(&curve, 7, 7.0, 11.0, 64, true);
+        assert!(
+            after.iter().all(|point| point.y == 0.0),
+            "the steps followed the control point"
+        );
+        assert_ne!(before, after);
     }
 
     #[test]

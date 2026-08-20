@@ -441,6 +441,7 @@ remove = "このポートを削除"
 move_up = "このポートを 1 つ前へ"
 move_down = "このポートを 1 つ後ろへ"
 builtin = "組み込みポート — レイヤーの殻が所有"
+group = "グループ"
 
 [properties.ports.type]
 float = "浮動小数"

@@ -447,6 +447,7 @@ remove = "Remove this port"
 move_up = "Move this port one slot earlier"
 move_down = "Move this port one slot later"
 builtin = "Built-in port — the layer shell owns it"
+group = "Group"
 
 [properties.ports.type]
 float = "Float"

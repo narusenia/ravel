@@ -1406,6 +1406,21 @@ impl NodeEditorPanel {
         })
     }
 
+    /// Put the custom parameter `name` of the In node `node_id` into the
+    /// display group `group` (empty takes it out of every group).
+    pub fn set_custom_port_group(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        group: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, _context| {
+            ravel_core::network::set_custom_port_group(graph, node_id, name, group)
+                .map(PortEdit::from)
+        })
+    }
+
     /// Move the custom port `name` one slot earlier (`offset < 0`) or later
     /// (`offset > 0`), never past a built-in port.
     pub fn move_custom_port(

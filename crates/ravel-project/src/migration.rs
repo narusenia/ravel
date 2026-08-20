@@ -132,6 +132,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(11)
         }
+        11 => {
+            migrate_v11_to_v12(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 11,
+                to: 12,
+                reason,
+            })?;
+            Ok(12)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -372,6 +380,32 @@ fn migrate_v9_to_v10(_manifest: &mut Value) -> Result<(), String> {
 /// [`MigrationError::TooNew`], which `load_with_backup` refuses to paper over
 /// (`ProjectError::is_too_new`), and never reaches the document.
 fn migrate_v10_to_v11(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// `v11 → v12`: `Node` gained the `param_groups` field — the display groups a
+/// network-interface In node's custom parameters are assigned to
+/// (`docs/implementation/parameter-groups-plan.md`, PGRP-4). Empty on every
+/// other node, where the grouping belongs to the node type.
+///
+/// **There is no typed pass** and nothing to convert: a v11 node has no
+/// groups, which reads as "no group assigned" — exactly what it is. The field
+/// is `#[serde(default)]`, so this step advances the version stamp and nothing
+/// else.
+///
+/// **Why the stamp moves at all**, given that `docs/dev/persistence.md` says a
+/// plain additive field does not need one: `Node` is the type the **undo
+/// journal** encodes with bincode, whose field layout is positional, so the
+/// field forces `JOURNAL_FORMAT_VERSION` to v11 regardless. The `.ravprj`
+/// stamp then buys the other half of the same protection. An older build reads
+/// a v12 `document/main.ron` fine — RON ignores the unknown field — and then
+/// writes the document back **without it**, discarding every group assignment
+/// in the project. `Layer.audio` could stay unversioned because losing it
+/// silences the layer; losing a group only rearranges Properties sections on
+/// an In node the user may not have open, so nothing on screen says the
+/// assignment is gone. Same criterion as the rest of the table — "can you tell
+/// when it silently disappears?" — and here the answer is no.
+fn migrate_v11_to_v12(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

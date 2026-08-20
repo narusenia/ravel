@@ -99,12 +99,30 @@ fn string_field(
 ///
 /// Returns `(group, title, parameters)` in section order. `group` is the
 /// identity the collapse state keys on (`""` for the implicit group) and
-/// `title` is what the host shows — the group's locale key.
+/// `title` is what the host shows: the group's locale key for a
+/// type-declared group, the user's own text for an In node's instance group.
 ///
-/// The grouping comes from the registry template's
-/// [`NodeTemplate::param_groups`] — what the node *type* declares. A type
-/// that declares nothing gets one section holding every parameter, exactly
-/// as before groups existed.
+/// Two sources of grouping, in precedence order:
+///
+/// 1. **The node's own** [`Node::param_groups`], on a network-interface **In**
+///    node only — the instance groups the user assigns to custom parameters,
+///    which have no type to declare them (`NETIF-2`, PGRP-4). They win
+///    outright on that node: the user assigned them by hand, and merging them
+///    with a type declaration would leave it unclear which half a parameter
+///    answers to. Their section order follows the parameter order, which is
+///    the order the ports were added.
+/// 2. **The registry template's** [`NodeTemplate::param_groups`] — what the
+///    node *type* declares.
+///
+/// A type that declares nothing (and an instance that assigns nothing) gets
+/// one section holding every parameter, exactly as before groups existed.
+///
+/// A non-In node carrying [`Node::param_groups`] — only a hand-edited
+/// `.ravprj` can produce one, since nothing writes there — falls back to its
+/// type's declaration. The editing path exists on In nodes alone, so the
+/// reading path matches it; refusing to *open* such a document instead would
+/// trade a cosmetic oddity for a project that saved and will not load
+/// (`HIGH-26`).
 ///
 /// Parameters no group claims come **first**, in one section titled
 /// `properties.section.parameters`, so a type that declares no groups (or
@@ -135,7 +153,15 @@ fn grouped_params<'a>(
         }
     };
 
-    if let Some(template) = registry.get(&node.type_key) {
+    if ravel_core::network::is_in_node(node) && !node.param_groups.is_empty() {
+        for param in &node.parameters {
+            let Some(group) = node.param_groups.get(&param.key).filter(|g| !g.is_empty()) else {
+                continue;
+            };
+            push(&mut groups, group, group.clone(), param);
+            claimed.insert(param.key.as_str());
+        }
+    } else if let Some(template) = registry.get(&node.type_key) {
         for (group, keys) in template.param_group_declarations() {
             for key in keys {
                 if claimed.contains(key.as_str()) {
@@ -178,7 +204,9 @@ fn grouped_params<'a>(
 ///
 /// The host needs the pair to key the collapse state on `(type_key, group)`
 /// while showing `title`: `title` alone would put a locale key in
-/// `ui_state.json`.
+/// `ui_state.json`. An In node's instance groups key on `net.in` like any
+/// other type, so folding "Look" away folds it on every In node that has
+/// one — the same trade the type-declared groups make.
 pub fn param_group_titles(node: &Node, registry: &NodeRegistry) -> Vec<(String, String)> {
     grouped_params(node, registry)
         .into_iter()
@@ -357,6 +385,14 @@ pub fn node_ports_section(node: &Node, context: NetworkContext) -> Option<Proper
             name: name.to_string(),
             port_type: custom_port_type(node, side, name),
             fixed: is_fixed_port(node, side, name),
+            // A group belongs to the parameter, so a port without one has no
+            // cell rather than an empty one. Read from the node, which is the
+            // only place the assignment lives.
+            group: node
+                .parameters
+                .iter()
+                .any(|p| p.key == name)
+                .then(|| node.param_groups.get(name).cloned().unwrap_or_default()),
         })
         .collect();
     Some(PropertySection {
@@ -1395,5 +1431,189 @@ mod tests {
                 "node.test.grouped.group.paint",
             ]
         );
+    }
+    // ----- instance parameter groups (parameter-groups-plan, PGRP-4) -------
+
+    /// The In node from [`in_node_with`], with `assign` applied to its
+    /// `param_groups`.
+    fn in_node_grouped(
+        context: NetworkContext,
+        ports: &[(&str, CustomPortType)],
+        assign: &[(&str, &str)],
+    ) -> Node {
+        let mut node = in_node_with(context, ports);
+        for (key, group) in assign {
+            node = ravel_core::network::set_custom_port_group(
+                Graph::new().add_node(node).unwrap(),
+                NodeId::new(1),
+                key,
+                group,
+            )
+            .map(|graph| (**graph.node(NodeId::new(1)).unwrap()).clone())
+            .expect("the parameter exists");
+        }
+        node
+    }
+
+    /// An In node's custom parameters split by the groups the user assigned,
+    /// in the order the parameters appear (the order the ports were added).
+    /// A parameter with no assignment stays in the leading section.
+    #[test]
+    fn an_in_node_instance_group_splits_its_parameters() {
+        let node = in_node_grouped(
+            NetworkContext::LayerRoot,
+            &[
+                ("width", CustomPortType::Float),
+                ("height", CustomPortType::Float),
+                ("seed", CustomPortType::Int),
+            ],
+            &[("width", "Size"), ("height", "Size")],
+        );
+        assert_eq!(
+            split(&node, &registry()),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["seed".to_string()]
+                ),
+                (
+                    "Size".to_string(),
+                    vec!["width".to_string(), "height".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// The group name is the user's own text, so it is the section title as
+    /// typed — never run through a locale key.
+    #[test]
+    fn an_instance_group_title_is_the_users_own_text() {
+        let node = in_node_grouped(
+            NetworkContext::LayerRoot,
+            &[("width", CustomPortType::Float)],
+            &[("width", "ばね")],
+        );
+        assert_eq!(
+            param_group_titles(&node, &registry()),
+            vec![("ばね".to_string(), "ばね".to_string())]
+        );
+    }
+
+    /// When the same In node has both an instance assignment and a type
+    /// declaration, the instance wins outright: the user made that assignment
+    /// by hand, and honouring half of each would leave it unclear which one a
+    /// parameter answers to.
+    #[test]
+    fn an_instance_group_wins_over_the_type_declaration() {
+        use ravel_core::registry::{NodeCategory, NodeTemplate};
+        let node = in_node_grouped(
+            NetworkContext::LayerRoot,
+            &[
+                ("width", CustomPortType::Float),
+                ("height", CustomPortType::Float),
+            ],
+            &[("width", "Size")],
+        );
+        let mut registry = NodeRegistry::new();
+        registry.register(
+            NodeTemplate::new(NET_IN_TYPE_KEY, "In", NodeCategory::Utility)
+                .with_param_group("declared", ["width", "height"]),
+        );
+        assert_eq!(
+            split(&node, &registry),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["height".to_string()]
+                ),
+                ("Size".to_string(), vec!["width".to_string()]),
+            ],
+            "the type's `declared` group is not consulted"
+        );
+
+        // Clearing the assignment hands the node back to its type.
+        let bare = in_node_with(
+            NetworkContext::LayerRoot,
+            &[
+                ("width", CustomPortType::Float),
+                ("height", CustomPortType::Float),
+            ],
+        );
+        assert_eq!(
+            split(&bare, &registry),
+            vec![(
+                "node.net.in.group.declared".to_string(),
+                vec!["width".to_string(), "height".to_string()]
+            )]
+        );
+    }
+
+    /// Only an In node reads its own `param_groups`. Any other node carrying
+    /// them — which only a hand-edited `.ravprj` can produce, since nothing
+    /// writes there — falls back to its type's declaration rather than being
+    /// refused. Refusing to open would trade a cosmetic oddity for a project
+    /// that saved and will not load.
+    #[test]
+    fn instance_groups_on_a_non_in_node_fall_back_to_the_type_declaration() {
+        let registry = grouped_registry(&[("shape", &["a", "b"])]);
+        let mut node = grouped_node(&registry);
+        node.param_groups
+            .insert("a".to_string(), "Hand edited".to_string());
+        assert_eq!(
+            split(&node, &registry),
+            vec![
+                (
+                    "properties.section.parameters".to_string(),
+                    vec!["c", "d", "e", "f"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                ),
+                (
+                    "node.test.grouped.group.shape".to_string(),
+                    vec!["a".to_string(), "b".to_string()]
+                ),
+            ]
+        );
+    }
+
+    /// The Ports section carries each port's group so the row can edit it —
+    /// and `None` for a port with no parameter, which has nothing to group
+    /// (every fixed In port, and every port of an Out node).
+    #[test]
+    fn the_ports_section_carries_the_group_of_each_parameter_carrying_port() {
+        // A wire-only custom type is only offered inside a subnet, so this
+        // covers both halves in the one context that can hold them.
+        let node = in_node_grouped(
+            NetworkContext::Subnet,
+            &[
+                ("width", CustomPortType::Float),
+                ("shape", CustomPortType::Geometry),
+            ],
+            &[("width", "Size")],
+        );
+        let section = node_ports_section(&node, NetworkContext::Subnet).expect("in node");
+        let (_, rows, _) = port_list(&section);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.name.as_str(), row.group.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (PORT_BASE_GEOMETRY, None),
+                (PORT_TIME, None),
+                (PORT_FRAME_INDEX, None),
+                (PORT_SOURCE, None),
+                // Assigned by the user.
+                ("width", Some("Size")),
+                // A Geometry port is wire-only: no parameter, no group cell.
+                ("shape", None),
+            ]
+        );
+
+        let out = Node::new(NodeId::new(2), NET_OUT_TYPE_KEY)
+            .with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        let section = node_ports_section(&out, NetworkContext::LayerRoot).expect("out node");
+        let (_, rows, _) = port_list(&section);
+        assert!(rows.iter().all(|row| row.group.is_none()));
     }
 }

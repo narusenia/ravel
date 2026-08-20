@@ -60,7 +60,11 @@ use thiserror::Error;
 /// same reasoning as v6 and v8.
 /// v10: `ParameterValue` gained the `StringSteps` variant (animatable strings,
 /// a held step curve) — same reasoning as v6, v8 and v9.
-pub const JOURNAL_FORMAT_VERSION: u32 = 10;
+/// v11: `Node` gained the `param_groups` field (an In node's instance
+/// parameter groups) — the same positional-layout incompatibility as v2 to v5,
+/// one level up: the field sits at the end of `Node`, so a v10 entry has one
+/// fewer field than the decoder expects.
+pub const JOURNAL_FORMAT_VERSION: u32 = 11;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";

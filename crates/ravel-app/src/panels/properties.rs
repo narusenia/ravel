@@ -391,6 +391,16 @@ fn custom_port_row(
                 .child(gpui_component::select::Select::new(select).xsmall()),
         );
     }
+    // The Properties group this port's parameter sits under (PGRP-4). Absent
+    // for a port with no parameter, which has nothing to group.
+    if let Some((_, input)) = ports.groups.iter().find(|(n, _)| n == &row.name) {
+        fields = fields.child(
+            div()
+                .flex_shrink_0()
+                .w(px(88.0))
+                .child(Input::new(input).xsmall().w_full()),
+        );
+    }
 
     div()
         .flex()
@@ -1542,7 +1552,11 @@ fn field_shape_key(field: &PropertyField) -> String {
         PropertyField::PortList { key, rows, .. } => {
             let mut shape = key.clone();
             for row in rows {
-                let _ = write!(shape, "\n{}\t{:?}\t{}", row.name, row.port_type, row.fixed);
+                let _ = write!(
+                    shape,
+                    "\n{}\t{:?}\t{}\t{:?}",
+                    row.name, row.port_type, row.fixed, row.group
+                );
             }
             shape
         }
@@ -1681,6 +1695,7 @@ type PortAddWidgets = (Entity<InputState>, Entity<SelectState<Vec<SharedString>>
 struct PortWidgets {
     names: Vec<(String, Entity<InputState>)>,
     types: Vec<(String, Entity<SelectState<Vec<SharedString>>>)>,
+    groups: Vec<(String, Entity<InputState>)>,
     add: Option<PortAddWidgets>,
     error: Option<SharedString>,
 }
@@ -1909,6 +1924,10 @@ pub struct PropertiesGpuiPanel {
     /// detects by fingerprinting the rows.
     port_names: Vec<(String, StringBinding)>,
     port_types: Vec<(String, SelectBinding)>,
+    /// Group Input per custom In port that carries a parameter (PGRP-4).
+    /// Shorter than `port_names`: a wire-only custom type has no parameter to
+    /// group.
+    port_groups: Vec<(String, StringBinding)>,
     port_add: Option<PortAddBinding>,
     /// The type menu the current Ports section offers, in the order the
     /// Selects list it. `SelectEvent::Confirm` hands back the *translated*
@@ -2172,6 +2191,7 @@ impl PropertiesGpuiPanel {
             ramps: Vec::new(),
             port_names: Vec::new(),
             port_types: Vec::new(),
+            port_groups: Vec::new(),
             port_add: None,
             port_type_options: Vec::new(),
             port_error: None,
@@ -2992,6 +3012,26 @@ impl PropertiesGpuiPanel {
         });
     }
 
+    /// Commit a row's edited group on Enter or blur (PGRP-4).
+    ///
+    /// No repeat guard like [`Self::rename_port`]'s: this edit does not change
+    /// the row's identity, so the second report of an Enter-then-blur pair
+    /// carries the value the graph already holds and
+    /// `network::set_custom_port_group` answers it with the graph it was given
+    /// — no undo step, nothing to suppress.
+    fn set_port_group(&mut self, name: &str, group: String, cx: &mut Context<Self>) {
+        if self
+            .port_row(name)
+            .is_some_and(|row| row.group.as_deref() == Some(group.trim()))
+        {
+            return;
+        }
+        let name = name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.set_custom_port_group(node_id, &name, &group, cx)
+        });
+    }
+
     fn remove_port(&mut self, name: &str, cx: &mut Context<Self>) {
         let name = name.to_string();
         self.route_port_edit(cx, move |editor, node_id, cx| {
@@ -3782,6 +3822,7 @@ impl PropertiesGpuiPanel {
         self.ramps.clear();
         self.port_names.clear();
         self.port_types.clear();
+        self.port_groups.clear();
         self.port_add = None;
         self.port_type_options.clear();
         self.exposed_names.clear();
@@ -4393,6 +4434,32 @@ impl PropertiesGpuiPanel {
             );
             self.port_types
                 .push((row.name.clone(), SelectBinding { state: entity, sub }));
+
+            // Only a port that has a parameter can carry a group; a wire-only
+            // custom type has none, so it gets no Input at all rather than one
+            // whose edit the core would refuse.
+            let Some(group) = row.group.clone() else {
+                continue;
+            };
+            let entity = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(SharedString::from(t!("properties.ports.group")))
+                    .default_value(group)
+            });
+            let name = row.name.clone();
+            let sub = cx.subscribe_in(
+                &entity,
+                window,
+                move |this, state, event: &InputEvent, _window, cx| match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let value = state.read(cx).value().to_string();
+                        this.set_port_group(&name, value, cx);
+                    }
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+            self.port_groups
+                .push((row.name.clone(), StringBinding { state: entity, sub }));
         }
 
         let name = cx.new(|cx| {
@@ -4553,6 +4620,11 @@ impl Render for PropertiesGpuiPanel {
                     .collect(),
                 types: self
                     .port_types
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone()))
+                    .collect(),
+                groups: self
+                    .port_groups
                     .iter()
                     .map(|(k, b)| (k.clone(), b.state.clone()))
                     .collect(),
@@ -7816,6 +7888,97 @@ mod tests {
             );
             history.pop();
         }
+    }
+
+    /// The Ports row's group cell assigns an In node's custom parameter to a
+    /// Properties group, and the parameters split into sections accordingly
+    /// (PGRP-4). Clearing the cell takes the parameter out of the group again.
+    #[gpui::test]
+    fn the_ports_group_cell_assigns_a_custom_parameter_to_a_section(cx: &mut TestAppContext) {
+        let (properties, project, path, in_id) = setup_in_node_target(cx);
+
+        let group_of = |properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+                        cx: &mut TestAppContext,
+                        name: &str| {
+            properties
+                .update(cx, |panel, _window, _cx| {
+                    panel.port_row(name).and_then(|row| row.group.clone())
+                })
+                .unwrap()
+        };
+        let section_titles = |properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+                              cx: &mut TestAppContext| {
+            properties
+                .update(cx, |panel, _window, _cx| {
+                    panel
+                        .sections
+                        .iter()
+                        .map(|section| section.title.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+        };
+
+        assert_eq!(
+            group_of(&properties, cx, "amount").as_deref(),
+            Some(""),
+            "a custom parameter starts in no group"
+        );
+        assert_eq!(
+            group_of(&properties, cx, net::PORT_TIME),
+            None,
+            "a fixed port has no parameter, so no group cell"
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.set_port_group("amount", " Look ".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            project.read_with(cx, |project, _| {
+                resolve_network(project.document(), &path)
+                    .and_then(|graph| graph.node(in_id))
+                    .and_then(|node| node.param_groups.get("amount").cloned())
+            }),
+            Some("Look".to_string()),
+            "the graph holds the trimmed group name"
+        );
+        assert_eq!(
+            properties
+                .update(cx, |panel, _window, _cx| panel.port_error.clone())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            section_titles(&properties, cx),
+            vec![
+                "properties.section.node_info".to_string(),
+                // `tint` is still ungrouped, so the leading section stays.
+                "properties.section.parameters".to_string(),
+                "Look".to_string(),
+                "properties.section.ports".to_string(),
+            ]
+        );
+
+        // Clearing the cell takes it back out; whitespace counts as empty.
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.set_port_group("amount", "   ".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            section_titles(&properties, cx),
+            vec![
+                "properties.section.node_info".to_string(),
+                "properties.section.parameters".to_string(),
+                "properties.section.ports".to_string(),
+            ]
+        );
+        assert_eq!(group_of(&properties, cx, "amount").as_deref(), Some(""));
     }
 
     /// A refused edit says why. Dropping it silently would look like the

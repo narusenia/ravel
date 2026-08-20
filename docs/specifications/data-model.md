@@ -26,6 +26,11 @@ struct Node {
     // Arc 共有によりノード複製は安価で、内部編集は replace_node で
     // ノードごと差し替える（イミュータブル維持）。
     subnet: Option<Arc<Graph>>,
+    // Properties の表示グループ（パラメータキー → グループ名）。
+    // ネットワークインターフェースの In ノードだけが持ち、それ以外は常に空
+    // （型が宣言するので NodeTemplate::param_groups 側にある）。
+    // format v12 で追加（PGRP-4）。
+    param_groups: BTreeMap<String, String>,
 }
 
 struct NodeMetadata {
@@ -620,7 +625,7 @@ struct SubgraphTemplate {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v11)
+### document/main.ron (RON形式、フォーマット v12)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
@@ -629,6 +634,8 @@ pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Lay
 `color_space` を追加）、公開パラメータ宣言（`exposed_parameters`。v7 で追加）。
 **v10 で `ParameterValue::IntChannel`**（アニメーション可能な整数）、
 **v11 で `ParameterValue::StringSteps`**（アニメーション可能な文字列）が入る。
+**v12 で `Node.param_groups`**（In ノードのカスタムパラメータの表示グループ、
+`PGRP-4`）が入る。
 
 **v8 で色の意味が変わった。** 作者が指定した色（ノードの `COLOR` パラメータ、
 `Composition.background_color`、`exposed_parameters` の `color` 既定値）は

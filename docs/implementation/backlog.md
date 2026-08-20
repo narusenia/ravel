@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-08-20
+最終更新: 2026-08-21
 
 ## 凡例
 
@@ -61,6 +61,7 @@
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
 | DISK-4 | Timeline の Int / String 行とキーフレーム編集 | `discrete-keyframes-plan.md` |
+| WARN-1 | 識別子パラメータの解決を 1 経路に畳む | `render-warning-channel-plan.md` |
 | PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
@@ -712,6 +713,14 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | DISK-4 | 🟡 | Timeline の行とキーフレーム編集 | DISK-3 ✅ |
 | DISK-5 | ⬜ | カーブエディタの階段描画（Int のみ） | DISK-4 |
 | DISK-6 | ⬜ | ロケール / 文書 | DISK-1〜5 |
+
+### レンダーの警告経路（`render-warning-channel-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| WARN-1 | 🟡 | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`） | — |
+| WARN-2 | ⬜ | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） | WARN-1 |
+| WARN-3 | ⬜ | ロケール / 文書 / issue の決着 | WARN-1, WARN-2 |
 
 ### 素材の同一性（`asset-identity-plan.md`）
 

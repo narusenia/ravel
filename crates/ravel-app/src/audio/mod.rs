@@ -32,7 +32,7 @@ use ravel_audio::{
     AudioCommand, AudioEngine, AudioEngineConfig, AudioError, OutputConfig, SyncClock, Track,
 };
 use ravel_core::composition::Document;
-use ravel_core::id::LayerId;
+use ravel_core::id::{AssetId, LayerId};
 use ravel_core::types::FrameRate;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -83,7 +83,12 @@ struct SentTrack {
 #[derive(Clone, Debug)]
 pub enum AudioServiceEvent {
     /// A decoded asset could not be prepared for playback.
-    PreparationFailed { asset_id: String, error: String },
+    ///
+    /// `asset` is the asset's **display name**, not its
+    /// [`AssetId`](ravel_core::id::AssetId): the payload ends up in a
+    /// notification the user reads, and an id is a number they cannot connect
+    /// to a file.
+    PreparationFailed { asset: String, error: String },
 }
 
 /// GPUI entity owning the audio engine, the decode cache, and the track
@@ -163,7 +168,7 @@ impl AudioService {
     }
 
     /// Whether any requested stream of this asset is currently preparing.
-    pub fn is_asset_preparing(&self, asset_id: &str) -> bool {
+    pub fn is_asset_preparing(&self, asset_id: AssetId) -> bool {
         self.pending.keys().any(|key| key.asset_id == asset_id)
     }
 
@@ -347,6 +352,26 @@ impl AudioService {
         }
     }
 
+    /// The name to show the user for `asset_id`.
+    ///
+    /// Read from the live document rather than remembered alongside the cache
+    /// key: the key is identity and a name is editable, so a remembered copy
+    /// would go stale. An asset that has left the document has no name left to
+    /// show, and its `Display` form at least says which reference broke.
+    fn asset_display_name(&self, asset_id: AssetId, cx: &App) -> String {
+        cx.try_global::<crate::project_state::ProjectStateHandle>()
+            .and_then(|handle| handle.0.upgrade())
+            .and_then(|project| {
+                project
+                    .read(cx)
+                    .document()
+                    .get_media_asset(asset_id)
+                    .map(|entry| entry.name.clone())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| asset_id.to_string())
+    }
+
     fn send(&self, command: AudioCommand) {
         let Some(sink) = &self.sink else {
             return;
@@ -362,11 +387,18 @@ impl AudioService {
         error: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        let asset_id = key.asset_id.clone();
+        let asset_id = key.asset_id;
         let error = error.into();
         if self.failed.insert(key) {
-            tracing::warn!(asset_id, error, "audio preparation failed; track skipped");
-            cx.emit(AudioServiceEvent::PreparationFailed { asset_id, error });
+            tracing::warn!(
+                asset_id = asset_id.raw(),
+                error,
+                "audio preparation failed; track skipped"
+            );
+            cx.emit(AudioServiceEvent::PreparationFailed {
+                asset: self.asset_display_name(asset_id, cx),
+                error,
+            });
         }
         cx.notify();
     }
@@ -417,7 +449,7 @@ impl AudioService {
         if self.pending.contains_key(&key) || self.failed.contains(&key) {
             return;
         }
-        let Some(entry) = document.media_assets.get(&spec.asset_id) else {
+        let Some(entry) = document.get_media_asset(spec.asset_id) else {
             self.mark_preparation_failed(key, "audio layer references an unknown media asset", cx);
             return;
         };
@@ -427,7 +459,7 @@ impl AudioService {
         };
 
         let generation = self.generation;
-        self.pending.insert(key.clone(), generation);
+        self.pending.insert(key, generation);
         cx.notify();
         let stream_index = spec.stream_index;
         let output_rate = self.output_rate;
@@ -532,10 +564,15 @@ mod tests {
     use super::*;
     use ravel_core::animation::AnimationChannel;
 
-    fn spec(layer: u64, asset_id: &str, stream_index: usize) -> TrackSpec {
+    /// The asset both tests name; its display name plays no part here.
+    fn music() -> AssetId {
+        AssetId::new(1)
+    }
+
+    fn spec(layer: u64, asset_id: AssetId, stream_index: usize) -> TrackSpec {
         TrackSpec {
             layer_id: LayerId::new(layer),
-            asset_id: asset_id.into(),
+            asset_id,
             stream_index,
             start_frame: 0,
             source_in_frames: 0,
@@ -551,9 +588,9 @@ mod tests {
     #[test]
     fn preparation_queries_follow_pending_and_failed_state() {
         let mut service = AudioService::with_sink(None, 48_000);
-        let spec = spec(7, "music", 2);
+        let spec = spec(7, music(), 2);
         let key = spec.cache_key();
-        service.pending.insert(key.clone(), service.generation);
+        service.pending.insert(key, service.generation);
         service.sent.insert(
             spec.layer_id,
             SentTrack {
@@ -563,29 +600,29 @@ mod tests {
             },
         );
 
-        assert!(service.is_asset_preparing("music"));
+        assert!(service.is_asset_preparing(music()));
         assert!(service.is_layer_preparing(LayerId::new(7)));
 
         service.pending.remove(&key);
         service.failed.insert(key);
-        assert!(!service.is_asset_preparing("music"));
+        assert!(!service.is_asset_preparing(music()));
         assert!(!service.is_layer_preparing(LayerId::new(7)));
     }
 
     #[test]
     fn stale_completion_keeps_the_replacement_documents_pending_entry() {
         let mut service = AudioService::with_sink(None, 48_000);
-        let key = spec(7, "music", 2).cache_key();
+        let key = spec(7, music(), 2).cache_key();
 
-        service.pending.insert(key.clone(), 0);
+        service.pending.insert(key, 0);
         service.pending.clear();
         service.generation = 1;
-        service.pending.insert(key.clone(), 1);
+        service.pending.insert(key, 1);
 
         service.finish_pending_generation(&key, 0);
-        assert!(service.is_asset_preparing("music"));
+        assert!(service.is_asset_preparing(music()));
 
         service.finish_pending_generation(&key, 1);
-        assert!(!service.is_asset_preparing("music"));
+        assert!(!service.is_asset_preparing(music()));
     }
 }

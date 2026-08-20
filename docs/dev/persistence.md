@@ -10,7 +10,7 @@
 | エントリ | 内容 |
 |---|---|
 | `manifest.json` | `format_version` とプロジェクト情報。**マイグレーション連鎖の起点** |
-| `document/main.ron` | Composition・レイヤー・ネットワーク（Subnet 入れ子含む）・キーフレーム・`media_assets`・`exposed_parameters`（公開パラメータ宣言、v7 で追加）。決定的 RON |
+| `document/main.ron` | Composition・レイヤー・ネットワーク（Subnet 入れ子含む）・キーフレーム・`media_assets`（v9 で `AssetId` キー）・`exposed_parameters`（公開パラメータ宣言、v7 で追加）。決定的 RON |
 | `settings.toml` | プロジェクト設定 |
 | `ui_state.json` | UI 状態（アクティブコンポジション、Timeline の BPM グリッド、コンポジションごとのループ範囲）。**任意エントリ**で、欠落時はアクティブコンポジションが `root_comp` に、BPM グリッドが既定に、ループ範囲が 0 件にフォールバック |
 | `workspace_layout.toml` | ワークスペースレイアウト。**任意エントリ**かつ**オプトイン**（既定 OFF）で、トグルが OFF のときは書かれない |
@@ -198,7 +198,7 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 **ロード後のドキュメントに対する型付きパス**として書き、`format_version` で
 ゲートする。
 
-前例が 2 つある。
+前例が 4 つある。
 
 **v4 → v5 のベクタパラメータ畳み込み**
 （`ravel_core::composition::Document::fold_component_params`、実装計画は
@@ -241,6 +241,37 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 変換できなかった箇所（式で駆動される色、キーフレーム間の補間のずれ）は
 `ColorMigrationReport` に集計して返し、ロード後に警告として出す。**黙って
 値を変えるより、変わらなかったことを伝える。**
+
+**v8 → v9 の素材 ID 化**（`Document::upgrade_asset_references`、実装計画は
+[`../implementation/asset-identity-plan.md`](../implementation/asset-identity-plan.md)
+の `AID-1` / `AID-2`）。v8 までは**素材の表示名がそのまま同一性**で、
+`Document::media_assets` のキーと参照 3 系統（`media` ノードの `asset_id`
+パラメータ・`AudioSource`・公開パラメータ宣言が束縛する `media` ノード）が
+同じ文字列を持っていた。v9 はキーを `AssetId` にし、文字列を
+`MediaAssetEntry::name` に移す。`migrate_v8_to_v9` は版印だけを進め、
+張り替えは `source_version < 9` のときに走る。
+
+- **旧キーは deserialize でしか見えない。** 参照は `Document` の中で
+  `compositions` → `media_assets` の順に読まれるので、どちらが先に旧文字列に
+  出会うか決まらない。だから `AssetId` の `Deserialize` が文字列を受け付けて
+  ID を採番し、対応表を `composition::asset_legacy` の**スコープ付き
+  thread-local** に残す。`asset_legacy::scoped` が 1 回のデシリアライズを
+  囲み、表を返す。表を**必ず捨てる**こと — 同じ名前を持つ 2 つの旧文書が
+  ID を共有すると、片方から貼ったレイヤーが**もう片方のファイルに繋がる**
+- **`AssetId` の `Deserialize` は 4 通りの綴りを受ける。** `deserialize_any`
+  を使う以上、隣の ID 型が derive で得ている newtype の綴りは自前で扱う:
+  RON は newtype を `(1)`（`struct_names` 時は `AssetId(1)`）と書くので、
+  整数・1 要素シーケンス・newtype・旧文字列の 4 つが同じ ID になる
+- **解決できない参照は文字列で残さず `AssetId::UNSET` にする。** 旧文書は
+  「素材表に無い名前を指す参照」を既に持ち得る（v8 までの削除がそれを残した）。
+  名前のまま残すと、次に同じ名前でインポートされた瞬間に**別のファイルへ
+  繋がり直す** — v9 が消しに来たバグそのもの。`media` ノードは
+  解決できない ID をエラーにせず**オフライン扱いで透明フレーム**を返す
+  （v9 で挙動を反転させた点。それまでは未知の ID は評価エラーだった）
+- **版を上げる理由は「1 度だけ」。** 文字列キーは形から見分けられるので
+  データ駆動でも走らせられるが、上の張り替えは**意図的に不可逆**。v9 文書の
+  `name` は編集可能で重複してよいので、そこへ同じパスを掛けると生きている
+  参照をオフラインにしてしまう
 
 **逆に v6 → v7（`Document.exposed_parameters`、公開パラメータ宣言）は型付き
 パスを持たない。** 版を上げた理由は上の判断表のとおりだが、**変換すべき既存の
@@ -296,9 +327,14 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 
 ## ID の扱い
 
-- ロード時に `NodeId` / `EdgeId` / `CompId` / `LayerId` のカウンタを
+- ロード時に `NodeId` / `EdgeId` / `CompId` / `LayerId` / `AssetId` のカウンタを
   ドキュメント最大 ID より先へ進める（REQ-LAYER-009）。新しい ID 種を足したら
   ここも足す
+- **水位は参照側も走査する。** `layer.ref` のターゲットと同じ理由で、
+  `id_watermarks` は素材表のキーだけでなく `media` ノードの `asset_id` と
+  `AudioSource` も見る。素材表に無い `AssetId` を指す参照は v9 では**正常な
+  状態**（オフライン）なので、そこを走査しないと次の採番がその番号に当たり、
+  オフラインだった参照が無関係なインポートに**繋がり直す**
 - `type_key` とパネルの `panel_id()` は**永続化に載る文字列**。後から変えると
   それぞれノードの復元とレイアウトの復元が壊れる
 
@@ -307,6 +343,17 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 パスは相対 / 変数形式で記録する（v4 で `assets/refs.json` を廃止）。
 絶対パスは `Absolute` として読める。リンク切れはオフライン表示になり、
 修復（Relink）は `MEDIA-7`。
+
+**同一性と表示名は別物**（v9、REQ-PROJ-001）。`Document::media_assets` のキーは
+`AssetId` で、**再利用されない**。表示名は `MediaAssetEntry::name` にあり、
+参照は誰も名前で引かない。だから:
+
+- 素材を削除して同名ファイルを入れ直すと**別の素材**になり、古い参照は
+  黙って繋がるのではなくオフラインとして現れる
+- 名前は自由に変えられる（改名 UI は `AID-3`）。名前は**一意ではない**ので、
+  `Document::media_asset_id_by_name` は 2 件以上一致したら `None` を返す
+- プロジェクト間でレイヤーをコピーしても、コピー先に同じ `AssetId` は
+  無いので別物を指さない
 
 ## テスト
 

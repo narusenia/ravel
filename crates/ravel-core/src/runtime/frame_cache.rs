@@ -1318,7 +1318,7 @@ mod tests {
         let old = document(&[comp_a()]);
         let mut new = old.clone();
         new.media_assets.insert(
-            "a".into(),
+            crate::id::AssetId::new(1),
             crate::composition::MediaAssetEntry::from_absolute("/tmp/clip.mov"),
         );
         cache.sync_document(Some(&old), &new, None);

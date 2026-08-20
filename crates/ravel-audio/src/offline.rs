@@ -50,7 +50,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use ravel_core::composition::Document;
-use ravel_core::id::{CompId, LayerId};
+use ravel_core::id::{AssetId, CompId, LayerId};
 use ravel_core::types::AudioBuffer;
 
 use crate::mixdown::{self, AudioMixdown, CacheKey, DecodedAudio};
@@ -68,7 +68,11 @@ pub struct SkippedSource {
     /// The layer whose sound is missing from the mix.
     pub layer_id: LayerId,
     /// The asset it names, whether or not the document still has it.
-    pub asset_id: String,
+    ///
+    /// An identity, not a name: the caller resolves it against the document
+    /// when it wants something to show the user, because an id the document
+    /// has lost has no name left to resolve.
+    pub asset_id: AssetId,
     /// Diagnostic English, for the caller to wrap in its own sentence.
     pub reason: String,
 }
@@ -136,7 +140,7 @@ pub fn mix_range(
         let key = spec.cache_key();
         let audio = match decoded.get(&key) {
             Some(audio) => audio.clone(),
-            None => match prepare(document, &spec.asset_id, spec.stream_index, rate) {
+            None => match prepare(document, spec.asset_id, spec.stream_index, rate) {
                 Ok(audio) => {
                     let audio = Arc::new(audio);
                     decoded.insert(key, audio.clone());
@@ -145,7 +149,7 @@ pub fn mix_range(
                 Err(reason) => {
                     skipped.push(SkippedSource {
                         layer_id: spec.layer_id,
-                        asset_id: spec.asset_id.clone(),
+                        asset_id: spec.asset_id,
                         reason,
                     });
                     continue;
@@ -178,20 +182,25 @@ pub fn mix_range(
 /// produce audio — an asset the document lost, one whose file is offline, one
 /// past the decode cap, a build with no decoder — comes back through it, so
 /// none of them can turn into silence without a word.
+///
+/// The sentence names the asset the way the user does, by its display name,
+/// which is why this takes the whole `document` and not just the entry: an id
+/// the document has lost has no name to show, and only there does the
+/// sentence fall back to the id — as a reference that resolves to nothing,
+/// not as a number the reader is expected to recognise.
 fn prepare(
     document: &Document,
-    asset_id: &str,
+    asset_id: AssetId,
     stream_index: usize,
     output_rate: u32,
 ) -> Result<DecodedAudio, String> {
-    let entry = document
-        .media_assets
-        .get(asset_id)
-        .ok_or_else(|| format!("the project has no media asset {asset_id:?}"))?;
+    let entry = document.get_media_asset(asset_id).ok_or_else(|| {
+        format!("the project contains no media asset for this reference ({asset_id})")
+    })?;
     let path = entry
         .resolved
         .as_ref()
-        .ok_or_else(|| format!("the media asset {asset_id:?} is offline"))?;
+        .ok_or_else(|| format!("the media asset {:?} is offline", entry.name))?;
     let audio =
         mixdown::decode_full_audio(path, stream_index).map_err(|error| format!("{error:#}"))?;
     mixdown::prepare_audio_at_rate(audio, output_rate).map_err(|error| format!("{error:#}"))
@@ -223,10 +232,13 @@ mod tests {
         Document::default().with_composition(comp)
     }
 
-    fn audio_layer(id: u64, asset: &str) -> Layer {
+    /// A layer whose sound comes from `asset`. The reference is written the
+    /// way the document writes it — the id's decimal spelling — so the test
+    /// exercises the same parse the loader does.
+    fn audio_layer(id: u64, asset: AssetId) -> Layer {
         let mut layer =
             Layer::new(LayerId::new(id), format!("layer {id}"), Graph::new()).with_time(0, 0, 300);
-        layer.audio = Some(AudioSource::new(asset, 0));
+        layer.audio = Some(AudioSource::new(asset.to_param_value(), 0));
         layer
     }
 
@@ -240,7 +252,8 @@ mod tests {
 
     #[test]
     fn an_unknown_composition_has_no_soundtrack() {
-        let document = comp_with_audio(vec![audio_layer(1, "voice")]);
+        let voice = AssetId::next();
+        let document = comp_with_audio(vec![audio_layer(1, voice)]);
         assert!(mix_range(&document, CompId::new(9), 0..30, &config()).is_none());
     }
 
@@ -248,7 +261,8 @@ mod tests {
     /// 30 fps frames is one second of 48 kHz samples.
     #[test]
     fn the_buffer_covers_exactly_the_requested_frame_range() {
-        let document = comp_with_audio(vec![audio_layer(1, "voice")]);
+        let voice = AssetId::next();
+        let document = comp_with_audio(vec![audio_layer(1, voice)]);
         let mix = mix_range(&document, CompId::new(1), 0..30, &config()).expect("has audio");
         assert_eq!(mix.frame_count(), 48_000);
         assert_eq!(mix.start_sample, 0);
@@ -260,7 +274,8 @@ mod tests {
     /// frame does, not at zero with a shorter buffer.
     #[test]
     fn a_later_range_starts_at_its_own_sample() {
-        let document = comp_with_audio(vec![audio_layer(1, "voice")]);
+        let voice = AssetId::next();
+        let document = comp_with_audio(vec![audio_layer(1, voice)]);
         let mix = mix_range(&document, CompId::new(1), 100..200, &config()).expect("has audio");
         assert_eq!(mix.start_sample, 100 * 48_000 / 30);
         assert_eq!(mix.frame_count(), 100 * 48_000 / 30);
@@ -270,7 +285,8 @@ mod tests {
     /// have to abut exactly where the whole one has its middle.
     #[test]
     fn split_ranges_abut_at_the_sample_the_whole_range_has_there() {
-        let document = comp_with_audio(vec![audio_layer(1, "voice")]);
+        let voice = AssetId::next();
+        let document = comp_with_audio(vec![audio_layer(1, voice)]);
         let whole = mix_range(&document, CompId::new(1), 0..100, &config()).expect("audio");
         let first = mix_range(&document, CompId::new(1), 0..37, &config()).expect("audio");
         let second = mix_range(&document, CompId::new(1), 37..100, &config()).expect("audio");
@@ -291,11 +307,12 @@ mod tests {
     /// An asset the document no longer has is reported, not silently dropped.
     #[test]
     fn a_missing_asset_is_reported_rather_than_silently_dropped() {
-        let document = comp_with_audio(vec![audio_layer(1, "voice")]);
+        let voice = AssetId::next();
+        let document = comp_with_audio(vec![audio_layer(1, voice)]);
         let mix = mix_range(&document, CompId::new(1), 0..30, &config()).expect("has audio");
         assert_eq!(mix.skipped.len(), 1);
         assert_eq!(mix.skipped[0].layer_id, LayerId::new(1));
-        assert_eq!(mix.skipped[0].asset_id, "voice");
+        assert_eq!(mix.skipped[0].asset_id, voice);
         assert!(mix.skipped[0].reason.contains("no media asset"));
         // Still the right length, so the picture it accompanies still lines up.
         assert_eq!(mix.frame_count(), 48_000);
@@ -306,12 +323,13 @@ mod tests {
     /// it is a different thing for the user to fix.
     #[test]
     fn an_offline_asset_says_so() {
-        let mut document = comp_with_audio(vec![audio_layer(1, "voice")]);
+        let voice = AssetId::next();
+        let mut document = comp_with_audio(vec![audio_layer(1, voice)]);
         let mut entry = MediaAssetEntry::from_absolute("/nowhere/voice.wav");
         // `resolved` is what evaluation reads, and `None` is exactly what
         // "the file this names is not there" looks like after a load.
         entry.resolved = None;
-        document.media_assets.insert("voice".into(), entry);
+        document.media_assets.insert(voice, entry);
         let mix = mix_range(&document, CompId::new(1), 0..30, &config()).expect("has audio");
         assert_eq!(mix.skipped.len(), 1);
         assert!(
@@ -325,7 +343,8 @@ mod tests {
     /// reported when it cannot be decoded at all.
     #[test]
     fn one_asset_shared_by_two_layers_is_reported_once_per_layer() {
-        let document = comp_with_audio(vec![audio_layer(1, "voice"), audio_layer(2, "voice")]);
+        let voice = AssetId::next();
+        let document = comp_with_audio(vec![audio_layer(1, voice), audio_layer(2, voice)]);
         let mix = mix_range(&document, CompId::new(1), 0..30, &config()).expect("has audio");
         assert_eq!(
             mix.skipped.len(),

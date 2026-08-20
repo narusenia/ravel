@@ -391,6 +391,7 @@ fn a_closed_stdout_is_not_a_failure() {
 #[test]
 fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
     use ravel_core::composition::{AudioSource, MediaAssetEntry};
+    use ravel_core::id::AssetId;
     use ravel_media::encode::WavWriter;
 
     let dir = TempDir::new().expect("tempdir");
@@ -407,13 +408,14 @@ fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
     let mut comp = Composition::new(CompId::new(1), "Main", (64, 64), FrameRate::new(24, 1), 24)
         .add_layer(Layer::new(LayerId::new(1), "shape", layer_network()).with_time(0, 0, 24));
     let mut voice = Layer::new(LayerId::new(2), "voice", Graph::new()).with_time(0, 0, 24);
-    voice.audio = Some(AudioSource::new("voice", 0));
+    let voice_asset = AssetId::next();
+    voice.audio = Some(AudioSource::new(voice_asset.to_param_value(), 0));
     comp = comp.add_layer(voice);
 
     let mut document = Document::default().with_composition(comp);
     document
         .media_assets
-        .insert("voice".into(), MediaAssetEntry::from_absolute(&asset));
+        .insert(voice_asset, MediaAssetEntry::from_absolute(&asset));
     let project = dir.path().join("sound.ravprj");
     ProjectFile::from_document("Sound", "2026-01-01T00:00:00Z", document)
         .save(&project)

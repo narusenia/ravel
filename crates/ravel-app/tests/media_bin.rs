@@ -28,6 +28,7 @@ use ravel_app::panels::media_bin::{
 use ravel_app::panels::{self, PropertiesTarget};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata, MediaAssetEntry};
+use ravel_core::id::AssetId;
 use ravel_core::types::FrameRate;
 use std::path::PathBuf;
 
@@ -128,10 +129,14 @@ fn probed_clip(path: &str) -> ProbedAsset {
     }
 }
 
-fn import_clip(harness: &Harness, cx: &mut TestAppContext) {
+/// Import the clip and hand back the id it was minted with — the identity
+/// the panel, the selection, and every row action name (the file stem
+/// `clip` is only its display name now).
+fn import_clip(harness: &Harness, cx: &mut TestAppContext) -> AssetId {
     harness.project.update(cx, |project, cx| {
-        project.import_media(vec![probed_clip("/media/clip.mov")], vec![], cx);
-    });
+        let summary = project.import_media(vec![probed_clip("/media/clip.mov")], vec![], cx);
+        summary.imported.first().expect("the clip is imported").0
+    })
 }
 
 fn properties_target(cx: &TestAppContext) -> PropertiesTarget {
@@ -165,22 +170,20 @@ fn document_assets_become_rows(cx: &mut TestAppContext) {
 #[gpui::test]
 fn selecting_an_asset_publishes_the_properties_target(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
-    import_clip(&harness, cx);
+    let clip = import_clip(&harness, cx);
 
     cx.update(|cx| {
-        panels::set_media_selection(vec!["clip".to_string()], cx);
+        panels::set_media_selection(vec![clip], cx);
     });
     assert_eq!(
         properties_target(cx),
-        PropertiesTarget::MediaAsset {
-            id: "clip".to_string()
-        },
+        PropertiesTarget::MediaAsset { id: clip }
     );
 
     // Several (or no) assets leave the panel empty — the single-asset
     // inspector is the only media target in this unit.
     cx.update(|cx| {
-        panels::set_media_selection(vec!["clip".to_string(), "other".to_string()], cx);
+        panels::set_media_selection(vec![clip, AssetId::next()], cx);
     });
     assert_eq!(properties_target(cx), PropertiesTarget::Empty);
 }
@@ -188,14 +191,14 @@ fn selecting_an_asset_publishes_the_properties_target(cx: &mut TestAppContext) {
 #[gpui::test]
 fn importing_does_not_place_a_layer_but_add_as_layer_does(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
-    import_clip(&harness, cx);
+    let clip = import_clip(&harness, cx);
 
     harness.project.read_with(cx, |project, cx| {
         let comp = project.active_composition(cx).expect("active composition");
         assert_eq!(comp.layer_count(), 0, "an import only imports");
     });
 
-    cx.update(|cx| add_asset_as_layer("clip", cx));
+    cx.update(|cx| add_asset_as_layer(clip, cx));
     cx.run_until_parked();
 
     harness.project.read_with(cx, |project, cx| {
@@ -215,29 +218,30 @@ fn importing_does_not_place_a_layer_but_add_as_layer_does(cx: &mut TestAppContex
 #[gpui::test]
 fn a_drop_places_the_selection_when_the_dragged_row_is_part_of_it(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
-    harness.project.update(cx, |project, cx| {
-        project.import_media(
+    let (a, b) = harness.project.update(cx, |project, cx| {
+        let summary = project.import_media(
             vec![probed_clip("/media/a.mov"), probed_clip("/media/b.mov")],
             vec![],
             cx,
         );
+        (summary.imported[0].0, summary.imported[1].0)
     });
 
     let drag = DraggedAsset {
-        asset_id: "a".to_string(),
+        asset_id: a,
         name: "a.mov".to_string(),
     };
     cx.update(|cx| {
-        panels::set_media_selection(vec!["a".to_string(), "b".to_string()], cx);
-        assert_eq!(dropped_asset_ids(&drag, cx), vec!["a", "b"]);
+        panels::set_media_selection(vec![a, b], cx);
+        assert_eq!(dropped_asset_ids(&drag, cx), vec![a, b]);
         // A row the selection does not hold travels alone.
-        panels::set_media_selection(vec!["b".to_string()], cx);
-        assert_eq!(dropped_asset_ids(&drag, cx), vec!["a"]);
+        panels::set_media_selection(vec![b], cx);
+        assert_eq!(dropped_asset_ids(&drag, cx), vec![a]);
     });
 
     // Dropping both is one undo step, at the frame the drop names.
     cx.update(|cx| {
-        panels::set_media_selection(vec!["a".to_string(), "b".to_string()], cx);
+        panels::set_media_selection(vec![a, b], cx);
         add_assets_as_layers(&dropped_asset_ids(&drag, cx), 24, cx);
     });
     cx.run_until_parked();
@@ -258,9 +262,9 @@ fn a_drop_places_the_selection_when_the_dragged_row_is_part_of_it(cx: &mut TestA
 #[gpui::test]
 fn new_composition_from_asset_uses_the_asset_settings(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
-    import_clip(&harness, cx);
+    let clip = import_clip(&harness, cx);
 
-    cx.update(|cx| new_composition_from_asset("clip", cx));
+    cx.update(|cx| new_composition_from_asset(clip, cx));
     cx.run_until_parked();
 
     harness.project.read_with(cx, |project, cx| {
@@ -280,54 +284,55 @@ fn new_composition_from_asset_uses_the_asset_settings(cx: &mut TestAppContext) {
 fn deleting_an_unused_asset_skips_the_confirmation(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
     // Register an asset no layer references.
+    let plate = AssetId::new(1);
     harness.project.update(cx, |project, cx| {
         let doc = project
             .document()
             .clone()
-            .with_media_asset_entry("plate", MediaAssetEntry::from_absolute("/media/plate.png"));
+            .with_media_asset_entry(plate, MediaAssetEntry::from_absolute("/media/plate.png"));
         project.commit_document(doc, ravel_core::runtime::InvalidationHint::None, cx);
     });
 
     AnyWindowHandle::from(harness.window)
         .update(cx, |_root, window, cx| {
-            request_delete_asset("plate", window, cx);
+            request_delete_asset(plate, window, cx);
         })
         .unwrap();
 
     assert!(!has_dialog(&harness, cx));
     harness.project.read_with(cx, |project, _| {
-        assert!(!project.document().media_assets.contains_key("plate"));
+        assert!(!project.document().media_assets.contains_key(&plate));
     });
 }
 
 #[gpui::test]
 fn deleting_an_in_use_asset_confirms_with_the_reference_count(cx: &mut TestAppContext) {
     let harness = open_panel(cx);
-    import_clip(&harness, cx);
-    cx.update(|cx| add_asset_as_layer("clip", cx));
+    let clip = import_clip(&harness, cx);
+    cx.update(|cx| add_asset_as_layer(clip, cx));
     cx.run_until_parked();
 
     // The confirmation names the referencing composition and layer and
     // carries the count.
     harness.project.read_with(cx, |project, _| {
-        let message = delete_confirmation(project.document(), "clip").expect("in use");
+        let message = delete_confirmation(project.document(), clip).expect("in use");
         assert!(message.contains("(1)"), "reference count: {message}");
         assert!(message.contains("Comp 1"), "comp name: {message}");
         assert!(message.contains("clip 1"), "layer name: {message}");
     });
 
     cx.update(|cx| {
-        panels::set_media_selection(vec!["clip".to_string()], cx);
+        panels::set_media_selection(vec![clip], cx);
     });
     AnyWindowHandle::from(harness.window)
         .update(cx, |_root, window, cx| {
-            request_delete_asset("clip", window, cx);
+            request_delete_asset(clip, window, cx);
         })
         .unwrap();
     assert!(has_dialog(&harness, cx), "in use asks first");
     harness.project.read_with(cx, |project, _| {
         assert!(
-            project.document().media_assets.contains_key("clip"),
+            project.document().media_assets.contains_key(&clip),
             "nothing is deleted before the confirmation"
         );
     });
@@ -339,7 +344,7 @@ fn deleting_an_in_use_asset_confirms_with_the_reference_count(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(!has_dialog(&harness, cx));
     harness.project.read_with(cx, |project, _| {
-        assert!(!project.document().media_assets.contains_key("clip"));
+        assert!(!project.document().media_assets.contains_key(&clip));
     });
     cx.read(|cx| {
         assert!(panels::media_selection(cx).is_empty());

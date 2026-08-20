@@ -108,6 +108,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(8)
         }
+        8 => {
+            migrate_v8_to_v9(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 8,
+                to: 9,
+                reason,
+            })?;
+            Ok(9)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -265,6 +273,36 @@ fn migrate_v6_to_v7(_manifest: &mut Value) -> Result<(), String> {
 /// the reverse: a v8 project opened by an older, display-referred build would
 /// render every colour too dark, and [`MigrationError::TooNew`] stops it.
 fn migrate_v7_to_v8(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
+/// `v8 → v9`: a media asset is identified by a minted id, not by its name.
+///
+/// The manifest itself is unchanged. The conversion is a **typed pass** over
+/// the loaded document
+/// ([`Document::upgrade_asset_references`](ravel_core::composition::Document::upgrade_asset_references)),
+/// applied by [`super::ProjectFile::from_archive`] for any archive older than
+/// v9 — the same shape as the three passes above, and for the same reason:
+/// this chain never sees `document/main.ron`. Up to v8 the key of
+/// `Document::media_assets` *was* the asset's display string, and all three
+/// reference systems (a `media` node's `asset_id` parameter, an `AudioSource`,
+/// and the `media` node an exposed declaration binds to) held that string; v9
+/// keys the table by `AssetId` and moves the string to
+/// `MediaAssetEntry::name`, so every reference has to be rewritten before it
+/// means the same thing (`docs/implementation/asset-identity-plan.md`).
+///
+/// **Why the version was bumped**, given that the pass could be driven by the
+/// shape of the data instead — a string key is unmistakably pre-v9: because
+/// the rewrite is *lossy on purpose*. A reference naming an asset the table
+/// does not hold becomes `AssetId::UNSET`, permanently offline, rather than
+/// keeping the name and reconnecting to whatever is imported under it next —
+/// and that decision must be taken exactly once, on the archive that was
+/// written before ids existed. Running it on a v9 document, where names are
+/// free to repeat and to be edited, would take working references offline.
+/// The bump also refuses the reverse: an older build opening a v9 project
+/// would read no asset at all, and [`MigrationError::TooNew`] stops it before
+/// it saves the references away.
+fn migrate_v8_to_v9(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 

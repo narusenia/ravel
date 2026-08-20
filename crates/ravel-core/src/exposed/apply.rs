@@ -74,18 +74,22 @@
 //! holds an `asset_id` into
 //! [`Document::media_assets`](crate::composition::Document::media_assets), and
 //! the file lives in that table. Applying one therefore does two things in the
-//! same document: it registers an entry for the path the caller gave, under the
-//! deterministic id `exposed:<declaration name>`, and it points the bound
-//! media node's `asset_id` at that entry.
+//! same document: it registers an entry for the path the caller gave, named
+//! `exposed:<declaration name>`, and it points the bound media node's
+//! `asset_id` at that entry's [`AssetId`].
 //!
-//! The id is derived from the declaration so that applying the same value
-//! twice is the same document, and so the entry says where it came from. The
-//! entry the node used to name is **left in the table**: another node, or a
-//! layer's audio source, may still reference it, and apply is not a garbage
-//! collector. By the same argument the derived id is never written over an
-//! entry the bound node does not already name
+//! Since `.ravprj` v9 the id is **minted**, so it cannot be derived from the
+//! declaration; the *name* is what is derived, and that is what makes applying
+//! the same value twice the same document — a re-apply looks the name up
+//! ([`Document::media_asset_id_by_name`]) and reuses the entry it left last
+//! time. The name also says where the entry came from.
+//!
+//! The entry the node used to reference is **left in the table**: another node,
+//! or a layer's audio source, may still reference it, and apply is not a
+//! garbage collector. By the same argument an entry the bound node does not
+//! already reference is never reused
 //! ([`ExposedApplyError::AssetIdTaken`]) — re-applying to one declaration is
-//! a swap, but replacing whatever else happens to sit on that id would swap
+//! a swap, but taking over whatever else happens to carry that name would swap
 //! media nobody asked about.
 //!
 //! Three consequences worth stating exactly:
@@ -119,12 +123,13 @@ use thiserror::Error;
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::composition::{
-    AssetKind, AssetPath, Composition, Document, MediaAssetEntry, graph_walk,
+    AssetKind, AssetPath, Composition, Document, MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS,
+    MediaAssetEntry, graph_walk,
 };
 use crate::eval::EvalContext;
 use crate::exposed::{ExposedBinding, ExposedParameter, ExposedType, ExposedValue, KeyRename};
 use crate::graph::{Graph, Node, Parameter, ParameterValue};
-use crate::id::NodeId;
+use crate::id::{AssetId, NodeId};
 use crate::types::{Color, FrameRate, Vec2, Vec3, Vec4};
 
 // ===========================================================================
@@ -261,10 +266,13 @@ pub enum ExposedApplyError {
     MediaUnresolved { name: String, path: AssetPath },
 
     #[error(
-        "exposed parameter {name:?} would register its media under the asset id {asset:?}, which already names {existing}"
+        "exposed parameter {name:?} would register its media under the asset name {asset:?}, which already names {existing}"
     )]
     AssetIdTaken {
         name: String,
+        /// The display name the declaration registers its asset under
+        /// ([`asset_name_for`]), not the asset's id: the id is minted here
+        /// and would tell the caller nothing about which declaration clashed.
         asset: String,
         existing: AssetPath,
     },
@@ -410,13 +418,12 @@ pub fn seed_value(
         .iter()
         .find(|parameter| parameter.key == binding.key)?;
 
-    if MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) && binding.key == ASSET_REFERENCE_KEY {
+    if MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) && binding.key == MEDIA_ASSET_PARAM_KEY {
         let ParameterValue::String(asset) = &current.value else {
             return None;
         };
-        return document
-            .media_assets
-            .get(asset)
+        return AssetId::from_param_value(asset)
+            .and_then(|id| document.get_media_asset(id))
             .map(|entry| ExposedValue::Media(entry.path.clone()));
     }
 
@@ -488,15 +495,23 @@ struct Inspected {
 enum Write {
     /// Store this parameter on this node.
     Parameter(NodeId, Parameter),
-    /// Register `entry` under `asset` and point the media node's parameter at
-    /// it — the two halves of a media swap, which land together or not at all.
+    /// Register `entry` and point the media node's parameter at it — the two
+    /// halves of a media swap, which land together or not at all.
+    ///
+    /// The id is not decided here: it is either the one the declaration
+    /// already owns or a freshly minted one, and telling those apart needs the
+    /// whole document, which [`apply`] has and [`inspect`] deliberately only
+    /// reads.
     Media {
         node: NodeId,
         key: String,
-        asset: String,
-        /// The asset id the node names today. `asset` replacing an entry this
-        /// does not name would take an unrelated asset with it.
-        current: String,
+        /// The display name to register the asset under
+        /// ([`asset_name_for`]).
+        name: String,
+        /// The asset the node references today, if it references one at all.
+        /// An entry the declaration does not already own is not overwritten:
+        /// doing so would take an unrelated asset with it.
+        current: Option<AssetId>,
         entry: Box<MediaAssetEntry>,
     },
     /// The binding is sound and there is nothing to store: a media
@@ -544,9 +559,9 @@ fn inspect(
         // id into one of those changes nothing the processor reads while
         // corrupting the parameter it does hit. The key has to be the one the
         // processor looks the asset up by.
-        if binding.key != ASSET_REFERENCE_KEY {
+        if binding.key != MEDIA_ASSET_PARAM_KEY {
             return Err(issue(BindingIssueReason::NotAnAssetReference {
-                expected: ASSET_REFERENCE_KEY,
+                expected: MEDIA_ASSET_PARAM_KEY,
             }));
         }
         // The asset reference itself holding something other than a string is
@@ -558,25 +573,32 @@ fn inspect(
                 parameter_kind: parameter_kind(&current.value),
             }));
         };
+        // A reference that is not an id at all — the template default `""`,
+        // or a pre-v9 name in a document assembled by hand — names no asset,
+        // which is the same starting point as a node nobody has pointed
+        // anywhere yet.
+        let references_today = AssetId::from_param_value(names_today);
         let Some(resolved) = resolved_media else {
             return Ok(Inspected {
                 write: Write::Nothing,
                 unapplied: None,
             });
         };
+        let name = asset_name_for(declaration.name());
         return Ok(Inspected {
             write: Write::Media {
                 node: binding.node,
                 key: binding.key.clone(),
-                asset: asset_id_for(declaration.name()),
-                current: names_today.clone(),
+                current: references_today,
                 entry: Box::new(MediaAssetEntry {
+                    name: name.clone(),
                     path: path.clone(),
                     kind: AssetKind::infer_from_path(resolved),
                     metadata: Default::default(),
                     color_space: None,
                     resolved: Some(resolved.to_path_buf()),
                 }),
+                name,
             },
             unapplied: None,
         });
@@ -610,35 +632,23 @@ fn inspect(
     }
 }
 
-/// The node types whose `asset_id` parameter a media declaration may bind to.
+/// The display name a media declaration registers its asset under.
 ///
-/// `"video"` is the pre-normalization alias
-/// (`Document::normalize_node_type_aliases`): a loaded document only holds
-/// `"media"`, but a document assembled in memory can still carry the old key,
-/// and refusing to swap its media would be a surprise with no upside.
-const MEDIA_TYPE_KEYS: [&str; 2] = ["media", "video"];
-
-/// The parameter a media node reads its asset from.
+/// Since `.ravprj` v9 an asset's identity is a minted
+/// [`AssetId`](crate::id::AssetId), which by construction cannot be derived
+/// from a declaration name — so the thing that *is* derived, and that makes
+/// applying the same value twice produce the same document, is this name. A
+/// re-apply finds the entry it left last time by looking the name up
+/// ([`Document::media_asset_id_by_name`]) and reuses that entry's id.
 ///
-/// This is the key the processor looks the asset table up by
-/// (`ravel_nodes::media`), so it is the only key a media declaration can bind
-/// to and have any effect. Naming it here rather than accepting "any string
-/// parameter" keeps a swap that reports success from being one that changes
-/// no picture.
-const ASSET_REFERENCE_KEY: &str = "asset_id";
-
-/// The asset table id a media declaration registers under.
+/// An entry is only ever written when this name is free or when the
+/// declaration's own node already references the entry holding it
+/// ([`ExposedApplyError::AssetIdTaken`]): replacing an entry some other node —
+/// or a layer's audio source — reads would swap media nobody asked to swap.
 ///
-/// The id is only ever written when it is free or when the declaration's own
-/// node already names it ([`ExposedApplyError::AssetIdTaken`]): replacing an
-/// entry some other node — or a layer's audio source — reads would swap media
-/// nobody asked to swap.
-///
-/// Derived from the declaration name so that applying the same value twice
-/// produces the same document, and so an entry in a saved project says which
-/// declaration put it there. The prefix keeps it clear of the file-stem ids
-/// the import path mints.
-fn asset_id_for(name: &str) -> String {
+/// The prefix keeps it clear of the file-stem names the import path mints, and
+/// says which declaration put the entry in a saved project.
+fn asset_name_for(name: &str) -> String {
     format!("exposed:{name}")
 }
 
@@ -725,7 +735,7 @@ pub fn apply(
     let mut writes: HashMap<NodeId, Vec<Parameter>> = HashMap::new();
     // Collected rather than installed as they are found: a refusal below has
     // to leave the document exactly as it arrived.
-    let mut assets: Vec<(String, MediaAssetEntry)> = Vec::new();
+    let mut assets: Vec<(AssetId, MediaAssetEntry)> = Vec::new();
     let mut issues = Vec::new();
     for declaration in declarations.iter() {
         let Some(value) = values.get(declaration.name()) else {
@@ -742,29 +752,39 @@ pub fn apply(
                     Write::Media {
                         node,
                         key,
-                        asset,
+                        name,
                         current,
                         entry,
                     } => {
-                        // Registering under an id the bound node does not
-                        // already name would replace whatever that id holds —
-                        // and every other node and audio source that reads it
-                        // (see `asset_id_for`). Re-applying to the same
-                        // declaration is the one case where the id is
-                        // legitimately in use: the node names it because a
-                        // previous apply put it there.
-                        if current != asset
-                            && let Some(existing) = document.get_media_asset(&asset)
-                        {
-                            return Err(ExposedApplyError::AssetIdTaken {
-                                name: declaration.name().to_string(),
-                                asset,
-                                existing: existing.path.clone(),
-                            });
-                        }
+                        // The entry this declaration left on an earlier apply,
+                        // found by the name it derives (see `asset_name_for`).
+                        let owned = document.media_asset_id_by_name(&name);
+                        // Reusing an entry the bound node does not already
+                        // reference would replace media that node has nothing
+                        // to do with — and take every other node and audio
+                        // source reading it along. Re-applying to the same
+                        // declaration is the one case where the entry is
+                        // legitimately in use: the node references it because
+                        // a previous apply put it there.
+                        let asset = match owned {
+                            Some(id) if current == Some(id) => id,
+                            Some(id) => {
+                                let existing = document
+                                    .get_media_asset(id)
+                                    .expect("the id came from the asset table");
+                                return Err(ExposedApplyError::AssetIdTaken {
+                                    name: declaration.name().to_string(),
+                                    asset: name,
+                                    existing: existing.path.clone(),
+                                });
+                            }
+                            // Nothing of that name yet, so this declaration
+                            // has never been applied to this document: mint.
+                            None => AssetId::next(),
+                        };
                         writes.entry(node).or_default().push(Parameter {
                             key,
-                            value: ParameterValue::String(asset.clone()),
+                            value: ParameterValue::String(asset.to_param_value()),
                         });
                         assets.push((asset, *entry));
                     }
@@ -1688,21 +1708,30 @@ mod tests {
         NodeId::new(3)
     }
 
-    /// A document whose layer network holds a media node pointing at the asset
-    /// `original`, with `plate` declared against its asset reference.
+    /// The asset `media_document`'s node starts out referencing. A fixed id so
+    /// a test can name both halves of the reference.
+    fn original_asset() -> AssetId {
+        AssetId::new(1)
+    }
+
+    /// A document whose layer network holds a media node referencing the asset
+    /// named `original`, with `plate` declared against its asset reference.
     fn media_document() -> Document {
         let network = Graph::new()
             .add_node(
                 Node::new(media_node(), "media")
                     .with_output("frame", DataTypeId::FRAME_BUFFER)
-                    .with_param("asset_id", ParameterValue::String("original".into())),
+                    .with_param(
+                        "asset_id",
+                        ParameterValue::String(original_asset().to_param_value()),
+                    ),
             )
             .unwrap();
         let comp = Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 100)
             .add_layer(Layer::new(LayerId::new(1), "Plate", network).with_time(0, 0, 100));
         Document::default()
             .with_composition(comp)
-            .with_media_asset("original", "/footage/original.mov")
+            .with_media_asset(original_asset(), "/footage/original.mov")
             .with_exposed_parameters(declarations([ExposedParameter::inferred(
                 "plate",
                 ExposedValue::Media(AssetPath::Relative("./footage/original.mov".into())),
@@ -1711,17 +1740,26 @@ mod tests {
             .unwrap()]))
     }
 
-    /// What the media processor reads: the node's `asset_id`, and the location
-    /// the document's asset table resolves it to.
-    fn media_source(document: &Document) -> (String, Option<PathBuf>) {
-        let ParameterValue::String(asset_id) = parameter_of(document, media_node(), "asset_id")
+    /// What the media processor reads: the asset the node references, and the
+    /// location the document's asset table resolves it to.
+    fn media_source(document: &Document) -> (Option<AssetId>, Option<PathBuf>) {
+        let ParameterValue::String(stored) = parameter_of(document, media_node(), "asset_id")
         else {
             panic!("the asset reference is a string");
         };
-        let resolved = document
-            .get_media_asset(&asset_id)
+        let asset = AssetId::from_param_value(&stored);
+        let resolved = asset
+            .and_then(|id| document.get_media_asset(id))
             .and_then(|entry| entry.resolved.clone());
-        (asset_id, resolved)
+        (asset, resolved)
+    }
+
+    /// The display name of the asset `document`'s media node references.
+    fn media_asset_name(document: &Document) -> Option<String> {
+        let (asset, _) = media_source(document);
+        asset
+            .and_then(|id| document.get_media_asset(id))
+            .map(|entry| entry.name.clone())
     }
 
     fn parameter_of(document: &Document, node: NodeId, key: &str) -> ParameterValue {
@@ -1755,7 +1793,7 @@ mod tests {
         let root = project_with_footage();
         let document = media_document();
         let before = media_source(&document);
-        assert_eq!(before.0, "original");
+        assert_eq!(before.0, Some(original_asset()));
 
         let applied = apply(
             document,
@@ -1769,7 +1807,11 @@ mod tests {
         assert!(applied.issues.is_empty(), "{:?}", applied.issues);
 
         let (asset_id, resolved) = media_source(&applied.document);
-        assert_eq!(asset_id, "exposed:plate", "the node names the new entry");
+        assert_eq!(
+            media_asset_name(&applied.document).as_deref(),
+            Some("exposed:plate"),
+            "the node references the entry this declaration registered"
+        );
         assert_eq!(
             resolved.as_deref(),
             Some(root.path().join("footage/replacement.mov").as_path()),
@@ -1777,13 +1819,15 @@ mod tests {
         );
         assert_ne!((asset_id, resolved), before);
 
-        // The entry the node used to name is still there: another node or a
-        // layer's audio source may reference it.
-        assert!(applied.document.get_media_asset("original").is_some());
+        // The entry the node used to reference is still there: another node or
+        // a layer's audio source may reference it.
+        assert!(applied.document.get_media_asset(original_asset()).is_some());
     }
 
-    /// Applying the same reference twice is the same document: the asset id is
-    /// derived from the declaration, not minted.
+    /// Applying the same reference twice is the same document. The id *is*
+    /// minted, so idempotence rests on the second apply finding the entry the
+    /// first one registered — by the name the declaration derives — and
+    /// reusing its id instead of minting a second one.
     #[test]
     fn swapping_the_same_media_twice_is_idempotent() {
         let root = project_with_footage();
@@ -1800,17 +1844,22 @@ mod tests {
         assert_eq!(once, twice);
     }
 
-    /// The id is derived, not minted, so it can collide with an asset that is
-    /// already there. Overwriting would swap the media under every other node
-    /// and audio source that reads that id, so the swap is refused instead.
+    /// The **name** the declaration registers under is derived, so it can
+    /// already be taken by an entry the bound node does not reference. Reusing
+    /// that entry would swap the media under every other node and audio source
+    /// reading it, so the swap is refused instead.
     #[test]
     fn a_swap_that_would_overwrite_an_unrelated_asset_is_refused() {
         let root = project_with_footage();
-        // An unrelated asset already sitting on the id this declaration
+        // An unrelated asset already carrying the name this declaration
         // derives — a hand-edited project, or one saved after a declaration
         // was renamed.
-        let document =
-            media_document().with_media_asset("exposed:plate", "/footage/somebody_elses.mov");
+        let occupant = AssetId::new(77);
+        let document = media_document().with_media_asset_entry(occupant, {
+            let mut entry = MediaAssetEntry::from_absolute("/footage/somebody_elses.mov");
+            entry.name = "exposed:plate".to_string();
+            entry
+        });
 
         let err = apply(
             document.clone(),
@@ -1820,7 +1869,7 @@ mod tests {
             )]),
             AssetContext::rooted(root.path()),
         )
-        .expect_err("the id is taken by an asset this node does not name");
+        .expect_err("the name is taken by an asset this node does not reference");
         assert!(matches!(
             err,
             ExposedApplyError::AssetIdTaken { ref name, ref asset, .. }
@@ -1828,13 +1877,15 @@ mod tests {
         ));
 
         assert_eq!(
-            document
-                .get_media_asset("exposed:plate")
-                .map(|e| e.path.clone()),
+            document.get_media_asset(occupant).map(|e| e.path.clone()),
             Some(AssetPath::Absolute("/footage/somebody_elses.mov".into())),
             "the occupant is untouched"
         );
-        assert_eq!(media_source(&document).0, "original", "and so is the node");
+        assert_eq!(
+            media_source(&document).0,
+            Some(original_asset()),
+            "and so is the node"
+        );
     }
 
     /// The failure this rule exists for: a render that starts and produces
@@ -1861,7 +1912,7 @@ mod tests {
         }
         assert_eq!(
             media_source(&document).0,
-            "original",
+            Some(original_asset()),
             "a refused call writes nothing"
         );
     }
@@ -1934,7 +1985,10 @@ mod tests {
             )
             .unwrap_or_else(|err| panic!("{path} should resolve: {err}"));
             let (asset_id, resolved) = media_source(&applied.document);
-            assert_eq!(asset_id, "exposed:plate");
+            assert_eq!(
+                media_asset_name(&applied.document).as_deref(),
+                Some("exposed:plate")
+            );
             assert_eq!(resolved.as_deref(), Some(absolute.as_path()), "{path}");
 
             // The persisted form is the one the caller gave: a relative or
@@ -1943,7 +1997,7 @@ mod tests {
             assert_eq!(
                 applied
                     .document
-                    .get_media_asset("exposed:plate")
+                    .get_media_asset(asset_id.expect("the node references an asset"))
                     .unwrap()
                     .path,
                 path
@@ -1957,7 +2011,7 @@ mod tests {
     #[test]
     fn a_swap_does_not_compensate_for_a_different_size_or_duration() {
         let root = project_with_footage();
-        let document = media_document().with_media_asset_entry("original", {
+        let document = media_document().with_media_asset_entry(original_asset(), {
             let mut entry = MediaAssetEntry::from_absolute("/footage/original.mov");
             entry.metadata.width = Some(4096);
             entry.metadata.height = Some(2160);
@@ -1995,7 +2049,7 @@ mod tests {
         // new file needs a decoder, which the core layer does not have.
         let entry = applied
             .document
-            .get_media_asset("exposed:plate")
+            .get_media_asset(media_source(&applied.document).0.expect("a reference"))
             .expect("the new entry");
         assert_eq!(entry.metadata, Default::default());
         assert_eq!(entry.kind, AssetKind::Container);
@@ -2012,7 +2066,10 @@ mod tests {
             .add_node(
                 Node::new(media_node(), "media")
                     .with_output("frame", DataTypeId::FRAME_BUFFER)
-                    .with_param("asset_id", ParameterValue::String("original".into()))
+                    .with_param(
+                        "asset_id",
+                        ParameterValue::String(original_asset().to_param_value()),
+                    )
                     // Any other string parameter a media node may carry.
                     .with_param("label", ParameterValue::String("Plate A".into())),
             )
@@ -2021,7 +2078,7 @@ mod tests {
             .add_layer(Layer::new(LayerId::new(1), "Plate", network).with_time(0, 0, 100));
         let document = Document::default()
             .with_composition(comp)
-            .with_media_asset("original", "/footage/original.mov")
+            .with_media_asset(original_asset(), "/footage/original.mov")
             .with_exposed_parameters(declarations([ExposedParameter::inferred(
                 "plate",
                 ExposedValue::Media(AssetPath::Relative("./footage/original.mov".into())),
@@ -2057,10 +2114,13 @@ mod tests {
         );
         assert_eq!(
             media_source(&applied.document).0,
-            "original",
+            Some(original_asset()),
             "and the asset the node actually reads is unchanged"
         );
-        assert!(applied.document.get_media_asset("exposed:plate").is_none());
+        assert_eq!(
+            applied.document.media_asset_id_by_name("exposed:plate"),
+            None
+        );
     }
 
     /// A media declaration bound to something that is not a media node writes
@@ -2101,8 +2161,9 @@ mod tests {
             ParameterValue::String("Ravel".into()),
             "the text parameter is untouched"
         );
-        assert!(
-            applied.document.get_media_asset("exposed:plate").is_none(),
+        assert_eq!(
+            applied.document.media_asset_id_by_name("exposed:plate"),
+            None,
             "and no asset was registered for a swap that did not happen"
         );
     }

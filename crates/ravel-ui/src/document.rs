@@ -16,10 +16,12 @@
 //! keeps them cheap).
 
 use ravel_core::composition::templates::{LayerTemplate, TemplateError};
-use ravel_core::composition::{Composition, Document, Layer};
+use ravel_core::composition::{
+    Composition, Document, Layer, MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS,
+};
 use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, Node, ParameterValue, PortSide};
-use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::id::{AssetId, CompId, LayerId, NodeId};
 use ravel_core::network::PinRename;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::types::{Color, FrameRate};
@@ -518,8 +520,8 @@ fn unique_layer_name(comp: &Composition, base: &str) -> String {
 pub struct MediaLayerSpec<'a> {
     /// Base of the layer name (uniquified within the composition).
     pub name_base: &'a str,
-    /// Asset id the media node is bound to.
-    pub asset_id: &'a str,
+    /// Asset the media node is bound to.
+    pub asset_id: AssetId,
     /// Composition frame the layer starts at (the playhead on import).
     pub start_frame: i64,
     /// Source-local end frame: the asset's length in composition frames, or
@@ -564,19 +566,23 @@ pub fn add_media_layer(
     // least one frame.
     let mut layer =
         Layer::new(id, name, network).with_time(spec.start_frame, 0, spec.out_frame.max(1));
-    layer.audio = spec
-        .audio_stream_index
-        .map(|stream_index| ravel_core::composition::AudioSource::new(spec.asset_id, stream_index));
+    layer.audio = spec.audio_stream_index.map(|stream_index| {
+        ravel_core::composition::AudioSource::new(spec.asset_id.to_param_value(), stream_index)
+    });
     Ok(add_layer(doc, comp, layer).map(|doc| (doc, id)))
 }
 
-/// Set the `asset_id` parameter on every media node in a freshly
+/// Set the asset reference parameter on every media node in a freshly
 /// instantiated network (`media`, with `video` accepted as the persisted
 /// alias).
-fn bind_media_asset_id(mut network: Graph, asset_id: &str) -> Graph {
+///
+/// The single place the spelling a `media` node stores is minted: the
+/// parameter is a plain string and holds the id in decimal
+/// (`AssetId::to_param_value`).
+fn bind_media_asset_id(mut network: Graph, asset_id: AssetId) -> Graph {
     let media_nodes: Vec<std::sync::Arc<Node>> = network
         .nodes()
-        .filter(|node| matches!(node.type_key.as_str(), "media" | "video"))
+        .filter(|node| MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()))
         .cloned()
         .collect();
     for node in media_nodes {
@@ -584,12 +590,12 @@ fn bind_media_asset_id(mut network: Graph, asset_id: &str) -> Graph {
         match updated
             .parameters
             .iter_mut()
-            .find(|param| param.key == "asset_id")
+            .find(|param| param.key == MEDIA_ASSET_PARAM_KEY)
         {
-            Some(param) => param.value = ParameterValue::String(asset_id.to_string()),
+            Some(param) => param.value = ParameterValue::String(asset_id.to_param_value()),
             None => updated.parameters.push(ravel_core::graph::Parameter {
-                key: "asset_id".to_string(),
-                value: ParameterValue::String(asset_id.to_string()),
+                key: MEDIA_ASSET_PARAM_KEY.to_string(),
+                value: ParameterValue::String(asset_id.to_param_value()),
             }),
         }
         network = network.replace_node(std::sync::Arc::new(updated));
@@ -617,7 +623,7 @@ pub fn add_media_layers(
     doc: &Document,
     comp: CompId,
     registry: &NodeRegistry,
-    asset_ids: &[String],
+    asset_ids: &[AssetId],
     start_frame: i64,
 ) -> (Document, Vec<LayerId>) {
     let mut next = doc.clone();
@@ -628,7 +634,7 @@ pub fn add_media_layers(
     else {
         return (next, created);
     };
-    for asset_id in asset_ids {
+    for &asset_id in asset_ids {
         let Some(entry) = next.get_media_asset(asset_id) else {
             continue;
         };
@@ -652,7 +658,7 @@ pub fn add_media_layers(
             .duration_secs
             .map(|secs| (secs * frame_rate.as_f64()).ceil().max(1.0) as u64)
             .unwrap_or(duration_frames);
-        let name_base = media_layer_name_base(asset_id, entry);
+        let name_base = media_layer_name_base(entry);
         // A template that fails to instantiate or a composition that vanished
         // skips this asset; the rest of the batch still lands.
         if let Ok(Some((doc, layer_id))) = add_media_layer(
@@ -681,19 +687,19 @@ fn is_audio_only(entry: &ravel_core::composition::MediaAssetEntry) -> bool {
     entry.kind == ravel_core::composition::AssetKind::Container && entry.metadata.width.is_none()
 }
 
-/// Base name of a media layer: the asset's file stem, or the asset id when
-/// the persisted path yields none (a bare `${VAR}` token, a trailing
+/// Base name of a media layer: the asset's file stem, or the asset's own
+/// [`MediaAssetEntry::name`](ravel_core::composition::MediaAssetEntry::name)
+/// when the persisted path yields none (a bare `${VAR}` token, a trailing
 /// separator).
-fn media_layer_name_base(
-    asset_id: &str,
-    entry: &ravel_core::composition::MediaAssetEntry,
-) -> String {
+///
+/// Never the id: a layer called `7` tells the user nothing.
+fn media_layer_name_base(entry: &ravel_core::composition::MediaAssetEntry) -> String {
     let path = entry.path.to_string();
     std::path::Path::new(&path)
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .filter(|stem| !stem.is_empty() && !stem.starts_with("${"))
-        .unwrap_or_else(|| asset_id.to_string())
+        .unwrap_or_else(|| entry.name.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,6 +1443,7 @@ mod tests {
     fn media_layer_binds_the_shell_audio_to_the_same_asset() {
         let (doc, comp) = doc_with_layers(0);
         let template = ravel_core::composition::templates::builtin_layer_template("media").unwrap();
+        let clip = AssetId::next();
         let (doc, id) = add_media_layer(
             &doc,
             comp,
@@ -1444,7 +1451,7 @@ mod tests {
             &registry(),
             MediaLayerSpec {
                 name_base: "clip",
-                asset_id: "clip",
+                asset_id: clip,
                 start_frame: 12,
                 out_frame: 48,
                 audio_stream_index: Some(1),
@@ -1459,7 +1466,7 @@ mod tests {
             (12, 0, 48)
         );
         let audio = layer.audio.as_ref().expect("audio source");
-        assert_eq!(audio.asset_id, "clip");
+        assert_eq!(AssetId::from_param_value(&audio.asset_id), Some(clip));
         assert_eq!(audio.stream_index, 1);
         // The media node points at the same asset — one asset, two consumers.
         let media = layer
@@ -1467,9 +1474,10 @@ mod tests {
             .nodes()
             .find(|node| node.type_key == "media")
             .expect("media node");
-        assert!(
-            media.parameters.iter().any(|param| param.key == "asset_id"
-                && param.value == ParameterValue::String("clip".into()))
+        assert_eq!(
+            ravel_core::composition::node_asset_reference(media),
+            Some(clip),
+            "the picture and the sound name one asset"
         );
     }
 
@@ -1486,7 +1494,7 @@ mod tests {
             &registry(),
             MediaLayerSpec {
                 name_base: "plate",
-                asset_id: "plate",
+                asset_id: AssetId::next(),
                 start_frame: 0,
                 out_frame: 10,
                 audio_stream_index: None,

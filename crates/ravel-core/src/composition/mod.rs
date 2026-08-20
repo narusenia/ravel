@@ -15,6 +15,8 @@
 //! enabling structural sharing for undo.
 
 pub mod asset;
+pub mod asset_legacy;
+mod asset_upgrade;
 mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
@@ -27,15 +29,15 @@ pub mod validate;
 pub use color_upgrade::{ColorMigrationNote, ColorMigrationReport, is_color_param};
 
 pub use asset::{
-    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource, MediaAssetEntry,
-    expand_variables,
+    AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource,
+    MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS, MediaAssetEntry, expand_variables, name_from_path,
 };
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
 use crate::exposed::ExposedParameters;
-use crate::graph::{Graph, InputPort, Parameter, PortSide};
-use crate::id::{CompId, DataTypeId, EdgeId, LayerId, NodeId};
+use crate::graph::{Graph, InputPort, Node, Parameter, ParameterValue, PortSide};
+use crate::id::{AssetId, CompId, DataTypeId, EdgeId, LayerId, NodeId};
 use crate::network;
 use crate::registry::NodeRegistry;
 use crate::types::{Color, FrameRate};
@@ -544,7 +546,12 @@ impl Composition {
 /// the whole [`Document`] for that would pin a snapshot's compositions and
 /// layer graphs alive. Crates outside `ravel-core` cannot spell `im::HashMap`
 /// (it is not their dependency), so the alias is what makes that possible.
-pub type MediaAssets = im::HashMap<String, MediaAssetEntry>;
+///
+/// Keyed by [`AssetId`] since `.ravprj` v9. The display string that used to be
+/// the key lives on [`MediaAssetEntry::name`], so renaming an asset breaks no
+/// reference and a re-imported file is a different asset rather than the same
+/// one (`docs/implementation/asset-identity-plan.md`).
+pub type MediaAssets = im::HashMap<AssetId, MediaAssetEntry>;
 
 /// Unified document snapshot containing the node graph and all compositions.
 ///
@@ -609,31 +616,57 @@ mod compositions_serde {
     }
 }
 
-/// Serde adapter for `im::HashMap<String, MediaAssetEntry>`: serialized as a
-/// key-sorted `Vec<(String, MediaAssetEntry)>` so the output is deterministic
-/// and diff-friendly.
+/// Serde adapter for [`MediaAssets`]: serialized as an [`AssetId`]-sorted
+/// `Vec<(AssetId, MediaAssetEntry)>` so the output is deterministic and
+/// diff-friendly.
+///
+/// Reading a pre-v9 document — whose keys are the display strings — needs
+/// nothing here: [`AssetId`]'s own deserializer accepts a string and mints an
+/// id for it (see [`asset_legacy`]). Sorting by id rather than by that string
+/// changes the *order* entries are written in for an upgraded project, not
+/// their content.
 mod media_assets_serde {
-    use super::MediaAssetEntry;
+    use super::{AssetId, MediaAssetEntry};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(
-        value: &im::HashMap<String, MediaAssetEntry>,
+        value: &im::HashMap<AssetId, MediaAssetEntry>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let mut entries: Vec<(&str, &MediaAssetEntry)> = value
-            .iter()
-            .map(|(id, entry)| (id.as_str(), entry))
-            .collect();
+        let mut entries: Vec<(AssetId, &MediaAssetEntry)> =
+            value.iter().map(|(id, entry)| (*id, entry)).collect();
         entries.sort_by_key(|(id, _)| *id);
         entries.serialize(serializer)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<im::HashMap<String, MediaAssetEntry>, D::Error> {
-        let entries = Vec::<(String, MediaAssetEntry)>::deserialize(deserializer)?;
+    ) -> Result<im::HashMap<AssetId, MediaAssetEntry>, D::Error> {
+        let entries = Vec::<(AssetId, MediaAssetEntry)>::deserialize(deserializer)?;
         Ok(entries.into_iter().collect())
     }
+}
+
+/// The [`AssetId`] a `media` node's parameter references, or `None` when the
+/// node is not a media node, has no reference parameter, or holds something
+/// that is not an id (the template default `""`, or a pre-v9 name in a
+/// document the v8 → v9 upgrade has not run over yet).
+///
+/// An id this returns need **not** be in the document's asset table: an
+/// offline reference is a real, persisted state, and every caller — the
+/// processor, the watermark scan, the "which layers use this asset?" query —
+/// has to see it.
+pub fn node_asset_reference(node: &Node) -> Option<AssetId> {
+    if !MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) {
+        return None;
+    }
+    node.parameters
+        .iter()
+        .find(|param| param.key == MEDIA_ASSET_PARAM_KEY)
+        .and_then(|param| match &param.value {
+            ParameterValue::String(text) => AssetId::from_param_value(text),
+            _ => None,
+        })
 }
 
 /// The largest raw id of each kind used in a [`Document`], as reported by
@@ -644,6 +677,7 @@ pub struct IdWatermarks {
     pub edge: u64,
     pub comp: u64,
     pub layer: u64,
+    pub asset: u64,
 }
 
 /// A structural invariant violation found by [`Document::validate`]
@@ -1162,6 +1196,21 @@ impl Document {
         self.map_graphs(curve_upgrade::upgrade_graph)
     }
 
+    /// Point every `.ravprj` v8 asset reference at the [`AssetId`] its display
+    /// string was interned to while the document was read — a `media` node's
+    /// parameter in every graph, and every layer's [`AudioSource`].
+    ///
+    /// `legacy` comes from
+    /// [`asset_legacy::scoped`](asset_legacy::scoped), which must wrap the
+    /// deserialization this document came out of. Mints no ids: they were all
+    /// minted during that deserialization, from a counter no stored document
+    /// has ever used, so its position relative to
+    /// [`Self::advance_id_counters`] is free. See
+    /// [`asset_upgrade`](self) for the reference that resolves to nothing.
+    pub fn upgrade_asset_references(self, legacy: &asset_legacy::LegacyAssetKeys) -> Self {
+        asset_upgrade::upgrade(self, legacy)
+    }
+
     /// Reinterpret every authored colour for the linear working space
     /// (`.ravprj` v7 → v8), in every graph of the document — the flat graph,
     /// each layer network, and nested subnets.
@@ -1264,17 +1313,13 @@ impl Document {
     /// Register a media asset that already has a known absolute location
     /// (import, `Relink`, and every test fixture). The persisted form starts
     /// out absolute and narrows to project-relative at save time.
-    pub fn with_media_asset(
-        self,
-        id: impl Into<String>,
-        path: impl Into<std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_media_asset(self, id: AssetId, path: impl Into<std::path::PathBuf>) -> Self {
         self.with_media_asset_entry(id, MediaAssetEntry::from_absolute(path))
     }
 
     /// Register a fully-described media asset.
-    pub fn with_media_asset_entry(mut self, id: impl Into<String>, entry: MediaAssetEntry) -> Self {
-        self.media_assets.insert(id.into(), entry);
+    pub fn with_media_asset_entry(mut self, id: AssetId, entry: MediaAssetEntry) -> Self {
+        self.media_assets.insert(id, entry);
         self
     }
 
@@ -1304,7 +1349,7 @@ impl Document {
         self.media_assets = self
             .media_assets
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.resolved_against(project_root, vars)))
+            .map(|(id, entry)| (*id, entry.resolved_against(project_root, vars)))
             .collect();
         self
     }
@@ -1316,7 +1361,7 @@ impl Document {
         self.media_assets = self
             .media_assets
             .iter()
-            .map(|(id, entry)| (id.clone(), entry.relativized(project_root)))
+            .map(|(id, entry)| (*id, entry.relativized(project_root)))
             .collect();
         self
     }
@@ -1325,8 +1370,32 @@ impl Document {
         self.compositions.get(&id)
     }
 
-    pub fn get_media_asset(&self, id: &str) -> Option<&MediaAssetEntry> {
-        self.media_assets.get(id)
+    pub fn get_media_asset(&self, id: AssetId) -> Option<&MediaAssetEntry> {
+        self.media_assets.get(&id)
+    }
+
+    /// The id of the asset called `name`, or `None` when no asset is.
+    ///
+    /// A linear scan, and deliberately not an index: names are **not unique**
+    /// — two imports of the same file stem are two assets with one name — so
+    /// there is nothing to index by. `Some` means exactly one entry carries
+    /// the name; two or more is reported as `None` rather than picking one,
+    /// because picking one is how a lookup silently touches the wrong asset.
+    /// Callers that hold an id use [`Self::get_media_asset`]; this exists for
+    /// the paths that only ever had a name (the v8 → v9 upgrade, and the
+    /// exposed-parameter contract, whose declarations name assets rather than
+    /// numbering them).
+    pub fn media_asset_id_by_name(&self, name: &str) -> Option<AssetId> {
+        let mut found = None;
+        for (id, entry) in &self.media_assets {
+            if entry.name == name {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(*id);
+            }
+        }
+        found
     }
 
     /// Network ownership paths whose contents changed between `old` and
@@ -1380,6 +1449,13 @@ impl Document {
     /// fresh allocation can never retarget a persisted reference
     /// (REQ-LAYER-009). No node parameter carries a `CompId` yet (PreComp
     /// is v2), so there is nothing composition-valued to scan.
+    ///
+    /// Asset references are scanned for the same reason, and it matters more
+    /// than for layers: a `media` node or an `AudioSource` may name an
+    /// [`AssetId`] the asset table no longer holds — that is what an offline
+    /// reference *is* after v9 — and a fresh id landing on that number would
+    /// reconnect the reference to an unrelated import, the exact silent
+    /// mis-link v9 exists to prevent.
     pub fn id_watermarks(&self) -> IdWatermarks {
         fn scan_graph(graph: &Graph, watermarks: &mut IdWatermarks) {
             for node in graph.nodes() {
@@ -1398,6 +1474,12 @@ impl Document {
             for target in targets {
                 watermarks.layer = watermarks.layer.max(target.raw());
             }
+            // `media` node parameters reference assets by id, in any graph.
+            for node in graph.nodes() {
+                if let Some(asset) = node_asset_reference(node) {
+                    watermarks.asset = watermarks.asset.max(asset.raw());
+                }
+            }
         }
 
         let mut watermarks = IdWatermarks::default();
@@ -1405,10 +1487,18 @@ impl Document {
         if let Some(root) = self.root_comp {
             watermarks.comp = watermarks.comp.max(root.raw());
         }
+        for (id, _) in &self.media_assets {
+            watermarks.asset = watermarks.asset.max(id.raw());
+        }
         for (comp_id, comp) in &self.compositions {
             watermarks.comp = watermarks.comp.max(comp_id.raw()).max(comp.id.raw());
             for layer in &comp.layers {
                 watermarks.layer = watermarks.layer.max(layer.id.raw());
+                if let Some(audio) = &layer.audio
+                    && let Some(asset) = AssetId::from_param_value(&audio.asset_id)
+                {
+                    watermarks.asset = watermarks.asset.max(asset.raw());
+                }
                 if let Some(parent) = layer.parent {
                     watermarks.layer = watermarks.layer.max(parent.raw());
                 }
@@ -1429,6 +1519,7 @@ impl Document {
         EdgeId::advance_counter_past(watermarks.edge);
         CompId::advance_counter_past(watermarks.comp);
         LayerId::advance_counter_past(watermarks.layer);
+        AssetId::advance_counter_past(watermarks.asset);
     }
 
     /// Structural validation of a deserialized document: the invariants
@@ -1508,6 +1599,7 @@ impl Document {
             ("edge", watermarks.edge),
             ("comp", watermarks.comp),
             ("layer", watermarks.layer),
+            ("asset", watermarks.asset),
         ] {
             if raw == u64::MAX {
                 return Err(DocumentValidationError::IdExhausted { kind });
@@ -2617,14 +2709,14 @@ mod tests {
         let doc = Document::new(flat)
             .with_composition(comp)
             .with_media_asset_entry(
-                "plate",
+                AssetId::new(1),
                 MediaAssetEntry {
                     resolved: None,
                     ..MediaAssetEntry::from_absolute("/tmp/media/plate.mov")
                 },
             )
             .with_media_asset_entry(
-                "audio",
+                AssetId::new(2),
                 MediaAssetEntry {
                     resolved: None,
                     ..MediaAssetEntry::from_absolute("/tmp/media/mix.wav")

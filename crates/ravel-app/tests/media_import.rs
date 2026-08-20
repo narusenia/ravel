@@ -24,6 +24,7 @@ use ravel_app::media::import::{ImportFailure, MediaProber, ProbedAsset};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
 use ravel_core::graph::ParameterValue;
+use ravel_core::id::AssetId;
 use ravel_core::media::{MediaError, MediaInfo, StreamInfo, VideoStreamInfo};
 use ravel_core::types::FrameRate;
 
@@ -39,13 +40,12 @@ fn project(cx: &mut TestAppContext) -> gpui::Entity<ProjectState> {
 /// Place already-imported assets, the way every "add as layer" path does.
 fn add_layers(
     project: &gpui::Entity<ProjectState>,
-    ids: &[&str],
+    ids: &[AssetId],
     start_frame: i64,
     cx: &mut TestAppContext,
 ) {
-    let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
     project.update(cx, |project, cx| {
-        project.add_asset_layers(&ids, start_frame, cx);
+        project.add_asset_layers(ids, start_frame, cx);
     });
 }
 
@@ -83,13 +83,13 @@ fn import_registers_the_asset_without_placing_it(cx: &mut TestAppContext) {
     });
     assert_eq!(summary.imported.len(), 1);
     assert!(summary.skipped.is_empty());
+    let clip = summary.imported[0].0;
 
     project.read_with(cx, |project, _| {
         let doc = project.document();
         assert_eq!(doc.media_assets.len(), 1);
-        let entry = doc
-            .get_media_asset("clip")
-            .expect("asset id from file stem");
+        let entry = doc.get_media_asset(clip).expect("the imported asset");
+        assert_eq!(entry.name, "clip", "display name from the file stem");
         assert_eq!(entry.kind, AssetKind::Container);
         assert_eq!(entry.resolved, Some(PathBuf::from("/media/clip.mov")));
         assert_eq!(entry.metadata.audio_stream_count, 1);
@@ -121,11 +121,14 @@ fn import_registers_the_asset_without_placing_it(cx: &mut TestAppContext) {
 #[gpui::test]
 fn adding_an_asset_as_a_layer_places_and_binds_it(cx: &mut TestAppContext) {
     let project = project(cx);
-    project.update(cx, |project, cx| {
-        project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
-    });
+    let clip = project
+        .update(cx, |project, cx| {
+            project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
+        })
+        .imported[0]
+        .0;
 
-    add_layers(&project, &["clip"], 42, cx);
+    add_layers(&project, &[clip], 42, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
@@ -148,7 +151,7 @@ fn adding_an_asset_as_a_layer_places_and_binds_it(cx: &mut TestAppContext) {
                 .parameters
                 .iter()
                 .any(|param| param.key == "asset_id"
-                    && param.value == ParameterValue::String("clip".into())),
+                    && param.value == ParameterValue::String(clip.to_param_value())),
             "the media node is bound to the imported asset id"
         );
     });
@@ -180,7 +183,7 @@ fn adding_an_asset_as_a_layer_places_and_binds_it(cx: &mut TestAppContext) {
 #[gpui::test]
 fn placing_several_assets_at_once_is_one_undo_step(cx: &mut TestAppContext) {
     let project = project(cx);
-    project.update(cx, |project, cx| {
+    let imported = project.update(cx, |project, cx| {
         project.import_media(
             vec![
                 probed_clip("/media/a.mov", Some(1.0)),
@@ -191,8 +194,9 @@ fn placing_several_assets_at_once_is_one_undo_step(cx: &mut TestAppContext) {
             cx,
         )
     });
+    let ids: Vec<AssetId> = imported.imported.iter().map(|(id, _)| *id).collect();
 
-    add_layers(&project, &["a", "b", "c"], 12, cx);
+    add_layers(&project, &ids, 12, cx);
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         assert_eq!(comp.layer_count(), 3);
@@ -295,9 +299,9 @@ fn probe_failures_are_skipped_and_successes_import(cx: &mut TestAppContext) {
     project.read_with(cx, |project, _| {
         let doc = project.document();
         assert_eq!(doc.media_assets.len(), 2, "only the probing files import");
-        assert!(doc.get_media_asset("good_a").is_some());
-        assert!(doc.get_media_asset("good_b").is_some());
-        assert!(doc.get_media_asset("broken").is_none());
+        assert!(doc.media_asset_id_by_name("good_a").is_some());
+        assert!(doc.media_asset_id_by_name("good_b").is_some());
+        assert!(doc.media_asset_id_by_name("broken").is_none());
     });
 
     project.update(cx, |project, cx| assert!(project.undo(cx)));
@@ -316,10 +320,13 @@ fn probe_failures_are_skipped_and_successes_import(cx: &mut TestAppContext) {
 fn unknown_duration_falls_back_to_the_composition_length(cx: &mut TestAppContext) {
     let project = project(cx);
 
-    project.update(cx, |project, cx| {
-        project.import_media(vec![probed_clip("/media/stillish.mov", None)], vec![], cx)
-    });
-    add_layers(&project, &["stillish"], 0, cx);
+    let stillish = project
+        .update(cx, |project, cx| {
+            project.import_media(vec![probed_clip("/media/stillish.mov", None)], vec![], cx)
+        })
+        .imported[0]
+        .0;
+    add_layers(&project, &[stillish], 0, cx);
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         let layer = &comp.layers[0];
@@ -347,7 +354,8 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
     });
 
     // …but placing it twice does make two layers pointing at the shared asset.
-    add_layers(&project, &["clip", "clip"], 0, cx);
+    let clip = first.imported[0].0;
+    add_layers(&project, &[clip, clip], 0, cx);
     project.read_with(cx, |project, _| {
         assert_eq!(
             ravel_ui::document::root_composition(project.document())
@@ -396,16 +404,33 @@ fn reimporting_the_same_path_reuses_the_asset(cx: &mut TestAppContext) {
 fn a_clip_with_audio_binds_the_shell_audio_source(cx: &mut TestAppContext) {
     let project = project(cx);
 
-    project.update(cx, |project, cx| {
-        project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
-    });
-    add_layers(&project, &["clip"], 10, cx);
+    let clip = project
+        .update(cx, |project, cx| {
+            project.import_media(vec![probed_clip("/media/clip.mov", Some(2.0))], vec![], cx)
+        })
+        .imported[0]
+        .0;
+    add_layers(&project, &[clip], 10, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         let layer = &comp.layers[0];
         let audio = layer.audio.as_ref().expect("audio source on the shell");
-        assert_eq!(audio.asset_id, "clip", "same asset id as the media node");
+        // The picture and the sound must name one asset: the media node's
+        // reference and the shell's audio source hold the same id, spelled
+        // the way each of them stores it.
+        let media_asset = layer
+            .network
+            .nodes()
+            .find(|node| node.type_key == "media")
+            .and_then(|node| ravel_core::composition::node_asset_reference(node))
+            .expect("the media node's asset reference");
+        assert_eq!(media_asset, clip, "the media node names the imported asset");
+        assert_eq!(
+            audio.asset_id,
+            clip.to_param_value(),
+            "same asset id as the media node"
+        );
         assert_eq!(audio.stream_index, 1, "the first audio stream, not video");
         assert!(!audio.audio_muted);
         // Timing stays on the shell: audio and picture share it.
@@ -445,10 +470,11 @@ fn silent_media_gets_no_audio_source(cx: &mut TestAppContext) {
     still.metadata.audio_stream_count = 0;
     still.metadata.audio_streams.clear();
 
-    project.update(cx, |project, cx| {
+    let imported = project.update(cx, |project, cx| {
         project.import_media(vec![silent, still], vec![], cx)
     });
-    add_layers(&project, &["silent", "plate"], 0, cx);
+    let ids: Vec<AssetId> = imported.imported.iter().map(|(id, _)| *id).collect();
+    add_layers(&project, &ids, 0, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
@@ -469,10 +495,13 @@ fn an_audio_only_file_becomes_a_frameless_audio_layer(cx: &mut TestAppContext) {
     music.metadata.height = None;
     music.metadata.frame_rate = None;
 
-    project.update(cx, |project, cx| {
-        project.import_media(vec![music], vec![], cx)
-    });
-    add_layers(&project, &["music"], 0, cx);
+    let music_id = project
+        .update(cx, |project, cx| {
+            project.import_media(vec![music], vec![], cx)
+        })
+        .imported[0]
+        .0;
+    add_layers(&project, &[music_id], 0, cx);
 
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
@@ -486,7 +515,7 @@ fn an_audio_only_file_becomes_a_frameless_audio_layer(cx: &mut TestAppContext) {
             "no media node is created for a file without video"
         );
         let audio = layer.audio.as_ref().expect("audio source");
-        assert_eq!(audio.asset_id, "music");
+        assert_eq!(audio.asset_id, music_id.to_param_value());
         assert_eq!(audio.stream_index, 1);
         assert_eq!(layer.out_frame, 120, "4 s at the comp's 30 fps");
     });
@@ -503,10 +532,13 @@ fn a_count_without_the_stream_list_binds_nothing(cx: &mut TestAppContext) {
     legacy.metadata.audio_streams.clear();
     assert_eq!(legacy.metadata.audio_stream_count, 1);
 
-    project.update(cx, |project, cx| {
-        project.import_media(vec![legacy], vec![], cx)
-    });
-    add_layers(&project, &["legacy"], 0, cx);
+    let legacy_id = project
+        .update(cx, |project, cx| {
+            project.import_media(vec![legacy], vec![], cx)
+        })
+        .imported[0]
+        .0;
+    add_layers(&project, &[legacy_id], 0, cx);
     project.read_with(cx, |project, _| {
         let comp = ravel_ui::document::root_composition(project.document()).unwrap();
         assert!(comp.layers[0].audio.is_none());
@@ -533,7 +565,7 @@ fn placing_without_an_active_composition_is_a_no_op(cx: &mut TestAppContext) {
     assert_eq!(summary.imported.len(), 1);
     assert_eq!(summary.skipped.len(), 1);
 
-    add_layers(&project, &["clip"], 0, cx);
+    add_layers(&project, &[summary.imported[0].0], 0, cx);
     project.read_with(cx, |project, _| {
         assert_eq!(project.document().media_assets.len(), 1);
         assert_eq!(

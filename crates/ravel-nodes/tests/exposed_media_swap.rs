@@ -30,7 +30,7 @@ mod ffmpeg_tests {
     use ravel_core::exposed::apply::{AssetContext, apply};
     use ravel_core::exposed::{ExposedBinding, ExposedParameter, ExposedParameters, ExposedValue};
     use ravel_core::graph::{Graph, Node, ParameterValue};
-    use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
+    use ravel_core::id::{AssetId, CompId, DataTypeId, LayerId, NodeId};
     use ravel_core::types::{FrameBuffer, FrameRate};
     use ravel_nodes::media::MediaProcessor;
     use std::collections::HashMap;
@@ -68,21 +68,30 @@ mod ffmpeg_tests {
         path
     }
 
-    /// A document whose only layer holds a media node pointing at `original`,
-    /// with `plate` declared against that node's asset reference.
+    /// The asset the document starts out referencing.
+    fn original_asset() -> AssetId {
+        AssetId::new(1)
+    }
+
+    /// A document whose only layer holds a media node referencing
+    /// `original_asset`, with `plate` declared against that node's asset
+    /// reference.
     fn document(original: &Path) -> Document {
         let network = Graph::new()
             .add_node(
                 Node::new(media_node(), "media")
                     .with_output("frame", DataTypeId::FRAME_BUFFER)
-                    .with_param("asset_id", ParameterValue::String("original".into())),
+                    .with_param(
+                        "asset_id",
+                        ParameterValue::String(original_asset().to_param_value()),
+                    ),
             )
             .unwrap();
         let comp = Composition::new(CompId::new(1), "Main", (32, 32), FPS, 30)
             .add_layer(Layer::new(LayerId::new(1), "Plate", network).with_time(0, 0, 30));
         Document::default()
             .with_composition(comp)
-            .with_media_asset("original", original)
+            .with_media_asset(original_asset(), original)
             .with_exposed_parameters(
                 ExposedParameters::from_declarations([ExposedParameter::inferred(
                     "plate",

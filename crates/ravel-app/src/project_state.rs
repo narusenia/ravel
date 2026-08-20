@@ -30,7 +30,7 @@ use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::{EvalContext, Quality};
 use ravel_core::graph::Graph;
-use ravel_core::id::{CompId, LayerId, NodeId};
+use ravel_core::id::{AssetId, CompId, LayerId, NodeId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
 use ravel_core::runtime::{
@@ -1179,25 +1179,32 @@ impl ProjectState {
         // Dedupe within the batch as well as against the document: two
         // frames of one sequence (or the same file picked twice) resolve to
         // one asset.
-        let mut batch_ids: HashMap<PathBuf, String> = HashMap::new();
+        let mut batch_ids: HashMap<PathBuf, AssetId> = HashMap::new();
         // Whether the run put anything new in the document. An import that
         // only names paths already in the bin leaves it untouched, and
         // committing that would push an undo step that reverts nothing —
         // reachable only since placing stopped being part of an import.
         let mut registered = false;
         for asset in probed {
-            let id = match batch_ids.get(&asset.path).cloned().or_else(|| {
+            let id = match batch_ids.get(&asset.path).copied().or_else(|| {
                 doc.media_assets.iter().find_map(|(id, entry)| {
-                    (entry.resolved.as_deref() == Some(asset.path.as_path())).then(|| id.clone())
+                    (entry.resolved.as_deref() == Some(asset.path.as_path())).then_some(*id)
                 })
             }) {
                 Some(id) => id,
                 None => {
                     registered = true;
-                    let id = unique_asset_id(&doc, &asset.path);
+                    // A fresh id every time, so a file imported after an
+                    // earlier asset was deleted is a *different* asset and
+                    // cannot inherit the deleted one's references. The
+                    // readable string is the display name now, and it is the
+                    // only thing `unique_asset_id` still numbers.
+                    let id = AssetId::next();
+                    let name = unique_asset_id(&doc, &asset.path);
                     doc = doc.with_media_asset_entry(
-                        id.clone(),
+                        id,
                         MediaAssetEntry {
+                            name,
                             color_space: None,
                             path: AssetPath::for_project_root(&asset.path, project_root.as_deref()),
                             kind: asset.kind.clone(),
@@ -1208,7 +1215,7 @@ impl ProjectState {
                     id
                 }
             };
-            batch_ids.insert(asset.path.clone(), id.clone());
+            batch_ids.insert(asset.path.clone(), id);
             summary.imported.push((id, asset.path.clone()));
         }
 
@@ -1226,7 +1233,7 @@ impl ProjectState {
     /// composition or when nothing resolves.
     pub fn add_asset_layers(
         &mut self,
-        asset_ids: &[String],
+        asset_ids: &[AssetId],
         start_frame: i64,
         cx: &mut Context<Self>,
     ) -> Vec<LayerId> {
@@ -1929,20 +1936,24 @@ fn scoped_eval_targets(
     scoped
 }
 
-/// A readable, collision-free asset id derived from the file name.
+/// A readable display name for an imported file, distinct from the names the
+/// document already uses.
+///
+/// Since `.ravprj` v9 this is a *name*, not an id: nothing references an asset
+/// by it, so two assets sharing one would be merely confusing rather than
+/// broken. The numbering is kept because two clips both called `plate` in the
+/// MediaBin are confusing — making it display-only (and the name editable) is
+/// `AID-3`.
 fn unique_asset_id(doc: &Document, path: &Path) -> String {
-    let base = path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| "asset".to_string());
-    if !doc.media_assets.contains_key(&base) {
+    let base = ravel_core::composition::name_from_path(path);
+    let taken = |name: &str| doc.media_assets.values().any(|entry| entry.name == name);
+    if !taken(&base) {
         return base;
     }
     let mut n = 2;
     loop {
         let candidate = format!("{base} {n}");
-        if !doc.media_assets.contains_key(&candidate) {
+        if !taken(&candidate) {
             return candidate;
         }
         n += 1;
@@ -3081,7 +3092,7 @@ mod tests {
                 },
                 PropertiesTarget::Composition { comp_id: comp.id },
                 PropertiesTarget::MediaAsset {
-                    id: "clip".to_string(),
+                    id: ravel_core::id::AssetId::next(),
                 },
                 PropertiesTarget::Project,
             ] {

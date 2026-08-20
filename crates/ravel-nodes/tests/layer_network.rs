@@ -14,7 +14,7 @@ use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::eval::{EvalContext, EvalScope, Evaluator, NodeProcessor, ResolvedParams};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{
-    CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
+    AssetId, CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex,
 };
 use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, FrameRate, NodeData, Scalar};
@@ -815,10 +815,11 @@ fn media_template_layer_decodes_in_local_time() {
         .as_ref()
         .clone();
     let media_id = media_node.id;
+    let clip = AssetId::new(1);
     let media_node = Node {
         parameters: vec![ravel_core::graph::Parameter {
             key: "asset_id".into(),
-            value: ParameterValue::String("clip".into()),
+            value: ParameterValue::String(clip.to_param_value()),
         }],
         ..media_node
     };
@@ -829,7 +830,7 @@ fn media_template_layer_decodes_in_local_time() {
         .add_layer(Layer::new(LayerId::new(1), "Media", network.clone()).with_time(10, 0, 300));
     let doc = Document::default()
         .with_composition(comp.clone())
-        .with_media_asset("clip", "/fake/clip.mov");
+        .with_media_asset(clip, "/fake/clip.mov");
 
     let (mut evaluator, graph, output) = setup(&comp, &[&network]);
     evaluator.register(
@@ -931,10 +932,11 @@ fn offline_media_layer_composes_transparent_and_other_layers_continue() {
         .unwrap()
         .as_ref()
         .clone();
+    let clip = AssetId::new(1);
     let media_node = Node {
         parameters: vec![ravel_core::graph::Parameter {
             key: "asset_id".into(),
-            value: ParameterValue::String("clip".into()),
+            value: ParameterValue::String(clip.to_param_value()),
         }],
         ..media_node
     };
@@ -950,8 +952,9 @@ fn offline_media_layer_composes_transparent_and_other_layers_continue() {
     let doc = Document::default()
         .with_composition(comp.clone())
         .with_media_asset_entry(
-            "clip",
+            clip,
             MediaAssetEntry {
+                name: "clip".into(),
                 color_space: None,
                 path: AssetPath::Relative("./footage/clip.mov".into()),
                 kind: AssetKind::Container,

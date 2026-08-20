@@ -211,7 +211,14 @@ pub fn render_audio(
                 .and_then(|comp| comp.layers.iter().find(|l| l.id == skipped.layer_id))
                 .map(|layer| layer.name.clone())
                 .unwrap_or_else(|| skipped.layer_id.raw().to_string()),
-            asset: skipped.asset_id.clone(),
+            // The name the user knows the asset by. An id the document has
+            // lost has none, and the same rule as the layer above applies:
+            // fall back to the reference itself rather than say nothing.
+            asset: plan
+                .document
+                .get_media_asset(skipped.asset_id)
+                .map(|entry| entry.name.clone())
+                .unwrap_or_else(|| skipped.asset_id.to_string()),
             detail: skipped.reason.clone(),
         };
         let (id, message) = crate::report::warning_text(&warning);
@@ -334,7 +341,7 @@ mod tests {
     use super::*;
     use ravel_core::composition::{AudioSource, Composition, Layer};
     use ravel_core::graph::Graph;
-    use ravel_core::id::LayerId;
+    use ravel_core::id::{AssetId, LayerId};
     use ravel_core::media::encode::{ImageSequenceOutput, PngDepth, SequenceCodec};
     use ravel_core::types::FrameRate;
 
@@ -348,7 +355,8 @@ mod tests {
             Composition::new(CompId::new(1), "Main", (16, 16), FrameRate::new(30, 1), 90);
         let mut layer = Layer::new(LayerId::new(1), "voice", Graph::new());
         if with_audio {
-            layer.audio = Some(AudioSource::new("voice", 0));
+            // The reference a document holds: the asset id's decimal spelling.
+            layer.audio = Some(AudioSource::new(AssetId::next().to_param_value(), 0));
         }
         comp = comp.add_layer(layer);
         Document::default().with_composition(comp)

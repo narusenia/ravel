@@ -2313,13 +2313,13 @@ fn show_project_event(
 }
 
 fn show_audio_event(event: &crate::audio::AudioServiceEvent, window: &mut Window, cx: &mut App) {
-    let crate::audio::AudioServiceEvent::PreparationFailed { asset_id, error } = event;
+    let crate::audio::AudioServiceEvent::PreparationFailed { asset, error } = event;
     window.push_notification(
         Notification::new()
             .with_type(NotificationType::Warning)
             .title(SharedString::from(t!("audio.notice.prepare_title")))
             .message(SharedString::from(format!(
-                "{}\n{asset_id}\n{error}",
+                "{}\n{asset}\n{error}",
                 t!("audio.notice.prepare_message")
             )))
             .autohide(false),

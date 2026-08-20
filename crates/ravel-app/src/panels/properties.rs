@@ -1519,6 +1519,34 @@ fn expression_editor_body(
     body
 }
 
+/// The fold identity of each of `sections`, in order: `Some((type_key, group))`
+/// for one of `node`'s parameter groups, `None` for a section that is always
+/// open (PGRP-3).
+///
+/// The parameter sections sit directly after the single info section
+/// (`sections_for_node`), so a group is found **by position** and confirmed by
+/// the title. Matching on the title alone would let a group the user named
+/// after another section's heading — an In node's instance group is free text
+/// — fold that section along with its own.
+fn param_group_keys(
+    node: &Node,
+    registry: &NodeRegistry,
+    sections: &[PropertySection],
+) -> Vec<Option<(String, String)>> {
+    let groups = ravel_ui::properties::node::param_group_titles(node, registry);
+    sections
+        .iter()
+        .enumerate()
+        .map(|(index, section)| {
+            index
+                .checked_sub(1)
+                .and_then(|group| groups.get(group))
+                .filter(|(_, title)| title == &section.title)
+                .map(|(group, _)| (node.type_key.clone(), group.clone()))
+        })
+        .collect()
+}
+
 /// Discriminant fingerprint of the sections' fields: key plus variant kind.
 /// A same-target refresh whose shape changed (e.g. a parameter switched
 /// between editable and driven read-only) must rebuild widget bindings.
@@ -4777,24 +4805,14 @@ impl Render for PropertiesGpuiPanel {
 
             // Which sections are node-parameter groups the user may fold away,
             // and under which `(type_key, group)` the fold is remembered
-            // (PGRP-3). `None` for every other section — the info, ports,
-            // declarations and description sections stay open, as they always
-            // were.
-            let param_group_keys: Vec<Option<(String, String)>> = match &resolved_nodes {
-                Some((nodes, ..)) => {
-                    let node = nodes.first().expect("resolved nodes are non-empty");
-                    let groups =
-                        ravel_ui::properties::node::param_group_titles(node, &self.registry);
-                    sections
-                        .iter()
-                        .map(|section| {
-                            groups
-                                .iter()
-                                .find(|(_, title)| title == &section.title)
-                                .map(|(group, _)| (node.type_key.clone(), group.clone()))
-                        })
-                        .collect()
-                }
+            // (PGRP-3). `None` for every other section — the info and ports
+            // sections stay open, as they always were.
+            let param_group_keys = match &resolved_nodes {
+                Some((nodes, ..)) => param_group_keys(
+                    nodes.first().expect("resolved nodes are non-empty"),
+                    &self.registry,
+                    &sections,
+                ),
                 None => vec![None; sections.len()],
             };
 
@@ -6860,18 +6878,14 @@ mod tests {
                     vec!["layout", "source"],
                     "scatter.grid declares both groups and leaves nothing ungrouped"
                 );
-                // The fold identity of each section, exactly as `render`
-                // builds it.
-                let keys: Vec<Option<(String, String)>> = panel
-                    .sections
-                    .iter()
-                    .map(|section| {
-                        groups
-                            .iter()
-                            .find(|(_, title)| title == &section.title)
-                            .map(|(group, _)| (node.type_key.clone(), group.clone()))
-                    })
-                    .collect();
+                // The fold identity of each section, from the same helper
+                // `render` uses. Only the parameter sections have one.
+                let keys = param_group_keys(&node, &panel.registry, &panel.sections);
+                assert_eq!(
+                    keys.iter().filter(|key| key.is_some()).count(),
+                    2,
+                    "the info and ports sections are not foldable"
+                );
                 let source = keys
                     .iter()
                     .position(|key| key.as_ref().is_some_and(|(_, g)| g == "source"))

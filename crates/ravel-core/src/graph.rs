@@ -247,6 +247,15 @@ pub enum ParameterValue {
     /// `PathPoints`, `Curve` and `Ramp`: bincode indexes variants by
     /// position, so only the tail is a safe place to grow, and the layout
     /// change is covered by the journal format version bump (v9).
+    ///
+    /// **The channel is `f32`, so integers past 2^24 are not exact**: a
+    /// keyframe on `16_777_217` reads back as `16_777_216`. That is the price
+    /// of reusing the f32 keyframe model rather than making
+    /// `AnimationChannel` generic (382 references — see
+    /// `docs/implementation/done/…discrete-keyframes` decision notes), and it
+    /// is a ceiling no builtin parameter reaches: these are counts, divisions
+    /// and enum-like selections. A parameter that needs the full `i32` range
+    /// animated needs an integer channel, not this one.
     IntChannel(crate::animation::channel::AnimationChannel),
     /// An animatable string (a text layer's content, an enum selection). A
     /// string has no midpoint, so this is a

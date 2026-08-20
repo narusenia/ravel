@@ -6,7 +6,7 @@
 //! A project is a zip container (see [`container`]) holding four logical parts:
 //!
 //! - [`manifest::Manifest`] — metadata + on-disk format version
-//! - [`Document`] serialized as RON (`document/main.ron`, format v7)
+//! - [`Document`] serialized as RON (`document/main.ron`, format v9)
 //! - [`settings::SettingsLayer`] — the project's settings override layer
 //! - [`ui_state::UiState`] — what the UI was looking at (REQ-UI-013)
 //! - an optional [`LayoutDocument`] — the workspace layout the project opted
@@ -1167,6 +1167,51 @@ mod tests {
         // The manifest is stamped from the root composition.
         assert_eq!(back.manifest.frame_rate, RationalRate::new(24, 1));
         assert_eq!(back.manifest.resolution, Resolution::new(1280, 720));
+    }
+
+    /// An animatable int survives a save/load cycle whole: the variant comes
+    /// back as an `IntChannel` with the keyframes that went in, and the
+    /// archive is stamped at the format version that guards it (an older build
+    /// must refuse the file, not recover an older `.bak` over it).
+    #[test]
+    fn the_archive_round_trips_an_animatable_int() {
+        let mut project = demo_project();
+        let stored = ParameterValue::from_channels(
+            Some(&ParameterValue::Int(3)),
+            vec![keyframed_channel(&[(0, 3.0), (12, 9.0)])],
+        )
+        .expect("one channel");
+        assert!(
+            matches!(stored, ParameterValue::IntChannel(_)),
+            "re-typing an Int with one channel keeps it an int"
+        );
+        project.document.graph = project
+            .document
+            .graph
+            .clone()
+            .add_node(
+                Node::new(NodeId::new(900), "shape.polygon")
+                    .with_output("out", DataTypeId::GEOMETRY)
+                    .with_param("sides", stored.clone()),
+            )
+            .unwrap();
+
+        let archive = project.to_archive().unwrap();
+        let back = ProjectFile::from_archive(&archive).unwrap();
+
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(back.document, project.document);
+        assert_eq!(
+            back.document
+                .graph
+                .node(NodeId::new(900))
+                .expect("the polygon node")
+                .parameters
+                .iter()
+                .find(|p| p.key == "sides")
+                .map(|p| &p.value),
+            Some(&stored)
+        );
     }
 
     /// A project's declarations round-trip whole — name, type, default,

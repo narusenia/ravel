@@ -848,7 +848,10 @@ pub fn shell_channel_names(group: PropertyGroup) -> &'static [&'static str] {
 /// REQ-LAYER-004).
 fn channel_components(value: &ParameterValue) -> Option<Vec<&AnimationChannel>> {
     match value {
-        ParameterValue::Channel(ch) => Some(vec![ch]),
+        // An animatable int carries the same f32 channel, so every read and
+        // write below works on it unchanged — the rounding back to `i32`
+        // happens where the value is read.
+        ParameterValue::Channel(ch) | ParameterValue::IntChannel(ch) => Some(vec![ch]),
         ParameterValue::Channel2(chs) => Some(chs.iter().collect()),
         ParameterValue::Channel3(chs) => Some(chs.iter().collect()),
         ParameterValue::Channel4(chs) => Some(chs.iter().collect()),
@@ -859,6 +862,13 @@ fn channel_components(value: &ParameterValue) -> Option<Vec<&AnimationChannel>> 
 /// Component names when the parameter is a `Channel*` value with at least
 /// one keyframed component (`None` = not part of the property tree).
 fn keyframed_channel_names(value: &ParameterValue) -> Option<Vec<String>> {
+    // An animatable int has a channel but no Timeline row yet: the row and its
+    // editing gestures are the next unit of the discrete-keyframes plan
+    // (`DISK-4`), and a row here without them would offer an interpolation
+    // menu over a value that is rounded on read.
+    if matches!(value, ParameterValue::IntChannel(_)) {
+        return None;
+    }
     let components = channel_components(value)?;
     if !components
         .iter()
@@ -911,7 +921,9 @@ fn mutate_channel(
                 return false;
             };
             let channel = match &mut param.value {
-                ParameterValue::Channel(ch) if component == 0 => Some(ch),
+                ParameterValue::Channel(ch) | ParameterValue::IntChannel(ch) if component == 0 => {
+                    Some(ch)
+                }
                 ParameterValue::Channel2(chs) => chs.get_mut(component),
                 ParameterValue::Channel3(chs) => chs.get_mut(component),
                 ParameterValue::Channel4(chs) => chs.get_mut(component),

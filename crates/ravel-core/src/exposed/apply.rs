@@ -2524,6 +2524,85 @@ mod tests {
         );
     }
 
+    /// Re-typing a declared parameter must not break its declaration. The
+    /// keyframe toggle turns an `Int` into an `IntChannel` and a `String` into
+    /// `StringSteps` under a declaration that already exists, and the binding
+    /// still names the same node and key — so the seed keeps answering and
+    /// `resolve` keeps reporting the binding, animated or not.
+    ///
+    /// The two differ in what a *write* can do, and that difference is the
+    /// point: an `IntChannel` whose source is still a constant takes the
+    /// value, while a step curve has no constant half to write into and is
+    /// reported animated instead. Both are declarations that resolve; neither
+    /// is a declaration that vanished.
+    #[test]
+    fn re_typing_a_declared_parameter_keeps_its_declaration_working() {
+        let base = document(ExposedParameters::new());
+
+        // Int -> IntChannel, still constant: seeds the same number and the
+        // declaration drives it.
+        let animated_int = with_network(
+            &base,
+            Graph::new()
+                .add_node(title_node().with_param(
+                    "count",
+                    ParameterValue::IntChannel(AnimationChannel::constant(7.0)),
+                ))
+                .unwrap(),
+        );
+        let binding = ExposedBinding::new(title(), "count");
+        assert_eq!(
+            seed_value(&animated_int, &binding, 0),
+            Some(ExposedValue::Int(7))
+        );
+        let document =
+            animated_int.with_exposed_parameters(declarations([ExposedParameter::inferred(
+                "count",
+                ExposedValue::Int(7),
+                binding,
+            )
+            .unwrap()]));
+        assert_eq!(
+            resolve(&document),
+            Vec::new(),
+            "a constant int channel still takes the declared value"
+        );
+
+        // String -> StringSteps: seeds the string this frame holds, and the
+        // declaration is reported animated rather than silently dropped.
+        let mut steps = crate::animation::StepCurve::new("Ravel".to_string());
+        steps.insert(0, "Ravel".to_string());
+        steps.insert(30, "Later".to_string());
+        let animated_string = with_parameter(&base, "text", ParameterValue::StringSteps(steps));
+        let binding = ExposedBinding::new(title(), "text");
+        assert_eq!(
+            seed_value(&animated_string, &binding, 0),
+            Some(ExposedValue::String("Ravel".into()))
+        );
+        assert_eq!(
+            seed_value(&animated_string, &binding, 30),
+            Some(ExposedValue::String("Later".into())),
+            "the seed follows the playhead"
+        );
+        let document =
+            animated_string.with_exposed_parameters(declarations([ExposedParameter::inferred(
+                "text",
+                ExposedValue::String("Ravel".into()),
+                binding,
+            )
+            .unwrap()]));
+        assert_eq!(
+            resolve(&document)
+                .into_iter()
+                .map(|issue| issue.reason)
+                .collect::<Vec<_>>(),
+            [BindingIssueReason::AnimatedComponents {
+                components: vec![0]
+            }],
+            "the binding still resolves; it just cannot overwrite the keys"
+        );
+    }
+
     #[test]
     fn a_media_reference_seeds_the_path_the_asset_table_holds() {
         let document = media_document();

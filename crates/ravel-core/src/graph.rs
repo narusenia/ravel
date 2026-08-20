@@ -348,10 +348,11 @@ impl ParameterValue {
     /// REQ-LAYER-009) and invalidate the scope of every layer it could ever
     /// point at, and a curve gives no finite answer to either — the values
     /// between two keys are as real as the keys. So keyframing an identifier
-    /// is not supported, and the unit that puts a keyframe toggle on `Int`
-    /// rows (`DISK-3`) owns keeping it off these parameters. Reading it here
-    /// rather than in each caller is what makes that one decision instead of
-    /// three.
+    /// is not supported: the Properties keyframe toggle asks
+    /// [`is_identifier_parameter`](crate::composition::validate::is_identifier_parameter)
+    /// and hides itself on these parameters. Reading the value here rather
+    /// than in each caller is what makes that one decision instead of three,
+    /// and that predicate is the same arrangement for the write side.
     pub fn static_identifier(&self) -> Option<u64> {
         let raw = match self {
             ParameterValue::Int(v) => *v,

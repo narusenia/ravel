@@ -31,6 +31,27 @@ pub const LAYER_REF_TYPE_KEY: &str = "layer.ref";
 /// Parameter on the Layer Ref node holding the referenced layer id.
 pub const LAYER_REF_LAYER_PARAM: &str = "layer";
 
+/// Whether the parameter `param_key` on a node of type `type_key` names an
+/// **identifier** rather than a number — the two references above, read back
+/// through [`ParameterValue::static_identifier`](crate::graph::ParameterValue::static_identifier).
+///
+/// Such a parameter is an `Int` and must never be animated: the value between
+/// two keys is as real as the keys, so a keyframed identifier gives no finite
+/// answer to which ids
+/// [`Document::id_watermarks`](crate::composition::Document::id_watermarks)
+/// must reserve (REQ-LAYER-009) or which referencing scopes to invalidate when
+/// a referenced layer's shell changes. This is what the Properties keyframe
+/// toggle asks before offering itself on an `Int` row, and it lives here — one
+/// predicate beside the constants it is made of — because the same question
+/// asked in two places is a question that gets a different answer in one of
+/// them the next time a reference node is added.
+pub fn is_identifier_parameter(type_key: &str, param_key: &str) -> bool {
+    matches!(
+        (type_key, param_key),
+        (PRECOMP_TYPE_KEY, PRECOMP_COMP_ID_PARAM) | (LAYER_REF_TYPE_KEY, LAYER_REF_LAYER_PARAM)
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum ValidationError {
     #[error("circular PreComp reference: {0:?} → {1:?}")]
@@ -224,6 +245,17 @@ pub fn validate_parenting_cycles(comp: &Composition) -> Result<(), ValidationErr
 
 #[cfg(test)]
 mod tests {
+    /// The two reference parameters, and nothing else. A key alone does not
+    /// make a parameter an identifier — `scatter.grid` has a `count_x` that is
+    /// a plain animatable count, and any node may name a parameter `layer`.
+    #[test]
+    fn only_the_reference_parameters_are_identifiers() {
+        assert!(super::is_identifier_parameter("layer.ref", "layer"));
+        assert!(super::is_identifier_parameter("precomp", "comp_id"));
+        assert!(!super::is_identifier_parameter("layer.ref", "port"));
+        assert!(!super::is_identifier_parameter("scatter.grid", "layer"));
+        assert!(!super::is_identifier_parameter("precomp", "layer"));
+    }
     use super::*;
     use crate::composition::Layer;
     use crate::graph::{Graph, Node, ParameterValue};

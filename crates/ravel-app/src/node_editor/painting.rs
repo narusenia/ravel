@@ -19,18 +19,34 @@ use crate::assets::RavelIcon;
 /// Display value for an animated channel without an evaluation context:
 /// the constant value, the curve's frame-0 sample, or 0 for
 /// not-yet-resolvable sources.
-fn channel_display(ch: &ravel_core::animation::channel::AnimationChannel) -> String {
+/// The number a channel shows in a node body, or `Err` with the text to show
+/// instead. An expression has no value without a context, and `0.00` would be
+/// a number the parameter does not hold; its source is what the node stores,
+/// and the row elides it like any other over-wide value.
+fn channel_sample(ch: &ravel_core::animation::channel::AnimationChannel) -> Result<f32, &str> {
     use ravel_core::animation::channel::ChannelSource;
-    let v = match &ch.source {
+    Ok(match &ch.source {
         ChannelSource::Constant(v) => *v,
         ChannelSource::Keyframes(curve) => curve.sample(0.0),
-        // An expression has no value without a context, and `0.00` would be a
-        // number the parameter does not hold. Its source is what the node
-        // stores, and the row elides it like any other over-wide value.
-        ChannelSource::Expression(expression) => return expression.source().to_string(),
+        ChannelSource::Expression(expression) => return Err(expression.source()),
         _ => 0.0,
-    };
-    format!("{v:.2}")
+    })
+}
+
+fn channel_display(ch: &ravel_core::animation::channel::AnimationChannel) -> String {
+    match channel_sample(ch) {
+        Ok(v) => format!("{v:.2}"),
+        Err(source) => source.to_string(),
+    }
+}
+
+/// The same for an animatable int: the row shows the integer the processor
+/// reads, not the f32 curve underneath it.
+fn channel_int_display(ch: &ravel_core::animation::channel::AnimationChannel) -> String {
+    match channel_sample(ch) {
+        Ok(v) => (v.round() as i32).to_string(),
+        Err(source) => source.to_string(),
+    }
 }
 
 fn channels_display(chs: &[ravel_core::animation::channel::AnimationChannel]) -> String {
@@ -781,6 +797,7 @@ fn paint_single_node(
                 ParameterValue::Bool(v) => v.to_string(),
                 ParameterValue::String(v) => v.clone(),
                 ParameterValue::Channel(ch) => channel_display(ch),
+                ParameterValue::IntChannel(ch) => channel_int_display(ch),
                 ParameterValue::Channel2(chs) => channels_display(chs),
                 ParameterValue::Channel3(chs) => channels_display(chs),
                 ParameterValue::Channel4(chs) => channels_display(chs),

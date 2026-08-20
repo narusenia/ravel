@@ -501,7 +501,7 @@ mod tests {
             .collect();
         Parameter {
             key: key.into(),
-            value: ParameterValue::from_channels(channels).expect("arity 1..=4"),
+            value: ParameterValue::from_channels(None, channels).expect("arity 1..=4"),
         }
     }
 

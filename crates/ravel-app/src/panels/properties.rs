@@ -1803,7 +1803,9 @@ fn animated_channel(channel: &ravel_core::animation::channel::AnimationChannel) 
 /// any.
 fn animated_parameter(value: &ParameterValue) -> bool {
     match value {
-        ParameterValue::Channel(channel) => animated_channel(channel),
+        ParameterValue::Channel(channel) | ParameterValue::IntChannel(channel) => {
+            animated_channel(channel)
+        }
         ParameterValue::Channel2(channels) => channels.iter().any(animated_channel),
         ParameterValue::Channel3(channels) => channels.iter().any(animated_channel),
         ParameterValue::Channel4(channels) => channels.iter().any(animated_channel),

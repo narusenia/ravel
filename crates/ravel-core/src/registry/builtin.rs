@@ -380,7 +380,7 @@ pub fn attribute_set_value_for_type(
                 .unwrap_or_else(|| AnimationChannel::constant(*default))
         })
         .collect();
-    ParameterValue::from_channels(channels)
+    ParameterValue::from_channels(Some(existing), channels)
 }
 
 /// Parameter updates that must accompany `changed` for `node` to stay

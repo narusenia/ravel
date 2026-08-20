@@ -452,6 +452,11 @@ pub fn seed_value(
         // An animatable int seeds the int it reads as at this frame, the same
         // rounding the evaluator applies.
         ParameterValue::IntChannel(c) => ExposedValue::Int(at(c).round() as i32),
+        // Likewise for an animatable string: the seed is the string this frame
+        // reads, which is the one the render would use.
+        ParameterValue::StringSteps(steps) => {
+            ExposedValue::String(steps.sample(frame as f64).clone())
+        }
         ParameterValue::Channel2(c) => ExposedValue::Vec2(Vec2(at(&c[0]), at(&c[1]))),
         ParameterValue::Channel3(c) => ExposedValue::Vec3(Vec3(at(&c[0]), at(&c[1]), at(&c[2]))),
         ParameterValue::Channel4(c) => ExposedValue::Color(Color {
@@ -920,6 +925,17 @@ fn assign(value: &ExposedValue, current: &ParameterValue) -> Option<Assignment> 
             std::slice::from_ref(channel),
             |written| ParameterValue::IntChannel(written[0].clone()),
         )),
+        // An animatable string is reachable by a declaration bound to it — the
+        // keyframe toggle re-types the parameter under a declaration that
+        // already exists, and the binding must not stop resolving — but the
+        // write is refused rather than applied. A step curve has no constant
+        // half to write into: every frame's value is a key the user placed,
+        // and overwriting them all is not what "set this parameter" means.
+        // Reporting it blocked is the same answer a fully keyframed channel
+        // gets from `channels` below.
+        (ExposedValue::String(_), ParameterValue::StringSteps(_)) => {
+            Some(Assignment::Blocked(vec![0]))
+        }
         (ExposedValue::Vec2(Vec2(x, y)), ParameterValue::Channel2(channels_now)) => {
             Some(channels(&[*x, *y], channels_now, |written| {
                 ParameterValue::Channel2([written[0].clone(), written[1].clone()])
@@ -1000,6 +1016,7 @@ fn parameter_kind(value: &ParameterValue) -> &'static str {
         ParameterValue::Curve(_) => "curve",
         ParameterValue::Ramp(_) => "ramp",
         ParameterValue::IntChannel(_) => "int channel",
+        ParameterValue::StringSteps(_) => "string steps",
     }
 }
 

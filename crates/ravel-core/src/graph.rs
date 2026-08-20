@@ -200,6 +200,8 @@ pub struct PathPoint {
 /// (REQ-LAYER-004). An animated `Int` is an [`IntChannel`](Self::IntChannel) —
 /// the same f32 channel, rounded on read — while a plain `Int` is the constant
 /// spelling of one, exactly as `Float` is the constant spelling of `Channel`.
+/// An animated `String` is a [`StringSteps`](Self::StringSteps), a step curve
+/// whose keys are held because a string has no midpoint to interpolate to.
 /// `Bool` remains constant-only in v1; `PathPoints`,
 /// `Curve` and `Ramp` are constant-only as well (path animation is the future
 /// PathChannel design, see the tool-system plan; animating a curve's or a
@@ -246,6 +248,18 @@ pub enum ParameterValue {
     /// position, so only the tail is a safe place to grow, and the layout
     /// change is covered by the journal format version bump (v9).
     IntChannel(crate::animation::channel::AnimationChannel),
+    /// An animatable string (a text layer's content, an enum selection). A
+    /// string has no midpoint, so this is a
+    /// [`StepCurve`](crate::animation::StepCurve) rather than an
+    /// [`AnimationChannel`]: its keys are held, never blended, and
+    /// [`channels`](Self::channels) keeps answering `None` so the curve editor
+    /// never sees one. A plain `String` is the constant spelling of it, the
+    /// same relation `Int` has to `IntChannel`. Appended last for the same
+    /// reason as `PathPoints`, `Curve`, `Ramp` and `IntChannel`: bincode
+    /// indexes variants by position, so only the tail is a safe place to
+    /// grow, and the layout change is covered by the journal format version
+    /// bump (v10).
+    StringSteps(crate::animation::step::StepCurve<String>),
 }
 
 impl ParameterValue {
@@ -275,6 +289,9 @@ impl ParameterValue {
     /// `Curve`, `Ramp`). A constant `Int` stays `None`: an int becomes
     /// channel-backed only when it is re-typed to `IntChannel`, so nothing
     /// that walks channels mistakes a constant count for an animatable float.
+    /// `StringSteps` stays `None` too, animated or not — a step curve is not
+    /// made of float components, so the curve editor and everything else that
+    /// walks channels must not see it.
     pub fn channels(&self) -> Option<Vec<AnimationChannel>> {
         match self {
             ParameterValue::Float(v) => Some(vec![AnimationChannel::constant(*v)]),
@@ -416,6 +433,7 @@ impl ParameterValue {
             ParameterValue::Channel3(_) => Some(DataTypeId::VEC3),
             ParameterValue::Channel4(_) => Some(DataTypeId::COLOR),
             ParameterValue::String(_)
+            | ParameterValue::StringSteps(_)
             | ParameterValue::PathPoints(_)
             | ParameterValue::Curve(_)
             | ParameterValue::Ramp(_) => None,
@@ -673,7 +691,8 @@ fn collect_parameter_sources(value: &ParameterValue, out: &mut Vec<(NodeId, Outp
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
-        | ParameterValue::Ramp(_) => {}
+        | ParameterValue::Ramp(_)
+        | ParameterValue::StringSteps(_) => {}
     }
 }
 
@@ -2014,7 +2033,8 @@ pub(crate) fn remap_parameter_node_outputs(
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
-        | ParameterValue::Ramp(_) => {}
+        | ParameterValue::Ramp(_)
+        | ParameterValue::StringSteps(_) => {}
     }
 }
 
@@ -2050,7 +2070,8 @@ fn remap_parameter_output_ports(
         | ParameterValue::String(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
-        | ParameterValue::Ramp(_) => {}
+        | ParameterValue::Ramp(_)
+        | ParameterValue::StringSteps(_) => {}
     }
 }
 

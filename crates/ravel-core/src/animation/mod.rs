@@ -21,12 +21,18 @@
 //!     └── Blend(left, right, BlendMode, factor)
 //! ```
 
+//! A value that cannot be interpolated draws from a [`StepCurve`] instead:
+//! its keys are held rather than blended, which is the only animation an
+//! animatable string can have.
+
 pub mod blend;
 pub mod channel;
 pub mod curve;
 pub mod interpolation;
+pub mod step;
 
 pub use blend::BlendMode;
 pub use channel::{AnimationChannel, AudioReactivePlaceholder, ChannelSource, ParameterExpression};
 pub use curve::{Keyframe, KeyframeCurve};
 pub use interpolation::Interpolation;
+pub use step::{StepCurve, StepKey};

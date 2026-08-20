@@ -1809,6 +1809,9 @@ fn animated_parameter(value: &ParameterValue) -> bool {
         ParameterValue::Channel2(channels) => channels.iter().any(animated_channel),
         ParameterValue::Channel3(channels) => channels.iter().any(animated_channel),
         ParameterValue::Channel4(channels) => channels.iter().any(animated_channel),
+        // A step curve needs two keys to show a different string from one
+        // frame to the next; one key or none is the same value everywhere.
+        ParameterValue::StringSteps(steps) => steps.len() > 1,
         ParameterValue::Float(_)
         | ParameterValue::Int(_)
         | ParameterValue::Bool(_)

@@ -796,6 +796,10 @@ fn paint_single_node(
                 ParameterValue::Int(v) => v.to_string(),
                 ParameterValue::Bool(v) => v.to_string(),
                 ParameterValue::String(v) => v.clone(),
+                // No evaluation context in a node body, so the frame-0 sample
+                // stands in — the same stand-in `channel_sample` uses for a
+                // keyframe curve.
+                ParameterValue::StringSteps(steps) => steps.sample(0.0).clone(),
                 ParameterValue::Channel(ch) => channel_display(ch),
                 ParameterValue::IntChannel(ch) => channel_int_display(ch),
                 ParameterValue::Channel2(chs) => channels_display(chs),

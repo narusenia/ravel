@@ -2830,7 +2830,8 @@ impl Evaluator {
         } else {
             // Only now are the constants materialised: this is the one path
             // that hands parameters to a processor.
-            let mut params = self.materialize_params(&node_ref, resolved_channels, &overridden);
+            let mut params =
+                self.materialize_params(&node_ref, resolved_channels, &overridden, ctx);
             for (param_key, resolved) in overlays {
                 params.set(&param_key, resolved);
             }
@@ -2998,7 +2999,10 @@ impl Evaluator {
                 | ParameterValue::String(_)
                 | ParameterValue::PathPoints(_)
                 | ParameterValue::Curve(_)
-                | ParameterValue::Ramp(_) => continue,
+                | ParameterValue::Ramp(_)
+                // A step curve pulls nothing from the graph; it is sampled in
+                // `materialize_params`, where the constants are.
+                | ParameterValue::StringSteps(_) => continue,
                 ParameterValue::Channel(ch) => {
                     let (v, fresh) =
                         self.resolve_channel(graph, ch, ctx, run, visiting, options.budget)?;
@@ -3064,6 +3068,7 @@ impl Evaluator {
         node: &Node,
         channels: Vec<(usize, ResolvedValue)>,
         skip: &dyn Fn(&str) -> bool,
+        ctx: &EvalContext,
     ) -> ResolvedParams {
         #[cfg(test)]
         {
@@ -3085,6 +3090,19 @@ impl Evaluator {
                     ParameterValue::Int(v) => ResolvedValue::Int(*v),
                     ParameterValue::Bool(v) => ResolvedValue::Bool(*v),
                     ParameterValue::String(v) => ResolvedValue::Str(v.clone()),
+                    // An animatable string is materialised here rather than in
+                    // `resolve_channel_params`: a step curve pulls nothing
+                    // from the graph, so the cache decision does not depend on
+                    // it (the frame it is sampled at is already part of the
+                    // cache identity, because `node_has_animated_params`
+                    // reports a keyed step curve as time-varying). Sampling
+                    // here keeps the string clone on the process path, where
+                    // every other constant's clone already lives (HIGH-03).
+                    // The processor still reads it with `str_or` and never
+                    // learns the parameter is animated.
+                    ParameterValue::StringSteps(steps) => {
+                        ResolvedValue::Str(steps.sample(ctx.sample_frame()).clone())
+                    }
                     ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
                     ParameterValue::Curve(curve) => ResolvedValue::Curve(curve.clone()),
                     ParameterValue::Ramp(ramp) => ResolvedValue::Ramp(ramp.clone()),
@@ -3324,6 +3342,7 @@ fn param_port_overlay(param: &ParameterValue, data: &dyn NodeData) -> Option<Res
                     .map(|v| ResolvedValue::Vec4([v.0, v.1, v.2, v.3]))
             }),
         ParameterValue::String(_)
+        | ParameterValue::StringSteps(_)
         | ParameterValue::PathPoints(_)
         | ParameterValue::Curve(_)
         | ParameterValue::Ramp(_) => None,
@@ -3427,6 +3446,11 @@ fn node_has_animated_params(node: &Node, skip: &dyn Fn(&str) -> bool) -> bool {
             ParameterValue::Channel2(chs) => chs.iter().any(channel_is_time_varying),
             ParameterValue::Channel3(chs) => chs.iter().any(channel_is_time_varying),
             ParameterValue::Channel4(chs) => chs.iter().any(channel_is_time_varying),
+            // A step curve varies with time as soon as it has two keys to
+            // switch between. One key holds the same string on every frame,
+            // and none falls back to the default — treating either as animated
+            // would recompute the node on every playback tick for nothing.
+            ParameterValue::StringSteps(steps) => steps.len() > 1,
             _ => false,
         }
     })
@@ -4525,6 +4549,130 @@ mod tests {
         assert!(
             !node_has_animated_params(&constant, &|_| false),
             "a constant int channel is not time-varying"
+        );
+    }
+
+    /// A `StringSteps` parameter is read with `str_or`, which knows nothing
+    /// about animation: the processor sees a different string on every frame
+    /// while its own code stays the code that read a constant `String`.
+    struct StringParamEcho;
+    impl NodeProcessor for StringParamEcho {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(crate::types::PlainText(
+                params.str_or("text", "<missing>").to_string(),
+            )))
+        }
+    }
+
+    fn string_steps_node(value: ParameterValue) -> Graph {
+        let node = Node::new(NodeId::new(1), "test")
+            .with_output("out", DataTypeId::PLAIN_TEXT)
+            .with_param("text", value);
+        Graph::new().add_node(node).unwrap()
+    }
+
+    fn evaluated_text(ev: &mut Evaluator, g: &Graph, frame: u64) -> String {
+        ev.evaluate(g, NodeId::new(1), &ctx_at(frame))
+            .unwrap()
+            .downcast_ref::<crate::types::PlainText>()
+            .expect("plain text")
+            .0
+            .clone()
+    }
+
+    /// The string switches at the key's frame and holds until the next one,
+    /// and the frames before the first key read the first key's value.
+    #[test]
+    fn a_keyed_string_parameter_switches_across_frames() {
+        use crate::animation::StepCurve;
+        let mut steps = StepCurve::new("unused default".to_string());
+        steps.insert(5, "first".to_string());
+        steps.insert(10, "second".to_string());
+        let g = string_steps_node(ParameterValue::StringSteps(steps));
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(StringParamEcho));
+
+        for (frame, expected) in [
+            (0u64, "first"),
+            (4, "first"),
+            (5, "first"),
+            (9, "first"),
+            (10, "second"),
+            (99, "second"),
+        ] {
+            assert_eq!(
+                evaluated_text(&mut ev, &g, frame),
+                expected,
+                "frame {frame}"
+            );
+        }
+    }
+
+    /// An empty step curve falls back to its default value — the same rule an
+    /// empty `KeyframeCurve` follows, and what makes removing the last key a
+    /// return to the constant the parameter had.
+    #[test]
+    fn an_empty_string_step_curve_reads_its_default() {
+        use crate::animation::StepCurve;
+        let g = string_steps_node(ParameterValue::StringSteps(StepCurve::new(
+            "fallback".to_string(),
+        )));
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(StringParamEcho));
+        assert_eq!(evaluated_text(&mut ev, &g, 0), "fallback");
+        assert_eq!(evaluated_text(&mut ev, &g, 42), "fallback");
+    }
+
+    /// Two keys make the node time-varying; one key or none does not. Missing
+    /// the first would serve frame 0's cached string forever — the keys would
+    /// be editable and have no effect — and reporting the others would
+    /// recompute the node on every playback tick for a string that never
+    /// changes.
+    #[test]
+    fn string_steps_are_time_varying_only_with_something_to_switch_to() {
+        use crate::animation::StepCurve;
+        let node_with = |steps: StepCurve<String>| {
+            Node::new(NodeId::new(1), "test")
+                .with_output("out", DataTypeId::PLAIN_TEXT)
+                .with_param("text", ParameterValue::StringSteps(steps))
+        };
+        let mut two = StepCurve::new(String::new());
+        two.insert(0, "a".to_string());
+        two.insert(10, "b".to_string());
+        assert!(node_has_animated_params(&node_with(two), &|_| false));
+
+        let one = StepCurve::keyed(0, "a".to_string());
+        assert!(
+            !node_has_animated_params(&node_with(one), &|_| false),
+            "one key holds the same string on every frame"
+        );
+        assert!(
+            !node_has_animated_params(&node_with(StepCurve::new(String::new())), &|_| false),
+            "an empty step curve is its default value on every frame"
+        );
+    }
+
+    /// The curve editor and the keyframe model walk `channels()`; a step curve
+    /// is not made of float components, so it must stay invisible to them
+    /// whether it holds keys or not.
+    #[test]
+    fn string_steps_expose_no_channels() {
+        use crate::animation::StepCurve;
+        let mut steps = StepCurve::new(String::new());
+        steps.insert(0, "a".to_string());
+        assert!(ParameterValue::StringSteps(steps).channels().is_none());
+        assert!(
+            ParameterValue::StringSteps(StepCurve::<String>::default())
+                .channels()
+                .is_none()
         );
     }
 

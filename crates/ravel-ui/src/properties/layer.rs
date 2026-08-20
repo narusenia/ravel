@@ -735,6 +735,15 @@ fn custom_parameters_section(layer: &Layer, ctx: &EvalContext) -> Option<Propert
                 key,
                 value: (ch.evaluate(frame as f64, ctx).round() as i32).to_string(),
             },
+            // Unreachable through the shell: a custom In port is one of the
+            // six value types (`CustomPortType::allowed_for_in`), none of
+            // which is a string. Read-only rather than a `panic!` because a
+            // hand-built network can still hold one, and a row is a better
+            // answer than a crash.
+            ParameterValue::StringSteps(steps) => PropertyField::ReadOnly {
+                key,
+                value: steps.sample(frame as f64).clone(),
+            },
         };
         fields.push(field);
     }

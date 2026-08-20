@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 /// Current on-disk project format version produced by this build of Ravel.
 ///
 /// Incremented whenever the layout or schema of a `.ravprj` archive changes in
-/// a way that requires a migration step — and, for v7 and v10, when a purely
-/// additive change must not be met by an older build with anything but a
-/// refusal (see the `migrate_v6_to_v7` and `migrate_v9_to_v10` steps in
-/// [`crate::migration`]).
-pub const CURRENT_FORMAT_VERSION: u32 = 10;
+/// a way that requires a migration step — and, for v7, v10 and v11, when a
+/// purely additive change must not be met by an older build with anything but
+/// a refusal (see the `migrate_v6_to_v7`, `migrate_v9_to_v10` and
+/// `migrate_v10_to_v11` steps in [`crate::migration`]).
+pub const CURRENT_FORMAT_VERSION: u32 = 11;
 
 /// Rational frame rate stored in the manifest (`{ "num": 30, "den": 1 }`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

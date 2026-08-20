@@ -1223,6 +1223,47 @@ mod tests {
         );
     }
 
+    /// An animatable string survives a save/load cycle whole: the variant
+    /// comes back as `StringSteps` with the keys and the default that went in,
+    /// and the archive is stamped at the format version that guards it (an
+    /// older build must refuse the file, not recover an older `.bak` over it).
+    #[test]
+    fn the_archive_round_trips_an_animatable_string() {
+        use ravel_core::animation::StepCurve;
+        let mut project = demo_project();
+        let mut steps = StepCurve::new("idle".to_string());
+        steps.insert(0, "first".to_string());
+        steps.insert(24, "second".to_string());
+        let stored = ParameterValue::StringSteps(steps);
+        project.document.graph = project
+            .document
+            .graph
+            .clone()
+            .add_node(
+                Node::new(NodeId::new(901), "text")
+                    .with_output("out", DataTypeId::PLAIN_TEXT)
+                    .with_param("content", stored.clone()),
+            )
+            .unwrap();
+
+        let archive = project.to_archive().unwrap();
+        let back = ProjectFile::from_archive(&archive).unwrap();
+
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(back.document, project.document);
+        assert_eq!(
+            back.document
+                .graph
+                .node(NodeId::new(901))
+                .expect("the text node")
+                .parameters
+                .iter()
+                .find(|p| p.key == "content")
+                .map(|p| &p.value),
+            Some(&stored)
+        );
+    }
+
     /// A project's declarations round-trip whole — name, type, default,
     /// description and binding — in the order they are presented, and a
     /// rewrite of the loaded project produces the same bytes (REQ-PROJ-006).

@@ -83,17 +83,23 @@ enum ParameterValue {
     // 通常の f32 チャネルで、読み出し時に round() して i32 にする。
     // 定数 `Int` はその定数綴り（`Float` と `Channel` の関係と同じ）
     IntChannel(AnimationChannel),
+    // アニメーション可能な文字列（テキスト内容、列挙の選択）。文字列に中間値は
+    // 定義できないので中身は `StepCurve<String>`（キーは補間せず保持）。
+    // 定数 `String` はその定数綴り（`Int` と `IntChannel` の関係と同じ）。
+    // `channels()` は常に None を返すのでカーブエディタには出ない
+    StringSteps(StepCurve<String>),
 }
 ```
 
-`PathPoints` / `Curve` / `Ramp` / `IntChannel` は**必ず末尾に足す**。bincode は
+`PathPoints` / `Curve` / `Ramp` / `IntChannel` / `StringSteps` は**必ず末尾に足す**。bincode は
 variant を位置で索引するので、途中に挿入すると既存 journal が読めなくなる。
 追加自体は `JOURNAL_FORMAT_VERSION` の更新で覆う — 末尾追加でも**旧ビルドが
 新しい variant を含む entry に出会う**側は壊れるので、版を上げて捨てさせる
 （`docs/dev/persistence.md` の規則が正）。
 
-`IntChannel` は `.ravprj` の `format_version` も上げた（v10）。**上げなければ**
-どうなるかが理由で、旧ビルドは `document/main.ron` の `IntChannel` を
+`IntChannel` は `.ravprj` の `format_version` も上げた（v10）。`StringSteps` も
+同じ理由で上げた（v11）。**上げなければ**
+どうなるかが理由で、旧ビルドは `document/main.ron` の新しい variant を
 パースできず、その失敗は切り詰めたファイルと区別できない —
 `load_with_backup` が破損とみなして `.bak` の**古いリビジョン**を開き、
 次の保存がそれを上書きする。版印があるので旧ビルドは
@@ -105,8 +111,14 @@ variant を位置で索引するので、途中に挿入すると既存 journal 
 - **Int はアニメーション可能**（`IntChannel`、journal v9 / `.ravprj` v10）:
   中身は f32 チャンネルそのもので、読み出しで `round()` して `i32` にする。
   定数の `Int` はそのまま残り（`Float` と `Channel` と同じ「2 つの綴り」の関係）、
-  キーフレームを打った瞬間に再型付けされる。**Bool は定数のみ**（step キーは
-  別単位）。PathPoints も定数のみ
+  キーフレームを打った瞬間に再型付けされる。
+- **String もアニメーション可能**（`StringSteps`、journal v10 / `.ravprj` v11）:
+  中身は `StepCurve<String>` で、キーは補間せず**そのフレーム以下で最大のキー**を
+  返す（最初のキーより前は最初のキーの値、キーが無ければ既定値）。文字列に
+  中間値が無いのでこれが唯一の補間で、`channels()` は `None` を返し続けるため
+  **カーブエディタには出ない**。定数の `String` はそのまま残り、キーフレームを
+  打った瞬間に再型付けされる。**Bool は定数のみ**（`StepCurve<T>` が機構としては
+  足りるが要求が出ていない）。PathPoints も定数のみ
   （journal v6 で追加。`in_tan`/`out_tan` 点属性として Geometry に展開
   され、曲線区間は rasterize が共有フラット化で消費する）。
 - `Curve` も定数のみ（journal v7 で追加）。`CurveParam` は `KeyframeCurve` と
@@ -597,14 +609,15 @@ struct SubgraphTemplate {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v9)
+### document/main.ron (RON形式、フォーマット v11)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
 ネットワーク・シェルプロパティ・予約フィールド含む）、メディアアセット
 （`MediaAssetEntry`。v4 で相対 / 変数パス対応、v8 で入力色空間の明示指定
 `color_space` を追加）、公開パラメータ宣言（`exposed_parameters`。v7 で追加）。
-**v10 で `ParameterValue::IntChannel`**（アニメーション可能な整数）が入る。
+**v10 で `ParameterValue::IntChannel`**（アニメーション可能な整数）、
+**v11 で `ParameterValue::StringSteps`**（アニメーション可能な文字列）が入る。
 
 **v8 で色の意味が変わった。** 作者が指定した色（ノードの `COLOR` パラメータ、
 `Composition.background_color`、`exposed_parameters` の `color` 既定値）は

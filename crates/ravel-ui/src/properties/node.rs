@@ -184,6 +184,14 @@ pub fn node_params_section(
                     key: p.key.clone(),
                     value: (channel_display_value(ch, frame, eval).round() as i32).to_string(),
                 },
+                // Read-only for the same reason and until the same unit: the
+                // row shows the string this frame holds, but nothing can
+                // re-type it back yet, so an editable text box here would drop
+                // every edit on the floor.
+                ParameterValue::StringSteps(steps) => PropertyField::ReadOnly {
+                    key: p.key.clone(),
+                    value: steps.sample(frame as f64).clone(),
+                },
             }
         })
         .collect();

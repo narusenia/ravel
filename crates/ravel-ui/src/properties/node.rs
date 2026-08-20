@@ -422,6 +422,22 @@ mod tests {
         })
     }
 
+    /// Every parameter row of a node, whatever group it sits in — for the
+    /// tests that look a row up by key and do not care which section holds
+    /// it.
+    fn node_params_fields(
+        node: &Node,
+        registry: &NodeRegistry,
+        frame: u64,
+        eval: &EvalContext,
+        driven: &[DrivenParam],
+    ) -> Vec<PropertyField> {
+        node_params_sections(node, registry, frame, eval, driven)
+            .into_iter()
+            .flat_map(|section| section.fields)
+            .collect()
+    }
+
     /// Display context for the sections. Only `fps` and the resolutions are
     /// read, and only by an expression-driven channel.
     fn eval() -> ravel_core::eval::EvalContext {
@@ -653,14 +669,12 @@ mod tests {
         let node = registry
             .create_node("math.curve", NodeId::new(1))
             .expect("math.curve is registered");
-        let section = node_params_section(&node, &registry, 0, &eval(), &[]);
+        let fields = node_params_fields(&node, &registry, 0, &eval(), &[]);
         assert!(
-            section
-                .fields
+            fields
                 .iter()
                 .any(|field| matches!(field, PropertyField::Curve { key, .. } if key == "curve")),
-            "math.curve must offer the same editable curve row: {:?}",
-            section.fields
+            "math.curve must offer the same editable curve row: {fields:?}"
         );
     }
 
@@ -822,9 +836,8 @@ mod tests {
             let node = registry
                 .create_node(type_key, NodeId::new(1))
                 .unwrap_or_else(|| panic!("{type_key}"));
-            let section = node_params_section(&node, &registry, 0, &eval(), &[]);
-            let field = section
-                .fields
+            let fields = node_params_fields(&node, &registry, 0, &eval(), &[]);
+            let field = fields
                 .iter()
                 .find(|field| field.key() == key)
                 .unwrap_or_else(|| panic!("{type_key}.{key} has no field"));
@@ -843,7 +856,7 @@ mod tests {
             let node = registry
                 .create_node(&template.type_key, NodeId::new(1))
                 .unwrap();
-            for field in node_params_section(&node, &registry, 0, &eval(), &[]).fields {
+            for field in node_params_fields(&node, &registry, 0, &eval(), &[]) {
                 assert!(
                     !matches!(
                         field.key(),
@@ -887,9 +900,8 @@ mod tests {
         };
         for (type_name, arity) in [("vec2", 2), ("vec3", 3)] {
             let node = node_for(type_name);
-            let section = node_params_section(&node, &registry, 0, &eval(), &[]);
-            let field = section
-                .fields
+            let fields = node_params_fields(&node, &registry, 0, &eval(), &[]);
+            let field = fields
                 .iter()
                 .find(|field| field.key() == "value")
                 .expect("value field");
@@ -901,15 +913,15 @@ mod tests {
             }
         }
         // `f32` keeps the single editable number it always had.
-        let section = node_params_section(&node_for("f32"), &registry, 0, &eval(), &[]);
+        let fields = node_params_fields(&node_for("f32"), &registry, 0, &eval(), &[]);
         assert!(matches!(
-            section.fields.iter().find(|f| f.key() == "value"),
+            fields.iter().find(|f| f.key() == "value"),
             Some(PropertyField::Float { .. })
         ));
         // The type selector is a closed set, so the retype path is reachable
         // from a dropdown rather than free text.
         assert!(matches!(
-            section.fields.iter().find(|f| f.key() == "type"),
+            fields.iter().find(|f| f.key() == "type"),
             Some(PropertyField::Enum { .. })
         ));
     }

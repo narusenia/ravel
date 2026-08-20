@@ -814,6 +814,9 @@ in_max = "入力範囲の終了。"
 out_min = "出力範囲の開始。"
 out_max = "出力範囲の終了。"
 clamp = "結果を出力範囲にクランプする。"
+[node."math.remap".group]
+input = "入力"
+output = "出力"
 
 [node."math.curve"]
 label = "カーブ"
@@ -826,6 +829,10 @@ out_min = "出力範囲の開始。"
 out_max = "出力範囲の終了。"
 extrapolation = "入力範囲外の扱い: clamp / repeat / 端点の接線を延長。"
 curve = "スカラーの変換カーブ。"
+[node."math.curve".group]
+input = "入力"
+output = "出力"
+curve = "カーブ"
 
 [node."vector.construct.vec2"]
 label = "Vec2 構築"
@@ -960,6 +967,10 @@ fov = "垂直画角（度）。パースペクティブのみ。"
 ortho_height = "縦方向にカバーする範囲（コンポジション単位）。オルソグラフィックのみ。"
 near = "ニアクリップ距離。"
 far = "ファークリップ距離。"
+[node."scene.camera".group]
+view = "視点"
+lens = "レンズ"
+clip = "クリップ"
 
 [node."blur"]
 label = "ブラー"
@@ -1068,6 +1079,9 @@ center = "グリッドの中心（ピクセル）。"
 center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+[node."scatter.grid".group]
+layout = "配置"
+source = "ソース"
 
 [node."scatter.circular"]
 label = "円形配置"
@@ -1080,6 +1094,9 @@ align_rotation = "各インスタンスを中心の外向きに回転する。"
 center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+[node."scatter.circular".group]
+layout = "配置"
+source = "ソース"
 
 [node."scatter.path_array"]
 label = "パス配列"
@@ -1101,6 +1118,9 @@ seed = "配置の乱数シード。"
 center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+[node."scatter.scatter".group]
+layout = "配置"
+source = "ソース"
 
 [node."attribute.set"]
 label = "アトリビュート設定"
@@ -1113,6 +1133,9 @@ value = "float / ベクトル / カラー型の値。"
 int_value = "i32 型の値。"
 bool_value = "bool 型の値。"
 string_value = "string 型の値。"
+[node."attribute.set".group]
+target = "対象"
+value = "値"
 
 [node."style.fill"]
 label = "スタイル塗り"
@@ -1133,6 +1156,10 @@ domain = "書き込むドメイン（point / primitive / instance）。"
 group = "書き込む対象の要素を示す Bool アトリビュート名。空なら全要素。"
 cap = "線の端点の形（butt / round / square）。Detail アトリビュートなのでジオメトリ全体で 1 値。"
 join = "線の角の形（miter / round / bevel）。Detail アトリビュートなのでジオメトリ全体で 1 値。"
+[node."style.stroke".group]
+stroke = "線"
+target = "対象"
+corner = "角"
 
 [node."style.dash"]
 label = "スタイル破線"
@@ -1302,6 +1329,10 @@ combine = "既存値との合成方法: set / add / multiply / min / max。"
 components = "対象の成分（空なら型が決める。Color と Vec4 は rgb、それ以外は全成分。例: xy / rgb / a）。"
 group = "対象要素を絞る bool アトリビュート名（空で全要素）。"
 create_if_missing = "対象アトリビュートが無いとき、失敗せずに作成する。"
+[node."field.apply".group]
+target = "対象"
+blend = "合成"
+scope = "適用範囲"
 
 [export]
 title = "書き出し"

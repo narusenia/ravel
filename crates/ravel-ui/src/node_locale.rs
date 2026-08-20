@@ -172,6 +172,67 @@ mod tests {
         }
     }
 
+    /// Every group a built-in template declares must have a heading in both
+    /// shipped locales. Without it the Properties section would show the bare
+    /// `node.<type_key>.group.<name>` key — `t!` returns the key rather than
+    /// panicking, so nothing but this test reports the omission.
+    #[test]
+    fn all_declared_param_groups_have_a_heading_in_every_locale() {
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+        let templates: Vec<_> = registry.all_templates().collect();
+
+        for locale in ["en", "ja"] {
+            let nodes = node_catalog(locale);
+            for template in &templates {
+                let groups = nodes
+                    .get(&template.type_key)
+                    .and_then(|entry| entry.get("group"))
+                    .and_then(toml::Value::as_table);
+                for (group, _) in template.param_group_declarations() {
+                    assert!(
+                        groups
+                            .and_then(|table| table.get(group))
+                            .and_then(toml::Value::as_str)
+                            .is_some(),
+                        "{locale}.toml has no heading for group {group:?} of node type {:?}",
+                        template.type_key
+                    );
+                }
+            }
+        }
+    }
+
+    /// The other direction: a `group.<name>` heading must name a group the
+    /// template really declares, so a renamed group leaves no orphan string
+    /// behind (the same guard `params` keys get).
+    #[test]
+    fn node_group_locale_keys_name_declared_groups() {
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+
+        for locale in ["en", "ja"] {
+            let nodes = node_catalog(locale);
+            for (type_key, entry) in &nodes {
+                let Some(groups) = entry.get("group").and_then(toml::Value::as_table) else {
+                    continue;
+                };
+                let template = registry.get(type_key).unwrap_or_else(|| {
+                    panic!("{locale}.toml documents unknown node type {type_key:?}")
+                });
+                for name in groups.keys() {
+                    assert!(
+                        template
+                            .param_group_declarations()
+                            .iter()
+                            .any(|(group, _)| group == name),
+                        "{locale}.toml documents group {name:?} that {type_key:?} does not declare"
+                    );
+                }
+            }
+        }
+    }
+
     /// The `[node]` table of a shipped locale catalog.
     fn node_catalog(locale: &str) -> toml::Table {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/");

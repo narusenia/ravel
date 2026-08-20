@@ -437,6 +437,13 @@ fn attribute_set() -> NodeTemplate {
         .with_param(string_parameter("string_value", ""))
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("int_value", -1e9..=1e9, -100.0..=100.0)
+        // `type` decides which of the four value rows is read, so the choice
+        // of attribute and the value written to it are two separate steps.
+        .with_param_group("target", ["domain", "name", "type"])
+        .with_param_group(
+            "value",
+            ["value", "int_value", "bool_value", "string_value"],
+        )
 }
 
 /// Writes the fill attributes (`fill`, `Cd`) onto the chosen domain.
@@ -478,6 +485,12 @@ fn style_stroke() -> NodeTemplate {
         .with_param(string_parameter("join", STROKE_JOINS[1]))
         .with_param_options("join", STROKE_JOINS)
         .with_param_range("width", 0.0..=1000.0, 0.0..=20.0)
+        // Cap and join are Detail — one value for the whole geometry — while
+        // width and colour are per-element, so they answer to `domain` and
+        // `group` and the corner shape does not.
+        .with_param_group("stroke", ["width", "color"])
+        .with_param_group("target", ["domain", "group"])
+        .with_param_group("corner", ["cap", "join"])
 }
 
 /// Writes the Detail dash attributes. Separate from `style.stroke` because a
@@ -767,6 +780,11 @@ fn field_apply() -> NodeTemplate {
             key: "create_if_missing".into(),
             value: ParameterValue::Bool(true),
         })
+        // Which attribute is written, how the field's value is folded into it,
+        // and which elements are reached are three separate questions.
+        .with_param_group("target", ["domain", "target"])
+        .with_param_group("blend", ["amount", "combine", "components"])
+        .with_param_group("scope", ["group", "create_if_missing"])
 }
 
 fn rasterize() -> NodeTemplate {
@@ -1206,6 +1224,10 @@ fn math_remap() -> NodeTemplate {
         .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("out_min", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("out_max", -1e9..=1e9, -10.0..=10.0)
+        // `clamp` is an output property: it bounds the remapped value, not
+        // the incoming one.
+        .with_param_group("input", ["value", "in_min", "in_max"])
+        .with_param_group("output", ["out_min", "out_max", "clamp"])
 }
 
 fn math_curve() -> NodeTemplate {
@@ -1227,6 +1249,11 @@ fn math_curve() -> NodeTemplate {
         .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("out_min", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("out_max", -1e9..=1e9, -10.0..=10.0)
+        .with_param_group("input", ["value", "in_min", "in_max"])
+        .with_param_group("output", ["out_min", "out_max"])
+        // The shape of the mapping, separate from the two ranges it is read
+        // between: the inline curve editor is the tallest row on the node.
+        .with_param_group("curve", ["extrapolation", "curve"])
 }
 
 fn geometry_transform() -> NodeTemplate {
@@ -1402,6 +1429,12 @@ fn scene_camera() -> NodeTemplate {
         .with_param_range("ortho_height", 1e-3..=1e9, 1.0..=4000.0)
         .with_param_range("near", 1e-4..=1e9, 0.1..=1000.0)
         .with_param_range("far", 1e-4..=1e9, 100.0..=20000.0)
+        // Where the camera is and what it looks at, the lens it looks through
+        // (`fov` for perspective, `ortho_height` for orthographic), and the
+        // depth range it keeps.
+        .with_param_group("view", ["position", "target", "projection"])
+        .with_param_group("lens", ["fov", "ortho_height"])
+        .with_param_group("clip", ["near", "far"])
 }
 
 fn blur() -> NodeTemplate {
@@ -1634,6 +1667,10 @@ fn scatter_grid() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
+        // Where the points are, then how the connected geometries are handed
+        // out to them — the same split on all three scatter nodes.
+        .with_param_group("layout", ["count_x", "count_y", "spacing", "center"])
+        .with_param_group("source", ["center_input", "source_mode", "source_seed"])
 }
 
 fn scatter_circular() -> NodeTemplate {
@@ -1679,6 +1716,8 @@ fn scatter_circular() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
+        .with_param_group("layout", ["count", "radius", "center", "align_rotation"])
+        .with_param_group("source", ["center_input", "source_mode", "source_seed"])
 }
 
 fn scatter_path_array() -> NodeTemplate {
@@ -1761,6 +1800,10 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
+        // `seed` places the points; `source_seed` picks which geometry lands
+        // on each. Two seeds, two groups.
+        .with_param_group("layout", ["count", "area", "center", "seed"])
+        .with_param_group("source", ["center_input", "source_mode", "source_seed"])
 }
 
 /// `shape.line`: one open path from `start` to `end`.
@@ -2541,6 +2584,76 @@ mod tests {
                         range.hard
                     );
                 }
+            }
+        }
+    }
+    /// Every key a built-in group declares must name a real parameter of that
+    /// template. The sections drop an unknown key silently — that is
+    /// deliberate, so a typo cannot break the panel — which means nothing but
+    /// this test would ever report a parameter renamed out from under its
+    /// group.
+    #[test]
+    fn declared_param_groups_name_real_parameters() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            for (group, keys) in tmpl.param_group_declarations() {
+                for key in keys {
+                    assert!(
+                        tmpl.default_params.iter().any(|p| &p.key == key),
+                        "{}: group {group:?} names parameter {key:?}, which it does not have",
+                        tmpl.type_key
+                    );
+                }
+            }
+        }
+    }
+
+    /// A key may appear in at most one group of a template. A repeat is not a
+    /// crash — the first declaration wins where the sections are built — but
+    /// it always means one of the two declarations was meant to say something
+    /// else.
+    #[test]
+    fn declared_param_groups_do_not_repeat_a_key() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            let mut seen = std::collections::HashSet::new();
+            for (group, keys) in tmpl.param_group_declarations() {
+                for key in keys {
+                    assert!(
+                        seen.insert(key),
+                        "{}: parameter {key:?} is in two groups (second is {group:?})",
+                        tmpl.type_key
+                    );
+                }
+            }
+        }
+    }
+
+    /// A template that groups anything groups **everything**: a leftover
+    /// parameter would sit in the untitled leading section above the named
+    /// ones, which reads as an oversight rather than a decision.
+    #[test]
+    fn a_template_that_declares_groups_covers_every_parameter() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            if tmpl.param_group_declarations().is_empty() {
+                continue;
+            }
+            let grouped: std::collections::HashSet<&String> = tmpl
+                .param_group_declarations()
+                .iter()
+                .flat_map(|(_, keys)| keys)
+                .collect();
+            for param in &tmpl.default_params {
+                assert!(
+                    grouped.contains(&param.key),
+                    "{}: parameter {:?} is in no group",
+                    tmpl.type_key,
+                    param.key
+                );
             }
         }
     }

@@ -200,6 +200,20 @@ impl TimeKey {
         self.0
     }
 
+    /// The quantised position back in frames — the inverse of
+    /// [`from_frame_position`](Self::from_frame_position), lossy by exactly the
+    /// quantum it applied.
+    ///
+    /// A value read at this position instead of the raw one is a value the
+    /// cache can serve: two requests that share a tick share the answer. That
+    /// matters for anything **discrete**, where a sub-tick difference is a
+    /// different value rather than an imperceptibly different one (see
+    /// `materialize_params`). Meaningless for [`TimeKey::TIMELESS`], which
+    /// names no position.
+    pub fn frame_position(self) -> f64 {
+        self.0 as f64 / Self::SUBFRAME_SCALE
+    }
+
     /// Whether this is the time-independent key.
     pub fn is_timeless(self) -> bool {
         self == Self::TIMELESS
@@ -3100,8 +3114,23 @@ impl Evaluator {
                     // every other constant's clone already lives (HIGH-03).
                     // The processor still reads it with `str_or` and never
                     // learns the parameter is animated.
+                    //
+                    // The position goes through [`TimeKey`] first, so
+                    // **evaluation and the cache see the same time**. The cache
+                    // identity holds a quantised tick (1/4096 frame, CACHE-2),
+                    // so frames 9.9999 and 10.0 are one entry; sampling the raw
+                    // position would put `"first"` in that entry from 9.9999
+                    // and then serve it for 10.0, where the key at 10 has taken
+                    // over — the switch would simply not happen. A continuous
+                    // channel does not care, because there the quantum costs a
+                    // sub-quantum difference in the number; a step curve turns
+                    // it into the wrong side of a discrete jump. Quantising the
+                    // read is the cheaper half of the agreement: the
+                    // alternative is a finer cache key for every node in the
+                    // document.
                     ParameterValue::StringSteps(steps) => {
-                        ResolvedValue::Str(steps.sample(ctx.sample_frame()).clone())
+                        let at = TimeKey::from_frame_position(ctx.sample_frame()).frame_position();
+                        ResolvedValue::Str(steps.sample(at).clone())
                     }
                     ParameterValue::PathPoints(points) => ResolvedValue::PathPoints(points.clone()),
                     ParameterValue::Curve(curve) => ResolvedValue::Curve(curve.clone()),
@@ -4629,6 +4658,60 @@ mod tests {
         ev.register(NodeId::new(1), Arc::new(StringParamEcho));
         assert_eq!(evaluated_text(&mut ev, &g, 0), "fallback");
         assert_eq!(evaluated_text(&mut ev, &g, 42), "fallback");
+    }
+
+    /// The cache identity quantises time to 1/4096 frame, so 9.9999 and 10.0
+    /// are one entry. A step curve sampled at the raw position would put the
+    /// pre-10 string in that entry and then serve it at 10.0, where the key at
+    /// 10 has taken over — the switch would silently not happen for whichever
+    /// order the two sub-frame positions were asked in. Both orders must answer
+    /// with the key at 10.
+    #[test]
+    fn a_step_curve_agrees_with_the_cache_across_a_subframe_boundary() {
+        use crate::animation::StepCurve;
+        let mut steps = StepCurve::new("default".to_string());
+        steps.insert(0, "first".to_string());
+        steps.insert(10, "second".to_string());
+        let g = string_steps_node(ParameterValue::StringSteps(steps));
+
+        // The two positions share a tick, so they share a cache entry.
+        assert_eq!(
+            TimeKey::from_frame_position(9.9999),
+            TimeKey::from_frame_position(10.0),
+            "the premise: one tick, one entry"
+        );
+
+        // Frame 9 plus 0.9999 of a frame, and frame 10 exactly. One cache
+        // entry serves both, so whichever is asked first decides the answer.
+        let just_under = || {
+            let mut ctx = ctx_at(9);
+            ctx.time += 0.9999 / FPS.as_f64();
+            ctx
+        };
+        let on_the_key = || ctx_at(10);
+
+        for (label, order) in [
+            ("sub-frame first", [just_under(), on_the_key()]),
+            ("on the key first", [on_the_key(), just_under()]),
+        ] {
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(1), Arc::new(StringParamEcho));
+            for ctx in order {
+                let text = ev
+                    .evaluate(&g, NodeId::new(1), &ctx)
+                    .unwrap()
+                    .downcast_ref::<crate::types::PlainText>()
+                    .expect("plain text")
+                    .0
+                    .clone();
+                assert_eq!(
+                    text,
+                    "second",
+                    "{label}: {} quantises to frame 10, where the key at 10 holds",
+                    ctx.sample_frame()
+                );
+            }
+        }
     }
 
     /// Two keys make the node time-varying; one key or none does not. Missing

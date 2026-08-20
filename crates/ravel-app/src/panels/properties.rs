@@ -4625,6 +4625,19 @@ impl Render for PropertiesGpuiPanel {
                             node.parameters
                                 .iter()
                                 .filter(|p| p.value.port_data_type().is_some())
+                                // An identifier parameter cannot be exposed as
+                                // a port (a wire would make the reference a
+                                // function of the frame), so it carries no
+                                // toggle — unless a port already exists, where
+                                // the toggle is the only way to remove it. Same
+                                // split as `toggle_param_port`, which refuses
+                                // the exposing half and nothing else.
+                                .filter(|p| {
+                                    !ravel_core::composition::validate::is_identifier_parameter(
+                                        &node.type_key,
+                                        &p.key,
+                                    ) || node.param_port_index(&p.key).is_some()
+                                })
                                 .map(|p| {
                                     let state = if driven.iter().any(|d| d.key == p.key) {
                                         PortToggleState::Connected

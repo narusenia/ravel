@@ -13,13 +13,24 @@
 
 該当するのは `composition::validate::is_identifier_parameter` が列挙する 3 つ:
 
-- `layer.ref` の `layer`（`LayerId` の生値）
-- `precomp` の `comp_id`（`CompId` の生値）
-- `media` の `asset_id`（`AssetId` の 10 進表記）
+- `layer.ref` の `layer`（`LayerId` の生値）— ワイヤで駆動できる
+- `precomp` の `comp_id`（`CompId` の生値）— ワイヤで駆動できる
+- `media` の `asset_id`（`AssetId` の 10 進表記）— **ワイヤでは駆動できない**
+  が、`StringSteps` で同じ状態になる（下記の訂正）
 
 `Graph::expose_param_port` はこれらを**普通の `SCALAR` 入力として受ける**。
 Scalar を繋ぐと `param_port_overlay` が `ResolvedValue::Int` に変換するので、
 **評価のたびに参照先 ID が変わる**。
+
+> **訂正（`render-warning-channel-plan.md` の着手時に実測）。**
+> ワイヤで動くのは `layer.ref` の `layer` と `precomp` の `comp_id` の 2 つだけ。
+> `media` の `asset_id` は `ParameterValue::String` で、
+> `param_port_overlay` は `String` / `StringSteps` に `None` を返すので
+> **ワイヤでは動かない**。ただし `asset_id` には**同じ状態に至る別の口**がある:
+> `DISK-2` が足した `StringSteps` を手編集で置くと、`eval.rs` が
+> フレームごとに `sample` して `media` の `str_or("asset_id", "")` に渡す一方、
+> `composition::node_asset_reference` は `ParameterValue::String` だけを読むので
+> `id_watermarks` がその ID を予約しない。**欠陥の形と帰結は同じ。**
 
 一方 `Document::id_watermarks` は**保存された値**しか走査しない
 （`ParameterValue::static_identifier` 経由）。したがって:
@@ -43,6 +54,10 @@ Scalar を繋ぐと `param_port_overlay` が `ResolvedValue::Int` に変換す�
 古い文書は依然としてこの状態を持てる**。
 
 ## 修正方針
+
+**決着済み**: 案 3（評価時に無視して警告する）を
+`docs/implementation/render-warning-channel-plan.md` の `WARN-1` / `WARN-2` が
+実施する（`HIGH-34` と同じ警告経路を共有する）。以下は判断の記録。
 
 **決めが要る。** 3 つの案があり、それぞれ代償が違う。
 

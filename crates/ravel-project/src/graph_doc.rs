@@ -55,9 +55,13 @@ impl GraphDoc {
     }
 
     /// Serialize to pretty-printed RON text.
+    ///
+    /// LF line endings, for the reason `document_to_ron` gives: the text is
+    /// meant to be deterministic, and RON's default newline is the platform's.
     pub fn to_ron(&self) -> Result<String, GraphDocError> {
         let config = ron::ser::PrettyConfig::new()
             .struct_names(true)
+            .new_line("\n")
             .indentor("  ".to_string());
         Ok(ron::ser::to_string_pretty(self, config)?)
     }

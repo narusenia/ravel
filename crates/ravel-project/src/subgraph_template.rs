@@ -79,9 +79,14 @@ pub enum SubgraphTemplateFileError {
 }
 
 /// Serialize `template` to pretty-printed RON.
+///
+/// LF line endings, like the `.ravprj` writers: a template is a file people
+/// hand around, and the same template written on two platforms should be the
+/// same bytes (`crate::document_to_ron`).
 pub fn to_ron(template: &SubgraphTemplate) -> Result<String, SubgraphTemplateFileError> {
     let config = ron::ser::PrettyConfig::new()
         .struct_names(true)
+        .new_line("\n")
         .indentor("  ".to_string());
     Ok(ron::ser::to_string_pretty(template, config)?)
 }
@@ -552,6 +557,19 @@ mod tests {
         assert_eq!(
             load(&dir.path().join("keep.ravtpl")).expect("it still loads"),
             shallow
+        );
+    }
+
+    /// The writer's line endings are LF on every platform. RON's default is
+    /// the platform's newline, and a file whose bytes depend on where it was
+    /// saved is not the deterministic text this module claims to write.
+    #[test]
+    fn the_serializer_writes_lf_line_endings() {
+        let text = to_ron(&deeply_nested(2)).expect("it serializes");
+        assert!(text.contains('\n'), "the pretty printer wrapped lines");
+        assert!(
+            !text.contains('\r'),
+            "no carriage returns, whatever the platform"
         );
     }
 

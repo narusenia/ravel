@@ -594,10 +594,18 @@ fn ron_options() -> ron::Options {
 }
 
 /// Serialize a [`Document`] to pretty RON (same style as [`GraphDoc`]:
-/// struct names, two-space indent).
+/// struct names, two-space indent, **LF line endings**).
+///
+/// `new_line` is set because RON's default is the *platform's* newline, and
+/// "deterministic, diff-friendly text" (the reason the document is projected
+/// onto sorted vectors at all) is not a property a file has if saving the same
+/// project on Windows and on macOS produces different bytes. It also removes a
+/// whole class of test bug: a fixture that rewrites serializer output matched
+/// nothing on Windows and only the Windows CI job could say so.
 fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
     let config = ron::ser::PrettyConfig::new()
         .struct_names(true)
+        .new_line("\n")
         .indentor("  ".to_string());
     ron::ser::to_string_pretty(document, config).map_err(ProjectError::DocumentSerialize)
 }
@@ -2846,6 +2854,18 @@ mod tests {
             tighter.from_str::<Document>(&text).is_ok(),
             "the budget is within 16 recursion levels of the depth limit's cost"
         );
+    }
+
+    /// Every RON the container writes uses LF, whatever the platform. RON's
+    /// `PrettyConfig` defaults `new_line` to `\r\n` on Windows, so without
+    /// the explicit setting the same project saved on two machines is two
+    /// different files — and this assertion only fails on the platform that
+    /// would produce the difference, which is the point of running CI there.
+    #[test]
+    fn the_document_writer_uses_lf_line_endings() {
+        let text = document_to_ron(&demo_document()).unwrap();
+        assert!(text.contains('\n'), "the pretty printer wrapped lines");
+        assert!(!text.contains('\r'), "no carriage returns");
     }
 
     #[test]

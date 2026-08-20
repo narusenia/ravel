@@ -28,6 +28,39 @@
 
 ---
 
+## MED-UI-02 | perf | Properties パネルが再生中フレームあたり2回、全セクションを再構築する
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:579-597`（project observer と
+PlaybackPosition observer）、`:1220-1255`（`refresh_values`）
+
+> **解決済み**: `RESP3-7`（PR #397）+ `VIS-2`〜`VIS-4`。二段で閉じた。
+>
+> - `RESP3-7`（#397）: 「プレイヘッドで再サンプルされるものが何も無いときは
+>   スキップ」。静的ターゲットの再生 1 秒あたりの `refresh_values` が
+>   30 → 1 回。アニメーション有りのターゲットは 30 回のまま据え置きで、
+>   これは正しい（削ると再生中に値が止まる）。
+> - `VIS-2`〜`VIS-4`: 残っていた「パネル非表示のときスキップ」。
+>   `panels::VisiblePanels`（`WindowHost::show_tree` が唯一の書き手）を
+>   `panels::is_instance_visible` / `on_became_visible` 経由で読み、裏のタブに
+>   いる間は sync を**遅らせる**。飛ばした分は `MirrorEpoch` を記録しない
+>   ことで借りとして残り、表に戻った瞬間に 1 回で返す。裏で再生 30 フレーム
+>   流しても `refresh_values` は 0 回、5 パネルすべてを裏に置いた
+>   ドラッグ 10 move で sync 合計 0 回
+>   （`crates/ravel-app/tests/panel_rebuild_gate.rs`）。
+>   Viewer は対象外 — 裏でも評価要求を出し続ける必要がある（理由は
+>   `ViewerPanel::new` のコメント）。
+
+再生中は `PlaybackPosition` observer（`publish_position` ごと、`playback.rs:417`）と
+ProjectState observer（[CRIT-01](CRIT-01-eval-update-notifies-whole-workspace.md)
+経由で評価結果ごと）の**両方**が `refresh_values` を呼ぶ。
+`refresh_values` はドキュメントからターゲットを再解決し、全アニメーションチャンネルを再サンプルし、
+新しい文字列を伴う全 `PropertySection` を再構築して notify する — 30〜60fps で毎フレーム2回。
+
+**修正方針**: 2つのトリガーを重複排除（フレームあたり最大1回）。
+アニメーションチャンネル由来のフィールドのみ再構築。パネル非表示時はスキップ。
+
+---
+
 ## MED-UI-03 | perf | Timeline に行の仮想化が無い — 全レイヤーのヘッダとレーンを毎フレーム構築・描画
 
 **該当**: `crates/ravel-app/src/panels/timeline.rs:3022-3057`（`build_layer_headers`）、

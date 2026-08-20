@@ -6,31 +6,6 @@
 
 ---
 
-## MED-UI-02 | perf | Properties パネルが再生中フレームあたり2回、全セクションを再構築する
-
-**該当**: `crates/ravel-app/src/panels/properties.rs:579-597`（project observer と
-PlaybackPosition observer）、`:1220-1255`（`refresh_values`）
-
-再生中は `PlaybackPosition` observer（`publish_position` ごと、`playback.rs:417`）と
-ProjectState observer（[CRIT-01](../closed/CRIT-01-eval-update-notifies-whole-workspace.md)
-経由で評価結果ごと）の**両方**が `refresh_values` を呼ぶ。
-`refresh_values` はドキュメントからターゲットを再解決し、全アニメーションチャンネルを再サンプルし、
-新しい文字列を伴う全 `PropertySection` を再構築して notify する — 30〜60fps で毎フレーム2回。
-
-**修正方針**: 2つのトリガーを重複排除（フレームあたり最大1回）。
-アニメーションチャンネル由来のフィールドのみ再構築。パネル非表示時はスキップ。
-
-> **部分的に解決（`RESP3-7`、PR #397）**: 「プレイヘッドで再サンプルされるものが
-> 何も無いときスキップ」が入り、静的ターゲットの再生 1 秒あたりの
-> `refresh_values` は 30 → 1 回になった。アニメーション有りのターゲットは
-> 30 回のまま据え置きで、これは正しい（削ると値が止まる）。
->
-> **残っているのは「パネル非表示のときスキップ」。** タブの可視性がパネルへ
-> 届く仕組みが無く（`ravel-dock` は `active: usize` を持つがパネルへ伝えない）、
-> 配線は設計ゲート規模になる。この 1 点が未達なので本項目は未解決のまま置く。
-
----
-
 ## MED-UI-07 | bug | 狭い Properties パネルで Vector 行が横にはみ出して見えなくなる
 
 **該当**: `crates/ravel-app/src/panels/properties.rs` の `PropertyField::Vector`

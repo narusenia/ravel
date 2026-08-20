@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
 | high | 3 | 31 | [high/](high/) — 1件1ファイル |
-| medium | 29 | 44 | [medium/](medium/) — 領域別5ファイル |
+| medium | 28 | 45 | [medium/](medium/) — 領域別5ファイル |
 | low | 32 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -34,7 +34,7 @@
 | NodeEditor 固有の再描画 + 操作の即効修正 | 完了（フェーズ A） |
 | もっさり 第1段（評価・レンダー回数） | 完了（`done/ui-responsiveness-plan.md`） |
 | もっさり 第2段（描画1回あたり） | フェーズ H（`gpu-compositing-plan.md`。`HIGH-05` は済） |
-| もっさり 第3段（評価器のアルゴリズム）+ パネル1回あたり | フェーズ C3「応答性の残り」（進行中 — 残りは `MED-UI-02` のみ） |
+| もっさり 第3段（評価器のアルゴリズム）+ パネル1回あたり | 完了（フェーズ C3「応答性の残り」） |
 | もっさり 第4段（メディア・スクラブ） | フェーズ C2（`cache-plan.md`）と C3 |
 | 設定が効かない / キーバインド上書き | フェーズ C（`settings-screen-plan.md`） |
 | 操作の正しさ（Timeline / NodeEditor / 選択） | フェーズ E |
@@ -151,9 +151,10 @@
 フェーズ C3 で解決したのは `MED-UI-01`（毎編集の再コンパイル）、
 `MED-UI-03`（Timeline の垂直カリング）、`MED-UI-04`（Timeline の revision ゲート）、
 `MED-UI-06`（2 経路の重複 sync）。`MED-UI-05`（Outliner / MediaBin の全行再構築）は
-Outliner 側が #397、MediaBin 側が #400 で解決した。**残っているのは
-`MED-UI-02` の「パネル非表示のときスキップ」だけ**で、これは部分的に解決済み
-（詳細は項目の追記）。
+Outliner 側が #397、MediaBin 側が #400 で解決した。`MED-UI-02` は二段で閉じた —
+`RESP3-7` がプレイヘッドの空振りを、`VIS-2`〜`VIS-4` が「裏のタブでは
+更新を遅らせ、表に戻ったときに追いつく」を入れた。**この節の未解決は
+`MED-UI-07`（狭い Properties の Vector 行）だけ**である。
 第1段を直すと呼ばれる回数は減るが、レイヤー数が増えるとこれらが再び効いてくる。
 
 ---

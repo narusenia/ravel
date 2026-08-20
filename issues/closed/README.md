@@ -62,7 +62,7 @@
 | [HIGH-29](HIGH-29-no-menu-bar-outside-macos.md) | Windows / Linux にメニューが 1 つも出ない | 実機フィードバック（Linux は未確認） |
 | [HIGH-26](HIGH-26-ravprj-saves-deeper-than-it-loads.md) | 保存できた `.ravprj` が二度と開けない（保存側と読み込み側で上限が違う） | 上限の一本化（`MAX_SUBNET_DEPTH` 16 + `RON_RECURSION_LIMIT`） |
 
-## medium（44件）
+## medium（45件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `12` `16` `18` `21` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33` `34` `35`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09` `10`
@@ -70,9 +70,8 @@
   `HIGH-26` で閉じたが、評価側の再帰が残るので未解決のまま。
   [`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07`
-- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `03` `04` `05` `06`
-  （`MED-UI-02` は**部分的に解決**で未解決のまま — 非表示スキップが
-  `panel-visibility-plan.md` の `VIS-*` 待ち。
+- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `02` `03` `04` `05` `06`
+  （未解決分は `MED-UI-07` のみ。
   [`../medium/ui-rendering.md`](../medium/ui-rendering.md)）
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `07` / `MED-AUD-01` `02` `03`
 

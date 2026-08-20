@@ -184,6 +184,9 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 マイグレーションも作っていない。`Composition.guides`（ユーザーガイド、
 `SNAP-2`）も v8 のまま同じ形で入っている — 欠落は「ガイドが無い」という事実
 そのもので、旧ビルドが捨てても画面から線が消えるので気づける。
+`MediaAssetEntry.exposed_owner`（公開宣言が作った素材の所有者、`AID-3`）も v9 の
+まま同じ形。旧ビルドが捨てて失われるのは所有関係だけで、症状は「同じ露出値を
+もう一度適用すると素材が 1 つ増える」— 素材表に見えるので気づける。
 `ui_state.json` も format_version 3 のまま追加された。
 
 この判断は `docs/implementation/roadmap.md` の基準 1（移行コストが時間で

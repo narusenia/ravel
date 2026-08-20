@@ -741,12 +741,17 @@ broken" are different answers. `ravel-project` loads a `.ravprj` without
 `gpui`, so archive → `Document` → listing → JSON is a GUI-free path.
 
 A **media** declaration is the one value that is not a parameter value: it
-registers a `MediaAssetEntry` for the caller's `AssetPath` under the
-**display name** `exposed:<name>` and points the bound media node's `asset_id`
-at the `AssetId` minted for it, in one document. The name is derived and the id
-is not, so re-applying the same value finds the entry it left last time by name
-(`Document::media_asset_id_by_name`) and reuses its id — that is what makes the
-call idempotent since v9. The path resolves through `AssetPath::resolve`
+registers a `MediaAssetEntry` for the caller's `AssetPath`, stamped with
+`exposed_owner: Some(<name>)` and named `exposed:<name>`, and points the bound
+media node's `asset_id` at the `AssetId` minted for it, in one document.
+**`exposed_owner` is the claim; the name is only a label**: re-applying the
+same value finds the entry by owner and reuses its id — that is what makes the
+call idempotent — while a name the user edited in the MediaBin survives the
+re-apply, and an unrelated asset renamed to `exposed:<name>` is never taken
+over. An entry the bound node no longer references is refused
+(`AssetIdTaken`), and two entries claiming one declaration — which only a
+hand-edited document can hold — are refused as `AssetOwnerAmbiguous` rather
+than resolved by a coin toss. The path resolves through `AssetPath::resolve`
 (absolute / `./relative` / `${VAR}`, REQ-PROJ-005) and **must exist** — an
 absent file is `MediaNotFound` before anything is written, never a silently
 blank render. The binding must name a `media` node **and its `asset_id` parameter**
@@ -2184,9 +2189,11 @@ Unknown type keys are skipped silently (plugin space).
   (`MediaBinFilter::{All, Video, Still, Audio}`) and a case-insensitive
   substring name search, sorted by name. `MediaBinRow { asset_id: AssetId,
   name, kind, duration, offline }` carries everything the row paints — the id
-  is identity and is never shown; `name` is the persisted path's file name,
-  falling back to `MediaAssetEntry::name` (never the id, which names no file
-  the user could recognise). `classify(entry)`
+  is identity and is never shown; `name` is `MediaAssetEntry::name`, the
+  editable display name (`AID-3`), falling back to the persisted path's file
+  name only when it is blank (never the id, which names no file the user could
+  recognise) — `ravel_ui::document::add_media_layers` names a media layer from
+  the same string. `classify(entry)`
   decides the `MediaBinRowKind::{Video, Still, Audio}` category (a container
   is audio only with audio streams and no probed video stream; a sequence is
   video). `asset_references(document, AssetId)` lists every layer still
@@ -2811,8 +2818,10 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   future-versioned content reads as `None`.
   Asset references (REQ-PROJ-001): `Document.media_assets` maps `AssetId` to
   `ravel_core::composition::MediaAssetEntry { name: String, path: AssetPath,
-  kind: AssetKind, metadata: AssetMetadata, #[serde(skip)] resolved:
-  Option<PathBuf> }`. The key was the display string until v9, which split
+  kind: AssetKind, metadata: AssetMetadata, color_space: Option<ColorSpace>,
+  exposed_owner: Option<String>, #[serde(skip)] resolved: Option<PathBuf> }`
+  (`exposed_owner` — which exposed declaration created the entry — was added
+  after v9 as a `#[serde(default)]` field, so it cost no format bump). The key was the display string until v9, which split
   identity (`AssetId`, never reused) from the name (`name`, editable, not
   unique); `#[serde(default)]` on `name` plus a lenient `AssetId` deserializer
   is what lets a v8 document load at all, and

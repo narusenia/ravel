@@ -594,10 +594,18 @@ fn ron_options() -> ron::Options {
 }
 
 /// Serialize a [`Document`] to pretty RON (same style as [`GraphDoc`]:
-/// struct names, two-space indent).
+/// struct names, two-space indent, **LF line endings**).
+///
+/// `new_line` is set because RON's default is the *platform's* newline, and
+/// "deterministic, diff-friendly text" (the reason the document is projected
+/// onto sorted vectors at all) is not a property a file has if saving the same
+/// project on Windows and on macOS produces different bytes. It also removes a
+/// whole class of test bug: a fixture that rewrites serializer output matched
+/// nothing on Windows and only the Windows CI job could say so.
 fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
     let config = ron::ser::PrettyConfig::new()
         .struct_names(true)
+        .new_line("\n")
         .indentor("  ".to_string());
     ron::ser::to_string_pretty(document, config).map_err(ProjectError::DocumentSerialize)
 }
@@ -892,9 +900,10 @@ mod tests {
         let project = demo_project();
         let ron = document_to_ron(&project.document).unwrap();
         assert!(ron.contains("guides:"), "the field was there to strip");
-        // By line rather than by substring: the serializer ends its lines the
-        // platform's way, so a pattern carrying `\n` strips nothing on Windows
-        // and the test would pass while proving the opposite.
+        // By line rather than by substring. `document_to_ron` pins LF now, so
+        // a `\n` pattern would work — but walking lines says what the strip
+        // means without depending on that, and the dependency is what made
+        // this class of fixture fail on Windows only.
         let stripped: String = ron
             .lines()
             .filter(|line| !line.trim_start().starts_with("guides:"))
@@ -2457,12 +2466,12 @@ mod tests {
                 .unwrap(),
             );
 
-        // **Line endings are normalized before the rewrites below.** RON's
-        // pretty printer emits the platform's newline (`PrettyConfig` defaults
-        // `new_line` to `\r\n` on Windows), so a pattern written with `\n`
-        // matches nothing there — the fixture would keep its v9 keys, and only
-        // the Windows CI job would ever say so.
-        let text = document_to_ron(&document).unwrap().replace("\r\n", "\n");
+        // The `\n` in the patterns below is safe because `document_to_ron`
+        // pins LF on every platform (`the_document_writer_uses_lf_line_endings`
+        // holds that, and fails on Windows if the setting is dropped). Before
+        // it did, this fixture matched nothing there and kept its v9 keys —
+        // green locally, six failures in the Windows CI job only.
+        let text = document_to_ron(&document).unwrap();
         // `(AssetId(n), MediaAssetEntry(\n  name: "x",` -> `("x", MediaAssetEntry(`
         let text = text
             .replace(
@@ -2846,6 +2855,18 @@ mod tests {
             tighter.from_str::<Document>(&text).is_ok(),
             "the budget is within 16 recursion levels of the depth limit's cost"
         );
+    }
+
+    /// Every RON the container writes uses LF, whatever the platform. RON's
+    /// `PrettyConfig` defaults `new_line` to `\r\n` on Windows, so without
+    /// the explicit setting the same project saved on two machines is two
+    /// different files — and this assertion only fails on the platform that
+    /// would produce the difference, which is the point of running CI there.
+    #[test]
+    fn the_document_writer_uses_lf_line_endings() {
+        let text = document_to_ron(&demo_document()).unwrap();
+        assert!(text.contains('\n'), "the pretty printer wrapped lines");
+        assert!(!text.contains('\r'), "no carriage returns");
     }
 
     #[test]

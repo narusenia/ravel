@@ -22,7 +22,7 @@
 | A4 | 完了 | 2026-07-30 |
 | A5 | 完了 | 2026-07-30 |
 | B | 完了 | 2026-07-31 |
-| B2 | 未着手 | — |
+| B2 | 進行中 | — |
 | C | 完了 | 2026-08-06 |
 | C4 | 完了 | 2026-08-13 |
 | CM | 進行中 | — |
@@ -320,13 +320,13 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 
 | 単位 | 内容 |
 |---|---|
-| `AID-1` / `AID-2` | `AssetId` 型と `MediaAssetEntry` の分離（format +1）と参照 3 系統の切り替え（`asset-identity-plan.md`） |
+| `AID-1` / `AID-2` | `AssetId` 型と `MediaAssetEntry` の分離（`.ravprj` v9）と参照 3 系統の切り替え（`asset-identity-plan.md`）**済**（#456） |
 | `AID-3` / `AID-4` | インポートの採番、MediaBin の改名 UI、ロケール / 文書 |
-| `DISK-1` | `IntChannel` と解決層（format +1。`discrete-keyframes-plan.md`） |
+| `DISK-1` | `IntChannel` と解決層（`.ravprj` v10。`discrete-keyframes-plan.md`）**済**（#457） |
 | `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書 |
 | `PGRP-4` | In ノードのインスタンスグループ（format +1。`parameter-groups-plan.md`） |
 | `CPO-5` | `layer` の Int → String 移行（format +1。`contextual-parameter-options-plan.md`。依存する `CPO-2` は post-release） |
-| `HIGH-26` | 保存できた `.ravprj` が読み込めない（`issues/high/`。単位ではないので `backlog.md` には無い） |
+| `HIGH-26` | 保存できた `.ravprj` が読み込めない（単位ではないので `backlog.md` には無い）**済**（#455 — `MAX_SUBNET_DEPTH` 64 → 16 と `RON_RECURSION_LIMIT`） |
 
 **`AID-1` / `AID-2` が先頭で、基準 1 ではなく基準 0 で先頭。** 素材の識別子が
 ファイル名から作った文字列（`"plate"`、衝突したら `"plate 2"`）で、それが
@@ -342,8 +342,9 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 方向は個票に書いてある。
 
 **フォーマット版は着手順に取る。** 同時に 2 つ上げると失敗の切り分けが
-難しくなるので 1 つずつ入れる（`CURRENT_FORMAT_VERSION` は 2026-08-20 時点で
-**8**）。`DISK-*` は「今できないことができるようになる」機能追加で、
+難しくなるので 1 つずつ入れた — 実際に `AID-*` が **v9**、`DISK-1` が **v10** を
+取り、後から入った側が rebase で振り直している（`PGRP-4` / `CPO-5` も同じ手順に
+なる）。`DISK-*` は「今できないことができるようになる」機能追加で、
 後回しにしても既存プロジェクトは壊れないため `AID-*` の後。
 
 ## フェーズ C: 塞がれているものを開ける

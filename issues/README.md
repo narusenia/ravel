@@ -9,7 +9,7 @@
 | 深刻度 | 未解決 | 解決済み | 未解決分の場所 |
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
-| high | 2 | 31 | [high/](high/) — 1件1ファイル |
+| high | 3 | 31 | [high/](high/) — 1件1ファイル |
 | medium | 29 | 44 | [medium/](medium/) — 領域別5ファイル |
 | low | 32 | 9 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
@@ -264,19 +264,25 @@ HIGH-23 の待ち時間をユーザーに説明する側の話なので同じフ
 
 - `MED-CORE-04`（評価とサブネット走査の深さ上限なし）→ **一部のみ解決。**
   評価の再帰には `EvalError::DepthLimitExceeded`、ロード後には
-  `validate_subnet_depth` が入ったが、**`ron::from_str::<Document>` が
-  検証より先に走るのでデシリアライズ経路が無防備**（2026-08-03 再判定）。
-  [medium/core-evaluator.md](medium/core-evaluator.md) に戻した
+  `validate_subnet_depth` が入り、**デシリアライズ経路は `HIGH-26` が閉じた**
+  （RON リーダは全経路が `RON_RECURSION_LIMIT` で、予算超過はパース中に
+  エラーを返す）。残るのは評価側の再帰を明示スタックに変える分で、
+  [medium/core-evaluator.md](medium/core-evaluator.md) に置いてある
 - `MED-CORE-03`（キャッシュ有効判定が `ctx.time` を無視）→ `CACHE-2` の `CacheIdentity`
 - `MED-GPU-03`（ブラー半径が未クランプ）→ `MAX_BLUR_RADIUS` でクランプ
 - `MED-MED-04` / `MED-MED-05`（音声エンコーダのチャンネルレイアウトとフレームサイズ）
   → `ChannelLayout::default_for_channels` と `audio_pending` バッファ。
   **書き出しを作る前に踏み終えた**
 
-残る latent な項目は `MED-CORE-04` のデシリアライズ経路と、
+残る latent な項目は `MED-CORE-04` の評価側の再帰と、
 [low/backlog.md](low/backlog.md) の `LOW-APP-16`（Timeline の壊れやすい
 panic 箇所）、そして下の `HIGH-33`。
 
+- **[HIGH-34](high/HIGH-34-offline-media-renders-silently-transparent.md)**
+  オフラインの素材がレンダー結果を黙って透明にする。`Warning` に映像側の
+  variant が無いので、`ravel-cli render` は**成功終了して真っ黒なフレームを
+  書く**（音声側は `AudioSourceSkipped` で言うのに、映像だけ無言）。
+  `AID-1` / `AID-2` でオフラインへの到達経路が増えたので頻度が上がっている
 - **[HIGH-33](high/HIGH-33-no-gpu-device-loss-recovery.md)**
   GPU デバイス喪失から復帰できない。`ravel-gpu` に復旧経路が無く、`ZC-8` で
   ウィンドウのレンダラとデバイスを共有するようになったため、GPUI が新しい

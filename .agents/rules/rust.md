@@ -64,6 +64,15 @@ paths:
 - Ask before adding a production dependency or changing a pinned git dependency.
 - Add regression tests for bug fixes. Prefer headless tests in `ravel-core` or
   `ravel-ui` when the behavior does not require an actual window.
+- **Do not match serializer output against a pattern containing `\n`.** RON's
+  `PrettyConfig` defaults `new_line` to the platform's newline, so a fixture
+  that rewrites or searches emitted text with an `\n` pattern silently matches
+  nothing on Windows — and a local run can never show it. The project writers
+  pin LF (`document_to_ron`, `GraphDoc::to_ron`, `subgraph_template::to_ron`),
+  so text from **those** is safe; anything else must normalize
+  (`.replace("\r\n", "\n")`) before it looks for a line break. This is not a
+  lint: `\n` patterns are correct once the text is normalized, and a grep that
+  cannot see the normalization would only earn an allow entry.
 
 Use targeted checks while iterating and broaden them in proportion to risk.
 `mise run check` is the full pre-PR verification (fmt + pattern lint + clippy

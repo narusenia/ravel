@@ -669,6 +669,16 @@ impl ProjectState {
             .and_then(ravel_project::project_root_of)
     }
 
+    /// Identity of the document currently open; see the field's doc comment.
+    ///
+    /// Read by background work that has to decide whether its result still
+    /// belongs to the document it was started for
+    /// ([`crate::media::import::relink_asset_with`]) — a File ▸ Open or New
+    /// in the meantime makes the same [`AssetId`] a different asset.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether the live document has changes newer than its last completed
     /// save (or its New/load baseline).
     pub fn is_dirty(&self) -> bool {

@@ -825,6 +825,51 @@ fn relink_brings_an_offline_asset_online_in_one_undo_step(cx: &mut TestAppContex
     });
 }
 
+/// A relink is *about* one document: if File ▸ Open or New replaces it while
+/// the probe runs, the result must be dropped rather than applied to whatever
+/// asset now happens to carry that id.
+///
+/// The fresh document deliberately reuses the same `AssetId` — a project
+/// reopened after a New does — so the only thing that can stop the relink is
+/// the generation guard, not the "asset is gone" check.
+#[gpui::test]
+fn a_relink_whose_project_was_replaced_applies_to_nothing(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let hero = offline_asset(&project, cx);
+
+    cx.update(|cx| {
+        ravel_app::media::import::relink_asset_with(
+            hero,
+            PathBuf::from("/media/hero_v2.mov"),
+            one_second_prober(),
+            cx,
+        );
+    });
+
+    // The probe has not landed yet; replace the document under it.
+    project.update(cx, |project, cx| {
+        project.new_document(cx);
+        let doc = project
+            .document()
+            .clone()
+            .with_media_asset(hero, "/media/unrelated.mov");
+        project.commit_document(doc, ravel_core::runtime::InvalidationHint::Structural, cx);
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        let entry = project
+            .document()
+            .get_media_asset(hero)
+            .expect("the new document's asset");
+        assert_eq!(
+            entry.resolved,
+            Some(PathBuf::from("/media/unrelated.mov")),
+            "the relink belonged to the document that is gone"
+        );
+    });
+}
+
 /// A file the probe refuses replaces nothing: the same refusal that keeps it
 /// out of an import keeps it from breaking a reference that already works.
 #[gpui::test]

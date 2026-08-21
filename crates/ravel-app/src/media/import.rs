@@ -224,25 +224,40 @@ pub fn relink_asset_with(asset_id: AssetId, path: PathBuf, prober: MediaProber, 
         })
         .unwrap_or(FrameRate::new(30, 1));
 
+    // The document this relink is *about*. A File ▸ Open or New while the
+    // probe runs replaces it, and the same `AssetId` in the replacement is a
+    // different asset — or none — so a result that arrives afterwards belongs
+    // to nothing here. Same guard, and the same reason, as the one
+    // `load_project_from` applies to its own result.
+    let generation = project.read_with(cx, |project, _| project.generation());
+
     let probe = cx
         .background_executor()
         .spawn(async move { probe_path(&path, &prober, sequence_fps) });
-    cx.spawn(async move |cx| match probe.await {
-        Ok(asset) => {
-            project.update(cx, |project, cx| {
-                project.relink_media_asset(asset_id, asset, cx);
-            });
-        }
-        Err(failure) => {
-            tracing::warn!(
-                path = %failure.path.display(),
-                reason = %failure.reason,
-                "media relink refused"
-            );
-            project.update(cx, |project, cx| {
-                project.report_media_failures(vec![failure], cx);
-            });
-        }
+    cx.spawn(async move |cx| {
+        let probed = probe.await;
+        project.update(cx, |project, cx| {
+            if project.generation() != generation {
+                tracing::debug!(
+                    ?asset_id,
+                    "discarding a relink whose project was replaced while it probed"
+                );
+                return;
+            }
+            match probed {
+                Ok(asset) => {
+                    project.relink_media_asset(asset_id, asset, cx);
+                }
+                Err(failure) => {
+                    tracing::warn!(
+                        path = %failure.path.display(),
+                        reason = %failure.reason,
+                        "media relink refused"
+                    );
+                    project.report_media_failures(vec![failure], cx);
+                }
+            }
+        });
     })
     .detach();
 }

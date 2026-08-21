@@ -42,6 +42,20 @@ f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e
 加えて全アニメーションノードパラメータも通る。
 → `hi - lo < 1e-6` で早期終了（または Newton + 二分フォールバック）。60 は病的ケースの上限にする。
 
+**LOW-CORE-04 | bug | `a_load_time_pin_removal_is_logged` が稀に落ちる（機構未特定）**
+`crates/ravel-core/src/composition/mod.rs`（`warnings_from` と
+`a_load_time_pin_removal_is_logged`）
+`mise run check` の workspace テストで **1 回だけ**、捕まえた警告文が空で落ちた。
+その後 `ravel-core --lib` 全体を 6 回、`composition::` を 3 回、
+`mise run check` を計 4 回回して再現していない。
+機構の候補は潰してある: `sync_subnet_pins` は単一スレッド（`rayon` も
+`thread::spawn` も無い）、`warnings_from` は `tracing::subscriber::with_default`
+＝スレッドローカルなので並列テストに奪われない、警告に warn-once の
+ガードは無い、`ravel-core` のテストは環境変数を触らない。
+→ **CI で赤を見たらこの項目に追記する。**再現の筋道が立つまで直せない。
+1 回の観測だけで消すには惜しいので記録だけ残す（次に見た人が同じ 20 分を
+使わないため）。
+
 ---
 
 ## ravel-gpu / ravel-nodes

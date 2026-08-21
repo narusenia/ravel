@@ -673,6 +673,7 @@ mod tests {
     };
     use ravel_core::network as net;
     use ravel_core::runtime::playback::LoopRange;
+    use ravel_ui::panels::viewer::ViewerResolution;
     use std::collections::BTreeMap;
 
     use crate::manifest::CURRENT_FORMAT_VERSION;
@@ -1078,6 +1079,19 @@ mod tests {
         let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
         assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
         assert!(!back.ui_state.show_node_param_values());
+    }
+
+    /// The viewer's preview resolution factor rides the same optional entry
+    /// (`VRES-3`): a chosen factor survives a save/load and the format
+    /// version stays put.
+    #[test]
+    fn the_archive_round_trips_the_preview_resolution() {
+        let mut project = demo_project();
+        project.ui_state.viewer_resolution = Some(ViewerResolution::Quarter);
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(back.ui_state.viewer_resolution(), ViewerResolution::Quarter);
     }
 
     /// A current-format archive may omit `ui_state.json`; it must still load,

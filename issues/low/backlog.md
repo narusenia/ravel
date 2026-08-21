@@ -128,6 +128,17 @@ intrusive list に変更。
 → 上限は打ち切り条件としてのみ使い、容量はストリーム長の見積り（`duration × rate`）で確保する。
 `HIGH-23` の準備経路の作り直しと同時に触るのが安い。
 
+**LOW-AUD-03 | debt | オフラインミックスダウンの「1 アセット 1 デコード」が失敗時に成立しない**
+`crates/ravel-audio/src/offline.rs:113-115`（doc）・`:139-157`
+`mix_range` の `decoded` マップは**成功したデコードだけ**を覚える。
+同じ asset + stream を 2 レイヤーが使い、その素材が上限超過なら
+`prepare` が**レイヤーごとに全長デコードを試みる**（オフライン・不読なら
+デコードはしないが `prepare` は 2 回走る）。doc コメントは
+「どれだけのレイヤーが使っても 1 回」と書いており、事実と違う。
+書き出し 1 回ぶんなので実害は小さいが、上限超過素材では 2 倍の
+デコードコストになる。
+→ 失敗も `HashMap<CacheKey, Result<…>>` として覚えるか、doc を実装に合わせる。
+
 **LOW-MED-02 | debt | 意図的に !Send な FFmpeg ラッパーに対する包括的 `unsafe impl Send`**
 `crates/ravel-media/src/encoder.rs:50`, `crates/ravel-media/src/hwaccel/device.rs:30`
 `unsafe impl Send for FfmpegEncoder` は構造体の現在および将来の全フィールドを覆い、

@@ -3488,6 +3488,22 @@ impl PropertiesGpuiPanel {
         let property_value = PropertyValue::String(value);
         self.update_field_value(key, &property_value);
         self.route_change(key, property_value, true, node_ids, cx);
+        // A refused edit — a blank composition name, a blank asset path —
+        // changes no document, so nothing else would ever put the retained
+        // value back and the row would keep displaying text that is not in
+        // the document. Reading the sections back from the document is what
+        // makes "refused" visible: the Input still shows what the user typed
+        // while it has focus (never yank text from under a typist), and
+        // `sync_string_widgets` snaps it back the moment it loses focus.
+        //
+        // Only for the targets this panel applies itself, which it has already
+        // committed by now. A node edit travels through the owning node editor
+        // and is not in the document yet, so re-reading here would restore the
+        // pre-edit value — and the blur that follows an Enter would then see a
+        // *changed* value and commit a second undo step.
+        if !matches!(self.target, PropertiesTarget::Nodes { .. }) {
+            self.refresh_values(cx);
+        }
     }
 
     /// Apply a color picker change live and debounce the undo commit: the
@@ -5807,6 +5823,59 @@ mod tests {
             entry(cx).resolved.as_deref(),
             Some(std::path::Path::new("/media/clip.mov"))
         );
+    }
+
+    /// A refused string edit leaves the panel showing the document rather
+    /// than the rejected text: a blank asset path changes nothing, so nothing
+    /// else would ever restore the row.
+    #[gpui::test]
+    fn a_refused_string_edit_snaps_the_row_back_to_the_document(cx: &mut TestAppContext) {
+        use ravel_core::id::AssetId;
+        use ravel_ui::properties::media_asset::FIELD_PATH;
+
+        let (window, project, ..) = setup(cx);
+        let clip = AssetId::new(11);
+        project.update(cx, |project, cx| {
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset(clip, "/media/clip.mov");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        let shown = window
+            .update(cx, |panel, window, cx| {
+                panel.target = PropertiesTarget::MediaAsset { id: clip };
+                panel.rebuild_widgets(window, cx);
+                panel.commit_string_change(FIELD_PATH, "   ".into(), &[], cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::String { key, value } if key == FIELD_PATH => {
+                            Some(value.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("the path row")
+            })
+            .unwrap();
+        assert_eq!(
+            shown, "/media/clip.mov",
+            "the row shows the reference the document still holds"
+        );
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_media_asset(clip)
+                    .expect("the asset")
+                    .path,
+                ravel_core::composition::AssetPath::Absolute("/media/clip.mov".into()),
+                "a refused edit changed no document"
+            );
+        });
     }
 
     /// Enter commits the string edit, and the following blur is ignored as

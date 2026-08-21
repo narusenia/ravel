@@ -272,8 +272,8 @@ fn the_declarations_section_reads_as_sentences_in_every_locale() {
 /// - the pair is a *translated* pattern with both factors substituted, not the
 ///   raw `viewer.resolution_effective` key and not one factor's name twice;
 /// - it shows the pair only while the effective factor differs from the
-///   selected one. Nothing can make them differ yet — `VRES-4`'s adaptive
-///   downgrade will — so the divergence is constructed here.
+///   selected one. `VRES-4`'s adaptive downgrade is what makes them differ in
+///   the running app; the divergence is constructed directly here.
 #[test]
 fn the_preview_resolution_label_distinguishes_selected_from_effective() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

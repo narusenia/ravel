@@ -12,13 +12,14 @@ use gpui::{AppContext as _, TestAppContext};
 use gpui_component::Root;
 use ravel_app::panels;
 use ravel_app::playback::PlaybackController;
-use ravel_app::project_state::{ProjectState, ProjectStateHandle};
+use ravel_app::project_state::{ProjectState, ProjectStateHandle, VIEWER_INPUT_SETTLE};
 use ravel_app::trace;
 use ravel_app::window_host;
 use ravel_app::workspace;
 use ravel_core::runtime::playback::PlaybackState;
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
+use ravel_ui::panels::viewer::ViewerResolution;
 use ravel_ui::shell::AppShell;
 
 fn init_i18n() {
@@ -225,4 +226,97 @@ fn seek_from_timeline_updates_the_clock_only(cx: &mut TestAppContext) {
         .update(cx, |timeline, _window, _cx| timeline.playhead())
         .unwrap();
     assert_eq!(playhead, 0);
+}
+
+/// Scrubbing the playhead is an input gesture and must lower the preview
+/// factor; the transport's own position publishes must not (`VRES-4`).
+///
+/// Both routes end in `publish_position`, so the signal has to sit in
+/// `seek_from_timeline` alone. Move it one function deeper and the picture
+/// degrades for the whole duration of a play — and a frame step would pay for
+/// two evaluations instead of one. Neither is visible from the scrub half of
+/// this test, which is why both halves are here.
+#[gpui::test]
+fn a_ruler_scrub_lowers_the_preview_factor_and_a_transport_publish_does_not(
+    cx: &mut TestAppContext,
+) {
+    init_i18n();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        init_globals(cx);
+    });
+
+    let project = init_project_state(cx);
+    let timeline = cx.add_window(|window, cx| {
+        panels::timeline::TimelineGpuiPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+    });
+    let controller = cx.update(|cx| cx.new(|_| PlaybackController::new()));
+
+    // `Full` is the only selection where a one-step drop is observable.
+    cx.update(|cx| {
+        project.update(cx, |project, cx| {
+            project.set_viewer_resolution(ViewerResolution::Full, cx);
+        });
+    });
+
+    // Same nesting as production: the scrub runs inside the timeline panel's
+    // own update.
+    timeline
+        .update(cx, |timeline, _window, cx| {
+            let (fps, duration) = timeline
+                .composition_params()
+                .expect("the active composition");
+            controller.update(cx, |controller, cx| {
+                controller.seek_from_timeline(42, fps, duration, cx);
+            });
+        })
+        .unwrap();
+
+    cx.update(|cx| {
+        let project = project.read(cx);
+        // The selection is untouched; only what the viewer evaluates at moved.
+        assert_eq!(project.viewer_resolution(), ViewerResolution::Full);
+        assert_eq!(
+            project.effective_viewer_resolution(),
+            ViewerResolution::Half,
+            "a ruler scrub did not lower the preview factor"
+        );
+    });
+
+    cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
+
+    let after_scrub = cx.update(|cx| {
+        let project = project.read(cx);
+        assert_eq!(
+            project.effective_viewer_resolution(),
+            ViewerResolution::Full,
+            "the factor never came back after the scrub"
+        );
+        project.viewer_eval_requests()
+    });
+
+    // A frame step is the whole of `publish` → `publish_position`, which is
+    // also the only route the playback tick loop reaches evaluation by. It
+    // must evaluate at the selected factor and arm no settle timer.
+    cx.update(|cx| {
+        controller.update(cx, |controller, cx| {
+            controller.handle_command(CommandId::FrameStepForward, cx);
+        });
+    });
+    cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
+
+    cx.update(|cx| {
+        let project = project.read(cx);
+        assert_eq!(
+            project.effective_viewer_resolution(),
+            ViewerResolution::Full,
+            "a transport publish lowered the preview factor, so playback would \
+             run the whole way at a degraded resolution"
+        );
+        assert_eq!(
+            project.viewer_eval_requests(),
+            after_scrub + 1,
+            "the step's own evaluation only"
+        );
+    });
 }

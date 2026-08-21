@@ -530,6 +530,18 @@ impl PlaybackController {
         duration_frames: u64,
         cx: &mut Context<Self>,
     ) {
+        // Scrubbing the ruler is an input gesture, so the viewer drops one
+        // preview factor for it (`VRES-4`). The signal sits here and not in
+        // `publish_position`, which is also the tick loop's route to
+        // evaluation: playback is not input and must keep the selected factor.
+        // Ahead of the publish below, so the scrubbed frame is already
+        // evaluated at the lowered factor.
+        if let Some(project) = cx
+            .try_global::<crate::project_state::ProjectStateHandle>()
+            .and_then(|handle| handle.0.upgrade())
+        {
+            project.update(cx, |project, cx| project.note_viewer_interaction(cx));
+        }
         let now = Instant::now();
         let params_changed = self.transport.sync_params(fps, duration_frames, now);
         self.adopt_loop_range(now, cx);

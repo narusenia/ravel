@@ -4331,6 +4331,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The re-resolution reaches the **retained versions** too, so an undo
+    /// taken after a `Save As` does not hand back the old root's resolution.
+    ///
+    /// Without it the version `Cmd+Z` restores still carries `resolved`
+    /// measured against the directory the project no longer lives in, and the
+    /// evaluator would read a file beside the *previous* copy of the project
+    /// — or nothing at all, if that copy is gone.
+    #[gpui::test]
+    fn an_undo_after_save_as_keeps_the_new_roots_resolution(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let root = std::env::temp_dir().join(format!("ravel_undo_root_{}", std::process::id()));
+        let from = root.join("from");
+        let to = root.join("to");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(from.join("footage")).unwrap();
+        std::fs::create_dir_all(to.join("footage")).unwrap();
+        let clip = from.join("footage").join("clip.mov");
+        std::fs::write(&clip, b"not really a movie").unwrap();
+        let first = from.join("proj.ravprj");
+        let second = to.join("proj.ravprj");
+
+        let asset = AssetId::next();
+        project.update(cx, |project, cx| {
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset(asset, clip.clone());
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(first.clone(), None, cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            project.load_project_from(first.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        // One ordinary edit, so there is a version to go back to. It leaves
+        // the asset alone: what the undo has to restore correctly is the
+        // *reference*, not the edit.
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            doc.root_comp = None;
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(second.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx), "the edit is a step to take back");
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(
+                entry.resolved.as_deref(),
+                Some(to.join("footage").join("clip.mov").as_path()),
+                "the restored version resolves against the root the project now has"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A failed load keeps the current document and path untouched.
     #[gpui::test]
     fn failed_load_keeps_the_current_document(cx: &mut TestAppContext) {

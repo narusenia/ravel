@@ -26,7 +26,8 @@ use ravel_core::composition::Document;
 use ravel_core::id::CompId;
 use ravel_core::runtime::playback::LoopRange;
 use ravel_ui::panels::timeline::BpmGrid;
-use serde::{Deserialize, Serialize};
+use ravel_ui::panels::viewer::ViewerResolution;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// UI state persisted alongside a project.
@@ -98,6 +99,45 @@ pub struct UiState {
     /// as `bpm_grid` above.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_node_param_values: Option<bool>,
+
+    /// The viewer's preview resolution factor
+    /// (`viewer-preview-resolution-plan.md`, `VRES-3`).
+    ///
+    /// It says how the user is looking at the composition, not what the frame
+    /// contains, so it belongs here and never in `.ravprj`'s document — an
+    /// export renders at composition resolution whatever this says.
+    ///
+    /// `None` (or a missing entry) is the ordinary first-run state and reads
+    /// as [`ViewerResolution::default`] through [`Self::viewer_resolution`],
+    /// so an untouched project writes no entry and `format_version` stays put
+    /// — the same rule as `bpm_grid` above.
+    ///
+    /// An unreadable value reads as absent rather than failing the whole
+    /// entry: this file is hand-editable, and one mistyped factor must not
+    /// cost the user their active composition, loop ranges and folded groups
+    /// as well (`ProjectFile::from_archive` drops a `ui_state.json` it cannot
+    /// parse *in full*).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_tolerant_resolution",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub viewer_resolution: Option<ViewerResolution>,
+}
+
+/// Read a preview resolution factor, treating an unknown one as absent.
+///
+/// `Option<ViewerResolution>`'s own implementation would fail the
+/// deserialization of the whole [`UiState`] on a hand-edited typo, and this
+/// entry has no field whose loss is worth that.
+fn deserialize_tolerant_resolution<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ViewerResolution>, D::Error> {
+    // Through `serde_json::Value` rather than `Option<ViewerResolution>`,
+    // because a failed enum deserialization is an error either way — the
+    // untyped value is what lets this swallow it.
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(raw).ok())
 }
 
 impl UiState {
@@ -113,6 +153,12 @@ impl UiState {
     /// back into range, or the default when the entry is absent.
     pub fn bpm_grid(&self) -> BpmGrid {
         self.bpm_grid.unwrap_or_default().sanitized()
+    }
+
+    /// The preview resolution factor the viewer should open with: the
+    /// persisted one, or the default when the entry is absent or unreadable.
+    pub fn viewer_resolution(&self) -> ViewerResolution {
+        self.viewer_resolution.unwrap_or_default()
     }
 
     /// The loop ranges that still apply to `document`: compositions it no
@@ -445,5 +491,48 @@ mod tests {
         let back = UiState::from_json(&json).unwrap();
         assert_eq!(back, state);
         assert!(!back.show_node_param_values());
+    }
+
+    /// The preview resolution factor rides the same optional-entry rule
+    /// (`VRES-3`): the default writes nothing, a chosen factor round-trips,
+    /// and an entry from a build that had no factor opens at the default.
+    #[test]
+    fn the_preview_resolution_round_trips_and_is_absent_by_default() {
+        let json = UiState::default().to_json().unwrap();
+        assert!(
+            !json.contains("viewer_resolution"),
+            "the default factor must not write an entry: {json}"
+        );
+        assert_eq!(
+            UiState::from_json(r#"{"active_comp": 1}"#)
+                .unwrap()
+                .viewer_resolution(),
+            ViewerResolution::default(),
+            "an entry written before the factor existed opens at the default"
+        );
+
+        let state = UiState {
+            viewer_resolution: Some(ViewerResolution::Full),
+            ..UiState::default()
+        };
+        let json = state.to_json().unwrap();
+        let back = UiState::from_json(&json).unwrap();
+        assert_eq!(back, state);
+        assert_eq!(back.viewer_resolution(), ViewerResolution::Full);
+    }
+
+    /// A hand-edited factor nobody can read costs that one field and nothing
+    /// else: the rest of the entry — the active composition, the loop ranges,
+    /// the folded groups — still loads.
+    #[test]
+    fn an_unreadable_preview_resolution_falls_back_without_losing_the_entry() {
+        let state = UiState::from_json(
+            r#"{"active_comp": 7, "viewer_resolution": "eighth", "show_node_param_values": false}"#,
+        )
+        .expect("one bad factor must not fail the whole entry");
+
+        assert_eq!(state.viewer_resolution(), ViewerResolution::default());
+        assert_eq!(state.active_comp, Some(CompId::new(7)));
+        assert!(!state.show_node_param_values());
     }
 }

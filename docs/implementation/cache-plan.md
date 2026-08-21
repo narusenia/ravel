@@ -29,7 +29,7 @@ REQ-CORE-013（スコープ軸）、REQ-GPU-001、REQ-PROJ-001、REQ-RENDER-004�
 | 動画デコーダ | `ravel-media/src/decoder.rs:50` | stream_index | 1 エントリ | —（HIGH-17 は解決） |
 | sws スケーラ | `ravel-media/src/decoder.rs` の `ScalerCache` | 入力 fmt + 入力寸法 + 出力 fmt + 出力寸法 | 1 エントリ | —（HIGH-17 / #380） |
 | ディスク派生物 | `ravel-app/src/media/cache.rs` | 絶対パス + mtime + size + extra | なし（GC もなし） | — |
-| 音声 mixdown | `ravel-app/src/audio/mixdown.rs:48` | asset_id + stream | — | LOW-APP-08（パスを含まずリリンクで stale） |
+| 音声 mixdown | `ravel-audio/src/mixdown.rs` の `CacheKey` | asset_id + stream + 解決済みパス | — | —（LOW-APP-08 は解決） |
 
 `LruBudget`（`texture_pool.rs:86`）が唯一の予算だが、会計対象は
 **プールに返却済み（アイドル）のテクスチャだけ**。キャッシュが

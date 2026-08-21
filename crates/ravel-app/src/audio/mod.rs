@@ -297,6 +297,9 @@ impl AudioService {
             }
 
             let key = spec.cache_key();
+            // Whatever this asset's stream held under another file is
+            // unreachable from here on, however this spec is served.
+            self.drop_superseded(&key);
             match self.cache.get(&key).cloned() {
                 Some(decoded) => {
                     match AudioMixdown::build_track(&spec, &decoded, comp_fps, self.output_rate) {
@@ -326,6 +329,20 @@ impl AudioService {
                     }
                 }
                 None => {
+                    // A track already in the mixer was built from another
+                    // file or another stream — this spec's build key changed,
+                    // or the cheap-update path above would have taken it.
+                    // Silence beats the wrong sound: playing the previous
+                    // file under the new reference is what `LOW-APP-08` is,
+                    // and a decode that never succeeds would leave it
+                    // audible for the rest of the session.
+                    if self
+                        .sent
+                        .get(&spec.layer_id)
+                        .is_some_and(|sent| sent.delivered)
+                    {
+                        self.send(AudioCommand::RemoveTrack(spec.layer_id.raw()));
+                    }
                     // Record the spec now so further edits do not spawn
                     // duplicate decodes; delivery happens when the decode
                     // completes and triggers a re-sync.
@@ -464,8 +481,6 @@ impl AudioService {
             self.mark_preparation_failed(key, "media asset is offline", cx);
             return;
         };
-        self.drop_superseded(&key);
-
         let generation = self.generation;
         self.pending.insert(key.clone(), generation);
         cx.notify();
@@ -478,8 +493,8 @@ impl AudioService {
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_pending_generation(&key, generation);
-                if this.generation == generation {
+                let owns_slot = this.finish_pending_generation(&key, generation);
+                if owns_slot && this.generation == generation {
                     match result {
                         Ok(audio) => {
                             this.cache.insert(key, Arc::new(audio));
@@ -502,9 +517,14 @@ impl AudioService {
     ///
     /// Those entries are unreachable the moment the asset resolves elsewhere,
     /// and a decoded buffer is up to [`mixdown::MAX_DECODE_BYTES`] of memory
-    /// nothing can read again. In-flight decodes are left alone: cancelling
-    /// them is not possible, and what they insert lands under their own —
-    /// now superseded — key, which the next relink of the same stream clears.
+    /// nothing can read again.
+    ///
+    /// The pending slot goes too. A running decode cannot be cancelled, but
+    /// giving up its slot is what makes its completion a no-op
+    /// ([`Self::finish_pending_generation`]): a decode of the previous file
+    /// must not record a cache entry — or, worse, a *failure* — under a key
+    /// the asset may resolve to again, because a failure entry is never
+    /// retried within a document.
     fn drop_superseded(&mut self, key: &CacheKey) {
         let superseded = |other: &CacheKey| {
             other.asset_id == key.asset_id
@@ -513,15 +533,22 @@ impl AudioService {
         };
         self.cache.retain(|other, _| !superseded(other));
         self.failed.retain(|other| !superseded(other));
+        self.pending.retain(|other, _| !superseded(other));
     }
 
-    /// Remove a completed preparation only when it still owns the pending
-    /// slot. An old document's task must not clear a replacement document's
-    /// task for a reused asset id.
-    fn finish_pending_generation(&mut self, key: &CacheKey, generation: u64) {
-        if self.pending.get(key).copied() == Some(generation) {
-            self.pending.remove(key);
+    /// Release the pending slot of a completed preparation, and report
+    /// whether it was this task's slot to release.
+    ///
+    /// `false` means the task was superseded while it ran — the document was
+    /// replaced and a new task holds the slot for a reused asset id, or the
+    /// asset was relinked and [`Self::drop_superseded`] took the slot away —
+    /// and its result must not reach the cache or the failure set.
+    fn finish_pending_generation(&mut self, key: &CacheKey, generation: u64) -> bool {
+        if self.pending.get(key).copied() != Some(generation) {
+            return false;
         }
+        self.pending.remove(key);
+        true
     }
 }
 
@@ -658,13 +685,26 @@ mod tests {
         service.failed.insert(old_file.clone());
         service.failed.insert(other_stream.clone());
 
+        service.pending.insert(old_file.clone(), service.generation);
+        service
+            .pending
+            .insert(other_stream.clone(), service.generation);
+
         service.drop_superseded(&relinked);
 
         assert!(!service.cache.contains_key(&old_file), "buffer freed");
         assert!(!service.failed.contains(&old_file), "failure retried");
         assert!(
+            !service.finish_pending_generation(&old_file, 0),
+            "the superseded decode no longer owns its slot, so its result is dropped"
+        );
+        assert!(
             service.failed.contains(&other_stream),
             "another stream of the same asset is untouched"
+        );
+        assert!(
+            service.finish_pending_generation(&other_stream, 0),
+            "another stream's decode still owns its slot"
         );
     }
 
@@ -678,10 +718,13 @@ mod tests {
         service.generation = 1;
         service.pending.insert(key.clone(), 1);
 
-        service.finish_pending_generation(&key, 0);
+        assert!(
+            !service.finish_pending_generation(&key, 0),
+            "the old document's task must not clear the replacement's slot"
+        );
         assert!(service.is_asset_preparing(music()));
 
-        service.finish_pending_generation(&key, 1);
+        assert!(service.finish_pending_generation(&key, 1));
         assert!(!service.is_asset_preparing(music()));
     }
 }

@@ -329,22 +329,20 @@ fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
     ));
 }
 
-/// Relinking the asset must change what is heard. The decode cache is keyed
-/// on the file the asset resolves to, so the track is rebuilt from the new
-/// file instead of the buffer decoded from the old one (`LOW-APP-08`: before
-/// this, the key was the asset id alone and the whole session kept playing
-/// the previous file).
+/// Relinking the asset changes what is heard, in the two steps the app
+/// really takes (`LOW-APP-08`): the old sound leaves the mixer the moment the
+/// reference changes — silence beats the previous file playing under the new
+/// reference, and a decode that never succeeds would otherwise leave it
+/// audible for the rest of the session — and the new file's audio goes out
+/// when its decode lands in the cache and re-syncs.
 #[gpui::test]
-fn relinking_the_asset_replaces_the_cached_audio(cx: &mut TestAppContext) {
+fn a_relink_silences_the_layer_then_plays_the_new_file(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
     resolve_asset_to(&project, &source(), cx);
     // The two files differ in channel count, which is what the sink records:
-    // the assertion is about which decode reached the mixer, not about
-    // placement.
-    let relinked = PathBuf::from("/ravel/tests/take-2.wav");
+    // the assertions are about which decode reached the mixer.
     audio.update(cx, |service, _| {
         service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
-        service.cache_decoded(key(0, &relinked), decoded(48_000, 1, 48_000));
     });
     commit_layer(&project, audio_layer(1, 0, asset()), cx);
     assert!(matches!(
@@ -352,16 +350,25 @@ fn relinking_the_asset_replaces_the_cached_audio(cx: &mut TestAppContext) {
         Recorded::SetTrack { channels: 2, .. }
     ));
 
+    let relinked = PathBuf::from("/ravel/tests/take-2.wav");
     resolve_asset_to(&project, &relinked, cx);
+    assert_eq!(
+        recording.commands()[1],
+        Recorded::RemoveTrack(1),
+        "the previous file must stop playing the moment the reference changes"
+    );
+
+    // What the background decode of the new file does when it completes.
+    audio.update(cx, |service, _| {
+        service.cache_decoded(key(0, &relinked), decoded(48_000, 1, 48_000));
+    });
+    let document = project.read_with(cx, |project, _| project.document().clone());
+    cx.update(|cx| ravel_app::audio::sync_from_document(&document, cx));
 
     let commands = recording.commands();
+    assert_eq!(commands.len(), 3);
     assert_eq!(
-        commands.len(),
-        2,
-        "one replacing SetTrack, no remove/add gap"
-    );
-    assert_eq!(
-        commands[1],
+        commands[2],
         Recorded::SetTrack {
             id: 1,
             start_frame: 0,

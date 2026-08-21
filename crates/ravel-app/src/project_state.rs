@@ -1579,6 +1579,19 @@ impl ProjectState {
         self.viewer_resolution
     }
 
+    /// The factor the viewer is **evaluating** at right now, which is what the
+    /// pixels on screen were produced with.
+    ///
+    /// Identical to [`Self::viewer_resolution`] today. `VRES-4` (adaptive
+    /// resolution) is what will make the two differ: it lowers *this* one step
+    /// while the user is dragging, scrubbing or editing a parameter, and
+    /// leaves the selection untouched so the factor comes back when the input
+    /// stops. Everything that needs the resolution a frame was evaluated at
+    /// reads this; only the picker reads the selection.
+    pub fn effective_viewer_resolution(&self) -> ViewerResolution {
+        self.viewer_resolution
+    }
+
     /// Choose the preview resolution factor and re-evaluate at it.
     ///
     /// The hint is [`InvalidationHint::None`] on purpose: nothing about the
@@ -1740,7 +1753,7 @@ impl ProjectState {
     ) -> OverlayContext {
         OverlayContext {
             resolution: Some(comp.resolution),
-            eval_resolution: Some(self.viewer_resolution.apply(comp.resolution)),
+            eval_resolution: Some(self.effective_viewer_resolution().apply(comp.resolution)),
             playback: cx
                 .try_global::<crate::panels::PlaybackPosition>()
                 .copied()
@@ -1769,11 +1782,15 @@ impl ProjectState {
     /// responsive picture, not the sample count an export pays for. The
     /// preview resolution factor is an independent axis (it scales the
     /// buffer, quality counts samples), so the two combine freely.
+    ///
+    /// The factor is the **effective** one, not the selection: what the
+    /// evaluator is asked for is by definition what the viewer is evaluating
+    /// at, so `VRES-4`'s adaptive downgrade needs no second edit here.
     fn viewer_eval_context(&self, comp: &Composition, frame: u64) -> EvalContext {
         EvalContext::new(
             frame,
             comp.frame_rate,
-            self.viewer_resolution.apply(comp.resolution),
+            self.effective_viewer_resolution().apply(comp.resolution),
         )
         .with_comp_resolution(comp.resolution)
         .with_quality(Quality::Preview)
@@ -3364,6 +3381,10 @@ mod tests {
             for factor in ViewerResolution::ALL {
                 project.set_viewer_resolution(factor, cx);
                 assert_eq!(project.viewer_resolution(), factor);
+                // Nothing is adapting the factor down yet, so the effective
+                // one is the selection. A hardcoded or stale effective factor
+                // would evaluate at something the picker never asked for.
+                assert_eq!(project.effective_viewer_resolution(), factor, "{factor:?}");
 
                 let ctx = project
                     .build_viewer_request(0, &OverlayRegistry::builtin(), cx)

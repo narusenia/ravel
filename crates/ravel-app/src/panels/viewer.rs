@@ -39,6 +39,7 @@ use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPort
 use ravel_core::runtime::InvalidationHint;
 use ravel_gpu::GpuFrameBuffer;
 use ravel_ui::document::NetworkPath;
+use ravel_ui::panels::viewer::ViewerResolution;
 use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
@@ -284,6 +285,28 @@ enum ViewerBackgroundMode {
     Composition,
     Checkerboard,
     Solid,
+}
+
+/// The preview resolution factor as the toolbar names it.
+///
+/// While the effective factor differs from the selected one — which only
+/// `VRES-4`'s adaptive downgrade can cause — **both** are shown, so a coarse
+/// preview is never read as the factor the user asked for. When they agree,
+/// only one is shown: a permanent `1/2 → 1/2` would train the user to ignore
+/// exactly the signal that matters.
+///
+/// The pair is one locale key with placeholders rather than a `format!` of
+/// translated fragments, because the order of the two is a language's choice
+/// (`docs/dev/add-locale.md`). Public for the same reason
+/// `properties::read_only_value` is: the lib unit tests run with an empty
+/// i18n store, so the coverage lives in the `localized_display_text` binary.
+pub fn resolution_label(selected: ViewerResolution, effective: ViewerResolution) -> String {
+    if effective == selected {
+        return t!(selected.label_key());
+    }
+    t!("viewer.resolution_effective")
+        .replace("{selected}", &t!(selected.label_key()))
+        .replace("{effective}", &t!(effective.label_key()))
 }
 
 impl ViewerBackgroundMode {
@@ -1425,7 +1448,12 @@ impl ViewerPanel {
             eval_resolution: self.composition_resolution.map(|resolution| {
                 project
                     .as_ref()
-                    .map(|project| project.read(cx).viewer_resolution().apply(resolution))
+                    .map(|project| {
+                        project
+                            .read(cx)
+                            .effective_viewer_resolution()
+                            .apply(resolution)
+                    })
                     .unwrap_or(resolution)
             }),
             comp: self.active_comp(cx),
@@ -2254,12 +2282,43 @@ impl ViewerPanel {
         row
     }
 
+    /// Point [`ProjectState`] at a preview resolution factor.
+    ///
+    /// The factor lives there and nowhere else: it is what the evaluation
+    /// request is built from, so a panel-local copy would be a second source
+    /// of truth for the same setting. The notify is this panel's own — it does
+    /// not observe the project entity, and the toolbar label reads the factor.
+    fn set_preview_resolution(&mut self, resolution: ViewerResolution, cx: &mut Context<Self>) {
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            project.set_viewer_resolution(resolution, cx);
+        });
+        cx.notify();
+    }
+
     /// AE-style bottom toolbar: zoom readout with preset menu, Fit, 100%,
-    /// and the grid / safe-area overlay toggles.
+    /// the preview resolution factor, and the grid / safe-area overlay
+    /// toggles.
     fn toolbar(&self, cx: &mut Context<Self>) -> Div {
         let zoom_label = SharedString::from(format!("{:.0}%", self.zoom_percent()));
         let entity = cx.entity().downgrade();
         let background_entity = entity.clone();
+        let resolution_entity = entity.clone();
+        // Selected and effective are read together from one borrow: showing a
+        // selection from before an adaptive downgrade next to the factor after
+        // it would report a difference that never existed.
+        let (selected_resolution, effective_resolution) = self
+            .project(cx)
+            .map(|project| {
+                let project = project.read(cx);
+                (
+                    project.viewer_resolution(),
+                    project.effective_viewer_resolution(),
+                )
+            })
+            .unwrap_or_default();
         let background_mode = self.background_mode;
         let field_entity = entity.clone();
         let (field_display, field_map, field_opacity) =
@@ -2326,6 +2385,42 @@ impl ViewerPanel {
                         this.set_zoom_percent(100.0);
                         cx.notify();
                     })),
+            )
+            .child(
+                // Beside the zoom readout, not with the toggles on the right:
+                // both are labelled scale readouts with a preset menu (display
+                // scale and evaluation scale), while everything past the
+                // spacer is an icon toggle for an overlay. `ui/viewer.md`
+                // places the zoom controls in this toolbar and does not name a
+                // slot for this one.
+                Button::new("viewer-preview-resolution")
+                    .xsmall()
+                    .ghost()
+                    .label(SharedString::from(resolution_label(
+                        selected_resolution,
+                        effective_resolution,
+                    )))
+                    .tooltip(t!("viewer.resolution"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for factor in ViewerResolution::ALL {
+                            let entity = resolution_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(factor.label_key())))
+                                    // The tick follows the *selection*: it is
+                                    // what the menu sets, and an adaptive
+                                    // downgrade is not the user's choice.
+                                    .checked(factor == selected_resolution)
+                                    .on_click(move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                this.set_preview_resolution(factor, cx);
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
             )
             .child(div().flex_1())
             .child(

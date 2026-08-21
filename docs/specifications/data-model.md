@@ -734,7 +734,8 @@ GraphDoc(
   "active_comp": 2,
   "bpm_grid": { "enabled": true, "bpm": 174.0, "offset_frames": 12.0 },
   "loop_ranges": [[2, { "in_frame": 30, "out_frame": 89 }]],
-  "collapsed_param_groups": [["scatter.grid", "source"]]
+  "collapsed_param_groups": [["scatter.grid", "source"]],
+  "show_node_param_values": false
 }
 ```
 
@@ -760,6 +761,12 @@ GraphDoc(
 `UiState::collapsed_param_groups()` を通し、重複した対は 1 件に畳み、
 `type_key` が空の項目は捨てる。手編集で存在しない型やグループを書いても
 どのセクションにも一致しないだけで、何も畳まれない。
+
+`show_node_param_values` はノードエディタがノード本体にパラメータ名 / 値の行を
+描くかどうか（`PGRP-5`）。**キャンバス全体で 1 つ**で、ノードごとには持たない。
+既定は「描く」なので**消したときだけ**書き、既定のままなら
+**エントリ自体が書かれない**。読み出しは `UiState::show_node_param_values()` を
+通し、エントリが無ければ `true` を返す。
 
 ユーザーが「何を見ていたか」はドキュメントの一部ではない — アクティブコンプを
 `Document` に入れると undo スナップショット（undo の単位）に載ってしまい、

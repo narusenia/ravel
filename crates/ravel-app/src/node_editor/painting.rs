@@ -101,10 +101,34 @@ pub fn node_width(zoom: f32) -> f32 {
     BASE_NODE_WIDTH * zoom
 }
 
-pub fn compute_node_size(node: &Node, zoom: f32) -> (f32, f32) {
+/// The node body's screen size at `zoom`.
+///
+/// `show_param_values` must be the same value the paint pass is given
+/// (`paint_nodes`): the parameter rows are part of the height, and measuring
+/// them while not drawing them (or the reverse) leaves the node box and the
+/// picture disagreeing about where the body ends. Every caller therefore
+/// takes the flag from `panels::show_node_param_values`.
+/// How many parameter rows a node body shows — `0` when the values are
+/// hidden, whatever the node holds.
+///
+/// [`compute_node_size`] and [`paint_single_node`] both go through this, which
+/// is the whole point: a body painted with rows the height did not reserve
+/// spills over the node below it, and a height that reserved rows nobody
+/// painted moves every port's hit target down by rows that are not there
+/// (`MED-APP-13` was that disagreement). One function means the two cannot
+/// drift apart — a change to the rule is a change to both.
+pub fn painted_param_rows(node: &Node, show_param_values: bool) -> usize {
+    if show_param_values {
+        node.parameters.len()
+    } else {
+        0
+    }
+}
+
+pub fn compute_node_size(node: &Node, zoom: f32, show_param_values: bool) -> (f32, f32) {
     let z = zoom;
     let port_rows = node.inputs.len().max(node.outputs.len());
-    let param_rows = node.parameters.len();
+    let param_rows = painted_param_rows(node, show_param_values);
     let sep = if param_rows > 0 { 6.0 * z } else { 0.0 };
     let h = BASE_NODE_PAD * z
         + BASE_HEADER_H * z
@@ -466,6 +490,7 @@ pub fn paint_nodes(
     timings: &HashMap<NodeId, EvalReadout>,
     categories: &HashMap<NodeId, NodeCategory>,
     labels: &HashMap<NodeId, String>,
+    show_param_values: bool,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
@@ -504,6 +529,7 @@ pub fn paint_nodes(
             is_selected,
             categories.get(&node.id).copied(),
             z,
+            show_param_values,
             colors,
             window,
             cx,
@@ -541,6 +567,7 @@ fn paint_single_node(
     selected: bool,
     category: Option<NodeCategory>,
     z: f32,
+    show_param_values: bool,
     colors: &ThemeColor,
     window: &mut Window,
     cx: &mut App,
@@ -761,7 +788,11 @@ fn paint_single_node(
             .ok();
     }
 
-    if !node.parameters.is_empty() {
+    // Skipped wholesale when the rows are off, separator included: the
+    // height `compute_node_size` returned for this node left no room for
+    // either (the two read the same flag).
+    let rows = painted_param_rows(node, show_param_values);
+    if rows > 0 {
         let param_row_h = BASE_PARAM_ROW_H * z;
         let params_base_y =
             port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z;
@@ -781,7 +812,7 @@ fn paint_single_node(
             }),
         ));
 
-        for (i, param) in node.parameters.iter().enumerate() {
+        for (i, param) in node.parameters.iter().enumerate().take(rows) {
             let py = params_base_y + i as f32 * param_row_h;
             let key_w = paint_mono_text_measured(
                 &param.key,
@@ -1702,9 +1733,59 @@ mod tests {
             Node::new(NodeId::new(2), "user.unknown").with_output("out", DataTypeId::FRAME_BUFFER);
         for zoom in [Viewport::MIN_ZOOM, 1.0, Viewport::MAX_ZOOM] {
             assert_eq!(
-                compute_node_size(&explicit, zoom),
-                compute_node_size(&fallback, zoom),
+                compute_node_size(&explicit, zoom, true),
+                compute_node_size(&fallback, zoom, true),
                 "node size must not depend on the header glyph at zoom {zoom}"
+            );
+        }
+    }
+
+    /// PGRP-5: turning the parameter rows off takes their height — and the
+    /// separator above them — out of the node, and leaves the width alone. A
+    /// node with no parameters is the same size either way, so the toggle
+    /// The row count is one rule, and both the height and the paint read it.
+    /// A body that painted rows the height did not reserve would spill over
+    /// the node below; a height that reserved rows nobody painted would move
+    /// every port's hit target down (`MED-APP-13`).
+    #[test]
+    fn the_painted_row_count_is_zero_exactly_when_the_values_are_hidden() {
+        let bare = Node::new(NodeId::new(1), "constant");
+        let with_params = Node::new(NodeId::new(2), "blur")
+            .with_param("radius", ParameterValue::Float(2.0))
+            .with_param("quality", ParameterValue::Int(1));
+
+        assert_eq!(painted_param_rows(&with_params, true), 2);
+        assert_eq!(painted_param_rows(&with_params, false), 0);
+        // A node with nothing to show is the same either way.
+        assert_eq!(painted_param_rows(&bare, true), 0);
+        assert_eq!(painted_param_rows(&bare, false), 0);
+    }
+
+    /// cannot move anything that was not showing rows.
+    #[test]
+    fn hiding_the_parameter_values_shrinks_the_node_by_its_parameter_rows() {
+        let node = Node::new(NodeId::new(1), "test")
+            .with_output("out", DataTypeId::FRAME_BUFFER)
+            .with_param("a", ravel_core::graph::ParameterValue::Float(1.0))
+            .with_param("b", ravel_core::graph::ParameterValue::Int(2))
+            .with_param("c", ravel_core::graph::ParameterValue::Bool(true));
+        let bare = Node::new(NodeId::new(2), "test").with_output("out", DataTypeId::FRAME_BUFFER);
+
+        for zoom in [Viewport::MIN_ZOOM, 1.0, Viewport::MAX_ZOOM] {
+            let (shown_w, shown_h) = compute_node_size(&node, zoom, true);
+            let (hidden_w, hidden_h) = compute_node_size(&node, zoom, false);
+            assert_eq!(
+                shown_w, hidden_w,
+                "the node width never depends on the rows"
+            );
+            assert!(
+                (shown_h - hidden_h - (3.0 * BASE_PARAM_ROW_H + 6.0) * zoom).abs() < 1e-3,
+                "at zoom {zoom} only the rows and their separator come off: {shown_h} -> {hidden_h}"
+            );
+            assert_eq!(
+                compute_node_size(&bare, zoom, true),
+                compute_node_size(&bare, zoom, false),
+                "a node with no parameters is unaffected at zoom {zoom}"
             );
         }
     }

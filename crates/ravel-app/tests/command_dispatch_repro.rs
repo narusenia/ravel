@@ -74,6 +74,35 @@ fn two_app_level_actions_each_execute_exactly_once(cx: &mut TestAppContext) {
     assert_eq!(app_commands, [CommandId::EditCopy, CommandId::EditUndo]);
 }
 
+/// The View toggle for the node bodies' parameter values reaches the UI-state
+/// global through the ordinary command route (`PGRP-5`).
+///
+/// The panel-level test drives `panels::toggle_node_param_values` directly, so
+/// it cannot see a dispatch arm that stopped calling it. This one dispatches
+/// the action a menu click dispatches.
+#[gpui::test]
+fn the_view_toggle_flips_the_node_parameter_values_global(cx: &mut TestAppContext) {
+    let _main_window = open_workspace(cx);
+    let window = cx.add_window(|_, _| BareView);
+
+    assert!(
+        cx.update(|cx| panels::show_node_param_values(cx)),
+        "drawn is the default"
+    );
+
+    cx.dispatch_action(window.into(), workspace::ViewToggleNodeParamValues);
+    assert!(
+        !cx.update(|cx| panels::show_node_param_values(cx)),
+        "the command hid the rows"
+    );
+
+    cx.dispatch_action(window.into(), workspace::ViewToggleNodeParamValues);
+    assert!(
+        cx.update(|cx| panels::show_node_param_values(cx)),
+        "and brought them back"
+    );
+}
+
 /// Builds a real main window. Panels needing a GPU or media backend
 /// (NodeGraph) are toggled invisible first so the test stays headless.
 fn open_workspace(cx: &mut TestAppContext) -> gpui::WindowHandle<Root> {

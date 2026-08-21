@@ -49,6 +49,13 @@ observe-global crates/ravel-app/src/panels/timeline.rs LoopRangeState
 # same node type, so it has to repaint from a fold it did not perform — the
 # same lifecycle and the same reason as BpmGridState above.
 observe-global crates/ravel-app/src/panels/properties.rs CollapsedParamGroupsState
+# Durable shared UI state (parameter-groups-plan PGRP-5): whether the node
+# bodies draw their parameter rows is written by the View menu, by a project
+# load and by File ▸ New — never by the panel itself. Every Node Editor
+# instance (a detached window included) has to re-measure its nodes from a flip
+# it did not perform, because `node_sizes` is what every hit test reads. Same
+# lifecycle and same reason as CollapsedParamGroupsState above.
+observe-global crates/ravel-app/src/panels/node_editor.rs ShowNodeParamValuesState
 # The Node Editor opens the network of the shared layer selection (REQ-UI-013
 # unit 3). Timeline and Outliner both write that selection, so observing the
 # durable state replaces per-writer pushes into this panel.

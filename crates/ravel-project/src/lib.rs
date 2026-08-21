@@ -1067,6 +1067,19 @@ mod tests {
         );
     }
 
+    /// The Node Graph parameter-row toggle rides the same optional entry
+    /// (PGRP-5): hiding the rows survives a save/load and the format version
+    /// stays put.
+    #[test]
+    fn the_archive_round_trips_the_hidden_node_parameter_values() {
+        let mut project = demo_project();
+        project.ui_state.show_node_param_values = Some(false);
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert!(!back.ui_state.show_node_param_values());
+    }
+
     /// A current-format archive may omit `ui_state.json`; it must still load,
     /// falling back to the document root. The optional entry never requires a
     /// format migration.

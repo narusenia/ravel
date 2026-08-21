@@ -108,6 +108,7 @@ macro_rules! for_each_command {
             ViewToggleLuaConsole,
             ViewToggleRenderQueue,
             ViewToggleAttributeSpreadsheet,
+            ViewToggleNodeParamValues,
             ViewFit,
             PlaybackToggle,
             PlaybackStop,
@@ -1529,6 +1530,12 @@ impl RavelWorkspace {
                     {
                         crate::window_host::focus_pane(instance, cx);
                     }
+                }
+                // The node bodies' parameter rows (PGRP-5). A display flag,
+                // so it goes to the UI-state global rather than the document;
+                // every Node Editor observes it and re-measures its nodes.
+                CommandId::ViewToggleNodeParamValues => {
+                    panels::toggle_node_param_values(cx);
                 }
                 // Named layouts (REQ-UI-005) plus the embed opt-in.
                 CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),

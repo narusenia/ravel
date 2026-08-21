@@ -98,6 +98,11 @@ pub enum CommandId {
     ViewToggleLuaConsole,
     ViewToggleRenderQueue,
     ViewToggleAttributeSpreadsheet,
+    /// Show or hide the parameter name/value rows the Node Graph editor
+    /// draws inside the node bodies (`parameter-groups-plan.md`, PGRP-5).
+    /// Unlike its neighbours this is not a panel toggle — the panel stays,
+    /// its nodes get shorter.
+    ViewToggleNodeParamValues,
     ViewFit,
     // Playback
     PlaybackToggle,
@@ -344,6 +349,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         CommandId::ViewToggleAttributeSpreadsheet,
         "view.toggle_attribute_spreadsheet",
     ),
+    (
+        CommandId::ViewToggleNodeParamValues,
+        "view.toggle_node_param_values",
+    ),
     (CommandId::ViewFit, "view.fit"),
     (CommandId::PlaybackToggle, "playback.toggle"),
     (CommandId::PlaybackStop, "playback.stop"),
@@ -459,6 +468,7 @@ impl CommandId {
             CommandId::ViewToggleLuaConsole => "menu.view.lua_console",
             CommandId::ViewToggleRenderQueue => "menu.view.render_queue",
             CommandId::ViewToggleAttributeSpreadsheet => "menu.view.attribute_spreadsheet",
+            CommandId::ViewToggleNodeParamValues => "menu.view.node_param_values",
             CommandId::ViewFit => "menu.view.fit",
             CommandId::PlaybackToggle => "menu.playback.toggle",
             CommandId::PlaybackStop => "menu.playback.stop",

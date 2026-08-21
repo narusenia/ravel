@@ -575,6 +575,60 @@ pub(crate) fn set_collapsed_param_groups(groups: BTreeSet<(String, String)>, cx:
     cx.set_global(CollapsedParamGroupsState(groups));
 }
 
+/// Durable shared state: whether the Node Graph editor draws the parameter
+/// name/value rows inside the node bodies
+/// (`docs/implementation/parameter-groups-plan.md`, PGRP-5).
+///
+/// A Global for the same reasons as [`CollapsedParamGroupsState`]: the View
+/// menu writes it, the project save path puts it in `ui_state.json`, a load
+/// installs it, and every Node Editor instance — including one in a detached
+/// window — has to follow a toggle it did not perform. UI state, so it stays
+/// out of the `Document` and out of undo.
+///
+/// The flag is canvas-wide rather than per node: a per-node setting is more
+/// state to persist for a preference nobody sets twice.
+///
+/// `true` — the rows are drawn — is the default, so [`Default`] is the
+/// first-run state and the absence of the global reads the same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShowNodeParamValuesState(bool);
+
+impl Default for ShowNodeParamValuesState {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+impl Global for ShowNodeParamValuesState {}
+
+/// Whether the node bodies show their parameter rows.
+///
+/// **The one source for both the node height and the painting.** The Node
+/// Editor reads it once per refresh and passes the same value to
+/// `painting::compute_node_size` and `painting::paint_nodes`: sizing the nodes
+/// as if the rows were there while not painting them would leave every port
+/// below the first hidden row mis-targeted (`MED-APP-13`'s shape).
+pub fn show_node_param_values(cx: &App) -> bool {
+    cx.try_global::<ShowNodeParamValuesState>()
+        .copied()
+        .unwrap_or_default()
+        .0
+}
+
+/// Flip the node bodies' parameter rows on or off (the View menu command).
+/// Returns the new state.
+pub(crate) fn toggle_node_param_values(cx: &mut App) -> bool {
+    let shown = !show_node_param_values(cx);
+    cx.set_global(ShowNodeParamValuesState(shown));
+    shown
+}
+
+/// Install the flag: [`crate::project_state::ProjectState`] on a project load
+/// or File ▸ New.
+pub(crate) fn set_show_node_param_values(shown: bool, cx: &mut App) {
+    cx.set_global(ShowNodeParamValuesState(shown));
+}
+
 /// Durable shared state: which frames of each composition the output-stage
 /// frame cache is currently holding — the Timeline's cache band (`CACHE-6`).
 ///

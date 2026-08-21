@@ -668,6 +668,13 @@ pub struct NodeEditorPanel {
     viewport: Viewport,
     selected_edges: HashSet<EdgeId>,
     node_sizes: HashMap<NodeId, (f32, f32)>,
+    /// Whether the node bodies draw their parameter rows (PGRP-5), mirrored
+    /// from [`super::ShowNodeParamValuesState`].
+    ///
+    /// Held as a field so the measured [`Self::node_sizes`] and the paint pass
+    /// can never read two different values: everything that re-measures uses
+    /// this, and `render` hands the same field to `painting::paint_nodes`.
+    show_param_values: bool,
     /// Header tint category per node, rebuilt with [`Self::node_sizes`].
     /// A function of the graph, so `render()` only clones it.
     node_categories: HashMap<NodeId, NodeCategory>,
@@ -723,6 +730,11 @@ pub struct NodeEditorPanel {
     /// (see [`super::on_became_visible`]).
     #[allow(dead_code)]
     visibility_sub: Subscription,
+    /// Follows the canvas-wide parameter-row toggle (PGRP-5); the View menu
+    /// writes it, so every instance has to re-measure from a flip it did not
+    /// perform.
+    #[allow(dead_code)]
+    param_values_sub: Subscription,
 }
 
 impl NodeEditorPanel {
@@ -820,6 +832,21 @@ impl NodeEditorPanel {
             }
         });
 
+        // The node bodies' parameter rows (PGRP-5). Written by the View menu,
+        // by a project load and by File ▸ New, so this instance follows the
+        // state rather than being pushed at. Re-measuring here is what keeps
+        // the hit targets honest — `node_sizes` is what every hit test reads.
+        let param_values_sub =
+            cx.observe_global::<super::ShowNodeParamValuesState>(|this: &mut Self, cx| {
+                let shown = super::show_node_param_values(cx);
+                if shown == this.show_param_values {
+                    return;
+                }
+                this.show_param_values = shown;
+                this.refresh_node_sizes();
+                cx.notify();
+            });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
@@ -843,6 +870,7 @@ impl NodeEditorPanel {
             },
             selected_edges: HashSet::new(),
             node_sizes: HashMap::new(),
+            show_param_values: super::show_node_param_values(cx),
             node_categories: HashMap::new(),
             node_labels: HashMap::new(),
             edge_style: crate::app_settings::resolved(cx).node_editor_edge_style,
@@ -867,6 +895,7 @@ impl NodeEditorPanel {
             mirror_epoch: super::MirrorEpoch::default(),
             timings_sub,
             visibility_sub,
+            param_values_sub,
         }
     }
 
@@ -2448,7 +2477,8 @@ impl NodeEditorPanel {
     }
 
     fn refresh_node_sizes(&mut self) {
-        self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+        self.node_sizes =
+            Self::compute_all_sizes(&self.graph, self.viewport.zoom, self.show_param_values);
     }
 
     /// Rebuild everything derived from the displayed graph. Called from the
@@ -2473,7 +2503,8 @@ impl NodeEditorPanel {
     /// switch, so nothing invalidates them today; a future switch has to
     /// call this (see the note in `node_locale`).
     fn refresh_graph_caches(&mut self, cx: &App) {
-        self.node_sizes = Self::compute_all_sizes(&self.graph, self.viewport.zoom);
+        self.node_sizes =
+            Self::compute_all_sizes(&self.graph, self.viewport.zoom, self.show_param_values);
         // Nodes without a registered template (and synthetic ones) get no
         // header tint, so they are simply absent from the map.
         self.node_categories = self
@@ -2522,10 +2553,19 @@ impl NodeEditorPanel {
             .collect()
     }
 
-    fn compute_all_sizes(graph: &Graph, zoom: f32) -> HashMap<NodeId, (f32, f32)> {
+    /// Measure every node. `show_param_values` is the same flag the paint
+    /// pass gets ([`Self::show_param_values`]), because the parameter rows are
+    /// part of the height: measuring rows that are not drawn would leave the
+    /// node box — and with it every body hit test and the popover anchor —
+    /// taller than the picture.
+    fn compute_all_sizes(
+        graph: &Graph,
+        zoom: f32,
+        show_param_values: bool,
+    ) -> HashMap<NodeId, (f32, f32)> {
         graph
             .nodes()
-            .map(|n| (n.id, compute_node_size(n, zoom)))
+            .map(|n| (n.id, compute_node_size(n, zoom, show_param_values)))
             .collect()
     }
 
@@ -3054,6 +3094,9 @@ impl Render for NodeEditorPanel {
         let timings = self.displayed_timings.clone();
         let categories = self.node_categories.clone();
         let labels = self.node_labels.clone();
+        // The very flag `node_sizes` above was measured with, so the picture
+        // and the geometry can never disagree.
+        let show_param_values = self.show_param_values;
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
 
@@ -3811,6 +3854,7 @@ impl Render for NodeEditorPanel {
                             &timings,
                             &categories,
                             &labels,
+                            show_param_values,
                             &colors,
                             window,
                             cx,
@@ -4497,6 +4541,49 @@ mod tests {
         );
     }
 
+    /// PGRP-5: the measured size and the hit test are one thing, so hiding
+    /// the parameter rows moves the body's lower boundary with them. A point
+    /// that sat in the parameter band hits the node while the rows are drawn
+    /// and misses once they are off — the divergence `MED-APP-13` was.
+    #[test]
+    fn hiding_the_parameter_values_moves_the_body_hit_boundary() {
+        let node = positioned_node(1, 1)
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("a", ParameterValue::Float(1.0))
+            .with_param("b", ParameterValue::Float(2.0));
+        let graph = Graph::new().add_node(node).unwrap();
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        };
+
+        let shown = NodeEditorPanel::compute_all_sizes(&graph, viewport.zoom, true);
+        let hidden = NodeEditorPanel::compute_all_sizes(&graph, viewport.zoom, false);
+        let (_, shown_h) = shown[&NodeId::new(1)];
+        let (_, hidden_h) = hidden[&NodeId::new(1)];
+        assert!(hidden_h < shown_h, "hiding the rows must shrink the node");
+
+        // Inside the band the rows occupied, which is body with them and
+        // empty canvas without.
+        let y = (hidden_h + shown_h) / 2.0;
+        assert_eq!(
+            NodeEditorPanel::node_hit_at(&graph, &viewport, &shown, 10.0, y),
+            Some(NodeId::new(1))
+        );
+        assert_eq!(
+            NodeEditorPanel::node_hit_at(&graph, &viewport, &hidden, 10.0, y),
+            None,
+            "the hit box must not keep the height of rows nobody paints"
+        );
+        // The header is body either way: the toggle moves the bottom edge and
+        // nothing else.
+        assert_eq!(
+            NodeEditorPanel::node_hit_at(&graph, &viewport, &hidden, 10.0, 10.0),
+            Some(NodeId::new(1))
+        );
+    }
+
     #[test]
     fn front_node_body_occludes_a_rear_port() {
         let mut rear = positioned_node(1, 2).with_output("out", DataTypeId::SCALAR);
@@ -4650,6 +4737,49 @@ mod tests {
                     );
                 }
                 assert!(panel.node_categories.contains_key(&blur));
+            })
+            .unwrap();
+    }
+
+    /// PGRP-5 end to end: the View-menu command writes the global, this panel
+    /// follows it, and the nodes it has already measured shrink — a repaint is
+    /// not what re-measures them, so a stale `node_sizes` would keep the old
+    /// hit boxes forever.
+    #[gpui::test]
+    fn toggling_the_node_parameter_values_re_measures_the_open_network(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+
+        let shown = window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.show_param_values, "the rows are drawn by default");
+                panel.node_sizes[&blur]
+            })
+            .unwrap();
+
+        // What `CommandId::ViewToggleNodeParamValues` does.
+        cx.update(|cx| {
+            assert!(!crate::panels::toggle_node_param_values(cx));
+        });
+
+        let hidden = window
+            .update(cx, |panel, _window, _cx| {
+                assert!(!panel.show_param_values);
+                panel.node_sizes[&blur]
+            })
+            .unwrap();
+        assert_eq!(hidden.0, shown.0, "the width does not move");
+        assert!(
+            hidden.1 < shown.1,
+            "the node must lose the row height it no longer draws: {shown:?} -> {hidden:?}"
+        );
+
+        cx.update(|cx| {
+            assert!(crate::panels::toggle_node_param_values(cx));
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.show_param_values);
+                assert_eq!(panel.node_sizes[&blur], shown, "flipping back restores it");
             })
             .unwrap();
     }

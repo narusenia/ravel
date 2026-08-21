@@ -3781,11 +3781,17 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // File ▸ New leaves the factor as the session has it, so set it back
-        // by hand: the second file is the one saved at the default.
+        // File ▸ New replaces the UI state with the default one, so the
+        // factor goes back to the default with it — the same rule the beat
+        // grid and the loop ranges follow, and what makes the second file the
+        // one saved at the default.
         project.update(cx, |project, cx| {
             project.new_document(cx);
-            project.set_viewer_resolution(ViewerResolution::default(), cx);
+            assert_eq!(
+                project.viewer_resolution(),
+                ViewerResolution::default(),
+                "a new project must not inherit the closing project's factor"
+            );
             project.save_project_to(default_path.clone(), None, cx);
         });
         cx.run_until_parked();

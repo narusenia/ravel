@@ -530,7 +530,7 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 - **読み込み時**、`path` をプロジェクトルート（`.ravprj` を置くディレクトリ）と
   変数表で解決して `resolved` を埋める。解決できなければ `None` = オフライン。
   オフラインのアセットを指す `media` ノードは評価を失敗させず、ctx の解像度の
-  透明フレームを返す（`docs/implementation/media-import-plan.md` の決定 7）。
+  透明フレームを返す（`docs/implementation/done/media-import-plan.md` の決定 7）。
 - **`Save As` でプロジェクトルートが変わったとき**、新しいルートを基準に
   `path` を相対化し直し、`resolved` を張り直す（`rebase_asset_references`）。
   `Variable`（`${PROJECT_ROOT}/…`）はユーザーが選んだ形なので書き換えず、

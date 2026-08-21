@@ -4,7 +4,7 @@
 
 プロジェクトのメディアアセット一覧。関連要件: REQ-UI-008、REQ-UI-010、
 REQ-PROJ-001。設計は
-[`../../implementation/media-import-plan.md`](../../implementation/media-import-plan.md)。
+[`../../implementation/done/media-import-plan.md`](../../implementation/done/media-import-plan.md)。
 
 ## 表示
 

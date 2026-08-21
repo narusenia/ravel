@@ -26,7 +26,6 @@ the design behind a unit.
 | File | Subject | Status | Related requirements |
 |---|---|---|---|
 | `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | units 1–4 done — 2026-07-26 | REQ-MEDIA-002, REQ-MEDIA-003 |
-| `media-import-plan.md` | Media import, asset references, MediaBin, and the unified media node | units 1–5 done — 2026-07-26 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
@@ -194,6 +193,7 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/media-import-plan.md` | Media import, asset references, MediaBin, the unified media node, the asset inspector with relink, and the offline marks | #469, #470 — 2026-08-21 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `done/asset-identity-plan.md` | Stable `AssetId` separate from the display name, so a re-import cannot silently rebind an existing reference; the exposed declaration's claim is recorded on the entry | #456, #460 — 2026-08-21 | REQ-PROJ-001, REQ-UI-008, REQ-UI-010 |
 | `done/panel-visibility-plan.md` | Tell a panel whether its tab is in front, so a background pane stops rebuilding and catches up when it returns | #409, #461 — 2026-08-21 | REQ-UI-002, REQ-UI-013 |
 | `done/responsiveness-stage3-plan.md` | Responsiveness stage 3 (roadmap phase C3): graph adjacency index, layer-level `ptr_eq`, path interning, panel revision gates, GPU rasterize and upload dedup | #395, #396, #397, #461 — 2026-08-21 | REQ-CORE-002/006/011, REQ-UI-002/003 |

@@ -47,6 +47,7 @@ lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
 attribute_spreadsheet = "属性スプレッドシート"
 node_param_values = "パラメータ値を表示"
+cycle_preview_resolution = "プレビュー解像度を切り替え"
 fit = "全体表示"
 
 [menu.composition]

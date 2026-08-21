@@ -197,6 +197,11 @@ impl MenuBar {
                 // answers instead — the rows appear or the nodes shrink —
                 // which is a stronger signal than a tick in a closed menu.
                 MenuItem::action(CommandId::ViewToggleNodeParamValues),
+                // Also not a `check` item, and it could not be one: it cycles
+                // through three states rather than toggling, and the factor
+                // lives in the application's project state, not in this
+                // headless model.
+                MenuItem::action(CommandId::ViewCyclePreviewResolution),
                 MenuItem::action(CommandId::ViewFit),
                 // Detaching had a label key and a keybinding but no menu row,
                 // so it was reachable by chord alone. A panel-scoped chord can

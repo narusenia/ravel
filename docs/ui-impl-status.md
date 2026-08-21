@@ -118,6 +118,7 @@ Popover・検索パレット・種別アイコン）Done
 | Bool/String/Color | ✅ | key-value テキスト表示 (将来: 専用ウィジェット) |
 | Ports セクション | ✅ | `net.in` / `net.out` 選択時のみ表示（network-interface-editing 計画 単位 3）。ノードが宣言する全ポートを 1 行 1 ポートで列挙し、**固定ポート（`net.in` の `base_geometry` / `t` / `f` / `source`、`net.out` の `frame`）は読み取り専用行**（名前と型のみ、ツールチップで組み込みと明示）。カスタム行は名前 Input・型 Select・上下移動・削除ボタンを持ち、末尾に追加行（名前 + 型 + `+`）。型 Select の選択肢は文脈依存（レイヤールートの In は値型 6 種、サブネット内 In は全 10 種、Out は 8 種 — `Int` / `Bool` は Out 側に種別の置き場が無く `Float` と区別できないので提示しない）。拒否された編集（重複名・予約名・許可されない型・空名）はセクション下に理由を表示 |
 | 公開パラメータセクション | ✅ | `CommandId::ProjectExposedParameters`（Cmd+Shift+K / コンポジションメニュー）で開くプロジェクト対象のみに表示（exposed-parameters 計画 EXPO-5）。1 行 1 宣言で、名前 Input・型と既定値の読み取り専用表示・説明 Input・上下移動・削除ボタン。**型と既定値は編集できない**（公開した時点でパラメータから導出され、変えると `apply` が書き戻せない宣言になる）。**追加行は無い** — 宣言はパラメータ行の公開トグルから作る。束縛が届かない宣言には警告アイコンと理由（`BindingIssueReason` ごとに 1 ロケールキー）を行の下に表示。宣言ゼロのときはその旨を表示。拒否された編集（重複名・空名）はリスト下に理由を表示 |
+| メディアアセットセクション | ✅ | `PropertiesTarget::MediaAsset` のとき表示（media-import 計画 単位 6、`ravel-ui/src/properties/media_asset.rs`）。**アセット**セクションは probe が記録した読み取り専用の値（名前・種別・解像度・フレームレート・長さ・コーデック・音声ストリーム数。記録の無い項目は行を出さない）、**ファイル**セクションは参照そのもの（解決先の絶対パス、または解決しなければ `media_bin.offline`＝オフライン、パス形式の Select（絶対 / プロジェクト相対 / 変数）、保存される文字列の Input、そして `Relink…` ボタン）。パス文字列の編集は `AssetPath::parse` で形式を再判定するので相対の欄に絶対パスを打てば絶対になる。パス形式の Select は**ファイルを変えずに形式を書き換える**ので、いまの位置で表せない形式（ルートの無いプロジェクトでの相対、ルート外のファイルの相対）は拒否して元の形式に戻る。表示名はここでは読み取り専用（改名は MediaBin の行が持つ）。**このモジュールはディスクを触らない**ので「オフライン」は参照が解決しないことだけを指す。`Relink…` はファイルダイアログ → background で probe → パス・種別・メタデータを 1 undo で差し替え（probe が読めないファイルは参照を変えずに理由を出す）。入力色空間の設定は `CM-8` で非対象 |
 | 式エディタ | ✅ | 式が付いた成分ごとに 1 行のテキスト入力を行の直下に展開。コンパイルエラーは入力欄の下に位置付き（行・列）で表示され、**確定を妨げない**（壊れたソースもそのまま保存され、値はチャネル既定値になる）。ソースは `ChannelSource::Expression` から毎リフレッシュ導出するので undo で巻き戻る |
 | 空状態プレースホルダー | ✅ | ノード未選択時に表示 |
 
@@ -152,6 +153,7 @@ Popover・検索パレット・種別アイコン）Done
 | `ravel-ui/src/properties/node.rs` | ノード用セクション生成 (NodeInfo, Parameters, Ports) |
 | `ravel-ui/src/properties/layer.rs` | レイヤー用セクション生成 (Layer, Transform, Timing, Compositing) |
 | `ravel-ui/src/properties/exposed.rs` | 公開パラメータ宣言のセクション生成（行・既定値の表示形・解決不能理由のロケールキー） |
+| `ravel-ui/src/properties/media_asset.rs` | メディアアセット用セクション生成（probe の読み取り専用行、参照のパス形式と文字列、逆写像 `apply_media_asset_field`） |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-app/src/widgets/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット） |
 | `ravel-app/src/widgets/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換と接線スナップは `widgets/curve_editor.rs` と共有） |
@@ -174,6 +176,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 |------|------|------|
 | ルーラー | ✅ | 高さ 24px、MM:SS:FF 形式、ズームに応じたティック間隔適応 |
 | レイヤーヘッダー | ✅ | 幅 200px、展開矢印、名前、S/M/L トグルボタン |
+| オフラインメディアの印 | ✅ | レイヤーのネットワーク（入れ子のサブネット含む）または殻の音声ソースがオフラインのアセットを参照している行に、名前と S/M/L の間に警告アイコンを出す（media-import 計画 単位 7）。ツールチップは MediaBin のバッジと同じ `media_bin.offline`。判定は `ravel_ui::panels::media_bin::layer_is_offline` の 1 箇所で Outliner と共有し、テーブルの引き当てはドキュメント同期時（`TimelinePanel::sync_offline_layers`）なので `render()` はアセット表もグラフも歩かない。**オフライン = 参照が解決しない**（`resolved == None`、アセット表がその `AssetId` を持たない場合も含む）。ファイルの存在は見ないので、解決するパスのファイルを消しただけでは印が出ない |
 | レイヤーバー | ✅ | 角丸 4px、start_frame/duration 反映、名前テキスト |
 | プロパティ展開行 | ✅ | 殻の AnchorPoint/Position/Scale/Rotation/Opacity（AE の並び。音声を持つレイヤーは Gain も）+ キーフレームを持つネットワーク内パラメータ（In カスタム・サブネット露出含む、REQ-LAYER-004）。**`IntChannel` と `StringSteps` も 1 レーンの行として出る**（discrete-keyframes 計画 DISK-4）。識別子パラメータ（`layer.ref` の `layer`、`precomp` の `comp_id`、メディアの `asset_id`）は行を出さない |
 | チャンネル行の値 | ✅ | 行の右端に再生ヘッド時点の値を出す（`ScrubInput`）。単位は Properties と同じでスケール・不透明度はパーセント、ネットワークパラメータは生値。式・ブレンド・ノード出力に駆動された成分には出さない |
@@ -223,7 +226,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | ファイル | 役割 |
 |---------|------|
 | `ravel-app/src/panels/timeline.rs` | GPUI Panel 実装、canvas 描画、イベントハンドラ |
-| `ravel-ui/src/panels/timeline.rs` | ヘッドレス状態 (playhead, scroll, zoom, 選択, 展開, S/M/L) |
+| `ravel-ui/src/panels/timeline.rs` | ヘッドレス状態 (playhead, scroll, zoom, 選択, 展開, S/M/L, オフライン印の集合) |
 | `ravel-core/src/composition/` | Composition, Layer（殻+ネットワーク）, 殻コンパイル |
 | `ravel-app/src/playback.rs` | PlaybackController（Transport + tick ループ、評価要求投函） |
 | `ravel-core/src/runtime/playback.rs` | PlaybackClock（フレーム精度、wall-clock マスター） |
@@ -406,8 +409,8 @@ gpui-component の `DockArea` 依存は撤去済み（`gpui_component::dock` へ
 
 | パネル | 状態 | 備考 |
 |--------|------|------|
-| MediaBin | ✅ | プロジェクトのメディアアセット一覧（media-import 計画 単位 4）。種別フィルタ（全て / 映像 / 静止画 / 音声）と名前検索、サムネイル（単位 5 の `ThumbnailCache`、生成前・失敗時は種別アイコン）、オフライン表示。選択は `MediaSelection` Global で Properties が `PropertiesTarget::MediaAsset` に追従（表示はプレースホルダ、作り込みは単位 6）。行の操作: ダブルクリック / 右クリックで「レイヤーとして追加」（再生ヘッド位置）、Timeline / Viewer へのドラッグでレイヤー化（Timeline はポインタ位置のフレーム、Viewer は再生ヘッド。複数素材でも 1 undo）「素材からコンポジションを作成」（素材の解像度・fps・長さ）「名前を変更」（行内インライン編集。Enter / フォーカス外れで確定、Escape で取り消し、空文字は不採用、前後の空白は落とす。1 ジェスチャ = 1 undo）「プロジェクトから削除」（使用中なら参照コンプ・レイヤー名つきで確認）。行のラベルと素材から作るレイヤー名は `MediaAssetEntry::name`（改名できる表示名。参照は `AssetId` なので改名で切れない、`AID-3`）で、パスのファイル名は名前が空のときだけのフォールバック。Relink… は単位 6 |
-| Outliner | ✅ | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete。ドラッグ中は `ResizeUpDown`）。複数選択（単位 6、Shift 範囲 / Cmd トグル、Duplicate・Delete は選択全体に 1 undo）。アクティブコンプ行の右クリックに「レイヤーを追加」サブメニュー（組み込みテンプレート 5 種。`LayerAdd*` Action を dispatch するので Layer メニューと同一経路）。検索・フィルタ欄と親子付け替え D&D は非対象 |
+| MediaBin | ✅ | プロジェクトのメディアアセット一覧（media-import 計画 単位 4）。種別フィルタ（全て / 映像 / 静止画 / 音声）と名前検索、サムネイル（単位 5 の `ThumbnailCache`、生成前・失敗時は種別アイコン）、オフライン表示。選択は `MediaSelection` Global で Properties が `PropertiesTarget::MediaAsset` に追従（メタデータ表示・パス編集・Relink は単位 6。Properties パネルの表を参照）。行の操作: ダブルクリック / 右クリックで「レイヤーとして追加」（再生ヘッド位置）、Timeline / Viewer へのドラッグでレイヤー化（Timeline はポインタ位置のフレーム、Viewer は再生ヘッド。複数素材でも 1 undo）「素材からコンポジションを作成」（素材の解像度・fps・長さ）「名前を変更」（行内インライン編集。Enter / フォーカス外れで確定、Escape で取り消し、空文字は不採用、前後の空白は落とす。1 ジェスチャ = 1 undo）「プロジェクトから削除」（使用中なら参照コンプ・レイヤー名つきで確認）。行のラベルと素材から作るレイヤー名は `MediaAssetEntry::name`（改名できる表示名。参照は `AssetId` なので改名で切れない、`AID-3`）で、パスのファイル名は名前が空のときだけのフォールバック。`Relink…` は Properties のファイルセクションのボタン（単位 6） |
+| Outliner | ✅ | Composition → Layer → Node の3階層ツリー、選択連動、active 切替、Unused グループ（単位 3）+ コンプの作成・複写・削除・設定（単位 4、Composition メニュー / ヘッダーボタン / 行の右クリック）。レイヤー操作（単位 5、D&D 並べ替え / 右クリックの Rename・Duplicate・Delete。ドラッグ中は `ResizeUpDown`）。複数選択（単位 6、Shift 範囲 / Cmd トグル、Duplicate・Delete は選択全体に 1 undo）。アクティブコンプ行の右クリックに「レイヤーを追加」サブメニュー（組み込みテンプレート 5 種。`LayerAdd*` Action を dispatch するので Layer メニューと同一経路）。オフラインのメディアを参照するレイヤー行には警告アイコン（単位 7、`OutlinerRow::offline`。判定は Timeline と共有の `media_bin::layer_is_offline`、ツールチップは `media_bin.offline`）。コンプ行とノード行には出さない — 印は再リンクの対象であるレイヤーに付ける。検索・フィルタ欄と親子付け替え D&D は非対象 |
 | Render Queue | ✅ | 書き出しジョブ一覧（`render-export-plan.md` 単位 5）。行は投入時点で出て「待機中」から始まり、ワーカーのイベントで 進捗バー・n / m フレーム・状態語が動く。中止ボタンは待機中・実行中の行だけに出し、フレーム境界で止めて書きかけの出力を消す。失敗行は `RenderError` の診断を下に出す。「完了分を消す」は終わった行だけを畳む。**キューはパネルではなくセッションが持つ**ので、パネルを閉じてもレンダリングは続き、開き直すと走っているジョブが見える |
 | 属性スプレッドシート | ✅ | 選択ノードが評価したジオメトリの属性表（`done/attribute-spreadsheet-plan.md` 単位 3）。ドメインタブ（ポイント / プリミティブ / インスタンス / ディテール）に要素数が出て、0 要素のタブは押せない。列は要素番号（左端固定）→ 標準属性 → 名前順の残り、値は型別書式（F32 は有効数字 4 桁、非有限値は `NaN` / `inf` / `-inf` をそのまま表示）。行は `DataTable` の仮想スクロールなので上限を切っていない（実測: `scatter.grid` 1 万インスタンスを端から端までスクロールして CPU 約 40%／1 コア、コマ落ちなし）。表示対象は Properties と同じ `SelectedPropertiesTarget` の先頭ノードで、結果は Viewer の評価要求に相乗りしたスコープターゲット（`EvalResults`、キーは `(path, node)`）から読む。**read-only**。セル編集・統計表示・複数選択の同時表示・`instance_source` の中身は非対象。ソートと列並べ替えは未実装なので UI も出していない |
 | Dopesheet | 🔲 | PlaceholderPanel |

@@ -691,6 +691,7 @@ impl TimelineGpuiPanel {
         if let Some(project) = &project {
             let comp = super::active_composition_in(project.read(cx).document(), cx).cloned();
             state.set_composition(comp);
+            state.sync_offline_layers(project.read(cx).document());
         }
 
         // A composition switch replaces everything this panel shows; the
@@ -849,6 +850,10 @@ impl TimelineGpuiPanel {
         let old_comp_id = self.state.comp_id();
         let new_comp_id = comp.as_ref().map(|comp| comp.id);
         self.state.set_composition(comp);
+        // Which layers reference an offline asset is a document question (the
+        // asset table plus a walk of each layer network), so it is answered
+        // here, on the sync, and never in `render()`.
+        self.state.sync_offline_layers(project.read(cx).document());
         // Drop a keyframe selection whose diamond disappeared (undo or
         // an external edit) — a stale selection would hijack Delete.
         self.selected_keyframes.retain(|keyframe| {
@@ -4684,6 +4689,13 @@ impl TimelineGpuiPanel {
             .iter()
             .map(|(id, ..)| self.state.is_layer_expanded(*id))
             .collect();
+        // Precomputed like the expansion flags above: the answer comes from
+        // the document sync ([`TimelinePanel::sync_offline_layers`]), so the
+        // row build is a set lookup.
+        let offline_layers: Vec<_> = layers
+            .iter()
+            .map(|(id, ..)| self.state.is_layer_offline(*id))
+            .collect();
         let layer_rows: Vec<Vec<PropertyRow>> = layers
             .iter()
             .map(|(id, ..)| {
@@ -4775,6 +4787,24 @@ impl TimelineGpuiPanel {
                             .text_color(theme.colors.foreground)
                             .child(SharedString::from(name.clone())),
                     )
+                    // Offline mark: this layer references media that resolves
+                    // to nothing, so it renders transparent. An icon rather
+                    // than the MediaBin's word — the header column is a fixed
+                    // width shared with the S/M/L toggles — with the same
+                    // locale string as its tooltip.
+                    .children(offline_layers[i].then(|| {
+                        div()
+                            .id(SharedString::from(format!("offline-{lid}")))
+                            .flex_shrink_0()
+                            .child(
+                                Icon::new(IconName::TriangleAlert)
+                                    .size_3()
+                                    .text_color(theme.colors.danger),
+                            )
+                            .tooltip(|window, cx| {
+                                Tooltip::new(t!("media_bin.offline")).build(window, cx)
+                            })
+                    }))
                     // S/M/L toggle buttons. The glyphs are untranslated
                     // notation (`docs/specifications/ui/timeline.md`); the
                     // localized word for each one is its tooltip.

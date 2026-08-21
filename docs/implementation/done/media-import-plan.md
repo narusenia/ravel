@@ -1,6 +1,6 @@
 # メディアインポート + アセット管理実装計画（REQ-UI-008 / REQ-UI-010 / REQ-PROJ-001）
 
-> **Status**: In progress — 2026-07-26 設計確定。単位 1・2・3・4・5 実装済み
+> **Status**: Done — 2026-07-26 設計確定、2026-08-21 全単位実装済み
 
 ## 問題
 
@@ -181,18 +181,47 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
    参照数つき削除確認、`PlaceholderPanel` の置換。
 5. ✅ **サムネイル生成とキャッシュ**（ravel-app）
    外部キャッシュ + メモリ LRU + background 生成 + 失敗フォールバック。
-6. **Properties の MediaAsset ターゲットと再リンク**（ravel-ui / ravel-app）
-   — **単位 1 からの持ち越し**: 変数パスを設定できるようにするなら、
-   `Save As` 後に live document の `resolved` を再解決する経路も同時に入れる
-   （undo ステップにも dirty 化にもしないこと）。
+6. ✅ **Properties の MediaAsset ターゲットと再リンク**（ravel-ui / ravel-app）
    `PropertiesTarget::MediaAsset { id }`、メタデータ表示、
    パス編集（Absolute / Relative / Variable の切替）、
    `Relink…`（ファイルダイアログ → パス差し替え → 1 undo）、
    オフライン表示。
-7. **オフラインの見え方とドキュメント整合**
+   **実装メモ**: セクションは 2 つ（`ravel-ui/src/properties/media_asset.rs`）。
+   probe が記録した値は読み取り専用で、記録の無い項目は行を出さない
+   （永続化は probe しないので「不明」の行が並ぶより無い方が正しい）。
+   表示名はここでは読み取り専用 — 改名は MediaBin の行が持っており、
+   1 つの文字列に編集口を 2 つ置く利得が無い。パス文字列の編集は
+   `AssetPath::parse` に形式を再判定させ、パス形式の Select は
+   **ファイルを変えずに形式を書き換える**（表せない形式は近似せず拒否して
+   元の形式に戻る）。`Relink…` はフィールドではなくボタンで、
+   `media::import::relink_asset_with` が background probe → パス・種別・
+   メタデータの差し替えを 1 undo で行い、probe が読めないファイルは参照を
+   変えず専用の文言で断る。**単位 1 からの持ち越しも閉じた**:
+   `Save As` はプロジェクトルートに合わせて `path` を相対化し直し `resolved` を
+   張り直す（`ProjectState::rebase_asset_references`）。undo 履歴の版も同じ
+   写像を通し、`revision` は進めないので保存が編集扱いにならない。
+7. ✅ **オフラインの見え方とドキュメント整合**
    Outliner / Timeline のレイヤー行にオフライン印、
    `docs/ui-impl-status.md` / `docs/agent-api-reference.md` /
    `docs/specifications/data-model.md` / REQ-UI-008・REQ-UI-010・REQ-PROJ の更新。
+   **実装メモ**: 判定は `ravel_ui::panels::media_bin::layer_is_offline` の
+   **1 関数**で、Outliner（`OutlinerRow::offline`）と Timeline
+   （`TimelinePanel::sync_offline_layers` が作る `LayerId` の集合）が同じものを
+   通る。`asset_references` と同じ 1 つの走査に載せたので、「どのレイヤーが
+   この素材を使うか」と「このレイヤーはオフラインか」が食い違わない。走査は
+   殻の音声ソースと、**入れ子のサブネットを含む**ネットワーク全体の `media`
+   ノードを見る（`Document::id_watermarks` と `ravel-cli` の事前走査と同じ再帰。
+   従来 `asset_references` だけがサブネットを見ておらず、削除確認の参照数が
+   過少だった）。アセット表が持たない `AssetId` もオフラインとして数える —
+   v9 以降、それが「参照が残っているのに素材が無い」状態そのもの。
+   印はレイヤー行だけで、コンプ行にもノード行にも出さない。
+   **オフラインの判定は広げなかった**: `is_offline()` は `resolved == None`
+   だけを見るので、解決するパスのファイルを消しただけでは印が出ない。
+   広げるには background の `stat` と、その結果の置き場・更新契機
+   （ロード / インポート / Relink / ...）を決める必要があり、
+   `AssetPath::resolve` がディスクを触らない設計と、描画経路・評価経路に
+   I/O を入れない制約から、この単位に収まる形にならなかった。
+   ロード / `Save As` / Relink のいずれかが走れば正しくなる。
 
 ## 完了条件（単位別）
 
@@ -219,6 +248,9 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
   Properties でパス種別を切り替えて保存 → ロードで保持される。
 - **単位 7**: `docs/ui-impl-status.md` の MediaBin 行が ✅ になり、
   REQ-UI-008 / REQ-UI-010 / REQ-PROJ-001 の該当受入条件がチェック済みになる。
+  オフラインの素材を参照するレイヤーの行に Outliner と Timeline の両方で印が
+  出て、解決するレイヤーには出ない（判定関数と両方の行モデルの headless
+  テスト）。
 
 ## 検証
 
@@ -235,6 +267,8 @@ File ▸ Import…（CommandId::FileImport）      OS からのファイル D&D
 - プロキシ生成と切替（`ProxyInfo` は将来の予約として設計に残すだけ）。
 - スマートコレクション、フォルダ階層、タグ（REQ-UI-008 の後半）。
 - 一括再リンク・ディレクトリ探索・ハッシュによる同一性判定。
+- **ファイルの存在確認によるオフライン判定**（background stat とその結果の
+  置き場・更新契機）。判定は「参照が解決しない」まで。
 - 書き出し（エクスポート機能自体が未実装。`ravel-media` の `Encoder` に
   UI 経路が無く、`CommandId` に Export が無い）。
 - 音声の再生・ミックス・解析（`docs/implementation/audio-plan.md`）。

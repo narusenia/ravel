@@ -111,7 +111,7 @@
   体感（スクラブ・再生・キャッシュ済み範囲の表示）に効くのは出力段だけなので、
   三層の定義を出力段に移した。ディスク層の格納先は、実装が
   「未保存プロジェクトでも効く」ことを理由に既にグローバルを選んでいた
-  （`docs/implementation/media-import-plan.md`）ことと、`.ravprj` の展開
+  （`docs/implementation/done/media-import-plan.md`）ことと、`.ravprj` の展開
   ディレクトリ運用が未実装であることから、要件側を実装に合わせた。
   設計は `docs/implementation/cache-plan.md`。
 

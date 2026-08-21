@@ -14,9 +14,12 @@
 //! The panel holds no selection — that is the host's `MediaSelection` global,
 //! the same split as the Outliner's `LayerSelection` (REQ-UI-013).
 
-use ravel_core::composition::{AssetKind, Document, MediaAssetEntry, node_asset_reference};
-use ravel_core::graph::Node;
+use ravel_core::composition::{
+    AssetKind, Composition, Document, Layer, MediaAssetEntry, node_asset_reference,
+};
+use ravel_core::graph::Graph;
 use ravel_core::id::{AssetId, CompId, LayerId};
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::panel::PanelKind;
@@ -207,15 +210,7 @@ pub fn asset_references(document: &Document, asset_id: AssetId) -> Vec<AssetRefe
     let mut references = Vec::new();
     for comp in comps {
         for layer in &comp.layers {
-            let used_by_node = layer
-                .network
-                .nodes()
-                .any(|node| node_uses_asset(node, asset_id));
-            let used_by_audio = layer
-                .audio
-                .as_ref()
-                .is_some_and(|audio| audio.asset_id == asset_id);
-            if used_by_node || used_by_audio {
+            if layer_references(layer, &mut |id| id == asset_id) {
                 references.push(AssetReference {
                     comp: comp.id,
                     layer: layer.id,
@@ -226,10 +221,79 @@ pub fn asset_references(document: &Document, asset_id: AssetId) -> Vec<AssetRefe
     references
 }
 
-/// Whether `node` is a media node referencing `asset_id` (the binding
-/// `add_media_layer` writes; `video` is the persisted alias of `media`).
-fn node_uses_asset(node: &Node, asset_id: AssetId) -> bool {
-    node_asset_reference(node) == Some(asset_id)
+/// Whether any media asset `layer` names is offline — the mark the Outliner
+/// and the Timeline put on the layer's row (media-import plan unit 7).
+///
+/// Both reference paths count, the same pair [`asset_references`] walks: a
+/// `media`/`video` node anywhere in the layer network (nested subnets
+/// included) and the layer shell's audio source.
+///
+/// A reference the asset table no longer holds counts as offline too. A
+/// dangling [`AssetId`] is a real persisted state — see
+/// [`node_asset_reference`] — and it produces no picture either, so hiding it
+/// would be the one case where the mark is needed most.
+///
+/// Two things this deliberately does not do:
+///
+/// - It does not follow a `precomp` node into another composition. The offline
+///   asset shows up on the rows of the composition that actually holds it, and
+///   crossing the boundary would need cycle handling for a mark.
+/// - It does not check whether the file is still there.
+///   [`MediaAssetEntry::is_offline`] reads `resolved`, which
+///   `AssetPath::resolve` fills in from the stored path without touching the
+///   filesystem, so a file deleted under a path that still resolves stays
+///   online until something re-resolves it. Widening that means a background
+///   stat and somewhere to keep its result; a row model must not do I/O.
+pub fn layer_is_offline(document: &Document, layer: &Layer) -> bool {
+    layer_references(layer, &mut |id| asset_is_offline(document, id))
+}
+
+/// The layers of `comp` whose row carries the offline mark, for a caller that
+/// needs the whole set up front rather than one row at a time (the Timeline
+/// header column, which is rebuilt from a `Composition` mirror).
+pub fn offline_layers(document: &Document, comp: &Composition) -> HashSet<LayerId> {
+    comp.layers
+        .iter()
+        .filter(|layer| layer_is_offline(document, layer))
+        .map(|layer| layer.id)
+        .collect()
+}
+
+/// Whether `asset_id` has no usable location: the table does not hold it, or
+/// the entry it holds resolved to nothing.
+fn asset_is_offline(document: &Document, asset_id: AssetId) -> bool {
+    document
+        .media_assets
+        .get(&asset_id)
+        .is_none_or(MediaAssetEntry::is_offline)
+}
+
+/// Whether any asset this layer references satisfies `pred` — the one walk
+/// behind both the "which layers use this asset?" query and the offline mark,
+/// so the two can never disagree about what a layer references.
+fn layer_references(layer: &Layer, pred: &mut impl FnMut(AssetId) -> bool) -> bool {
+    if layer
+        .audio
+        .as_ref()
+        .is_some_and(|audio| pred(audio.asset_id))
+    {
+        return true;
+    }
+    graph_references(&layer.network, pred)
+}
+
+/// The node half of [`layer_references`]. Nested networks are walked: a
+/// `media` node inside a subnet references its asset exactly as one at the top
+/// level does (the same recursion `Document::id_watermarks` and the CLI's
+/// pre-render scan do).
+fn graph_references(graph: &Graph, pred: &mut impl FnMut(AssetId) -> bool) -> bool {
+    graph.nodes().any(|node| {
+        node_asset_reference(node).is_some_and(&mut *pred)
+            || node
+                .subnet
+                .as_ref()
+                .is_some_and(|subnet| graph_references(subnet, pred))
+    })
 }
 
 #[cfg(test)]
@@ -238,7 +302,7 @@ mod tests {
     use ravel_core::composition::{
         AssetMetadata, AudioSource, Composition, Layer, MEDIA_ASSET_PARAM_KEY,
     };
-    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::NodeId;
     use ravel_core::types::FrameRate;
     use std::path::PathBuf;
@@ -489,5 +553,140 @@ mod tests {
         assert!(references.iter().all(|reference| reference.comp == comp_id));
 
         assert!(asset_references(&doc, AssetId::next()).is_empty());
+    }
+
+    #[test]
+    fn references_reach_a_media_node_nested_in_a_subnet() {
+        let clip = AssetId::next();
+        let outer = Graph::new()
+            .add_node(
+                Node::new(NodeId::next(), "subnet")
+                    .with_output("frame", ravel_core::id::DataTypeId::FRAME_BUFFER)
+                    .with_subnet(media_network(clip)),
+            )
+            .unwrap();
+        let layer = Layer::new(LayerId::next(), "Nested", outer);
+        let layer_id = layer.id;
+        let comp = comp_with_layers("Comp 1", vec![layer]);
+        let mut doc = Document::default();
+        doc.compositions.insert(comp.id, Arc::new(comp));
+
+        assert_eq!(
+            asset_references(&doc, clip)
+                .iter()
+                .map(|reference| reference.layer)
+                .collect::<Vec<_>>(),
+            vec![layer_id],
+            "a nested network references its assets exactly as a top-level one does"
+        );
+    }
+
+    // ----- offline marks ----------------------------------------------------
+
+    /// An entry whose stored path resolves to nothing — what a `.ravprj`
+    /// carrying a relative path with no project root, or a file the user moved
+    /// away, loads as. `resolved` is the only thing `is_offline` reads.
+    fn offline_entry() -> MediaAssetEntry {
+        MediaAssetEntry {
+            resolved: None,
+            ..MediaAssetEntry::from_absolute("/media/gone.mov")
+        }
+    }
+
+    /// A document holding one composition and the given asset table.
+    fn document_with_comp(comp: Composition, assets: Vec<(AssetId, MediaAssetEntry)>) -> Document {
+        let mut doc = Document::default();
+        for (id, entry) in assets {
+            doc = doc.with_media_asset_entry(id, entry);
+        }
+        doc.compositions.insert(comp.id, Arc::new(comp));
+        doc
+    }
+
+    #[test]
+    fn a_layer_whose_media_resolves_to_nothing_is_offline() {
+        let clip = AssetId::next();
+        let layer = Layer::new(LayerId::next(), "Offline", media_network(clip));
+        let comp = comp_with_layers("Comp 1", vec![layer]);
+        let layer_ref = comp.layers[0].clone();
+
+        let online = document_with_comp(
+            comp.clone(),
+            vec![(clip, MediaAssetEntry::from_absolute("/media/clip.mov"))],
+        );
+        assert!(
+            !layer_is_offline(&online, &layer_ref),
+            "a reference that resolves carries no mark"
+        );
+
+        let offline = document_with_comp(comp, vec![(clip, offline_entry())]);
+        assert!(layer_is_offline(&offline, &layer_ref));
+    }
+
+    #[test]
+    fn a_reference_the_asset_table_no_longer_holds_is_offline() {
+        let clip = AssetId::next();
+        let layer = Layer::new(LayerId::next(), "Dangling", media_network(clip));
+        let comp = comp_with_layers("Comp 1", vec![layer]);
+        let layer_ref = comp.layers[0].clone();
+        // The table is empty: the asset was removed from the project while the
+        // node kept naming it. That is offline, not "fine".
+        let doc = document_with_comp(comp, Vec::new());
+        assert!(layer_is_offline(&doc, &layer_ref));
+    }
+
+    #[test]
+    fn an_offline_audio_source_marks_its_layer() {
+        let clip = AssetId::next();
+        let mut layer = Layer::new(LayerId::next(), "Audio", Graph::new());
+        layer.audio = Some(AudioSource {
+            asset_id: clip,
+            ..AudioSource::default()
+        });
+        let comp = comp_with_layers("Comp 1", vec![layer]);
+        let layer_ref = comp.layers[0].clone();
+        let doc = document_with_comp(comp, vec![(clip, offline_entry())]);
+        assert!(layer_is_offline(&doc, &layer_ref));
+    }
+
+    #[test]
+    fn an_offline_media_node_inside_a_subnet_marks_its_layer() {
+        let clip = AssetId::next();
+        let outer = Graph::new()
+            .add_node(
+                Node::new(NodeId::next(), "subnet")
+                    .with_output("frame", ravel_core::id::DataTypeId::FRAME_BUFFER)
+                    .with_subnet(media_network(clip)),
+            )
+            .unwrap();
+        let layer = Layer::new(LayerId::next(), "Nested", outer);
+        let comp = comp_with_layers("Comp 1", vec![layer]);
+        let layer_ref = comp.layers[0].clone();
+        let doc = document_with_comp(comp, vec![(clip, offline_entry())]);
+        assert!(layer_is_offline(&doc, &layer_ref));
+    }
+
+    #[test]
+    fn offline_layers_names_only_the_layers_that_are() {
+        let gone = AssetId::next();
+        let here = AssetId::next();
+        let broken = Layer::new(LayerId::next(), "Broken", media_network(gone));
+        let fine = Layer::new(LayerId::next(), "Fine", media_network(here));
+        let assetless = Layer::new(LayerId::next(), "No media", Graph::new());
+        let broken_id = broken.id;
+        let comp = comp_with_layers("Comp 1", vec![broken, fine, assetless]);
+        let doc = document_with_comp(
+            comp.clone(),
+            vec![
+                (gone, offline_entry()),
+                (here, MediaAssetEntry::from_absolute("/media/clip.mov")),
+            ],
+        );
+
+        assert_eq!(
+            offline_layers(&doc, &comp),
+            HashSet::from([broken_id]),
+            "only the layer whose asset resolves to nothing is named"
+        );
     }
 }

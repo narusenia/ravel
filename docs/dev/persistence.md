@@ -374,8 +374,12 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 ## メディア参照
 
 パスは相対 / 変数形式で記録する（v4 で `assets/refs.json` を廃止）。
-絶対パスは `Absolute` として読める。リンク切れはオフライン表示になり、
-修復（Relink）は `MEDIA-7`。
+絶対パスは `Absolute` として読める。リンク切れはオフライン表示になり
+（MediaBin の行バッジ、Outliner と Timeline のレイヤー行の印、
+Properties のファイルセクション）、修復は Properties の `Relink…`。
+**オフラインは参照が解決しないこと**を指し、ファイルの存在は見ない
+（`AssetPath::resolve` はディスクを触らない）ので、解決するパスのファイルを
+消しただけでは表示に出ない。
 
 **同一性と表示名は別物**（v9、REQ-PROJ-001）。`Document::media_assets` のキーは
 `AssetId` で、**再利用されない**。表示名は `MediaAssetEntry::name` にあり、

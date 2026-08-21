@@ -2215,6 +2215,12 @@ Unknown type keys are skipped silently (plugin space).
   the sole active criterion clears it; `Shift` toggles membership),
   `reveal_filters()`, and `visible_property_rows(layer)` — **the** filtered
   row enumeration every layout derivation in the host walks (`MED-APP-13`).
+  The offline media mark is panel state for the same reason the mirror is:
+  `sync_offline_layers(&Document)` recomputes the marked set through
+  `media_bin::offline_layers` and `is_layer_offline(LayerId)` answers per row,
+  so the host's `render()` does a set lookup instead of an asset-table walk.
+  `set_composition` clears the set — a switch reuses layer numbers — and the
+  host calls the sync right after it (media-import plan unit 7).
 - Composition management (REQ-UI-013) lives in `document.rs`:
   `CompositionSettings { name, resolution, frame_rate, duration_frames,
   background_color }` is the settings value (`from_composition`, `fallback`,
@@ -2241,8 +2247,11 @@ Unknown type keys are skipped silently (plugin space).
   keyed by `OutlinerKey::{Comp, Layer, Node, Unused}` and stored as the
   difference from per-kind defaults (comps and node chains open, layers and
   the unused bucket closed), so rows that do not exist yet already have the
-  right state. The panel holds no selection — that is the host's
-  `LayerSelection` / `CanvasSelection`.
+  right state. `OutlinerRow::offline` marks a LAYER row whose network (or
+  shell audio source) references offline media — `false` on every other kind,
+  because the mark belongs on the layer the user relinks and not on each node
+  under it (media-import plan unit 7). The panel holds no selection — that is
+  the host's `LayerSelection` / `CanvasSelection`.
 - `panels::media_bin` (panels/media_bin.rs) flattens `Document::media_assets`
   into `Vec<MediaBinRow>` for the MediaBin list (REQ-UI-008, media-import plan
   unit 4): `MediaBinPanel::rows(document)` applies the kind filter
@@ -2258,8 +2267,16 @@ Unknown type keys are skipped silently (plugin space).
   is audio only with audio streams and no probed video stream; a sequence is
   video). `asset_references(document, AssetId)` lists every layer still
   using an asset (media node binding or shell audio source) for the delete
-  confirmation. The panel holds no selection — that is the host's
-  `MediaSelection`.
+  confirmation, and `layer_is_offline(document, &Layer)` /
+  `offline_layers(document, &Composition)` answer the reverse question for the
+  Outliner and Timeline row marks (media-import plan unit 7). All three share
+  one walk, so they cannot disagree about what a layer references: both
+  reference paths, and nested subnets at any depth. Offline covers an
+  `AssetId` the table no longer holds — a dangling reference produces no
+  picture either — but NOT a file deleted under a path that still resolves:
+  `is_offline()` reads `resolved`, which `AssetPath::resolve` fills in without
+  touching the disk, and a row model must do no I/O. The panel holds no
+  selection — that is the host's `MediaSelection`.
 - `keyframes` (keyframes.rs): the timeline property-tree model and keyframe
   editing (REQ-LAYER-004). `PropertyRowId::{Shell(PropertyGroup), Network
   { node, key }}` identifies a channel group; `property_rows(layer)` lists
@@ -2373,6 +2390,24 @@ Unknown type keys are skipped silently (plugin space).
   at `local_frame`, not flattened), `layer::toggle_layer_keyframe` /
   `layer::layer_field_keyframed` for the per-field key toggle,
   `layer::in_node_id`.
+- `properties::media_asset` (properties/media_asset.rs) is the
+  `PropertiesTarget::MediaAsset` half (REQ-UI-008, media-import plan unit 6):
+  `sections_for_media_asset(&MediaAssetEntry)` builds a read-only probe
+  section (`SECTION_ASSET`: name, kind, resolution, frame rate, duration,
+  codec, audio stream count — absent metadata gets no row rather than a row
+  saying nothing) and the reference section (`SECTION_FILE`: the resolved
+  location or `VALUE_OFFLINE`, the path form as an `Enum`, and the persisted
+  string), and
+  `apply_media_asset_field(&mut MediaAssetEntry, key, &PropertyValue,
+  project_root)` maps an edit back. `FIELD_PATH` rewrites the stored string
+  and lets `AssetPath::parse` reclassify it; `FIELD_PATH_KIND` keeps the file
+  and rewrites the form, refusing a form the current location cannot express
+  rather than approximating it. The display name is read-only here — the
+  MediaBin row owns that edit — and nothing in the module touches the disk, so
+  "offline" means the reference does not resolve. `Relink…` is not a field: the
+  host's `media::import::{prompt_relink, relink_asset, relink_asset_with}`
+  probes the picked file on the background executor and replaces the path,
+  kind and metadata in one undo step, refusing a file the probe cannot read.
 - Read-only values that name a state rather than carrying data travel as
   locale keys the host resolves (`panels::properties::read_only_value`):
   `VALUE_ON` / `VALUE_OFF`, `PARENT_NONE`, and the Layer section's
@@ -2562,7 +2597,9 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `set_media_selection` is the only writer — it also publishes the Properties
   subject (`PropertiesTarget::MediaAsset { id }` for one asset, `Empty`
   otherwise). `PropertiesTarget::MediaAsset` only identifies the subject; the
-  Properties panel shows a placeholder until media-import plan unit 6.
+  Properties panel resolves the entry from the live document on every refresh
+  and renders `properties::media_asset`'s two sections (media-import plan
+  unit 6).
   `ProjectState::document_changed` also calls `panels::prune_media_selection`
   after every document change, dropping selected assets (and a stale
   `MediaAsset` target) the document has lost. The MediaBin panel

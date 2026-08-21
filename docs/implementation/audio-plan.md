@@ -1,7 +1,7 @@
 # オーディオ実装計画（REQ-MEDIA-002 / REQ-MEDIA-003）
 
 > **Status**: In progress — 2026-07-26 単位 1–4 完了（動画レイヤーの音声まで）。
-> `docs/implementation/media-import-plan.md` の単位 1（アセットモデル）は完了済み。
+> `docs/implementation/done/media-import-plan.md` の単位 1（アセットモデル）は完了済み。
 
 ## 問題
 

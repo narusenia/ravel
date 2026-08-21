@@ -100,6 +100,18 @@ mod i18n_coverage {
     }
 
     #[test]
+    fn all_viewer_resolution_label_keys_in_catalog() {
+        let catalog = load_catalog();
+        for factor in panels::viewer::ViewerResolution::ALL {
+            let key = factor.label_key();
+            assert!(
+                has_key(&catalog, key),
+                "missing locale key for ViewerResolution::{factor:?}: \"{key}\""
+            );
+        }
+    }
+
+    #[test]
     fn all_preset_label_keys_in_catalog() {
         let catalog = load_catalog();
         for preset in BuiltinPreset::ALL {

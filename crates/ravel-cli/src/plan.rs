@@ -253,21 +253,24 @@ pub fn plan_render(
 /// *mapping* of the persisted path, not a promise that anything is there, so
 /// footage that moved after the project was saved lands here.
 ///
-/// FFmpeg is asked only about containers. Stills and image sequences are read
-/// by the image decoder instead, and probing those with FFmpeg would call a
-/// file Ravel reads perfectly well unreadable. A build without FFmpeg asks
-/// nothing and says nothing: **"cannot be checked" is not "cannot be read"**,
-/// and the honest way to report a limited build is the way
-/// [`NoAudio::NoDecoder`] does it — once, about the build.
+/// Everything that is there is asked of FFmpeg, whatever its
+/// [`AssetKind`](ravel_core::composition::AssetKind): a still and a sequence
+/// frame are decoded by `ravel_media::image_seq::read_image_frame`, which
+/// opens them with the same `FfmpegDecoder` a container goes through, so the
+/// probe and the render agree about what "readable" means. A sequence is
+/// probed through its representative frame — the one `resolved` names — which
+/// is the frame the render reads first.
+///
+/// A build without FFmpeg asks nothing and says nothing: **"cannot be
+/// checked" is not "cannot be read"**, and the honest way to report a limited
+/// build is the way [`NoAudio::NoDecoder`] does it — once, about the build.
 fn probe_asset(entry: &MediaAssetEntry) -> Option<String> {
     let path = entry.resolved.as_ref()?;
     if let Err(error) = std::fs::metadata(path) {
         return Some(format!("{}: {error}", path.display()));
     }
     #[cfg(feature = "ffmpeg")]
-    if matches!(entry.kind, ravel_core::composition::AssetKind::Container)
-        && let Err(error) = ravel_media::format::probe(path)
-    {
+    if let Err(error) = ravel_media::format::probe(path) {
         return Some(format!("{}: {error}", path.display()));
     }
     None
@@ -901,16 +904,26 @@ mod tests {
             "the reason names the file: {detail}"
         );
 
+        // A still that is there but is not an image. `read_image_frame` opens
+        // it with the same decoder a container goes through, so a probe that
+        // let this pass would promise a frame the render then falls back to
+        // transparent for — the silence `HIGH-34` is about.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plate.png");
         std::fs::write(&path, b"not really a png").unwrap();
-        assert_eq!(
-            probe_asset(&ravel_core::composition::MediaAssetEntry::from_absolute(
-                path
-            )),
-            None,
-            "a still is read by the image decoder, so the probe does not judge it"
-        );
+        let entry = ravel_core::composition::MediaAssetEntry::from_absolute(path);
+        #[cfg(feature = "ffmpeg")]
+        {
+            let detail = probe_asset(&entry).expect("a file that is not an image is not readable");
+            assert!(
+                detail.contains("plate.png"),
+                "the reason names the file: {detail}"
+            );
+        }
+        // Without a decoder the build cannot tell, and says so by saying
+        // nothing: "cannot be checked" is not "cannot be read".
+        #[cfg(not(feature = "ffmpeg"))]
+        assert_eq!(probe_asset(&entry), None);
     }
 
     /// Every shape that stops an identifier from standing still produces one

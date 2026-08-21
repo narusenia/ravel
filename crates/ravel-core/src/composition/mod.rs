@@ -678,7 +678,7 @@ pub fn node_asset_reference(node: &Node) -> Option<AssetId> {
     node.parameters
         .iter()
         .find(|param| param.key == MEDIA_ASSET_PARAM_KEY)
-        .and_then(|param| param.value.static_identifier())
+        .and_then(|param| param.value.static_text_identifier())
         .map(AssetId::new)
 }
 
@@ -1472,12 +1472,11 @@ impl Document {
     }
 
     /// The largest id of each kind used anywhere in the document
-    /// (compositions — map keys and embedded ids alike — layers, every
-    /// network recursively including subnets, `layer.ref` parameter
-    /// targets, and the legacy flat graph). Reference ids are included so a
-    /// fresh allocation can never retarget a persisted reference
-    /// (REQ-LAYER-009). No node parameter carries a `CompId` yet (PreComp
-    /// is v2), so there is nothing composition-valued to scan.
+    /// (compositions — map keys, embedded ids and `precomp` targets alike —
+    /// layers, every network recursively including subnets, `layer.ref`
+    /// parameter targets, and the legacy flat graph). Reference ids are
+    /// included so a fresh allocation can never retarget a persisted
+    /// reference (REQ-LAYER-009).
     ///
     /// Asset references are scanned for the same reason, and it matters more
     /// than for layers: a `media` node or an `AudioSource` may name an
@@ -1508,6 +1507,15 @@ impl Document {
                 if let Some(asset) = node_asset_reference(node) {
                     watermarks.asset = watermarks.asset.max(asset.raw());
                 }
+            }
+            // `precomp` parameters reference compositions by raw id, in any
+            // graph. A reference the table no longer holds is the case that
+            // needs the reservation: allocating its id would point the stored
+            // `precomp` at an unrelated composition.
+            let mut comps = Vec::new();
+            validate::precomp_targets(graph, &mut comps);
+            for target in comps {
+                watermarks.comp = watermarks.comp.max(target.raw());
             }
         }
 
@@ -3084,6 +3092,22 @@ mod tests {
 
         let watermarks = doc.id_watermarks();
         assert_eq!(watermarks.layer, 99_000);
+
+        // A `precomp` target counts too, and it is the case that matters:
+        // composition 77_000 is not in the table, so nothing but this scan
+        // keeps a fresh CompId off the id the stored reference names.
+        let precomp = Node::new(NodeId::new(2), "precomp")
+            .with_param("comp_id", ParameterValue::Int(77_000))
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        let network = Graph::new().add_node(precomp).unwrap();
+        let comp = Composition::new(CompId::new(8), "e", (16, 16), FrameRate::new(30, 1), 10)
+            .add_layer(Layer::new(LayerId::new(3), "P", network));
+        doc = doc.with_composition(comp);
+        assert_eq!(
+            doc.id_watermarks().comp,
+            77_000,
+            "a dangling precomp reference is still a reservation"
+        );
 
         // An embedded composition id larger than its map key counts too.
         let mut comp = Composition::new(

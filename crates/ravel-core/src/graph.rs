@@ -491,11 +491,46 @@ impl ParameterValue {
         }
     }
 
-    /// The non-negative integer this parameter names as an identifier, or
-    /// `None` if it names none — [`identifier`](Self::identifier) with the
-    /// reason dropped, for the callers that only have to resolve a reference.
+    /// The non-negative integer this parameter names as an identifier **in the
+    /// numeric spelling**, or `None` if it names none —
+    /// [`identifier`](Self::identifier) with the reason dropped, restricted to
+    /// the two shapes an `Int`-flavoured identifier is stored in.
+    ///
+    /// # Why the spelling matters
+    ///
+    /// The two identifier flavours are not interchangeable. `layer.ref`'s
+    /// `layer` and `precomp`'s `comp_id` are read back with `i32_or`, and
+    /// `media`'s `asset_id` with `str_or`, so a `String("5")` on `layer.ref`
+    /// reaches the processor as a string it does not read: the reference does
+    /// **not** resolve. Reserving id 5 for it anyway would make the watermark
+    /// scan claim an id nothing points at, which is the disagreement between
+    /// reservation and evaluation this whole path exists to remove. A caller
+    /// that resolves a text-spelled identifier uses
+    /// [`static_text_identifier`](Self::static_text_identifier).
     pub fn static_identifier(&self) -> Option<u64> {
-        self.identifier().static_raw()
+        match self {
+            ParameterValue::Int(_) | ParameterValue::IntChannel(_) => {
+                self.identifier().static_raw()
+            }
+            _ => None,
+        }
+    }
+
+    /// The non-negative integer this parameter names as an identifier **in the
+    /// text spelling** (`media`'s `asset_id`, which holds an [`AssetId`] as
+    /// decimal digits), or `None` if it names none.
+    ///
+    /// The mirror of [`static_identifier`](Self::static_identifier); see there
+    /// for why the two spellings do not stand in for each other.
+    ///
+    /// [`AssetId`]: crate::id::AssetId
+    pub fn static_text_identifier(&self) -> Option<u64> {
+        match self {
+            ParameterValue::String(_) | ParameterValue::StringSteps(_) => {
+                self.identifier().static_raw()
+            }
+            _ => None,
+        }
     }
 
     /// Static float value, if this is a `Float`.
@@ -2372,6 +2407,55 @@ impl Graph {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every source that can drive an `IntChannel` names the shape it is, and
+    /// none of them resolves to an id. The reason travels into the render's
+    /// `identifier-not-static` note, so a wrong arm here mislabels the warning
+    /// rather than losing it — which no other test would notice.
+    #[test]
+    fn a_driven_identifier_names_the_shape_that_drives_it() {
+        use crate::animation::BlendMode;
+        use crate::animation::channel::{AnimationChannel, ChannelSource, ParameterExpression};
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation;
+        use crate::id::{NodeId, OutputPortIndex};
+
+        let of = |source: ChannelSource| {
+            ParameterValue::IntChannel(AnimationChannel { source }).identifier()
+        };
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 1.0, Interpolation::Linear);
+        curve.insert(10, 2.0, Interpolation::Linear);
+
+        assert_eq!(
+            of(ChannelSource::Keyframes(curve.clone())),
+            Identifier::Dynamic(DynamicIdentifier::Keyframes)
+        );
+        assert_eq!(
+            of(ChannelSource::Expression(ParameterExpression::new("1 + 1"))),
+            Identifier::Dynamic(DynamicIdentifier::Expression)
+        );
+        assert_eq!(
+            of(ChannelSource::NodeOutput(
+                NodeId::new(3),
+                OutputPortIndex(0)
+            )),
+            Identifier::Dynamic(DynamicIdentifier::NodeOutput)
+        );
+        assert_eq!(
+            of(ChannelSource::Blend(
+                Box::new(ChannelSource::Constant(1.0)),
+                Box::new(ChannelSource::Constant(2.0)),
+                BlendMode::Add,
+                0.5,
+            )),
+            Identifier::Dynamic(DynamicIdentifier::Blend)
+        );
+        // The one shape that does resolve, for contrast.
+        assert_eq!(of(ChannelSource::Constant(4.0)), Identifier::Static(4));
+    }
+
     use super::*;
     use crate::animation::channel::{AnimationChannel, ChannelSource};
     use crate::animation::curve::KeyframeCurve;

@@ -111,6 +111,34 @@ fn precomp_references(comp: &Composition) -> Vec<CompId> {
         .collect()
 }
 
+/// Composition ids referenced by `precomp` nodes inside a network, including
+/// nested subnet graphs — the composition-valued twin of
+/// [`layer_ref_targets`].
+///
+/// Used by [`Document::id_watermarks`](crate::composition::Document::id_watermarks)
+/// so a fresh `CompId` can never land on an id a stored `precomp` already
+/// names. That matters most for a reference the composition table no longer
+/// holds: allocating its id would reconnect the reference to an unrelated
+/// composition, the same silent mis-link the asset watermark exists to
+/// prevent.
+pub(crate) fn precomp_targets(network: &Graph, targets: &mut Vec<CompId>) {
+    for node in network.nodes() {
+        if node.type_key == PRECOMP_TYPE_KEY
+            && let Some(id) = node
+                .parameters
+                .iter()
+                .find(|p| p.key == PRECOMP_COMP_ID_PARAM)
+                .and_then(|p| p.value.static_identifier())
+                .map(CompId::new)
+        {
+            targets.push(id);
+        }
+        if let Some(inner) = node.subnet.as_deref() {
+            precomp_targets(inner, targets);
+        }
+    }
+}
+
 /// Check for circular PreComp references across a set of compositions.
 ///
 /// DFS from each composition; if we re-visit a node on the current path,

@@ -725,6 +725,11 @@ audio_not_rendered = "this composition has {count} layer(s) with audio, and --no
 audio_no_decoder = "this composition has {count} layer(s) with audio, but this build has no FFmpeg and cannot decode any, so the render is picture only"
 audio_source_skipped = "the layer \"{layer}\" is silent in the mix: its media asset \"{asset}\" could not be loaded: {detail}"
 binding_issue = "a supplied parameter did not fully reach the project: {detail}"
+media_offline = "the media asset \"{asset}\" is offline, so it renders transparent in: {layers}"
+media_unreadable = "the media asset \"{asset}\" cannot be opened, so it renders transparent in: {layers} ({detail})"
+# {shape} is not translated: it names a stored value's spelling, and a script
+# has to find the same word in every locale.
+identifier_not_static = "the layer \"{layer}\": node {node}'s \"{param}\" is driven by {shape}, so it references nothing and is ignored"
 
 [cli.result]
 completed = "wrote {count} frame(s) to {path}"

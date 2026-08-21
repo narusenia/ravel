@@ -121,6 +121,39 @@ pub fn warning_text(warning: &Warning) -> (&'static str, String) {
             "binding-issue",
             t!("cli.warn.binding_issue").replace("{detail}", detail),
         ),
+        Warning::MediaOffline { asset, layers } => (
+            "media-offline",
+            t!("cli.warn.media_offline")
+                .replace("{asset}", asset)
+                .replace("{layers}", &layers.join(", ")),
+        ),
+        Warning::MediaUnreadable {
+            asset,
+            layers,
+            detail,
+        } => (
+            "media-unreadable",
+            t!("cli.warn.media_unreadable")
+                .replace("{asset}", asset)
+                .replace("{layers}", &layers.join(", "))
+                .replace("{detail}", detail),
+        ),
+        Warning::IdentifierNotStatic {
+            layer,
+            node,
+            param,
+            shape,
+        } => (
+            "identifier-not-static",
+            t!("cli.warn.identifier_not_static")
+                .replace("{layer}", layer)
+                .replace("{node}", &node.to_string())
+                .replace("{param}", param)
+                // Untranslated on purpose: the shape names a `ParameterValue`
+                // spelling, and a script that greps for it must find the same
+                // word in every locale.
+                .replace("{shape}", shape),
+        ),
     }
 }
 

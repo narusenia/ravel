@@ -216,6 +216,23 @@ ParameterValue::from_channels(Option<&ParameterValue>, Vec<AnimationChannel>)
     // Rebuild from components, re-typed after the value being replaced: one
     // channel over an Int / IntChannel stays an IntChannel, everything else
     // follows the count (Float -> Channel). None outside 1..=4.
+ParameterValue::identifier() -> Identifier   // THE read mouth for references
+    // Identifier::{Static(u64), Unset, Dynamic(DynamicIdentifier)}; helpers
+    // .static_raw() -> Option<u64> and .dynamic() -> Option<DynamicIdentifier>.
+    // ::static_identifier() is .identifier().static_raw().
+    // Reads BOTH spellings of an identifier: Int / constant IntChannel (a raw
+    // LayerId / CompId) and String / a StringSteps no key can move (an
+    // AssetId's decimal form). Everything else is Dynamic — keyframes,
+    // expression, blend, node output, string steps — and Dynamic names
+    // NOTHING: a reference that changed per frame could not be reserved by
+    // Document::id_watermarks, and the next allocation would land on it.
+    // Which parameters are identifiers is composition::validate::
+    // is_identifier_parameter (layer.ref `layer`, precomp `comp_id`, media
+    // `asset_id`); what one names is this. Evaluation goes through it too, so
+    // a wire into an identifier port is IGNORED (the port stays, and stays
+    // disconnectable) and node_asset_reference agrees with the render.
+    // DynamicIdentifier::as_str() is the untranslated shape word the CLI
+    // warning carries.
 
 Graph::new()
     .add_node(Node) -> Result<Graph, GraphError>      // consumes self
@@ -889,7 +906,9 @@ Document::{with_media_asset(AssetId, path), with_media_asset_entry(AssetId, entr
     // picking one. A reference whose AssetId is absent from the table is
     // OFFLINE, not an error: the media node yields a transparent frame.
     // composition::node_asset_reference(&Node) -> Option<AssetId> reads a
-    // media node's reference; MEDIA_ASSET_PARAM_KEY / MEDIA_TYPE_KEYS name the
+    // media node's reference through ParameterValue::identifier, so a value
+    // that does not stand still names no asset here and none at evaluation
+    // time either; MEDIA_ASSET_PARAM_KEY / MEDIA_TYPE_KEYS name the
     // parameter and the node types that carry it. AudioSource::asset_id is a
     // typed AssetId, so a v8 document's audio reference is resolved by
     // AssetId's own deserializer and needs no upgrade step.
@@ -912,6 +931,15 @@ Document::with_exposed_parameters(ExposedParameters)
 // well as definitions (layer.ref targets, media node asset_id, AudioSource):
 // an AssetId no entry carries is a live offline reference, and minting it
 // again would re-attach that reference to an unrelated import.
+Document::dynamic_identifiers() -> Vec<DynamicIdentifierRef>
+    // The complement of id_watermarks over the same traversal: every
+    // identifier parameter whose value does not stand still, so it references
+    // nothing. Fields: comp / layer (None for the legacy flat graph), node,
+    // param, reason. A CONNECTED parameter port is reported too, as
+    // DynamicIdentifier::ParameterPort, in preference to the stored value's
+    // own shape. `ravel-cli render` turns these into `identifier-not-static`
+    // notes; the two sets together partition the identifier parameters, which
+    // is what makes a static scan enough to warn about a dead reference.
 Document::sync_subnet_pins()   // load-time DRIFT REPAIR, not a format upgrade
     // Re-derives every subnet node's pins from its own inner In/Out
     // (`network::sync_subnet_pins`) in the flat graph, each layer network and
@@ -3147,7 +3175,17 @@ plan::plan_render(&RenderArgs, &Document, project_root, &[EncoderAvailability])
     -> Result<RenderPlan, CliError>                     // pure decision
 plan::Warning::{AudioNotRendered { layers, reason: audio::NoAudio },
                 AudioSourceSkipped { layer, asset, detail },
-                BindingIssue { detail }}
+                BindingIssue { detail },
+                MediaOffline { asset, layers: Vec<String> },
+                MediaUnreadable { asset, layers: Vec<String>, detail },
+                IdentifierNotStatic { layer, node, param, shape }}
+    // The last three are the picture's warnings, collected by plan_render
+    // from a STATIC scan of the rendered composition — WARN-1 folded every
+    // identifier down to a static value, so nothing has to be evaluated to
+    // know a reference is dead (and a cached frame cannot go unreported).
+    // Media rows are one per AssetId and carry EVERY layer that names it;
+    // IdentifierNotStatic is one per (node, parameter) and its `shape` is
+    // DynamicIdentifier::as_str() — untranslated, like the id.
 audio::plan_audio(&Document, CompId, &ImageSequenceOutput, Range<u64>, bool)
     -> (Option<AudioPlan>, Vec<Warning>)        // called by plan_render
 audio::render_audio(&RenderPlan, &mut dyn Reporter)
@@ -3255,6 +3293,13 @@ offline, relinked away, past `MAX_DECODE_BYTES` — yields
 `Warning::AudioSourceSkipped` (id `audio-source-skipped`) and the render
 continues, with the mix still the full length so picture and sound stay in
 sync.
+
+The picture says the same three kinds of thing about itself, so a render that
+loses footage is never a silently black deliverable: a reference that resolves
+to no asset is `media-offline`, one whose file cannot be opened is
+`media-unreadable`, and an identifier parameter that does not stand still — a
+wire, keyframes, a step curve — is `identifier-not-static`. All decided during
+planning, none of them a failure: the exit code is unchanged.
 
 The mixdown returns a `ravel_core::types::AudioBuffer`, which is what
 `MediaWriter::write_audio_chunk` takes: when a container `Encoder` exists its

@@ -36,7 +36,7 @@ pub use asset::{
 use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
 use crate::exposed::ExposedParameters;
-use crate::graph::{Graph, InputPort, Node, Parameter, ParameterValue, PortSide};
+use crate::graph::{DynamicIdentifier, Graph, InputPort, Node, Parameter, PortSide};
 use crate::id::{AssetId, CompId, DataTypeId, EdgeId, LayerId, NodeId};
 use crate::network;
 use crate::registry::NodeRegistry;
@@ -665,6 +665,12 @@ mod media_assets_serde {
 /// offline reference is a real, persisted state, and every caller — the
 /// processor, the watermark scan, the "which layers use this asset?" query —
 /// has to see it.
+///
+/// A value that does not stand still — a step curve with keys of its own —
+/// names no asset here, and does not name one at evaluation time either:
+/// both go through [`ParameterValue::identifier`](crate::graph::ParameterValue::identifier),
+/// which is what keeps the
+/// watermark scan and the render agreeing about which assets exist.
 pub fn node_asset_reference(node: &Node) -> Option<AssetId> {
     if !MEDIA_TYPE_KEYS.contains(&node.type_key.as_str()) {
         return None;
@@ -672,10 +678,8 @@ pub fn node_asset_reference(node: &Node) -> Option<AssetId> {
     node.parameters
         .iter()
         .find(|param| param.key == MEDIA_ASSET_PARAM_KEY)
-        .and_then(|param| match &param.value {
-            ParameterValue::String(text) => AssetId::from_param_value(text),
-            _ => None,
-        })
+        .and_then(|param| param.value.static_text_identifier())
+        .map(AssetId::new)
 }
 
 /// The largest raw id of each kind used in a [`Document`], as reported by
@@ -687,6 +691,20 @@ pub struct IdWatermarks {
     pub comp: u64,
     pub layer: u64,
     pub asset: u64,
+}
+
+/// One identifier parameter that references nothing because its value does
+/// not stand still, as reported by [`Document::dynamic_identifiers`].
+///
+/// `comp` and `layer` are `None` for the legacy flat graph, which belongs to
+/// no layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynamicIdentifierRef {
+    pub comp: Option<CompId>,
+    pub layer: Option<LayerId>,
+    pub node: NodeId,
+    pub param: String,
+    pub reason: DynamicIdentifier,
 }
 
 /// A structural invariant violation found by [`Document::validate`]
@@ -1454,12 +1472,11 @@ impl Document {
     }
 
     /// The largest id of each kind used anywhere in the document
-    /// (compositions — map keys and embedded ids alike — layers, every
-    /// network recursively including subnets, `layer.ref` parameter
-    /// targets, and the legacy flat graph). Reference ids are included so a
-    /// fresh allocation can never retarget a persisted reference
-    /// (REQ-LAYER-009). No node parameter carries a `CompId` yet (PreComp
-    /// is v2), so there is nothing composition-valued to scan.
+    /// (compositions — map keys, embedded ids and `precomp` targets alike —
+    /// layers, every network recursively including subnets, `layer.ref`
+    /// parameter targets, and the legacy flat graph). Reference ids are
+    /// included so a fresh allocation can never retarget a persisted
+    /// reference (REQ-LAYER-009).
     ///
     /// Asset references are scanned for the same reason, and it matters more
     /// than for layers: a `media` node or an `AudioSource` may name an
@@ -1491,6 +1508,15 @@ impl Document {
                     watermarks.asset = watermarks.asset.max(asset.raw());
                 }
             }
+            // `precomp` parameters reference compositions by raw id, in any
+            // graph. A reference the table no longer holds is the case that
+            // needs the reservation: allocating its id would point the stored
+            // `precomp` at an unrelated composition.
+            let mut comps = Vec::new();
+            validate::precomp_targets(graph, &mut comps);
+            for target in comps {
+                watermarks.comp = watermarks.comp.max(target.raw());
+            }
         }
 
         let mut watermarks = IdWatermarks::default();
@@ -1518,6 +1544,79 @@ impl Document {
             }
         }
         watermarks
+    }
+
+    /// Every identifier parameter in the document whose value does not stand
+    /// still, and therefore references **nothing** — the complement of what
+    /// [`id_watermarks`](Self::id_watermarks) reserves, over the same
+    /// traversal.
+    ///
+    /// The two are one question asked from both sides: an identifier is read
+    /// through [`ParameterValue::identifier`](crate::graph::ParameterValue::identifier)
+    /// wherever it is read, so a
+    /// reference evaluation can see is a reference the watermark scan
+    /// reserved, and everything else is in this list. That is what makes a
+    /// static scan enough to warn about: a render never discovers a
+    /// reference this did not already know was dead
+    /// (`docs/implementation/render-warning-channel-plan.md`).
+    ///
+    /// A connected parameter port counts too, and is reported as
+    /// [`DynamicIdentifier::ParameterPort`] in preference to whatever the
+    /// stored value is: the wire is the part the user has to disconnect.
+    pub fn dynamic_identifiers(&self) -> Vec<DynamicIdentifierRef> {
+        fn scan_graph(
+            graph: &Graph,
+            comp: Option<CompId>,
+            layer: Option<LayerId>,
+            found: &mut Vec<DynamicIdentifierRef>,
+        ) {
+            for node in graph.nodes() {
+                if let Some(subnet) = &node.subnet {
+                    scan_graph(subnet, comp, layer, found);
+                }
+                for param in &node.parameters {
+                    if !validate::is_identifier_parameter(&node.type_key, &param.key) {
+                        continue;
+                    }
+                    let wired = node
+                        .inputs
+                        .iter()
+                        .position(|port| port.is_param && port.name == param.key)
+                        .is_some_and(|slot| {
+                            graph.edges().any(|edge| {
+                                edge.target == node.id && edge.target_port.0 as usize == slot
+                            })
+                        });
+                    let reason = if wired {
+                        Some(DynamicIdentifier::ParameterPort)
+                    } else {
+                        param.value.identifier().dynamic()
+                    };
+                    if let Some(reason) = reason {
+                        found.push(DynamicIdentifierRef {
+                            comp,
+                            layer,
+                            node: node.id,
+                            param: param.key.clone(),
+                            reason,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        scan_graph(&self.graph, None, None, &mut found);
+        for (comp_id, comp) in &self.compositions {
+            for layer in &comp.layers {
+                scan_graph(&layer.network, Some(*comp_id), Some(layer.id), &mut found);
+            }
+        }
+        // The document's maps are unordered, so a caller that prints these
+        // needs the order fixed somewhere; here is the only place that sees
+        // all of them.
+        found.sort_by(|a, b| (a.node.raw(), &a.param).cmp(&(b.node.raw(), &b.param)));
+        found
     }
 
     /// Advance all four global id counters past the document's watermarks
@@ -2994,6 +3093,22 @@ mod tests {
         let watermarks = doc.id_watermarks();
         assert_eq!(watermarks.layer, 99_000);
 
+        // A `precomp` target counts too, and it is the case that matters:
+        // composition 77_000 is not in the table, so nothing but this scan
+        // keeps a fresh CompId off the id the stored reference names.
+        let precomp = Node::new(NodeId::new(2), "precomp")
+            .with_param("comp_id", ParameterValue::Int(77_000))
+            .with_output("out", DataTypeId::FRAME_BUFFER);
+        let network = Graph::new().add_node(precomp).unwrap();
+        let comp = Composition::new(CompId::new(8), "e", (16, 16), FrameRate::new(30, 1), 10)
+            .add_layer(Layer::new(LayerId::new(3), "P", network));
+        doc = doc.with_composition(comp);
+        assert_eq!(
+            doc.id_watermarks().comp,
+            77_000,
+            "a dangling precomp reference is still a reservation"
+        );
+
         // An embedded composition id larger than its map key counts too.
         let mut comp = Composition::new(
             CompId::new(88_000),
@@ -3058,6 +3173,94 @@ mod tests {
             2,
             "an animated identifier reserves nothing but the layer that holds it"
         );
+    }
+
+    /// Every shape that makes an identifier stop standing still is listed,
+    /// once per parameter, with the shape named — including a wire, which no
+    /// stored value can show. This is the list `ravel-cli render` turns into
+    /// warnings, so a reference silently dropped by evaluation is a reference
+    /// the report names.
+    #[test]
+    fn dynamic_identifiers_list_every_shape_including_a_wire() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation;
+        use crate::animation::step::StepCurve;
+        use crate::graph::{DynamicIdentifier, Node, ParameterValue};
+        use crate::id::{CompId, DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 5.0, Interpolation::Linear);
+        curve.insert(24, 6.0, Interpolation::Linear);
+        let mut steps = StepCurve::new("7".to_string());
+        steps.insert(0, "7".to_string());
+        steps.insert(12, "8".to_string());
+
+        // Node 1: a wire into `layer`. Node 2: keyframes on `layer`.
+        // Node 3: a step curve on `asset_id`. Node 4: a plain static id.
+        let network = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(2), validate::LAYER_REF_TYPE_KEY)
+                    .with_param(validate::LAYER_REF_LAYER_PARAM, ParameterValue::Int(3)),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(3), validate::LAYER_REF_TYPE_KEY).with_param(
+                    validate::LAYER_REF_LAYER_PARAM,
+                    ParameterValue::IntChannel(AnimationChannel::keyframes(curve)),
+                ),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(4), MEDIA_TYPE_KEYS[0])
+                    .with_param(MEDIA_ASSET_PARAM_KEY, ParameterValue::StringSteps(steps)),
+            )
+            .unwrap()
+            .add_node(Node::new(NodeId::new(5), MEDIA_TYPE_KEYS[0]).with_param(
+                MEDIA_ASSET_PARAM_KEY,
+                ParameterValue::String("9".to_string()),
+            ))
+            .unwrap()
+            .expose_param_port(NodeId::new(2), validate::LAYER_REF_LAYER_PARAM)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let comp = Composition::new(CompId::new(7), "c", (16, 16), FrameRate::new(30, 1), 10)
+            .add_layer(Layer::new(LayerId::new(2), "L", network));
+        let document = Document::default().with_composition(comp);
+        assert_eq!(document.validate(), Ok(()), "the document still opens");
+
+        let found = document.dynamic_identifiers();
+        assert_eq!(
+            found
+                .iter()
+                .map(|entry| (entry.node.raw(), entry.param.as_str(), entry.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, "layer", DynamicIdentifier::ParameterPort),
+                (3, "layer", DynamicIdentifier::Keyframes),
+                (4, "asset_id", DynamicIdentifier::StringSteps),
+            ],
+            "one row per parameter, the wire named ahead of its stored value"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|entry| entry.comp == Some(CompId::new(7))
+                    && entry.layer == Some(LayerId::new(2))),
+            "each row says which layer's network holds it"
+        );
+        // The static reference is reserved instead of listed — the two sets
+        // partition the identifier parameters of the document.
+        assert_eq!(document.id_watermarks().asset, 9);
     }
 
     #[test]

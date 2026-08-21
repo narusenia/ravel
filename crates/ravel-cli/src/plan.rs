@@ -26,14 +26,14 @@
 //! [`RenderOutput::conflicts`], so it is one answer asked twice rather than
 //! two answers.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use ravel_core::composition::Document;
+use ravel_core::composition::{Document, MediaAssetEntry, node_asset_reference};
 use ravel_core::exposed::apply::{self, AssetContext};
 use ravel_core::exposed::listing::ExposedListing;
-use ravel_core::id::CompId;
+use ravel_core::id::{AssetId, CompId};
 use ravel_core::media::encode::{
     Availability, EncoderAvailability, ImageSequenceOutput, SequenceCodec,
 };
@@ -121,6 +121,47 @@ pub enum Warning {
     /// have gone. `apply` reports these rather than failing, because the
     /// project is what is broken, not the call.
     BindingIssue { detail: String },
+    /// A referenced media asset resolves to nothing, so every layer that
+    /// names it renders transparent. The picture-side counterpart of
+    /// [`AudioSourceSkipped`](Self::AudioSourceSkipped): a render that loses
+    /// footage still produces the rest of the composition, but never
+    /// silently.
+    MediaOffline {
+        /// The asset's display name, or the reference itself when the
+        /// document no longer holds the asset — the same rule
+        /// [`AudioSourceSkipped`](Self::AudioSourceSkipped) follows.
+        asset: String,
+        /// **Every** layer of the rendered composition that names it, in
+        /// layer order. One row per asset with one layer name would hide the
+        /// rest.
+        layers: Vec<String>,
+    },
+    /// A referenced media asset resolves to a file that cannot be opened.
+    /// Distinct from [`MediaOffline`](Self::MediaOffline) because the fix is
+    /// different: the reference is right and the file is not.
+    MediaUnreadable {
+        asset: String,
+        layers: Vec<String>,
+        /// Why it could not be opened.
+        detail: String,
+    },
+    /// An identifier parameter (a `layer.ref` target, a `precomp`
+    /// composition, a `media` asset) is driven by something that does not
+    /// stand still, so it references **nothing**
+    /// ([`ParameterValue::identifier`](ravel_core::graph::ParameterValue::identifier)).
+    /// One row per parameter, naming the shape that was ignored: a wire and
+    /// a step curve are disconnected in different places.
+    IdentifierNotStatic {
+        /// The layer whose network holds the node, or its id when the layer
+        /// is gone.
+        layer: String,
+        /// The node's raw id — the only name a node has.
+        node: u64,
+        param: String,
+        /// Untranslated shape word from
+        /// [`DynamicIdentifier::as_str`](ravel_core::graph::DynamicIdentifier::as_str).
+        shape: &'static str,
+    },
 }
 
 /// Decide everything about the render, or refuse it.
@@ -176,6 +217,14 @@ pub fn plan_render(
     let values = crate::params::parse(&args.params, &listing)?;
     let (document, mut warnings) = apply_values(document.clone(), &values, project_root)?;
 
+    // The picture's own warnings, decided from the document exactly as the
+    // sound's are. `WARN-1` folded every identifier down to a static value,
+    // so what a frame will reference is fully determined here — no frame has
+    // to be evaluated to know a reference is dead, which is what keeps these
+    // out of the evaluator and off the cached-frame problem.
+    warnings.extend(media_warnings(&document, comp, &probe_asset));
+    warnings.extend(identifier_warnings(&document, comp));
+
     let (audio, audio_warnings) =
         crate::audio::plan_audio(&document, comp, &output, range.clone(), !args.no_audio);
     warnings.extend(audio_warnings);
@@ -195,6 +244,135 @@ pub fn plan_render(
         audio,
         warnings,
     })
+}
+
+/// Why an asset's file cannot be opened, or `None` when there is nothing to
+/// report.
+///
+/// A missing file is the ordinary case and needs no decoder: `resolved` is a
+/// *mapping* of the persisted path, not a promise that anything is there, so
+/// footage that moved after the project was saved lands here.
+///
+/// Everything that is there is asked of FFmpeg, whatever its
+/// [`AssetKind`](ravel_core::composition::AssetKind): a still and a sequence
+/// frame are decoded by `ravel_media::image_seq::read_image_frame`, which
+/// opens them with the same `FfmpegDecoder` a container goes through, so the
+/// probe and the render agree about what "readable" means. A sequence is
+/// probed through its representative frame — the one `resolved` names — which
+/// is the frame the render reads first.
+///
+/// A build without FFmpeg asks nothing and says nothing: **"cannot be
+/// checked" is not "cannot be read"**, and the honest way to report a limited
+/// build is the way [`NoAudio::NoDecoder`] does it — once, about the build.
+fn probe_asset(entry: &MediaAssetEntry) -> Option<String> {
+    let path = entry.resolved.as_ref()?;
+    if let Err(error) = std::fs::metadata(path) {
+        return Some(format!("{}: {error}", path.display()));
+    }
+    #[cfg(feature = "ffmpeg")]
+    if let Err(error) = ravel_media::format::probe(path) {
+        return Some(format!("{}: {error}", path.display()));
+    }
+    None
+}
+
+/// Every media asset the rendered composition references, and which of its
+/// layers name it — the grouping the warnings are reported in.
+///
+/// Keyed by [`AssetId`] rather than by name so two assets that share a
+/// display name stay two rows, and walked per layer so a layer whose network
+/// references one asset from three nodes contributes its name once.
+fn asset_references(document: &Document, comp: CompId) -> BTreeMap<AssetId, Vec<String>> {
+    fn walk(graph: &ravel_core::graph::Graph, found: &mut BTreeSet<AssetId>) {
+        for node in graph.nodes() {
+            if let Some(subnet) = &node.subnet {
+                walk(subnet, found);
+            }
+            if let Some(asset) = node_asset_reference(node) {
+                found.insert(asset);
+            }
+        }
+    }
+
+    let mut references: BTreeMap<AssetId, Vec<String>> = BTreeMap::new();
+    let Some(comp) = document.get_composition(comp) else {
+        return references;
+    };
+    for layer in &comp.layers {
+        let mut in_layer = BTreeSet::new();
+        walk(&layer.network, &mut in_layer);
+        for asset in in_layer {
+            references
+                .entry(asset)
+                .or_default()
+                .push(layer.name.clone());
+        }
+    }
+    references
+}
+
+/// One warning per referenced asset that will not produce a picture:
+/// offline (the reference resolves to nothing) or unreadable (it resolves to
+/// a file `probe` cannot open).
+///
+/// `probe` is injected for the same reason `plan_render` takes its encoders:
+/// the interesting cases — a file that vanished, a container FFmpeg refuses —
+/// have to be testable on a machine where everything works.
+fn media_warnings(
+    document: &Document,
+    comp: CompId,
+    probe: &dyn Fn(&MediaAssetEntry) -> Option<String>,
+) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+    for (id, layers) in asset_references(document, comp) {
+        let entry = document.get_media_asset(id);
+        // The name the user knows the asset by, falling back to the
+        // reference itself — `AudioSourceSkipped`'s rule.
+        let asset = entry
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| id.to_string());
+        let Some(entry) = entry.filter(|entry| entry.resolved.is_some()) else {
+            warnings.push(Warning::MediaOffline { asset, layers });
+            continue;
+        };
+        if let Some(detail) = probe(entry) {
+            warnings.push(Warning::MediaUnreadable {
+                asset,
+                layers,
+                detail,
+            });
+        }
+    }
+    warnings
+}
+
+/// One warning per identifier parameter of the rendered composition that
+/// references nothing because its value does not stand still.
+fn identifier_warnings(document: &Document, comp: CompId) -> Vec<Warning> {
+    let composition = document.get_composition(comp);
+    document
+        .dynamic_identifiers()
+        .into_iter()
+        .filter(|entry| entry.comp == Some(comp))
+        .map(|entry| Warning::IdentifierNotStatic {
+            layer: composition
+                .and_then(|comp| {
+                    comp.layers
+                        .iter()
+                        .find(|layer| Some(layer.id) == entry.layer)
+                })
+                .map(|layer| layer.name.clone())
+                .unwrap_or_else(|| {
+                    entry
+                        .layer
+                        .map(|id| id.raw().to_string())
+                        .unwrap_or_default()
+                }),
+            node: entry.node.raw(),
+            param: entry.param,
+            shape: entry.reason.as_str(),
+        })
+        .collect()
 }
 
 /// Apply the supplied values, turning the bindings that did not land into
@@ -634,5 +812,344 @@ mod tests {
         )
         .expect("plans");
         assert!(plan.warnings.is_empty());
+    }
+
+    // ---- the picture's warnings --------------------------------------------
+
+    /// A `media` node pointing at `asset`.
+    fn media_node(id: u64, asset: AssetId) -> ravel_core::graph::Node {
+        use ravel_core::composition::{MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
+        use ravel_core::graph::{Node, ParameterValue};
+        use ravel_core::id::{DataTypeId, NodeId};
+
+        Node::new(NodeId::new(id), MEDIA_TYPE_KEYS[0])
+            .with_param(
+                MEDIA_ASSET_PARAM_KEY,
+                ParameterValue::String(asset.to_param_value()),
+            )
+            .with_output("out", DataTypeId::FRAME_BUFFER)
+    }
+
+    fn layer_with(id: u64, name: &str, node: ravel_core::graph::Node) -> Layer {
+        Layer::new(LayerId::new(id), name, Graph::new().add_node(node).unwrap())
+    }
+
+    /// An asset the document has lost, and one whose path resolves nowhere,
+    /// are both offline — one row each, whatever the layer count.
+    #[test]
+    fn an_offline_asset_is_reported_once_per_asset() {
+        let comp = comp(1, "Main")
+            .add_layer(layer_with(11, "Plate", media_node(100, AssetId::new(7))))
+            .add_layer(layer_with(12, "Insert", media_node(101, AssetId::new(7))))
+            .add_layer(layer_with(13, "Sky", media_node(102, AssetId::new(7))));
+        let document = Document::default().with_composition(comp);
+
+        let warnings = media_warnings(&document, CompId::new(1), &|_| None);
+        assert_eq!(
+            warnings,
+            vec![Warning::MediaOffline {
+                // No entry in the table: the reference itself is the name.
+                asset: AssetId::new(7).to_string(),
+                layers: vec!["Plate".into(), "Insert".into(), "Sky".into()],
+            }],
+            "one row per asset, carrying every layer that names it"
+        );
+
+        // An entry that exists but resolves to nothing is the same state.
+        let mut entry = ravel_core::composition::MediaAssetEntry::from_absolute("/gone/plate.mov");
+        entry.resolved = None;
+        let document = document.with_media_asset_entry(AssetId::new(7), entry);
+        assert_eq!(
+            media_warnings(&document, CompId::new(1), &|_| None),
+            vec![Warning::MediaOffline {
+                asset: "plate".into(),
+                layers: vec!["Plate".into(), "Insert".into(), "Sky".into()],
+            }],
+            "an asset the reader knows by name is named"
+        );
+    }
+
+    /// An asset that resolves but cannot be opened is a different row with a
+    /// different fix, and the reason travels with it.
+    #[test]
+    fn an_unreadable_asset_is_reported_separately() {
+        let comp =
+            comp(1, "Main").add_layer(layer_with(11, "Plate", media_node(100, AssetId::new(7))));
+        let document = Document::default()
+            .with_composition(comp)
+            .with_media_asset(AssetId::new(7), "/tmp/plate.mov");
+
+        assert_eq!(
+            media_warnings(&document, CompId::new(1), &|_| Some("truncated".into())),
+            vec![Warning::MediaUnreadable {
+                asset: "plate".into(),
+                layers: vec!["Plate".into()],
+                detail: "truncated".into(),
+            }]
+        );
+        // A build that cannot check says nothing rather than guessing: this
+        // is the shape `probe_asset` takes without FFmpeg.
+        assert!(media_warnings(&document, CompId::new(1), &|_| None).is_empty());
+    }
+
+    /// The real prober reports the ordinary failure — footage that moved
+    /// after the project was saved — with no decoder involved.
+    #[test]
+    fn the_probe_reports_a_file_that_is_not_there() {
+        let missing =
+            ravel_core::composition::MediaAssetEntry::from_absolute("/nowhere/at/all/plate.mov");
+        let detail = probe_asset(&missing).expect("a path with no file is not readable");
+        assert!(
+            detail.contains("plate.mov"),
+            "the reason names the file: {detail}"
+        );
+
+        // A still that is there but is not an image. `read_image_frame` opens
+        // it with the same decoder a container goes through, so a probe that
+        // let this pass would promise a frame the render then falls back to
+        // transparent for — the silence `HIGH-34` is about.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plate.png");
+        std::fs::write(&path, b"not really a png").unwrap();
+        let entry = ravel_core::composition::MediaAssetEntry::from_absolute(path);
+        #[cfg(feature = "ffmpeg")]
+        {
+            let detail = probe_asset(&entry).expect("a file that is not an image is not readable");
+            assert!(
+                detail.contains("plate.png"),
+                "the reason names the file: {detail}"
+            );
+        }
+        // Without a decoder the build cannot tell, and says so by saying
+        // nothing: "cannot be checked" is not "cannot be read".
+        #[cfg(not(feature = "ffmpeg"))]
+        assert_eq!(probe_asset(&entry), None);
+    }
+
+    /// Every shape that stops an identifier from standing still produces one
+    /// row naming that shape, with the layer it happened in.
+    #[test]
+    fn a_driven_identifier_is_reported_per_parameter() {
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+        use ravel_core::animation::interpolation::Interpolation;
+        use ravel_core::animation::step::StepCurve;
+        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+        use ravel_core::composition::{MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
+        use ravel_core::graph::{Node, ParameterValue};
+        use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 11.0, Interpolation::Linear);
+        curve.insert(24, 12.0, Interpolation::Linear);
+        let mut steps = StepCurve::new("7".to_string());
+        steps.insert(0, "7".to_string());
+        steps.insert(24, "8".to_string());
+
+        // A wire into the target of one `layer.ref`, keyframes on another's.
+        let wired = Graph::new()
+            .add_node(Node::new(NodeId::new(100), "constant").with_output("v", DataTypeId::SCALAR))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(101), LAYER_REF_TYPE_KEY)
+                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(12))
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(102), LAYER_REF_TYPE_KEY)
+                    .with_param(
+                        LAYER_REF_LAYER_PARAM,
+                        ParameterValue::IntChannel(AnimationChannel::keyframes(curve)),
+                    )
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(103), MEDIA_TYPE_KEYS[0])
+                    .with_param(MEDIA_ASSET_PARAM_KEY, ParameterValue::StringSteps(steps))
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .expose_param_port(NodeId::new(101), LAYER_REF_LAYER_PARAM)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(104),
+                NodeId::new(100),
+                OutputPortIndex(0),
+                NodeId::new(101),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let document = Document::default()
+            .with_composition(comp(1, "Main").add_layer(Layer::new(
+                LayerId::new(11),
+                "Driven",
+                wired,
+            )))
+            // Another composition's identifiers are not this render's problem.
+            .with_composition(comp(2, "Other").add_layer(layer_with(
+                21,
+                "Elsewhere",
+                Node::new(NodeId::new(200), LAYER_REF_TYPE_KEY).with_param(
+                    LAYER_REF_LAYER_PARAM,
+                    ParameterValue::IntChannel(AnimationChannel::keyframes({
+                        let mut curve = KeyframeCurve::new();
+                        curve.insert(0, 1.0, Interpolation::Linear);
+                        curve.insert(9, 2.0, Interpolation::Linear);
+                        curve
+                    })),
+                ),
+            )));
+
+        assert_eq!(
+            identifier_warnings(&document, CompId::new(1)),
+            vec![
+                Warning::IdentifierNotStatic {
+                    layer: "Driven".into(),
+                    node: 101,
+                    param: LAYER_REF_LAYER_PARAM.into(),
+                    shape: "parameter port",
+                },
+                Warning::IdentifierNotStatic {
+                    layer: "Driven".into(),
+                    node: 102,
+                    param: LAYER_REF_LAYER_PARAM.into(),
+                    shape: "keyframes",
+                },
+                Warning::IdentifierNotStatic {
+                    layer: "Driven".into(),
+                    node: 103,
+                    param: MEDIA_ASSET_PARAM_KEY.into(),
+                    shape: "string steps",
+                },
+            ],
+            "one row per parameter, each naming the shape that was ignored"
+        );
+    }
+
+    /// The ids are stable and untranslated, and only the sentence is
+    /// localized — the `note` event's contract.
+    #[test]
+    fn the_new_warnings_carry_stable_ids() {
+        use crate::report::warning_text;
+
+        // The sentences are only sentences once a catalog is loaded; the ids
+        // never were.
+        let locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/locales");
+        let _ = ravel_i18n::init(&locales, "en");
+
+        let ids: Vec<&str> = [
+            Warning::MediaOffline {
+                asset: "plate".into(),
+                layers: vec!["A".into(), "B".into()],
+            },
+            Warning::MediaUnreadable {
+                asset: "plate".into(),
+                layers: vec!["A".into()],
+                detail: "truncated".into(),
+            },
+            Warning::IdentifierNotStatic {
+                layer: "Driven".into(),
+                node: 7,
+                param: "layer".into(),
+                shape: "parameter port",
+            },
+        ]
+        .iter()
+        .map(|warning| warning_text(warning).0)
+        .collect();
+        assert_eq!(
+            ids,
+            vec!["media-offline", "media-unreadable", "identifier-not-static"]
+        );
+
+        // The sentence carries the values, and the shape word is the id-like
+        // half that stays put.
+        let (_, message) = warning_text(&Warning::MediaOffline {
+            asset: "plate".into(),
+            layers: vec!["A".into(), "B".into()],
+        });
+        assert!(
+            message.contains("plate") && message.contains("A, B"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("{asset}"),
+            "every slot was filled: {message}"
+        );
+        let (_, message) = warning_text(&Warning::IdentifierNotStatic {
+            layer: "Driven".into(),
+            node: 7,
+            param: "layer".into(),
+            shape: "parameter port",
+        });
+        assert!(
+            message.contains("parameter port") && message.contains('7'),
+            "{message}"
+        );
+    }
+
+    /// A document whose every reference resolves gains no rows, and a render
+    /// with warnings is still a render — the exit code is untouched.
+    ///
+    /// The probe is injected rather than left to `plan_render`'s real one: the
+    /// fixture's bytes are not a movie, so a build **with** the `ffmpeg`
+    /// feature would rightly call the file unreadable and this test would be
+    /// asserting the opposite of what it means. What it means is "a resolved,
+    /// readable reference says nothing", and that is the prober's answer to
+    /// state, not the file's.
+    #[test]
+    fn a_document_that_resolves_says_nothing_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plate.mov");
+        std::fs::write(&path, b"contents").unwrap();
+        let document = Document::default()
+            .with_composition(comp(1, "Main").add_layer(layer_with(
+                11,
+                "Plate",
+                media_node(100, AssetId::new(7)),
+            )))
+            .with_media_asset(AssetId::new(7), path);
+        let warnings = media_warnings(&document, CompId::new(1), &|_| None);
+        assert!(
+            warnings.is_empty(),
+            "a project with nothing wrong is as quiet as before: {warnings:?}"
+        );
+        // And planning still succeeds on it, warnings or not: the exit code
+        // is not what a warning changes.
+        plan_render(
+            &args(Path::new("/tmp/out")),
+            &document,
+            None,
+            &available_encoders(),
+        )
+        .expect("plans");
+    }
+
+    /// The whole picture-side scan is part of planning, so the warnings are
+    /// on the plan the renderer is handed — which is what puts them in the
+    /// report and in `--json` alike.
+    #[test]
+    fn planning_collects_the_picture_warnings() {
+        let document = Document::default().with_composition(comp(1, "Main").add_layer(layer_with(
+            11,
+            "Plate",
+            media_node(100, AssetId::new(7)),
+        )));
+        let plan = plan_render(
+            &args(Path::new("/tmp/out")),
+            &document,
+            None,
+            &available_encoders(),
+        )
+        .expect("an offline reference is not a reason to refuse");
+        assert_eq!(
+            plan.warnings,
+            vec![Warning::MediaOffline {
+                asset: AssetId::new(7).to_string(),
+                layers: vec!["Plate".into()],
+            }]
+        );
     }
 }

@@ -2711,7 +2711,28 @@ impl Evaluator {
         // per-frame recomputes). Unconnected ports and conversion failures
         // fall back to the stored parameter. Freshness of the driving
         // input is already in `any_input_fresh`.
-        let mut overlays: Vec<(String, ResolvedValue)> = Vec::new();
+        //
+        // Identifier parameters are decided *before* the wires and never by
+        // them: a reference is whatever the stored value statically names, or
+        // nothing at all (`ParameterValue::identifier`). An id that changed
+        // per frame could not be reserved by `Document::id_watermarks`, so a
+        // fresh allocation would land on it and reconnect the reference to
+        // unrelated footage (REQ-LAYER-009); ignoring the wire here is what
+        // makes the reserved set and the evaluated set the same one. The port
+        // stays visible and can still be disconnected — an existing document
+        // must keep opening — and `ravel-cli render` reports every parameter
+        // this drops (`docs/implementation/render-warning-channel-plan.md`).
+        let mut overlays: Vec<(String, ResolvedValue)> = node_ref
+            .parameters
+            .iter()
+            .filter(|param| {
+                crate::composition::validate::is_identifier_parameter(
+                    &node_ref.type_key,
+                    &param.key,
+                )
+            })
+            .map(|param| (param.key.clone(), identifier_overlay(&param.value)))
+            .collect();
         for (index, port) in node_ref.inputs.iter().enumerate() {
             if !port.is_param {
                 continue;
@@ -2719,6 +2740,12 @@ impl Evaluator {
             let Some(value) = input_values[index].take() else {
                 continue;
             };
+            // An identifier's overlay is already decided above; the input is
+            // still stripped, because a processor must never see a parameter
+            // port as one of its inputs.
+            if overlays.iter().any(|(decided, _)| *decided == port.name) {
+                continue;
+            }
             let Some(param) = node_ref.parameters.iter().find(|p| p.key == port.name) else {
                 // Validate rejects this shape at document boundaries;
                 // tolerate it at eval time.
@@ -3336,6 +3363,55 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
         || new.blend_mode != old.blend_mode
         || new.adjustment != old.adjustment
         || new.parent != old.parent
+}
+
+/// The value a processor sees for an **identifier** parameter: its stored
+/// value when that value stands still, and the *unset* spelling of the
+/// parameter's own type when it does not — because a wire, a keyframe curve or
+/// a step curve on an identifier references nothing at all
+/// ([`ParameterValue::identifier`]).
+///
+/// A static value passes through **verbatim**, including the ones that name no
+/// id: an unset `""`, a pre-v9 asset name, a negative target. Those are the
+/// processor's own diagnostics (`media` refuses an `asset_id` nobody set, and
+/// says so), and flattening them into one "nothing" would trade a precise
+/// complaint for a vague one.
+///
+/// The unset spellings, for the values that do not stand still, are ones the
+/// processors already handle, so nothing downstream learns a new case:
+/// [`AssetId::UNSET`](crate::id::AssetId::UNSET) is the id no asset has and no
+/// allocation can reach, so `media` resolves it to **offline** exactly as it
+/// resolves a deleted asset, and `layer.ref` reads a negative target as "no
+/// target set". Every parameter in
+/// [`is_identifier_parameter`](crate::composition::validate::is_identifier_parameter)
+/// is one of the two types, so the `Int` arm is the fallthrough rather than a
+/// guess.
+fn identifier_overlay(param: &ParameterValue) -> ResolvedValue {
+    if param.identifier().dynamic().is_some() {
+        return match param {
+            ParameterValue::String(_) | ParameterValue::StringSteps(_) => {
+                ResolvedValue::Str(crate::id::AssetId::UNSET.to_param_value())
+            }
+            _ => ResolvedValue::Int(-1),
+        };
+    }
+    match param {
+        ParameterValue::Int(v) => ResolvedValue::Int(*v),
+        ParameterValue::String(text) => ResolvedValue::Str(text.clone()),
+        // Static because no key can move it, so the default is the only
+        // value it ever samples to.
+        ParameterValue::StringSteps(steps) => ResolvedValue::Str(steps.default_value().clone()),
+        // A constant channel: the rounded id it holds, or "no target" for one
+        // no `i32` can spell — which no persistable document can reference.
+        ParameterValue::IntChannel(_) => ResolvedValue::Int(
+            param
+                .static_identifier()
+                .and_then(|raw| i32::try_from(raw).ok())
+                .unwrap_or(-1),
+        ),
+        // No other kind spells an identifier at all.
+        _ => ResolvedValue::Int(-1),
+    }
 }
 
 /// Convert a parameter-port input value to the [`ResolvedValue`] shape of
@@ -5256,6 +5332,271 @@ mod tests {
             Arc::new(Emit(crate::types::Color::new(1.0, 2.0, 3.0, 4.0))),
         );
         assert!((from_color - 1234.0).abs() < 1e-3);
+    }
+
+    // ---- identifier parameters ---------------------------------------------
+
+    use crate::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+
+    /// Echoes the identifier a `layer.ref` node resolved to.
+    struct LayerTargetEcho;
+    impl NodeProcessor for LayerTargetEcho {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(Scalar(
+                params.i32_or(LAYER_REF_LAYER_PARAM, -1) as f32
+            )))
+        }
+    }
+
+    /// Evaluate a `layer.ref` whose `layer` parameter holds `value`, with a
+    /// Scalar `wire` driving its parameter port when one is given.
+    fn resolved_layer_target(value: ParameterValue, wire: Option<f32>) -> f32 {
+        let target = Node::new(NodeId::new(2), LAYER_REF_TYPE_KEY)
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param(LAYER_REF_LAYER_PARAM, value);
+        let mut g = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "test").with_output("out", DataTypeId::SCALAR))
+            .unwrap()
+            .add_node(target)
+            .unwrap();
+        let mut ev = Evaluator::new();
+        if let Some(wire) = wire {
+            g = g
+                .expose_param_port(NodeId::new(2), LAYER_REF_LAYER_PARAM)
+                .expect("an identifier parameter still exposes a port")
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            ev.register(
+                NodeId::new(1),
+                Arc::new(CountingConst {
+                    value: wire,
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+            );
+        }
+        ev.register(NodeId::new(2), Arc::new(LayerTargetEcho));
+        ev.evaluate(&g, NodeId::new(2), &ctx_at(0))
+            .unwrap()
+            .downcast_ref::<Scalar>()
+            .unwrap()
+            .0
+    }
+
+    /// A wire into an identifier parameter is ignored: the stored value is
+    /// what the reference resolves to. Driving it per frame would name ids
+    /// `Document::id_watermarks` never reserved, and the next allocation
+    /// would reconnect the reference to an unrelated layer (REQ-LAYER-009).
+    #[test]
+    fn a_wire_into_an_identifier_parameter_is_ignored() {
+        assert_eq!(
+            resolved_layer_target(ParameterValue::Int(5), Some(9.0)),
+            5.0,
+            "the wire's 9 must not become the referenced layer"
+        );
+        // And with no wire at all, the same stored value comes through.
+        assert_eq!(resolved_layer_target(ParameterValue::Int(5), None), 5.0);
+    }
+
+    /// Keyframes on an identifier resolve to **no reference** rather than to
+    /// a per-frame id, whether or not a port is exposed. A hand-edited
+    /// document holding this shape has to evaluate, not fail.
+    #[test]
+    fn a_keyframed_identifier_resolves_to_no_reference() {
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 5.0, Interpolation::Linear);
+        curve.insert(10, 12.0, Interpolation::Linear);
+        let keyed = ParameterValue::IntChannel(AnimationChannel::keyframes(curve));
+        assert_eq!(resolved_layer_target(keyed.clone(), None), -1.0);
+        assert_eq!(resolved_layer_target(keyed, Some(9.0)), -1.0);
+        // A constant channel is still a static value, so it still resolves.
+        assert_eq!(
+            resolved_layer_target(
+                ParameterValue::IntChannel(AnimationChannel::constant(7.0)),
+                None
+            ),
+            7.0
+        );
+    }
+
+    /// A `media` node whose `asset_id` is a step curve is **offline**: the
+    /// reference resolves to `AssetId::UNSET`, which no asset table can hold,
+    /// so the processor takes its ordinary offline path instead of seeing a
+    /// different asset on every frame.
+    #[test]
+    fn a_step_curve_asset_reference_resolves_to_unset() {
+        use crate::animation::step::StepCurve;
+        use crate::composition::{MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
+
+        struct AssetEcho;
+        impl NodeProcessor for AssetEcho {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn NodeData>>],
+                params: &ResolvedParams,
+                _scope: &mut dyn EvalScope,
+            ) -> anyhow::Result<Arc<dyn NodeData>> {
+                Ok(Arc::new(Scalar(
+                    params
+                        .str_or(MEDIA_ASSET_PARAM_KEY, "")
+                        .parse::<f32>()
+                        .unwrap_or(f32::NAN),
+                )))
+            }
+        }
+
+        let run = |value: ParameterValue| {
+            let node = Node::new(NodeId::new(1), MEDIA_TYPE_KEYS[0])
+                .with_output("out", DataTypeId::SCALAR)
+                .with_param(MEDIA_ASSET_PARAM_KEY, value);
+            let g = Graph::new().add_node(node).unwrap();
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(1), Arc::new(AssetEcho));
+            ev.evaluate(&g, NodeId::new(1), &ctx_at(0))
+                .unwrap()
+                .downcast_ref::<Scalar>()
+                .unwrap()
+                .0
+        };
+
+        // Two keys with different values: the reference moves, so it is none.
+        let mut steps = StepCurve::new("4".to_string());
+        steps.insert(0, "4".to_string());
+        steps.insert(10, "5".to_string());
+        assert_eq!(
+            run(ParameterValue::StringSteps(steps)),
+            crate::id::AssetId::UNSET.raw() as f32
+        );
+        // The shape the keyframe toggle produces — one key agreeing with the
+        // default — still names its asset: it samples to one value forever.
+        assert_eq!(
+            run(ParameterValue::StringSteps(StepCurve::keyed(
+                0,
+                "4".to_string()
+            ))),
+            4.0
+        );
+        assert_eq!(run(ParameterValue::String("4".to_string())), 4.0);
+    }
+
+    /// The set of ids evaluation can see and the set
+    /// [`Document::id_watermarks`](crate::composition::Document::id_watermarks)
+    /// reserves are the same set, read from one document. That is the whole
+    /// point of one read mouth: an id evaluation resolves that the watermark
+    /// scan did not see would be handed out again by the next allocation.
+    #[test]
+    fn every_identifier_evaluation_can_see_is_reserved() {
+        use crate::animation::step::StepCurve;
+        use crate::composition::{
+            Composition, Document, Layer, MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS,
+        };
+
+        let mut curve = KeyframeCurve::new();
+        curve.insert(0, 900.0, Interpolation::Linear);
+        curve.insert(10, 901.0, Interpolation::Linear);
+        let keyed_layer = ParameterValue::IntChannel(AnimationChannel::keyframes(curve));
+        let mut moving_asset = StepCurve::new("700".to_string());
+        moving_asset.insert(0, "700".to_string());
+        moving_asset.insert(5, "701".to_string());
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10), LAYER_REF_TYPE_KEY)
+                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(3)),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(11), LAYER_REF_TYPE_KEY)
+                    .with_param(LAYER_REF_LAYER_PARAM, keyed_layer),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(12), MEDIA_TYPE_KEYS[0])
+                    .with_param(MEDIA_ASSET_PARAM_KEY, ParameterValue::String("6".into())),
+            )
+            .unwrap()
+            .add_node(Node::new(NodeId::new(13), MEDIA_TYPE_KEYS[0]).with_param(
+                MEDIA_ASSET_PARAM_KEY,
+                ParameterValue::StringSteps(moving_asset),
+            ))
+            .unwrap();
+        let comp = Composition::new(CompId::new(1), "C", (16, 16), FPS, 100).add_layer(Layer::new(
+            LayerId::new(3),
+            "L",
+            network.clone(),
+        ));
+        let document = Document::new(Graph::new()).with_composition(comp);
+        assert!(
+            document.validate().is_ok(),
+            "a hand-edited identifier must not make the document unopenable"
+        );
+
+        let watermarks = document.id_watermarks();
+        let mut visible = Vec::new();
+        for node in network.nodes() {
+            for param in &node.parameters {
+                if !crate::composition::validate::is_identifier_parameter(
+                    &node.type_key,
+                    &param.key,
+                ) {
+                    continue;
+                }
+                // Exactly what evaluation hands the processor.
+                let seen = match identifier_overlay(&param.value) {
+                    ResolvedValue::Int(v) => u64::try_from(v).ok(),
+                    ResolvedValue::Str(text) => text
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|raw| *raw != crate::id::AssetId::UNSET.raw()),
+                    other => panic!("an identifier resolved to {other:?}"),
+                };
+                if let Some(raw) = seen {
+                    visible.push((node.type_key.clone(), raw));
+                }
+            }
+        }
+        visible.sort();
+        assert_eq!(
+            visible,
+            vec![
+                (MEDIA_TYPE_KEYS[0].to_string(), 6),
+                (LAYER_REF_TYPE_KEY.to_string(), 3),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+            "only the static references are visible to evaluation"
+        );
+        for (type_key, raw) in &visible {
+            let reserved = if type_key == LAYER_REF_TYPE_KEY {
+                watermarks.layer
+            } else {
+                watermarks.asset
+            };
+            assert!(
+                *raw <= reserved,
+                "evaluation sees {type_key} id {raw} but the watermark reserves only {reserved}"
+            );
+        }
+        // And the ids only the dynamic values name are reserved by nobody,
+        // which is safe exactly because nothing can resolve them.
+        assert!(watermarks.layer < 900, "a keyframed target is not reserved");
+        assert!(watermarks.asset < 700, "a moving asset is not reserved");
     }
 
     /// A `Channel3` parameter exposes a VEC3 port and is driven by a Vec3

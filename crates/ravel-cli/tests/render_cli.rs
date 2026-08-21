@@ -673,6 +673,56 @@ fn a_project_with_audio_warns_that_the_render_is_silent() {
     );
 }
 
+/// The picture's own version of the same guarantee: an offline media
+/// reference is reported through the note channel — the one both the human
+/// report and `--progress json` are written from — and the render still
+/// succeeds. Before this, a project whose footage had moved produced black
+/// frames, exit code 0, and not one word anywhere a script could see.
+#[test]
+fn an_offline_media_reference_is_reported_and_the_render_goes_on() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut document = document(false);
+    let comp_id = CompId::new(COMP);
+    let mut comp = document
+        .get_composition(comp_id)
+        .expect("the fixture composition")
+        .as_ref()
+        .clone();
+    let mut layer = comp.layers[0].clone();
+    // A `media` node in the layer's network naming an asset the document
+    // does not have. Left unconnected on purpose: the scan reads the
+    // document, so the reference is found without the node being evaluated.
+    layer.network = layer
+        .network
+        .clone()
+        .add_node(
+            Node::new(NodeId::new(900), "media")
+                .with_param(
+                    "asset_id",
+                    ParameterValue::String(AssetId::new(4242).to_param_value()),
+                )
+                .with_output("out", DataTypeId::FRAME_BUFFER),
+        )
+        .expect("media node");
+    comp.layers.set(0, layer);
+    document.compositions.insert(comp_id, Arc::new(comp));
+
+    let project = project_file(dir.path(), document);
+    let run = run(&args(&project, &dir.path().join("out")));
+
+    assert_eq!(
+        run.code(),
+        0,
+        "a warning is not a failure: {:?}",
+        run.result.as_ref().err()
+    );
+    assert!(
+        run.recorder.notes.contains(&"media-offline".to_string()),
+        "the transparent frames have to be said out loud: {:?}",
+        run.recorder.notes
+    );
+}
+
 #[test]
 fn a_project_without_audio_says_nothing() {
     let dir = TempDir::new().expect("tempdir");

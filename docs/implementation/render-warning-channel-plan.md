@@ -156,21 +156,23 @@ Outliner / Timeline のレイヤー行にオフライン印を出すのは
 ### 単位 2: `ravel-cli render` の映像側 `Warning` と静的走査
 
 `Warning` に 3 つ足す。**`docs/dev/render-cli.md` の `note` イベントの契約に
-従う** — `id` は翻訳しない安定 ID、`message` は翻訳される文。ID は次の 3 つ:
+従う** — `id` は翻訳しない安定 ID、`message` は翻訳される文。綴りは既存の
+`audio-not-rendered` / `audio-source-skipped` / `binding-issue` と同じ
+**ケバブケース**（着手時にこの表をスネークケースから直した）。ID は次の 3 つ:
 
 | `id` | 意味 | 粒度と鍵 |
 |---|---|---|
-| `media_offline` | 参照している素材が解決できない（`HIGH-34`） | **素材ごとに 1 行**。鍵は `AssetId`。行は影響を受けたレイヤー名を**全部**持つ（1 つだけ持つと残りが消える） |
-| `media_unreadable` | 素材は解決するが**開けない**（`HIGH-34` の同族） | 同じ。鍵は `AssetId` |
-| `identifier_not_static` | 識別子パラメータが静的でないので参照が解決しない（`HIGH-35`） | **パラメータごとに 1 行**。鍵は `(NodeId, パラメータキー)`。ワイヤ / `IntChannel` / `StringSteps` / 式のどれだったかを `message` に出す |
+| `media-offline` | 参照している素材が解決できない（`HIGH-34`） | **素材ごとに 1 行**。鍵は `AssetId`。行は影響を受けたレイヤー名を**全部**持つ（1 つだけ持つと残りが消える） |
+| `media-unreadable` | 素材は解決するが**開けない**（`HIGH-34` の同族） | 同じ。鍵は `AssetId` |
+| `identifier-not-static` | 識別子パラメータが静的でないので参照が解決しない（`HIGH-35`） | **パラメータごとに 1 行**。鍵は `(NodeId, パラメータキー)`。ワイヤ / `IntChannel` / `StringSteps` / 式のどれだったかを `message` に出す |
 
-- **`identifier_not_static` はポート経由に限らない。** `WARN-1` が「静的でない
+- **`identifier-not-static` はポート経由に限らない。** `WARN-1` が「静的でない
   識別子は参照無し」に落とす**すべての形**（ワイヤ、キーフレーム、
   `StringSteps`、式、ブレンド）が同じ 1 行を出す。落として黙るのは
   `HIGH-34` と同じ欠陥を新しく作ることになる
 - 収集はレンダー前の**文書の静的な走査**。`plan_render` が既に文書を
   走査しているので、そこに寄せる
-- `media_unreadable` だけは走査で決まらないので、**参照されている素材ごとに
+- `media-unreadable` だけは走査で決まらないので、**参照されている素材ごとに
   1 回 probe する**（`MediaProber` はインポート経路が既に持っている）。
   **上限はここまで** — 開けたあとフレーム途中で壊れているファイルは
   レンダー中の `tracing::warn!` のままにする（非対象に理由を書いた）
@@ -182,9 +184,9 @@ Outliner / Timeline のレイヤー行にオフライン印を出すのは
 
 - オフラインの素材を含む文書のレンダーで、レポートと `--json` の**両方**に
   素材ごとに 1 行出る
-- 素材が実在するが開けない文書で `media_unreadable` が 1 行出る
+- 素材が実在するが開けない文書で `media-unreadable` が 1 行出る
 - 識別子パラメータがワイヤ / `IntChannel` / `StringSteps` のそれぞれで
-  駆動されている文書で、`identifier_not_static` が**形ごとに** 1 行出る
+  駆動されている文書で、`identifier-not-static` が**形ごとに** 1 行出る
 - **終了コードは変わらない**（警告は失敗ではない）
 - 素材が全部解決する文書で 1 行も増えない（既存の出力が変わらないこと）
 - 同じ素材を 3 レイヤーが参照しているとき、行が**素材ごとに 1 行**に畳まれ、
@@ -203,6 +205,23 @@ Outliner / Timeline のレイヤー行にオフライン印を出すのは
 - `issues/high/HIGH-34` と `issues/high/HIGH-35` が
   `issues/closed/` へ移り、`**解決済み**` 行が入る。
   `issues/README.md` と `issues/closed/README.md` の件数が合う
+
+## 受け入れた上限（独立レビューで挙がったもの）
+
+- **無視したワイヤは依存としては生きている。** `param_port_overlay` が
+  識別子の**値**を無視しても、入力は overlay の判定より前に `pull_input` され、
+  `any_input_fresh` に入る。上流が更新されると再計算が走り、上流の評価エラーも
+  伝播する。エッジは DAG に実在するので依存構造としては正しく、
+  `layer.ref` / `media` はどちらも time-dependent なので実害は隠れる。
+  値の無視と依存の切断を分けるのは評価器側の別の変更
+- **`media-unreadable` は `--features ffmpeg` のビルドでしか判定しない。**
+  probe は FFmpeg を通す（静止画・連番も
+  `image_seq::read_image_frame` が `FfmpegDecoder` を使うので、
+  コンテナと同じ意味の「読める」になる）。フィーチャ無しのビルドは何も言わない
+  — 「確かめられない」を「読めない」と混同しないため。
+  **CI はこのフィーチャを一度もビルドしていない**ので、実プローブの経路は
+  CI では検証されない（警告の集計側は差し替え可能な prober でテスト済み）
+- **開けたあとフレーム途中で壊れているファイル**は拾えない（下記の非対象）
 
 ## 非対象
 

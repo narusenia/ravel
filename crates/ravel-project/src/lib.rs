@@ -892,6 +892,87 @@ mod tests {
         assert_eq!(back.document, project.document);
     }
 
+    /// A document whose identifier parameters are driven — a wire into a
+    /// `layer.ref` target, a step curve on a `media` reference — opens,
+    /// round-trips unchanged, and **keeps its parameter port**.
+    ///
+    /// Evaluation ignores both (`render-warning-channel-plan.md`, `WARN-1`)
+    /// rather than the format refusing them: a document that saved and then
+    /// cannot be opened is data loss (`HIGH-26`), and the port has to stay
+    /// visible for the user to be able to disconnect it. So nothing here may
+    /// move — least of all the format version, since only the reading of a
+    /// value changed.
+    #[test]
+    fn a_driven_identifier_parameter_round_trips_with_its_port() {
+        use ravel_core::animation::step::StepCurve;
+        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+        use ravel_core::composition::{MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
+
+        let mut steps = StepCurve::new("1".to_string());
+        steps.insert(0, "1".to_string());
+        steps.insert(30, "2".to_string());
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(200), "constant").with_output("value", DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(201), LAYER_REF_TYPE_KEY)
+                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(12))
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(202), MEDIA_TYPE_KEYS[0])
+                    .with_param(MEDIA_ASSET_PARAM_KEY, ParameterValue::StringSteps(steps))
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .expose_param_port(NodeId::new(201), LAYER_REF_LAYER_PARAM)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(203),
+                NodeId::new(200),
+                OutputPortIndex(0),
+                NodeId::new(201),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        project.document =
+            ravel_ui::document::update_composition(&project.document, root, |comp| {
+                comp.add_layer(Layer::new(LayerId::new(21), "Driven", network))
+            })
+            .expect("the root composition");
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(
+            back.manifest.format_version, CURRENT_FORMAT_VERSION,
+            "only the reading of the value changed; the format did not"
+        );
+        assert_eq!(back.document, project.document);
+        let node = back
+            .document
+            .get_composition(root)
+            .unwrap()
+            .layers
+            .iter()
+            .find(|layer| layer.id == LayerId::new(21))
+            .expect("the layer came back")
+            .network
+            .node(NodeId::new(201))
+            .expect("the layer.ref node came back")
+            .clone();
+        assert!(
+            node.inputs
+                .iter()
+                .any(|port| port.is_param && port.name == LAYER_REF_LAYER_PARAM),
+            "the identifier's parameter port survives, so it can be disconnected"
+        );
+    }
+
     /// An archive written before guides existed carries no `guides` field. It
     /// is a current-version archive — no migration was added for the additive
     /// field — so it has to load as it stands, with no guides.

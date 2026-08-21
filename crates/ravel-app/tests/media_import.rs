@@ -747,7 +747,12 @@ fn offline_asset(project: &gpui::Entity<ProjectState>, cx: &mut TestAppContext) 
                     ..AssetMetadata::default()
                 },
                 color_space: Some(ravel_core::color::ColorSpace::SRGB),
-                exposed_owner: None,
+                // The declaration that owns this entry
+                // (`ravel_core::exposed::apply`). Part of the fixture because
+                // ownership must survive a relink: losing it would hand the
+                // next `apply` of the same declaration a fresh entry and
+                // orphan every reference to this one.
+                exposed_owner: Some("hero".into()),
                 resolved: None,
             },
         );
@@ -802,6 +807,11 @@ fn relink_brings_an_offline_asset_online_in_one_undo_step(cx: &mut TestAppContex
             entry.color_space,
             Some(ravel_core::color::ColorSpace::SRGB),
             "an explicit input colour space describes the footage, not the file"
+        );
+        assert_eq!(
+            entry.exposed_owner.as_deref(),
+            Some("hero"),
+            "the declaration that owns the entry still owns it"
         );
     });
 

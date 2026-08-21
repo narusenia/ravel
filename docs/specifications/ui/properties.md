@@ -51,7 +51,7 @@
 
 パラメータ数の多いノード（10 個超）で関係の無い項目が縦に連なるのを、
 **1 階層**のグループに割って解く。設計判断の経緯は
-[`../../implementation/parameter-groups-plan.md`](../../implementation/parameter-groups-plan.md)。
+[`../../implementation/done/parameter-groups-plan.md`](../../implementation/done/parameter-groups-plan.md)。
 
 - **グループを宣言するのはノード型**（`NodeTemplate::param_groups`、
   「グループ名 → パラメータキーの並び」）。組み込みのグループ分けはコードに

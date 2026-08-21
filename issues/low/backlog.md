@@ -260,6 +260,24 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
   現在の書き込み側はすべて ≥1 を保つが `Layer::with_time` は 0 を受理する。`min`/`max` を使う
 - `timeline.rs:1423` — dead な `let _ = changed;`
 
+**LOW-APP-27 | bug | `ui_state.json` に載る UI 状態を変えてもプロジェクトが dirty にならず、保存確認も出ずに失われる**
+`crates/ravel-app/src/project_state.rs:659`（`is_dirty` は `revision != saved_revision` だけを見る）
+`ui_state.json` に永続化される状態 — Timeline の BPM グリッド、コンポジションごとの
+ループ範囲、Properties で畳んだパラメータグループ（`PGRP-3`）、ノード本体の
+パラメータ値表示（`PGRP-5`）— はどれも Global を書くだけで `revision` を
+動かさない。したがって:
+- 保存済みプロジェクトで畳んだ / トグルしたあと**明示的に Save せずに**
+  終了・File ▸ New・File ▸ Open すると、**保存確認が出ない**
+- 次に開くと既定値に戻っている（利用者からは「覚えてくれない」に見える）
+**永続化そのものは動いている**（明示的に Save → Load で残る）。欠けているのは
+「UI 状態も未保存の変更である」という扱い。
+→ 判断が要る: (a) UI 状態の変更も dirty にする（`revision` とは別のフラグでも
+よい。保存確認の条件に足す）、(b) UI 状態は明示保存の対象外と割り切って
+文書にそう書く。**(a) なら「保存しますか」が UI 設定の変更でも出る**ので、
+どちらが望ましいかはプロダクトの判断。
+**備考**: #468（`PGRP-5`）の独立レビューで指摘された。`PGRP-3` から在る形で、
+`bpm_grid` / `loop_ranges` まで遡る。
+
 **LOW-APP-26 | debt | 非アクティブなコンプのノード行 / レイヤー行はシングルクリックが無反応で、理由が画面に出ない**
 `crates/ravel-app/src/panels/outliner.rs:698`（`on_row_click`）
 `active = active_composition == row.comp()` で、ノード行とレイヤー行の

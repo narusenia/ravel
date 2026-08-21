@@ -933,7 +933,7 @@ issue 側に「単位が引き受けた」と記録して個別には着手し�
 |---|---|
 | `SHELL-1〜4` | `time_remap` / `track_matte` の配線と UI 露出 |
 | `BLUR-4〜5` | モーションブラー（`BLUR-2` は `CACHE-2`、`BLUR-3` はフェーズ C4 へ） |
-| `MEDIA-6` / `MEDIA-7` | メディア Properties と再リンク |
+| `MEDIA-6` / `MEDIA-7` | メディア Properties と再リンク。`MEDIA-6` **済**（#469 — インスペクタ / パス種別 / Relink / `Save As` の参照付け替え）。残りは `MEDIA-7`（オフライン表示 + 文書。これで計画書が閉じる） |
 | `AUDIO-5〜7` | 波形表示と解析ノード |
 | `PARAM-5` | カーブエディタの縦ズーム（Timeline と共有） |
 | `ALIGN-1〜3` | 整列・分布パネル |

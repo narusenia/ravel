@@ -278,6 +278,21 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 **備考**: #468（`PGRP-5`）の独立レビューで指摘された。`PGRP-3` から在る形で、
 `bpm_grid` / `loop_ranges` まで遡る。
 
+**LOW-APP-28 | debt | 数を埋め込むロケール文字列に単数形が無く「1 audio streams」と出る**
+`assets/locales/{en,ja}.toml`（`properties.media.audio_streams` /
+`kind_sequence` / `duration_frames` ほか `{count}` を持つキー）、
+`crates/ravel-ui/src/properties/media_asset.rs`（`probe_fields`）
+`ravel_i18n::translate` はキーを引いて `{count}` を置換するだけで、
+**複数形の選択機構が無い**。英語では「1 audio streams」「1 frames」のように
+出る（日本語は影響なし）。`duration_frames` は以前から同じ形なので、
+**新しいキーだけ単数形を足すと規約が 2 つになる**。
+→ 判断が要る: (a) `translate` に複数形の選択を足す（ICU MessageFormat 相当か、
+`*.one` / `*.other` の 2 キー規約）、(b) 数を含む文言を「Audio streams: 1」の
+形に寄せて単数複数の問題を回避する。
+**(b) は文言の作り直しだが機構を増やさない**。どちらもロケール全体に効く
+判断なので、キー単位で場当たりに直さないこと。
+**備考**: #469（`MEDIA-6`）の CodeRabbit レビューで指摘された。
+
 **LOW-APP-26 | debt | 非アクティブなコンプのノード行 / レイヤー行はシングルクリックが無反応で、理由が画面に出ない**
 `crates/ravel-app/src/panels/outliner.rs:698`（`on_row_click`）
 `active = active_composition == row.comp()` で、ノード行とレイヤー行の

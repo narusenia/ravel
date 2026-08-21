@@ -1092,6 +1092,13 @@ mod tests {
 
     /// A document whose every reference resolves gains no rows, and a render
     /// with warnings is still a render — the exit code is untouched.
+    ///
+    /// The probe is injected rather than left to `plan_render`'s real one: the
+    /// fixture's bytes are not a movie, so a build **with** the `ffmpeg`
+    /// feature would rightly call the file unreadable and this test would be
+    /// asserting the opposite of what it means. What it means is "a resolved,
+    /// readable reference says nothing", and that is the prober's answer to
+    /// state, not the file's.
     #[test]
     fn a_document_that_resolves_says_nothing_new() {
         let dir = tempfile::tempdir().unwrap();
@@ -1104,18 +1111,20 @@ mod tests {
                 media_node(100, AssetId::new(7)),
             )))
             .with_media_asset(AssetId::new(7), path);
-        let plan = plan_render(
+        let warnings = media_warnings(&document, CompId::new(1), &|_| None);
+        assert!(
+            warnings.is_empty(),
+            "a project with nothing wrong is as quiet as before: {warnings:?}"
+        );
+        // And planning still succeeds on it, warnings or not: the exit code
+        // is not what a warning changes.
+        plan_render(
             &args(Path::new("/tmp/out")),
             &document,
             None,
             &available_encoders(),
         )
         .expect("plans");
-        assert!(
-            plan.warnings.is_empty(),
-            "a project with nothing wrong is as quiet as before: {:?}",
-            plan.warnings
-        );
     }
 
     /// The whole picture-side scan is part of planning, so the warnings are

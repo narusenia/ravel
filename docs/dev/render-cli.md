@@ -190,7 +190,7 @@ ravel-cli interactive project.ravprj
 | `audio-source-skipped` | 音声レイヤー 1 本の素材を読めず、その音だけがミックスから欠ける | レイヤーごとに 1 行 |
 | `binding-issue` | `--param` の値がパラメータに（完全には）届かなかった | 指摘ごとに 1 行 |
 | `media-offline` | 参照している素材が解決できず、そのレイヤーが透明になる | **素材ごとに 1 行**（影響を受けたレイヤー名を全部持つ） |
-| `media-unreadable` | 素材は解決するがファイルを開けない | 同じ |
+| `media-unreadable` | 素材は解決するがファイルを開けない（**`--features ffmpeg` のビルドだけ**。下記） | 同じ |
 | `identifier-not-static` | 識別子パラメータ（`layer.ref` の `layer`、`precomp` の `comp_id`、`media` の `asset_id`）がワイヤ / キーフレーム / ステップ曲線などで駆動されているため何も参照しない | **パラメータごとに 1 行**（`shape` の語も翻訳しない） |
 
 映像側の 3 つは**レンダー前の文書の静的な走査**で決まる。識別子は静的な値しか
@@ -198,6 +198,14 @@ ravel-cli interactive project.ravprj
 「評価しないと分からないオフライン」が存在せず、キャッシュから返ったフレームが
 無言になることもない。開けたファイルがフレーム途中で壊れている場合だけは
 静的走査でも probe でも分からないので、`tracing::warn!` のまま残る。
+
+**`media-unreadable` はデコーダを持つビルドでしか出ない。** probe は FFmpeg を
+通す（静止画・連番も `image_seq::read_image_frame` が同じデコーダを使うので、
+コンテナと同じ意味の「読める」になる）。`--features ffmpeg` 無しでビルドした
+`ravel-cli` は**この 1 行を出さない** — 「確かめられない」を「読めない」と
+言わないため。ファイルが**無い**場合は decoder を要らないので、そのビルドでも
+`media-offline` として出る。スクリプトはこの ID の**不在を「読める」の証明に
+使えない**。
 
 ## 終了コード
 

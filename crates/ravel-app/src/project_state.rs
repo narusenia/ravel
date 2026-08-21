@@ -894,6 +894,15 @@ impl ProjectState {
                 // default, so only "hidden" is worth an entry.
                 show_node_param_values: Some(crate::panels::show_node_param_values(cx))
                     .filter(|shown| !shown),
+                // The preview resolution factor comes from this entity rather
+                // than a panel Global — it is what the evaluation request is
+                // built from. Same default rule: only a non-default factor is
+                // worth an entry. The **selection**, never the effective
+                // factor, so saving mid-drag under `VRES-4`'s adaptive
+                // downgrade cannot persist a coarser factor than the user
+                // chose.
+                viewer_resolution: Some(self.viewer_resolution)
+                    .filter(|factor| *factor != ViewerResolution::default()),
             },
             workspace_layout,
             settings: crate::app_settings::layer(crate::app_settings::SettingsScope::Project, cx),
@@ -1171,6 +1180,7 @@ impl ProjectState {
         let loop_ranges = ui_state.loop_ranges(&document);
         let collapsed_param_groups = ui_state.collapsed_param_groups();
         let show_node_param_values = ui_state.show_node_param_values();
+        let viewer_resolution = ui_state.viewer_resolution();
         // The layer selection of the previous document never carries over —
         // even a reloaded project reuses composition ids for different
         // content. Published after the swap so observers resolve the new id
@@ -1181,6 +1191,10 @@ impl ProjectState {
         crate::panels::set_loop_ranges(loop_ranges, cx);
         crate::panels::set_collapsed_param_groups(collapsed_param_groups, cx);
         crate::panels::set_show_node_param_values(show_node_param_values, cx);
+        // Before the viewer request below, so the first evaluation of the
+        // opened project already uses the factor it was saved with instead of
+        // evaluating once at the previous project's factor.
+        self.viewer_resolution = viewer_resolution;
         crate::app_settings::set_project_layer(settings, cx);
         self.project_path = path;
         self.generation += 1;
@@ -3734,6 +3748,70 @@ mod tests {
         });
 
         for path in [&hidden_path, &shown_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// `VRES-3`: the viewer's preview resolution factor is UI state, so a
+    /// chosen factor has to survive save → File ▸ New → load. Both directions
+    /// are asserted, because the write filter (only a non-default factor gets
+    /// an entry) is what can get them backwards: `Full` comes back `Full`, and
+    /// a project saved at the default does not open at the previous project's
+    /// factor.
+    #[gpui::test]
+    fn the_preview_resolution_survives_a_save_and_load(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_preview_res_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let full_path = dir.join("full.ravprj");
+        let default_path = dir.join("default.ravprj");
+        for path in [&full_path, &default_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
+        }
+
+        project.update(cx, |project, cx| {
+            assert_eq!(project.viewer_resolution(), ViewerResolution::default());
+            project.set_viewer_resolution(ViewerResolution::Full, cx);
+            project.save_project_to(full_path.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        // File ▸ New leaves the factor as the session has it, so set it back
+        // by hand: the second file is the one saved at the default.
+        project.update(cx, |project, cx| {
+            project.new_document(cx);
+            project.set_viewer_resolution(ViewerResolution::default(), cx);
+            project.save_project_to(default_path.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            project.set_viewer_resolution(ViewerResolution::Quarter, cx);
+            project.load_project_from(full_path.clone(), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.viewer_resolution()),
+            ViewerResolution::Full,
+            "the saved session was evaluating at full resolution"
+        );
+
+        project.update(cx, |project, cx| {
+            project.load_project_from(default_path.clone(), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            project.read_with(cx, |project, _| project.viewer_resolution()),
+            ViewerResolution::default(),
+            "a project saved at the default must not inherit the open one's factor"
+        );
+
+        for path in [&full_path, &default_path] {
             let _ = std::fs::remove_file(path);
             let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
         }

@@ -121,7 +121,7 @@ pub fn mix_range(
 ) -> Option<RangeMixdown> {
     let composition = document.get_composition(comp)?;
     let rate = config.output_sample_rate;
-    let specs = AudioMixdown::desired_tracks(composition, rate);
+    let specs = AudioMixdown::desired_tracks(document, composition, rate);
     if specs.is_empty() {
         return None;
     }

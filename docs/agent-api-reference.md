@@ -3079,7 +3079,7 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `RavelWorkspace`) owns the optional `AudioEngine` — started lazily on the
   first audio layer; a missing device is a fallback, not an error. Every
   document change reaches `AudioService::sync` through `ProjectState`'s
-  document observer; `AudioMixdown::desired_tracks(comp, output_rate)`
+  document observer; `AudioMixdown::desired_tracks(document, comp, output_rate)`
   (`ravel_audio::mixdown`, moved out of `ravel-app` by `EXPORT-4` so a
   headless render shares it) maps audio-carrying layers to `TrackSpec`s in
   output-rate sample frames (start/gain-curve/fades are converted
@@ -3089,7 +3089,10 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   and sample format; `AudioService` rebuilds the first desired-track diff if
   that rate differs from its startup placeholder. Decode and output-rate SRC
   run together on the background executor, and the completed buffer enters a
-  per-asset+stream cache. `SetTrack` therefore always carries output-rate
+  cache keyed on asset + stream + **the file the asset resolves to**
+  (`TrackSpec::resolved`, read from the document), so a relink neither hits the
+  previous file's buffer nor inherits its "offline" failure entry; the old
+  file's entries — and its in-flight decode's claim on them — are dropped. `SetTrack` therefore always carries output-rate
   samples and the engine has no SRC worker; placement, trim, mute, solo, and
   fade edits reuse the cached asset instead of starting another full-track job.
   Decoding is full-length (`MAX_DECODE_BYTES` = 128 MiB cap → warn-and-skip); FFmpeg
@@ -3097,9 +3100,12 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   skip tracks with a visible warning. The `ffmpeg` feature that gates
   `mixdown::decode_full_audio` is now `ravel-audio`'s, forwarded by
   `ravel-app/ffmpeg` and `ravel-cli/ffmpeg`. `TrackSpec::shares_build_with` keys the
-  expensive rebuild on asset + stream + trim + gain, so changing a layer's
-  `stream_index` re-decodes and re-sends the track (the other stream is what
-  then plays) while a timeline drag only patches placement. Picture and sound
+  expensive rebuild on asset + stream + resolved file + trim + gain, so
+  changing a layer's `stream_index` — or relinking its asset — re-decodes and
+  re-sends the track (the other file or stream is what then plays) while a
+  timeline drag only patches placement. A rebuild with no decoded audio yet
+  removes the track first: the layer falls silent instead of playing the file
+  it no longer references. Picture and sound
   read the same layer-local axis: the shell's
   `start_frame`/`in_frame`/`out_frame` drive both the `media` node's
   `media_frame_for(local_secs, stream)` and the track's

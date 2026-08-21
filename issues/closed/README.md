@@ -15,7 +15,7 @@
 | critical | 4 | 1件1ファイル |
 | high | 33 | 1件1ファイル |
 | medium | 44 | 領域別5ファイル（`medium-*.md`） |
-| low | 9 | [low.md](low.md) 1ファイル |
+| low | 10 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
 
@@ -77,6 +77,6 @@
   [`../medium/ui-rendering.md`](../medium/ui-rendering.md)）
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `07` / `MED-AUD-01` `02` `03`
 
-## low（9件）
+## low（10件）
 
-[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `07` `11` `14` `15` `17` `24`
+[low.md](low.md) — `LOW-GPU-01` / `LOW-AUD-01` / `LOW-APP-01` `07` `08` `11` `14` `15` `17` `24`

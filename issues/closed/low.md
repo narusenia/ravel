@@ -115,3 +115,31 @@ inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
 `PORT_FRAME_INDEX` / `PORT_SOURCE` で正しく seed され、コメントもその理由を
 書いている。**outbound だけが対称性を欠いている。**
 → `outbound_names` を `[PORT_FRAME]` で seed する。1 行。
+
+**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（**latent ではなくなった** — #469 で到達可能）**
+（**解決済み**: `CacheKey` / `TrackSpec` に解決済みパスを持たせた。
+`AudioMixdown::desired_tracks` が `Document` から各アセットの `resolved` を引き、
+キー・spec の等価性・`build_key` の 3 つ全部にパスが乗る。オフラインは
+`resolved: None` のキーになるので、リリンクすると別キーとして再試行される。
+古いパスのエントリは `AudioService::drop_superseded` が捨てる。回帰テストは
+`relinking_the_asset_replaces_the_cached_audio`
+（`crates/ravel-app/tests/audio_playback.rs`）、
+`the_resolved_file_comes_from_the_document_and_keys_the_cache`
+（`crates/ravel-audio/src/mixdown.rs`）、
+`a_relink_drops_only_the_previous_files_entries`
+（`crates/ravel-app/src/audio/mod.rs`））
+`crates/ravel-audio/src/mixdown.rs:53`（`CacheKey`）、`crates/ravel-app/src/audio/mod.rs:106`・`:177`・`:386`
+`CacheKey` が `(asset_id, stream_index)` で**解決済みパスを含まない**。
+起票時は「将来リリンクを実装すると」という latent な指摘だったが、
+**`MEDIA-6`（#469）で Relink が入ったので今日到達する**:
+音声素材を Relink しても、そのセッションの間は**古いデコード結果が
+キャッシュから返り続ける**（映像側は `FrameKey::image(path, …)` が
+パス鍵なので影響を受けない — 音声だけが例外）。
+一度オフラインになったアセットはセッション中に再試行されない
+（モジュールコメントは逆のことを書いている）。
+**深刻度は low のままにしてあるが、実質「利用者の操作のあとに出る音が
+古い」= 出力の誤り**なので、着手順は low の並びではなく
+`roadmap.md` の基準 0 として扱う。
+→ キーに解決済みパスを含める / `resolved` の変更時に失敗エントリを消す。
+コメントを直す。**`ravel-audio` 側の `CacheKey` に手が入るので、
+`ravel-app` の 3 箇所と合わせて 1 単位**。

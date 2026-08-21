@@ -128,6 +128,17 @@ intrusive list に変更。
 → 上限は打ち切り条件としてのみ使い、容量はストリーム長の見積り（`duration × rate`）で確保する。
 `HIGH-23` の準備経路の作り直しと同時に触るのが安い。
 
+**LOW-AUD-03 | debt | オフラインミックスダウンの「1 アセット 1 デコード」が失敗時に成立しない**
+`crates/ravel-audio/src/offline.rs:113-115`（doc）・`:139-157`
+`mix_range` の `decoded` マップは**成功したデコードだけ**を覚える。
+同じ asset + stream を 2 レイヤーが使い、その素材が上限超過なら
+`prepare` が**レイヤーごとに全長デコードを試みる**（オフライン・不読なら
+デコードはしないが `prepare` は 2 回走る）。doc コメントは
+「どれだけのレイヤーが使っても 1 回」と書いており、事実と違う。
+書き出し 1 回ぶんなので実害は小さいが、上限超過素材では 2 倍の
+デコードコストになる。
+→ 失敗も `HashMap<CacheKey, Result<…>>` として覚えるか、doc を実装に合わせる。
+
 **LOW-MED-02 | debt | 意図的に !Send な FFmpeg ラッパーに対する包括的 `unsafe impl Send`**
 `crates/ravel-media/src/encoder.rs:50`, `crates/ravel-media/src/hwaccel/device.rs:30`
 `unsafe impl Send for FfmpegEncoder` は構造体の現在および将来の全フィールドを覆い、
@@ -213,23 +224,6 @@ Delete でユーザーが見たことのないキーを削除する。
 短いコンポジションへ切り替える（または設定 / undo で短縮する）と、
 次のスクラブまでミラーされたプレイヘッドが終端を超えたまま残る。
 → `sync_from_project` でクランプ。
-
-**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（**latent ではなくなった** — #469 で到達可能）**
-`crates/ravel-audio/src/mixdown.rs:53`（`CacheKey`）、`crates/ravel-app/src/audio/mod.rs:106`・`:177`・`:386`
-`CacheKey` が `(asset_id, stream_index)` で**解決済みパスを含まない**。
-起票時は「将来リリンクを実装すると」という latent な指摘だったが、
-**`MEDIA-6`（#469）で Relink が入ったので今日到達する**:
-音声素材を Relink しても、そのセッションの間は**古いデコード結果が
-キャッシュから返り続ける**（映像側は `FrameKey::image(path, …)` が
-パス鍵なので影響を受けない — 音声だけが例外）。
-一度オフラインになったアセットはセッション中に再試行されない
-（モジュールコメントは逆のことを書いている）。
-**深刻度は low のままにしてあるが、実質「利用者の操作のあとに出る音が
-古い」= 出力の誤り**なので、着手順は low の並びではなく
-`roadmap.md` の基準 0 として扱う。
-→ キーに解決済みパスを含める / `resolved` の変更時に失敗エントリを消す。
-コメントを直す。**`ravel-audio` 側の `CacheKey` に手が入るので、
-`ravel-app` の 3 箇所と合わせて 1 単位**。
 
 **LOW-APP-09 | bug | `format_duration` が分境界で `0:60.0` を出す**
 `crates/ravel-app/src/panels/media_bin.rs:481-485`

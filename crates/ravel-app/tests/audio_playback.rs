@@ -26,13 +26,14 @@ use ravel_app::playback::{ClockSource, Transport};
 use ravel_app::project_state::{ProjectState, ProjectStateHandle};
 use ravel_audio::mixdown::{AudioMixdown, CacheKey, DecodedAudio};
 use ravel_audio::{AudioCommand, AudioError, SyncClock};
-use ravel_core::composition::{AudioSource, Composition, Layer};
+use ravel_core::composition::{AudioSource, Composition, Document, Layer, MediaAssetEntry};
 use ravel_core::graph::Graph;
 use ravel_core::id::{AssetId, CompId, LayerId};
 use ravel_core::media::VideoStreamInfo;
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::runtime::playback::PlaybackState;
 use ravel_core::types::FrameRate;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -105,6 +106,23 @@ fn asset() -> AssetId {
     AssetId::new(1)
 }
 
+/// The file [`asset`] resolves to. Never opened: every test seeds the decode
+/// cache, so no test reaches the decoder.
+fn source() -> PathBuf {
+    PathBuf::from("/ravel/tests/take-1.wav")
+}
+
+/// The decode-cache key of one stream of [`asset`] as it resolves to `path`.
+/// The path is part of the key, so seeding the wrong one is a miss — which is
+/// the point of [`relinking_the_asset_replaces_the_cached_audio`].
+fn key(stream_index: usize, path: &Path) -> CacheKey {
+    CacheKey {
+        asset_id: asset(),
+        stream_index,
+        resolved: Some(Arc::from(path)),
+    }
+}
+
 fn audio_layer(id: u64, start: i64, asset_id: AssetId) -> Layer {
     let mut layer =
         Layer::new(LayerId::new(id), format!("audio {id}"), Graph::new()).with_time(start, 0, 300);
@@ -112,8 +130,9 @@ fn audio_layer(id: u64, start: i64, asset_id: AssetId) -> Layer {
     layer
 }
 
-/// A project state with a registered stub-backed audio service. Returns
-/// both entities plus the recording; the caller keeps the entities alive.
+/// A project state with a registered stub-backed audio service and the
+/// document's single media asset resolved to [`source`]. Returns both
+/// entities plus the recording; the caller keeps the entities alive.
 fn init_project_with_audio(
     cx: &mut TestAppContext,
 ) -> (
@@ -140,6 +159,19 @@ fn init_project_with_audio(
     })
 }
 
+/// Point [`asset`] at `path`. The decode cache is keyed on what the asset
+/// resolves to, so the layers below can only be served audio seeded under
+/// the same path.
+fn resolve_asset_to(project: &gpui::Entity<ProjectState>, path: &Path, cx: &mut TestAppContext) {
+    project.update(cx, |project, cx| {
+        let document = project
+            .document()
+            .clone()
+            .with_media_asset_entry(asset(), MediaAssetEntry::from_absolute(path));
+        project.commit_document(document, InvalidationHint::Structural, cx);
+    });
+}
+
 fn commit_layer(project: &gpui::Entity<ProjectState>, layer: Layer, cx: &mut TestAppContext) {
     project.update(cx, |project, cx| {
         let comp = project.document().root_comp.expect("root comp");
@@ -157,14 +189,9 @@ fn commit_layer(project: &gpui::Entity<ProjectState>, layer: Layer, cx: &mut Tes
 #[gpui::test]
 fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
     audio.update(cx, |service, _| {
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 0,
-            },
-            decoded(48_000, 2, 48_000),
-        );
+        service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
     });
 
     // Layer starts at comp frame 30 = 1s at 30fps.
@@ -187,14 +214,9 @@ fn audio_layer_produces_a_set_track(cx: &mut TestAppContext) {
 #[gpui::test]
 fn layer_moves_send_minimal_diffs(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
     audio.update(cx, |service, _| {
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 0,
-            },
-            decoded(48_000, 2, 48_000),
-        );
+        service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
     });
     commit_layer(&project, audio_layer(1, 0, asset()), cx);
     assert_eq!(recording.commands().len(), 1);
@@ -232,14 +254,9 @@ fn layer_moves_send_minimal_diffs(cx: &mut TestAppContext) {
 #[gpui::test]
 fn removing_the_layer_removes_the_track(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
     audio.update(cx, |service, _| {
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 0,
-            },
-            decoded(48_000, 2, 48_000),
-        );
+        service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
     });
     commit_layer(&project, audio_layer(1, 0, asset()), cx);
 
@@ -258,14 +275,9 @@ fn removing_the_layer_removes_the_track(cx: &mut TestAppContext) {
 #[gpui::test]
 fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
     audio.update(cx, |service, _| {
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 0,
-            },
-            decoded(48_000, 2, 48_000),
-        );
+        service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
     });
 
     commit_layer(&project, audio_layer(1, 0, asset()), cx);
@@ -317,6 +329,57 @@ fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
     ));
 }
 
+/// Relinking the asset changes what is heard, in the two steps the app
+/// really takes (`LOW-APP-08`): the old sound leaves the mixer the moment the
+/// reference changes — silence beats the previous file playing under the new
+/// reference, and a decode that never succeeds would otherwise leave it
+/// audible for the rest of the session — and the new file's audio goes out
+/// when its decode lands in the cache and re-syncs.
+#[gpui::test]
+fn a_relink_silences_the_layer_then_plays_the_new_file(cx: &mut TestAppContext) {
+    let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
+    // The two files differ in channel count, which is what the sink records:
+    // the assertions are about which decode reached the mixer.
+    audio.update(cx, |service, _| {
+        service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
+    });
+    commit_layer(&project, audio_layer(1, 0, asset()), cx);
+    assert!(matches!(
+        recording.commands()[0],
+        Recorded::SetTrack { channels: 2, .. }
+    ));
+
+    let relinked = PathBuf::from("/ravel/tests/take-2.wav");
+    resolve_asset_to(&project, &relinked, cx);
+    assert_eq!(
+        recording.commands()[1],
+        Recorded::RemoveTrack(1),
+        "the previous file must stop playing the moment the reference changes"
+    );
+
+    // What the background decode of the new file does when it completes.
+    audio.update(cx, |service, _| {
+        service.cache_decoded(key(0, &relinked), decoded(48_000, 1, 48_000));
+    });
+    let document = project.read_with(cx, |project, _| project.document().clone());
+    cx.update(|cx| ravel_app::audio::sync_from_document(&document, cx));
+
+    let commands = recording.commands();
+    assert_eq!(commands.len(), 3);
+    assert_eq!(
+        commands[2],
+        Recorded::SetTrack {
+            id: 1,
+            start_frame: 0,
+            channels: 1,
+            muted: false,
+            solo: false,
+        },
+        "the relinked file's audio is what now plays"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Video layer audio (audio-plan unit 4)
 // ---------------------------------------------------------------------------
@@ -328,21 +391,10 @@ fn mute_and_solo_map_to_the_mixer(cx: &mut TestAppContext) {
 #[gpui::test]
 fn switching_the_stream_sends_the_other_streams_track(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
     audio.update(cx, |service, _| {
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 1,
-            },
-            decoded(48_000, 2, 48_000),
-        );
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 2,
-            },
-            decoded(48_000, 1, 48_000),
-        );
+        service.cache_decoded(key(1, &source()), decoded(48_000, 2, 48_000));
+        service.cache_decoded(key(2, &source()), decoded(48_000, 1, 48_000));
     });
 
     let mut layer = Layer::new(LayerId::new(1), "clip", Graph::new()).with_time(0, 0, 300);
@@ -417,7 +469,7 @@ fn picture_and_sound_share_the_layer_local_time_axis() {
     let mut comp = Composition::new(CompId::new(1), "comp", (640, 480), FPS, 300);
     comp.layers = vec![layer.clone()].into();
 
-    let spec = &AudioMixdown::desired_tracks(&comp, OUTPUT_RATE)[0];
+    let spec = &AudioMixdown::desired_tracks(&Document::default(), &comp, OUTPUT_RATE)[0];
     assert_eq!(spec.source_in_frames, 10);
     assert_eq!(spec.source_out_frames, 100);
 
@@ -461,7 +513,7 @@ fn the_layer_trim_bounds_the_audible_range() {
     let mut comp = Composition::new(CompId::new(1), "comp", (640, 480), FPS, 300);
     comp.layers = vec![layer].into();
 
-    let spec = &AudioMixdown::desired_tracks(&comp, OUTPUT_RATE)[0];
+    let spec = &AudioMixdown::desired_tracks(&Document::default(), &comp, OUTPUT_RATE)[0];
     // 10 s of source at 48 kHz; the layer only plays comp frames 10..100,
     // i.e. source seconds 1/3 .. 10/3.
     let track = AudioMixdown::build_track(spec, &decoded(10 * 48_000, 2, 48_000), FPS, OUTPUT_RATE)
@@ -479,6 +531,7 @@ fn the_layer_trim_bounds_the_audible_range() {
 #[gpui::test]
 fn clock_switches_only_with_tracks_and_engine(cx: &mut TestAppContext) {
     let (project, audio, recording) = init_project_with_audio(cx);
+    resolve_asset_to(&project, &source(), cx);
     let _ = recording;
     assert!(
         audio
@@ -488,13 +541,7 @@ fn clock_switches_only_with_tracks_and_engine(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(ravel_app::audio::playback_clock(cx).is_none()));
 
     audio.update(cx, |service, _| {
-        service.cache_decoded(
-            CacheKey {
-                asset_id: asset(),
-                stream_index: 0,
-            },
-            decoded(48_000, 2, 48_000),
-        );
+        service.cache_decoded(key(0, &source()), decoded(48_000, 2, 48_000));
     });
     commit_layer(&project, audio_layer(1, 0, asset()), cx);
 

@@ -14,7 +14,8 @@
 //!   output rate before it enters the cache, so later placement edits reach
 //!   the mixer at the next mixed block without repeating SRC.
 //! - Source audio is decoded and resampled on the background executor (never
-//!   the UI thread) and cached per asset + stream, per decision 8 of the plan
+//!   the UI thread) and cached per asset + stream + resolved file (the key a
+//!   relink has to miss, see [`CacheKey`]), per decision 8 of the plan
 //!   (full-length decode, memory-resident, warn-and-skip past
 //!   [`mixdown::MAX_DECODE_BYTES`]).
 //! - The engine starts lazily on the first audio layer and its absence is
@@ -102,10 +103,13 @@ pub struct AudioService {
     /// Sample rate the engine runs at; every placement value is converted
     /// into these frames (see [`ravel_audio::mixdown`]).
     output_rate: u32,
-    /// Fully decoded source audio per asset + stream (decision 8).
+    /// Fully decoded source audio per asset + stream + resolved file
+    /// (decision 8).
     cache: HashMap<CacheKey, Arc<DecodedAudio>>,
-    /// Assets that failed to decode (offline, over the memory cap, …); not
-    /// retried until the document is replaced.
+    /// Attempts that failed to decode (offline, over the memory cap, …); not
+    /// retried until the document is replaced or the asset resolves to
+    /// another file — the key carries the path, so a relink is a miss here
+    /// too.
     failed: HashSet<CacheKey>,
     /// Decodes currently in flight on the background executor, tagged with
     /// the document generation that requested them.
@@ -234,7 +238,7 @@ impl AudioService {
         let comp = crate::panels::active_composition_in(document, cx);
         let comp_fps = comp.map(|c| c.frame_rate).unwrap_or(FrameRate::new(30, 1));
         let mut desired = comp
-            .map(|comp| AudioMixdown::desired_tracks(comp, self.output_rate))
+            .map(|comp| AudioMixdown::desired_tracks(document, comp, self.output_rate))
             .unwrap_or_default();
         self.desired_count = desired.len();
         if self.desired_count > 0 {
@@ -242,7 +246,7 @@ impl AudioService {
             self.ensure_engine(cx);
             if self.output_rate != previous_rate {
                 desired = comp
-                    .map(|comp| AudioMixdown::desired_tracks(comp, self.output_rate))
+                    .map(|comp| AudioMixdown::desired_tracks(document, comp, self.output_rate))
                     .unwrap_or_default();
                 self.desired_count = desired.len();
             }
@@ -293,6 +297,9 @@ impl AudioService {
             }
 
             let key = spec.cache_key();
+            // Whatever this asset's stream held under another file is
+            // unreachable from here on, however this spec is served.
+            self.drop_superseded(&key);
             match self.cache.get(&key).cloned() {
                 Some(decoded) => {
                     match AudioMixdown::build_track(&spec, &decoded, comp_fps, self.output_rate) {
@@ -322,6 +329,20 @@ impl AudioService {
                     }
                 }
                 None => {
+                    // A track already in the mixer was built from another
+                    // file or another stream — this spec's build key changed,
+                    // or the cheap-update path above would have taken it.
+                    // Silence beats the wrong sound: playing the previous
+                    // file under the new reference is what `LOW-APP-08` is,
+                    // and a decode that never succeeds would leave it
+                    // audible for the rest of the session.
+                    if self
+                        .sent
+                        .get(&spec.layer_id)
+                        .is_some_and(|sent| sent.delivered)
+                    {
+                        self.send(AudioCommand::RemoveTrack(spec.layer_id.raw()));
+                    }
                     // Record the spec now so further edits do not spawn
                     // duplicate decodes; delivery happens when the decode
                     // completes and triggers a re-sync.
@@ -449,17 +470,19 @@ impl AudioService {
         if self.pending.contains_key(&key) || self.failed.contains(&key) {
             return;
         }
-        let Some(entry) = document.get_media_asset(spec.asset_id) else {
+        if document.get_media_asset(spec.asset_id).is_none() {
             self.mark_preparation_failed(key, "audio layer references an unknown media asset", cx);
             return;
-        };
-        let Some(path) = entry.resolved.clone() else {
+        }
+        // What the asset resolved to when the spec was built, not a second
+        // lookup: the key this decode lands under has to be the key the
+        // diff will look for.
+        let Some(path) = spec.resolved.clone() else {
             self.mark_preparation_failed(key, "media asset is offline", cx);
             return;
         };
-
         let generation = self.generation;
-        self.pending.insert(key, generation);
+        self.pending.insert(key.clone(), generation);
         cx.notify();
         let stream_index = spec.stream_index;
         let output_rate = self.output_rate;
@@ -470,8 +493,8 @@ impl AudioService {
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_pending_generation(&key, generation);
-                if this.generation == generation {
+                let owns_slot = this.finish_pending_generation(&key, generation);
+                if owns_slot && this.generation == generation {
                     match result {
                         Ok(audio) => {
                             this.cache.insert(key, Arc::new(audio));
@@ -490,13 +513,42 @@ impl AudioService {
         .detach();
     }
 
-    /// Remove a completed preparation only when it still owns the pending
-    /// slot. An old document's task must not clear a replacement document's
-    /// task for a reused asset id.
-    fn finish_pending_generation(&mut self, key: &CacheKey, generation: u64) {
-        if self.pending.get(key).copied() == Some(generation) {
-            self.pending.remove(key);
+    /// Drop what this asset's stream held under a *different* file.
+    ///
+    /// Those entries are unreachable the moment the asset resolves elsewhere,
+    /// and a decoded buffer is up to [`mixdown::MAX_DECODE_BYTES`] of memory
+    /// nothing can read again.
+    ///
+    /// The pending slot goes too. A running decode cannot be cancelled, but
+    /// giving up its slot is what makes its completion a no-op
+    /// ([`Self::finish_pending_generation`]): a decode of the previous file
+    /// must not record a cache entry — or, worse, a *failure* — under a key
+    /// the asset may resolve to again, because a failure entry is never
+    /// retried within a document.
+    fn drop_superseded(&mut self, key: &CacheKey) {
+        let superseded = |other: &CacheKey| {
+            other.asset_id == key.asset_id
+                && other.stream_index == key.stream_index
+                && other.resolved != key.resolved
+        };
+        self.cache.retain(|other, _| !superseded(other));
+        self.failed.retain(|other| !superseded(other));
+        self.pending.retain(|other, _| !superseded(other));
+    }
+
+    /// Release the pending slot of a completed preparation, and report
+    /// whether it was this task's slot to release.
+    ///
+    /// `false` means the task was superseded while it ran — the document was
+    /// replaced and a new task holds the slot for a reused asset id, or the
+    /// asset was relinked and [`Self::drop_superseded`] took the slot away —
+    /// and its result must not reach the cache or the failure set.
+    fn finish_pending_generation(&mut self, key: &CacheKey, generation: u64) -> bool {
+        if self.pending.get(key).copied() != Some(generation) {
+            return false;
         }
+        self.pending.remove(key);
+        true
     }
 }
 
@@ -574,6 +626,9 @@ mod tests {
             layer_id: LayerId::new(layer),
             asset_id,
             stream_index,
+            resolved: Some(std::sync::Arc::from(std::path::Path::new(
+                "/ravel/tests/music.wav",
+            ))),
             start_frame: 0,
             source_in_frames: 0,
             source_out_frames: u64::MAX,
@@ -590,7 +645,7 @@ mod tests {
         let mut service = AudioService::with_sink(None, 48_000);
         let spec = spec(7, music(), 2);
         let key = spec.cache_key();
-        service.pending.insert(key, service.generation);
+        service.pending.insert(key.clone(), service.generation);
         service.sent.insert(
             spec.layer_id,
             SentTrack {
@@ -609,20 +664,67 @@ mod tests {
         assert!(!service.is_layer_preparing(LayerId::new(7)));
     }
 
+    /// A relink frees the previous file's decoded buffer and its failure
+    /// entry, and leaves every other asset and stream alone.
+    #[test]
+    fn a_relink_drops_only_the_previous_files_entries() {
+        let mut service = AudioService::with_sink(None, 48_000);
+        let old_file = spec(7, music(), 2).cache_key();
+        let other_stream = spec(7, music(), 3).cache_key();
+        let mut relinked = old_file.clone();
+        relinked.resolved = Some(std::sync::Arc::from(std::path::Path::new("/other.wav")));
+
+        service.cache_decoded(
+            old_file.clone(),
+            DecodedAudio {
+                samples: vec![0.0; 8].into(),
+                sample_rate: 48_000,
+                channels: 2,
+            },
+        );
+        service.failed.insert(old_file.clone());
+        service.failed.insert(other_stream.clone());
+
+        service.pending.insert(old_file.clone(), service.generation);
+        service
+            .pending
+            .insert(other_stream.clone(), service.generation);
+
+        service.drop_superseded(&relinked);
+
+        assert!(!service.cache.contains_key(&old_file), "buffer freed");
+        assert!(!service.failed.contains(&old_file), "failure retried");
+        assert!(
+            !service.finish_pending_generation(&old_file, 0),
+            "the superseded decode no longer owns its slot, so its result is dropped"
+        );
+        assert!(
+            service.failed.contains(&other_stream),
+            "another stream of the same asset is untouched"
+        );
+        assert!(
+            service.finish_pending_generation(&other_stream, 0),
+            "another stream's decode still owns its slot"
+        );
+    }
+
     #[test]
     fn stale_completion_keeps_the_replacement_documents_pending_entry() {
         let mut service = AudioService::with_sink(None, 48_000);
         let key = spec(7, music(), 2).cache_key();
 
-        service.pending.insert(key, 0);
+        service.pending.insert(key.clone(), 0);
         service.pending.clear();
         service.generation = 1;
-        service.pending.insert(key, 1);
+        service.pending.insert(key.clone(), 1);
 
-        service.finish_pending_generation(&key, 0);
+        assert!(
+            !service.finish_pending_generation(&key, 0),
+            "the old document's task must not clear the replacement's slot"
+        );
         assert!(service.is_asset_preparing(music()));
 
-        service.finish_pending_generation(&key, 1);
+        assert!(service.finish_pending_generation(&key, 1));
         assert!(!service.is_asset_preparing(music()));
     }
 }

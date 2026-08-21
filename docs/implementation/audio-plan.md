@@ -93,10 +93,11 @@ pub struct Layer {
 Document（audio を持つレイヤー群）
         │  ProjectState の document observer
         ▼
-AudioMixdown::build(comp, frame_rate)      ravel-audio の mixdown モジュール
+AudioMixdown::desired_tracks(document, comp, rate)  ravel-audio の mixdown モジュール
         │  レイヤー → Track { samples, start_frame, gain 曲線, fades, mute/solo }
         │  background で decode + output-rate SRC
-        │  結果は asset_id + stream で Arc キャッシュ
+        │  結果は asset_id + stream + 解決済みパスで Arc キャッシュ
+        │  （パスを含むのは LOW-APP-08。リリンクで古い音が返るのを防ぐ）
         ├─────────────────────────────┐
         ▼                             ▼
 AudioEngine::SetTrack …        offline::mix_range（範囲を 1 回、AudioBuffer）

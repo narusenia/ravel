@@ -78,6 +78,11 @@ single `media` node connects decoded video, stills, and image sequences to
 layer-network evaluation (`video` remains a load-time alias). Import runs
 through File ▸ Import and OS file drops, assets persist as runtime-resolved
 relative paths, and the MediaBin panel browses them with cached thumbnails.
+The Properties inspector shows an asset's probed metadata and its reference —
+the resolved location, the path form (absolute / project-relative / variable)
+and `Relink…` — and a layer whose network or audio source references an
+offline asset is marked in both the Outliner and the Timeline. "Offline" means
+the reference does not resolve; nothing on the display path stats a file.
 
 Rendering to disk works from both front ends. `ravel-cli render` drives the
 render queue headlessly and writes PNG / EXR sequences without FFmpeg
@@ -86,10 +91,9 @@ render queue headlessly and writes PNG / EXR sequences without FFmpeg
 `ravel-cli list comps | params | codecs` and `ravel-cli interactive` sit on the
 same resolution path (`docs/dev/render-cli.md`). `File ▸ Export…` submits the
 same job description through the same worker and encoder, and the render queue
-panel follows it. Media properties and relinking, offline-asset display, and
-**video-container output** are not implemented — a video target is enumerated
-with its route but has no writer, so both front ends refuse it before a frame
-(`done/render-export-plan.md`).
+panel follows it. **Video-container output** is not implemented — a video
+target is enumerated with its route but has no writer, so both front ends
+refuse it before a frame (`done/render-export-plan.md`).
 
 ### Audio
 

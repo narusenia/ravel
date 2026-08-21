@@ -119,6 +119,13 @@ pub enum ProjectEvent {
     MediaImportSkipped {
         failures: Vec<crate::media::import::ImportFailure>,
     },
+    /// A relink could not read the file the user picked. Separate from
+    /// [`Self::MediaImportSkipped`] because it is a different sentence: an
+    /// import that skips a file adds nothing, a relink that fails leaves an
+    /// existing reference as it was.
+    MediaRelinkFailed {
+        failure: crate::media::import::ImportFailure,
+    },
 }
 
 /// The document the session now holds came from somewhere else: a project that
@@ -1363,18 +1370,16 @@ impl ProjectState {
         true
     }
 
-    /// Report files a probe refused, so the user hears about it. The event is
-    /// the session's user-visible feedback channel and every emission of it
-    /// lives in this module (see [`Self::report_settings_write_failure`]).
-    pub fn report_media_failures(
+    /// Report the file a relink's probe refused, so the user hears why nothing
+    /// changed. The event is the session's user-visible feedback channel and
+    /// every emission of it lives in this module (see
+    /// [`Self::report_settings_write_failure`]).
+    pub fn report_relink_failure(
         &mut self,
-        failures: Vec<crate::media::import::ImportFailure>,
+        failure: crate::media::import::ImportFailure,
         cx: &mut Context<Self>,
     ) {
-        if failures.is_empty() {
-            return;
-        }
-        cx.emit(ProjectEvent::MediaImportSkipped { failures });
+        cx.emit(ProjectEvent::MediaRelinkFailed { failure });
     }
 
     /// Stack a layer for each already-imported asset on the active

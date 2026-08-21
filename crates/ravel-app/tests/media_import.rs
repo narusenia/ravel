@@ -870,13 +870,36 @@ fn a_relink_whose_project_was_replaced_applies_to_nothing(cx: &mut TestAppContex
     });
 }
 
+/// Every `ProjectEvent` the session emitted, for the notification assertions.
+#[derive(Default)]
+struct EventLog(Vec<ravel_app::project_state::ProjectEvent>);
+
+fn record_events(
+    project: &gpui::Entity<ProjectState>,
+    cx: &mut TestAppContext,
+) -> gpui::Entity<EventLog> {
+    let log = cx.new(|_| EventLog::default());
+    log.update(cx, |_, cx| {
+        cx.subscribe(
+            project,
+            |log: &mut EventLog, _project, event: &ravel_app::project_state::ProjectEvent, _cx| {
+                log.0.push(event.clone());
+            },
+        )
+        .detach();
+    });
+    log
+}
+
 /// A file the probe refuses replaces nothing: the same refusal that keeps it
-/// out of an import keeps it from breaking a reference that already works.
+/// out of an import keeps it from breaking a reference that already works —
+/// and it says so in its own words, not the import path's.
 #[gpui::test]
 fn a_file_the_probe_refuses_relinks_nothing(cx: &mut TestAppContext) {
     let project = project(cx);
     let hero = offline_asset(&project, cx);
     let before = project.read_with(cx, |project, _| project.document().clone());
+    let log = record_events(&project, cx);
 
     cx.update(|cx| {
         ravel_app::media::import::relink_asset_with(
@@ -894,5 +917,24 @@ fn a_file_the_probe_refuses_relinks_nothing(cx: &mut TestAppContext) {
         // one undo removes it outright — the refused relink pushed nothing.
         assert!(project.undo(cx));
         assert!(project.document().media_assets.is_empty());
+    });
+
+    log.read_with(cx, |log, _| {
+        use ravel_app::project_state::ProjectEvent;
+        assert!(
+            log.0.iter().any(|event| matches!(
+                event,
+                ProjectEvent::MediaRelinkFailed { failure }
+                    if failure.path == std::path::Path::new("/media/broken.mov")
+            )),
+            "a refused relink reports itself as a relink, got {:?}",
+            log.0
+        );
+        assert!(
+            !log.0
+                .iter()
+                .any(|event| matches!(event, ProjectEvent::MediaImportSkipped { .. })),
+            "and never as a skipped import"
+        );
     });
 }

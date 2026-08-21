@@ -306,6 +306,8 @@ recovered_message = "The main project file was unreadable, so Ravel opened the p
 backup_path = "Backup"
 import_title = "Some media files were skipped"
 import_message = "Ravel could not import the following files"
+relink_title = "The media could not be relinked"
+relink_message = "Ravel could not read the file you picked, so the reference is unchanged"
 
 [audio]
 preparing = "Preparing audio…"

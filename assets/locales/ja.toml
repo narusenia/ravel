@@ -301,6 +301,8 @@ recovered_message = "元のプロジェクトファイルを読み込めなか�
 backup_path = "バックアップ"
 import_title = "一部のメディアを読み込めませんでした"
 import_message = "次のファイルを読み込めませんでした"
+relink_title = "再リンクできませんでした"
+relink_message = "選択したファイルを読み込めなかったので、参照は変更していません"
 
 [audio]
 preparing = "音声を準備中…"

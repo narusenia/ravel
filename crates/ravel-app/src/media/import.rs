@@ -254,7 +254,7 @@ pub fn relink_asset_with(asset_id: AssetId, path: PathBuf, prober: MediaProber, 
                         reason = %failure.reason,
                         "media relink refused"
                     );
-                    project.report_media_failures(vec![failure], cx);
+                    project.report_relink_failure(failure, cx);
                 }
             }
         });

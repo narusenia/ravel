@@ -2292,6 +2292,16 @@ fn show_project_event(
                 backup.display()
             ),
         ),
+        ProjectEvent::MediaRelinkFailed { failure } => (
+            NotificationType::Warning,
+            t!("project.notice.relink_title"),
+            format!(
+                "{}\n{}: {}",
+                t!("project.notice.relink_message"),
+                failure.path.display(),
+                failure.reason
+            ),
+        ),
         ProjectEvent::MediaImportSkipped { failures } => {
             let details = failures
                 .iter()

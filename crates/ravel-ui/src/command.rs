@@ -103,6 +103,11 @@ pub enum CommandId {
     /// Unlike its neighbours this is not a panel toggle — the panel stays,
     /// its nodes get shorter.
     ViewToggleNodeParamValues,
+    /// Step the viewer's preview resolution factor to the next one
+    /// (`viewer-preview-resolution-plan.md`, REQ-UI-004). One cycling command
+    /// rather than three "set to X" commands, because the factors are one
+    /// ordered axis.
+    ViewCyclePreviewResolution,
     ViewFit,
     // Playback
     PlaybackToggle,
@@ -353,6 +358,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         CommandId::ViewToggleNodeParamValues,
         "view.toggle_node_param_values",
     ),
+    (
+        CommandId::ViewCyclePreviewResolution,
+        "view.cycle_preview_resolution",
+    ),
     (CommandId::ViewFit, "view.fit"),
     (CommandId::PlaybackToggle, "playback.toggle"),
     (CommandId::PlaybackStop, "playback.stop"),
@@ -469,6 +478,7 @@ impl CommandId {
             CommandId::ViewToggleRenderQueue => "menu.view.render_queue",
             CommandId::ViewToggleAttributeSpreadsheet => "menu.view.attribute_spreadsheet",
             CommandId::ViewToggleNodeParamValues => "menu.view.node_param_values",
+            CommandId::ViewCyclePreviewResolution => "menu.view.cycle_preview_resolution",
             CommandId::ViewFit => "menu.view.fit",
             CommandId::PlaybackToggle => "menu.playback.toggle",
             CommandId::PlaybackStop => "menu.playback.stop",

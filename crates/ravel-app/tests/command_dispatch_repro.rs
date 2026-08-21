@@ -9,11 +9,13 @@
 use gpui::{Context, Empty, Entity, Focusable, Render, TestAppContext, Window};
 use gpui_component::Root;
 use ravel_app::panels;
+use ravel_app::project_state::ProjectStateHandle;
 use ravel_app::trace::{self, CommandTrace, TraceSource};
 use ravel_app::window_host::{self, WindowRegistry};
 use ravel_app::workspace::{self, RavelWorkspace};
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
+use ravel_ui::panels::viewer::ViewerResolution;
 use ravel_ui::shell::AppShell;
 
 /// Root view with no action handlers: actions dispatched into this window
@@ -100,6 +102,49 @@ fn the_view_toggle_flips_the_node_parameter_values_global(cx: &mut TestAppContex
     assert!(
         cx.update(|cx| panels::show_node_param_values(cx)),
         "and brought them back"
+    );
+}
+
+/// The View command steps the viewer's preview resolution factor through the
+/// real action route — the one the `Alt+R` chord and the menu row use
+/// (REQ-UI-004).
+///
+/// The Viewer's toolbar select calls `ProjectState::set_viewer_resolution`
+/// directly, so a dispatch arm that stopped cycling, cycled the wrong
+/// direction, or skipped a factor would leave the select working and only the
+/// chord and the menu broken.
+#[gpui::test]
+fn the_view_command_cycles_the_preview_resolution(cx: &mut TestAppContext) {
+    let _main_window = open_workspace(cx);
+    let window = cx.add_window(|_, _| BareView);
+
+    fn selected(cx: &mut TestAppContext) -> ViewerResolution {
+        cx.update(|cx| {
+            cx.global::<ProjectStateHandle>()
+                .0
+                .upgrade()
+                .expect("the session's project state is alive")
+                .read(cx)
+                .viewer_resolution()
+        })
+    }
+
+    let mut walked = vec![selected(cx)];
+    for _ in 0..ViewerResolution::ALL.len() {
+        cx.dispatch_action(window.into(), workspace::ViewCyclePreviewResolution);
+        walked.push(selected(cx));
+    }
+
+    // From the session default, one full lap: every factor is reachable by
+    // chord alone and the last step wraps back.
+    assert_eq!(
+        walked,
+        vec![
+            ViewerResolution::Half,
+            ViewerResolution::Quarter,
+            ViewerResolution::Full,
+            ViewerResolution::Half,
+        ]
     );
 }
 

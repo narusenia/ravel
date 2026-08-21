@@ -61,6 +61,7 @@ toggle_curve_editor = "Alt+5"
 toggle_scopes = "Alt+6"
 toggle_outliner = "Alt+7"
 toggle_media_bin = "Alt+8"
+cycle_preview_resolution = "Alt+R"
 
 [composition]
 settings = "Cmd+K"

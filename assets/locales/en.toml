@@ -49,6 +49,7 @@ lua_console = "Lua Console"
 render_queue = "Render Queue"
 attribute_spreadsheet = "Attribute Spreadsheet"
 node_param_values = "Show Parameter Values"
+cycle_preview_resolution = "Cycle Preview Resolution"
 fit = "Fit View"
 
 [menu.composition]
@@ -372,6 +373,13 @@ eval_error = "Evaluation error"
 display_transform_failed = "The display transform did not run — the viewer cannot show this frame. See the log."
 fit = "Fit"
 actual_size = "Actual size (100%)"
+resolution = "Preview resolution"
+resolution_full = "Full"
+resolution_half = "1/2"
+resolution_quarter = "1/4"
+# Selected factor and the factor actually being evaluated, shown together
+# only while they differ.
+resolution_effective = "{selected} → {effective}"
 grid = "Grid"
 safe_areas = "Safe areas"
 rulers = "Rulers"

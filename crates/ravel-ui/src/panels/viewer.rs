@@ -57,6 +57,31 @@ impl ViewerResolution {
         }
     }
 
+    /// Locale key for this factor's name.
+    ///
+    /// The key, not the text: `ravel-ui` does not depend on i18n, so the
+    /// display boundary in `ravel-app` resolves it (the same shape as
+    /// [`crate::ToolKind::label_key`]).
+    pub fn label_key(self) -> &'static str {
+        match self {
+            Self::Full => "viewer.resolution_full",
+            Self::Half => "viewer.resolution_half",
+            Self::Quarter => "viewer.resolution_quarter",
+        }
+    }
+
+    /// The next factor in [`ViewerResolution::ALL`], wrapping past the last.
+    ///
+    /// The factors are one ordered axis, so the command system gets a single
+    /// cycling command rather than three "set to X" commands: one chord walks
+    /// the axis and the keybinding list stays one row instead of three.
+    pub fn cycled(self) -> Self {
+        let index = Self::ALL.iter().position(|factor| *factor == self);
+        // `ALL` contains every variant, so the fallback is unreachable; a 0
+        // start is still the honest answer if a variant is ever left out.
+        Self::ALL[(index.unwrap_or(0) + 1) % Self::ALL.len()]
+    }
+
     /// The evaluation resolution for a composition sized `(w, h)`.
     ///
     /// Rounding is **`div_ceil`**, chosen over `round` plus a `max(1)` clamp
@@ -94,6 +119,35 @@ mod tests {
     #[test]
     fn default_is_half() {
         assert_eq!(ViewerResolution::default(), ViewerResolution::Half);
+    }
+
+    #[test]
+    fn cycling_walks_every_factor_and_wraps() {
+        let mut factor = ViewerResolution::ALL[0];
+        let mut visited = Vec::new();
+        for _ in 0..ViewerResolution::ALL.len() {
+            visited.push(factor);
+            factor = factor.cycled();
+        }
+        // Every factor once, in the order the picker lists them, and back to
+        // the start: a cycle that skips one leaves it reachable only from the
+        // menu, and one that does not wrap dead-ends on `Quarter`.
+        assert_eq!(visited, ViewerResolution::ALL.to_vec());
+        assert_eq!(factor, ViewerResolution::ALL[0]);
+    }
+
+    #[test]
+    fn label_keys_are_distinct() {
+        let mut keys: Vec<_> = ViewerResolution::ALL
+            .iter()
+            .map(|factor| factor.label_key())
+            .collect();
+        keys.sort_unstable();
+        let total = keys.len();
+        keys.dedup();
+        // Two factors sharing a key makes the toolbar name the wrong one, and
+        // the i18n coverage test cannot see it — both keys exist.
+        assert_eq!(keys.len(), total, "two factors share a label key");
     }
 
     #[test]

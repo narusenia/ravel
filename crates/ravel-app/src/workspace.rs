@@ -109,6 +109,7 @@ macro_rules! for_each_command {
             ViewToggleRenderQueue,
             ViewToggleAttributeSpreadsheet,
             ViewToggleNodeParamValues,
+            ViewCyclePreviewResolution,
             ViewFit,
             PlaybackToggle,
             PlaybackStop,
@@ -1536,6 +1537,18 @@ impl RavelWorkspace {
                 // every Node Editor observes it and re-measures its nodes.
                 CommandId::ViewToggleNodeParamValues => {
                     panels::toggle_node_param_values(cx);
+                }
+                // The viewer's preview resolution factor (REQ-UI-004). Handled
+                // here rather than in the Viewer panel's `on_action`: the
+                // factor belongs to `ProjectState`, which builds the
+                // evaluation request, and it applies whichever panel has
+                // focus — a Viewer-scoped handler would make the chord dead
+                // while the user is in the Timeline.
+                CommandId::ViewCyclePreviewResolution => {
+                    self.project.update(cx, |project, cx| {
+                        let next = project.viewer_resolution().cycled();
+                        project.set_viewer_resolution(next, cx);
+                    });
                 }
                 // Named layouts (REQ-UI-005) plus the embed opt-in.
                 CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),

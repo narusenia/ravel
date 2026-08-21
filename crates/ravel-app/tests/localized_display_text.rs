@@ -16,6 +16,7 @@
 
 use ravel_app::panels::properties::read_only_value;
 use ravel_app::panels::timeline::channel_name_label;
+use ravel_app::panels::viewer::resolution_label;
 use ravel_core::composition::{Composition, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Graph, Node};
@@ -23,6 +24,7 @@ use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
 use ravel_core::network::{NET_OUT_TYPE_KEY, PORT_FRAME};
 use ravel_core::types::FrameRate;
 use ravel_ui::keyframes::{CHANNEL_VALUE, property_rows};
+use ravel_ui::panels::viewer::ViewerResolution;
 use ravel_ui::properties::layer::{
     DURATION_FRAMES, SOURCE_AUDIO, SOURCE_NETWORK, SOURCE_NULL, sections_for_layer,
 };
@@ -258,6 +260,59 @@ fn the_declarations_section_reads_as_sentences_in_every_locale() {
             let text = ravel_i18n::translate(key);
             assert_ne!(text, key, "{locale}: {key} has no translation");
             assert!(!text.is_empty(), "{locale}: {key} translates to nothing");
+        }
+    }
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
+/// The Viewer toolbar's preview resolution label (REQ-UI-004). Two things it
+/// has to get right, and neither is visible from the lib tests (which run with
+/// an empty i18n store, so every `t!` returns its key):
+///
+/// - the pair is a *translated* pattern with both factors substituted, not the
+///   raw `viewer.resolution_effective` key and not one factor's name twice;
+/// - it shows the pair only while the effective factor differs from the
+///   selected one. Nothing can make them differ yet — `VRES-4`'s adaptive
+///   downgrade will — so the divergence is constructed here.
+#[test]
+fn the_preview_resolution_label_distinguishes_selected_from_effective() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_i18n();
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+
+        for factor in ViewerResolution::ALL {
+            let name = ravel_i18n::translate(factor.label_key());
+            assert_ne!(
+                name,
+                factor.label_key(),
+                "{locale}: {factor:?} has no translation, so the toolbar shows the key"
+            );
+            // Agreeing factors read as one name: a permanent "1/2 → 1/2"
+            // would train the user to ignore the one signal that matters.
+            assert_eq!(resolution_label(factor, factor), name, "{locale}");
+        }
+
+        for selected in ViewerResolution::ALL {
+            for effective in ViewerResolution::ALL {
+                if selected == effective {
+                    continue;
+                }
+                let label = resolution_label(selected, effective);
+                assert!(
+                    label.contains(&ravel_i18n::translate(selected.label_key())),
+                    "{locale}: {label:?} dropped the selected factor {selected:?}"
+                );
+                assert!(
+                    label.contains(&ravel_i18n::translate(effective.label_key())),
+                    "{locale}: {label:?} dropped the effective factor {effective:?}"
+                );
+                assert!(
+                    !label.contains('{'),
+                    "{locale}: {label:?} left a placeholder unfilled"
+                );
+            }
         }
     }
     ravel_i18n::set_locale("en").expect("en catalog is shipped");

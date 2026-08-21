@@ -42,6 +42,20 @@ f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e
 加えて全アニメーションノードパラメータも通る。
 → `hi - lo < 1e-6` で早期終了（または Newton + 二分フォールバック）。60 は病的ケースの上限にする。
 
+**LOW-CORE-04 | bug | `a_load_time_pin_removal_is_logged` が稀に落ちる（機構未特定）**
+`crates/ravel-core/src/composition/mod.rs`（`warnings_from` と
+`a_load_time_pin_removal_is_logged`）
+`mise run check` の workspace テストで **1 回だけ**、捕まえた警告文が空で落ちた。
+その後 `ravel-core --lib` 全体を 6 回、`composition::` を 3 回、
+`mise run check` を計 4 回回して再現していない。
+機構の候補は潰してある: `sync_subnet_pins` は単一スレッド（`rayon` も
+`thread::spawn` も無い）、`warnings_from` は `tracing::subscriber::with_default`
+＝スレッドローカルなので並列テストに奪われない、警告に warn-once の
+ガードは無い、`ravel-core` のテストは環境変数を触らない。
+→ **CI で赤を見たらこの項目に追記する。**再現の筋道が立つまで直せない。
+1 回の観測だけで消すには惜しいので記録だけ残す（次に見た人が同じ 20 分を
+使わないため）。
+
 ---
 
 ## ravel-gpu / ravel-nodes
@@ -200,12 +214,22 @@ Delete でユーザーが見たことのないキーを削除する。
 次のスクラブまでミラーされたプレイヘッドが終端を超えたまま残る。
 → `sync_from_project` でクランプ。
 
-**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（latent）**
-`crates/ravel-app/src/audio/mixdown.rs:44-53`, `crates/ravel-app/src/audio/mod.rs:94-96`, `:358-379`
-`CacheKey` が `(asset_id, stream)` でパスを含まないため、将来リリンクを実装すると
-stale なデコードキャッシュにヒットする。
-一度オフラインになったアセットはセッション中に再試行されない（モジュールコメントは逆のことを書いている）。
-→ キーに解決済みパスを含める / `resolved` 変更時に失敗エントリをクリア。コメントを修正。
+**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（**latent ではなくなった** — #469 で到達可能）**
+`crates/ravel-audio/src/mixdown.rs:53`（`CacheKey`）、`crates/ravel-app/src/audio/mod.rs:106`・`:177`・`:386`
+`CacheKey` が `(asset_id, stream_index)` で**解決済みパスを含まない**。
+起票時は「将来リリンクを実装すると」という latent な指摘だったが、
+**`MEDIA-6`（#469）で Relink が入ったので今日到達する**:
+音声素材を Relink しても、そのセッションの間は**古いデコード結果が
+キャッシュから返り続ける**（映像側は `FrameKey::image(path, …)` が
+パス鍵なので影響を受けない — 音声だけが例外）。
+一度オフラインになったアセットはセッション中に再試行されない
+（モジュールコメントは逆のことを書いている）。
+**深刻度は low のままにしてあるが、実質「利用者の操作のあとに出る音が
+古い」= 出力の誤り**なので、着手順は low の並びではなく
+`roadmap.md` の基準 0 として扱う。
+→ キーに解決済みパスを含める / `resolved` の変更時に失敗エントリを消す。
+コメントを直す。**`ravel-audio` 側の `CacheKey` に手が入るので、
+`ravel-app` の 3 箇所と合わせて 1 単位**。
 
 **LOW-APP-09 | bug | `format_duration` が分境界で `0:60.0` を出す**
 `crates/ravel-app/src/panels/media_bin.rs:481-485`
@@ -245,6 +269,54 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 - `timeline.rs:1356` — `clamp(0, origin_out-1)` は `out_frame == 0` が起きると panic。
   現在の書き込み側はすべて ≥1 を保つが `Layer::with_time` は 0 を受理する。`min`/`max` を使う
 - `timeline.rs:1423` — dead な `let _ = changed;`
+
+**LOW-APP-27 | bug | `ui_state.json` に載る UI 状態を変えてもプロジェクトが dirty にならず、保存確認も出ずに失われる**
+`crates/ravel-app/src/project_state.rs:659`（`is_dirty` は `revision != saved_revision` だけを見る）
+`ui_state.json` に永続化される状態 — Timeline の BPM グリッド、コンポジションごとの
+ループ範囲、Properties で畳んだパラメータグループ（`PGRP-3`）、ノード本体の
+パラメータ値表示（`PGRP-5`）— はどれも Global を書くだけで `revision` を
+動かさない。したがって:
+- 保存済みプロジェクトで畳んだ / トグルしたあと**明示的に Save せずに**
+  終了・File ▸ New・File ▸ Open すると、**保存確認が出ない**
+- 次に開くと既定値に戻っている（利用者からは「覚えてくれない」に見える）
+**永続化そのものは動いている**（明示的に Save → Load で残る）。欠けているのは
+「UI 状態も未保存の変更である」という扱い。
+→ 判断が要る: (a) UI 状態の変更も dirty にする（`revision` とは別のフラグでも
+よい。保存確認の条件に足す）、(b) UI 状態は明示保存の対象外と割り切って
+文書にそう書く。**(a) なら「保存しますか」が UI 設定の変更でも出る**ので、
+どちらが望ましいかはプロダクトの判断。
+**備考**: #468（`PGRP-5`）の独立レビューで指摘された。`PGRP-3` から在る形で、
+`bpm_grid` / `loop_ranges` まで遡る。
+
+**LOW-APP-28 | debt | 数を埋め込むロケール文字列に単数形が無く「1 audio streams」と出る**
+`assets/locales/{en,ja}.toml`（`properties.media.audio_streams` /
+`kind_sequence` / `duration_frames` ほか `{count}` を持つキー）、
+`crates/ravel-ui/src/properties/media_asset.rs`（`probe_fields`）
+`ravel_i18n::translate` はキーを引いて `{count}` を置換するだけで、
+**複数形の選択機構が無い**。英語では「1 audio streams」「1 frames」のように
+出る（日本語は影響なし）。`duration_frames` は以前から同じ形なので、
+**新しいキーだけ単数形を足すと規約が 2 つになる**。
+→ 判断が要る: (a) `translate` に複数形の選択を足す（ICU MessageFormat 相当か、
+`*.one` / `*.other` の 2 キー規約）、(b) 数を含む文言を「Audio streams: 1」の
+形に寄せて単数複数の問題を回避する。
+**(b) は文言の作り直しだが機構を増やさない**。どちらもロケール全体に効く
+判断なので、キー単位で場当たりに直さないこと。
+**備考**: #469（`MEDIA-6`）の CodeRabbit レビューで指摘された。
+
+**LOW-APP-26 | debt | 非アクティブなコンプのノード行 / レイヤー行はシングルクリックが無反応で、理由が画面に出ない**
+`crates/ravel-app/src/panels/outliner.rs:698`（`on_row_click`）
+`active = active_composition == row.comp()` で、ノード行とレイヤー行の
+シングルクリックは `else if active` の中にある。**非アクティブなコンプの行を
+1 回クリックしても何も起きない**（行のハイライトすら変わらない）。
+これは設計どおりで、理由は関数の doc にある（`LayerSelection.comp ==
+ActiveComposition` を保つため）。問題は**そう見えないこと** — 「壊れている」と
+読めるので、ダブルクリックならコンプを切り替えて選択できることに気づけない。
+ヘッドレステスト（`a_node_row_selects_the_node_in_its_layer_network`）は
+アクティブなコンプの行しか押さないので、**この経路はテストにも無い**。
+→ (a) 非アクティブなコンプの行を「今は選べない」と見て分かるようにする、
+または (b) シングルクリックでコンプを切り替えてから選択する。
+どちらも 1 行の判断が要るので、まず**無反応であることのテスト**を足して
+現状を固定するだけでも良い。
 
 **LOW-APP-23 | bug | ノードの評価時間の表示がノード直下に出て、下のノードに被る**
 `crates/ravel-app/src/node_editor/painting.rs:495-508`

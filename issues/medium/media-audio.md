@@ -137,3 +137,40 @@ mtime も内容の版も含まない**。プロジェクトを開いたまま素
 - `hw_get_format` のフォールバックが先頭要素（別の HW フォーマットの可能性）を返す
 - prep スレッドのコメントが存在しない送信タイムアウトを約束している
 - FFmpeg ラッパーに対する包括的 `unsafe impl Send`
+
+## MED-MED-10 | debt | CI が `--features ffmpeg` を一度もビルドしない — 出荷する構成が検証されていない
+
+**該当**: `.github/workflows/ci.yml`、`crates/ravel-media/Cargo.toml`
+（`ffmpeg = ["dep:ffmpeg-the-third"]`、`default = []`）
+
+`ffmpeg` はワークスペース全体でオプトインのフィーチャで、`ci.yml` に
+`--features` が 1 つも出てこない。つまり **CI は素材のデコードとエンコードを
+含むビルドを一度も compile していない**。`mise run check` も同じ既定なので、
+手元でも同じ。
+
+`#[cfg(feature = "ffmpeg")]` の中身は型検査すら通らないまま `main` に入りうる。
+実際にこの穴で見つかったもの:
+
+- `ravel-cli` の `probe_asset`（`media-unreadable` の警告、`WARN-2`）は
+  cfg の中にあり、**CI では compile されない**
+- `ravel-media` の `read_image_frame` / `format::probe` / `decoder.rs` の
+  大部分が同じ位置にある
+
+**影響**: リリースは当然 `--features ffmpeg` で作る（そうでなければ動画が
+読めない）。その構成だけが壊れていても、PR は緑のまま通る。
+`Cargo.lock` の再解決が Windows のクレートを降格させる類の「手元では絶対に
+見えない」破損と同じ形で、**気づく場所が無い**のが問題。
+
+**修正方針**: `ci.yml` に `--features ffmpeg` のジョブを 1 本足す。
+少なくとも `cargo clippy -p ravel-media -p ravel-nodes -p ravel-cli
+--features ffmpeg --all-targets` までは、FFmpeg の開発ヘッダを入れれば
+runner で通る（macOS は `brew install ffmpeg`、Windows は vcpkg か
+プリビルド）。テストの実行までやるかは別の判断 — 素材ファイルを用意する
+必要があるので、**まず型検査だけでも価値がある**。
+
+`ffmpeg-the-third` のバージョンと runner の FFmpeg の互換が要る点に注意
+（手元では ffmpeg 8.1 と `ffmpeg-the-third 5.0` が非互換で、
+`cargo clippy --all-features` が依存クレート内で落ちる）。CI では
+runner の FFmpeg を固定して入れる方が安定する。
+
+**備考**: `WARN-2`（#467）の独立レビュー中に見つけた。

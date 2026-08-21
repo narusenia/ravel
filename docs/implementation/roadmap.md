@@ -322,9 +322,9 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 |---|---|
 | `AID-1` / `AID-2` | `AssetId` 型と `MediaAssetEntry` の分離（`.ravprj` v9）と参照 3 系統の切り替え（`asset-identity-plan.md`）**済**（#456） |
 | `AID-3` / `AID-4` | インポートの採番、MediaBin の改名 UI、ロケール / 文書 **済**（#460 — 露出宣言の所有権を `MediaAssetEntry::exposed_owner` へ明示化。計画書は `done/`） |
-| `DISK-1` | `IntChannel` と解決層（`.ravprj` v10。`discrete-keyframes-plan.md`）**済**（#457） |
-| `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書。`DISK-2` / `DISK-3` **済**（#462 — `.ravprj` v11、識別子パラメータはアニメート不可）。残りは `DISK-4〜6` |
-| `PGRP-4` | In ノードのインスタンスグループ（format +1。`parameter-groups-plan.md`） |
+| `DISK-1` | `IntChannel` と解決層（`.ravprj` v10。`done/discrete-keyframes-plan.md`）**済**（#457） |
+| `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書。**全部済**（#462 — `.ravprj` v11、識別子パラメータはアニメート不可 / #465 — Timeline の Int / String 行と Int カーブの階段描画。計画書は `done/`） |
+| `PGRP-4` | In ノードのインスタンスグループ（`.ravprj` **v12** / journal v11。`done/parameter-groups-plan.md`）**済**（#466 — `PGRP-1`〜`PGRP-3` も同じ PR） |
 | `CPO-5` | `layer` の Int → String 移行（format +1。`contextual-parameter-options-plan.md`。依存する `CPO-2` は post-release） |
 | `HIGH-26` | 保存できた `.ravprj` が読み込めない（単位ではないので `backlog.md` には無い）**済**（#455 — `MAX_SUBNET_DEPTH` 64 → 16 と `RON_RECURSION_LIMIT`） |
 
@@ -347,7 +347,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 なる）。`DISK-*` は「今できないことができるようになる」機能追加で、
 後回しにしても既存プロジェクトは壊れないため `AID-*` の後。
 
-## フェーズ B3: 出力が黙って間違わないこと
+## フェーズ B3: 出力が黙って間違わないこと（完了）
 
 **目標**: レンダーが**成功終了しながら間違った成果物を出す**経路を、
 機械可読な出力で言わせる。基準 0。フォーマットは触らないので B2 とは
@@ -356,9 +356,9 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 
 | 単位 | 内容 |
 |---|---|
-| `WARN-1` | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`。`render-warning-channel-plan.md`） |
-| `WARN-2` | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） |
-| `WARN-3` | ロケール / 文書 / issue の決着 |
+| `WARN-1` | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`。`done/render-warning-channel-plan.md`）**済**（#467） |
+| `WARN-2` | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`）**済**（#467 — `media-offline` / `media-unreadable` / `identifier-not-static`） |
+| `WARN-3` | ロケール / 文書 / issue の決着 **済**（#467 — `HIGH-34` / `HIGH-35` は `issues/closed/`） |
 
 **2 件の issue を 1 つの計画で扱う理由**は、どちらも「警告をどこに出すか」に
 行き当たるから。`HIGH-35`（識別子をワイヤで動かせる）を「評価時に無視する」で
@@ -933,7 +933,7 @@ issue 側に「単位が引き受けた」と記録して個別には着手し�
 |---|---|
 | `SHELL-1〜4` | `time_remap` / `track_matte` の配線と UI 露出 |
 | `BLUR-4〜5` | モーションブラー（`BLUR-2` は `CACHE-2`、`BLUR-3` はフェーズ C4 へ） |
-| `MEDIA-6` / `MEDIA-7` | メディア Properties と再リンク |
+| `MEDIA-6` / `MEDIA-7` | メディア Properties と再リンク **済**（#469 — インスペクタ / パス種別 / Relink / `Save As` の参照付け替え。#470 — Outliner / Timeline のオフライン印。**計画書は `done/`**） |
 | `AUDIO-5〜7` | 波形表示と解析ノード |
 | `PARAM-5` | カーブエディタの縦ズーム（Timeline と共有） |
 | `ALIGN-1〜3` | 整列・分布パネル |
@@ -1004,7 +1004,7 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 |---|---|
 | 近接修正 | `LOW-CORE-01`〜`03`、`LOW-GPU-02`〜`04`、`LOW-MED-01` / `02`、`LOW-AUD-01`、`LOW-UI-01` / `02` / `03`、`LOW-APP-02`〜`07`、`LOW-APP-09` / `10`、`LOW-APP-16` |
 | 単位が引き受けたもの | `LOW-APP-15`（キーバインド上書き → `SET-5`）、`LOW-APP-14`（分離ウィンドウの配置永続化 → `DOCK-9`）、`LOW-APP-17`（分離窓失敗ログの `eprintln!` → `DOCK-8` で該当コードごと削除）。`MED-APP-01`（分離窓クローズの desync）も `DOCK-6` が引き受けた。**これ以外は引き受け先が無い**（`LOW-UI-03` は `OVL-3` と同じ箇所を触るが、あの単位はメモ化を約束していないので随時側に残す） |
-| 依存待ち | `LOW-APP-08`（音声デコードキャッシュのキーがパスを含まず、リリンク実装後に stale ヒットする）は `MEDIA-7`（再リンク）と同時に直す — 再リンクが無い今は発現しない |
+| **着手可能（基準 0）** | `LOW-APP-08`（音声デコードキャッシュのキーがパスを含まない）は **#469 で Relink が入った時点で発現するようになった** — 音声素材を Relink してもセッション中は古い音が返る。映像側はパス鍵なので影響なし。**次に拾う 1 件**（起票は `issues/low/backlog.md`、深刻度ラベルは low のまま扱いは基準 0） |
 
 **基準 0 は low にも適用する。** データを失う形のバグは深刻度ラベルに関係なく
 フェーズ A2 へ上げる（`LOW-APP-01` と `LOW-GPU-01` がその例で、上表からは

@@ -60,10 +60,6 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
-| DISK-4 | Timeline の Int / String 行とキーフレーム編集 | `discrete-keyframes-plan.md` |
-| WARN-1 | 識別子パラメータの解決を 1 経路に畳む | `render-warning-channel-plan.md` |
-| PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
-| PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
 | NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
@@ -79,7 +75,6 @@
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
 | FX-4 | トランスフォーム拡張と合成（マスク / キーイング） | `effects-library-plan.md` |
-| MEDIA-6 | メディア Properties + 再リンク | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
@@ -703,24 +698,24 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
 | CICACHE-2 | ✅ #339 | 効果の計測と設定の詰め（cold/warm 実測、R2 見積もり、`line-tables-only`） | CICACHE-1 ✅ |
 
-### 離散パラメータのキーフレーム（`discrete-keyframes-plan.md`）
+### 離散パラメータのキーフレーム（`done/discrete-keyframes-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | DISK-1 | ✅ #457 | `IntChannel` と解決層（フォーマット上げ。`.ravprj` v10） | — |
 | DISK-2 | ✅ #462 | `StepCurve<String>` と `StringSteps` | DISK-1 ✅ |
 | DISK-3 | ✅ #462 | Properties のキーフレームトグルと再型付け | DISK-1, DISK-2 |
-| DISK-4 | 🟡 | Timeline の行とキーフレーム編集 | DISK-3 ✅ |
-| DISK-5 | ⬜ | カーブエディタの階段描画（Int のみ） | DISK-4 |
-| DISK-6 | ⬜ | ロケール / 文書 | DISK-1〜5 |
+| DISK-4 | ✅ #465 | Timeline の行とキーフレーム編集 | DISK-3 ✅ |
+| DISK-5 | ✅ #465 | カーブエディタの階段描画（Int のみ） | DISK-4 ✅ |
+| DISK-6 | ✅ #465 | ロケール / 文書 | DISK-1〜5 ✅ |
 
-### レンダーの警告経路（`render-warning-channel-plan.md`）
+### レンダーの警告経路（`done/render-warning-channel-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| WARN-1 | 🟡 | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`） | — |
-| WARN-2 | ⬜ | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） | WARN-1 |
-| WARN-3 | ⬜ | ロケール / 文書 / issue の決着 | WARN-1, WARN-2 |
+| WARN-1 | ✅ #467 | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`。予約と評価の一致） | — |
+| WARN-2 | ✅ #467 | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） | WARN-1 ✅ |
+| WARN-3 | ✅ #467 | ロケール / 文書 / issue の決着 | WARN-1, WARN-2 ✅ |
 
 ### 素材の同一性（`asset-identity-plan.md`）
 
@@ -731,16 +726,16 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | AID-3 | ✅ #460 | インポートの採番と MediaBin の改名 UI（**露出宣言の所有権をここで決める** — 計画書参照） | AID-2 ✅ |
 | AID-4 | ✅ #460 | ロケール / 文書 | AID-1〜3 |
 
-### パラメータのグループ（`parameter-groups-plan.md`）
+### パラメータのグループ（`done/parameter-groups-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PGRP-1 | 🟡 | `NodeTemplate::param_groups` と Properties の分割（挙動不変） | — |
-| PGRP-2 | ⬜ | 組み込みノードへのグループ宣言 | PGRP-1 |
-| PGRP-3 | ⬜ | 開閉状態の永続化（`ui_state.json`） | PGRP-1 |
-| PGRP-4 | ⬜ | In ノードのインスタンスグループ（フォーマット上げ） | PGRP-1 |
-| PGRP-5 | 🟡 | ノードエディタのパラメータ値表示トグル | — |
-| PGRP-6 | ⬜ | ロケール / 文書 | PGRP-2〜5 |
+| PGRP-1 | ✅ #466 | `NodeTemplate::param_groups` と Properties の分割（挙動不変） | — |
+| PGRP-2 | ✅ #466 | 組み込みノードへのグループ宣言（6 個以上の 9 テンプレート） | PGRP-1 ✅ |
+| PGRP-3 | ✅ #466 | 開閉状態の永続化（`ui_state.json`。版は据え置き） | PGRP-1 ✅ |
+| PGRP-4 | ✅ #466 | In ノードのインスタンスグループ（`.ravprj` v12 / journal v11） | PGRP-1 ✅ |
+| PGRP-5 | ✅ #468 | ノードエディタのパラメータ値表示トグル（`ui_state.json`） | — |
+| PGRP-6 | ✅ #468 | ロケール / 文書 | PGRP-2〜5 ✅ |
 
 ### ワークフロー貫通の UX（`refactor-plan-0808.md`）
 
@@ -1091,8 +1086,8 @@ CPU フィールド評価は 10 万で 1.17 ms しかないので、GPU-2 が効
 | A4-3 | ✅ | 音声準備状態と失敗の可視化 | #212 |
 | A4-4 | ✅ | 文書更新と完了ゲート | #212 |
 | MEDIA-1〜5 | ✅ | アセットモデル / media ノード / インポート / MediaBin / サムネイル | #167, #173, #176, #177, #169 |
-| MEDIA-6 | 🟡 | Properties + 再リンク | — |
-| MEDIA-7 | ⬜ | オフライン表示 + 文書 | MEDIA-6 |
+| MEDIA-6 | ✅ #469 | Properties + 再リンク（`Save As` の参照付け替えを含む） | — |
+| MEDIA-7 | ✅ #470 | オフライン表示 + 文書（Outliner / Timeline のレイヤー行に印） | MEDIA-6 ✅ |
 | AUDIO-1〜4 | ✅ | データモデル / ミキサ / 再生配線 / 動画音声 | #172, #168, #174, #178 |
 | AUDIO-5 | 🟡 | 波形表示 | — |
 | AUDIO-6 | 🟡 | 解析ノード（RMS / ピーク） | — |

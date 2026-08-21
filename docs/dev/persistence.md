@@ -12,7 +12,7 @@
 | `manifest.json` | `format_version` とプロジェクト情報。**マイグレーション連鎖の起点** |
 | `document/main.ron` | Composition・レイヤー・ネットワーク（Subnet 入れ子含む）・キーフレーム・`media_assets`（v9 で `AssetId` キー）・`exposed_parameters`（公開パラメータ宣言、v7 で追加）。決定的 RON |
 | `settings.toml` | プロジェクト設定 |
-| `ui_state.json` | UI 状態（アクティブコンポジション、Timeline の BPM グリッド、コンポジションごとのループ範囲、Properties で畳んだパラメータグループ）。**任意エントリ**で、欠落時はアクティブコンポジションが `root_comp` に、BPM グリッドが既定に、ループ範囲が 0 件に、パラメータグループが全展開にフォールバック |
+| `ui_state.json` | UI 状態（アクティブコンポジション、Timeline の BPM グリッド、コンポジションごとのループ範囲、Properties で畳んだパラメータグループ、ノード本体のパラメータ値を描くか）。**任意エントリ**で、欠落時はアクティブコンポジションが `root_comp` に、BPM グリッドが既定に、ループ範囲が 0 件に、パラメータグループが全展開に、パラメータ値の表示が**描く**にフォールバック |
 | `workspace_layout.toml` | ワークスペースレイアウト。**任意エントリ**かつ**オプトイン**（既定 OFF）で、トグルが OFF のときは書かれない |
 
 保存時は前のリビジョンを `.bak` にする。書き込みはアトミック

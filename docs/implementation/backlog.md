@@ -61,7 +61,6 @@
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
 | WARN-1 | 識別子パラメータの解決を 1 経路に畳む | `render-warning-channel-plan.md` |
-| PGRP-1 | `NodeTemplate::param_groups` と Properties の分割 | `parameter-groups-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
@@ -734,12 +733,12 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PGRP-1 | 🟡 | `NodeTemplate::param_groups` と Properties の分割（挙動不変） | — |
-| PGRP-2 | ⬜ | 組み込みノードへのグループ宣言 | PGRP-1 |
-| PGRP-3 | ⬜ | 開閉状態の永続化（`ui_state.json`） | PGRP-1 |
-| PGRP-4 | ⬜ | In ノードのインスタンスグループ（フォーマット上げ） | PGRP-1 |
+| PGRP-1 | ✅ #466 | `NodeTemplate::param_groups` と Properties の分割（挙動不変） | — |
+| PGRP-2 | ✅ #466 | 組み込みノードへのグループ宣言（6 個以上の 9 テンプレート） | PGRP-1 ✅ |
+| PGRP-3 | ✅ #466 | 開閉状態の永続化（`ui_state.json`。版は据え置き） | PGRP-1 ✅ |
+| PGRP-4 | ✅ #466 | In ノードのインスタンスグループ（`.ravprj` v12 / journal v11） | PGRP-1 ✅ |
 | PGRP-5 | 🟡 | ノードエディタのパラメータ値表示トグル | — |
-| PGRP-6 | ⬜ | ロケール / 文書 | PGRP-2〜5 |
+| PGRP-6 | ⬜ | ロケール / 文書 | PGRP-2〜4 ✅, PGRP-5 |
 
 ### ワークフロー貫通の UX（`refactor-plan-0808.md`）
 

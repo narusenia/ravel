@@ -324,7 +324,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `AID-3` / `AID-4` | インポートの採番、MediaBin の改名 UI、ロケール / 文書 **済**（#460 — 露出宣言の所有権を `MediaAssetEntry::exposed_owner` へ明示化。計画書は `done/`） |
 | `DISK-1` | `IntChannel` と解決層（`.ravprj` v10。`done/discrete-keyframes-plan.md`）**済**（#457） |
 | `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書。**全部済**（#462 — `.ravprj` v11、識別子パラメータはアニメート不可 / #465 — Timeline の Int / String 行と Int カーブの階段描画。計画書は `done/`） |
-| `PGRP-4` | In ノードのインスタンスグループ（format +1。`parameter-groups-plan.md`） |
+| `PGRP-4` | In ノードのインスタンスグループ（`.ravprj` **v12** / journal v11。`parameter-groups-plan.md`）**済**（#466 — `PGRP-1`〜`PGRP-3` も同じ PR） |
 | `CPO-5` | `layer` の Int → String 移行（format +1。`contextual-parameter-options-plan.md`。依存する `CPO-2` は post-release） |
 | `HIGH-26` | 保存できた `.ravprj` が読み込めない（単位ではないので `backlog.md` には無い）**済**（#455 — `MAX_SUBNET_DEPTH` 64 → 16 と `RON_RECURSION_LIMIT`） |
 

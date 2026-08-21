@@ -464,16 +464,7 @@ impl AudioService {
             self.mark_preparation_failed(key, "media asset is offline", cx);
             return;
         };
-        // The previous file's entries are unreachable now that this asset
-        // resolves elsewhere, and a full decode is up to
-        // `mixdown::MAX_DECODE_BYTES` of memory nothing can ever read again.
-        let superseded = |other: &CacheKey| {
-            other.asset_id == key.asset_id
-                && other.stream_index == key.stream_index
-                && other.resolved != key.resolved
-        };
-        self.cache.retain(|other, _| !superseded(other));
-        self.failed.retain(|other| !superseded(other));
+        self.drop_superseded(&key);
 
         let generation = self.generation;
         self.pending.insert(key.clone(), generation);
@@ -505,6 +496,23 @@ impl AudioService {
             });
         })
         .detach();
+    }
+
+    /// Drop what this asset's stream held under a *different* file.
+    ///
+    /// Those entries are unreachable the moment the asset resolves elsewhere,
+    /// and a decoded buffer is up to [`mixdown::MAX_DECODE_BYTES`] of memory
+    /// nothing can read again. In-flight decodes are left alone: cancelling
+    /// them is not possible, and what they insert lands under their own —
+    /// now superseded — key, which the next relink of the same stream clears.
+    fn drop_superseded(&mut self, key: &CacheKey) {
+        let superseded = |other: &CacheKey| {
+            other.asset_id == key.asset_id
+                && other.stream_index == key.stream_index
+                && other.resolved != key.resolved
+        };
+        self.cache.retain(|other, _| !superseded(other));
+        self.failed.retain(|other| !superseded(other));
     }
 
     /// Remove a completed preparation only when it still owns the pending
@@ -627,6 +635,37 @@ mod tests {
         service.failed.insert(key);
         assert!(!service.is_asset_preparing(music()));
         assert!(!service.is_layer_preparing(LayerId::new(7)));
+    }
+
+    /// A relink frees the previous file's decoded buffer and its failure
+    /// entry, and leaves every other asset and stream alone.
+    #[test]
+    fn a_relink_drops_only_the_previous_files_entries() {
+        let mut service = AudioService::with_sink(None, 48_000);
+        let old_file = spec(7, music(), 2).cache_key();
+        let other_stream = spec(7, music(), 3).cache_key();
+        let mut relinked = old_file.clone();
+        relinked.resolved = Some(std::sync::Arc::from(std::path::Path::new("/other.wav")));
+
+        service.cache_decoded(
+            old_file.clone(),
+            DecodedAudio {
+                samples: vec![0.0; 8].into(),
+                sample_rate: 48_000,
+                channels: 2,
+            },
+        );
+        service.failed.insert(old_file.clone());
+        service.failed.insert(other_stream.clone());
+
+        service.drop_superseded(&relinked);
+
+        assert!(!service.cache.contains_key(&old_file), "buffer freed");
+        assert!(!service.failed.contains(&old_file), "failure retried");
+        assert!(
+            service.failed.contains(&other_stream),
+            "another stream of the same asset is untouched"
+        );
     }
 
     #[test]

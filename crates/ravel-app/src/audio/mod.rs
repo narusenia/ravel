@@ -14,7 +14,8 @@
 //!   output rate before it enters the cache, so later placement edits reach
 //!   the mixer at the next mixed block without repeating SRC.
 //! - Source audio is decoded and resampled on the background executor (never
-//!   the UI thread) and cached per asset + stream, per decision 8 of the plan
+//!   the UI thread) and cached per asset + stream + resolved file (the key a
+//!   relink has to miss, see [`CacheKey`]), per decision 8 of the plan
 //!   (full-length decode, memory-resident, warn-and-skip past
 //!   [`mixdown::MAX_DECODE_BYTES`]).
 //! - The engine starts lazily on the first audio layer and its absence is
@@ -102,10 +103,13 @@ pub struct AudioService {
     /// Sample rate the engine runs at; every placement value is converted
     /// into these frames (see [`ravel_audio::mixdown`]).
     output_rate: u32,
-    /// Fully decoded source audio per asset + stream (decision 8).
+    /// Fully decoded source audio per asset + stream + resolved file
+    /// (decision 8).
     cache: HashMap<CacheKey, Arc<DecodedAudio>>,
-    /// Assets that failed to decode (offline, over the memory cap, …); not
-    /// retried until the document is replaced.
+    /// Attempts that failed to decode (offline, over the memory cap, …); not
+    /// retried until the document is replaced or the asset resolves to
+    /// another file — the key carries the path, so a relink is a miss here
+    /// too.
     failed: HashSet<CacheKey>,
     /// Decodes currently in flight on the background executor, tagged with
     /// the document generation that requested them.
@@ -234,7 +238,7 @@ impl AudioService {
         let comp = crate::panels::active_composition_in(document, cx);
         let comp_fps = comp.map(|c| c.frame_rate).unwrap_or(FrameRate::new(30, 1));
         let mut desired = comp
-            .map(|comp| AudioMixdown::desired_tracks(comp, self.output_rate))
+            .map(|comp| AudioMixdown::desired_tracks(document, comp, self.output_rate))
             .unwrap_or_default();
         self.desired_count = desired.len();
         if self.desired_count > 0 {
@@ -242,7 +246,7 @@ impl AudioService {
             self.ensure_engine(cx);
             if self.output_rate != previous_rate {
                 desired = comp
-                    .map(|comp| AudioMixdown::desired_tracks(comp, self.output_rate))
+                    .map(|comp| AudioMixdown::desired_tracks(document, comp, self.output_rate))
                     .unwrap_or_default();
                 self.desired_count = desired.len();
             }
@@ -449,17 +453,30 @@ impl AudioService {
         if self.pending.contains_key(&key) || self.failed.contains(&key) {
             return;
         }
-        let Some(entry) = document.get_media_asset(spec.asset_id) else {
+        if document.get_media_asset(spec.asset_id).is_none() {
             self.mark_preparation_failed(key, "audio layer references an unknown media asset", cx);
             return;
-        };
-        let Some(path) = entry.resolved.clone() else {
+        }
+        // What the asset resolved to when the spec was built, not a second
+        // lookup: the key this decode lands under has to be the key the
+        // diff will look for.
+        let Some(path) = spec.resolved.clone() else {
             self.mark_preparation_failed(key, "media asset is offline", cx);
             return;
         };
+        // The previous file's entries are unreachable now that this asset
+        // resolves elsewhere, and a full decode is up to
+        // `mixdown::MAX_DECODE_BYTES` of memory nothing can ever read again.
+        let superseded = |other: &CacheKey| {
+            other.asset_id == key.asset_id
+                && other.stream_index == key.stream_index
+                && other.resolved != key.resolved
+        };
+        self.cache.retain(|other, _| !superseded(other));
+        self.failed.retain(|other| !superseded(other));
 
         let generation = self.generation;
-        self.pending.insert(key, generation);
+        self.pending.insert(key.clone(), generation);
         cx.notify();
         let stream_index = spec.stream_index;
         let output_rate = self.output_rate;
@@ -574,6 +591,9 @@ mod tests {
             layer_id: LayerId::new(layer),
             asset_id,
             stream_index,
+            resolved: Some(std::sync::Arc::from(std::path::Path::new(
+                "/ravel/tests/music.wav",
+            ))),
             start_frame: 0,
             source_in_frames: 0,
             source_out_frames: u64::MAX,
@@ -590,7 +610,7 @@ mod tests {
         let mut service = AudioService::with_sink(None, 48_000);
         let spec = spec(7, music(), 2);
         let key = spec.cache_key();
-        service.pending.insert(key, service.generation);
+        service.pending.insert(key.clone(), service.generation);
         service.sent.insert(
             spec.layer_id,
             SentTrack {
@@ -614,10 +634,10 @@ mod tests {
         let mut service = AudioService::with_sink(None, 48_000);
         let key = spec(7, music(), 2).cache_key();
 
-        service.pending.insert(key, 0);
+        service.pending.insert(key.clone(), 0);
         service.pending.clear();
         service.generation = 1;
-        service.pending.insert(key, 1);
+        service.pending.insert(key.clone(), 1);
 
         service.finish_pending_generation(&key, 0);
         assert!(service.is_asset_preparing(music()));

@@ -30,10 +30,11 @@
 use crate::{Track, TrackGain};
 use ravel_core::animation::AnimationChannel;
 use ravel_core::animation::channel::ChannelSource;
-use ravel_core::composition::Composition;
+use ravel_core::composition::{Composition, Document};
 use ravel_core::eval::EvalContext;
 use ravel_core::id::{AssetId, LayerId};
 use ravel_core::types::FrameRate;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Cap on decoded audio held in memory per asset (decision 8 of the plan:
@@ -42,19 +43,34 @@ use std::sync::Arc;
 /// headroom.
 pub const MAX_DECODE_BYTES: usize = 128 * 1024 * 1024;
 
-/// Cache key for decoded audio: the document asset plus the stream inside
-/// its container. The resolved path is recorded in [`DecodedAudio`] for
-/// diagnostics; identity stays the asset id so a relink does not silently
-/// swap content under a playing track (the spec diff re-sends on change).
+/// Cache key for decoded audio: the document asset, the stream inside its
+/// container, and **the file that asset resolves to right now**.
 ///
-/// The id, not the asset's display name: renaming an asset must not evict the
-/// buffer decoded from the file it still points at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The resolved path is part of the identity because the cache outlives a
+/// relink. Keyed by the asset id alone, a relinked layer keeps hearing the
+/// audio decoded from the file it no longer points at, and an asset that was
+/// offline once is never retried for the rest of the session
+/// (`issues/closed/low.md`, `LOW-APP-08`). The video side keys its decoded
+/// frames on the path for the same reason
+/// (`ravel_media::frame_cache::FrameKey`).
+///
+/// `resolved: None` is the key of an asset that resolves to nothing — the
+/// entry an offline preparation failure is recorded under, so the next path
+/// the asset resolves to cannot hit it.
+///
+/// The asset id stays in the key beside the path: it is what a layer
+/// references, and preparation queries ask about the id. The id, never the
+/// asset's display name — renaming an asset must not evict the buffer
+/// decoded from the file it still points at.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     /// Identity of the asset in `Document::media_assets`.
     pub asset_id: AssetId,
     /// Audio stream number inside the container.
     pub stream_index: usize,
+    /// The file the asset resolved to when this entry was made; `None` while
+    /// the asset is offline (or gone from the document).
+    pub resolved: Option<Arc<Path>>,
 }
 
 /// One fully decoded and output-rate-prepared audio stream, shared between
@@ -148,6 +164,14 @@ pub struct TrackSpec {
     pub asset_id: AssetId,
     /// Audio stream number inside the container.
     pub stream_index: usize,
+    /// The file `asset_id` resolves to, `None` while the asset is offline or
+    /// missing from the document.
+    ///
+    /// Resolved here rather than at decode time so that it takes part in the
+    /// spec diff *and* in [`CacheKey`]: a relink changes the spec, which
+    /// rebuilds the track, and changes the key, which stops the rebuild from
+    /// reusing the audio decoded from the previous file.
+    pub resolved: Option<Arc<Path>>,
     /// Output-timeline sample frame where the track starts playing.
     pub start_frame: u64,
     /// First layer-local source frame (composition frames) that is heard:
@@ -176,16 +200,18 @@ impl TrackSpec {
         CacheKey {
             asset_id: self.asset_id,
             stream_index: self.stream_index,
+            resolved: self.resolved.clone(),
         }
     }
 
     /// The parts of the spec that decide the expensive build products (the
     /// sample slice and the gain curve). Placement/mute/fade changes reuse
     /// the previously built track; a build-key change rebuilds it.
-    fn build_key(&self) -> (AssetId, usize, u64, u64, &AnimationChannel) {
+    fn build_key(&self) -> (AssetId, usize, Option<&Path>, u64, u64, &AnimationChannel) {
         (
             self.asset_id,
             self.stream_index,
+            self.resolved.as_deref(),
             self.source_in_frames,
             self.source_out_frames,
             &self.gain,
@@ -206,11 +232,19 @@ impl AudioMixdown {
     /// Collect the desired mixer state of every audio-carrying layer in
     /// `comp`, in output-rate units.
     ///
+    /// `document` supplies what `comp` cannot: the file each referenced asset
+    /// currently resolves to ([`TrackSpec::resolved`]). Layer timing comes
+    /// from the composition, asset identity from the document.
+    ///
     /// Solo/mute follows the compositor's `active_layers` rule: a muted
     /// layer is silent, and when any layer (audio or not) is soloed, every
     /// non-solo layer is silent. Parenting deliberately has no effect on
     /// audio — the parent's transform means nothing to sound.
-    pub fn desired_tracks(comp: &Composition, output_rate: u32) -> Vec<TrackSpec> {
+    pub fn desired_tracks(
+        document: &Document,
+        comp: &Composition,
+        output_rate: u32,
+    ) -> Vec<TrackSpec> {
         let fps = comp.frame_rate;
         let any_solo = comp.layers.iter().any(|layer| layer.solo);
         comp.layers
@@ -225,6 +259,10 @@ impl AudioMixdown {
                     layer_id: layer.id,
                     asset_id: audio.asset_id,
                     stream_index: audio.stream_index,
+                    resolved: document
+                        .get_media_asset(audio.asset_id)
+                        .and_then(|entry| entry.resolved.as_deref())
+                        .map(Arc::from),
                     start_frame: comp_frames_to_rate(timeline_start, fps, output_rate),
                     source_in_frames: layer.in_frame + head_skip,
                     source_out_frames: if layer.out_frame > layer.in_frame {
@@ -406,9 +444,10 @@ mod tests {
     use super::*;
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
-    use ravel_core::composition::{AudioSource, Layer};
+    use ravel_core::composition::{AudioSource, Layer, MediaAssetEntry};
     use ravel_core::graph::Graph;
     use ravel_core::id::LayerId;
+    use std::path::PathBuf;
 
     const FPS_30: FrameRate = FrameRate { num: 30, den: 1 };
     const OUTPUT_RATE: u32 = 48_000;
@@ -424,6 +463,13 @@ mod tests {
             .with_time(start, 0, 300);
         layer.audio = Some(audio);
         layer
+    }
+
+    /// Desired tracks for a document that holds nothing but `comp`: no media
+    /// asset entry, so every spec's `resolved` is `None`. The tests that care
+    /// about the resolved path build a document with one.
+    fn tracks(comp: Composition) -> Vec<TrackSpec> {
+        AudioMixdown::desired_tracks(&Document::default(), &comp, OUTPUT_RATE)
     }
 
     fn comp(layers: Vec<Layer>) -> Composition {
@@ -476,10 +522,7 @@ mod tests {
     #[test]
     fn start_frame_is_converted_to_output_rate() {
         // Layer starts at comp frame 30 = 1s at 30fps → 48 000 output frames.
-        let spec = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, 30, source(AssetId::next()))]),
-            OUTPUT_RATE,
-        );
+        let spec = tracks(comp(vec![audio_layer(1, 30, source(AssetId::next()))]));
         assert_eq!(spec.len(), 1);
         assert_eq!(spec[0].start_frame, 48_000);
         assert_eq!(spec[0].source_in_frames, 0);
@@ -489,10 +532,7 @@ mod tests {
     fn negative_start_trims_the_source_head() {
         // Layer starts 15 comp frames before the origin: the track starts at
         // output frame 0 and the first 15 source frames are skipped.
-        let spec = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, -15, source(AssetId::next()))]),
-            OUTPUT_RATE,
-        );
+        let spec = tracks(comp(vec![audio_layer(1, -15, source(AssetId::next()))]));
         assert_eq!(spec[0].start_frame, 0);
         assert_eq!(spec[0].source_in_frames, 15);
     }
@@ -507,10 +547,7 @@ mod tests {
         let mut audio_muted = audio_layer(4, 0, source(AssetId::next()));
         audio_muted.audio.as_mut().unwrap().audio_muted = true;
 
-        let specs = AudioMixdown::desired_tracks(
-            &comp(vec![quiet, soloed_video, audible, audio_muted]),
-            OUTPUT_RATE,
-        );
+        let specs = tracks(comp(vec![quiet, soloed_video, audible, audio_muted]));
         assert_eq!(specs.len(), 3);
         assert!(specs[0].muted, "layer mute");
         assert!(specs[1].muted, "silenced by another layer's solo");
@@ -521,7 +558,7 @@ mod tests {
     #[test]
     fn layers_without_audio_produce_no_specs() {
         let silent = Layer::new(LayerId::new(1), "solid", Graph::new());
-        assert!(AudioMixdown::desired_tracks(&comp(vec![silent]), OUTPUT_RATE).is_empty());
+        assert!(tracks(comp(vec![silent])).is_empty());
     }
 
     #[test]
@@ -529,7 +566,7 @@ mod tests {
         let mut audio = source(AssetId::next());
         audio.fade_in_frames = 15; // 0.5s at 30fps
         audio.fade_out_frames = 30; // 1s
-        let spec = AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
+        let spec = tracks(comp(vec![audio_layer(1, 0, audio)]));
         assert_eq!(spec[0].fade_in_frames, 24_000);
         assert_eq!(spec[0].fade_out_frames, 48_000);
     }
@@ -538,8 +575,7 @@ mod tests {
     fn constant_gain_stays_constant() {
         let mut audio = source(AssetId::next());
         audio.gain = AnimationChannel::constant(0.25);
-        let specs =
-            AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
+        let specs = tracks(comp(vec![audio_layer(1, 0, audio)]));
         let source = decoded(100, 2, 48_000);
         let track = AudioMixdown::build_track(&specs[0], &source, FPS_30, OUTPUT_RATE)
             .expect("audible range");
@@ -558,8 +594,7 @@ mod tests {
         let mut audio = source(AssetId::next());
         audio.gain = AnimationChannel::keyframes(curve);
 
-        let specs =
-            AudioMixdown::desired_tracks(&comp(vec![audio_layer(1, 0, audio)]), OUTPUT_RATE);
+        let specs = tracks(comp(vec![audio_layer(1, 0, audio)]));
         // 2s of prepared source: the curve length follows the output rate.
         let track = AudioMixdown::build_track(
             &specs[0],
@@ -587,7 +622,7 @@ mod tests {
     fn trimmed_source_is_sliced() {
         let mut layer = Layer::new(LayerId::new(1), "a", Graph::new()).with_time(0, 30, 60);
         layer.audio = Some(source(AssetId::next()));
-        let specs = AudioMixdown::desired_tracks(&comp(vec![layer]), OUTPUT_RATE);
+        let specs = tracks(comp(vec![layer]));
         assert_eq!(specs[0].source_in_frames, 30);
         assert_eq!(specs[0].source_out_frames, 60);
         // 30..60 comp frames at 30fps = 1s..2s of a 3s 48kHz source.
@@ -603,11 +638,7 @@ mod tests {
 
     #[test]
     fn empty_trim_range_builds_nothing() {
-        let mut spec = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, 0, source(AssetId::next()))]),
-            OUTPUT_RATE,
-        )[0]
-        .clone();
+        let mut spec = tracks(comp(vec![audio_layer(1, 0, source(AssetId::next()))]))[0].clone();
         spec.source_in_frames = 300;
         spec.source_out_frames = 300;
         assert!(
@@ -616,13 +647,54 @@ mod tests {
         );
     }
 
+    /// The resolved file is part of the spec and of its cache key, so a
+    /// relink cannot be served the audio decoded from the previous file
+    /// (`LOW-APP-08`).
+    #[test]
+    fn the_resolved_file_comes_from_the_document_and_keys_the_cache() {
+        let asset = AssetId::next();
+        let before = PathBuf::from("/media/take-1.wav");
+        let document = Document::default()
+            .with_composition(comp(vec![audio_layer(1, 0, source(asset))]))
+            .with_media_asset_entry(asset, MediaAssetEntry::from_absolute(before.clone()));
+        let composition = document
+            .get_composition(document.root_comp.unwrap())
+            .unwrap();
+
+        let spec = &AudioMixdown::desired_tracks(&document, composition, OUTPUT_RATE)[0];
+        assert_eq!(spec.resolved.as_deref(), Some(before.as_path()));
+        assert_eq!(spec.cache_key().resolved.as_deref(), Some(before.as_path()));
+
+        // Relinked: same asset id and stream, another file.
+        let after = PathBuf::from("/media/take-2.wav");
+        let relinked = document
+            .clone()
+            .with_media_asset_entry(asset, MediaAssetEntry::from_absolute(after.clone()));
+        let relinked_spec = &AudioMixdown::desired_tracks(&relinked, composition, OUTPUT_RATE)[0];
+        assert_eq!(relinked_spec.resolved.as_deref(), Some(after.as_path()));
+        assert_ne!(
+            relinked_spec.cache_key(),
+            spec.cache_key(),
+            "a relinked asset must miss the previous file's cache entry"
+        );
+        assert_ne!(
+            relinked_spec, spec,
+            "the diff has to see the change, or the track is never rebuilt"
+        );
+        assert!(
+            !spec.shares_build_with(relinked_spec),
+            "another file is another set of samples, not a placement patch"
+        );
+
+        // Offline: no file, and therefore not the online key either.
+        let offline = &tracks(comp(vec![audio_layer(1, 0, source(asset))]))[0];
+        assert!(offline.resolved.is_none());
+        assert_ne!(offline.cache_key(), spec.cache_key());
+    }
+
     #[test]
     fn build_key_sharing_ignores_placement_and_mute() {
-        let base = AudioMixdown::desired_tracks(
-            &comp(vec![audio_layer(1, 0, source(AssetId::next()))]),
-            OUTPUT_RATE,
-        )[0]
-        .clone();
+        let base = tracks(comp(vec![audio_layer(1, 0, source(AssetId::next()))]))[0].clone();
         let mut moved = base.clone();
         moved.start_frame = 48_000;
         moved.muted = true;

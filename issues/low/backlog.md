@@ -260,6 +260,21 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
   現在の書き込み側はすべて ≥1 を保つが `Layer::with_time` は 0 を受理する。`min`/`max` を使う
 - `timeline.rs:1423` — dead な `let _ = changed;`
 
+**LOW-APP-26 | debt | 非アクティブなコンプのノード行 / レイヤー行はシングルクリックが無反応で、理由が画面に出ない**
+`crates/ravel-app/src/panels/outliner.rs:698`（`on_row_click`）
+`active = active_composition == row.comp()` で、ノード行とレイヤー行の
+シングルクリックは `else if active` の中にある。**非アクティブなコンプの行を
+1 回クリックしても何も起きない**（行のハイライトすら変わらない）。
+これは設計どおりで、理由は関数の doc にある（`LayerSelection.comp ==
+ActiveComposition` を保つため）。問題は**そう見えないこと** — 「壊れている」と
+読めるので、ダブルクリックならコンプを切り替えて選択できることに気づけない。
+ヘッドレステスト（`a_node_row_selects_the_node_in_its_layer_network`）は
+アクティブなコンプの行しか押さないので、**この経路はテストにも無い**。
+→ (a) 非アクティブなコンプの行を「今は選べない」と見て分かるようにする、
+または (b) シングルクリックでコンプを切り替えてから選択する。
+どちらも 1 行の判断が要るので、まず**無反応であることのテスト**を足して
+現状を固定するだけでも良い。
+
 **LOW-APP-23 | bug | ノードの評価時間の表示がノード直下に出て、下のノードに被る**
 `crates/ravel-app/src/node_editor/painting.rs:495-508`
 評価時間の読み出しを**ノードごとに、ノードの直下**（`wy + sh + 2`）へ描く。

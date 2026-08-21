@@ -48,6 +48,7 @@ shader_editor = "Shader Editor"
 lua_console = "Lua Console"
 render_queue = "Render Queue"
 attribute_spreadsheet = "Attribute Spreadsheet"
+node_param_values = "Show Parameter Values"
 fit = "Fit View"
 
 [menu.composition]

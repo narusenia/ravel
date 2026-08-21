@@ -46,6 +46,7 @@ shader_editor = "シェーダエディタ"
 lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
 attribute_spreadsheet = "属性スプレッドシート"
+node_param_values = "パラメータ値を表示"
 fit = "全体表示"
 
 [menu.composition]

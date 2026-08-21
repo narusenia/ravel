@@ -860,6 +860,10 @@ impl ProjectState {
                 collapsed_param_groups: crate::panels::collapsed_param_groups(cx)
                     .into_iter()
                     .collect(),
+                // And for the node bodies' parameter rows: drawn is the
+                // default, so only "hidden" is worth an entry.
+                show_node_param_values: Some(crate::panels::show_node_param_values(cx))
+                    .filter(|shown| !shown),
             },
             workspace_layout,
             settings: crate::app_settings::layer(crate::app_settings::SettingsScope::Project, cx),
@@ -1080,6 +1084,7 @@ impl ProjectState {
         let bpm_grid = ui_state.bpm_grid();
         let loop_ranges = ui_state.loop_ranges(&document);
         let collapsed_param_groups = ui_state.collapsed_param_groups();
+        let show_node_param_values = ui_state.show_node_param_values();
         // The layer selection of the previous document never carries over —
         // even a reloaded project reuses composition ids for different
         // content. Published after the swap so observers resolve the new id
@@ -1089,6 +1094,7 @@ impl ProjectState {
         crate::panels::set_bpm_grid(bpm_grid, cx);
         crate::panels::set_loop_ranges(loop_ranges, cx);
         crate::panels::set_collapsed_param_groups(collapsed_param_groups, cx);
+        crate::panels::set_show_node_param_values(show_node_param_values, cx);
         crate::app_settings::set_project_layer(settings, cx);
         self.project_path = path;
         self.generation += 1;
@@ -3500,6 +3506,75 @@ mod tests {
             probe.read_with(cx, |probe, _| probe.rebuilds) > baseline,
             "a document edit must still notify observers"
         );
+    }
+
+    /// PGRP-5: the node bodies' parameter rows are UI state, so hiding them
+    /// has to survive save → File ▸ New → load. The default direction is what
+    /// the write filter can get backwards, so both are asserted: hidden comes
+    /// back hidden, and a project saved with the rows showing opens showing
+    /// them.
+    #[gpui::test]
+    fn hiding_the_node_parameter_values_survives_a_save_and_load(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let dir = std::env::temp_dir().join(format!("ravel_param_rows_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hidden_path = dir.join("hidden.ravprj");
+        let shown_path = dir.join("shown.ravprj");
+        for path in [&hidden_path, &shown_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
+        }
+
+        cx.update(|cx| {
+            assert!(
+                crate::panels::show_node_param_values(cx),
+                "the rows are drawn until someone turns them off"
+            );
+            crate::panels::set_show_node_param_values(false, cx);
+        });
+        project.update(cx, |project, cx| {
+            project.save_project_to(hidden_path.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        // File ▸ New goes back to the default, so the reload has something to
+        // change.
+        project.update(cx, |project, cx| project.new_document(cx));
+        cx.update(|cx| assert!(crate::panels::show_node_param_values(cx)));
+        project.update(cx, |project, cx| {
+            project.save_project_to(shown_path.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            project.load_project_from(hidden_path.clone(), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                !crate::panels::show_node_param_values(cx),
+                "the saved session had the rows hidden"
+            );
+        });
+
+        project.update(cx, |project, cx| {
+            project.load_project_from(shown_path.clone(), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                crate::panels::show_node_param_values(cx),
+                "a project saved with the rows showing must not open hidden"
+            );
+        });
+
+        for path in [&hidden_path, &shown_path] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(ravel_project::container::backup_path(path));
+        }
+        let _ = std::fs::remove_dir(&dir);
     }
 
     /// RESP-2: `mirror_epoch` is the panel rebuild gate, so it must move for

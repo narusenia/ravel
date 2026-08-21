@@ -85,6 +85,19 @@ pub struct UiState {
     /// decision table in `docs/dev/persistence.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_param_groups: Vec<(String, String)>,
+
+    /// Whether the Node Graph editor draws the parameter name/value rows in
+    /// the node bodies (`parameter-groups-plan.md`, PGRP-5).
+    ///
+    /// One flag for the whole canvas rather than one per node: a per-node
+    /// setting is more state to carry for a preference nobody sets twice.
+    ///
+    /// `None` (or a missing entry) is the ordinary first-run state and reads
+    /// as "drawn" through [`Self::show_node_param_values`], so an untouched
+    /// project writes no entry and `format_version` stays put — the same rule
+    /// as `bpm_grid` above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_node_param_values: Option<bool>,
 }
 
 impl UiState {
@@ -130,6 +143,12 @@ impl UiState {
             .filter(|(type_key, _)| !type_key.is_empty())
             .cloned()
             .collect()
+    }
+
+    /// Whether the Node Graph editor should draw the parameter rows in the
+    /// node bodies: the persisted choice, or "drawn" when the entry is absent.
+    pub fn show_node_param_values(&self) -> bool {
+        self.show_node_param_values.unwrap_or(true)
     }
 
     /// The composition the UI should open `document` on: the persisted one
@@ -398,5 +417,33 @@ mod tests {
     fn an_entry_without_the_field_opens_fully_expanded() {
         let state = UiState::from_json(r#"{"active_comp": 1}"#).unwrap();
         assert!(state.collapsed_param_groups().is_empty());
+    }
+
+    /// The node-body parameter rows are drawn by default, so only the hidden
+    /// state is written — an untouched project keeps the `ui_state.json`
+    /// earlier builds wrote, and an archive without the field opens with the
+    /// rows visible.
+    #[test]
+    fn hidden_node_parameter_values_round_trip_and_are_absent_by_default() {
+        let json = UiState::default().to_json().unwrap();
+        assert!(
+            !json.contains("show_node_param_values"),
+            "unexpected json: {json}"
+        );
+        assert!(UiState::from_json(&json).unwrap().show_node_param_values());
+        assert!(
+            UiState::from_json(r#"{"active_comp": 1}"#)
+                .unwrap()
+                .show_node_param_values()
+        );
+
+        let state = UiState {
+            show_node_param_values: Some(false),
+            ..UiState::default()
+        };
+        let json = state.to_json().unwrap();
+        let back = UiState::from_json(&json).unwrap();
+        assert_eq!(back, state);
+        assert!(!back.show_node_param_values());
     }
 }

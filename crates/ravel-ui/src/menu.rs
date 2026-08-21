@@ -190,6 +190,13 @@ impl MenuBar {
                     visibility.is_visible(PanelKind::AttributeSpreadsheet),
                 ),
                 MenuItem::Separator,
+                // Not a `check` item: the only checkboxes the menu carries
+                // come from state this headless model owns (panel visibility,
+                // the active preset), and the node bodies' parameter rows are
+                // application UI state the shell does not hold. The canvas
+                // answers instead — the rows appear or the nodes shrink —
+                // which is a stronger signal than a tick in a closed menu.
+                MenuItem::action(CommandId::ViewToggleNodeParamValues),
                 MenuItem::action(CommandId::ViewFit),
                 // Detaching had a label key and a keybinding but no menu row,
                 // so it was reachable by chord alone. A panel-scoped chord can

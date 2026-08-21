@@ -75,7 +75,6 @@
 | FX-2 | ブラー / シャープ / ディストーション | `effects-library-plan.md` |
 | FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
 | FX-4 | トランスフォーム拡張と合成（マスク / キーイング） | `effects-library-plan.md` |
-| MEDIA-7 | オフライン表示 + 文書（media-import 計画が閉じる） | `media-import-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
@@ -1088,7 +1087,7 @@ CPU フィールド評価は 10 万で 1.17 ms しかないので、GPU-2 が効
 | A4-4 | ✅ | 文書更新と完了ゲート | #212 |
 | MEDIA-1〜5 | ✅ | アセットモデル / media ノード / インポート / MediaBin / サムネイル | #167, #173, #176, #177, #169 |
 | MEDIA-6 | ✅ #469 | Properties + 再リンク（`Save As` の参照付け替えを含む） | — |
-| MEDIA-7 | 🟡 | オフライン表示 + 文書 | MEDIA-6 ✅ |
+| MEDIA-7 | ✅ #470 | オフライン表示 + 文書（Outliner / Timeline のレイヤー行に印） | MEDIA-6 ✅ |
 | AUDIO-1〜4 | ✅ | データモデル / ミキサ / 再生配線 / 動画音声 | #172, #168, #174, #178 |
 | AUDIO-5 | 🟡 | 波形表示 | — |
 | AUDIO-6 | 🟡 | 解析ノード（RMS / ピーク） | — |

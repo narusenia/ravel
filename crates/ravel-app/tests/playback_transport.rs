@@ -303,15 +303,23 @@ fn a_ruler_scrub_lowers_the_preview_factor_and_a_transport_publish_does_not(
             controller.handle_command(CommandId::FrameStepForward, cx);
         });
     });
+    // Checked before the clock moves: a settle timer would restore the factor
+    // and hide the drop from the assertion below.
+    cx.update(|cx| {
+        assert_eq!(
+            project.read(cx).effective_viewer_resolution(),
+            ViewerResolution::Full,
+            "a transport publish lowered the preview factor, so playback would \
+             run the whole way at a degraded resolution"
+        );
+    });
     cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
 
     cx.update(|cx| {
         let project = project.read(cx);
         assert_eq!(
             project.effective_viewer_resolution(),
-            ViewerResolution::Full,
-            "a transport publish lowered the preview factor, so playback would \
-             run the whole way at a degraded resolution"
+            ViewerResolution::Full
         );
         assert_eq!(
             project.viewer_eval_requests(),

@@ -108,14 +108,27 @@ pub fn node_width(zoom: f32) -> f32 {
 /// them while not drawing them (or the reverse) leaves the node box and the
 /// picture disagreeing about where the body ends. Every caller therefore
 /// takes the flag from `panels::show_node_param_values`.
-pub fn compute_node_size(node: &Node, zoom: f32, show_param_values: bool) -> (f32, f32) {
-    let z = zoom;
-    let port_rows = node.inputs.len().max(node.outputs.len());
-    let param_rows = if show_param_values {
+/// How many parameter rows a node body shows — `0` when the values are
+/// hidden, whatever the node holds.
+///
+/// [`compute_node_size`] and [`paint_single_node`] both go through this, which
+/// is the whole point: a body painted with rows the height did not reserve
+/// spills over the node below it, and a height that reserved rows nobody
+/// painted moves every port's hit target down by rows that are not there
+/// (`MED-APP-13` was that disagreement). One function means the two cannot
+/// drift apart — a change to the rule is a change to both.
+pub fn painted_param_rows(node: &Node, show_param_values: bool) -> usize {
+    if show_param_values {
         node.parameters.len()
     } else {
         0
-    };
+    }
+}
+
+pub fn compute_node_size(node: &Node, zoom: f32, show_param_values: bool) -> (f32, f32) {
+    let z = zoom;
+    let port_rows = node.inputs.len().max(node.outputs.len());
+    let param_rows = painted_param_rows(node, show_param_values);
     let sep = if param_rows > 0 { 6.0 * z } else { 0.0 };
     let h = BASE_NODE_PAD * z
         + BASE_HEADER_H * z
@@ -778,7 +791,8 @@ fn paint_single_node(
     // Skipped wholesale when the rows are off, separator included: the
     // height `compute_node_size` returned for this node left no room for
     // either (the two read the same flag).
-    if show_param_values && !node.parameters.is_empty() {
+    let rows = painted_param_rows(node, show_param_values);
+    if rows > 0 {
         let param_row_h = BASE_PARAM_ROW_H * z;
         let params_base_y =
             port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z;
@@ -798,7 +812,7 @@ fn paint_single_node(
             }),
         ));
 
-        for (i, param) in node.parameters.iter().enumerate() {
+        for (i, param) in node.parameters.iter().enumerate().take(rows) {
             let py = params_base_y + i as f32 * param_row_h;
             let key_w = paint_mono_text_measured(
                 &param.key,
@@ -1729,6 +1743,24 @@ mod tests {
     /// PGRP-5: turning the parameter rows off takes their height — and the
     /// separator above them — out of the node, and leaves the width alone. A
     /// node with no parameters is the same size either way, so the toggle
+    /// The row count is one rule, and both the height and the paint read it.
+    /// A body that painted rows the height did not reserve would spill over
+    /// the node below; a height that reserved rows nobody painted would move
+    /// every port's hit target down (`MED-APP-13`).
+    #[test]
+    fn the_painted_row_count_is_zero_exactly_when_the_values_are_hidden() {
+        let bare = Node::new(NodeId::new(1), "constant");
+        let with_params = Node::new(NodeId::new(2), "blur")
+            .with_param("radius", ParameterValue::Float(2.0))
+            .with_param("quality", ParameterValue::Int(1));
+
+        assert_eq!(painted_param_rows(&with_params, true), 2);
+        assert_eq!(painted_param_rows(&with_params, false), 0);
+        // A node with nothing to show is the same either way.
+        assert_eq!(painted_param_rows(&bare, true), 0);
+        assert_eq!(painted_param_rows(&bare, false), 0);
+    }
+
     /// cannot move anything that was not showing rows.
     #[test]
     fn hiding_the_parameter_values_shrinks_the_node_by_its_parameter_rows() {

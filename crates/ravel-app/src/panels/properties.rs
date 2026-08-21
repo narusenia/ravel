@@ -52,7 +52,7 @@ use gpui_component::select::{SelectEvent, SelectState};
 use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::color::ColorSpace;
-use ravel_core::composition::{AssetMetadata, Document, Layer};
+use ravel_core::composition::{AssetMetadata, Document, Layer, MediaAssetEntry};
 use ravel_core::eval::EvalContext;
 use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
@@ -74,6 +74,9 @@ use ravel_ui::properties::expression;
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
+};
+use ravel_ui::properties::media_asset::{
+    SECTION_FILE, apply_media_asset_field, sections_for_media_asset,
 };
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
@@ -415,6 +418,25 @@ fn custom_port_row(
 
 /// The trailing row: a name to type, the type the port gets, and the button
 /// that creates it.
+/// The Relink button of a media asset's file section: pick another file for
+/// this asset (media-import plan unit 6).
+///
+/// The click opens a file dialog and probes what it returns, both off the UI
+/// thread ([`crate::media::import::prompt_relink`]) — nothing here reaches the
+/// disk, and nothing here dispatches a command: replacing one asset's
+/// reference is a widget action on the panel's own subject, not an application
+/// command with a shortcut.
+fn relink_row(asset_id: ravel_core::id::AssetId) -> Div {
+    div().flex().justify_end().px_1().py(px(2.0)).child(
+        gpui_component::button::Button::new("media-relink")
+            .xsmall()
+            .label(SharedString::from(t!("properties.media.relink")))
+            .on_click(move |_event, _window, cx| {
+                crate::media::import::prompt_relink(asset_id, cx);
+            }),
+    )
+}
+
 fn add_port_row(
     ports: &PortWidgets,
     gutter: bool,
@@ -2659,6 +2681,54 @@ impl PropertiesGpuiPanel {
         });
     }
 
+    /// Resolve the current media asset target from the live document. `None`
+    /// once the asset is gone (removed from the project, undone) — the panel
+    /// then shows its empty state instead of a stale reference.
+    fn resolved_media_asset(&self, cx: &App) -> Option<MediaAssetEntry> {
+        let PropertiesTarget::MediaAsset { id } = &self.target else {
+            return None;
+        };
+        self.project
+            .as_ref()?
+            .read(cx)
+            .document()
+            .get_media_asset(*id)
+            .cloned()
+    }
+
+    /// Route a media asset field edit into the document (media-import plan
+    /// unit 6): the persisted path, or the form it is stored in.
+    ///
+    /// Always one committed step — there is no gesture to preview, and the
+    /// hint is `Structural` because the reference is what the `media` node
+    /// resolves: an asset that just came online has to be pulled again, and
+    /// one that went offline has to stop serving the old file's frames.
+    fn apply_media_asset_change(
+        &mut self,
+        key: &str,
+        value: PropertyValue,
+        cx: &mut Context<Self>,
+    ) {
+        let PropertiesTarget::MediaAsset { id } = &self.target else {
+            return;
+        };
+        let id = *id;
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let Some(mut entry) = self.resolved_media_asset(cx) else {
+            return;
+        };
+        let root = project.read(cx).project_root();
+        if !apply_media_asset_field(&mut entry, key, &value, root.as_deref()) {
+            return;
+        }
+        project.update(cx, |project, cx| {
+            let doc = project.document().clone().with_media_asset_entry(id, entry);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+    }
+
     /// Route a layer field edit into the document (REQ-LAYER-009).
     fn apply_layer_change(
         &mut self,
@@ -3360,6 +3430,10 @@ impl PropertiesGpuiPanel {
             self.apply_composition_change(key, value, commit, cx);
             return;
         }
+        if matches!(self.target, PropertiesTarget::MediaAsset { .. }) {
+            self.apply_media_asset_change(key, value, cx);
+            return;
+        }
         // A multi-layer target has no editable field (REQ-UI-013 v1): a widget
         // left over from the previous single-layer target must not route an
         // edit at a selection this panel cannot apply it to.
@@ -3414,6 +3488,22 @@ impl PropertiesGpuiPanel {
         let property_value = PropertyValue::String(value);
         self.update_field_value(key, &property_value);
         self.route_change(key, property_value, true, node_ids, cx);
+        // A refused edit — a blank composition name, a blank asset path —
+        // changes no document, so nothing else would ever put the retained
+        // value back and the row would keep displaying text that is not in
+        // the document. Reading the sections back from the document is what
+        // makes "refused" visible: the Input still shows what the user typed
+        // while it has focus (never yank text from under a typist), and
+        // `sync_string_widgets` snaps it back the moment it loses focus.
+        //
+        // Only for the targets this panel applies itself, which it has already
+        // committed by now. A node edit travels through the owning node editor
+        // and is not in the document yet, so re-reading here would restore the
+        // pre-edit value — and the blur that follows an Enter would then see a
+        // *changed* value and commit a second undo step.
+        if !matches!(self.target, PropertiesTarget::Nodes { .. }) {
+            self.refresh_values(cx);
+        }
     }
 
     /// Apply a color picker change live and debounce the undo commit: the
@@ -3698,9 +3788,13 @@ impl PropertiesGpuiPanel {
                 Some(settings) => sections_for_composition(&settings),
                 None => Vec::new(),
             },
-            // A media asset shows a placeholder until unit 6 builds the real
-            // inspector (metadata, path editing, relink).
-            PropertiesTarget::MediaAsset { .. } => Vec::new(),
+            // A media asset's probed metadata and its file reference
+            // (REQ-UI-008). Nothing here is sampled at a frame, and nothing
+            // here touches the file.
+            PropertiesTarget::MediaAsset { .. } => match self.resolved_media_asset(cx) {
+                Some(entry) => sections_for_media_asset(&entry),
+                None => Vec::new(),
+            },
             // The project's external parameter contract (REQ-PROJ-006). The
             // section exists even when nothing is declared, so the list has
             // somewhere to say so.
@@ -4569,15 +4663,7 @@ impl Render for PropertiesGpuiPanel {
             .track_focus(&self.focus_handle);
 
         if self.sections.is_empty() {
-            // A media asset target has no sections yet (unit 6 builds the
-            // real inspector); say so instead of showing the generic empty
-            // state, which would read as "nothing selected".
-            let message = match &self.target {
-                PropertiesTarget::MediaAsset { .. } => {
-                    t!("panel.properties.media_asset_placeholder")
-                }
-                _ => t!("panel.properties.empty"),
-            };
+            let message = t!("panel.properties.empty");
             content = content.child(
                 div()
                     .size_full()
@@ -4824,11 +4910,20 @@ impl Render for PropertiesGpuiPanel {
                 None => vec![None; sections.len()],
             };
 
+            // The asset the Relink button acts on, `None` for every other
+            // target. The button sits under the file reference rather than on
+            // a row of its own values, because it replaces all of them.
+            let relink_asset = match &self.target {
+                PropertiesTarget::MediaAsset { id } => Some(*id),
+                _ => None,
+            };
+
             let mut accordion = Accordion::new("properties-accordion")
                 .multiple(true)
                 .small();
             for (index, section) in sections.into_iter().enumerate() {
                 let fields = section.fields.clone();
+                let relink = relink_asset.filter(|_| section.title == SECTION_FILE);
                 let title: SharedString = ravel_i18n::translate(&section.title).into();
                 // A section with no fold identity is always open.
                 let open = !param_group_keys
@@ -4991,6 +5086,9 @@ impl Render for PropertiesGpuiPanel {
                         if let Some(body) = expression_body {
                             container = container.child(body);
                         }
+                    }
+                    if let Some(asset_id) = relink {
+                        container = container.child(relink_row(asset_id));
                     }
                     item.title(title.clone()).open(open).child(container)
                 });
@@ -5640,6 +5738,144 @@ mod tests {
                 .stream_index,
             2
         );
+    }
+
+    /// Unit 6: a media asset target shows the file reference and routes both
+    /// of its edits — the path text and the form it is stored in — into the
+    /// document as one undo step each.
+    ///
+    /// The routing is what this pins: a target whose branch is missing from
+    /// `route_change` renders its widgets and silently swallows every edit.
+    #[gpui::test]
+    fn media_asset_path_edits_route_into_the_document(cx: &mut TestAppContext) {
+        use ravel_core::id::AssetId;
+        use ravel_ui::properties::media_asset::{FIELD_PATH, FIELD_PATH_KIND, PATH_ABSOLUTE};
+
+        let (window, project, ..) = setup(cx);
+        let clip = AssetId::new(7);
+        project.update(cx, |project, cx| {
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset(clip, "/media/clip.mov");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        window
+            .update(cx, |panel, window, cx| {
+                panel.target = PropertiesTarget::MediaAsset { id: clip };
+                panel.rebuild_widgets(window, cx);
+            })
+            .unwrap();
+
+        let entry = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_media_asset(clip)
+                    .expect("the asset")
+                    .clone()
+            })
+        };
+
+        // The reference is on screen, editable, and the placeholder is gone.
+        let path_field = window
+            .update(cx, |panel, _window, _cx| {
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find(|field| field.key() == FIELD_PATH)
+                    .cloned()
+                    .expect("the path row")
+            })
+            .unwrap();
+        assert!(matches!(
+            path_field,
+            PropertyField::String { ref value, .. } if value == "/media/clip.mov"
+        ));
+
+        // Typing another path re-resolves the reference.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_string_change(FIELD_PATH, "/media/other.mov".into(), &[], cx);
+            })
+            .unwrap();
+        assert_eq!(
+            entry(cx).resolved.as_deref(),
+            Some(std::path::Path::new("/media/other.mov"))
+        );
+
+        // Switching the form to the one it already has is not an edit, so it
+        // records no second step: one undo puts the original path back.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.route_change(
+                    FIELD_PATH_KIND,
+                    PropertyValue::String(PATH_ABSOLUTE.into()),
+                    true,
+                    &[],
+                    cx,
+                );
+            })
+            .unwrap();
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            entry(cx).resolved.as_deref(),
+            Some(std::path::Path::new("/media/clip.mov"))
+        );
+    }
+
+    /// A refused string edit leaves the panel showing the document rather
+    /// than the rejected text: a blank asset path changes nothing, so nothing
+    /// else would ever restore the row.
+    #[gpui::test]
+    fn a_refused_string_edit_snaps_the_row_back_to_the_document(cx: &mut TestAppContext) {
+        use ravel_core::id::AssetId;
+        use ravel_ui::properties::media_asset::FIELD_PATH;
+
+        let (window, project, ..) = setup(cx);
+        let clip = AssetId::new(11);
+        project.update(cx, |project, cx| {
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset(clip, "/media/clip.mov");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        let shown = window
+            .update(cx, |panel, window, cx| {
+                panel.target = PropertiesTarget::MediaAsset { id: clip };
+                panel.rebuild_widgets(window, cx);
+                panel.commit_string_change(FIELD_PATH, "   ".into(), &[], cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::String { key, value } if key == FIELD_PATH => {
+                            Some(value.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("the path row")
+            })
+            .unwrap();
+        assert_eq!(
+            shown, "/media/clip.mov",
+            "the row shows the reference the document still holds"
+        );
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project
+                    .document()
+                    .get_media_asset(clip)
+                    .expect("the asset")
+                    .path,
+                ravel_core::composition::AssetPath::Absolute("/media/clip.mov".into()),
+                "a refused edit changed no document"
+            );
+        });
     }
 
     /// Enter commits the string edit, and the following blur is ignored as

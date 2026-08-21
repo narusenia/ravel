@@ -165,7 +165,7 @@ impl MediaBinPanel {
 /// usable file name. Never the id: an [`AssetId`] is a number the user has no
 /// way to connect to a file, so showing it would be worse than showing
 /// nothing.
-fn asset_name(entry: &MediaAssetEntry) -> String {
+pub fn asset_name(entry: &MediaAssetEntry) -> String {
     if !entry.name.trim().is_empty() {
         return entry.name.clone();
     }
@@ -175,6 +175,17 @@ fn asset_name(entry: &MediaAssetEntry) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty() && !name.starts_with("${"))
         .unwrap_or_default()
+}
+
+/// `m:ss.t` for a duration in seconds.
+///
+/// Shared with the Properties media-asset section
+/// (`crate::properties::media_asset`) so a row and its inspector never spell
+/// the same length two ways.
+pub fn format_duration(secs: f64) -> String {
+    let minutes = (secs / 60.0).floor() as u64;
+    let seconds = secs - minutes as f64 * 60.0;
+    format!("{minutes}:{seconds:04.1}")
 }
 
 /// One layer referencing an asset, named by its composition for the delete

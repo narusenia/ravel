@@ -1244,6 +1244,66 @@ mod tests {
         );
     }
 
+    /// Unit 6's completion condition at the level that decides it: an offline
+    /// asset paints nothing and opens no file, and the **same asset id**
+    /// pointed at a real one by a relink evaluates to that file's picture.
+    ///
+    /// The two halves are pinned apart elsewhere
+    /// (`a_reference_to_a_missing_asset_yields_a_transparent_frame`,
+    /// `a_relinked_asset_never_hits_the_old_paths_frame`); what this adds is
+    /// the sequence, which is what "the evaluation comes back" means.
+    #[test]
+    fn relinking_an_offline_asset_brings_its_picture_back() {
+        let (image_factory, reads) = counting_image_factory();
+        let processor = MediaProcessor::with_factories_and_cache(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+            MediaFrameCache::standalone(),
+        );
+        let online = still("/fake/plate_0002.png");
+        let (mut ev, graph) = media_evaluator(
+            processor,
+            MediaAssetEntry {
+                resolved: None,
+                ..online.clone()
+            },
+        );
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (4, 4));
+
+        let offline_frame = ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap();
+        assert!(
+            offline_frame
+                .downcast_ref::<FrameBuffer>()
+                .expect("a frame")
+                .as_f32()
+                .iter()
+                .all(|value| *value == 0.0),
+            "an offline asset is transparent, not an error"
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "and it opens no file at all"
+        );
+
+        // Relink: the same asset id now resolves.
+        ev.set_document(Arc::new(
+            Document::default().with_media_asset_entry(test_asset(), online),
+        ));
+        ev.invalidate_all();
+
+        assert_eq!(
+            decoded_frame_index(&ev.evaluate(&graph, NodeId::new(1), &ctx).unwrap()),
+            2.0,
+            "the relinked asset serves its own file's frame"
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "which it read exactly once"
+        );
+    }
+
     /// The key names the resolved path, so a relinked asset cannot be served
     /// the frame decoded from the file it used to point at. Getting this
     /// wrong shows the old footage with no way to tell.

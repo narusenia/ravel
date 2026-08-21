@@ -119,6 +119,13 @@ pub enum ProjectEvent {
     MediaImportSkipped {
         failures: Vec<crate::media::import::ImportFailure>,
     },
+    /// A relink could not read the file the user picked. Separate from
+    /// [`Self::MediaImportSkipped`] because it is a different sentence: an
+    /// import that skips a file adds nothing, a relink that fails leaves an
+    /// existing reference as it was.
+    MediaRelinkFailed {
+        failure: crate::media::import::ImportFailure,
+    },
 }
 
 /// The document the session now holds came from somewhere else: a project that
@@ -656,6 +663,29 @@ impl ProjectState {
         self.project_path.as_deref()
     }
 
+    /// The directory the open `.ravprj` lives in — the project root a relative
+    /// or variable asset reference is measured against. `None` for a project
+    /// that has never been saved, which leaves references absolute rather than
+    /// rooting them at the process's working directory.
+    ///
+    /// Resolved through the same function the loader and the writer use, so
+    /// what a stored form means here is what it means on disk.
+    pub fn project_root(&self) -> Option<PathBuf> {
+        self.project_path
+            .as_deref()
+            .and_then(ravel_project::project_root_of)
+    }
+
+    /// Identity of the document currently open; see the field's doc comment.
+    ///
+    /// Read by background work that has to decide whether its result still
+    /// belongs to the document it was started for
+    /// ([`crate::media::import::relink_asset_with`]) — a File ▸ Open or New
+    /// in the meantime makes the same [`AssetId`] a different asset.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether the live document has changes newer than its last completed
     /// save (or its New/load baseline).
     pub fn is_dirty(&self) -> bool {
@@ -921,16 +951,26 @@ impl ProjectState {
                         // write must not inherit a path that describes
                         // different content.
                         if this.generation == generation {
+                            // `Save As` into another directory changes what
+                            // every relative and variable reference means, so
+                            // the live document has to be re-read against the
+                            // new root before anything evaluates again.
+                            let root_moved =
+                                ravel_project::project_root_of(&path) != this.project_root();
                             this.project_path = Some(path.clone());
                             this.saved_revision = revision;
-                            if this.revision == revision {
+                            let outcome = if this.revision == revision {
                                 SaveOutcome::Saved
                             } else {
                                 cx.emit(ProjectEvent::SaveChangedDuringWrite {
                                     path: path.clone(),
                                 });
                                 SaveOutcome::SavedButDirty
+                            };
+                            if root_moved {
+                                this.rebase_asset_references(cx);
                             }
+                            outcome
                         } else {
                             tracing::warn!(
                                 path = %path.display(),
@@ -962,6 +1002,52 @@ impl ProjectState {
             });
         })
         .detach();
+    }
+
+    /// Rebase every asset reference on the current project root, exactly the
+    /// way the writer does.
+    ///
+    /// Called after a `Save As` that moved the root. The two steps are the
+    /// writer's own ([`ravel_project::ProjectFile::to_archive_for_root`]
+    /// relativizes, the loader resolves), in that order, so the live document
+    /// ends up holding what the archive it just wrote holds — reopening the
+    /// new file lands on the same paths the session already has.
+    ///
+    /// What that means per form, because the order is the whole rule:
+    ///
+    /// - a **relative** reference is rewritten from `resolved`, which is the
+    ///   source of truth ([`MediaAssetEntry::relativized`]): `Save As` copies
+    ///   the project, never the footage, so a clip that lived beside the old
+    ///   `.ravprj` keeps being that clip and the stored form turns absolute;
+    /// - a **variable** reference is left alone by the relativize step on
+    ///   purpose — the user chose it — so it re-resolves against the new
+    ///   `${PROJECT_ROOT}`, which is the whole point of being able to set one;
+    /// - an **offline** reference keeps its stored path (there is no
+    ///   `resolved` to rewrite it from) and can come online if the new root
+    ///   answers it.
+    ///
+    /// Deliberately **not** an edit: no `revision` bump and no undo step.
+    /// Rewriting `path` without dirtying the project is honest precisely
+    /// because the archive on disk already carries that form — "matches what
+    /// was saved" still holds. The retained versions are mapped too, so an
+    /// undo cannot restore a reading measured against the directory the
+    /// project no longer lives in.
+    fn rebase_asset_references(&mut self, cx: &mut Context<Self>) {
+        let root = self.project_root();
+        let changed = self.store.rederive(|document| {
+            document
+                .clone()
+                .with_relativized_assets(root.as_deref())
+                .with_resolved_assets(root.as_deref(), &HashMap::new())
+        });
+        if !changed {
+            return;
+        }
+        tracing::info!(
+            root = ?root,
+            "rebased asset references on the new project root"
+        );
+        self.document_changed(InvalidationHint::Structural, cx);
     }
 
     /// Load a `.ravprj` from `path`, replacing the current document (File ▸
@@ -1183,11 +1269,7 @@ impl ProjectState {
             return summary;
         }
 
-        let project_root = self
-            .project_path
-            .as_deref()
-            .and_then(|path| path.parent())
-            .map(Path::to_path_buf);
+        let project_root = self.project_root();
 
         let mut doc = self.store.document().clone();
         // Dedupe within the batch as well as against the document: two
@@ -1238,6 +1320,66 @@ impl ProjectState {
             self.commit_document(doc, InvalidationHint::Structural, cx);
         }
         summary
+    }
+
+    /// Point an existing asset at another file (media-import plan unit 6).
+    /// One `commit_document`, so a relink is exactly one undo step and `Cmd+Z`
+    /// puts the old reference — and the offline state that came with it —
+    /// back.
+    ///
+    /// `probed` describes the new file, so `kind` and `metadata` are replaced
+    /// along with the path: leaving the old file's resolution and duration on
+    /// screen would describe footage that is no longer there. What survives is
+    /// everything the *user* said about the asset — its display name, an
+    /// explicit input colour space (`CM-2`), and the exposed declaration that
+    /// owns it — none of which is a property of the file on disk.
+    ///
+    /// Returns whether the document changed: `false` when the asset is gone
+    /// (deleted while the dialog was open) or when the probe named the file it
+    /// already points at.
+    pub fn relink_media_asset(
+        &mut self,
+        id: AssetId,
+        probed: crate::media::import::ProbedAsset,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(entry) = self.store.document().get_media_asset(id) else {
+            tracing::warn!(?id, "relink: the asset is no longer in the project");
+            return false;
+        };
+        let relinked = MediaAssetEntry {
+            name: entry.name.clone(),
+            path: AssetPath::for_project_root(&probed.path, self.project_root().as_deref()),
+            kind: probed.kind,
+            metadata: probed.metadata,
+            color_space: entry.color_space,
+            exposed_owner: entry.exposed_owner.clone(),
+            resolved: Some(probed.path),
+        };
+        if relinked == *entry {
+            return false;
+        }
+        let doc = self
+            .store
+            .document()
+            .clone()
+            .with_media_asset_entry(id, relinked);
+        // Structural: the `media` node keys its decode cache on the resolved
+        // path, so an asset that just came online has to be pulled again.
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        true
+    }
+
+    /// Report the file a relink's probe refused, so the user hears why nothing
+    /// changed. The event is the session's user-visible feedback channel and
+    /// every emission of it lives in this module (see
+    /// [`Self::report_settings_write_failure`]).
+    pub fn report_relink_failure(
+        &mut self,
+        failure: crate::media::import::ImportFailure,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(ProjectEvent::MediaRelinkFailed { failure });
     }
 
     /// Stack a layer for each already-imported asset on the active
@@ -4138,6 +4280,230 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// A temp directory holding a `from/` and a `to/` project, each with a
+    /// `footage/clip.mov`, plus the two `.ravprj` paths. The caller removes
+    /// `root` when it is done.
+    fn two_project_roots(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("ravel_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for side in ["from", "to"] {
+            std::fs::create_dir_all(root.join(side).join("footage")).unwrap();
+            std::fs::write(
+                root.join(side).join("footage").join("clip.mov"),
+                b"not really a movie",
+            )
+            .unwrap();
+        }
+        (root.clone(), root.join("from"), root.join("to"))
+    }
+
+    /// The asset as the archive at `path` records it, i.e. what reopening the
+    /// project would give the user.
+    fn reopened_asset(path: &Path, asset: AssetId) -> MediaAssetEntry {
+        ravel_project::ProjectFile::load(path)
+            .expect("the archive reopens")
+            .document
+            .get_media_asset(asset)
+            .expect("the asset survived the round trip")
+            .clone()
+    }
+
+    /// `Save As` into another directory rebases every asset reference the way
+    /// the **writer** does, so the live document holds what the archive it
+    /// just wrote holds (media-import plan unit 6, carried over from unit 1).
+    ///
+    /// `Save As` copies the project, not the footage: a project-relative clip
+    /// stays the clip beside the *old* `.ravprj`, and the stored form turns
+    /// absolute — which is exactly what
+    /// `ProjectFile::to_archive_for_root(new_root)` writes. Resolving the
+    /// pre-save relative form against the new root instead would leave the
+    /// session pointing at a file that does not exist and disagreeing with
+    /// its own archive.
+    ///
+    /// And the rebase is not an edit: the project stays saved and the undo
+    /// history stays exactly as deep as it was.
+    #[gpui::test]
+    fn save_as_leaves_the_live_document_agreeing_with_the_archive(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let (root, from, to) = two_project_roots("save_as_agree");
+        let clip = from.join("footage").join("clip.mov");
+        let first = from.join("proj.ravprj");
+        let second = to.join("proj.ravprj");
+
+        // Save a project holding a clip that lives inside it, so the archive
+        // records the reference relative (REQ-PROJ-001).
+        let asset = AssetId::next();
+        project.update(cx, |project, cx| {
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset(asset, clip.clone());
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(first.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        // Reopen it: the live document now holds the *relative* form, and
+        // loading leaves no undo history behind.
+        project.update(cx, |project, cx| {
+            project.load_project_from(first.clone(), cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(entry.path, AssetPath::Relative("./footage/clip.mov".into()));
+            assert_eq!(entry.resolved.as_deref(), Some(clip.as_path()));
+            assert!(!project.is_dirty());
+            assert!(!project.undo(cx), "loading is not an undo step");
+        });
+
+        // Save As into the other directory.
+        project.update(cx, |project, cx| {
+            project.save_project_to(second.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(
+                entry.path,
+                AssetPath::Absolute(clip.clone()),
+                "the footage did not move with the project, so the stored form did"
+            );
+            assert_eq!(
+                entry.resolved.as_deref(),
+                Some(clip.as_path()),
+                "and it still resolves to the clip that exists"
+            );
+            assert_eq!(
+                reopened_asset(&second, asset),
+                *entry,
+                "the archive and the live document say the same thing"
+            );
+            assert!(
+                !project.is_dirty(),
+                "the rebase must not make a just-saved project dirty"
+            );
+            assert!(!project.undo(cx), "the rebase must not push an undo step");
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `${PROJECT_ROOT}` reference is the one form the writer deliberately
+    /// leaves alone, so `Save As` re-resolves it against the **new** root.
+    /// This is what the plan's carried-over requirement is for: a variable
+    /// path is only worth setting if moving the project follows it.
+    #[gpui::test]
+    fn save_as_re_resolves_a_variable_path_against_the_new_root(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let (root, from, to) = two_project_roots("save_as_variable");
+        let first = from.join("proj.ravprj");
+        let second = to.join("proj.ravprj");
+
+        let asset = AssetId::next();
+        project.update(cx, |project, cx| {
+            let mut entry = MediaAssetEntry::from_absolute(from.join("footage").join("clip.mov"));
+            entry.path = AssetPath::Variable("${PROJECT_ROOT}/footage/clip.mov".into());
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset_entry(asset, entry);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(first.clone(), None, cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            project.load_project_from(first.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            project.save_project_to(second.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(
+                entry.path,
+                AssetPath::Variable("${PROJECT_ROOT}/footage/clip.mov".into()),
+                "a variable path the user set is never rewritten"
+            );
+            assert_eq!(
+                entry.resolved.as_deref(),
+                Some(to.join("footage").join("clip.mov").as_path()),
+                "it follows the project to the new root"
+            );
+            assert_eq!(reopened_asset(&second, asset), *entry);
+            assert!(!project.is_dirty());
+            assert!(!project.undo(cx), "the rebase must not push an undo step");
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The rebase reaches the **retained versions** too, so an undo taken
+    /// after a `Save As` does not hand back the old root's reading.
+    ///
+    /// A variable path is the fixture because it is the form whose meaning
+    /// actually moves with the project: without the mapping, the version
+    /// `Cmd+Z` restores still resolves `${PROJECT_ROOT}` against the directory
+    /// the project no longer lives in.
+    #[gpui::test]
+    fn an_undo_after_save_as_keeps_the_new_roots_resolution(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let (root, from, to) = two_project_roots("undo_root");
+        let first = from.join("proj.ravprj");
+        let second = to.join("proj.ravprj");
+
+        let asset = AssetId::next();
+        project.update(cx, |project, cx| {
+            let mut entry = MediaAssetEntry::from_absolute(from.join("footage").join("clip.mov"));
+            entry.path = AssetPath::Variable("${PROJECT_ROOT}/footage/clip.mov".into());
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset_entry(asset, entry);
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(first.clone(), None, cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            project.load_project_from(first.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        // One ordinary edit, so there is a version to go back to. It leaves
+        // the asset alone: what the undo has to restore correctly is the
+        // *reference*, not the edit.
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            doc.root_comp = None;
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(second.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx), "the edit is a step to take back");
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(
+                entry.resolved.as_deref(),
+                Some(to.join("footage").join("clip.mov").as_path()),
+                "the restored version resolves against the root the project now has"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A failed load keeps the current document and path untouched.

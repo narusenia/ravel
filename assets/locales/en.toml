@@ -306,6 +306,8 @@ recovered_message = "The main project file was unreadable, so Ravel opened the p
 backup_path = "Backup"
 import_title = "Some media files were skipped"
 import_message = "Ravel could not import the following files"
+relink_title = "The media could not be relinked"
+relink_message = "Ravel could not read the file you picked, so the reference is unchanged"
 
 [audio]
 preparing = "Preparing audio…"
@@ -409,7 +411,6 @@ anchor = "Anchor point"
 [panel.properties]
 _self = "Properties"
 empty = "No node selected"
-media_asset_placeholder = "Media asset (details coming in a later update)"
 
 [properties.section]
 layers = "Selected Layers"
@@ -421,6 +422,8 @@ compositing = "Compositing"
 audio = "Audio"
 node_info = "Node Info"
 parameters = "Parameters"
+media_asset = "Media Asset"
+media_file = "File"
 ports = "Ports"
 exposed = "Exposed Parameters"
 
@@ -432,6 +435,7 @@ source_network = "Network ({count} nodes)"
 source_audio = "Audio"
 source_null = "Null"
 duration_frames = "{count} frames"
+audio_streams = "{count} audio streams"
 
 [properties.toggle]
 keyframe = "Toggle keyframe at the current frame"
@@ -493,6 +497,15 @@ not_exposable = "This parameter cannot be part of an external contract"
 already_exposed = "This parameter is already exposed"
 failed = "The declaration could not be changed"
 
+[properties.media]
+kind_container = "Video / Audio"
+kind_still = "Still Image"
+kind_sequence = "Image Sequence ({count} frames)"
+path_absolute = "Absolute"
+path_relative = "Project-relative"
+path_variable = "Variable"
+relink = "Relink…"
+
 [properties.curve]
 expand = "Show the curve editor — double-click to add or remove a point, drag to move one, click to select"
 fit = "Fit the view to the whole curve"
@@ -553,6 +566,12 @@ fade_in_frames = "Fade In (frames)"
 fade_out_frames = "Fade Out (frames)"
 audio_muted = "Audio Muted"
 stream_index = "Stream Index"
+resolution = "Resolution"
+codec = "Codec"
+audio = "Audio"
+resolved_path = "File"
+path_kind = "Path Type"
+path = "Path"
 
 [timeline.toggle]
 solo = "Solo"

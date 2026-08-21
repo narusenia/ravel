@@ -403,7 +403,6 @@ anchor = "アンカーポイント"
 [panel.properties]
 _self = "プロパティ"
 empty = "ノード未選択"
-media_asset_placeholder = "メディアアセット（詳細は今後の更新で追加）"
 
 [properties.section]
 layers = "選択レイヤー"
@@ -415,6 +414,8 @@ compositing = "合成"
 audio = "オーディオ"
 node_info = "ノード情報"
 parameters = "パラメータ"
+media_asset = "メディアアセット"
+media_file = "ファイル"
 ports = "ポート"
 exposed = "公開パラメータ"
 
@@ -426,6 +427,7 @@ source_network = "ネットワーク（{count} ノード）"
 source_audio = "オーディオ"
 source_null = "ヌル"
 duration_frames = "{count} フレーム"
+audio_streams = "オーディオ {count} ストリーム"
 
 [properties.toggle]
 keyframe = "現在フレームのキーフレームを切替"
@@ -487,6 +489,15 @@ not_exposable = "このパラメータは外部契約にできません"
 already_exposed = "このパラメータは既に公開されています"
 failed = "宣言を変更できませんでした"
 
+[properties.media]
+kind_container = "動画 / 音声"
+kind_still = "静止画"
+kind_sequence = "連番画像（{count} フレーム）"
+path_absolute = "絶対パス"
+path_relative = "プロジェクト相対"
+path_variable = "変数パス"
+relink = "再リンク…"
+
 [properties.curve]
 expand = "カーブエディタを開く — ダブルクリックで点を追加・削除、ドラッグで移動、クリックで選択"
 fit = "カーブ全体が入るように表示範囲を合わせる"
@@ -547,6 +558,12 @@ fade_in_frames = "フェードイン（フレーム）"
 fade_out_frames = "フェードアウト（フレーム）"
 audio_muted = "オーディオミュート"
 stream_index = "ストリーム番号"
+resolution = "解像度"
+codec = "コーデック"
+audio = "オーディオ"
+resolved_path = "ファイル"
+path_kind = "パス形式"
+path = "パス"
 
 [timeline.toggle]
 solo = "ソロ"

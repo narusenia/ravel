@@ -1,10 +1,11 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Media import path (REQ-UI-010, media-import plan unit 3).
+//! Media import and relink paths (REQ-UI-010, media-import plan units 3 and
+//! 6).
 //!
-//! Pins the unit-3 completion conditions without real FFmpeg or real media
-//! files (probe backends are injected):
+//! Pins their completion conditions without real FFmpeg or real media files
+//! (probe backends are injected):
 //!
 //! - an import registers assets and **nothing else** — placing them is a
 //!   separate action (refactor unit 10) — and is exactly one undo step
@@ -17,7 +18,10 @@
 //! - `add_asset_layers` places at the requested frame with
 //!   `ceil(duration × comp_fps)` frames, falling back to the composition
 //!   length when the duration is unknown, and a whole batch is one undo
-//!   step.
+//!   step;
+//! - a relink brings an offline asset back online with the new file's own
+//!   metadata, in one undo step, and a file the probe refuses relinks
+//!   nothing (unit 6).
 
 use std::path::PathBuf;
 
@@ -687,5 +691,163 @@ fn placing_without_an_active_composition_is_a_no_op(cx: &mut TestAppContext) {
                 .layer_count(),
             0
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Relink (media-import plan unit 6)
+// ---------------------------------------------------------------------------
+
+/// A prober that opens everything except `broken.mov`, reporting 640×480 at
+/// 30 fps for one second.
+fn one_second_prober() -> MediaProber {
+    MediaProber::new(
+        std::sync::Arc::new(|path: &std::path::Path| {
+            if path.ends_with("broken.mov") {
+                return Err(MediaError::Other("cannot open".into()));
+            }
+            Ok(MediaInfo {
+                container: None,
+                container_name: "fake".into(),
+                streams: vec![StreamInfo::Video(VideoStreamInfo {
+                    stream_index: 0,
+                    codec: None,
+                    codec_name: "fake".into(),
+                    width: 640,
+                    height: 480,
+                    frame_rate: FrameRate::new(30, 1),
+                    frame_count: None,
+                    duration_secs: Some(1.0),
+                    pixel_format: "rgba".into(),
+                    color_primaries: None,
+                    color_transfer: None,
+                    color_matrix: None,
+                })],
+                duration_secs: Some(1.0),
+            })
+        }),
+        std::sync::Arc::new(|_path| Err(MediaError::Other("no sequence".into()))),
+    )
+}
+
+/// An asset whose variable path resolves to nothing — offline, which is the
+/// state a relink exists to get out of.
+fn offline_asset(project: &gpui::Entity<ProjectState>, cx: &mut TestAppContext) -> AssetId {
+    let id = AssetId::next();
+    project.update(cx, |project, cx| {
+        let doc = project.document().clone().with_media_asset_entry(
+            id,
+            ravel_core::composition::MediaAssetEntry {
+                name: "hero shot".into(),
+                path: ravel_core::composition::AssetPath::Variable("${MEDIA}/hero.mov".into()),
+                kind: AssetKind::Container,
+                metadata: AssetMetadata {
+                    width: Some(1920),
+                    height: Some(1080),
+                    ..AssetMetadata::default()
+                },
+                color_space: Some(ravel_core::color::ColorSpace::SRGB),
+                exposed_owner: None,
+                resolved: None,
+            },
+        );
+        project.commit_document(doc, ravel_core::runtime::InvalidationHint::Structural, cx);
+    });
+    id
+}
+
+/// Unit 6: relinking an offline asset brings it back online with the new
+/// file's own metadata, and one undo puts the offline reference back.
+#[gpui::test]
+fn relink_brings_an_offline_asset_online_in_one_undo_step(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let hero = offline_asset(&project, cx);
+
+    cx.update(|cx| {
+        ravel_app::media::import::relink_asset_with(
+            hero,
+            PathBuf::from("/media/hero_v2.mov"),
+            one_second_prober(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        let entry = project
+            .document()
+            .get_media_asset(hero)
+            .expect("the asset is still the same asset");
+        assert!(!entry.is_offline(), "the relinked asset resolves");
+        assert_eq!(
+            entry.resolved,
+            Some(PathBuf::from("/media/hero_v2.mov")),
+            "evaluation reads the new file"
+        );
+        assert_eq!(
+            entry.path,
+            ravel_core::composition::AssetPath::Absolute("/media/hero_v2.mov".into()),
+            "an unsaved project has no root to relativize against"
+        );
+        assert_eq!(
+            (entry.metadata.width, entry.metadata.height),
+            (Some(640), Some(480)),
+            "the new file's numbers replace the old file's"
+        );
+        assert_eq!(
+            entry.name, "hero shot",
+            "the display name is the user's, not the file's"
+        );
+        assert_eq!(
+            entry.color_space,
+            Some(ravel_core::color::ColorSpace::SRGB),
+            "an explicit input colour space describes the footage, not the file"
+        );
+    });
+
+    // One step back, and redo proves it was a real history entry rather than
+    // an uncommitted preview being reverted.
+    project.update(cx, |project, cx| assert!(project.undo(cx)));
+    project.read_with(cx, |project, _| {
+        let entry = project.document().get_media_asset(hero).expect("the asset");
+        assert!(entry.is_offline(), "undo restores the offline reference");
+        assert_eq!(entry.metadata.width, Some(1920));
+    });
+    project.update(cx, |project, cx| assert!(project.redo(cx)));
+    project.read_with(cx, |project, _| {
+        assert!(
+            !project
+                .document()
+                .get_media_asset(hero)
+                .expect("the asset")
+                .is_offline()
+        );
+    });
+}
+
+/// A file the probe refuses replaces nothing: the same refusal that keeps it
+/// out of an import keeps it from breaking a reference that already works.
+#[gpui::test]
+fn a_file_the_probe_refuses_relinks_nothing(cx: &mut TestAppContext) {
+    let project = project(cx);
+    let hero = offline_asset(&project, cx);
+    let before = project.read_with(cx, |project, _| project.document().clone());
+
+    cx.update(|cx| {
+        ravel_app::media::import::relink_asset_with(
+            hero,
+            PathBuf::from("/media/broken.mov"),
+            one_second_prober(),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(project.document(), &before);
+        // The only step in the history is the one that created the asset, so
+        // one undo removes it outright — the refused relink pushed nothing.
+        assert!(project.undo(cx));
+        assert!(project.document().media_assets.is_empty());
     });
 }

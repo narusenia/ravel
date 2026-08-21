@@ -12,6 +12,7 @@ pub mod composition;
 pub mod exposed;
 pub mod expression;
 pub mod layer;
+pub mod media_asset;
 pub mod node;
 
 use exposed::ExposedRow;

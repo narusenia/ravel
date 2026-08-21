@@ -656,6 +656,19 @@ impl ProjectState {
         self.project_path.as_deref()
     }
 
+    /// The directory the open `.ravprj` lives in — the project root a relative
+    /// or variable asset reference is measured against. `None` for a project
+    /// that has never been saved, which leaves references absolute rather than
+    /// rooting them at the process's working directory.
+    ///
+    /// Resolved through the same function the loader and the writer use, so
+    /// what a stored form means here is what it means on disk.
+    pub fn project_root(&self) -> Option<PathBuf> {
+        self.project_path
+            .as_deref()
+            .and_then(ravel_project::project_root_of)
+    }
+
     /// Whether the live document has changes newer than its last completed
     /// save (or its New/load baseline).
     pub fn is_dirty(&self) -> bool {
@@ -1183,11 +1196,7 @@ impl ProjectState {
             return summary;
         }
 
-        let project_root = self
-            .project_path
-            .as_deref()
-            .and_then(|path| path.parent())
-            .map(Path::to_path_buf);
+        let project_root = self.project_root();
 
         let mut doc = self.store.document().clone();
         // Dedupe within the batch as well as against the document: two
@@ -1238,6 +1247,68 @@ impl ProjectState {
             self.commit_document(doc, InvalidationHint::Structural, cx);
         }
         summary
+    }
+
+    /// Point an existing asset at another file (media-import plan unit 6).
+    /// One `commit_document`, so a relink is exactly one undo step and `Cmd+Z`
+    /// puts the old reference — and the offline state that came with it —
+    /// back.
+    ///
+    /// `probed` describes the new file, so `kind` and `metadata` are replaced
+    /// along with the path: leaving the old file's resolution and duration on
+    /// screen would describe footage that is no longer there. What survives is
+    /// everything the *user* said about the asset — its display name, an
+    /// explicit input colour space (`CM-2`), and the exposed declaration that
+    /// owns it — none of which is a property of the file on disk.
+    ///
+    /// Returns whether the document changed: `false` when the asset is gone
+    /// (deleted while the dialog was open) or when the probe named the file it
+    /// already points at.
+    pub fn relink_media_asset(
+        &mut self,
+        id: AssetId,
+        probed: crate::media::import::ProbedAsset,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(entry) = self.store.document().get_media_asset(id) else {
+            tracing::warn!(?id, "relink: the asset is no longer in the project");
+            return false;
+        };
+        let relinked = MediaAssetEntry {
+            name: entry.name.clone(),
+            path: AssetPath::for_project_root(&probed.path, self.project_root().as_deref()),
+            kind: probed.kind,
+            metadata: probed.metadata,
+            color_space: entry.color_space,
+            exposed_owner: entry.exposed_owner.clone(),
+            resolved: Some(probed.path),
+        };
+        if relinked == *entry {
+            return false;
+        }
+        let doc = self
+            .store
+            .document()
+            .clone()
+            .with_media_asset_entry(id, relinked);
+        // Structural: the `media` node keys its decode cache on the resolved
+        // path, so an asset that just came online has to be pulled again.
+        self.commit_document(doc, InvalidationHint::Structural, cx);
+        true
+    }
+
+    /// Report files a probe refused, so the user hears about it. The event is
+    /// the session's user-visible feedback channel and every emission of it
+    /// lives in this module (see [`Self::report_settings_write_failure`]).
+    pub fn report_media_failures(
+        &mut self,
+        failures: Vec<crate::media::import::ImportFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        if failures.is_empty() {
+            return;
+        }
+        cx.emit(ProjectEvent::MediaImportSkipped { failures });
     }
 
     /// Stack a layer for each already-imported asset on the active

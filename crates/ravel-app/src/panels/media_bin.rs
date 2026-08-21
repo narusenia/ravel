@@ -26,6 +26,7 @@ use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
 use ravel_ui::panels::media_bin::{
     AssetReference, MediaBinFilter, MediaBinPanel, MediaBinRow, MediaBinRowKind, asset_references,
+    format_duration,
 };
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -841,13 +842,6 @@ fn decode_thumbnail(bytes: &[u8]) -> Option<Arc<RenderImage>> {
         image::Frame::new(pixels),
         1,
     ))))
-}
-
-/// `m:ss.t` for a row's duration column.
-fn format_duration(secs: f64) -> String {
-    let minutes = (secs / 60.0).floor() as u64;
-    let seconds = secs - minutes as f64 * 60.0;
-    format!("{minutes}:{seconds:04.1}")
 }
 
 /// The asset the delete/add operations resolve, or `None` when it is gone.

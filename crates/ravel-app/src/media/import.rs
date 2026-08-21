@@ -21,9 +21,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::App;
+use gpui::{App, PathPromptOptions};
 use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, AssetMetadata, AudioStreamMetadata};
+use ravel_core::id::AssetId;
 use ravel_core::media::{ImageSequenceInfo, MediaInfo, MediaResult, StreamInfo, VideoStreamInfo};
 // Only the no-FFmpeg stub and the tests construct an error of their own; with
 // the feature on, the real backend is the one that fails.
@@ -166,6 +167,82 @@ pub fn import_paths_with(paths: Vec<PathBuf>, prober: MediaProber, cx: &mut App)
                 summary.imported.len(),
             );
         });
+    })
+    .detach();
+}
+
+/// Point an existing asset at another file (media-import plan unit 6): ask
+/// for one, probe it, and replace the asset's reference — **one** undo step.
+/// Cancelling the dialog is a no-op.
+///
+/// The dialog and the probe are the reason this is not a plain document edit:
+/// neither may happen on the UI thread, so the edit lands in a task, exactly
+/// as an import's does.
+pub fn prompt_relink(asset_id: AssetId, cx: &mut App) {
+    let receiver = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: None,
+    });
+    cx.spawn(async move |cx| match receiver.await {
+        Ok(Ok(Some(paths))) => {
+            if let Some(path) = paths.into_iter().next() {
+                cx.update(|cx| relink_asset(asset_id, path, cx));
+            }
+        }
+        // The dialog was cancelled (or the app is shutting down).
+        Ok(Ok(None)) | Err(_) => {}
+        Ok(Err(err)) => tracing::error!(%err, "relink dialog failed"),
+    })
+    .detach();
+}
+
+/// [`prompt_relink`] without the dialog: the file is already chosen.
+pub fn relink_asset(asset_id: AssetId, path: PathBuf, cx: &mut App) {
+    relink_asset_with(asset_id, path, MediaProber::ffmpeg(), cx);
+}
+
+/// [`relink_asset`] with explicit probe backends (tests and alternate
+/// backends).
+///
+/// The new file is probed exactly as an imported one is, so the relinked asset
+/// carries *its* kind and metadata rather than the old file's numbers. A file
+/// the probe refuses relinks nothing: the same refusal that keeps it out of an
+/// import keeps it from replacing a working reference.
+pub fn relink_asset_with(asset_id: AssetId, path: PathBuf, prober: MediaProber, cx: &mut App) {
+    let Some(project) = cx
+        .try_global::<ProjectStateHandle>()
+        .and_then(|handle| handle.0.upgrade())
+    else {
+        tracing::warn!("media relink: project state unavailable");
+        return;
+    };
+    let sequence_fps = project
+        .read_with(cx, |project, cx| {
+            project.active_composition(cx).map(|comp| comp.frame_rate)
+        })
+        .unwrap_or(FrameRate::new(30, 1));
+
+    let probe = cx
+        .background_executor()
+        .spawn(async move { probe_path(&path, &prober, sequence_fps) });
+    cx.spawn(async move |cx| match probe.await {
+        Ok(asset) => {
+            project.update(cx, |project, cx| {
+                project.relink_media_asset(asset_id, asset, cx);
+            });
+        }
+        Err(failure) => {
+            tracing::warn!(
+                path = %failure.path.display(),
+                reason = %failure.reason,
+                "media relink refused"
+            );
+            project.update(cx, |project, cx| {
+                project.report_media_failures(vec![failure], cx);
+            });
+        }
     })
     .detach();
 }

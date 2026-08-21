@@ -347,7 +347,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 なる）。`DISK-*` は「今できないことができるようになる」機能追加で、
 後回しにしても既存プロジェクトは壊れないため `AID-*` の後。
 
-## フェーズ B3: 出力が黙って間違わないこと
+## フェーズ B3: 出力が黙って間違わないこと（完了）
 
 **目標**: レンダーが**成功終了しながら間違った成果物を出す**経路を、
 機械可読な出力で言わせる。基準 0。フォーマットは触らないので B2 とは
@@ -356,9 +356,9 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 
 | 単位 | 内容 |
 |---|---|
-| `WARN-1` | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`。`render-warning-channel-plan.md`） |
-| `WARN-2` | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） |
-| `WARN-3` | ロケール / 文書 / issue の決着 |
+| `WARN-1` | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`。`done/render-warning-channel-plan.md`）**済**（#467） |
+| `WARN-2` | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`）**済**（#467 — `media-offline` / `media-unreadable` / `identifier-not-static`） |
+| `WARN-3` | ロケール / 文書 / issue の決着 **済**（#467 — `HIGH-34` / `HIGH-35` は `issues/closed/`） |
 
 **2 件の issue を 1 つの計画で扱う理由**は、どちらも「警告をどこに出すか」に
 行き当たるから。`HIGH-35`（識別子をワイヤで動かせる）を「評価時に無視する」で

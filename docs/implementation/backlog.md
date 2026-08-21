@@ -60,7 +60,6 @@
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
-| WARN-1 | 識別子パラメータの解決を 1 経路に畳む | `render-warning-channel-plan.md` |
 | PGRP-5 | ノードエディタのパラメータ値表示トグル | `parameter-groups-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
@@ -712,13 +711,13 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | DISK-5 | ✅ #465 | カーブエディタの階段描画（Int のみ） | DISK-4 ✅ |
 | DISK-6 | ✅ #465 | ロケール / 文書 | DISK-1〜5 ✅ |
 
-### レンダーの警告経路（`render-warning-channel-plan.md`）
+### レンダーの警告経路（`done/render-warning-channel-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| WARN-1 | 🟡 | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`） | — |
-| WARN-2 | ⬜ | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） | WARN-1 |
-| WARN-3 | ⬜ | ロケール / 文書 / issue の決着 | WARN-1, WARN-2 |
+| WARN-1 | ✅ #467 | 識別子パラメータの解決を 1 経路に畳む（`HIGH-35`。予約と評価の一致） | — |
+| WARN-2 | ✅ #467 | `ravel-cli render` の映像側 `Warning` と静的走査（`HIGH-34`） | WARN-1 ✅ |
+| WARN-3 | ✅ #467 | ロケール / 文書 / issue の決着 | WARN-1, WARN-2 ✅ |
 
 ### 素材の同一性（`asset-identity-plan.md`）
 

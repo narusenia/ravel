@@ -214,12 +214,22 @@ Delete でユーザーが見たことのないキーを削除する。
 次のスクラブまでミラーされたプレイヘッドが終端を超えたまま残る。
 → `sync_from_project` でクランプ。
 
-**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（latent）**
-`crates/ravel-app/src/audio/mixdown.rs:44-53`, `crates/ravel-app/src/audio/mod.rs:94-96`, `:358-379`
-`CacheKey` が `(asset_id, stream)` でパスを含まないため、将来リリンクを実装すると
-stale なデコードキャッシュにヒットする。
-一度オフラインになったアセットはセッション中に再試行されない（モジュールコメントは逆のことを書いている）。
-→ キーに解決済みパスを含める / `resolved` 変更時に失敗エントリをクリア。コメントを修正。
+**LOW-APP-08 | bug | 音声のリリンク / オフライン staleness（**latent ではなくなった** — #469 で到達可能）**
+`crates/ravel-audio/src/mixdown.rs:53`（`CacheKey`）、`crates/ravel-app/src/audio/mod.rs:106`・`:177`・`:386`
+`CacheKey` が `(asset_id, stream_index)` で**解決済みパスを含まない**。
+起票時は「将来リリンクを実装すると」という latent な指摘だったが、
+**`MEDIA-6`（#469）で Relink が入ったので今日到達する**:
+音声素材を Relink しても、そのセッションの間は**古いデコード結果が
+キャッシュから返り続ける**（映像側は `FrameKey::image(path, …)` が
+パス鍵なので影響を受けない — 音声だけが例外）。
+一度オフラインになったアセットはセッション中に再試行されない
+（モジュールコメントは逆のことを書いている）。
+**深刻度は low のままにしてあるが、実質「利用者の操作のあとに出る音が
+古い」= 出力の誤り**なので、着手順は low の並びではなく
+`roadmap.md` の基準 0 として扱う。
+→ キーに解決済みパスを含める / `resolved` の変更時に失敗エントリを消す。
+コメントを直す。**`ravel-audio` 側の `CacheKey` に手が入るので、
+`ravel-app` の 3 箇所と合わせて 1 単位**。
 
 **LOW-APP-09 | bug | `format_duration` が分境界で `0:60.0` を出す**
 `crates/ravel-app/src/panels/media_bin.rs:481-485`

@@ -199,8 +199,9 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 もう一度適用すると素材が 1 つ増える」— 素材表に見えるので気づける。
 `ui_state.json` も format_version 3 のまま追加された。同じエントリへ後から
 足した `bpm_grid` / `loop_ranges` / `collapsed_param_groups`（Properties で
-畳んだパラメータグループ、`PGRP-3`）も版を据え置いている — 既定が
-「off / 0 件 / 全展開」なので、旧ビルドが捨てても**画面を見れば分かる**。
+畳んだパラメータグループ、`PGRP-3`）/ `show_node_param_values`（ノード本体の
+パラメータ行を描くか、`PGRP-5`）も版を据え置いている — 既定が
+「off / 0 件 / 全展開 / 描く」なので、旧ビルドが捨てても**画面を見れば分かる**。
 
 この判断は `docs/implementation/roadmap.md` の基準 1（移行コストが時間で
 増える単位を先に）にも影響する。**フィールド追加だけなら後回しのコストは

@@ -1,7 +1,6 @@
 # パラメータのグループ（Page）実装計画
 
-> **Status**: In progress — `PGRP-1`〜`PGRP-4` 実装済み、`PGRP-5` / `PGRP-6` 未着手
-> — 2026-08-21
+> **Status**: Done — `PGRP-1`〜`PGRP-6` 実装済み — 2026-08-21
 
 対象: `ravel-core` のノードテンプレート、`ravel-ui` の Properties モデル、
 `ravel-app` の Properties パネルとノードエディタ。要件文書は無い（UI の構造化）。
@@ -194,9 +193,25 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 
 ### 単位 5: ノードエディタのパラメータ値表示トグル
 
+**実装済み。**
+
 - ノード本体のパラメータ名 / 値の描画を on/off する。表示単位は**全体**
   （ノードごとの設定は状態が増える割に使われない）
-- `ui_state.json` に持つ
+- `ui_state.json` に持つ（`show_node_param_values`）。**既定は「描く」**なので
+  消したときだけエントリが書かれ、`format_version` は据え置き
+- 引き口は `CommandId::ViewToggleNodeParamValues`（View メニュー）。**既定の
+  キーバインドは付けていない**
+- **高さの計算・描画・当たり判定は 1 つの旗を読む**:
+  `painting::compute_node_size` と `painting::paint_nodes` が同じ値を受け取り、
+  ヒットテストが読む `node_sizes` はその計算の結果。旗を持つのは
+  `NodeEditorPanel::show_param_values` の 1 箇所で、Global
+  （`panels::ShowNodeParamValuesState`）の observe で更新して**その場で
+  再計測する** — 片方だけ従うと隠れた行の分だけ当たり判定が絵より下へ伸びる
+  （`MED-APP-13` と同型）
+- View メニューの項目に**チェックマークは付けていない**。メニューのチェックは
+  headless の `MenuBar` が持つ状態（パネル表示・アクティブプリセット）にしか
+  対応しておらず、この旗はアプリ側の UI 状態。判断材料はキャンバス自身
+  （行が出る / ノードが縮む）で足りる
 
 **完了条件**
 
@@ -204,6 +219,18 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 - 再起動をまたいで残る
 
 ### 単位 6: ロケール / 文書
+
+**実装済み。**`PGRP-1`〜`PGRP-4` の分も含めて書いた。
+
+- `docs/specifications/ui/properties.md` に「パラメータグループ」節
+  （型宣言とインスタンス宣言、優先順位、暗黙セクション、宣言の破れの吸収、
+  ロケールキー、組み込み 9 テンプレートとしきい値、折り畳みの永続化、
+  受け入れた上限 3 件）
+- `docs/specifications/ui/node-editor.md` に「パラメータ値の表示トグル」節
+- `docs/ui-impl-status.md` の Properties（グループ / 折り畳みの 2 行）、
+  Node Graph Editor（パラメータ表示の行）、UI 状態の保存の行
+- `docs/specifications/data-model.md` と `docs/dev/persistence.md` の
+  `ui_state.json` の記述
 
 **完了条件**
 

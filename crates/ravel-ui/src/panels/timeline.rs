@@ -12,7 +12,8 @@
 
 use crate::keyframes::RevealFilter;
 use crate::panel::PanelKind;
-use ravel_core::composition::{Composition, Layer};
+use crate::panels::media_bin;
+use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::id::{CompId, LayerId};
 use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::FrameRate;
@@ -225,6 +226,12 @@ pub struct TimelinePanel {
     /// tree, and it deliberately outlives a layer selection change, so it
     /// cannot hang off the selection either.
     reveal: HashSet<crate::keyframes::RevealFilter>,
+    /// Layers whose row carries the offline media mark, recomputed by
+    /// [`TimelinePanel::sync_offline_layers`]. Kept as a set rather than
+    /// resolved per row because the answer needs the document's asset table
+    /// and a walk of the layer network, and the host paints rows in
+    /// `render()`.
+    offline_layers: HashSet<LayerId>,
 }
 
 impl TimelinePanel {
@@ -246,6 +253,7 @@ impl TimelinePanel {
             view_mode: TimelineViewMode::default(),
             selected_channels: Vec::new(),
             reveal: HashSet::new(),
+            offline_layers: HashSet::new(),
         }
     }
 
@@ -300,6 +308,31 @@ impl TimelinePanel {
         self.composition = comp;
         self.selected_channels
             .retain(|channel| valid_channels.contains(channel));
+        // The marks describe the composition that just went away. A switch
+        // reuses layer numbers, so keeping them would mark unrelated layers;
+        // the host calls `sync_offline_layers` right after this.
+        self.offline_layers.clear();
+    }
+
+    /// Recompute which layer rows carry the offline media mark
+    /// ([`media_bin::layer_is_offline`]) from `document`.
+    ///
+    /// Separate from [`TimelinePanel::set_composition`] because the mirror is
+    /// a `Composition` while the asset table lives on the `Document`: the host
+    /// holds both, and doing the walk here is what keeps it out of `render()`.
+    /// Call it after every `set_composition`, which clears the set.
+    pub fn sync_offline_layers(&mut self, document: &Document) {
+        self.offline_layers = self
+            .composition
+            .as_ref()
+            .map(|comp| media_bin::offline_layers(document, comp))
+            .unwrap_or_default();
+    }
+
+    /// Whether this layer references a media asset that is offline, and so
+    /// shows the mark. `false` for a layer of another composition.
+    pub fn is_layer_offline(&self, layer: LayerId) -> bool {
+        self.offline_layers.contains(&layer)
     }
 
     // ----- Playhead --------------------------------------------------------
@@ -1474,5 +1507,74 @@ mod tests {
             21,
             "no candidates is the frame under the pointer"
         );
+    }
+
+    /// Media-import plan unit 7: the layer row's offline mark. The set is
+    /// filled from the document on the sync (never in `render()`), covers only
+    /// the layers whose media resolves to nothing, and is dropped by a
+    /// composition switch so a same-numbered layer cannot inherit it.
+    #[test]
+    fn the_offline_mark_follows_the_document_and_not_the_layer_number() {
+        use ravel_core::composition::{Document, MEDIA_ASSET_PARAM_KEY, MediaAssetEntry};
+        use ravel_core::graph::{Node, Parameter, ParameterValue};
+        use ravel_core::id::{AssetId, DataTypeId, LayerId, NodeId};
+        use std::sync::Arc;
+
+        fn media_network(asset: AssetId) -> Graph {
+            let mut node =
+                Node::new(NodeId::next(), "media").with_output("frame", DataTypeId::FRAME_BUFFER);
+            node.parameters.push(Parameter {
+                key: MEDIA_ASSET_PARAM_KEY.to_string(),
+                value: ParameterValue::String(asset.to_param_value()),
+            });
+            Graph::new().add_node(node).unwrap()
+        }
+
+        let gone = AssetId::next();
+        let here = AssetId::next();
+        let broken = Layer::new(LayerId::next(), "Broken", media_network(gone));
+        let fine = Layer::new(LayerId::next(), "Fine", media_network(here));
+        let broken_id = broken.id;
+        let fine_id = fine.id;
+        let comp = Composition::new(
+            CompId::next(),
+            "Comp 1",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(broken)
+        .add_layer(fine);
+        let comp_id = comp.id;
+
+        let mut doc = Document::default();
+        doc = doc.with_media_asset_entry(
+            gone,
+            MediaAssetEntry {
+                resolved: None,
+                ..MediaAssetEntry::from_absolute("/media/gone.mov")
+            },
+        );
+        doc = doc.with_media_asset_entry(here, MediaAssetEntry::from_absolute("/media/clip.mov"));
+        doc.compositions.insert(comp_id, Arc::new(comp.clone()));
+
+        let mut p = TimelinePanel::new(FrameRate::new(30, 1));
+        p.set_composition(Some(comp));
+        assert!(
+            !p.is_layer_offline(broken_id),
+            "nothing is marked before the host has synced the document"
+        );
+
+        p.sync_offline_layers(&doc);
+        assert!(p.is_layer_offline(broken_id));
+        assert!(
+            !p.is_layer_offline(fine_id),
+            "a layer whose media resolves carries no mark"
+        );
+
+        // A switch replaces what the panel shows; the marks describe the
+        // composition that is gone.
+        p.set_composition(None);
+        assert!(!p.is_layer_offline(broken_id));
     }
 }

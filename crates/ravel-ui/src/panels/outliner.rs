@@ -23,6 +23,7 @@ use ravel_core::network;
 use std::collections::{HashMap, HashSet};
 
 use crate::panel::PanelKind;
+use crate::panels::media_bin;
 
 /// What an [`OutlinerRow`] points at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +71,11 @@ pub struct OutlinerRow {
     pub expandable: bool,
     /// Whether those children are currently shown.
     pub expanded: bool,
+    /// A layer row whose network references an offline media asset
+    /// ([`crate::panels::media_bin::layer_is_offline`]). Always `false` on the
+    /// other kinds: a composition is not a thing that can be offline, and the
+    /// mark belongs on the layer the user relinks, not on each node under it.
+    pub offline: bool,
 }
 
 impl OutlinerRow {
@@ -196,18 +202,26 @@ impl OutlinerPanel {
                 label: comp.name.clone(),
                 expandable: !comp.layers.is_empty(),
                 expanded,
+                offline: false,
             });
             if !expanded {
                 continue;
             }
             for layer in comp.layers.iter().rev() {
-                self.push_layer_rows(comp.id, layer, &mut rows);
+                let offline = media_bin::layer_is_offline(document, layer);
+                self.push_layer_rows(comp.id, layer, offline, &mut rows);
             }
         }
         rows
     }
 
-    fn push_layer_rows(&self, comp: CompId, layer: &Layer, rows: &mut Vec<OutlinerRow>) {
+    fn push_layer_rows(
+        &self,
+        comp: CompId,
+        layer: &Layer,
+        offline: bool,
+        rows: &mut Vec<OutlinerRow>,
+    ) {
         let key = OutlinerKey::Layer(comp, layer.id);
         let expanded = self.is_expanded(key);
         rows.push(OutlinerRow {
@@ -225,6 +239,7 @@ impl OutlinerPanel {
             // so all that work only ever decided this bool.
             expandable: network_has_rows(&layer.network),
             expanded,
+            offline,
         });
         if !expanded {
             return;
@@ -258,6 +273,7 @@ impl OutlinerPanel {
                 label: entry.label.clone(),
                 expandable: entry.has_inputs && !entry.reference,
                 expanded,
+                offline: false,
             });
         }
 
@@ -276,6 +292,7 @@ impl OutlinerPanel {
             label: String::new(),
             expandable: true,
             expanded,
+            offline: false,
         });
         if !expanded {
             return;
@@ -293,6 +310,7 @@ impl OutlinerPanel {
                 label: entry.label.clone(),
                 expandable: false,
                 expanded: false,
+                offline: false,
             });
         }
     }
@@ -921,5 +939,63 @@ mod tests {
     #[test]
     fn an_empty_document_has_no_rows() {
         assert!(OutlinerPanel::new().rows(&Document::default()).is_empty());
+    }
+
+    /// A `media` node bound to `asset` — the binding the import writes.
+    fn media_network(asset: ravel_core::id::AssetId) -> Graph {
+        let mut node =
+            Node::new(NodeId::next(), "media").with_output("frame", DataTypeId::FRAME_BUFFER);
+        node.parameters.push(ravel_core::graph::Parameter {
+            key: ravel_core::composition::MEDIA_ASSET_PARAM_KEY.to_string(),
+            value: ravel_core::graph::ParameterValue::String(asset.to_param_value()),
+        });
+        Graph::new().add_node(node).unwrap()
+    }
+
+    /// Media-import plan unit 7: the layer row carries the offline mark, and
+    /// only that row — a layer whose media resolves is unmarked, and neither
+    /// the composition row above nor the node rows below claim it.
+    #[test]
+    fn only_a_layer_row_referencing_offline_media_is_marked() {
+        let gone = ravel_core::id::AssetId::next();
+        let here = ravel_core::id::AssetId::next();
+        let broken = Layer::new(LayerId::next(), "Broken", media_network(gone));
+        let fine = Layer::new(LayerId::next(), "Fine", media_network(here));
+        let broken_id = broken.id;
+        let fine_id = fine.id;
+        let mut doc = document(vec![comp("Comp 1", vec![broken, fine])]);
+        doc = doc.with_media_asset_entry(
+            gone,
+            ravel_core::composition::MediaAssetEntry {
+                resolved: None,
+                ..ravel_core::composition::MediaAssetEntry::from_absolute("/media/gone.mov")
+            },
+        );
+        doc = doc.with_media_asset_entry(
+            here,
+            ravel_core::composition::MediaAssetEntry::from_absolute("/media/clip.mov"),
+        );
+
+        let mut panel = OutlinerPanel::new();
+        // Expanded so the node rows are in the list too: the mark must not
+        // spread to them.
+        let comp_id = doc.compositions.keys().next().copied().expect("comp");
+        panel.set_expanded(OutlinerKey::Layer(comp_id, broken_id), true);
+        panel.set_expanded(OutlinerKey::Layer(comp_id, fine_id), true);
+        let rows = panel.rows(&doc);
+
+        let marked: Vec<&OutlinerRow> = rows.iter().filter(|row| row.offline).collect();
+        assert_eq!(
+            marked.len(),
+            1,
+            "exactly one row carries the mark: {rows:#?}"
+        );
+        assert_eq!(
+            marked[0].kind,
+            OutlinerRowKind::Layer {
+                comp: comp_id,
+                layer: broken_id,
+            }
+        );
     }
 }

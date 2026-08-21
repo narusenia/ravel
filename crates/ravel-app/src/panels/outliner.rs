@@ -995,6 +995,25 @@ impl OutlinerGpuiPanel {
             ),
         };
 
+        // Offline mark: a layer row whose network references media that
+        // resolves to nothing, so the layer renders transparent
+        // (`media_bin::layer_is_offline`). Same locale string as the MediaBin
+        // badge, as a tooltip — the tree row has the badge slot, not the room
+        // for a word.
+        if row.offline {
+            content = content.child(
+                div()
+                    .id(SharedString::from(format!("outliner-offline-{index}")))
+                    .flex_shrink_0()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_3()
+                            .text_color(colors.danger),
+                    )
+                    .tooltip(|window, cx| Tooltip::new(t!("media_bin.offline")).build(window, cx)),
+            );
+        }
+
         // Badges: a node already shown above, and a node owning a subnet.
         if let OutlinerRowKind::Node {
             subnet, reference, ..

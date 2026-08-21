@@ -27,7 +27,7 @@ use ravel_core::id::CompId;
 use ravel_core::runtime::playback::LoopRange;
 use ravel_ui::panels::timeline::BpmGrid;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// UI state persisted alongside a project.
 ///
@@ -68,6 +68,23 @@ pub struct UiState {
     /// your loop range (2026-08-09).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_ranges: Vec<(CompId, LoopRange)>,
+
+    /// The Properties parameter groups the user has folded away, as
+    /// `(type_key, group)` pairs.
+    ///
+    /// Keyed by node **type**, not by node: the groups belong to the type's
+    /// declaration (`parameter-groups-plan.md`), so folding "Source" away on
+    /// one Grid and having to fold it again on the next one would be busywork.
+    /// The group is the short name the template declares (`""` for the
+    /// leading section holding whatever no group claims).
+    ///
+    /// Only the **folded** groups are listed, because the default is
+    /// all-expanded: an untouched project writes no entry, and deleting
+    /// `ui_state.json` opens everything. Adding the field left
+    /// `format_version` alone for the same reason `bpm_grid` did — see the
+    /// decision table in `docs/dev/persistence.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed_param_groups: Vec<(String, String)>,
 }
 
 impl UiState {
@@ -97,6 +114,21 @@ impl UiState {
                 let comp = document.get_composition(*id)?;
                 Some((*id, range.clamped_to(comp.duration_frames)?))
             })
+            .collect()
+    }
+
+    /// The folded parameter groups, sanitized: duplicate pairs collapse into
+    /// one and an entry with an empty `type_key` is dropped (it could not name
+    /// a node type, so nothing would ever read it).
+    ///
+    /// This entry is hand-editable, so the reader is the tolerant layer: a
+    /// `type_key` no build registers, or a group a template no longer
+    /// declares, simply never matches a section and folds nothing.
+    pub fn collapsed_param_groups(&self) -> BTreeSet<(String, String)> {
+        self.collapsed_param_groups
+            .iter()
+            .filter(|(type_key, _)| !type_key.is_empty())
+            .cloned()
             .collect()
     }
 
@@ -301,5 +333,70 @@ mod tests {
             UiState::with_active_comp(Some(CompId::new(5))).initial_active_comp(&document),
             None
         );
+    }
+    /// The default writes no entry, so an untouched project keeps the
+    /// `ui_state.json` earlier builds wrote — and an archive without the
+    /// field opens with everything expanded.
+    #[test]
+    fn folded_parameter_groups_round_trip_and_are_absent_by_default() {
+        let json = UiState::default().to_json().unwrap();
+        assert!(
+            !json.contains("collapsed_param_groups"),
+            "unexpected json: {json}"
+        );
+        assert!(
+            UiState::from_json(&json)
+                .unwrap()
+                .collapsed_param_groups()
+                .is_empty()
+        );
+
+        let state = UiState {
+            collapsed_param_groups: vec![
+                ("scatter.grid".to_string(), "source".to_string()),
+                ("math.curve".to_string(), String::new()),
+            ],
+            ..UiState::default()
+        };
+        let json = state.to_json().unwrap();
+        let back = UiState::from_json(&json).unwrap();
+        assert_eq!(back, state);
+        assert_eq!(
+            back.collapsed_param_groups(),
+            BTreeSet::from([
+                ("math.curve".to_string(), String::new()),
+                ("scatter.grid".to_string(), "source".to_string()),
+            ])
+        );
+    }
+
+    /// A hand-edited entry must not cost the project its UI state: a repeated
+    /// pair is one folded group and an entry naming no node type is dropped.
+    #[test]
+    fn a_hand_edited_folded_group_list_is_sanitized_on_read() {
+        let state = UiState::from_json(
+            r#"{"collapsed_param_groups": [
+                ["scatter.grid", "source"],
+                ["scatter.grid", "source"],
+                ["", "source"],
+                ["field.apply", "scope"]
+            ]}"#,
+        )
+        .expect("a hand-edited list must still parse");
+        assert_eq!(
+            state.collapsed_param_groups(),
+            BTreeSet::from([
+                ("field.apply".to_string(), "scope".to_string()),
+                ("scatter.grid".to_string(), "source".to_string()),
+            ])
+        );
+    }
+
+    /// An archive written before this field existed — the `ui_state.json` of
+    /// every earlier build — opens with every group expanded.
+    #[test]
+    fn an_entry_without_the_field_opens_fully_expanded() {
+        let state = UiState::from_json(r#"{"active_comp": 1}"#).unwrap();
+        assert!(state.collapsed_param_groups().is_empty());
     }
 }

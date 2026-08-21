@@ -623,13 +623,18 @@ pub fn remove_custom_port(
                 },
             )?;
             let mut graph = graph.remove_output_port(node_id, OutputPortIndex(index as u32))?;
-            if node.parameters.iter().any(|p| p.key == name) {
+            if node.parameters.iter().any(|p| p.key == name) || node.param_groups.contains_key(name)
+            {
                 let updated = {
                     let node = graph
                         .node(node_id)
                         .expect("the port was removed from this node a moment ago");
                     let mut updated = (**node).clone();
                     updated.parameters.retain(|p| p.key != name);
+                    // The parameter is gone, so its display group entry has
+                    // nothing left to name. Leaving it would silently
+                    // re-group a port later added back under the same name.
+                    updated.param_groups.remove(name);
                     updated
                 };
                 graph = graph.replace_node(Arc::new(updated));
@@ -899,6 +904,11 @@ pub fn set_custom_port_type(
                 (Some(at), Some(value)) => updated.parameters[at].value = value,
                 (Some(at), None) => {
                     updated.parameters.remove(at);
+                    // A wire-only port carries no value, so its display group
+                    // entry names nothing. Leaving it would put the port back
+                    // into its old group the moment the type changes back —
+                    // the same reason `remove_custom_port` drops the entry.
+                    updated.param_groups.remove(name);
                 }
                 (None, Some(value)) => updated.parameters.push(Parameter {
                     key: name.to_string(),
@@ -988,6 +998,63 @@ pub fn move_custom_port(
     let moved = order.remove(index);
     order.insert(target, moved);
     Ok(graph.reorder_ports(node_id, side, &order)?)
+}
+
+/// Put the custom parameter `name` of the network-interface In node `node_id`
+/// into the display group `group`, or take it out of every group when `group`
+/// is empty or whitespace.
+///
+/// This is the one writer of [`Node::param_groups`]. It exists only for the In
+/// node because that is the only node whose parameters have no **type** to
+/// declare their groups: the user adds them at run time (`NETIF-2`), so the
+/// assignment has to live on the instance
+/// (`docs/implementation/parameter-groups-plan.md`, PGRP-4). Everywhere else
+/// the grouping is the registry template's, and there is nothing here to set.
+///
+/// The group name is the heading the Properties section shows literally — the
+/// user typed it, so it is not a locale key. Surrounding whitespace is
+/// trimmed, which is also what makes "  " mean "no group" rather than a group
+/// nobody can name twice.
+///
+/// Errors when the node is not an In node, or when it has no parameter under
+/// `name` — a fixed port (`f`, `t`) and a wire-only custom port have none, and
+/// a group on a parameter that does not exist would display nothing. Assigning
+/// the group a parameter already has is a no-op, so a re-pick of the same text
+/// records no undo step.
+pub fn set_custom_port_group(
+    graph: Graph,
+    node_id: NodeId,
+    name: &str,
+    group: &str,
+) -> Result<Graph, NetworkError> {
+    let node = graph
+        .node(node_id)
+        .ok_or(GraphError::NodeNotFound(node_id))?
+        .clone();
+    if !is_in_node(&node) {
+        return Err(NetworkError::NotInterfaceNode(node_id));
+    }
+    if !node.parameters.iter().any(|p| p.key == name) {
+        return Err(GraphError::ParamNotFound {
+            node: node_id,
+            key: name.to_string(),
+        }
+        .into());
+    }
+    let group = group.trim();
+    let current = node.param_groups.get(name).map(String::as_str);
+    if current.unwrap_or("") == group {
+        return Ok(graph);
+    }
+    let mut updated = (*node).clone();
+    if group.is_empty() {
+        updated.param_groups.remove(name);
+    } else {
+        updated
+            .param_groups
+            .insert(name.to_string(), group.to_string());
+    }
+    Ok(graph.replace_node(Arc::new(updated)))
 }
 
 // ===========================================================================
@@ -4414,5 +4481,167 @@ mod tests {
             .unwrap();
         let err = extract_subnet(graph, subnet_id()).unwrap_err();
         assert!(matches!(err, NetworkError::NoInnerGraph(_)), "{err}");
+    }
+    // ----- instance parameter groups (parameter-groups-plan, PGRP-4) -------
+
+    /// An In node with two custom float parameters to group.
+    fn in_graph_with_two_custom_params() -> Graph {
+        let graph = add_custom_port(
+            in_graph(),
+            in_id(),
+            "width",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .expect("width");
+        add_custom_port(
+            graph,
+            in_id(),
+            "height",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .expect("height")
+    }
+
+    #[test]
+    fn a_custom_parameter_can_be_put_in_a_group_and_taken_out_again() {
+        let graph = in_graph_with_two_custom_params();
+        let graph = set_custom_port_group(graph, in_id(), "width", " Size ").expect("assign");
+        assert_eq!(
+            node_of(&graph, in_id()).param_groups.get("width"),
+            Some(&"Size".to_string()),
+            "the group name is trimmed, not stored with the user's spaces"
+        );
+        // Whitespace only means "no group", so the entry is removed rather
+        // than kept as a heading nobody can type twice.
+        let graph = set_custom_port_group(graph, in_id(), "width", "  ").expect("clear");
+        assert!(node_of(&graph, in_id()).param_groups.is_empty());
+    }
+
+    /// Re-picking the group a parameter already has answers with the graph it
+    /// was given, so the caller's Document commit records no undo step that
+    /// undoes to an identical document.
+    #[test]
+    fn assigning_the_group_a_parameter_already_has_is_a_no_op() {
+        let graph = in_graph_with_two_custom_params();
+        let graph = set_custom_port_group(graph, in_id(), "width", "Size").expect("assign");
+        let again = set_custom_port_group(graph.clone(), in_id(), "width", "Size").expect("again");
+        assert_eq!(node_of(&again, in_id()), node_of(&graph, in_id()));
+    }
+
+    /// Only an In node's parameters carry instance groups; every other node
+    /// takes its grouping from its type. A fixed port and a parameter that
+    /// does not exist are both refused rather than recorded as a group
+    /// naming nothing.
+    #[test]
+    fn only_an_in_node_parameter_can_be_grouped() {
+        let out = out_graph();
+        assert!(matches!(
+            set_custom_port_group(out, out_id(), PORT_FRAME, "Size"),
+            Err(NetworkError::NotInterfaceNode(_))
+        ));
+
+        let blur = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(9), "blur")
+                    .with_param("radius", crate::graph::ParameterValue::Float(1.0)),
+            )
+            .unwrap();
+        assert!(matches!(
+            set_custom_port_group(blur, NodeId::new(9), "radius", "Size"),
+            Err(NetworkError::NotInterfaceNode(_))
+        ));
+
+        let graph = in_graph_with_two_custom_params();
+        // `f` is a fixed output with no parameter behind it.
+        assert!(matches!(
+            set_custom_port_group(graph.clone(), in_id(), PORT_FRAME_INDEX, "Size"),
+            Err(NetworkError::Graph(GraphError::ParamNotFound { .. }))
+        ));
+        assert!(matches!(
+            set_custom_port_group(graph, in_id(), "nope", "Size"),
+            Err(NetworkError::Graph(GraphError::ParamNotFound { .. }))
+        ));
+    }
+
+    /// Renaming a custom port carries its group with it: the group is keyed by
+    /// parameter key, and dropping it would silently un-group the port the
+    /// user only meant to rename.
+    #[test]
+    fn renaming_a_custom_port_carries_its_group() {
+        let graph = in_graph_with_two_custom_params();
+        let graph = set_custom_port_group(graph, in_id(), "width", "Size").expect("assign");
+        let graph = rename_custom_port(graph, in_id(), "width", "w", NetworkContext::LayerRoot)
+            .expect("rename")
+            .into_parts()
+            .0;
+        let node = node_of(&graph, in_id());
+        assert_eq!(node.param_groups.get("w"), Some(&"Size".to_string()));
+        assert!(!node.param_groups.contains_key("width"));
+    }
+
+    /// Removing a custom port drops its group entry. Left behind, it would
+    /// silently re-group a port later added back under the same name.
+    #[test]
+    fn removing_a_custom_port_drops_its_group() {
+        let graph = in_graph_with_two_custom_params();
+        let graph = set_custom_port_group(graph, in_id(), "width", "Size").expect("assign");
+        let graph =
+            remove_custom_port(graph, in_id(), "width", NetworkContext::LayerRoot).expect("remove");
+        assert!(node_of(&graph, in_id()).param_groups.is_empty());
+
+        let graph = add_custom_port(
+            graph,
+            in_id(),
+            "width",
+            CustomPortType::Float,
+            NetworkContext::LayerRoot,
+        )
+        .expect("re-add");
+        assert!(
+            node_of(&graph, in_id()).param_groups.is_empty(),
+            "a re-added port starts ungrouped"
+        );
+    }
+
+    /// Changing a grouped port to a wire-only type drops its group with its
+    /// parameter. The group names a value, and a wire-only port has none —
+    /// keeping the entry would put the port back into its old group the
+    /// moment the type changes back, which no gesture asked for.
+    #[test]
+    fn retyping_a_grouped_port_to_a_wire_only_type_drops_its_group() {
+        let graph = in_graph_with_two_custom_params();
+        let graph = set_custom_port_group(graph, in_id(), "width", "Size").expect("assign");
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "width",
+            CustomPortType::Geometry,
+            NetworkContext::Subnet,
+        )
+        .expect("retype to a wire-only type");
+        let node = node_of(&graph, in_id());
+        assert!(
+            !node.parameters.iter().any(|p| p.key == "width"),
+            "a wire-only port carries no parameter"
+        );
+        assert!(
+            node.param_groups.is_empty(),
+            "and so it carries no group either"
+        );
+
+        let graph = set_custom_port_type(
+            graph,
+            in_id(),
+            "width",
+            CustomPortType::Float,
+            NetworkContext::Subnet,
+        )
+        .expect("retype back");
+        assert!(
+            node_of(&graph, in_id()).param_groups.is_empty(),
+            "the old group does not come back with the parameter"
+        );
     }
 }

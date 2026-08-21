@@ -1,6 +1,7 @@
 # パラメータのグループ（Page）実装計画
 
-> **Status**: Planned — 2026-08-08
+> **Status**: In progress — `PGRP-1`〜`PGRP-4` 実装済み、`PGRP-5` / `PGRP-6` 未着手
+> — 2026-08-21
 
 対象: `ravel-core` のノードテンプレート、`ravel-ui` の Properties モデル、
 `ravel-app` の Properties パネルとノードエディタ。要件文書は無い（UI の構造化）。
@@ -10,8 +11,8 @@
 
 ### 1. ノードのパラメータが 1 枚の平打ちリストにしかならない
 
-`ravel-ui/src/properties/node.rs:179` の `parameters` セクションが、
-ノードの全パラメータを 1 つの `PropertySection` に並べる。
+`ravel-ui/src/properties/node.rs` の `node_params_section` が、
+ノードの全パラメータを 1 つの `PropertySection` に並べていた。
 `PropertySection { title, fields }` という入れ物は既にあるが、
 **ノードのパラメータは常にその 1 枚に入る**。
 
@@ -78,12 +79,23 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 
 ### 単位 1: `NodeTemplate::param_groups` と Properties の分割
 
-- `NodeTemplate` に `param_groups: Vec<(String, Vec<String>)>`（ロケールキーと
-  パラメータキーの並び）を足し、`with_param_group` を生やす
-- `ravel-ui/src/properties/node.rs` の `node_parameters_section` を
-  **`Vec<PropertySection>` を返す形**に変える。宣言が無ければ今までどおり 1 枚
+**実装済み。**
+
+- `NodeTemplate` に `param_groups: Vec<(String, Vec<String>)>` を足し、
+  `with_param_group` を生やす。**タプルの 1 要素目はグループ名**で、ロケール
+  キーは `ravel-ui` の表示境界が `node_locale::group_key` で組む
+  （`ravel-core` にロケールキーを持たせない既存の分担に合わせる。同じ名前が
+  `PGRP-3` の開閉キーと `PGRP-4` のインスタンスグループ名にもなる）
+- `ravel-ui/src/properties/node.rs` の `node_params_section` を
+  `node_params_sections`（**`Vec<PropertySection>` を返す**）に改名。
+  分割そのものは `grouped_params` の 1 本で、`param_group_titles` が
+  同じ分割の「グループ名と見出し」だけを返す（`PGRP-3` のホストが使う）
 - 宣言に現れないパラメータは、宣言されたグループより**前**に置く
   （既存ノードの見た目が変わらない）
+- 宣言に無いキーは黙って落ち、メンバが 0 になったグループはセクションを
+  作らない。同じキーを 2 つのグループが挙げたら**先に挙げた方**が勝ち、
+  同じグループ名を 2 回宣言したら**1 セクションに統合**する
+  （名前が開閉キーなので、同名 2 セクションは区別できない）
 
 **完了条件**
 
@@ -93,10 +105,31 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 
 ### 単位 2: 組み込みノードへのグループ宣言
 
-- パラメータが 6 個以上ある組み込みノードにグループを宣言する
-  （実測: `grep -c with_param` で対象を出す。計画時点の候補は
-  `rasterize` / `scatter.*` / `comp.transform` / `shape.*`）
-- ロケールキーは `node.<type_key>.group.<name>` で `DISC-1` の体系に合わせる
+**実装済み。**対象はテンプレート単位で実測した 9 つ（1 ファイルに複数
+テンプレートがあるので `grep -c with_param` では出ない）。
+
+| ノード | グループ |
+|---|---|
+| `attribute.set` | target / value |
+| `style.stroke` | stroke / target / corner |
+| `field.apply` | target / blend / scope |
+| `math.remap` | input / output |
+| `math.curve` | input / output / curve |
+| `scene.camera` | view / lens / clip |
+| `scatter.grid` | layout / source |
+| `scatter.circular` | layout / source |
+| `scatter.scatter` | layout / source |
+
+計画時点の候補のうち `rasterize`（3）・`shape.*`（2〜4）・`comp.transform`
+（テンプレートが無い）は 6 個に届かないので宣言していない。
+`scatter.path_array` は 4 個なので同じく見送った（`source` の 3 つは兄弟と
+同じ並びだが、4 行を 2 セクションに割る利得が無い）。
+
+ロケールキーは `node.<type_key>.group.<name>` で `DISC-1` の体系に合わせる。
+`ravel-ui::node_locale` のテストが **en / ja 両方の欠落**と、宣言に無い
+グループの**余り**の両方を落とす。`registry/builtin.rs` 側のテストは
+「1 つでも切ったら全部切る」「実在するキーだけ」「同じキーを 2 度挙げない」を
+強制する。
 
 **完了条件**
 
@@ -105,8 +138,21 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 
 ### 単位 3: 開閉状態の永続化
 
-- 畳んだグループを `ui_state.json` に持つ。キーは `(type_key, group)`
-  — ノードごとではない。同じ型のノードを選び直すたびに畳み直すのは煩わしい
+**実装済み。**
+
+- 畳んだグループを `ui_state.json` の `collapsed_param_groups` に持つ。
+  キーは `(type_key, group)` — ノードごとではない。同じ型のノードを
+  選び直すたびに畳み直すのは煩わしい
+- **既定は全展開**なので、書くのは「畳まれているもの」だけ。1 件も無ければ
+  エントリごと書かれないので `format_version` は上げていない
+  （`bpm_grid` / `loop_ranges` と同じ扱い）
+- 経路は `bpm_grid` に倣った Global 1 本
+  （`panels::CollapsedParamGroupsState`）。保存は `ProjectState` の
+  `enqueue_save`、復元は `replace_document`
+- Properties の Accordion は開いているセクションの集合しか報告せず、しかも
+  行のクリックでも発火するので、`set_param_group_collapsed` が
+  「変わったか」を返し、変わったときだけ再描画する。パラメータグループ
+  以外のセクション（info / ports / 宣言 / 説明）は畳めるようにしていない
 
 **完了条件**
 
@@ -115,11 +161,30 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 
 ### 単位 4: In ノードのインスタンスグループ
 
-- `Node` に `param_groups` を足す（In ノード以外は常に空）
-- `.ravprj` フォーマットを 1 つ上げる。**採番はマージ順**（`v8` が空いていれば `v8`。
-  `discrete-keyframes-plan.md` / `asset-identity-plan.md` / `CM-2` と競るので、
-  着手時に `manifest.rs` の `CURRENT_FORMAT_VERSION` を見て決める）
-- Properties の Ports セクションからグループを編集する
+**実装済み。**
+
+- `Node` に `param_groups: BTreeMap<String, String>`（パラメータキー →
+  グループ名）を**末尾**に足した。テンプレート側の「グループ → キーの並び」
+  ではなく**パラメータごとの対**にしたのは、インスタンス側には順序の出所が
+  もう 1 つあるから: セクション順は最初のメンバの登場順（= ポートを足した
+  順）で決まるので、改名は 1 エントリの移動、削除は 1 エントリの除去で済む。
+  同期漏れの余地を作らない
+- `.ravprj` フォーマットは **v11 → v12**（`migrate_v11_to_v12` は版印だけを
+  進める）。`Node` にフィールドを足すと bincode の位置索引が動くので
+  `JOURNAL_FORMAT_VERSION` も v10 → v11
+- 書き手は `network::set_custom_port_group` の 1 本だけ。改名は
+  `Graph::rename_port` がグループを連れて行き、削除は
+  `network::remove_custom_port` がエントリを落とす（残すと、同名のポートを
+  足し直したときに黙って元のグループへ入る）
+- Properties の Ports セクションの各カスタム行に「グループ」欄が出る。
+  **パラメータを持たないポート（固定ポート、wire 専用型）には欄が出ない** —
+  `PortRow::group` が `None` になる
+- **優先順位**: 同じ In ノードに型宣言とインスタンス宣言の両方があるときは
+  **インスタンスが勝つ**（ユーザーが手で割り当てたものなので、片方ずつ
+  混ぜるとどちらに従っているのか説明できない）
+- **In ノード以外の非空 `param_groups`**（手編集した `.ravprj` でしか作れない）
+  は**表示側が無視**し、型宣言に従う。`validate` で開けなくはしない
+  — 「保存できたが開けない」を作らないため（`HIGH-26`）
 
 **完了条件**
 
@@ -144,6 +209,22 @@ ofx の Page → Group は 2 階層だが、Ravel の Properties は既に
 
 - `docs/specifications/ui/` の Properties とノードエディタの記述が追随
 - `docs/ui-impl-status.md` が更新されている
+
+## 受け入れた上限（独立レビューで挙がったもの）
+
+- **セクションの順はポートの並べ替えに追随しない。** インスタンスグループの
+  セクション順は `node.parameters` の登場順で決まるが、`Graph::reorder_ports`
+  はポート配列だけを並べ替えて `parameters` を並べ替えない（`main` から
+  ある形で、グループ機能が「順序」に依存したことで初めて見えた）。
+  パラメータ側も並べ替えるのは `PGRP-*` の外の変更なので、要求が出たら別単位
+- **グループ名がロケールキーと衝突すると翻訳される。** インスタンスグループの
+  名前は自由入力で、`PropertySection.title` はホストが `t!` を通す。
+  `properties.section.parameters` のような**内部キーそのもの**を名前に打つと、
+  その翻訳が見出しに出る。畳み判定は位置で引くので**別のセクションを畳む事故は
+  起きない**（`PGRP-4` の修正）。表示だけの問題で、名前を変えれば直る
+- **開閉の永続化は明示的な保存に乗る。** 折り畳みは `ui_state` を dirty にする
+  だけで保存を起こさない（自動保存は `SET-9` で未実装）。「畳んで保存して
+  開き直すと残る」までがこの単位の範囲
 
 ## 非対象
 

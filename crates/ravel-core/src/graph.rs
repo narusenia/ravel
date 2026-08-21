@@ -10,7 +10,7 @@
 use crate::animation::channel::AnimationChannel;
 use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -537,6 +537,26 @@ pub struct Node {
     // journal); the None is always written.
     #[serde(default, with = "subnet_serde")]
     pub subnet: Option<Arc<Graph>>,
+    /// Display group of each parameter, for the parameters whose grouping
+    /// cannot come from a node **type**: a network-interface In node's custom
+    /// parameters, which the user adds at run time (`NETIF-2`). Empty on every
+    /// other node, where the grouping is the registry template's
+    /// `NodeTemplate::param_groups` and nothing writes here.
+    ///
+    /// Parameter key → group name. A per-parameter map rather than the
+    /// template's ordered "group → keys" list because the instance has a
+    /// second source of order the template does not: the port list the user
+    /// reorders in the Properties Ports section. Sections therefore appear in
+    /// the order their first member does, and a rename or a removal is one
+    /// map entry to move rather than a list to keep in step.
+    ///
+    /// An empty group name (or a missing entry) means "no group" — the
+    /// parameter shows up in the leading ungrouped section. Additive field —
+    /// `default` only, never `skip_serializing_if` (see
+    /// [`NodeMetadata::bypassed`]); covered by the journal format version
+    /// bump to v11 and the `.ravprj` bump to v12.
+    #[serde(default)]
+    pub param_groups: BTreeMap<String, String>,
 }
 
 /// Serde adapter for `Option<Arc<Graph>>` (serde's `Arc` support needs the
@@ -570,6 +590,7 @@ impl Node {
             parameters: Vec::new(),
             metadata: NodeMetadata::default(),
             subnet: None,
+            param_groups: BTreeMap::new(),
         }
     }
 
@@ -1670,6 +1691,12 @@ impl Graph {
             && let Some(param) = updated.parameters.iter_mut().find(|p| p.key == old_name)
         {
             param.key = new_name.to_string();
+            // The display group is keyed by parameter key, so it moves with
+            // it. Doing this anywhere but here would leave one rename path
+            // that drops the group silently.
+            if let Some(group) = updated.param_groups.remove(old_name) {
+                updated.param_groups.insert(new_name.to_string(), group);
+            }
         }
         self.nodes.insert(node_id, Arc::new(updated));
         Ok(self)

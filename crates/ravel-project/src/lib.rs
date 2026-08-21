@@ -969,6 +969,23 @@ mod tests {
         );
     }
 
+    /// The folded parameter groups ride the same optional entry: a project
+    /// saved with a group folded away comes back with it, and the format
+    /// version stays put (an additive optional field, `docs/dev/persistence.md`).
+    #[test]
+    fn the_archive_round_trips_the_folded_parameter_groups() {
+        let mut project = demo_project();
+        project.ui_state.collapsed_param_groups =
+            vec![("scatter.grid".to_string(), "source".to_string())];
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            back.ui_state.collapsed_param_groups(),
+            std::collections::BTreeSet::from([("scatter.grid".to_string(), "source".to_string())])
+        );
+    }
+
     /// A current-format archive may omit `ui_state.json`; it must still load,
     /// falling back to the document root. The optional entry never requires a
     /// format migration.
@@ -1365,6 +1382,97 @@ mod tests {
         );
         archive.insert(container::entry::DOCUMENT, kept.join("\n").into_bytes());
         archive
+    }
+
+    /// The In node of the demo project's first layer, whose custom
+    /// `intensity` parameter the group tests assign.
+    fn demo_in_node(project: &ProjectFile) -> (CompId, NodeId) {
+        let comp = project.document.root_comp.expect("demo project has a root");
+        let id = project
+            .document
+            .get_composition(comp)
+            .expect("root exists")
+            .layers[0]
+            .network
+            .nodes()
+            .find(|node| net::is_in_node(node))
+            .expect("the demo layer network has an In node")
+            .id;
+        (comp, id)
+    }
+
+    /// A `document/main.ron` from before v12 has no `param_groups` on any
+    /// node. Every such project must open — with no group assignments, which
+    /// is what a project written before instance groups existed has — and
+    /// rewrite cleanly.
+    #[test]
+    fn a_project_written_before_instance_groups_existed_opens_with_none() {
+        for version in 3..CURRENT_FORMAT_VERSION {
+            let mut project = demo_project();
+            let (comp, in_node) = demo_in_node(&project);
+            project.manifest.format_version = version;
+            let mut archive = project.to_archive().unwrap();
+            // `document_to_ron` pins LF, so splitting on lines is safe here.
+            let text = document_to_ron(&project.document).unwrap();
+            let kept: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("param_groups:"))
+                .collect();
+            assert!(
+                kept.len() < text.lines().count(),
+                "the fixture must actually drop the field: {text}"
+            );
+            archive.insert(container::entry::DOCUMENT, kept.join("\n").into_bytes());
+
+            let back = ProjectFile::from_archive(&archive)
+                .unwrap_or_else(|err| panic!("a v{version} project still opens: {err}"));
+            assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+            assert!(
+                back.document
+                    .get_composition(comp)
+                    .expect("root survives")
+                    .layers[0]
+                    .network
+                    .node(in_node)
+                    .expect("In node survives")
+                    .param_groups
+                    .is_empty(),
+                "a v{version} project assigns no groups"
+            );
+        }
+    }
+
+    /// An In node's instance group survives a save and a load.
+    #[test]
+    fn the_archive_round_trips_an_in_node_instance_group() {
+        let mut project = demo_project();
+        let (comp_id, in_node) = demo_in_node(&project);
+        let mut comp = (**project
+            .document
+            .get_composition(comp_id)
+            .expect("root exists"))
+        .clone();
+        let mut layer = comp.layers[0].clone();
+        layer.network =
+            net::set_custom_port_group(layer.network.clone(), in_node, "intensity", "Look")
+                .expect("intensity is a custom parameter of the In node");
+        comp.layers.set(0, layer);
+        project.document = project.document.clone().with_composition(comp);
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            back.document
+                .get_composition(comp_id)
+                .expect("root survives")
+                .layers[0]
+                .network
+                .node(in_node)
+                .expect("In node survives")
+                .param_groups
+                .get("intensity"),
+            Some(&"Look".to_string())
+        );
     }
 
     /// Every `document/main.ron` written before v7 lacks the declarations

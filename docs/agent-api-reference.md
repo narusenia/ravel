@@ -1039,6 +1039,16 @@ set_custom_port_type(graph, node_id, name, CustomPortType, NetworkContext)
     // no-op that keeps the value. Refuses a fixed port, and refuses turning a
     // legacy custom `f` into a parameterless type (without its parameter the
     // port would become the built-in `f` and stop being editable).
+set_custom_port_group(graph, node_id, name, group)   // In node ONLY: put the
+    // custom parameter `name` in the Properties display group `group` (empty
+    // or whitespace = no group). The ONLY writer of `Node::param_groups`; it
+    // exists because an In node's parameters are added at run time and have no
+    // TYPE to declare their groups (every other node reads
+    // `NodeTemplate::param_groups`). The name is the user's own text, shown
+    // literally — not a locale key. Trimmed. Refuses a non-In node and a port
+    // with no parameter (fixed ports, wire-only types). Re-assigning the
+    // current group is a no-op, so no undo step. A rename carries the group
+    // (`Graph::rename_port`), a removal drops it (`remove_custom_port`).
 move_custom_port(graph, node_id, name, offset)   // -1 = one slot earlier
     // Fixed ports neither move nor are crossed: a step onto one stops the
     // move (as a step past either end does) and the call still succeeds, so
@@ -1428,9 +1438,18 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // on it; Size is measured from the node's first Position param.
     // Channel2/Channel3 only, and a param driven by a connected port gets no
     // handle. Drag writes are clamped to the param's hard ParamRange.
+    .with_param_group(name, keys)        // one Properties section per group,
+    // in declaration order (a Vec, not a map: the order IS the display
+    // order). Heading = locale key `node.<type_key>.group.<name>`. Keys the
+    // template does not have are dropped where the sections are built, and a
+    // key named twice belongs to the first group. Params in no group stay in
+    // one leading `properties.section.parameters` section, so a template that
+    // declares nothing looks exactly as it did. Builtin tests enforce: real
+    // keys, no repeats, and all-or-nothing coverage per template.
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
 registry.param_role(type_key, param_key) -> Option<ParamRole>
+template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node
     // NOT a pure function of the template for one type key: a `subnet`
     // template declares no ports, so this builds the inner net.in/net.out pair
@@ -2288,12 +2307,21 @@ Unknown type keys are skipped silently (plugin space).
   whole `CurveParam`; the panel renders it as a thumbnail row that expands
   `widgets::param_curve_editor` inline, and which rows are open is panel view
   state that never enters the Document). `PortList { key, side, rows:
-  Vec<PortRow { name, port_type, fixed }>, options }` is the odd one out: it
+  Vec<PortRow { name, port_type, fixed, group }>, options }` is the odd one out: it
   describes a network interface node's SHAPE, not a value, so it never travels
   through `PropertyValue` — the host routes its edits to
   `network::{add,remove,rename,move}_custom_port` and
-  `network::set_custom_port_type` instead of to a parameter write. Fixed ports are rows too (`fixed` marks them read-only), so
-  the list matches the node on the canvas. Builders: `sections_for_node(node,
+  `network::{set_custom_port_type,set_custom_port_group}` instead of to a parameter write. Fixed ports are rows too (`fixed` marks them read-only), so
+  the list matches the node on the canvas. `group` is `Some` only for a port
+  that HAS a parameter to group, so the host draws the group cell for those
+  rows alone. Node parameters split into ONE SECTION PER GROUP
+  (`node_params_sections`, PGRP-1): the type's `NodeTemplate::param_groups`,
+  or an In node's own `Node::param_groups` where it has any (the instance wins
+  on that node; every other node ignores its own field). Params in no group
+  come first under `properties.section.parameters`, so an ungrouped type is
+  unchanged. `param_group_titles(node, &registry) -> Vec<(group, title)>` is
+  the same split without the fields — the host keys the fold state on
+  `(type_key, group)` in `ui_state.json` and shows `title`. Builders: `sections_for_node(node,
   &registry, frame, driven, NetworkContext)` (samples animated channels at the
   layer-local frame; the context reaches only `node_ports_section`, which
   returns `None` for anything but `net.in` / `net.out`. Collapse a

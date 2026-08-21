@@ -60,7 +60,11 @@ use thiserror::Error;
 /// same reasoning as v6 and v8.
 /// v10: `ParameterValue` gained the `StringSteps` variant (animatable strings,
 /// a held step curve) — same reasoning as v6, v8 and v9.
-pub const JOURNAL_FORMAT_VERSION: u32 = 10;
+/// v11: `Node` gained the `param_groups` field (an In node's instance
+/// parameter groups) — the same positional-layout incompatibility as v2 to v5,
+/// one level up: the field sits at the end of `Node`, so a v10 entry has one
+/// fewer field than the decoder expects.
+pub const JOURNAL_FORMAT_VERSION: u32 = 11;
 
 /// Magic bytes at the start of every journal file.
 const JOURNAL_MAGIC: [u8; 4] = *b"RVLJ";
@@ -488,6 +492,38 @@ mod tests {
                 .map(|p| &p.value),
             Some(&ParameterValue::PathPoints(points))
         );
+    }
+
+    /// The v11 layout change: `Node::param_groups` must round-trip through the
+    /// bincode journal codec. The field is what forced the version bump —
+    /// bincode's layout is positional, so a v10 reader would misread every
+    /// field after it — and an empty map would round-trip even if the field
+    /// were dropped, so the assignment has to be non-empty here
+    /// (`parameter-groups-plan.md`, PGRP-4).
+    #[test]
+    fn bincode_roundtrip_preserves_parameter_groups() {
+        use crate::graph::ParameterValue;
+        let mut node = Node::new(NodeId::new(11), crate::network::NET_IN_TYPE_KEY)
+            .with_param("width", ParameterValue::Float(4.0))
+            .with_param("count", ParameterValue::Int(3));
+        node.param_groups
+            .insert("width".to_string(), "Size".to_string());
+        node.param_groups
+            .insert("count".to_string(), "Layout".to_string());
+        let entry = JournalEntry {
+            sequence: 11,
+            timestamp_secs: 1700000000,
+            mutation: GraphMutation::AddNode(node.clone()),
+        };
+        let data = BincodeCodec.encode(&entry).unwrap();
+        let decoded = BincodeCodec.decode(&data).unwrap();
+        let GraphMutation::AddNode(decoded) = decoded.mutation else {
+            panic!("expected AddNode");
+        };
+        assert_eq!(decoded.param_groups, node.param_groups);
+        // And the fields after it are still themselves: a positional codec
+        // that lost the map would read the next field out of the group bytes.
+        assert_eq!(decoded.parameters, node.parameters);
     }
 
     /// The v7 layout change: `ParameterValue::Curve` must round-trip through

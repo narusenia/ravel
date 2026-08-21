@@ -42,6 +42,14 @@ pub struct PortRow {
     /// The shell owns this port: it cannot be renamed, retyped, reordered or
     /// removed.
     pub fixed: bool,
+    /// The display group this port's parameter is assigned to, empty for
+    /// "no group" — the Properties group editor of PGRP-4.
+    ///
+    /// `None` when the port has **no parameter** to group: every port of an
+    /// Out node, a fixed In port (`f`, `t`, `base_geometry`, `source`), and a
+    /// wire-only custom type. The host renders the group cell only for a
+    /// `Some`, so a row that cannot carry a group does not offer one.
+    pub group: Option<String>,
 }
 
 /// A single editable (or read-only) field in a property section.

@@ -447,6 +447,7 @@ remove = "Remove this port"
 move_up = "Move this port one slot earlier"
 move_down = "Move this port one slot later"
 builtin = "Built-in port — the layer shell owns it"
+group = "Group"
 
 [properties.ports.type]
 float = "Float"
@@ -823,6 +824,9 @@ in_max = "End of the input range."
 out_min = "Start of the output range."
 out_max = "End of the output range."
 clamp = "Clamp the result to the output range."
+[node."math.remap".group]
+input = "Input"
+output = "Output"
 
 [node."math.curve"]
 label = "Curve"
@@ -835,6 +839,10 @@ out_min = "Start of the output range."
 out_max = "End of the output range."
 extrapolation = "How values outside the input range are handled: clamp, repeat, or extend the endpoint tangent."
 curve = "The scalar transfer curve."
+[node."math.curve".group]
+input = "Input"
+output = "Output"
+curve = "Curve"
 
 [node."vector.construct.vec2"]
 label = "Construct Vec2"
@@ -969,6 +977,10 @@ fov = "Vertical field of view in degrees. Perspective only."
 ortho_height = "Vertical extent covered, in composition units. Orthographic only."
 near = "Near clip distance."
 far = "Far clip distance."
+[node."scene.camera".group]
+view = "View"
+lens = "Lens"
+clip = "Clipping"
 
 [node."blur"]
 label = "Blur"
@@ -1077,6 +1089,9 @@ center = "Center of the grid in pixels."
 center_input = "Re-centre each source geometry on its anchor before instancing."
 source_mode = "How sources are assigned to points when several are connected: sequential or random."
 source_seed = "Random seed for source assignment."
+[node."scatter.grid".group]
+layout = "Layout"
+source = "Source"
 
 [node."scatter.circular"]
 label = "Circular"
@@ -1089,6 +1104,9 @@ align_rotation = "Rotate each instance to face outward from the center."
 center_input = "Re-centre each source geometry on its anchor before instancing."
 source_mode = "How sources are assigned to points when several are connected: sequential or random."
 source_seed = "Random seed for source assignment."
+[node."scatter.circular".group]
+layout = "Layout"
+source = "Source"
 
 [node."scatter.path_array"]
 label = "Path Array"
@@ -1110,6 +1128,9 @@ seed = "Random seed for placement."
 center_input = "Re-centre each source geometry on its anchor before instancing."
 source_mode = "How sources are assigned to points when several are connected: sequential or random."
 source_seed = "Random seed for source assignment."
+[node."scatter.scatter".group]
+layout = "Layout"
+source = "Source"
 
 [node."attribute.set"]
 label = "Attribute Set"
@@ -1122,6 +1143,9 @@ value = "Value for the float, vector, and color types."
 int_value = "Value for the i32 type."
 bool_value = "Value for the bool type."
 string_value = "Value for the string type."
+[node."attribute.set".group]
+target = "Target"
+value = "Value"
 
 [node."style.fill"]
 label = "Style Fill"
@@ -1142,6 +1166,10 @@ domain = "Domain to write on (point, primitive, instance)."
 group = "Bool attribute naming the elements to write; empty writes every element."
 cap = "Shape of the stroke ends (butt, round, square); a Detail attribute, so one value for the geometry."
 join = "Shape of the stroke corners (miter, round, bevel); a Detail attribute, so one value for the geometry."
+[node."style.stroke".group]
+stroke = "Stroke"
+target = "Target"
+corner = "Corner"
 
 [node."style.dash"]
 label = "Style Dash"
@@ -1311,6 +1339,10 @@ combine = "How the sampled value combines with the existing one: set, add, multi
 components = "Components to affect (empty lets the type decide: rgb for a Color or Vec4, every component otherwise; for example xy, rgb, a)."
 group = "Name of a bool attribute limiting the affected elements (empty for all)."
 create_if_missing = "Create the attribute when the geometry does not have it yet, instead of failing."
+[node."field.apply".group]
+target = "Target"
+blend = "Blend"
+scope = "Scope"
 
 [export]
 title = "Export"

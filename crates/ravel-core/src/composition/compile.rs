@@ -124,6 +124,7 @@ fn synthetic_node(id: NodeId, type_key: &str, label: &str) -> Node {
             ..NodeMetadata::default()
         },
         subnet: None,
+        param_groups: std::collections::BTreeMap::new(),
     }
 }
 

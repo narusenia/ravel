@@ -26,6 +26,11 @@ struct Node {
     // Arc 共有によりノード複製は安価で、内部編集は replace_node で
     // ノードごと差し替える（イミュータブル維持）。
     subnet: Option<Arc<Graph>>,
+    // Properties の表示グループ（パラメータキー → グループ名）。
+    // ネットワークインターフェースの In ノードだけが持ち、それ以外は常に空
+    // （型が宣言するので NodeTemplate::param_groups 側にある）。
+    // format v12 で追加（PGRP-4）。
+    param_groups: BTreeMap<String, String>,
 }
 
 struct NodeMetadata {
@@ -620,7 +625,7 @@ struct SubgraphTemplate {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v11)
+### document/main.ron (RON形式、フォーマット v12)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
@@ -629,6 +634,8 @@ pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Lay
 `color_space` を追加）、公開パラメータ宣言（`exposed_parameters`。v7 で追加）。
 **v10 で `ParameterValue::IntChannel`**（アニメーション可能な整数）、
 **v11 で `ParameterValue::StringSteps`**（アニメーション可能な文字列）が入る。
+**v12 で `Node.param_groups`**（In ノードのカスタムパラメータの表示グループ、
+`PGRP-4`）が入る。
 
 **v8 で色の意味が変わった。** 作者が指定した色（ノードの `COLOR` パラメータ、
 `Composition.background_color`、`exposed_parameters` の `color` 既定値）は
@@ -726,7 +733,8 @@ GraphDoc(
 {
   "active_comp": 2,
   "bpm_grid": { "enabled": true, "bpm": 174.0, "offset_frames": 12.0 },
-  "loop_ranges": [[2, { "in_frame": 30, "out_frame": 89 }]]
+  "loop_ranges": [[2, { "in_frame": 30, "out_frame": 89 }]],
+  "collapsed_param_groups": [["scatter.grid", "source"]]
 }
 ```
 
@@ -743,6 +751,15 @@ GraphDoc(
 手で `in_frame` と `out_frame` を逆に書いた場合は**読み込み時に並べ替える**
 （`LoopRange` の Deserialize が `LoopRange::new` を通る）。逆順のまま折り返しに
 渡すと減算がアンダーフローするため、BPM の 1〜999 丸め込みと同じ扱いにしてある。
+
+`collapsed_param_groups` は Properties で**畳んだ**パラメータグループを
+`(type_key, group)` の対で持つ（`PGRP-3`）。ノードごとではなく**ノード型**を
+キーにするのは、グループが型の宣言だからで、同じ型のノードを選び直すたびに
+畳み直す手間を作らないため。既定は全展開なので**畳んだものだけ**を書き、
+1 件も無ければ**エントリ自体が書かれない**。読み出しは
+`UiState::collapsed_param_groups()` を通し、重複した対は 1 件に畳み、
+`type_key` が空の項目は捨てる。手編集で存在しない型やグループを書いても
+どのセクションにも一致しないだけで、何も畳まれない。
 
 ユーザーが「何を見ていたか」はドキュメントの一部ではない — アクティブコンプを
 `Document` に入れると undo スナップショット（undo の単位）に載ってしまい、

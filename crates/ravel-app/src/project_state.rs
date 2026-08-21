@@ -854,6 +854,12 @@ impl ProjectState {
                 // Same rule for the loop ranges: no entry at all until one
                 // composition actually has one.
                 loop_ranges: crate::panels::loop_ranges(cx).into_iter().collect(),
+                // And for the folded Properties groups: the default is
+                // all-expanded, so a project nobody folded anything in writes
+                // no entry.
+                collapsed_param_groups: crate::panels::collapsed_param_groups(cx)
+                    .into_iter()
+                    .collect(),
             },
             workspace_layout,
             settings: crate::app_settings::layer(crate::app_settings::SettingsScope::Project, cx),
@@ -1073,6 +1079,7 @@ impl ProjectState {
         let active_comp = ui_state.initial_active_comp(&document);
         let bpm_grid = ui_state.bpm_grid();
         let loop_ranges = ui_state.loop_ranges(&document);
+        let collapsed_param_groups = ui_state.collapsed_param_groups();
         // The layer selection of the previous document never carries over —
         // even a reloaded project reuses composition ids for different
         // content. Published after the swap so observers resolve the new id
@@ -1081,6 +1088,7 @@ impl ProjectState {
         crate::panels::set_active_composition(active_comp, cx);
         crate::panels::set_bpm_grid(bpm_grid, cx);
         crate::panels::set_loop_ranges(loop_ranges, cx);
+        crate::panels::set_collapsed_param_groups(collapsed_param_groups, cx);
         crate::app_settings::set_project_layer(settings, cx);
         self.project_path = path;
         self.generation += 1;

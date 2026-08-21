@@ -391,6 +391,16 @@ fn custom_port_row(
                 .child(gpui_component::select::Select::new(select).xsmall()),
         );
     }
+    // The Properties group this port's parameter sits under (PGRP-4). Absent
+    // for a port with no parameter, which has nothing to group.
+    if let Some((_, input)) = ports.groups.iter().find(|(n, _)| n == &row.name) {
+        fields = fields.child(
+            div()
+                .flex_shrink_0()
+                .w(px(88.0))
+                .child(Input::new(input).xsmall().w_full()),
+        );
+    }
 
     div()
         .flex()
@@ -1509,6 +1519,34 @@ fn expression_editor_body(
     body
 }
 
+/// The fold identity of each of `sections`, in order: `Some((type_key, group))`
+/// for one of `node`'s parameter groups, `None` for a section that is always
+/// open (PGRP-3).
+///
+/// The parameter sections sit directly after the single info section
+/// (`sections_for_node`), so a group is found **by position** and confirmed by
+/// the title. Matching on the title alone would let a group the user named
+/// after another section's heading — an In node's instance group is free text
+/// — fold that section along with its own.
+fn param_group_keys(
+    node: &Node,
+    registry: &NodeRegistry,
+    sections: &[PropertySection],
+) -> Vec<Option<(String, String)>> {
+    let groups = ravel_ui::properties::node::param_group_titles(node, registry);
+    sections
+        .iter()
+        .enumerate()
+        .map(|(index, section)| {
+            index
+                .checked_sub(1)
+                .and_then(|group| groups.get(group))
+                .filter(|(_, title)| title == &section.title)
+                .map(|(group, _)| (node.type_key.clone(), group.clone()))
+        })
+        .collect()
+}
+
 /// Discriminant fingerprint of the sections' fields: key plus variant kind.
 /// A same-target refresh whose shape changed (e.g. a parameter switched
 /// between editable and driven read-only) must rebuild widget bindings.
@@ -1542,7 +1580,11 @@ fn field_shape_key(field: &PropertyField) -> String {
         PropertyField::PortList { key, rows, .. } => {
             let mut shape = key.clone();
             for row in rows {
-                let _ = write!(shape, "\n{}\t{:?}\t{}", row.name, row.port_type, row.fixed);
+                let _ = write!(
+                    shape,
+                    "\n{}\t{:?}\t{}\t{:?}",
+                    row.name, row.port_type, row.fixed, row.group
+                );
             }
             shape
         }
@@ -1681,6 +1723,7 @@ type PortAddWidgets = (Entity<InputState>, Entity<SelectState<Vec<SharedString>>
 struct PortWidgets {
     names: Vec<(String, Entity<InputState>)>,
     types: Vec<(String, Entity<SelectState<Vec<SharedString>>>)>,
+    groups: Vec<(String, Entity<InputState>)>,
     add: Option<PortAddWidgets>,
     error: Option<SharedString>,
 }
@@ -1909,6 +1952,10 @@ pub struct PropertiesGpuiPanel {
     /// detects by fingerprinting the rows.
     port_names: Vec<(String, StringBinding)>,
     port_types: Vec<(String, SelectBinding)>,
+    /// Group Input per custom In port that carries a parameter (PGRP-4).
+    /// Shorter than `port_names`: a wire-only custom type has no parameter to
+    /// group.
+    port_groups: Vec<(String, StringBinding)>,
     port_add: Option<PortAddBinding>,
     /// The type menu the current Ports section offers, in the order the
     /// Selects list it. `SelectEvent::Confirm` hands back the *translated*
@@ -1991,6 +2038,11 @@ pub struct PropertiesGpuiPanel {
     /// (see [`super::on_became_visible`]).
     #[allow(dead_code)]
     visibility_sub: Subscription,
+    /// Folding a group writes the Global; a second Properties panel has to
+    /// repaint from it rather than wait for an unrelated refresh
+    /// (`CollapsedParamGroupsState`).
+    #[allow(dead_code)]
+    collapsed_groups_sub: Subscription,
 }
 
 impl PropertiesGpuiPanel {
@@ -2003,6 +2055,8 @@ impl PropertiesGpuiPanel {
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
 
+        let collapsed_groups_sub =
+            cx.observe_global::<super::CollapsedParamGroupsState>(|_this, cx| cx.notify());
         let selection_sub =
             cx.observe_global::<SelectedPropertiesTarget>(move |this: &mut Self, cx| {
                 let target = cx
@@ -2172,6 +2226,7 @@ impl PropertiesGpuiPanel {
             ramps: Vec::new(),
             port_names: Vec::new(),
             port_types: Vec::new(),
+            port_groups: Vec::new(),
             port_add: None,
             port_type_options: Vec::new(),
             port_error: None,
@@ -2195,6 +2250,7 @@ impl PropertiesGpuiPanel {
             focus_handle,
             focus_subscriptions,
             selection_sub,
+            collapsed_groups_sub,
             project_sub,
             mirror_epoch: super::MirrorEpoch::default(),
             playhead_sensitive: true,
@@ -2719,6 +2775,43 @@ impl PropertiesGpuiPanel {
         // The document observer refreshes the displayed toggle state.
     }
 
+    /// Record which parameter groups are folded after a click in the section
+    /// accordion (PGRP-3).
+    ///
+    /// `keys` is the `(type_key, group)` fold identity of each section in
+    /// order (`None` for a section that cannot be folded away) and `open` the
+    /// indices the accordion reports as open. The accordion hands over the
+    /// whole open set rather than the header that moved, and it fires on any
+    /// click that bubbles out of the list — a scrub, a checkbox, a text field
+    /// — so every fold is written through
+    /// [`crate::panels::set_param_group_collapsed`], which reports whether it
+    /// changed anything, and only a real change repaints.
+    ///
+    /// The fold is UI state: it never reaches the document, so it records no
+    /// undo step, and the project save path carries it to `ui_state.json`.
+    fn apply_param_group_folds(
+        &mut self,
+        keys: &[Option<(String, String)>],
+        open: &[usize],
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for (index, key) in keys.iter().enumerate() {
+            let Some((type_key, group)) = key else {
+                continue;
+            };
+            changed |= crate::panels::set_param_group_collapsed(
+                type_key,
+                group,
+                !open.contains(&index),
+                cx,
+            );
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     /// Open or close the inline curve editor of the row `key`.
     ///
     /// Expansion is view state only: nothing here touches the document, so
@@ -2952,6 +3045,26 @@ impl PropertiesGpuiPanel {
         let name = name.to_string();
         self.route_port_edit(cx, move |editor, node_id, cx| {
             editor.set_custom_port_type(node_id, &name, port_type, cx)
+        });
+    }
+
+    /// Commit a row's edited group on Enter or blur (PGRP-4).
+    ///
+    /// No repeat guard like [`Self::rename_port`]'s: this edit does not change
+    /// the row's identity, so the second report of an Enter-then-blur pair
+    /// carries the value the graph already holds and
+    /// `network::set_custom_port_group` answers it with the graph it was given
+    /// — no undo step, nothing to suppress.
+    fn set_port_group(&mut self, name: &str, group: String, cx: &mut Context<Self>) {
+        if self
+            .port_row(name)
+            .is_some_and(|row| row.group.as_deref() == Some(group.trim()))
+        {
+            return;
+        }
+        let name = name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.set_custom_port_group(node_id, &name, &group, cx)
         });
     }
 
@@ -3745,6 +3858,7 @@ impl PropertiesGpuiPanel {
         self.ramps.clear();
         self.port_names.clear();
         self.port_types.clear();
+        self.port_groups.clear();
         self.port_add = None;
         self.port_type_options.clear();
         self.exposed_names.clear();
@@ -4356,6 +4470,32 @@ impl PropertiesGpuiPanel {
             );
             self.port_types
                 .push((row.name.clone(), SelectBinding { state: entity, sub }));
+
+            // Only a port that has a parameter can carry a group; a wire-only
+            // custom type has none, so it gets no Input at all rather than one
+            // whose edit the core would refuse.
+            let Some(group) = row.group.clone() else {
+                continue;
+            };
+            let entity = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(SharedString::from(t!("properties.ports.group")))
+                    .default_value(group)
+            });
+            let name = row.name.clone();
+            let sub = cx.subscribe_in(
+                &entity,
+                window,
+                move |this, state, event: &InputEvent, _window, cx| match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let value = state.read(cx).value().to_string();
+                        this.set_port_group(&name, value, cx);
+                    }
+                    InputEvent::Change | InputEvent::Focus => {}
+                },
+            );
+            self.port_groups
+                .push((row.name.clone(), StringBinding { state: entity, sub }));
         }
 
         let name = cx.new(|cx| {
@@ -4519,6 +4659,11 @@ impl Render for PropertiesGpuiPanel {
                     .iter()
                     .map(|(k, b)| (k.clone(), b.state.clone()))
                     .collect(),
+                groups: self
+                    .port_groups
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone()))
+                    .collect(),
                 add: self
                     .port_add
                     .as_ref()
@@ -4666,12 +4811,32 @@ impl Render for PropertiesGpuiPanel {
             // declared, `bound_to` what already is. The panel only draws them.
             let exposed_states = self.exposed_states(&sections, cx);
 
+            // Which sections are node-parameter groups the user may fold away,
+            // and under which `(type_key, group)` the fold is remembered
+            // (PGRP-3). `None` for every other section — the info and ports
+            // sections stay open, as they always were.
+            let param_group_keys = match &resolved_nodes {
+                Some((nodes, ..)) => param_group_keys(
+                    nodes.first().expect("resolved nodes are non-empty"),
+                    &self.registry,
+                    &sections,
+                ),
+                None => vec![None; sections.len()],
+            };
+
             let mut accordion = Accordion::new("properties-accordion")
                 .multiple(true)
                 .small();
-            for section in sections {
+            for (index, section) in sections.into_iter().enumerate() {
                 let fields = section.fields.clone();
                 let title: SharedString = ravel_i18n::translate(&section.title).into();
+                // A section with no fold identity is always open.
+                let open = !param_group_keys
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|(type_key, group)| {
+                        crate::panels::is_param_group_collapsed(type_key, group, cx)
+                    });
                 let scrubs = scrub_entities.clone();
                 let strings = string_entities.clone();
                 let selects = select_entities.clone();
@@ -4827,9 +4992,23 @@ impl Render for PropertiesGpuiPanel {
                             container = container.child(body);
                         }
                     }
-                    item.title(title.clone()).open(true).child(container)
+                    item.title(title.clone()).open(open).child(container)
                 });
             }
+            // The Accordion reports the whole open set rather than the header
+            // that moved, and it fires on any click that bubbles out of the
+            // list — including the property rows. So this writes each fold
+            // through `set_param_group_collapsed`, which returns whether it
+            // changed anything, and only a real change repaints.
+            accordion = accordion.on_toggle_click({
+                let keys = param_group_keys.clone();
+                let editor = editor.clone();
+                move |open, _window, cx| {
+                    editor
+                        .update(cx, |this, cx| this.apply_param_group_folds(&keys, open, cx))
+                        .ok();
+                }
+            });
             // The Accordion fills its parent (`size_full` with `flex_1`
             // items whose content is `overflow_hidden`), so as a direct
             // child of the scroll container it would squash the sections
@@ -6682,6 +6861,77 @@ mod tests {
         })
     }
 
+    /// A folded parameter group is remembered under `(type_key, group)` — not
+    /// per node — and unfolding forgets it again. The project save path reads
+    /// the same global into `ui_state.json`, which is what carries the fold
+    /// across a restart; the default (nothing recorded) is all-expanded.
+    ///
+    /// Sections that are not parameter groups (the info section here) are
+    /// never recorded: they have no fold identity, so a click that reports
+    /// them closed must not put anything in the set.
+    #[gpui::test]
+    fn folding_a_parameter_group_records_it_by_node_type(cx: &mut TestAppContext) {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let node = registry
+            .create_node("scatter.grid", NodeId::next())
+            .expect("scatter.grid is registered");
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(cx, node.clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let groups = ravel_ui::properties::node::param_group_titles(&node, &panel.registry);
+                assert_eq!(
+                    groups.iter().map(|(g, _)| g.as_str()).collect::<Vec<_>>(),
+                    vec!["layout", "source"],
+                    "scatter.grid declares both groups and leaves nothing ungrouped"
+                );
+                // The fold identity of each section, from the same helper
+                // `render` uses. Only the parameter sections have one.
+                let keys = param_group_keys(&node, &panel.registry, &panel.sections);
+                assert_eq!(
+                    keys.iter().filter(|key| key.is_some()).count(),
+                    2,
+                    "the info and ports sections are not foldable"
+                );
+                let source = keys
+                    .iter()
+                    .position(|key| key.as_ref().is_some_and(|(_, g)| g == "source"))
+                    .expect("the Source section is foldable");
+
+                assert!(
+                    crate::panels::collapsed_param_groups(cx).is_empty(),
+                    "nothing is folded before the first click"
+                );
+
+                // Every section open but Source — and the info section
+                // reported closed too, which must record nothing.
+                let open: Vec<usize> = (0..keys.len()).filter(|i| *i != source).collect();
+                panel.apply_param_group_folds(&keys, &open, cx);
+                assert!(crate::panels::is_param_group_collapsed(
+                    "scatter.grid",
+                    "source",
+                    cx
+                ));
+                assert!(!crate::panels::is_param_group_collapsed(
+                    "scatter.grid",
+                    "layout",
+                    cx
+                ));
+                assert_eq!(
+                    crate::panels::collapsed_param_groups(cx).len(),
+                    1,
+                    "only the parameter group is recorded"
+                );
+
+                // Unfolding it forgets the entry rather than storing "open".
+                let open: Vec<usize> = (0..keys.len()).collect();
+                panel.apply_param_group_folds(&keys, &open, cx);
+                assert!(crate::panels::collapsed_param_groups(cx).is_empty());
+            })
+            .unwrap();
+    }
+
     /// Curve parameters reach the panel as curve rows with a curve editor
     /// bound to each, and rows expand independently — a curve is compared
     /// against its neighbours, so expansion is not an exclusive accordion.
@@ -7660,6 +7910,97 @@ mod tests {
             );
             history.pop();
         }
+    }
+
+    /// The Ports row's group cell assigns an In node's custom parameter to a
+    /// Properties group, and the parameters split into sections accordingly
+    /// (PGRP-4). Clearing the cell takes the parameter out of the group again.
+    #[gpui::test]
+    fn the_ports_group_cell_assigns_a_custom_parameter_to_a_section(cx: &mut TestAppContext) {
+        let (properties, project, path, in_id) = setup_in_node_target(cx);
+
+        let group_of = |properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+                        cx: &mut TestAppContext,
+                        name: &str| {
+            properties
+                .update(cx, |panel, _window, _cx| {
+                    panel.port_row(name).and_then(|row| row.group.clone())
+                })
+                .unwrap()
+        };
+        let section_titles = |properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+                              cx: &mut TestAppContext| {
+            properties
+                .update(cx, |panel, _window, _cx| {
+                    panel
+                        .sections
+                        .iter()
+                        .map(|section| section.title.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+        };
+
+        assert_eq!(
+            group_of(&properties, cx, "amount").as_deref(),
+            Some(""),
+            "a custom parameter starts in no group"
+        );
+        assert_eq!(
+            group_of(&properties, cx, net::PORT_TIME),
+            None,
+            "a fixed port has no parameter, so no group cell"
+        );
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.set_port_group("amount", " Look ".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            project.read_with(cx, |project, _| {
+                resolve_network(project.document(), &path)
+                    .and_then(|graph| graph.node(in_id))
+                    .and_then(|node| node.param_groups.get("amount").cloned())
+            }),
+            Some("Look".to_string()),
+            "the graph holds the trimmed group name"
+        );
+        assert_eq!(
+            properties
+                .update(cx, |panel, _window, _cx| panel.port_error.clone())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            section_titles(&properties, cx),
+            vec![
+                "properties.section.node_info".to_string(),
+                // `tint` is still ungrouped, so the leading section stays.
+                "properties.section.parameters".to_string(),
+                "Look".to_string(),
+                "properties.section.ports".to_string(),
+            ]
+        );
+
+        // Clearing the cell takes it back out; whitespace counts as empty.
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.set_port_group("amount", "   ".into(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            section_titles(&properties, cx),
+            vec![
+                "properties.section.node_info".to_string(),
+                "properties.section.parameters".to_string(),
+                "properties.section.ports".to_string(),
+            ]
+        );
+        assert_eq!(group_of(&properties, cx, "amount").as_deref(), Some(""));
     }
 
     /// A refused edit says why. Dropping it silently would look like the

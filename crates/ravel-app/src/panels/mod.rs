@@ -32,7 +32,7 @@ use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::timeline::BpmGrid;
 use smallvec::SmallVec;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -515,6 +515,64 @@ pub(crate) fn set_loop_range(range: Option<LoopRange>, cx: &mut App) -> bool {
 /// on a project load or File ▸ New.
 pub(crate) fn set_loop_ranges(ranges: BTreeMap<CompId, LoopRange>, cx: &mut App) {
     cx.set_global(LoopRangeState(ranges));
+}
+
+/// Durable shared state: the Properties parameter groups the user has folded
+/// away, as `(type_key, group)` pairs
+/// (`docs/implementation/parameter-groups-plan.md`, PGRP-3).
+///
+/// A Global for the same reasons as [`BpmGridState`]: the project save path
+/// writes it to `ui_state.json`, a load installs it, and a second Properties
+/// panel must show the same folds. It is UI state, so it stays out of the
+/// `Document` and out of undo — folding a group records no undo step.
+///
+/// Keyed by node **type**, not by node: the groups are the type's
+/// declaration, so the fold follows the type the user is working on rather
+/// than needing to be redone on every node of it. Only the folded groups are
+/// stored, because the default is all-expanded.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CollapsedParamGroupsState(BTreeSet<(String, String)>);
+
+impl Global for CollapsedParamGroupsState {}
+
+/// Every folded parameter group, for the project save path.
+pub fn collapsed_param_groups(cx: &App) -> BTreeSet<(String, String)> {
+    cx.try_global::<CollapsedParamGroupsState>()
+        .map_or_else(BTreeSet::new, |state| state.0.clone())
+}
+
+/// Whether `group` of node type `type_key` is folded away.
+pub fn is_param_group_collapsed(type_key: &str, group: &str, cx: &App) -> bool {
+    cx.try_global::<CollapsedParamGroupsState>()
+        .is_some_and(|state| state.0.contains(&(type_key.to_string(), group.to_string())))
+}
+
+/// Fold `group` of node type `type_key` away, or unfold it. Returns whether
+/// anything changed, so a caller can skip the notify — the Accordion reports
+/// the open set on every click inside it, including clicks on the rows.
+pub(crate) fn set_param_group_collapsed(
+    type_key: &str,
+    group: &str,
+    collapsed: bool,
+    cx: &mut App,
+) -> bool {
+    let mut groups = collapsed_param_groups(cx);
+    let key = (type_key.to_string(), group.to_string());
+    let changed = if collapsed {
+        groups.insert(key)
+    } else {
+        groups.remove(&key)
+    };
+    if changed {
+        cx.set_global(CollapsedParamGroupsState(groups));
+    }
+    changed
+}
+
+/// Install every folded group at once: [`crate::project_state::ProjectState`]
+/// on a project load or File ▸ New.
+pub(crate) fn set_collapsed_param_groups(groups: BTreeSet<(String, String)>, cx: &mut App) {
+    cx.set_global(CollapsedParamGroupsState(groups));
 }
 
 /// Durable shared state: which frames of each composition the output-stage

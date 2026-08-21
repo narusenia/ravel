@@ -1339,6 +1339,15 @@ impl NodeEditorPanel {
             return Ok(());
         };
         let (graph, key_rename, pin_rename) = edit(self.graph.clone(), context)?.into_parts();
+        // A port edit that changed nothing — the group already selected, a
+        // move that ran into a fixed neighbour — hands back the graph it was
+        // given. Committing it anyway would push an undo step with no
+        // difference in it and mark the project dirty, which is the rule the
+        // declaration list already follows (`Graph::ptr_eq` is O(1) and only
+        // returns true for the shared root, so a real edit never trips it).
+        if graph.ptr_eq(&self.graph) && key_rename.is_none() && pin_rename.is_none() {
+            return Ok(());
+        }
         self.commit_port_edit(graph, key_rename, pin_rename, cx);
         // The edit went straight into `self.graph`, so the document observer
         // will find nothing to re-sync and the teardown in
@@ -1402,6 +1411,21 @@ impl NodeEditorPanel {
     ) -> Result<(), NetworkError> {
         self.edit_custom_ports(cx, |graph, context| {
             ravel_core::network::set_custom_port_type(graph, node_id, name, port_type, context)
+                .map(PortEdit::from)
+        })
+    }
+
+    /// Put the custom parameter `name` of the In node `node_id` into the
+    /// display group `group` (empty takes it out of every group).
+    pub fn set_custom_port_group(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        group: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        self.edit_custom_ports(cx, |graph, _context| {
+            ravel_core::network::set_custom_port_group(graph, node_id, name, group)
                 .map(PortEdit::from)
         })
     }
@@ -6863,6 +6887,57 @@ mod tests {
                     ]
                 );
                 assert_eq!(panel.graph.edges().count(), 2);
+            })
+            .unwrap();
+    }
+
+    /// A port edit that changes nothing does not reach the document: no undo
+    /// step, no dirty flag. Setting the group a port already has is the case
+    /// the Properties row produces twice per commit (Enter, then blur), and a
+    /// move that runs into a fixed neighbour is the other one.
+    #[gpui::test]
+    fn a_port_edit_that_changes_nothing_pushes_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, _path, in_id, _sink) = setup_custom_ports(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel
+                    .set_custom_port_group(in_id, "amount", "Size", cx)
+                    .expect("assign the group");
+            })
+            .unwrap();
+        let after_assign = project.read_with(cx, |project, _| project.mirror_epoch());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The same group again: `network::set_custom_port_group` hands
+                // back the graph it was given.
+                panel
+                    .set_custom_port_group(in_id, "amount", "Size", cx)
+                    .expect("the repeat is accepted");
+                // And a move that cannot go anywhere: `amount` is already as
+                // far forward as a custom port may sit.
+                panel
+                    .move_custom_port(in_id, "amount", -1, cx)
+                    .expect("the blocked move is accepted");
+            })
+            .unwrap();
+
+        assert_eq!(
+            project.read_with(cx, |project, _| project.mirror_epoch()),
+            after_assign,
+            "neither no-op reached the document"
+        );
+
+        // One undo returns to no group at all — proof the repeat did not
+        // stack a second step on top of the assignment.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.graph.node(in_id).unwrap().param_groups.is_empty(),
+                    "the assignment was the only step"
+                );
             })
             .unwrap();
     }

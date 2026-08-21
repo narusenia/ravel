@@ -934,16 +934,26 @@ impl ProjectState {
                         // write must not inherit a path that describes
                         // different content.
                         if this.generation == generation {
+                            // `Save As` into another directory changes what
+                            // every relative and variable reference means, so
+                            // the live document has to be re-read against the
+                            // new root before anything evaluates again.
+                            let root_moved =
+                                ravel_project::project_root_of(&path) != this.project_root();
                             this.project_path = Some(path.clone());
                             this.saved_revision = revision;
-                            if this.revision == revision {
+                            let outcome = if this.revision == revision {
                                 SaveOutcome::Saved
                             } else {
                                 cx.emit(ProjectEvent::SaveChangedDuringWrite {
                                     path: path.clone(),
                                 });
                                 SaveOutcome::SavedButDirty
+                            };
+                            if root_moved {
+                                this.reresolve_assets(cx);
                             }
+                            outcome
                         } else {
                             tracing::warn!(
                                 path = %path.display(),
@@ -975,6 +985,35 @@ impl ProjectState {
             });
         })
         .detach();
+    }
+
+    /// Re-read every asset reference against the current project root.
+    ///
+    /// Called after a `Save As` that moved the root: a relative or variable
+    /// path names a different file from the new location, and
+    /// [`MediaAssetEntry::resolved`] — the only path evaluation reads — has to
+    /// follow it. An asset can come online or go offline as a result, so the
+    /// viewer re-evaluates.
+    ///
+    /// Deliberately **not** an edit: no `revision` bump (a project does not
+    /// become unsaved by being saved) and no undo step (there is nothing here
+    /// for the user to take back). The history is re-read with the live
+    /// document so an undo cannot restore the old root's resolution.
+    fn reresolve_assets(&mut self, cx: &mut Context<Self>) {
+        let root = self.project_root();
+        let changed = self.store.rederive(|document| {
+            document
+                .clone()
+                .with_resolved_assets(root.as_deref(), &HashMap::new())
+        });
+        if !changed {
+            return;
+        }
+        tracing::info!(
+            root = ?root,
+            "re-resolved asset references against the new project root"
+        );
+        self.document_changed(InvalidationHint::Structural, cx);
     }
 
     /// Load a `.ravprj` from `path`, replacing the current document (File ▸
@@ -4209,6 +4248,87 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(ravel_project::container::backup_path(&path));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// `Save As` into another directory re-reads every asset reference against
+    /// the new root (media-import plan unit 6, carried over from unit 1): a
+    /// project-relative clip has to resolve beside the *new* `.ravprj`, or the
+    /// media node keeps pulling from the directory the project just left.
+    ///
+    /// And re-resolution is not an edit: the project stays saved and the undo
+    /// history stays exactly as deep as it was.
+    #[gpui::test]
+    fn save_as_reresolves_relative_assets_without_dirtying_or_undo(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        let root = std::env::temp_dir().join(format!("ravel_relink_{}", std::process::id()));
+        let from = root.join("from");
+        let to = root.join("to");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(from.join("footage")).unwrap();
+        std::fs::create_dir_all(to.join("footage")).unwrap();
+        let clip = from.join("footage").join("clip.mov");
+        std::fs::write(&clip, b"not really a movie").unwrap();
+        let first = from.join("proj.ravprj");
+        let second = to.join("proj.ravprj");
+
+        // Save a project holding a clip that lives inside it, so the archive
+        // records the reference relative (REQ-PROJ-001).
+        let asset = AssetId::next();
+        project.update(cx, |project, cx| {
+            let doc = project
+                .document()
+                .clone()
+                .with_media_asset(asset, clip.clone());
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            project.save_project_to(first.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        // Reopen it: the live document now holds the *relative* form, and
+        // loading leaves no undo history behind.
+        project.update(cx, |project, cx| {
+            project.load_project_from(first.clone(), cx);
+        });
+        cx.run_until_parked();
+        project.update(cx, |project, cx| {
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(entry.path, AssetPath::Relative("./footage/clip.mov".into()));
+            assert_eq!(entry.resolved.as_deref(), Some(clip.as_path()));
+            assert!(!project.is_dirty());
+            assert!(!project.undo(cx), "loading is not an undo step");
+        });
+
+        // Save As into the other directory.
+        project.update(cx, |project, cx| {
+            project.save_project_to(second.clone(), None, cx);
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| {
+            let entry = project.document().get_media_asset(asset).expect("asset");
+            assert_eq!(
+                entry.path,
+                AssetPath::Relative("./footage/clip.mov".into()),
+                "the stored form is untouched — only what it resolves to moved"
+            );
+            assert_eq!(
+                entry.resolved.as_deref(),
+                Some(to.join("footage").join("clip.mov").as_path()),
+                "the clip resolves beside the new project file"
+            );
+            assert!(
+                !project.is_dirty(),
+                "re-resolution must not make a just-saved project dirty"
+            );
+            assert!(
+                !project.undo(cx),
+                "re-resolution must not push an undo step"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A failed load keeps the current document and path untouched.

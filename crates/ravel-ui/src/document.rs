@@ -187,6 +187,24 @@ impl DocumentStore {
         }
     }
 
+    /// Re-derive the live document **and** its whole history through `f`,
+    /// recording no undo step and leaving the live document as committed (or
+    /// as uncommitted) as it was. Returns whether the live document changed.
+    ///
+    /// This is for a change that is not an edit. The one caller re-resolves
+    /// asset references after a `Save As` moved the project root: the same
+    /// stored paths now name different files, but nothing the user did
+    /// changed, so it must neither dirty the project nor become a step
+    /// `Cmd+Z` can land on — and every retained version has to be re-read
+    /// too, or an undo would restore the old root's resolution.
+    pub fn rederive(&mut self, f: impl Fn(&Document) -> Document) -> bool {
+        let live = f(&self.live);
+        let changed = live != self.live;
+        self.live = live;
+        self.undo.map_versions(&f);
+        changed
+    }
+
     pub fn can_undo(&self) -> bool {
         self.undo.can_undo()
     }

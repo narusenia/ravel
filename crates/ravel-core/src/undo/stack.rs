@@ -94,6 +94,18 @@ impl<T: Clone> UndoStack<T> {
     pub fn current_index(&self) -> usize {
         self.current
     }
+
+    /// Re-derive every retained version through `f`, adding and removing no
+    /// step.
+    ///
+    /// For a change that is **not an edit**: the versions still describe the
+    /// same history, they are just read differently. Leaving the older ones
+    /// alone would make an undo restore the previous reading — which is what
+    /// asset re-resolution after a `Save As` would otherwise do, handing back
+    /// paths measured against the directory the project no longer lives in.
+    pub fn map_versions(&mut self, f: impl FnMut(&T) -> T) {
+        self.versions = self.versions.iter().map(f).collect();
+    }
 }
 
 impl<T: Clone + PartialEq> UndoStack<T> {

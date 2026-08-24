@@ -661,6 +661,13 @@ mod tests {
 
         // And through the registry: keying a layer's position must not grow the
         // request the viewer posts.
+        //
+        // Counted, not compared element by element: the two fixtures are
+        // different documents, so every target's ids differ. What must not
+        // differ is how *many* there are — a motion path that declared a
+        // target of its own would show up here as one more
+        // (`ShellManipulator` asks for the selected layer's geometry in both,
+        // `MED-APP-36`).
         let registry = super::super::overlay::OverlayRegistry::builtin();
         let (still, ..) = context(
             AnimationChannel::constant(100.0),
@@ -668,8 +675,8 @@ mod tests {
             120,
         );
         assert_eq!(
-            registry.eval_targets(&ctx),
-            registry.eval_targets(&still),
+            registry.eval_targets(&ctx).len(),
+            registry.eval_targets(&still).len(),
             "the motion path changed what the viewer asks the evaluator for"
         );
     }

@@ -3622,6 +3622,10 @@ mod tests {
             // restored, so it can never be inherited either.
             assert_eq!(project.display_channel(), DisplayChannel::Rgb);
             let baseline = request(project, cx);
+            // The setup's own `Structural` is still pending — there is no
+            // worker to hand it to — and the assertion below is about what
+            // the *switch* asks for.
+            project.pending_hint = InvalidationHint::None;
 
             for channel in DisplayChannel::ALL {
                 let before = project.viewer_eval_requests();
@@ -3634,6 +3638,14 @@ mod tests {
                     project.viewer_eval_requests(),
                     expected,
                     "{channel:?} did not cost exactly one evaluation"
+                );
+                // With no worker the posted hint stays here, which is the only
+                // place it can be read. `Structural` would mark every node
+                // dirty to redo a byte conversion.
+                assert!(
+                    matches!(project.pending_hint, InvalidationHint::None),
+                    "{channel:?} asked for {:?} instead of no invalidation",
+                    project.pending_hint
                 );
                 // The same mode again is not a change, so it must not pay for
                 // a transform that would produce the picture already on
@@ -3651,6 +3663,69 @@ mod tests {
                     "{channel:?} changed the evaluation request"
                 );
             }
+        });
+    }
+
+    /// The other half of `INSP-2`'s switch, and the half a headless
+    /// `ProjectState` normally cannot see: the finished frames have to be
+    /// dropped, or the re-evaluation is a **cache hit** that hands back the
+    /// bytes of the previous mode. The evaluation request is identical in
+    /// every mode by design (the test above), which is exactly what makes
+    /// that hit certain.
+    ///
+    /// A real worker is installed here rather than waited for: with no
+    /// service there is no cache, and the property is about the cache. The
+    /// second evaluation must be a miss.
+    #[gpui::test]
+    fn switching_the_display_channel_drops_the_finished_frames(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+
+        project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+
+        let mut await_frame = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if rx.try_recv().is_ok() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the evaluation worker sent no result"
+                );
+                std::thread::yield_now();
+            }
+        };
+        await_frame();
+
+        let stats = |project: &ProjectState| project.eval.as_ref().unwrap().frame_cache().stats();
+        project.read_with(cx, |project, _| {
+            assert_eq!(stats(project).hits, 0, "the first evaluation was a hit");
+        });
+
+        project.update(cx, |project, cx| {
+            project.set_display_channel(DisplayChannel::Alpha, cx);
+        });
+        await_frame();
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                stats(project).hits,
+                0,
+                "the mode switch was served from the frame cache, so the \
+                 viewer kept the previous mode's picture"
+            );
         });
     }
 

@@ -29,7 +29,7 @@ use ravel_gpu::{GpuContext, GpuDeviceState, GpuFrameBuffer, ShaderManager, Textu
 
 use crate::display::DisplayTransform;
 use ravel_media::frame_cache::MediaFrameCache;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
 pub struct GpuEvalHooks {
@@ -124,6 +124,22 @@ impl GpuEvalHooks {
     /// worker while the GPUI device capability is discovered by the host.
     pub fn with_display_surface_mode(mut self, zero_copy_surface: Arc<AtomicBool>) -> Self {
         self.display = Some(DisplayTransform::with_surface_mode(zero_copy_surface));
+        self
+    }
+
+    /// Install the viewer display transform with a host-controlled display
+    /// channel (`INSP-2`).
+    ///
+    /// Order-independent with respect to [`Self::with_display_surface_mode`]:
+    /// whichever comes second keeps what the first installed, so a host can
+    /// name the two capabilities in either order without silently losing one.
+    pub fn with_display_channel(mut self, channel: Arc<AtomicU32>) -> Self {
+        self.display = Some(
+            self.display
+                .take()
+                .unwrap_or_default()
+                .with_channel(channel),
+        );
         self
     }
 

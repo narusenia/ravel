@@ -29,10 +29,10 @@
 //! `docs/specifications/color-management.md` records and
 //! `tests/display_transform.rs` pins.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ravel_core::color::CubeLut;
+use ravel_core::color::{CubeLut, DisplayChannel};
 use ravel_core::id::DataTypeId;
 use ravel_core::types::{FrameBuffer, NodeData};
 use ravel_gpu::{
@@ -159,7 +159,9 @@ struct Params {
     domain_max: [f32; 4],
     lut_size: u32,
     lut_row: u32,
-    _pad: [u32; 2],
+    /// [`DisplayChannel`]'s wire value (`INSP-2`).
+    channel: u32,
+    _pad: u32,
 }
 
 /// The display transform's pipeline and its optional user LUT.
@@ -178,6 +180,15 @@ pub struct DisplayTransform {
     /// readback fallback until the host proves that GPUI samples the same
     /// native device; the flag is never read from `render()`.
     zero_copy_surface: Arc<AtomicBool>,
+    /// Which channel of the composite to show (`INSP-2`), shared with the
+    /// host for the same reason `zero_copy_surface` is: the user picks it on
+    /// the UI thread and this transform reads it on the evaluation worker.
+    ///
+    /// Deliberately **not** part of [`EvalContext`](ravel_core::eval::EvalContext):
+    /// a display mode that entered the cache identity would make every node
+    /// result a miss on a switch, and the composite this transforms does not
+    /// depend on it at all.
+    channel: Arc<AtomicU32>,
 }
 
 impl Default for DisplayTransform {
@@ -194,17 +205,24 @@ impl DisplayTransform {
             lut: None,
             lut_texture: None,
             zero_copy_surface: Arc::new(AtomicBool::new(false)),
+            channel: Arc::new(AtomicU32::new(DisplayChannel::default().to_u32())),
         }
     }
 
     /// A transform whose output mode follows a host capability flag.
     pub fn with_surface_mode(zero_copy_surface: Arc<AtomicBool>) -> Self {
         Self {
-            pipeline: None,
-            lut: None,
-            lut_texture: None,
             zero_copy_surface,
+            ..Self::new()
         }
+    }
+
+    /// A transform whose display channel follows a cell the host writes
+    /// (`INSP-2`). Read once per frame, so a switch reaches the next
+    /// transform without a new transform being built.
+    pub fn with_channel(mut self, channel: Arc<AtomicU32>) -> Self {
+        self.channel = channel;
+        self
     }
 
     /// Install (or clear) the user's display LUT.
@@ -276,6 +294,9 @@ impl DisplayTransform {
         // Acquires only on success, and stores what it acquired in `self`.
         self.ensure_lut_texture(ctx, pool)?;
 
+        // Read per frame, not per transform: the host stores into the cell
+        // whenever the user picks a mode, and the next frame carries it.
+        let channel = self.channel.load(Ordering::Acquire);
         let params = match &self.lut {
             Some(lut) => {
                 let (min, max) = lut.domain();
@@ -284,7 +305,8 @@ impl DisplayTransform {
                     domain_max: [max[0], max[1], max[2], 0.0],
                     lut_size: lut.size() as u32,
                     lut_row: LUT_ROW,
-                    _pad: [0; 2],
+                    channel,
+                    _pad: 0,
                 }
             }
             None => Params {
@@ -292,7 +314,8 @@ impl DisplayTransform {
                 domain_max: [1.0; 4],
                 lut_size: 0,
                 lut_row: 1,
-                _pad: [0; 2],
+                channel,
+                _pad: 0,
             },
         };
 

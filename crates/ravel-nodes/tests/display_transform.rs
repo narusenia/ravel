@@ -11,13 +11,16 @@
 //!
 //! Requires a GPU adapter; every test skips gracefully without one.
 
-use ravel_core::color::{CubeLut, quantize_u8, to_display_rgba8};
+use ravel_core::color::{
+    CubeLut, DisplayChannel, quantize_u8, to_display_rgba8, to_display_rgba8_channel,
+};
 use ravel_core::eval::{EvalContext, Quality};
 use ravel_core::runtime::EvalWorkerHooks as _;
 use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_gpu::GpuContext;
 use ravel_nodes::{DisplayFrame, GpuEvalHooks};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Hooks wired the way the interactive viewer wires them.
 fn viewer_hooks(gpu: GpuContext) -> GpuEvalHooks {
@@ -136,6 +139,77 @@ fn the_gpu_and_cpu_roads_agree_within_one_code() {
         }
     }
     eprintln!("largest gpu/cpu difference: {worst} code(s)");
+}
+
+/// `INSP-2`: every channel mode agrees with the CPU definition, and the mode
+/// really reaches the shader.
+///
+/// The cell is read per dispatch, so one hooks instance — one compiled
+/// pipeline — walks every mode. Same ±1 code criterion as the composite, for
+/// the same reason: the two roads evaluate the transfer function at different
+/// precisions.
+#[test]
+fn every_display_channel_agrees_with_the_cpu_definition() {
+    let Ok(gpu) = GpuContext::new_blocking() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let cell = Arc::new(AtomicU32::new(DisplayChannel::default().to_u32()));
+    let mut hooks = GpuEvalHooks::new(gpu).with_display_channel(cell.clone());
+
+    // Colour and alpha both sweep, so an isolated channel that picked the
+    // wrong component — or an alpha mode that ran the transfer function over
+    // coverage — lands outside the tolerance somewhere.
+    let mut pixels: Vec<f32> = Vec::new();
+    for step in 0..256u32 {
+        let v = step as f32 / 255.0;
+        pixels.extend_from_slice(&[v, 1.0 - v, v * 0.5 + 0.25, 1.0 - v * 0.5]);
+    }
+    for extra in [
+        [1.0f32, 1.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [-1.0, 2.0, 0.003, 1.5],
+        [0.5, 0.5, 0.5, 0.5],
+    ] {
+        pixels.extend_from_slice(&extra);
+    }
+    let fb = FrameBuffer::from_f32(pixels.len() as u32 / 4, 1, pixels);
+    let source = fb.as_f32().to_vec();
+
+    let mut per_mode: Vec<Vec<u8>> = Vec::new();
+    for channel in DisplayChannel::ALL {
+        cell.store(channel.to_u32(), Ordering::Release);
+        let bytes = display(&mut hooks, &fb);
+        for (index, (out, pixel)) in bytes
+            .chunks_exact(4)
+            .zip(source.chunks_exact(4))
+            .enumerate()
+        {
+            let cpu = to_display_rgba8_channel([pixel[0], pixel[1], pixel[2], pixel[3]], channel);
+            let gpu = [out[2], out[1], out[0], out[3]];
+            for component in 0..4 {
+                let delta = i32::from(gpu[component]) - i32::from(cpu[component]);
+                assert!(
+                    delta.abs() <= 1,
+                    "{channel:?} pixel {index} component {component}: gpu {gpu:?} vs cpu {cpu:?} for {pixel:?}",
+                );
+            }
+        }
+        per_mode.push(bytes);
+    }
+
+    // The uniform is really read: a shader that ignored it would produce the
+    // composite six times, and every mode would be byte-identical to `Rgb`.
+    // The sweep contains a transparent white pixel, so no two modes can agree
+    // over all of it.
+    for (index, bytes) in per_mode.iter().enumerate().skip(1) {
+        assert_ne!(
+            bytes,
+            &per_mode[0],
+            "{:?} produced the composite untouched",
+            DisplayChannel::ALL[index],
+        );
+    }
 }
 
 /// A `.cube` the user supplies replaces the display transform, and taking it

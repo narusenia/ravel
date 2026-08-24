@@ -29,8 +29,11 @@ struct Params {
     lut_size: u32,
     // Texels per row of the LUT atlas (see `lut_texel`).
     lut_row: u32,
+    // Which channel of the composite to show: the wire value of
+    // `ravel_core::color::DisplayChannel` (`INSP-2`). The `CHANNEL_*`
+    // constants below mirror that enum's discriminants.
+    channel: u32,
     _pad0: u32,
-    _pad1: u32,
 }
 
 @group(0) @binding(0) var input_tex: texture_2d<f32>;
@@ -39,6 +42,14 @@ struct Params {
 @group(0) @binding(1) var lut_tex: texture_2d<f32>;
 @group(0) @binding(2) var output_tex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<uniform> params: Params;
+
+// `DisplayChannel`'s discriminants. 0 (`Rgb`) is the whole composite and
+// needs no constant: it is the `default` arm below.
+const CHANNEL_RED: u32 = 1u;
+const CHANNEL_GREEN: u32 = 2u;
+const CHANNEL_BLUE: u32 = 3u;
+const CHANNEL_ALPHA: u32 = 4u;
+const CHANNEL_ALPHA_MATTE: u32 = 5u;
 
 const SRGB_PHI: f32 = 12.92;
 const SRGB_LINEAR_BREAK: f32 = 0.0031308;
@@ -115,24 +126,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let coord = vec2<i32>(i32(gid.x), i32(gid.y));
     let linear = textureLoad(input_tex, coord, 0);
 
+    // The matte view applies the frame's own alpha, and a matte multiplies
+    // *linear light* — doing it to the encoded value would darken by the
+    // wrong curve. Every other mode leaves the colour alone.
+    let light = select(
+        linear.rgb,
+        linear.rgb * linear.a,
+        params.channel == CHANNEL_ALPHA_MATTE,
+    );
+
     var encoded: vec3<f32>;
     if (params.lut_size >= 2u) {
         // A display LUT replaces the transfer function: it takes the linear
         // working value and yields the display-encoded one.
-        encoded = lut_sample(linear.rgb);
+        encoded = lut_sample(light);
     } else {
         encoded = vec3<f32>(
-            srgb_encode(linear.r),
-            srgb_encode(linear.g),
-            srgb_encode(linear.b),
+            srgb_encode(light.r),
+            srgb_encode(light.g),
+            srgb_encode(light.b),
         );
     }
 
     // Alpha is coverage, not light: quantised, never encoded.
-    textureStore(output_tex, coord, vec4<f32>(
-        display_code(encoded.b),
-        display_code(encoded.g),
+    let codes = vec4<f32>(
         display_code(encoded.r),
+        display_code(encoded.g),
+        display_code(encoded.b),
         display_code(linear.a),
-    ));
+    );
+
+    // Channel isolation is the last step, on the codes the composite would
+    // have shown (`INSP-2`): an isolated channel is grey and opaque, so the
+    // value being judged is not tinted and cannot be composited away.
+    var rgba: vec4<f32>;
+    switch (params.channel) {
+        case CHANNEL_RED: { rgba = vec4<f32>(codes.rrr, 1.0); }
+        case CHANNEL_GREEN: { rgba = vec4<f32>(codes.ggg, 1.0); }
+        case CHANNEL_BLUE: { rgba = vec4<f32>(codes.bbb, 1.0); }
+        case CHANNEL_ALPHA: { rgba = vec4<f32>(codes.aaa, 1.0); }
+        // The matte was already applied to the light above; what is left is
+        // to show it opaque.
+        case CHANNEL_ALPHA_MATTE: { rgba = vec4<f32>(codes.rgb, 1.0); }
+        default: { rgba = codes; }
+    }
+
+    textureStore(output_tex, coord, vec4<f32>(rgba.b, rgba.g, rgba.r, rgba.a));
 }

@@ -792,3 +792,51 @@ GUI で調整した設定がそのまま効くという期待も裏切る。
 > bbox が変換後になること、`scatter.*` の全インスタンスが点として描かれることを
 > それぞれテストで固定した。
 
+## MED-APP-36 | bug | 殻マニピュレータが「レイヤー 1 枚だけ選択」で出ない（評価要求の相互待ち）
+
+> **解決済み**: 2026-08-24。`ShellManipulator::is_active` を**選択だけ**から
+> 決める形へ直し、`eval_targets` を実装して自分が必要とするジオメトリ評価を
+> 自分で頼むようにした（`GeometryOverlay` と同じ規律）。描画とハンドルは従来
+> どおり `ShellState::resolve` を通すので、評価が届くまでは何も描かず何も
+> 掴めない。回帰テストは
+> `one_selected_layer_requests_its_own_geometry_evaluation`
+> （`crates/ravel-app/src/panels/viewer/overlay.rs`。旧実装では
+> 「nobody asked for the selected layer's geometry: []」で落ちる）。
+
+**該当**: `crates/ravel-app/src/panels/viewer/overlay.rs:1248-1260`（`GeometryOverlay::networks`、
+`BboxScope::Layer`）、`:2027`（`ShellManipulator::is_active`）、`:852`（`eval_targets` の既定実装）
+
+`ShellManipulator::is_active` は `ShellState::resolve(ctx).is_some()` で、これは
+`layer_comp_rect` → `geometry::evaluated_bounds` → `ctx.eval_result(..)` と辿るので
+**そのレイヤーのジオメトリノードの評価結果が既に手元にあること**を要求する。
+ところが `ShellManipulator` は `eval_targets` を実装していない（既定は空 Vec）ので、
+その評価を頼むのは `GeometryOverlay` だけ。そして `BboxScope::Layer` の
+`networks()` は **`layer_selection.layers().len() < 2` で空を返す** ため、
+**レイヤーを 1 枚だけ選んでいるときは誰も頼まない** → 結果が来ない →
+`is_active` が false のまま。`GeometryOverlay::is_active` の doc コメントが
+「結果から is_active を決めると、頼まれないから結果が来ない相互待ちになる」と
+警告している、まさにその形。
+
+`BboxScope::Node`（ノード選択）が同じネットワークのジオメトリを頼むので、
+**Node Graph でノードを選んでいる間は出る**。だから普段の作業では気づきにくい。
+
+**再現**（実機、2026-08-24 / macOS）:
+1. 新規プロジェクト → `Layer ▸ Add Shape Layer`
+2. Outliner でそのレイヤーをクリック（`set_layer_selection` は走る。
+   Properties も Transform を出す）
+3. Viewer は Select ツール。**bbox もハンドルも出ず、図形をドラッグしても
+   `position` は動かない**（Properties の数値編集でしか動かせない）
+
+`docs/ui-impl-status.md` の「レイヤー殻のマニピュレータ」は ✅ と書いており、
+**実装状況の記述と挙動が食い違っている**。
+
+→ `ShellManipulator` に `eval_targets` を実装し、選択中の 1 枚について
+`geometry::geometry_targets(document, &NetworkPath::layer(comp, layer))` を返す
+（`GeometryOverlay` と同じ形）。`is_active` を結果に依存させたままにするなら、
+**その結果を自分で頼むのが唯一の直し方**。
+
+**検証**: レイヤー 1 枚選択・ノード選択なしの状態で `eval_targets` が空でない
+テスト。オーバーレイの登録経路（`OverlayRegistry::builtin`）越しに、1 枚選択で
+`ShellManipulator` の要求が畳み込まれることを検査する。
+
+---

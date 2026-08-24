@@ -166,15 +166,25 @@ const SHELL_LAYER_COUNTS: [usize; 2] = [3, SHELL_LAYERS];
 /// stay comparable run to run, and the pair still answers the question they
 /// were added for, which is what full resolution costs against the reduced
 /// scale the viewer normally runs at. Read the reduced-scale numbers as a
-/// slight over-estimate of what `Half` costs at 1080p; `VRES-5` re-measures
-/// per factor at the real dimensions.
+/// slight over-estimate of what `Half` costs at 1080p. The viewer-path
+/// scenario measures each factor at its real dimensions
+/// ([`VIEWER_PATH_RESOLUTIONS`], `VRES-5`); this readback series keeps the
+/// original three so the transfer-cost curve stays comparable.
 const READBACK_RESOLUTIONS: [(u32, u32); 3] = [(1024, 576), (1920, 1080), (3840, 2160)];
 /// Frames per resolution in the readback scenario.
 const READBACK_FRAMES: usize = 20;
-/// Resolutions the viewer-path scenario measures: the reduced scale the
-/// viewer runs at by default and the full 1080p a user gets by choosing
-/// `ViewerResolution::Full` (see [`READBACK_RESOLUTIONS`]).
-const VIEWER_PATH_RESOLUTIONS: [(u32, u32); 2] = [(1024, 576), (1920, 1080)];
+/// Resolutions the viewer-path scenario measures: the legacy 1024x576 anchor
+/// that keeps the series comparable with every earlier run, then **one entry
+/// per preview factor** at the dimensions a 16:9 1080p composition actually
+/// evaluates at — `Full` 1920x1080, `Half` 960x540, `Quarter` 480x270
+/// (`ViewerResolution::apply`, `VRES-5`).
+///
+/// The factor rows are what the picker and the adaptive step trade between,
+/// so they are the numbers the plan's decision needs; the anchor stays only
+/// so the older rows in `perf-baseline.md` remain readable against the new
+/// ones (see [`READBACK_RESOLUTIONS`]).
+const VIEWER_PATH_RESOLUTIONS: [(u32, u32); 4] =
+    [(1024, 576), (1920, 1080), (960, 540), (480, 270)];
 /// Frames per resolution in the viewer-path scenario, mirroring
 /// [`READBACK_FRAMES`].
 const VIEWER_PATH_FRAMES: usize = 20;

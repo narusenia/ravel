@@ -466,7 +466,8 @@ OFX（REQ-PLUGIN-001）と HW デコード（REQ-GPU-001）のためだけの出
 
 - デバイス共有が維持されていることのテスト（REQ-GPU-001 の受入条件）
 - フォーク方針が `docs/specifications/architecture.md` に書かれている
-- `VIEWER_MAX_DIM` の判断根拠が `perf-baseline.md` にある
+- 当時の `VIEWER_MAX_DIM` の判断根拠が `perf-baseline.md` にある（定数は
+  `VRES-1` が撤去し、係数ごとの実測は同じ文書の `VRES-5` の節にある）
 
 ### GPUBK-14 wgpu 直叩きの取り分を測る（❓判断ゲート）
 

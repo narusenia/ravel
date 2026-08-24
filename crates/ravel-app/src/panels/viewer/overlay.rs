@@ -1752,12 +1752,10 @@ impl ShellState {
     /// can read the shell as it stood when the gesture pressed.
     fn resolve_in(ctx: &OverlayContext, document: &Document) -> Option<Self> {
         let (resolution, playback) = (ctx.resolution?, ctx.playback?);
-        let comp_id = ctx.layer_selection.comp()?;
         // Exactly one layer: two or more have no single shell to manipulate,
         // and the multi-layer bbox already says so by drawing no handles.
-        let [layer_id] = ctx.layer_selection.layers() else {
-            return None;
-        };
+        let (comp_id, layer_id) = ShellManipulator::selected_layer(ctx)?;
+        let (comp_id, layer_id) = (comp_id, &layer_id);
         let comp = document.get_composition(comp_id)?;
         let layer = comp.get_layer(*layer_id)?;
         let eval = EvalContext::new(playback.frame, playback.fps, resolution);
@@ -2006,6 +2004,19 @@ impl ShellManipulator {
     /// by both `paint` and `handles`, so the drawn ring cannot drift away from
     /// the zone that answers the pointer.
     const ROTATE_CORNERS: [u8; 4] = [0, 2, 5, 7];
+
+    /// The one layer this manipulator acts on, decided from the **selection
+    /// alone**.
+    ///
+    /// Exactly one layer: two or more have no single shell to manipulate, and
+    /// [`GeometryOverlay`] draws their bboxes instead.
+    fn selected_layer(ctx: &OverlayContext) -> Option<(CompId, LayerId)> {
+        let comp = ctx.layer_selection.comp()?;
+        let [layer] = ctx.layer_selection.layers() else {
+            return None;
+        };
+        Some((comp, *layer))
+    }
 }
 
 impl ViewerOverlay for ShellManipulator {
@@ -2023,7 +2034,31 @@ impl ViewerOverlay for ShellManipulator {
         // stayed live under Rect / Ellipse / Hand / Zoom would answer the
         // press those tools are waiting for and start a transform instead of
         // a shape or a pan.
-        ctx.tool == Some(ToolKind::Select) && ShellState::resolve(ctx).is_some()
+        //
+        // Decided from the **selection**, never from the evaluated geometry —
+        // the same rule [`GeometryOverlay::is_active`] states, and for the
+        // same reason. Reading `ShellState::resolve` here meant waiting for an
+        // evaluation that only an *active* overlay is asked to request, so
+        // with one layer selected and no node selection open nobody requested
+        // it and the manipulator never appeared (`MED-APP-36`). `paint` and
+        // `handles` still resolve, so nothing is drawn or grabbable until the
+        // geometry lands.
+        ctx.tool == Some(ToolKind::Select) && Self::selected_layer(ctx).is_some()
+    }
+
+    /// The geometry of the selected layer's own network.
+    ///
+    /// [`GeometryOverlay`] asks for the same targets, but only for a selected
+    /// *node* or for two or more layers — neither of which is the state this
+    /// manipulator works in, so it has to ask for its own.
+    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget> {
+        let Some(document) = ctx.document.as_ref() else {
+            return Vec::new();
+        };
+        let Some((comp, layer)) = Self::selected_layer(ctx) else {
+            return Vec::new();
+        };
+        super::geometry::geometry_targets(document, &NetworkPath::layer(comp, layer))
     }
 
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
@@ -3754,6 +3789,44 @@ mod tests {
             (at(&transform.scale[0]), at(&transform.scale[1])),
             at(&transform.rotation),
         )
+    }
+
+    /// `MED-APP-36`: one layer selected, **no node selection**, nothing
+    /// evaluated yet — the state the Outliner leaves after `Layer ▸ Add Shape
+    /// Layer`. The manipulator has to ask for the geometry it needs itself,
+    /// because `GeometryOverlay` asks only for a selected node or for two or
+    /// more layers.
+    #[test]
+    fn one_selected_layer_requests_its_own_geometry_evaluation() {
+        let (mut ctx, node, comp, layer) = doc_with_node(rect_node((100.0, 200.0)));
+        // The state the bug needs: a layer selection, no node selection, and
+        // no results in hand.
+        ctx.selection = None;
+        ctx.layer_selection = crate::panels::LayerSelection::of(comp, vec![layer]);
+        ctx.results = EvalResults::default();
+
+        let registry = OverlayRegistry::builtin();
+        let targets = registry.eval_targets(&ctx);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.node == node
+                    && target.network == NetworkPath::layer(comp, layer)),
+            "nobody asked for the selected layer's geometry: {targets:?}"
+        );
+
+        // Nothing is drawn or grabbable while the request is outstanding — the
+        // manipulator is active on the selection, not on a guess.
+        assert!(ShellManipulator.is_active(&ctx));
+        assert!(painted(&ShellManipulator, &ctx).is_empty());
+        assert!(ShellManipulator.handles(&ctx).is_empty());
+
+        // And once the evaluation lands, the grips are there.
+        ctx.results = stub_results(ctx.document.as_ref().unwrap());
+        assert!(
+            !ShellManipulator.handles(&ctx).is_empty(),
+            "the manipulator stayed empty after its geometry arrived"
+        );
     }
 
     fn shell_handle(ctx: &OverlayContext, id: ShellHandle) -> OverlayHandle {

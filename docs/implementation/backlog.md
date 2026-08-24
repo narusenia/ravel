@@ -31,9 +31,6 @@
 | ID | 単位 | 計画 |
 |---|---|---|
 | INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
-| VRES-2 | 係数の UI とコマンド | `viewer-preview-resolution-plan.md` |
-| VRES-3 | UI 状態の永続化（`ui_state.json`） | `viewer-preview-resolution-plan.md` |
-| VRES-4 | 適応解像度（入力中は落とす） | `viewer-preview-resolution-plan.md` |
 | INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
@@ -184,7 +181,7 @@ GPUCOMP-5 / 6 で merge も GPU 化し、**シェルチェーン由来の readba
 - **`VIEWER_MAX_DIM` の引き上げ** — **`VRES-1`（✅ #300）が回収済み。**
   定数そのものを撤去し、係数モデル（`ViewerResolution`）に置き換えた。
   判断の根拠は `GPUBK-9` の計測（`perf-baseline.md`、「常時フル解像度は
-  目標に置かない」）で、そこから `viewer-preview-resolution-plan.md` が
+  目標に置かない」）で、そこから `done/viewer-preview-resolution-plan.md` が
   生まれている。**`VIEWER_MAX_DIM` という識別子はコードに存在しない**ので、
   文書で見かけたら過去の計測記録としてだけ読むこと
 - **ゼロコピー表示** — **判断は `GPUBK-9`（✅ #296）で済んでいるが、実装の
@@ -517,23 +514,23 @@ INSP-1 は**設定できるのに効かない**フィールドの解消なので
 
 ### Viewer のプレビュー解像度
 
-計画: [`viewer-preview-resolution-plan.md`](viewer-preview-resolution-plan.md)
+計画: [`done/viewer-preview-resolution-plan.md`](done/viewer-preview-resolution-plan.md)
+（**完了** — 2026-08-24）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | VRES-1 | ✅ | 係数モデルと評価経路（`VIEWER_MAX_DIM` の撤去） | #300 |
-| VRES-2 | 🟡 | 係数の UI とコマンド | VRES-1 ✅ |
-| VRES-3 | 🟡 | UI 状態の永続化（`ui_state.json`） | VRES-1 ✅ |
-| VRES-4 | 🟡 | 適応解像度（入力中は落とす） | VRES-1 ✅ |
-| VRES-5 | ⬜ | 文書更新と `REQ-UI-004` の受入条件 | VRES-2, VRES-4 |
+| VRES-2 | ✅ | 係数の UI とコマンド | #473 |
+| VRES-3 | ✅ | UI 状態の永続化（`ui_state.json`） | #474 |
+| VRES-4 | ✅ | 適応解像度（入力中は落とす） | #475 |
+| VRES-5 | ✅ | 文書更新と `REQ-UI-004` の受入条件 | #476 |
 
-**`VRES-1`〜`3` で「フル解像度で確認できる」価値が出る。** `VRES-1` で隠し定数
-`VIEWER_MAX_DIM = 1024` は撤去され、`ViewerResolution`（`Full` / `Half` /
-`Quarter`、既定 `Half`）に置き換わった。**ただし係数を変える UI がまだ無いので、
-等倍で結果を見られるようになるのは `VRES-2` から。**
-`GPUBK-9` の計測（`perf-baseline.md`）で「常時フル解像度 60 fps は届かないが、
-止めて確認する用途なら成立する」ことが分かったのが係数モデルの根拠。
-`VRES-4` は応答性の改善で独立にマージできる。
+隠し定数 `VIEWER_MAX_DIM = 1024` は `ViewerResolution`（`Full` / `Half` /
+`Quarter`、既定 `Half`）に置き換わり、ツールバーのセレクトと `Alt+R`
+（循環コマンド）で選べて `ui_state.json` に残る。操作中は 1 段落ちて
+最後の入力から 120 ms で戻る。**係数ごとの実測は `perf-baseline.md` の
+「プレビュー解像度の係数ごと」節**（1080p で `Full` 12.65 ms /
+`Half` 3.74 ms / `Quarter` 1.85 ms）。実機確認済み。
 
 ### Viewer のスナップとガイド
 

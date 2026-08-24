@@ -101,7 +101,7 @@ pub struct UiState {
     pub show_node_param_values: Option<bool>,
 
     /// The viewer's preview resolution factor
-    /// (`viewer-preview-resolution-plan.md`, `VRES-3`).
+    /// (`done/viewer-preview-resolution-plan.md`, `VRES-3`).
     ///
     /// It says how the user is looking at the composition, not what the frame
     /// contains, so it belongs here and never in `.ravprj`'s document — an

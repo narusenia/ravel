@@ -31,7 +31,6 @@ the design behind a unit.
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
 | `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30 | REQ-UI-004, REQ-LAYER-001 |
-| `viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, plus input-driven adaptive resolution — **the only way to inspect output at full resolution today** | VRES-1 done — 2026-08-06 (no UI to change the factor until VRES-2) | REQ-UI-004 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
@@ -190,6 +189,7 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, the picker and cycling command, the factor in `ui_state.json`, and the input-driven adaptive step | #300, #473, #474, #475, #476 — 2026-08-24 | REQ-UI-004 |
 | `done/media-import-plan.md` | Media import, asset references, MediaBin, the unified media node, the asset inspector with relink, and the offline marks | #469, #470 — 2026-08-21 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `done/render-warning-channel-plan.md` | Machine-readable warnings for what a render silently gets wrong: offline or unreadable media, and identifier parameters that are not static (`HIGH-34`, `HIGH-35` — both closed) | #467 — 2026-08-21 | — |
 | `done/parameter-groups-plan.md` | Parameter groups (Pages) declared by the node type or, on an In node, by the instance; the folded state in `ui_state.json`; the node editor's parameter-value toggle | #466, #468 — 2026-08-21 | REQ-PLUGIN-001 |

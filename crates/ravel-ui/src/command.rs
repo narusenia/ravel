@@ -104,7 +104,7 @@ pub enum CommandId {
     /// its nodes get shorter.
     ViewToggleNodeParamValues,
     /// Step the viewer's preview resolution factor to the next one
-    /// (`viewer-preview-resolution-plan.md`, REQ-UI-004). One cycling command
+    /// (`done/viewer-preview-resolution-plan.md`, REQ-UI-004). One cycling command
     /// rather than three "set to X" commands, because the factors are one
     /// ordered axis.
     ViewCyclePreviewResolution,

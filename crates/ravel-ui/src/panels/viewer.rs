@@ -82,6 +82,22 @@ impl ViewerResolution {
         Self::ALL[(index.unwrap_or(0) + 1) % Self::ALL.len()]
     }
 
+    /// One step coarser, saturating at [`ViewerResolution::Quarter`].
+    ///
+    /// This is the adaptive step: while the user is dragging, scrubbing or
+    /// editing a parameter, the viewer evaluates at this instead of the
+    /// selection and comes back when the input stops (`VRES-4`). It saturates
+    /// rather than wrapping — the point is to make the preview cheaper, and
+    /// `Quarter` going to `Full` mid-gesture would do the exact opposite.
+    /// `Quarter` therefore never adapts at all, which is also the honest
+    /// answer for a user who has already asked for the cheapest preview.
+    pub fn lowered(self) -> Self {
+        match self {
+            Self::Full => Self::Half,
+            Self::Half | Self::Quarter => Self::Quarter,
+        }
+    }
+
     /// The evaluation resolution for a composition sized `(w, h)`.
     ///
     /// Rounding is **`div_ceil`**, chosen over `round` plus a `max(1)` clamp
@@ -134,6 +150,22 @@ mod tests {
         // menu, and one that does not wrap dead-ends on `Quarter`.
         assert_eq!(visited, ViewerResolution::ALL.to_vec());
         assert_eq!(factor, ViewerResolution::ALL[0]);
+    }
+
+    #[test]
+    fn lowering_walks_one_step_down_and_stops_at_quarter() {
+        assert_eq!(ViewerResolution::Full.lowered(), ViewerResolution::Half);
+        assert_eq!(ViewerResolution::Half.lowered(), ViewerResolution::Quarter);
+        // Saturation, not wrapping: `cycled()` is the wrapping one, and
+        // reusing it here would make a mid-gesture `Quarter` jump to `Full`,
+        // i.e. make the preview four times *more* expensive exactly while the
+        // user is dragging.
+        assert_eq!(
+            ViewerResolution::Quarter.lowered(),
+            ViewerResolution::Quarter
+        );
+        // One step, never two: a `Full` selection must not land on `Quarter`.
+        assert_ne!(ViewerResolution::Full.lowered(), ViewerResolution::Quarter);
     }
 
     #[test]

@@ -70,6 +70,24 @@ pub fn disable_background_eval_for_tests() {
     EVAL_DISABLED_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// How long the viewer stays at the adaptive (lowered) factor after the last
+/// input signal before it goes back to the selected one
+/// ([`ProjectState::note_viewer_interaction`]).
+///
+/// The window has to sit between two numbers. Consecutive mouse moves of one
+/// drag arrive a few to some tens of milliseconds apart, and every one of them
+/// re-arms this timer, so anything near that interval would let the factor pop
+/// back mid-drag — the flicker the mechanism exists to prevent. At the other
+/// end, a delay a person notices between releasing the mouse and the picture
+/// sharpening starts around 200 ms. 120 ms clears the first by roughly an
+/// order of magnitude and stays well inside the second, and it is a constant
+/// on purpose: making it a setting asks the user a question about their own
+/// mouse they cannot answer (`viewer-preview-resolution-plan.md`, `VRES-4`).
+///
+/// Public so the integration tests can advance the test clock exactly past it
+/// instead of guessing a literal that a retune would silently invalidate.
+pub const VIEWER_INPUT_SETTLE: Duration = Duration::from_millis(120);
+
 /// Durable registry of the app's single [`ProjectState`]. Panels resolve it
 /// at construction; a stale weak entity simply fails to upgrade.
 pub struct ProjectStateHandle(pub WeakEntity<ProjectState>);
@@ -338,6 +356,25 @@ pub struct ProjectState {
     /// the `.ravprj`, so opening somebody else's project does not import
     /// their preview setting.
     viewer_resolution: ViewerResolution,
+    /// Whether the adaptive step is currently in effect, i.e. an input
+    /// gesture is in flight and the viewer evaluates one factor below the
+    /// selection (`VRES-4`). Set by [`Self::note_viewer_interaction`] and
+    /// cleared by the settle timer it arms.
+    viewer_input_active: bool,
+    /// Generation of the settle timer armed by
+    /// [`Self::note_viewer_interaction`]. Every signal bumps it, so the timers
+    /// armed by the earlier moves of a drag find a different generation when
+    /// they wake and leave the factor alone; only the last one restores it.
+    /// Same shape as [`crate::playback::PlaybackController`]'s tick epoch.
+    viewer_input_epoch: u64,
+    /// How many viewer evaluations have been requested this session
+    /// ([`Self::request_viewer_eval`]).
+    ///
+    /// Public because "the factor came back and re-evaluated **once**" is not
+    /// observable anywhere else: the request either reaches the coalescing
+    /// worker, which is precisely the thing that would hide a duplicate, or —
+    /// in a headless test — reaches no worker at all.
+    viewer_eval_requests: u64,
 }
 
 /// Every node id the document can evaluate: the flat graph, every layer
@@ -598,6 +635,9 @@ impl ProjectState {
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
             viewer_resolution: ViewerResolution::default(),
+            viewer_input_active: false,
+            viewer_input_epoch: 0,
+            viewer_eval_requests: 0,
         }
     }
 
@@ -733,12 +773,18 @@ impl ProjectState {
     // ----- document edits ----------------------------------------------------
 
     /// Live (mid-gesture) document update: no undo step is recorded.
+    ///
+    /// "Live and uncommitted" *is* "a gesture is in progress", so this is one
+    /// of the two adaptive-resolution signals — before the evaluation request
+    /// below, so this frame is already evaluated at the lowered factor
+    /// ([`Self::note_viewer_interaction`]).
     pub fn apply_document(
         &mut self,
         doc: Document,
         hint: InvalidationHint,
         cx: &mut Context<Self>,
     ) {
+        self.note_viewer_interaction(cx);
         self.revision += 1;
         self.store.apply(doc);
         self.document_changed(hint, cx);
@@ -1596,14 +1642,81 @@ impl ProjectState {
     /// The factor the viewer is **evaluating** at right now, which is what the
     /// pixels on screen were produced with.
     ///
-    /// Identical to [`Self::viewer_resolution`] today. `VRES-4` (adaptive
-    /// resolution) is what will make the two differ: it lowers *this* one step
-    /// while the user is dragging, scrubbing or editing a parameter, and
-    /// leaves the selection untouched so the factor comes back when the input
-    /// stops. Everything that needs the resolution a frame was evaluated at
-    /// reads this; only the picker reads the selection.
+    /// One factor below [`Self::viewer_resolution`] while an input gesture is
+    /// in flight (adaptive resolution, `VRES-4`), the selection itself
+    /// otherwise. The selection is never modified, so the factor comes back on
+    /// its own when the input stops. Everything that needs the resolution a
+    /// frame was evaluated at reads this; only the picker reads the selection.
     pub fn effective_viewer_resolution(&self) -> ViewerResolution {
-        self.viewer_resolution
+        if self.viewer_input_active {
+            self.viewer_resolution.lowered()
+        } else {
+            self.viewer_resolution
+        }
+    }
+
+    /// How many viewer evaluations were requested this session. See the field.
+    pub fn viewer_eval_requests(&self) -> u64 {
+        self.viewer_eval_requests
+    }
+
+    /// An input gesture produced a frame: evaluate one factor lower until it
+    /// stops (REQ-UI-004, `VRES-4`).
+    ///
+    /// Called from the **two** funnels every gesture passes through —
+    /// [`Self::apply_document`] (every live, uncommitted edit: timeline,
+    /// viewer, properties, node editor, outliner and overlay drags alike) and
+    /// [`crate::playback::PlaybackController::seek_from_timeline`] (playhead
+    /// scrubbing, which changes no document). Deciding it here rather than in
+    /// each panel is the point: "interacting" means something different in
+    /// every panel, so a per-panel implementation is guaranteed to miss one.
+    ///
+    /// Two paths deliberately do **not** signal:
+    ///
+    /// - [`Self::commit_document`]. A single click edit is one evaluation; if
+    ///   it lowered the factor, that evaluation would be thrown away and paid
+    ///   for again [`VIEWER_INPUT_SETTLE`] later. A gesture that ends in a
+    ///   commit has already signalled through its live frames.
+    /// - playback's tick loop, which reaches evaluation through
+    ///   `publish_position` and not through this. Playback is not input, and
+    ///   degrading the picture for the whole duration of a play is the one
+    ///   thing an input-driven trigger exists to avoid.
+    ///
+    /// No evaluation is requested here: both callers request one immediately
+    /// afterwards, so the gesture's own frame is already the lowered one.
+    pub fn note_viewer_interaction(&mut self, cx: &mut Context<Self>) {
+        if self.viewer_resolution.lowered() == self.viewer_resolution {
+            // The selection is already the coarsest factor, so there is
+            // nothing to lower and nothing to restore. Arming a timer anyway
+            // would buy one redundant re-evaluation at the *same* resolution
+            // at the end of every gesture — the adaptive step is simply a
+            // no-op at `Quarter`.
+            return;
+        }
+        self.viewer_input_active = true;
+        self.viewer_input_epoch += 1;
+        let epoch = self.viewer_input_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VIEWER_INPUT_SETTLE).await;
+            this.update(cx, |this, cx| {
+                // A later signal armed its own timer, so this one belongs to a
+                // move the gesture has already passed: restoring the factor
+                // here would evaluate a mid-drag frame at the full selection,
+                // which is the cost this whole mechanism removes.
+                if this.viewer_input_epoch != epoch {
+                    return;
+                }
+                this.viewer_input_active = false;
+                // Exactly one request per gesture. The hint is `None` because
+                // the document did not change — only the resolution did, and
+                // the evaluator's cache identity already carries that
+                // (`CacheMiss::ResolutionChanged`).
+                this.request_viewer_eval(InvalidationHint::None, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Choose the preview resolution factor and re-evaluate at it.
@@ -1629,6 +1742,7 @@ impl ProjectState {
     /// there, and hints that could not be posted at all are retained
     /// locally.
     pub fn request_viewer_eval(&mut self, hint: InvalidationHint, cx: &mut Context<Self>) {
+        self.viewer_eval_requests += 1;
         self.report_gpu_device_loss(false, cx);
         // Accumulate first: every early return below must retain the hint.
         let pending = std::mem::replace(&mut self.pending_hint, InvalidationHint::None);
@@ -2153,7 +2267,7 @@ fn unique_display_name(doc: &Document, path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::panels::viewer::overlay::{EvalTarget, OverlayId, ViewerOverlay};
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, Entity, TestAppContext};
     use ravel_core::animation::channel::AnimationChannel;
     use ravel_core::animation::curve::KeyframeCurve;
     use ravel_core::animation::interpolation::Interpolation;
@@ -3419,6 +3533,222 @@ mod tests {
                 .unwrap()
                 .ctx;
             assert_eq!(ctx.resolution, comp_resolution);
+        });
+    }
+
+    /// A document with one evaluable layer and `selected` as the preview
+    /// factor: the starting point of every adaptive-resolution test. Returns
+    /// the composition resolution, which is the basis the factor scales.
+    fn project_at_factor(
+        project: &Entity<ProjectState>,
+        selected: ViewerResolution,
+        cx: &mut TestAppContext,
+    ) -> (u32, u32) {
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            project.set_viewer_resolution(selected, cx);
+            project.active_composition(cx).unwrap().resolution
+        })
+    }
+
+    fn eval_resolution(project: &Entity<ProjectState>, cx: &mut TestAppContext) -> (u32, u32) {
+        project.update(cx, |project, cx| {
+            project
+                .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                .unwrap()
+                .unwrap()
+                .ctx
+                .resolution
+        })
+    }
+
+    fn eval_requests(project: &Entity<ProjectState>, cx: &mut TestAppContext) -> u64 {
+        project.update(cx, |project, _| project.viewer_eval_requests())
+    }
+
+    /// A live, uncommitted edit is a gesture in progress, so the viewer
+    /// evaluates one factor below the selection until the input settles
+    /// (REQ-UI-004, `VRES-4`).
+    ///
+    /// Two ways this breaks silently: the drop never happens (a scrub at
+    /// `Full` keeps paying full-resolution evaluation per mouse move, which is
+    /// what the unit exists to fix), or the drop is written into the
+    /// *selection* instead of the effective factor — the picker would then
+    /// walk down one step per gesture and `ui_state.json` would persist a
+    /// factor the user never chose.
+    #[gpui::test]
+    fn a_live_edit_lowers_the_preview_factor_and_it_returns_when_input_settles(
+        cx: &mut TestAppContext,
+    ) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let comp_resolution = project_at_factor(&project, ViewerResolution::Full, cx);
+        let before = eval_requests(&project, cx);
+
+        project.update(cx, |project, cx| {
+            let document = project.document().clone();
+            project.apply_document(document, InvalidationHint::None, cx);
+            assert_eq!(project.viewer_resolution(), ViewerResolution::Full);
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Half
+            );
+        });
+        assert_eq!(
+            eval_resolution(&project, cx),
+            ViewerResolution::Half.apply(comp_resolution),
+            "the mid-gesture evaluation must be built from the lowered factor"
+        );
+
+        cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
+
+        project.update(cx, |project, _| {
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Full,
+                "the factor never came back, so the preview stays coarse forever"
+            );
+            // The edit's own request plus exactly one from the settle timer.
+            assert_eq!(project.viewer_eval_requests(), before + 2);
+        });
+        assert_eq!(eval_resolution(&project, cx), comp_resolution);
+    }
+
+    /// While the input continues, the lowered factor holds and no extra
+    /// evaluation is posted: every signal re-arms the timer, and only the last
+    /// one owns the generation.
+    ///
+    /// Drop the epoch check in the settle timer and this fails twice over —
+    /// the first move's timer restores the factor in the middle of the drag
+    /// (evaluating an intermediate frame at full resolution, the one thing the
+    /// plan says must not happen) and every move ends up paying for a second
+    /// evaluation.
+    #[gpui::test]
+    fn continuing_input_holds_the_lowered_factor_and_re_evaluates_once(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        project_at_factor(&project, ViewerResolution::Full, cx);
+        let before = eval_requests(&project, cx);
+
+        // Three moves of one drag, each closer together than the settle
+        // window, so no timer can expire between them.
+        for move_index in 0..3 {
+            if move_index > 0 {
+                cx.executor().advance_clock(VIEWER_INPUT_SETTLE / 3);
+            }
+            project.update(cx, |project, cx| {
+                let document = project.document().clone();
+                project.apply_document(document, InvalidationHint::None, cx);
+                assert_eq!(
+                    project.effective_viewer_resolution(),
+                    ViewerResolution::Half,
+                    "move {move_index}"
+                );
+            });
+        }
+        project.update(cx, |project, _| {
+            assert_eq!(
+                project.viewer_eval_requests(),
+                before + 3,
+                "an extra evaluation ran mid-drag"
+            );
+        });
+
+        cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
+
+        project.update(cx, |project, _| {
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Full
+            );
+            // All three armed timers have expired by now; exactly one of them
+            // still owns the generation, so the drag is followed by one
+            // re-evaluation, not three.
+            assert_eq!(project.viewer_eval_requests(), before + 4);
+        });
+    }
+
+    /// `Quarter` is already the coarsest factor, so the adaptive step is a
+    /// no-op there: nothing is lowered, and no settle re-evaluation is posted
+    /// either — that one would be a second evaluation at the *same*
+    /// resolution at the end of every gesture.
+    ///
+    /// Reuse `cycled()` for the adaptive step instead of `lowered()` and this
+    /// fails loudly: `Quarter` would wrap to `Full` and a drag would get four
+    /// times more expensive rather than cheaper.
+    #[gpui::test]
+    fn quarter_never_adapts_lower(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let comp_resolution = project_at_factor(&project, ViewerResolution::Quarter, cx);
+        let before = eval_requests(&project, cx);
+
+        project.update(cx, |project, cx| {
+            let document = project.document().clone();
+            project.apply_document(document, InvalidationHint::None, cx);
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Quarter
+            );
+        });
+        assert_eq!(
+            eval_resolution(&project, cx),
+            ViewerResolution::Quarter.apply(comp_resolution)
+        );
+
+        cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
+
+        project.update(cx, |project, _| {
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Quarter
+            );
+            assert_eq!(
+                project.viewer_eval_requests(),
+                before + 1,
+                "the gesture's own evaluation only: nothing was lowered, so \
+                 nothing has to be restored"
+            );
+        });
+    }
+
+    /// A committed edit is not an input signal. A single-click edit is one
+    /// evaluation; lowering the factor for it would throw that evaluation away
+    /// and pay for a second one a settle window later — twice the cost for a
+    /// coarser first frame.
+    #[gpui::test]
+    fn a_committed_edit_does_not_lower_the_preview_factor(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let comp_resolution = project_at_factor(&project, ViewerResolution::Full, cx);
+        let before = eval_requests(&project, cx);
+
+        project.update(cx, |project, cx| {
+            let document = project.document().clone();
+            project.commit_document(document, InvalidationHint::None, cx);
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Full
+            );
+        });
+        assert_eq!(eval_resolution(&project, cx), comp_resolution);
+
+        cx.executor().advance_clock(VIEWER_INPUT_SETTLE * 2);
+
+        project.update(cx, |project, _| {
+            assert_eq!(
+                project.effective_viewer_resolution(),
+                ViewerResolution::Full
+            );
+            assert_eq!(
+                project.viewer_eval_requests(),
+                before + 1,
+                "a commit armed a settle timer, so every click pays twice"
+            );
         });
     }
 

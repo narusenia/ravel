@@ -116,6 +116,16 @@ to_display_rgba8([f32; 4]) -> [u8; 4]                  // encode + quantise
 to_display_rgba16([f32; 4]) -> [u16; 4]
 quantize_u8(f32) -> u8 / quantize_u16(f32) -> u16      // round to nearest
 
+// Which channel the viewer shows (INSP-2). Display only: no evaluation and
+// no cache identity sees it. The discriminants are the wire values the
+// display_transform.wgsl uniform and the host-to-worker AtomicU32 carry.
+enum DisplayChannel { Rgb = 0, Red, Green, Blue, Alpha, AlphaMatte }
+    ::ALL / ::default() == Rgb
+    .to_u32() -> u32 / ::from_u32(u32) -> Self      // unknown -> Rgb
+to_display_rgba8_channel([f32; 4], DisplayChannel) -> [u8; 4]
+                                        // grey + opaque for one channel;
+                                        // AlphaMatte multiplies in linear light
+
 struct CubeLut                            // .cube 3D LUT, trilinear
     ::parse(&str) -> Result<Self, CubeError>   // text, not a path
     .size() / .domain() / .sample([f32; 3]) -> [f32; 3]
@@ -1599,7 +1609,11 @@ which shrinks the readback to four bytes a pixel. **Only the interactive
 viewer opts in** — the export worker and `ravel-cli` need the linear frame
 their own `to_output_space` step encodes. `set_display_lut(Option<CubeLut>)`
 installs a user `.cube` on the hooks that have one; there is no UI for it
-until `CM-8`. A `Params` hint whose node
+until `CM-8`. `.with_display_channel(Arc<AtomicU32>)` points the transform at
+a `DisplayChannel` cell the host writes (`INSP-2`) — read per dispatch, so a
+switch reaches the next frame; order-independent with
+`.with_display_surface_mode(Arc<AtomicBool>)`, which does the same for the
+zero-copy surface flag. A `Params` hint whose node
 already has a processor reporting `rebuild_on_node_change() == false` is
 served by `Evaluator::invalidate_node` instead of a rebuild — a GPU
 processor's construction compiles a shader and creates a pipeline.
@@ -2756,7 +2770,14 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   re-evaluates with `InvalidationHint::None` because the evaluator's cache
   identity already carries the target resolution
   (`CacheMiss::ResolutionChanged`). It is view state and never reaches the
-  `.ravprj`. The `image` is a `panels::ViewerImage` — a
+  `.ravprj`. `ProjectState::{display_channel, set_display_channel}` do the
+  same for the channel the viewer isolates (`INSP-2`): the setter stores into
+  the `AtomicU32` the worker's display transform reads, drops the active
+  composition's entries from the output-stage frame cache (they hold finished
+  display bytes, so a hit would serve the previous mode), and re-evaluates
+  with `InvalidationHint::None` — the composite is unchanged, so no node
+  result is thrown away. Session state only: it reaches neither the `.ravprj`
+  nor `ui_state.json`. The `image` is a `panels::ViewerImage` — a
   straight-alpha BGRA `RenderImage` plus the evaluation buffer's dimensions —
   wrapped from the `ravel_nodes::DisplayFrame` the worker produced, by
   `ViewerImage::from_display_frame` **on the evaluation worker thread**

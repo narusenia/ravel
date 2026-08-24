@@ -82,7 +82,7 @@ pub fn disable_background_eval_for_tests() {
 /// sharpening starts around 200 ms. 120 ms clears the first by roughly an
 /// order of magnitude and stays well inside the second, and it is a constant
 /// on purpose: making it a setting asks the user a question about their own
-/// mouse they cannot answer (`viewer-preview-resolution-plan.md`, `VRES-4`).
+/// mouse they cannot answer (`done/viewer-preview-resolution-plan.md`, `VRES-4`).
 ///
 /// Public so the integration tests can advance the test clock exactly past it
 /// instead of guessing a literal that a retune would silently invalidate.

@@ -46,7 +46,7 @@ Apple M5 / 512×512）では、シナリオ (b) の 1 tick 1.02〜1.17 ms のう
 `VIEWER_MAX_DIM = 1024`（当時の `project_state.rs`）はこの制約への譲歩で、
 コメント自身がそう認めていた。**定数はもう無い** — `VRES-1`（#300）が
 係数モデル（`ViewerResolution`）へ置き換え、選べる UI と永続化と適応解像度は
-`viewer-preview-resolution-plan.md` の `VRES-2`〜`VRES-4` で入った。
+`done/viewer-preview-resolution-plan.md` の `VRES-2`〜`VRES-5` で入った。
 
 ### 2. リードバック実装そのもの（HIGH-04）
 
@@ -205,7 +205,7 @@ GPU 版を既定にし、CPU 実装は `pub` のまま残してテストが明�
 | GPUCOMP-9 | f32→BGRA 変換を評価ワーカーへ移す | HIGH-08, HIGH-09 | ✅ #284（`HIGH-08` 解決、`HIGH-09` は一部） |
 | GPUCOMP-8 | リードバック実装の改善（ステージング再利用・二重コピー除去・wait 範囲） | HIGH-04 | ✅ `GPUBK-6`（#282）が回収 |
 | GPUCOMP-10 | 非同期リードバック（フレーム N の map と N+1 の評価を重ねる） | HIGH-04 | ❌ `GPUBK-6` の測定で不要と判断 |
-| GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | 判断は `GPUBK-9`（#296）で完了。**上限そのものは `viewer-preview-resolution-plan.md` へ委譲**し、`VRES-1`（#300）が係数モデルへ置き換えて撤去、`VRES-2`〜`VRES-5` が UI・永続化・適応解像度・受入条件を引き受けた。**ゼロコピー表示は `zero-copy-viewer-plan.md` が引き受け、macOS は完了（#382 / #384 / #386）、Linux / Windows も `ZC-7` / `ZC-8`（#391）で完了** |
+| GPUCOMP-11 | `VIEWER_MAX_DIM` の引き上げ / ゼロコピー表示の判断 | HIGH-09 | 判断は `GPUBK-9`（#296）で完了。**上限そのものは `done/viewer-preview-resolution-plan.md` へ委譲**し、`VRES-1`（#300）が係数モデルへ置き換えて撤去、`VRES-2`〜`VRES-5` が UI・永続化・適応解像度・受入条件を引き受けた。**ゼロコピー表示は `zero-copy-viewer-plan.md` が引き受け、macOS は完了（#382 / #384 / #386）、Linux / Windows も `ZC-7` / `ZC-8`（#391）で完了** |
 
 > **2026-08-03 改訂**: REQ-INFRA-009（GPU バックエンドの内製化）が決まったので、
 > 残り単位を**バックエンド依存性で振り分けた**。
@@ -475,7 +475,7 @@ MED-GPU-02 の残り半分。GPUCOMP-3 で作った premultiply の形を再利�
 レイヤーごとに readback する」ことへの譲歩だった。その前提は
 `GPUCOMP-5` / `6` で消え、`GPUBK-9` の計測が「**常時フル解像度は目標に
 置かない**」と結論した（`perf-baseline.md`）。そこから
-`viewer-preview-resolution-plan.md` が生まれ、**`VRES-1`（✅ #300）が定数を
+`done/viewer-preview-resolution-plan.md` が生まれ、**`VRES-1`（✅ #300）が定数を
 撤去して係数モデル（`ViewerResolution`）に置き換えた**。
 **`VIEWER_MAX_DIM` という識別子はもうコードに無い。**
 

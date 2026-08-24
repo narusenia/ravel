@@ -5,7 +5,7 @@
 //!
 //! The viewer evaluates the active composition at a **fraction** of the
 //! composition resolution rather than at a hidden absolute cap
-//! (REQ-UI-004, `viewer-preview-resolution-plan.md`). A factor keeps the
+//! (REQ-UI-004, `done/viewer-preview-resolution-plan.md`). A factor keeps the
 //! meaning of a setting the same for a 1080p and an 8K composition — the user
 //! can predict how coarse the preview is — and it leaves a path to inspecting
 //! the output at composition resolution, which an absolute cap denied

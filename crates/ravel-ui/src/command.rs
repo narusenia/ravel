@@ -108,6 +108,22 @@ pub enum CommandId {
     /// rather than three "set to X" commands, because the factors are one
     /// ordered axis.
     ViewCyclePreviewResolution,
+    /// Show one channel of the composite on its own (`INSP-2`, REQ-UI-004):
+    /// the whole composite, R, G, B, or alpha.
+    ///
+    /// Five "set to X" commands rather than one cycling command, unlike
+    /// [`CommandId::ViewCyclePreviewResolution`] next door. The preview
+    /// factors are one ordered axis where the next step is always meaningful;
+    /// the channels are not an axis, and cycling would make "show me green"
+    /// cost between one and five presses depending on where the user already
+    /// is. The alpha *matte* view has no command — it is a variant of the
+    /// alpha view for judging a matte over black, and the toolbar menu is
+    /// where that choice belongs.
+    ViewerChannelRgb,
+    ViewerChannelRed,
+    ViewerChannelGreen,
+    ViewerChannelBlue,
+    ViewerChannelAlpha,
     ViewFit,
     // Playback
     PlaybackToggle,
@@ -362,6 +378,11 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         CommandId::ViewCyclePreviewResolution,
         "view.cycle_preview_resolution",
     ),
+    (CommandId::ViewerChannelRgb, "viewer.channel_rgb"),
+    (CommandId::ViewerChannelRed, "viewer.channel_red"),
+    (CommandId::ViewerChannelGreen, "viewer.channel_green"),
+    (CommandId::ViewerChannelBlue, "viewer.channel_blue"),
+    (CommandId::ViewerChannelAlpha, "viewer.channel_alpha"),
     (CommandId::ViewFit, "view.fit"),
     (CommandId::PlaybackToggle, "playback.toggle"),
     (CommandId::PlaybackStop, "playback.stop"),
@@ -479,6 +500,11 @@ impl CommandId {
             CommandId::ViewToggleAttributeSpreadsheet => "menu.view.attribute_spreadsheet",
             CommandId::ViewToggleNodeParamValues => "menu.view.node_param_values",
             CommandId::ViewCyclePreviewResolution => "menu.view.cycle_preview_resolution",
+            CommandId::ViewerChannelRgb => "menu.view.channel_rgb",
+            CommandId::ViewerChannelRed => "menu.view.channel_red",
+            CommandId::ViewerChannelGreen => "menu.view.channel_green",
+            CommandId::ViewerChannelBlue => "menu.view.channel_blue",
+            CommandId::ViewerChannelAlpha => "menu.view.channel_alpha",
             CommandId::ViewFit => "menu.view.fit",
             CommandId::PlaybackToggle => "menu.playback.toggle",
             CommandId::PlaybackStop => "menu.playback.stop",

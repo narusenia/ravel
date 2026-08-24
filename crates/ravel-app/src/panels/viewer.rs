@@ -33,13 +33,14 @@ use super::{CanvasSelection, ToolState, ViewerFrame, track_panel_focus};
 use crate::assets::RavelIcon;
 use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
 use crate::project_state::{ProjectState, ProjectStateHandle};
+use ravel_core::color::DisplayChannel;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::composition::{Guide, GuideAxis};
 use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
 use ravel_gpu::GpuFrameBuffer;
 use ravel_ui::document::NetworkPath;
-use ravel_ui::panels::viewer::ViewerResolution;
+use ravel_ui::panels::viewer::{ViewerResolution, display_channel_label_key};
 use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
@@ -2298,6 +2299,22 @@ impl ViewerPanel {
         cx.notify();
     }
 
+    /// Show one channel of the composite on its own (`INSP-2`).
+    ///
+    /// Through `ProjectState` like the preview factor, and for the same
+    /// reason: the mode has to reach the display transform on the evaluation
+    /// worker, and the project owns the cell that gets it there. The same
+    /// call is what `CommandId::ViewerChannel*` reaches.
+    fn set_display_channel(&mut self, channel: DisplayChannel, cx: &mut Context<Self>) {
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            project.set_display_channel(channel, cx);
+        });
+        cx.notify();
+    }
+
     /// AE-style bottom toolbar: zoom readout with preset menu, Fit, 100%,
     /// the preview resolution factor, and the grid / safe-area overlay
     /// toggles.
@@ -2320,6 +2337,11 @@ impl ViewerPanel {
             })
             .unwrap_or_default();
         let background_mode = self.background_mode;
+        let channel_entity = entity.clone();
+        let display_channel = self
+            .project(cx)
+            .map(|project| project.read(cx).display_channel())
+            .unwrap_or_default();
         let field_entity = entity.clone();
         let (field_display, field_map, field_opacity) =
             (self.field_display, self.field_map, self.field_opacity);
@@ -2445,6 +2467,41 @@ impl ViewerPanel {
                                             })
                                             .ok();
                                     }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                // Beside the background mode, not with the icon toggles: both
+                // are display options that change how the frame is shown
+                // rather than something drawn over it, and both need a name
+                // on screen because "which mode am I in" is the question the
+                // channel views exist to answer.
+                Button::new("viewer-display-channel")
+                    .xsmall()
+                    .ghost()
+                    .label(SharedString::from(t!(display_channel_label_key(
+                        display_channel
+                    ))))
+                    .tooltip(t!("viewer.channel"))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for channel in DisplayChannel::ALL {
+                            let entity = channel_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(
+                                    display_channel_label_key(channel)
+                                )))
+                                .checked(channel == display_channel)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                this.set_display_channel(channel, cx);
+                                            })
+                                            .ok();
+                                    },
+                                ),
                             );
                         }
                         menu

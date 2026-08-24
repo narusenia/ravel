@@ -17,14 +17,18 @@
 use ravel_app::panels::properties::read_only_value;
 use ravel_app::panels::timeline::channel_name_label;
 use ravel_app::panels::viewer::resolution_label;
+use ravel_core::color::DisplayChannel;
 use ravel_core::composition::{Composition, Layer};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Graph, Node};
 use ravel_core::id::{CompId, DataTypeId, LayerId, NodeId};
 use ravel_core::network::{NET_OUT_TYPE_KEY, PORT_FRAME};
 use ravel_core::types::FrameRate;
+use ravel_ui::command::CommandId;
 use ravel_ui::keyframes::{CHANNEL_VALUE, property_rows};
-use ravel_ui::panels::viewer::ViewerResolution;
+use ravel_ui::panels::viewer::{
+    ViewerResolution, display_channel_from_command, display_channel_label_key,
+};
 use ravel_ui::properties::layer::{
     DURATION_FRAMES, SOURCE_AUDIO, SOURCE_NETWORK, SOURCE_NULL, sections_for_layer,
 };
@@ -257,6 +261,55 @@ fn the_declarations_section_reads_as_sentences_in_every_locale() {
     for locale in ["en", "ja"] {
         ravel_i18n::set_locale(locale).expect("catalog is shipped");
         for key in keys {
+            let text = ravel_i18n::translate(key);
+            assert_ne!(text, key, "{locale}: {key} has no translation");
+            assert!(!text.is_empty(), "{locale}: {key} translates to nothing");
+        }
+    }
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
+/// `INSP-2`'s locale criterion: every channel mode is named in every locale.
+///
+/// The toolbar menu shows these names, so a missing key is a raw
+/// `viewer.channel_blue` on screen — and the lib tests cannot see it, because
+/// they run with an empty store where every `t!` returns its key. The
+/// commands' own labels come along: those are what the Preferences keybinding
+/// list shows for a chord.
+#[test]
+fn every_display_channel_is_named_in_every_locale() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_i18n();
+
+    let command_keys: Vec<&str> = CommandId::all()
+        .filter(|cmd| display_channel_from_command(*cmd).is_some())
+        .map(CommandId::label_key)
+        .collect();
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+
+        let mut names = Vec::new();
+        for channel in DisplayChannel::ALL {
+            let key = display_channel_label_key(channel);
+            let text = ravel_i18n::translate(key);
+            assert_ne!(
+                text, key,
+                "{locale}: {key} has no translation, so the toolbar shows the key"
+            );
+            assert!(!text.is_empty(), "{locale}: {key} translates to nothing");
+            names.push(text);
+        }
+        // Two modes translated to the same words are as unusable as an
+        // untranslated one, and no key-based check can see it.
+        let distinct: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            names.len(),
+            "{locale}: two channel modes share a name: {names:?}"
+        );
+
+        for key in std::iter::once("viewer.channel").chain(command_keys.iter().copied()) {
             let text = ravel_i18n::translate(key);
             assert_ne!(text, key, "{locale}: {key} has no translation");
             assert!(!text.is_empty(), "{locale}: {key} translates to nothing");

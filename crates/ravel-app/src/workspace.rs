@@ -110,6 +110,11 @@ macro_rules! for_each_command {
             ViewToggleAttributeSpreadsheet,
             ViewToggleNodeParamValues,
             ViewCyclePreviewResolution,
+            ViewerChannelRgb,
+            ViewerChannelRed,
+            ViewerChannelGreen,
+            ViewerChannelBlue,
+            ViewerChannelAlpha,
             ViewFit,
             PlaybackToggle,
             PlaybackStop,
@@ -1549,6 +1554,24 @@ impl RavelWorkspace {
                         let next = project.viewer_resolution().cycled();
                         project.set_viewer_resolution(next, cx);
                     });
+                }
+                // The viewer's channel isolation (`INSP-2`). Here for the
+                // same reason as the factor above: the mode lives on
+                // `ProjectState`, which owns the cell the evaluation
+                // worker's display transform reads, and it applies whichever
+                // panel has focus.
+                CommandId::ViewerChannelRgb
+                | CommandId::ViewerChannelRed
+                | CommandId::ViewerChannelGreen
+                | CommandId::ViewerChannelBlue
+                | CommandId::ViewerChannelAlpha => {
+                    if let Some(channel) =
+                        ravel_ui::panels::viewer::display_channel_from_command(cmd)
+                    {
+                        self.project.update(cx, |project, cx| {
+                            project.set_display_channel(channel, cx);
+                        });
+                    }
                 }
                 // Named layouts (REQ-UI-005) plus the embed opt-in.
                 CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),

@@ -368,9 +368,11 @@ impl DisplayTransform {
 
     /// The linear frame the readout reads, or `None` when it is switched off.
     ///
-    /// A GPU-resident input is read back — the full frame at 16 bytes per
-    /// pixel, which is exactly the cost `GPUCOMP-9` removed from this path and
-    /// which this restores **only** while the user is asking for values. A
+    /// A GPU-resident input is read back whole — 16 bytes per pixel for the
+    /// `RgbaF32` working format, less for a frame that is already narrower
+    /// (`to_frame_buffer` keeps the texture's own format), which is the cost
+    /// `GPUCOMP-9` removed from this path and which this restores **only**
+    /// while the user is asking for values. A
     /// region readback would be smaller, but `ravel-gpu` has no partial read
     /// and adding one would either need a GPU wait per pointer move or put
     /// that wait on the UI thread; neither is allowed, and the frame is

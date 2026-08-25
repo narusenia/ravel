@@ -448,6 +448,11 @@ pub struct ViewerPanel {
     viewer_sub: Subscription,
     #[allow(dead_code)]
     tool_sub: Subscription,
+    /// Repaints when the pixel readout's scale changes (`INSP-3`): the
+    /// Global is the only thing that moves, so nothing else would. Held for
+    /// its lifetime, like the neighbours — dropping it unsubscribes.
+    #[allow(dead_code)]
+    readout_format_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
@@ -477,6 +482,13 @@ impl ViewerPanel {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = track_panel_focus(instance, &focus_handle, window, cx);
+
+        // The readout's scale is a Global written by the command
+        // (`INSP-3`), and nothing else repaints for it: with the pointer
+        // standing still, the chord would change the numbers only at the next
+        // frame or the next mouse move.
+        let readout_format_sub =
+            cx.observe_global::<super::ViewerReadoutFormat>(|_this, cx| cx.notify());
 
         let tool_sub = cx.observe_global::<ToolState>(|this, cx| {
             let state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
@@ -674,6 +686,7 @@ impl ViewerPanel {
             focus_subscriptions,
             viewer_sub,
             tool_sub,
+            readout_format_sub,
             selection_sub,
             layer_selection_sub,
         }

@@ -47,7 +47,7 @@ cycle_preview_resolution = "Alt+R"
 # Viewer's tools, and because the modes are not an ordered axis one chord
 # could walk. The alpha *matte* view is toolbar-only.
 [viewer]
-channel_rgb = "Alt+Shift+C"
+channel_rgb = "Alt+Shift+P"
 channel_red = "Alt+Shift+R"
 channel_green = "Alt+Shift+G"
 channel_blue = "Alt+Shift+B"

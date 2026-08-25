@@ -50,12 +50,14 @@ render_queue = "Render Queue"
 attribute_spreadsheet = "Attribute Spreadsheet"
 node_param_values = "Show Parameter Values"
 cycle_preview_resolution = "Cycle Preview Resolution"
+fit = "Fit View"
+
+[menu.viewer]
 channel_rgb = "Show RGB"
 channel_red = "Show Red Channel"
 channel_green = "Show Green Channel"
 channel_blue = "Show Blue Channel"
 channel_alpha = "Show Alpha Channel"
-fit = "Fit View"
 
 [menu.composition]
 _self = "Composition"

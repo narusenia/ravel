@@ -64,7 +64,7 @@ toggle_media_bin = "Alt+8"
 cycle_preview_resolution = "Alt+R"
 
 [viewer]
-channel_rgb = "Alt+Shift+C"
+channel_rgb = "Alt+Shift+P"
 channel_red = "Alt+Shift+R"
 channel_green = "Alt+Shift+G"
 channel_blue = "Alt+Shift+B"

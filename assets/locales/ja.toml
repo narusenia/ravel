@@ -48,12 +48,14 @@ render_queue = "レンダーキュー"
 attribute_spreadsheet = "属性スプレッドシート"
 node_param_values = "パラメータ値を表示"
 cycle_preview_resolution = "プレビュー解像度を切り替え"
+fit = "全体表示"
+
+[menu.viewer]
 channel_rgb = "RGB を表示"
 channel_red = "赤チャンネルを表示"
 channel_green = "緑チャンネルを表示"
 channel_blue = "青チャンネルを表示"
 channel_alpha = "アルファチャンネルを表示"
-fit = "全体表示"
 
 [menu.composition]
 _self = "コンポジション"

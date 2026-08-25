@@ -23,6 +23,7 @@ use ravel_core::graph::GraphError;
 use ravel_core::id::{AssetId, CompId, LayerId, NodeId};
 use ravel_core::network::NetworkError;
 use ravel_core::runtime::playback::LoopRange;
+use ravel_core::types::FrameBuffer;
 use ravel_dock::PaneContent;
 use ravel_gpu::GpuFrameBuffer;
 use ravel_i18n::t;
@@ -925,6 +926,21 @@ pub struct ToolState {
 
 impl Global for ToolState {}
 
+/// Durable shared state: which scale the Viewer's pixel readout prints values
+/// on (`INSP-3`). Written by `CommandId::ViewerPixelReadoutFormat`, observed
+/// by the Viewer.
+///
+/// A Global rather than a field on `ProjectState` beside the readout's on/off
+/// cell, because the two are different kinds of fact and only one of them
+/// crosses to the evaluation worker: switching the readout on changes what the
+/// worker attaches to every frame, while switching the scale changes a
+/// `format!` on the UI thread and must not cost a transform. They cannot drift
+/// — neither is a copy of the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewerReadoutFormat(pub ravel_ui::panels::viewer::PixelReadoutFormat);
+
+impl Global for ViewerReadoutFormat {}
+
 /// Where a [`ViewerImage`] conversion ran.
 ///
 /// Test-only: the completion criterion for moving the conversion off the UI
@@ -1079,6 +1095,12 @@ pub enum ViewerFrame {
     Frame {
         image: ViewerImage,
         composition_resolution: (u32, u32),
+        /// The linear frame the display bytes were made from, present only
+        /// while the pixel readout is on (`INSP-3`). Carried *with* the
+        /// picture rather than published beside it: two globals written in
+        /// separate updates drift, and a readout a frame behind the image
+        /// would report values for pixels nobody is looking at.
+        linear: Option<Arc<FrameBuffer>>,
     },
     /// A display-encoded GPU texture ready for the GPUI surface path. The
     /// handle stays alive in this durable global until the next frame replaces
@@ -1086,6 +1108,10 @@ pub enum ViewerFrame {
     GpuFrame {
         frame: GpuFrameBuffer,
         composition_resolution: (u32, u32),
+        /// As on [`ViewerFrame::Frame`]: the zero-copy path never reads its
+        /// picture back, so the readout's float frame is the only thing on
+        /// this road the CPU can index.
+        linear: Option<Arc<FrameBuffer>>,
     },
     /// The latest evaluation failed; the panel drops the stale frame and
     /// shows a black frame with a small error overlay. The composition

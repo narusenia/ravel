@@ -38,9 +38,10 @@ use ravel_core::graph::{ParameterValue, PathPoint};
 use ravel_core::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use ravel_core::registry::{NodeRegistry, ParamRange, ParamRole};
 use ravel_core::runtime::InvalidationHint;
-use ravel_core::types::{NodeData, PortRecord};
+use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
+use ravel_ui::panels::viewer::{PixelReadoutFormat, comp_to_buffer_index, pixel_readout_text};
 
 use crate::panels::{CanvasSelection, LayerSelection, PlaybackPosition};
 use std::collections::HashMap;
@@ -94,6 +95,11 @@ pub mod priority {
     /// the drag in flight has snapped to, so it has to be readable over the
     /// bbox, the grips and the safe areas it lands on.
     pub const SNAP_GUIDES: i32 = 45;
+    /// Below the evaluation error and above everything drawn in composition
+    /// space: the readout is a corner label that grabs nothing, so its order
+    /// only decides which text wins the corner it sits in — and an error the
+    /// user has to read wins.
+    pub const PIXEL_READOUT: i32 = 48;
     pub const EVAL_ERROR: i32 = 50;
 }
 
@@ -224,6 +230,28 @@ pub struct OverlayContext {
     /// (`ParamRole`). Shared rather than cloned: the snapshot is rebuilt on
     /// every pointer move.
     pub registry: Option<Arc<NodeRegistry>>,
+    /// What the pixel readout needs, or `None` while it is switched off
+    /// (`INSP-3`).
+    ///
+    /// One `Option` rather than a pointer field, a frame field and a flag: the
+    /// readout draws only when it has all three, so requiring them together
+    /// makes "off shows nothing" structural instead of a condition an overlay
+    /// has to remember to check.
+    pub pixel_readout: Option<PixelReadout>,
+}
+
+/// Everything the pixel readout reads (`INSP-3`).
+#[derive(Clone, Debug)]
+pub struct PixelReadout {
+    /// The pointer in composition space, **unclamped**: a pointer beside the
+    /// composition is a real position and the readout has to answer "nothing"
+    /// for it rather than never hearing about it.
+    pub pointer: (f32, f32),
+    /// The evaluated frame the values come from, at whatever resolution the
+    /// viewer evaluated it — which is normally smaller than the composition.
+    pub frame: Arc<FrameBuffer>,
+    /// The scale the values are printed on.
+    pub format: PixelReadoutFormat,
 }
 
 /// The handle drag in flight, as the overlays see it.
@@ -549,6 +577,10 @@ pub enum LabelPlacement {
     /// a fixed corner never lands under the pointer or under the handles the
     /// gesture is moving.
     CanvasTopLeft,
+    /// Pinned to the canvas area's bottom-left corner, clear of the drag HUD
+    /// above it. Where the pixel readout sits: it updates on every pointer
+    /// move, so it must not be anywhere the pointer goes.
+    CanvasBottomLeft,
     /// Anchored at a composition point, so the text travels with the element
     /// it annotates under pan and zoom. The panel converts through the same
     /// viewport the pointer is resolved with; a label outside the canvas is
@@ -910,6 +942,7 @@ impl OverlayRegistry {
             Box::new(PathEditOverlay),
             Box::new(super::guides::GuideOverlay),
             Box::new(super::snap::SnapGuideOverlay),
+            Box::new(PixelReadoutOverlay),
             Box::new(EvalErrorOverlay),
         ])
     }
@@ -2441,6 +2474,62 @@ impl ViewerOverlay for ParamManipulator {
 /// emits a [`OverlayLabel`] instead of primitives. Keeping it in the registry
 /// is what lets unit 2 see that it needs no evaluation and unit 7 reuse the
 /// same channel for the drag HUD.
+/// The value of the pixel under the pointer (`INSP-3`, REQ-UI-004).
+///
+/// Screen-space text and nothing else: the readout answers "what is the value
+/// here", which is a number, not a mark on the picture. It declares no
+/// [`ViewerOverlay::eval_targets`] — the values come from the frame already on
+/// screen, so moving the pointer costs a lookup and a `format!` and never an
+/// evaluation.
+pub struct PixelReadoutOverlay;
+
+impl PixelReadoutOverlay {
+    pub const ID: OverlayId = OverlayId("viewer.pixel_readout");
+}
+
+impl ViewerOverlay for PixelReadoutOverlay {
+    fn id(&self) -> OverlayId {
+        Self::ID
+    }
+
+    fn priority(&self) -> i32 {
+        priority::PIXEL_READOUT
+    }
+
+    fn is_active(&self, ctx: &OverlayContext) -> bool {
+        ctx.pixel_readout.is_some()
+    }
+
+    fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
+        let Some(readout) = ctx.pixel_readout.as_ref() else {
+            return Vec::new();
+        };
+        // The composition's resolution, not the frame's: the pointer is
+        // resolved in composition space, and the frame under it is normally
+        // smaller (`ViewerResolution`). `None` for either — no composition on
+        // screen, or a point outside it — is "no value here", which the
+        // readout says by drawing nothing at all rather than by printing a
+        // placeholder that would follow the pointer off the frame.
+        let Some(resolution) = ctx.resolution else {
+            return Vec::new();
+        };
+        let frame = readout.frame.as_ref();
+        let Some((x, y)) =
+            comp_to_buffer_index(readout.pointer, resolution, (frame.width, frame.height))
+        else {
+            return Vec::new();
+        };
+        let Some(rgba) = frame.sample_rgba(x, y) else {
+            return Vec::new();
+        };
+        vec![OverlayLabel {
+            text: SharedString::from(pixel_readout_text(readout.pointer, rgba, readout.format)),
+            color: ctx.colors.path,
+            placement: LabelPlacement::CanvasBottomLeft,
+        }]
+    }
+}
+
 pub struct EvalErrorOverlay;
 
 impl EvalErrorOverlay {
@@ -2502,8 +2591,142 @@ mod tests {
         }
     }
 
+    /// A composition twice the size of the buffer under it on each axis —
+    /// the viewer's default `Half` relationship, small enough to write out.
+    /// Channel R carries the buffer index so a misread pixel names itself.
+    fn readout_context(pointer: (f32, f32), format: PixelReadoutFormat) -> OverlayContext {
+        let pixels: Vec<f32> = (0..8).flat_map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
+        OverlayContext {
+            resolution: Some((8, 4)),
+            pixel_readout: Some(PixelReadout {
+                pointer,
+                frame: Arc::new(FrameBuffer::from_f32(4, 2, pixels)),
+                format,
+            }),
+            ..base_context()
+        }
+    }
+
+    fn readout_line(ctx: &OverlayContext) -> Option<String> {
+        let labels = PixelReadoutOverlay.labels(ctx);
+        assert!(labels.len() <= 1, "the readout draws one line or none");
+        labels.first().map(|label| label.text.to_string())
+    }
+
+    /// The evaluation buffer is smaller than the composition, so composition
+    /// coordinates are not buffer indices — the readout has to convert, and
+    /// `ViewerFrame::Frame` carries both resolutions precisely so it can.
+    ///
+    /// R names the buffer index, so a readout that used the composition
+    /// resolution for the buffer (or skipped the conversion) reads a different
+    /// number, not merely a differently-rounded one.
+    #[test]
+    fn the_readout_names_the_pixel_under_the_pointer_in_a_smaller_buffer() {
+        let line = |pointer| readout_line(&readout_context(pointer, PixelReadoutFormat::Float));
+        // Two composition pixels per buffer pixel, on both axes.
+        assert_eq!(
+            line((0.0, 0.0)).as_deref(),
+            Some("0, 0   R 0.0000  G 0.0000  B 0.0000  A 1.0000")
+        );
+        assert_eq!(
+            line((1.9, 1.9)).as_deref(),
+            Some("1, 1   R 0.0000  G 0.0000  B 0.0000  A 1.0000"),
+            "the far corner of buffer pixel 0 is still buffer pixel 0"
+        );
+        assert_eq!(
+            line((2.0, 0.0)).as_deref(),
+            Some("2, 0   R 1.0000  G 0.0000  B 0.0000  A 1.0000"),
+            "the second composition pixel pair is the second buffer pixel"
+        );
+        // The last composition pixel reaches the last buffer pixel — index 7
+        // is row 1, column 3 — and stops there.
+        assert_eq!(
+            line((7.99, 3.99)).as_deref(),
+            Some("7, 3   R 7.0000  G 0.0000  B 0.0000  A 1.0000")
+        );
+        assert_eq!(
+            line((6.0, 2.0)).as_deref(),
+            Some("6, 2   R 7.0000  G 0.0000  B 0.0000  A 1.0000")
+        );
+    }
+
+    /// Off the composition there is no value, so there is no line — the label
+    /// disappears rather than freezing on the last pixel or clamping to the
+    /// edge, either of which would report a colour for a place the pointer is
+    /// not.
+    #[test]
+    fn the_readout_shows_nothing_with_the_pointer_off_the_frame() {
+        for outside in [
+            (-0.5, 2.0),
+            (2.0, -0.5),
+            (8.0, 2.0),
+            (2.0, 4.0),
+            (100.0, 100.0),
+        ] {
+            assert_eq!(
+                readout_line(&readout_context(outside, PixelReadoutFormat::Float)),
+                None,
+                "{outside:?} is off the composition"
+            );
+        }
+        // Switched off entirely: not active, and silent even if asked.
+        let off = base_context();
+        assert!(!PixelReadoutOverlay.is_active(&off));
+        assert_eq!(readout_line(&off), None);
+        // On, but with no composition on screen there is no coordinate space
+        // to resolve the pointer in.
+        let no_comp = OverlayContext {
+            resolution: None,
+            ..readout_context((0.0, 0.0), PixelReadoutFormat::Float)
+        };
+        assert_eq!(readout_line(&no_comp), None);
+    }
+
+    /// The scale switch changes how the same value is printed and nothing
+    /// else — same pixel, same channels, same order.
+    #[test]
+    fn the_readout_prints_the_same_pixel_on_either_scale() {
+        let pixels = vec![0.5, 0.25, 0.0, 1.0];
+        let ctx = |format| OverlayContext {
+            pixel_readout: Some(PixelReadout {
+                pointer: (0.0, 0.0),
+                frame: Arc::new(FrameBuffer::from_f32(1, 1, pixels.clone())),
+                format,
+            }),
+            resolution: Some((2, 2)),
+            ..base_context()
+        };
+        assert_eq!(
+            readout_line(&ctx(PixelReadoutFormat::Float)).as_deref(),
+            Some("0, 0   R 0.5000  G 0.2500  B 0.0000  A 1.0000")
+        );
+        assert_eq!(
+            readout_line(&ctx(PixelReadoutFormat::Byte)).as_deref(),
+            Some("0, 0   R 128  G 64  B 0  A 255")
+        );
+    }
+
+    /// The readout declares no evaluation target: it reads the frame already
+    /// on screen. A target here would post an evaluation request on every
+    /// pointer move, since the context is rebuilt per move.
+    #[test]
+    fn the_readout_asks_for_no_evaluation() {
+        let on = readout_context((1.0, 1.0), PixelReadoutFormat::Float);
+        assert!(PixelReadoutOverlay.eval_targets(&on).is_empty());
+        // And it adds none to the registry's list either, so the request
+        // `ProjectState::build_viewer_request` assembles is the same whether
+        // the readout is on or off.
+        let off = OverlayContext {
+            pixel_readout: None,
+            ..readout_context((1.0, 1.0), PixelReadoutFormat::Float)
+        };
+        let registry = OverlayRegistry::builtin();
+        assert_eq!(registry.eval_targets(&on), registry.eval_targets(&off));
+    }
+
     fn base_context() -> OverlayContext {
         OverlayContext {
+            pixel_readout: None,
             resolution: Some((1920, 1080)),
             comp: None,
             playback: Some(PlaybackPosition::default()),

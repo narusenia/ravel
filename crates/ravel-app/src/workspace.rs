@@ -115,6 +115,8 @@ macro_rules! for_each_command {
             ViewerChannelGreen,
             ViewerChannelBlue,
             ViewerChannelAlpha,
+            ViewerPixelReadout,
+            ViewerPixelReadoutFormat,
             ViewFit,
             PlaybackToggle,
             PlaybackStop,
@@ -1572,6 +1574,26 @@ impl RavelWorkspace {
                             project.set_display_channel(channel, cx);
                         });
                     }
+                }
+                // The viewer's pixel readout (`INSP-3`). The on/off goes to
+                // `ProjectState` for the reason the channel does — it owns
+                // the cell the worker's display transform reads — while the
+                // scale is a Global, because printing a number differently
+                // must not cost a transform.
+                CommandId::ViewerPixelReadout => {
+                    self.project.update(cx, |project, cx| {
+                        let on = project.pixel_readout();
+                        project.set_pixel_readout(!on, cx);
+                    });
+                }
+                CommandId::ViewerPixelReadoutFormat => {
+                    let next = cx
+                        .try_global::<panels::ViewerReadoutFormat>()
+                        .copied()
+                        .unwrap_or_default()
+                        .0
+                        .toggled();
+                    cx.set_global(panels::ViewerReadoutFormat(next));
                 }
                 // Named layouts (REQ-UI-005) plus the embed opt-in.
                 CommandId::WorkspaceManageLayouts => self.prompt_workspace_layouts(window, cx),

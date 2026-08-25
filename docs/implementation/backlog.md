@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-08-21
+最終更新: 2026-08-25
 
 ## 凡例
 
@@ -30,8 +30,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| INSP-2 | チャンネル単独表示（R / G / B / A） | `viewer-inspection-plan.md` |
-| INSP-3 | ピクセル値の読み取り | `viewer-inspection-plan.md` |
+| INSP-4 | 再生とキャッシュの状態表示 | `viewer-inspection-plan.md` |
 | TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
@@ -503,9 +502,9 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | INSP-1 | ✅ | `background_color` の配線とチェッカーボード（MED-CORE-09、PR #213） | — |
-| INSP-2 | 🟡 | チャンネル単独表示（R / G / B / A） | INSP-1 |
-| INSP-3 | 🟡 | ピクセル値の読み取り | OVL-1 |
-| INSP-4 | ⬜ | 再生とキャッシュの状態表示 | （キャッシュ表示のみ CACHE-6） |
+| INSP-2 | ✅ | チャンネル単独表示（R / G / B / A / マット、PR #479） | INSP-1 |
+| INSP-3 | ✅ | ピクセル値の読み取り（PR #480） | OVL-1 |
+| INSP-4 | 🟡 | 再生とキャッシュの状態表示 | （キャッシュ表示のみ CACHE-6 ✅） |
 | INSP-5 | ❓ | スコープ 4 種の引き取り判断 | — |
 
 INSP-1 は**設定できるのに効かない**フィールドの解消なので、他の検査機能より

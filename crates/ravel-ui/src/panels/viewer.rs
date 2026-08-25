@@ -361,21 +361,36 @@ fn downgraded_preview_factor(
 
 /// Share of `duration_frames` the ranges cover, as a whole percent.
 ///
-/// `None` — draw nothing — for both empty inputs: an empty band is the state
-/// before any evaluation, where `0%` would claim a measurement nobody took, and
-/// a zero-length composition has no denominator. The sum is clamped to the
-/// duration because a band is allowed to hold frames a shortened composition no
-/// longer has.
+/// `None` — draw nothing — whenever no frame *of this composition* is
+/// measured: an empty band is the state before any evaluation, a zero-length
+/// composition has no denominator, and a band describing only frames the
+/// composition no longer has measures nothing about the picture on screen.
+/// `0%` in any of those would claim a measurement nobody took.
+///
+/// Each range is clipped to the composition before it is counted, because a
+/// band may outlive a shortened composition: counting a stale tail and then
+/// clamping only the total would report a share of frames that are gone.
+/// Ranges are counted as disjoint, which is what
+/// `FrameCache::cached_ranges` produces (it sorts, dedups and merges adjacent
+/// frames); the clamp is the guard if that ever stops being true.
 fn cached_percent(ranges: &[Range<u64>], duration_frames: u64) -> Option<u32> {
-    if ranges.is_empty() || duration_frames == 0 {
+    if duration_frames == 0 {
         return None;
     }
-    let cached: u64 = ranges
+    let cached = ranges
         .iter()
-        .map(|range| range.end.saturating_sub(range.start))
-        .sum();
-    let share = cached.min(duration_frames) as f64 / duration_frames as f64;
-    Some((share * 100.0).round() as u32)
+        .fold(0u64, |total, range| {
+            let start = range.start.min(duration_frames);
+            let end = range.end.min(duration_frames);
+            total.saturating_add(end.saturating_sub(start))
+        })
+        .min(duration_frames);
+    // Integer arithmetic with a half-up bias: the percent is a label, and a
+    // float here would round differently on the boundary depending on the
+    // representation of the division.
+    (cached > 0).then(|| {
+        ((cached as u128 * 100 + duration_frames as u128 / 2) / duration_frames as u128) as u32
+    })
 }
 
 #[cfg(test)]
@@ -937,6 +952,38 @@ mod tests {
         assert_eq!(
             status_line(true, 0, ASKED, &[0..250, 250..500], 300).as_deref(),
             Some("cached 100%")
+        );
+    }
+
+    /// The stale tail is *clipped*, not counted and then clamped: 100 frames
+    /// past the end of a 300-frame composition are 0% of it, not 33%.
+    #[test]
+    fn frames_past_the_end_of_the_composition_are_not_a_share_of_it() {
+        assert_eq!(
+            status_line(true, 0, ASKED, &[400..450, 460..500], 300),
+            None,
+            "a band describing only frames that are gone measures nothing"
+        );
+        assert_eq!(
+            status_line(true, 0, ASKED, &[0..150, 400..500], 300).as_deref(),
+            Some("cached 50%"),
+            "the frames that do exist still count"
+        );
+    }
+
+    /// A band big enough to overflow the multiplication in a naive percent.
+    #[test]
+    fn an_enormous_composition_still_reports_a_percent() {
+        assert_eq!(
+            status_line(
+                true,
+                0,
+                ASKED,
+                &[0..u64::MAX / 4, u64::MAX / 4..u64::MAX / 2],
+                u64::MAX
+            )
+            .as_deref(),
+            Some("cached 50%")
         );
     }
 

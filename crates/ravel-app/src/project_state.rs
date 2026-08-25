@@ -260,6 +260,15 @@ pub struct ProjectState {
     /// Multiple frames can observe the same loss, but the workspace must show
     /// one durable notification only.
     gpu_loss_notified: bool,
+    /// Whether a GPU device epoch swap is between its stop and its restart.
+    ///
+    /// The swap gives up the UI thread to join the retired worker, so a second
+    /// request arriving in that window would find `eval` already `None`, read
+    /// the generation off the fence instead of off the retiring worker, and
+    /// build a **second** replacement — two workers, and whichever landed last
+    /// deciding which device the frame on screen came from. `GPULOSS-3` reaches
+    /// this by polling, so the second request is not hypothetical.
+    eval_restart_in_progress: bool,
     /// Host capability shared with the evaluation worker. It is false until
     /// the live GPUI window proves that both renderers use the same device;
     /// false also selects the worker-side CPU fallback on unsupported hosts.
@@ -615,6 +624,7 @@ impl ProjectState {
             eval: None,
             gpu: None,
             gpu_loss_notified: false,
+            eval_restart_in_progress: false,
             viewer_surface_enabled,
             cache_budget,
             startup_gpu_error: None,
@@ -720,12 +730,18 @@ impl ProjectState {
     /// `gpu` is the context the session runs on from now on; obtaining it is
     /// the caller's job, because where a replacement comes from is
     /// platform-specific (`GPULOSS-3`, `GPULOSS-4`).
-    pub fn restart_eval_on_gpu(&mut self, gpu: GpuContext, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether the swap was started. `false` means one is already
+    /// running and this request was ignored — the answer a polling detector
+    /// (`GPULOSS-3`) needs, and the reason it is reported rather than kept
+    /// private: a caller that had to remember "I already asked" would be a
+    /// second authority on a fact this object already holds.
+    pub fn restart_eval_on_gpu(&mut self, gpu: GpuContext, cx: &mut Context<Self>) -> bool {
         self.restart_eval_worker(
             Some(gpu.clone()),
             move |this| this.viewer_gpu_hooks(gpu),
             cx,
-        );
+        )
     }
 
     /// The device epoch swap, with the hooks left to a factory so a headless
@@ -749,15 +765,24 @@ impl ProjectState {
     /// The budget itself is never rebuilt or zeroed: it is the session's
     /// accounting authority, and the old caches returning their reservations
     /// as they drop is what brings the usage back down.
+    ///
+    /// Steps 3 and 4 are separated by an await, so the whole thing is guarded
+    /// against re-entry: see [`Self::eval_restart_in_progress`].
     fn restart_eval_worker<H, F>(
         &mut self,
         gpu: Option<GpuContext>,
         make_hooks: F,
         cx: &mut Context<Self>,
-    ) where
+    ) -> bool
+    where
         H: EvalWorkerHooks,
         F: FnOnce(&Self) -> H + 'static,
     {
+        if self.eval_restart_in_progress {
+            tracing::debug!("a GPU device epoch swap is already running; request ignored");
+            return false;
+        }
+        self.eval_restart_in_progress = true;
         // The number both sides of the boundary agree on. Taken from the
         // outgoing worker, not from the fence, because a request it has not
         // reported yet is still newer than the last published frame.
@@ -796,10 +821,12 @@ impl ProjectState {
                 // Same document, same playhead — and no caches on the new
                 // device, so nothing else would ask for a frame.
                 this.request_viewer_eval(InvalidationHint::Structural, cx);
+                this.eval_restart_in_progress = false;
                 cx.notify();
             });
         })
         .detach();
+        true
     }
 
     pub fn startup_gpu_error(&self) -> Option<&str> {
@@ -2876,6 +2903,73 @@ mod tests {
             ["old built", "old dropped", "new built"],
             "the replacement worker was built before the retired one was gone"
         );
+    }
+
+    /// `GPULOSS-2`: a second swap request arriving while one is running is
+    /// refused, not honoured.
+    ///
+    /// The swap gives up the UI thread to join the retired worker, so a second
+    /// request in that window finds `eval` already `None`. Without a guard it
+    /// reads the generation off the fence rather than the retiring worker and
+    /// builds a **second** replacement — and whichever landed last decides
+    /// which device produced the frame on screen. `GPULOSS-3` reaches this by
+    /// polling, so the second request is a certainty rather than a race.
+    #[gpui::test]
+    fn a_second_swap_request_while_one_is_running_is_refused(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(None, EpochHooks::new("old", &log), 0, cx);
+        });
+
+        let (first_log, second_log) = (log.clone(), log.clone());
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(None, move |_| EpochHooks::new("new", &first_log), cx),
+                "the first swap was refused"
+            );
+            // Same turn, so the first swap has not reached its await yet —
+            // exactly the window a polling detector lands in.
+            assert!(
+                !project.restart_eval_worker(
+                    None,
+                    move |_| EpochHooks::new("extra", &second_log),
+                    cx
+                ),
+                "a second swap started while the first was still running"
+            );
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| !project.eval_restart_in_progress) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the swap never finished; log: {:?}",
+                log.lock().unwrap()
+            );
+            std::thread::yield_now();
+        }
+
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.iter().filter(|entry| *entry == "new built").count(),
+            1,
+            "the swap built more than one replacement worker: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|entry| entry.starts_with("extra")),
+            "the refused request built a worker anyway: {log:?}"
+        );
+        project.read_with(cx, |project, _| {
+            assert!(project.eval.is_some(), "the session has no worker left");
+        });
     }
 
     /// `GPULOSS-2`: the comparison at the fence is `<=`, not `<`.

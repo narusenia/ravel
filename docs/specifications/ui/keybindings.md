@@ -69,6 +69,8 @@ channel_red = "Alt+Shift+R"
 channel_green = "Alt+Shift+G"
 channel_blue = "Alt+Shift+B"
 channel_alpha = "Alt+Shift+A"
+pixel_readout = "Alt+Shift+I"
+pixel_readout_format = "Alt+Shift+F"
 
 [composition]
 settings = "Cmd+K"

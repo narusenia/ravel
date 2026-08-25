@@ -361,6 +361,16 @@ pub struct ProjectState {
     /// week's inspection mode still applied is a bug report waiting to
     /// happen (`viewer-inspection-plan.md`).
     display_channel: Arc<AtomicU32>,
+    /// Whether the viewer reports the value of the pixel under the pointer
+    /// (`INSP-3`).
+    ///
+    /// The cell **is** the state, for the reason [`Self::display_channel`]'s
+    /// is: the worker's display transform reads the same `Arc` and attaches
+    /// the linear frame while it is set. Only the on/off lives here — the
+    /// scale the values are *printed* on is a UI-side format with no bearing
+    /// on what the worker produces, and sits in
+    /// [`crate::panels::ViewerReadoutFormat`].
+    pixel_readout: Arc<AtomicBool>,
     /// Fraction of the composition resolution the viewer evaluates at
     /// (REQ-UI-004). View state, not document content: it is never written to
     /// the `.ravprj`, so opening somebody else's project does not import
@@ -437,6 +447,10 @@ pub(crate) struct ViewerUpdate {
     frame: u64,
     timings: Vec<(NodeId, Duration)>,
     output: ViewerOutput,
+    /// The linear frame the display bytes were made from, when the worker
+    /// attached one (`INSP-3`). `None` whenever the pixel readout is off,
+    /// which is the state the viewer is normally in.
+    linear: Option<Arc<FrameBuffer>>,
     scoped_results: Vec<(EvalResultKey, Arc<dyn ravel_core::types::NodeData>)>,
 }
 
@@ -460,21 +474,27 @@ impl ViewerUpdate {
     /// Overlay values come from `scoped`, which is where the request put
     /// them, and keep the scope they were evaluated in as part of their key.
     pub(crate) fn from_eval(update: EvalUpdate) -> Self {
+        // Taken off the same `DisplayFrame` the picture comes from, so the
+        // values the readout reports and the pixels on screen are one frame.
+        let mut linear = None;
         let output = match update.results.into_iter().next() {
             // The worker's hooks finish a viewer frame on the GPU (`CM-7`), so
             // what arrives is display bytes rather than a linear buffer.
             Some((_, Ok(data))) => match data.downcast_ref::<DisplayFrame>() {
-                Some(frame) => match frame.gpu_frame() {
-                    Some(gpu) => ViewerOutput::Gpu(gpu.clone()),
-                    None => match ViewerImage::from_display_frame(frame) {
-                        Some(image) => ViewerOutput::Image(image),
-                        // A degenerate frame carries nothing to draw; the
-                        // panel used to receive it as a `Frame` whose image
-                        // was `None` and paint the same black quad it paints
-                        // for `Blank`.
-                        None => ViewerOutput::NotAFrame,
-                    },
-                },
+                Some(frame) => {
+                    linear = frame.linear().cloned();
+                    match frame.gpu_frame() {
+                        Some(gpu) => ViewerOutput::Gpu(gpu.clone()),
+                        None => match ViewerImage::from_display_frame(frame) {
+                            Some(image) => ViewerOutput::Image(image),
+                            // A degenerate frame carries nothing to draw; the
+                            // panel used to receive it as a `Frame` whose image
+                            // was `None` and paint the same black quad it paints
+                            // for `Blank`.
+                            None => ViewerOutput::NotAFrame,
+                        },
+                    }
+                }
                 // A frame that is still linear means `finalize` could not run
                 // the display transform — a shader that will not compile, a
                 // lost device. Drawing linear light would be wrong and
@@ -503,6 +523,7 @@ impl ViewerUpdate {
             frame: update.frame,
             timings: update.timings,
             output,
+            linear,
             scoped_results,
         }
     }
@@ -571,6 +592,7 @@ impl ProjectState {
         let cache_budget = SharedCacheBudget::new(app_settings::resolved(cx).cache_budget());
         let viewer_surface_enabled = Arc::new(AtomicBool::new(false));
         let display_channel = Arc::new(AtomicU32::new(DisplayChannel::default().to_u32()));
+        let pixel_readout = Arc::new(AtomicBool::new(false));
         let (eval, gpu, startup_gpu_error) =
             if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
                 (None, None, None)
@@ -587,7 +609,8 @@ impl ProjectState {
                             // not: its own encode step needs the linear frame.
                             ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
                                 .with_display_surface_mode(viewer_surface_enabled.clone())
-                                .with_display_channel(display_channel.clone()),
+                                .with_display_channel(display_channel.clone())
+                                .with_display_pixel_readout(pixel_readout.clone()),
                             budget.clone(),
                             update_tx,
                         );
@@ -647,6 +670,7 @@ impl ProjectState {
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
             display_channel,
+            pixel_readout,
             viewer_resolution: ViewerResolution::default(),
             viewer_input_active: false,
             viewer_input_epoch: 0,
@@ -1796,6 +1820,36 @@ impl ProjectState {
         cx.notify();
     }
 
+    /// Whether the viewer reports pixel values under the pointer (`INSP-3`).
+    pub fn pixel_readout(&self) -> bool {
+        self.pixel_readout.load(Ordering::Acquire)
+    }
+
+    /// Switch the pixel value readout on or off (`INSP-3`, REQ-UI-004).
+    ///
+    /// The same three steps as [`Self::set_display_channel`], and the middle
+    /// one matters for the same reason: the output-stage cache holds what
+    /// `finalize` produced, and a frame finished with the readout off carries
+    /// no linear source at all. Serving one back would leave the readout blank
+    /// until the user scrubbed — and, switching the other way, would keep
+    /// paying for the float frames the user just stopped asking for.
+    ///
+    /// The hint is [`InvalidationHint::None`]: the composite did not change,
+    /// and what the frames cost again is the transform, not the graph. Nothing
+    /// about the *pointer* passes through here — moving it re-reads a frame
+    /// the UI already holds, so it costs neither an evaluation nor a readback.
+    pub fn set_pixel_readout(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.pixel_readout() == on {
+            return;
+        }
+        self.pixel_readout.store(on, Ordering::Release);
+        if let Some(eval) = self.eval.as_ref() {
+            eval.frame_cache().clear();
+        }
+        self.request_viewer_eval(InvalidationHint::None, cx);
+        cx.notify();
+    }
+
     /// Post one background evaluation of the active composition output at the
     /// current playback position (REQ-LAYER-007). The worker coalesces
     /// rapid-fire requests latest-wins; hints of skipped requests are merged
@@ -2112,6 +2166,7 @@ impl ProjectState {
                     .map(|c| c.resolution)
                     .unwrap_or((image.width(), image.height())),
                 image,
+                linear: update.linear,
             },
             ViewerOutput::Gpu(frame) => crate::panels::ViewerFrame::GpuFrame {
                 composition_resolution: self
@@ -2119,6 +2174,7 @@ impl ProjectState {
                     .map(|c| c.resolution)
                     .unwrap_or((frame.width(), frame.height())),
                 frame,
+                linear: update.linear,
             },
             ViewerOutput::NotAFrame => self.viewer_blank(cx),
             ViewerOutput::Failed(message) => {
@@ -3825,6 +3881,69 @@ mod tests {
                  viewer kept the previous mode's picture"
             );
         });
+    }
+
+    /// Switching the pixel readout on has to drop the finished frames too
+    /// (`INSP-3`), and for a sharper reason than the channel switch: a frame
+    /// finished with the readout off carries **no float source at all**, so a
+    /// cache hit would leave the readout permanently blank on that frame
+    /// rather than merely showing the previous mode. Switching it off has the
+    /// mirror problem — the cached frames would keep the 16-bytes-a-pixel
+    /// copies the user just stopped paying for.
+    ///
+    /// A real worker is installed for the reason
+    /// `switching_the_display_channel_drops_the_finished_frames` installs one:
+    /// with no service there is no cache, and the property is about the cache.
+    #[gpui::test]
+    fn switching_the_pixel_readout_drops_the_finished_frames(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+
+        project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+
+        let mut await_frame = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if rx.try_recv().is_ok() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the evaluation worker sent no result"
+                );
+                std::thread::yield_now();
+            }
+        };
+        await_frame();
+
+        let stats = |project: &ProjectState| project.eval.as_ref().unwrap().frame_cache().stats();
+        project.read_with(cx, |project, _| {
+            assert_eq!(stats(project).hits, 0, "the first evaluation was a hit");
+        });
+
+        // On, then off: both directions leave the cached frames wrong.
+        for on in [true, false] {
+            project.update(cx, |project, cx| project.set_pixel_readout(on, cx));
+            await_frame();
+            project.read_with(cx, |project, _| {
+                assert_eq!(
+                    stats(project).hits,
+                    0,
+                    "switching the readout {on} was served from the frame cache,                      so the viewer kept a frame finished under the other setting"
+                );
+            });
+        }
     }
 
     /// A document with one evaluable layer and `selected` as the preview
@@ -5588,6 +5707,7 @@ mod tests {
             Some(ViewerFrame::Frame {
                 image,
                 composition_resolution,
+                ..
             }) => {
                 assert_eq!((image.width(), image.height()), (4, 4));
                 assert_eq!(

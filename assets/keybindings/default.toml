@@ -53,6 +53,11 @@ channel_green = "Alt+Shift+G"
 channel_blue = "Alt+Shift+B"
 channel_alpha = "Alt+Shift+A"
 
+# Pixel value readout (INSP-3), on the same `Alt+Shift+<initial>` shelf as the
+# channel views above and free of every chord in it and in PANEL_BINDINGS.
+pixel_readout = "Alt+Shift+I"
+pixel_readout_format = "Alt+Shift+F"
+
 [composition]
 settings = "Cmd+K"
 

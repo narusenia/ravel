@@ -124,6 +124,16 @@ pub enum CommandId {
     ViewerChannelGreen,
     ViewerChannelBlue,
     ViewerChannelAlpha,
+    /// Show or hide the value of the pixel under the pointer (`INSP-3`,
+    /// REQ-UI-004), and switch which scale that value is printed on.
+    ///
+    /// Two commands, not one per form: the readout is either on or off, and
+    /// the two print forms are a pair, so both are toggles. The on/off one is
+    /// a command of its own rather than a side effect of the format because
+    /// what it costs is not the same — while the readout is on, every viewer
+    /// frame carries the float frame it was made from.
+    ViewerPixelReadout,
+    ViewerPixelReadoutFormat,
     ViewFit,
     // Playback
     PlaybackToggle,
@@ -383,6 +393,11 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::ViewerChannelGreen, "viewer.channel_green"),
     (CommandId::ViewerChannelBlue, "viewer.channel_blue"),
     (CommandId::ViewerChannelAlpha, "viewer.channel_alpha"),
+    (CommandId::ViewerPixelReadout, "viewer.pixel_readout"),
+    (
+        CommandId::ViewerPixelReadoutFormat,
+        "viewer.pixel_readout_format",
+    ),
     (CommandId::ViewFit, "view.fit"),
     (CommandId::PlaybackToggle, "playback.toggle"),
     (CommandId::PlaybackStop, "playback.stop"),
@@ -505,6 +520,8 @@ impl CommandId {
             CommandId::ViewerChannelGreen => "menu.viewer.channel_green",
             CommandId::ViewerChannelBlue => "menu.viewer.channel_blue",
             CommandId::ViewerChannelAlpha => "menu.viewer.channel_alpha",
+            CommandId::ViewerPixelReadout => "menu.viewer.pixel_readout",
+            CommandId::ViewerPixelReadoutFormat => "menu.viewer.pixel_readout_format",
             CommandId::ViewFit => "menu.view.fit",
             CommandId::PlaybackToggle => "menu.playback.toggle",
             CommandId::PlaybackStop => "menu.playback.stop",

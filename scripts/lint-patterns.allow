@@ -122,6 +122,12 @@ observe-global crates/ravel-app/src/panels/viewer.rs CanvasSelection
 # CanvasSelection above).
 observe-global crates/ravel-app/src/panels/viewer.rs LayerSelection
 
+# The pixel readout's scale is durable shared state written by a command
+# (`INSP-3`), and the Viewer is the only reader. Nothing else repaints for it:
+# with the pointer standing still the chord would otherwise change the printed
+# numbers only at the next frame. Same lifecycle as ToolState above.
+observe-global crates/ravel-app/src/panels/viewer.rs ViewerReadoutFormat
+
 # MediaBin panel (REQ-UI-008, media-import plan unit 4): repaint on focus
 # change (same as every other panel), and highlight the shared media
 # selection it writes through set_media_selection — durable shared state,

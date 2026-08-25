@@ -38,9 +38,10 @@ use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::composition::{Guide, GuideAxis};
 use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use ravel_core::runtime::InvalidationHint;
+use ravel_core::types::FrameBuffer;
 use ravel_gpu::GpuFrameBuffer;
 use ravel_ui::document::NetworkPath;
-use ravel_ui::panels::viewer::{ViewerResolution, display_channel_label_key};
+use ravel_ui::panels::viewer::{PixelReadoutFormat, ViewerResolution, display_channel_label_key};
 use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
@@ -391,6 +392,13 @@ pub struct ViewerPanel {
     /// outlive the correction it reports.
     snap_guides: SnapGuides,
     pointer_hint: ViewerPointerHint,
+    /// The evaluated frame behind the picture, held only while the pixel
+    /// readout is on (`INSP-3`). The readout indexes this; nothing evaluates
+    /// or reads back when the pointer moves.
+    linear: Option<Arc<FrameBuffer>>,
+    /// Composition-space pointer position, tracked only while the readout is
+    /// on. Off, the field stays `None` and a pointer move notifies nothing.
+    readout_pointer: Option<(f32, f32)>,
     /// Proportional (3x3) grid overlay toggle.
     show_grid: bool,
     /// Action-safe (90%) / title-safe (80%) overlay toggle.
@@ -440,6 +448,11 @@ pub struct ViewerPanel {
     viewer_sub: Subscription,
     #[allow(dead_code)]
     tool_sub: Subscription,
+    /// Repaints when the pixel readout's scale changes (`INSP-3`): the
+    /// Global is the only thing that moves, so nothing else would. Held for
+    /// its lifetime, like the neighbours — dropping it unsubscribes.
+    #[allow(dead_code)]
+    readout_format_sub: Subscription,
     #[allow(dead_code)]
     selection_sub: Subscription,
     #[allow(dead_code)]
@@ -469,6 +482,13 @@ impl ViewerPanel {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = track_panel_focus(instance, &focus_handle, window, cx);
+
+        // The readout's scale is a Global written by the command
+        // (`INSP-3`), and nothing else repaints for it: with the pointer
+        // standing still, the chord would change the numbers only at the next
+        // frame or the next mouse move.
+        let readout_format_sub =
+            cx.observe_global::<super::ViewerReadoutFormat>(|_this, cx| cx.notify());
 
         let tool_sub = cx.observe_global::<ToolState>(|this, cx| {
             let state = cx.try_global::<ToolState>().cloned().unwrap_or_default();
@@ -579,6 +599,7 @@ impl ViewerPanel {
             let content = viewer_content(vf);
             this.error = content.error;
             this.composition_resolution = content.composition_resolution;
+            this.linear = content.linear;
             // `ImageSource::Render` bypasses gpui's image cache, so atlas
             // entries are only freed by an explicit drop_image. Without this
             // every published frame would leak VRAM (one texture per scrub
@@ -643,6 +664,8 @@ impl ViewerPanel {
             guide_drag: None,
             snap_guides: SnapGuides::default(),
             pointer_hint: ViewerPointerHint::default(),
+            linear: content.linear,
+            readout_pointer: None,
             show_grid: false,
             show_safe_areas: false,
             show_rulers: false,
@@ -663,6 +686,7 @@ impl ViewerPanel {
             focus_subscriptions,
             viewer_sub,
             tool_sub,
+            readout_format_sub,
             selection_sub,
             layer_selection_sub,
         }
@@ -711,6 +735,36 @@ impl ViewerPanel {
 
     fn project(&self, cx: &App) -> Option<Entity<ProjectState>> {
         cx.try_global::<ProjectStateHandle>()?.0.upgrade()
+    }
+
+    /// Follow the pointer for the pixel readout (`INSP-3`).
+    ///
+    /// Only while the readout is on: with it off the field stays `None`, so a
+    /// pointer move stores nothing and notifies nothing. Nothing here asks for
+    /// an evaluation or a readback either — the values come from the frame
+    /// this panel already holds, which is the whole reason the linear frame
+    /// travels with the picture.
+    ///
+    /// The position is kept **unclamped** in composition space: a point beside
+    /// the composition is a real place the pointer can be, and the readout has
+    /// to answer "no value here" for it. A point outside the canvas area is
+    /// not — a zoomed-in composition extends under the toolbar, and reporting
+    /// pixels the panel is not drawing there would be reporting a place the
+    /// user cannot see.
+    fn track_readout_pointer(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let enabled = self
+            .project(cx)
+            .is_some_and(|project| project.read(cx).pixel_readout());
+        let local = self.local_position(position);
+        let (width, height) = self.viewport_size.get();
+        let on_canvas = local.0 >= 0.0 && local.1 >= 0.0 && local.0 < width && local.1 < height;
+        let next = (enabled && on_canvas)
+            .then(|| self.comp_position(position))
+            .flatten();
+        if self.readout_pointer != next {
+            self.readout_pointer = next;
+            cx.notify();
+        }
     }
 
     fn publish_selection(network: NetworkPath, nodes: HashSet<NodeId>, cx: &mut App) {
@@ -1503,6 +1557,23 @@ impl ViewerPanel {
             registry: self
                 .project(cx)
                 .map(|project| project.read(cx).shared_registry()),
+            // All three or nothing (`INSP-3`): the readout is on, a pointer
+            // has been seen, and the frame on screen brought its evaluated
+            // source along. A frame published while the readout was off has no
+            // `linear`, so the readout stays quiet for the one frame between
+            // switching it on and the re-finalized frame arriving.
+            pixel_readout: self
+                .readout_pointer
+                .zip(self.linear.clone())
+                .map(|(pointer, frame)| overlay::PixelReadout {
+                    pointer,
+                    frame,
+                    format: cx
+                        .try_global::<super::ViewerReadoutFormat>()
+                        .copied()
+                        .unwrap_or_default()
+                        .0,
+                }),
         }
     }
 
@@ -2315,6 +2386,27 @@ impl ViewerPanel {
         cx.notify();
     }
 
+    /// Switch the pixel value readout on or off (`INSP-3`).
+    ///
+    /// Through `ProjectState` like the display channel above, and for the same
+    /// reason: the flag has to reach the display transform on the evaluation
+    /// worker, and the project owns the cell that gets it there. The same call
+    /// is what `CommandId::ViewerPixelReadout` reaches.
+    fn set_pixel_readout(&mut self, on: bool, cx: &mut Context<Self>) {
+        let Some(project) = self.project(cx) else {
+            return;
+        };
+        project.update(cx, |project, cx| {
+            project.set_pixel_readout(on, cx);
+        });
+        // Off, the last position would otherwise still be sitting here when
+        // the readout is switched on again, before the pointer has moved.
+        if !on {
+            self.readout_pointer = None;
+        }
+        cx.notify();
+    }
+
     /// AE-style bottom toolbar: zoom readout with preset menu, Fit, 100%,
     /// the preview resolution factor, and the grid / safe-area overlay
     /// toggles.
@@ -2342,6 +2434,15 @@ impl ViewerPanel {
             .project(cx)
             .map(|project| project.read(cx).display_channel())
             .unwrap_or_default();
+        let readout_entity = entity.clone();
+        let (pixel_readout, readout_format) = (
+            self.project(cx)
+                .is_some_and(|project| project.read(cx).pixel_readout()),
+            cx.try_global::<super::ViewerReadoutFormat>()
+                .copied()
+                .unwrap_or_default()
+                .0,
+        );
         let field_entity = entity.clone();
         let (field_display, field_map, field_opacity) =
             (self.field_display, self.field_map, self.field_opacity);
@@ -2502,6 +2603,37 @@ impl ViewerPanel {
                                             .ok();
                                     },
                                 ),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .child(
+                // Beside the channel picker: both answer "what am I being
+                // shown", and the readout's own menu carries the only other
+                // decision it has — which scale the numbers are on.
+                Button::new("viewer-pixel-readout")
+                    .xsmall()
+                    .ghost()
+                    .selected(pixel_readout)
+                    .label(SharedString::from(t!("viewer.pixel_readout")))
+                    .tooltip(t!("viewer.pixel_readout"))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        let on = this
+                            .project(cx)
+                            .is_some_and(|project| project.read(cx).pixel_readout());
+                        this.set_pixel_readout(!on, cx);
+                    }))
+                    .dropdown_menu(move |mut menu, _window, _cx| {
+                        for format in PixelReadoutFormat::ALL {
+                            let entity = readout_entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(t!(format.label_key())))
+                                    .checked(format == readout_format)
+                                    .on_click(move |_, _window, cx| {
+                                        cx.set_global(super::ViewerReadoutFormat(format));
+                                        entity.update(cx, |_this, cx| cx.notify()).ok();
+                                    }),
                             );
                         }
                         menu
@@ -2800,6 +2932,7 @@ fn overlay_label_element(
             .justify_center()
             .child(text),
         LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(text),
+        LabelPlacement::CanvasBottomLeft => div().absolute().bottom_2().left_2().child(text),
         LabelPlacement::Comp(comp) => {
             let (rect, resolution) = viewport?;
             let (x, y) = comp_to_screen(comp, rect, resolution.0);
@@ -2979,6 +3112,10 @@ struct ViewerContent {
     gpu_frame: Option<GpuFrameBuffer>,
     error: Option<SharedString>,
     composition_resolution: Option<(u32, u32)>,
+    /// The evaluated frame behind the picture, while the pixel readout is on
+    /// (`INSP-3`). Blank and error frames have none — there is no composite to
+    /// report values from.
+    linear: Option<Arc<FrameBuffer>>,
 }
 
 /// Split a published [`ViewerFrame`] into durable panel content. Black is
@@ -2989,6 +3126,7 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
         ViewerFrame::Frame {
             image,
             composition_resolution,
+            linear,
         } => ViewerContent {
             // Already BGRA and already wrapped — the conversion ran on the
             // evaluation worker (HIGH-08).
@@ -2996,15 +3134,18 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
             gpu_frame: None,
             error: None,
             composition_resolution: Some(composition_resolution),
+            linear,
         },
         ViewerFrame::GpuFrame {
             frame,
             composition_resolution,
+            linear,
         } => ViewerContent {
             image: None,
             gpu_frame: Some(frame),
             error: None,
             composition_resolution: Some(composition_resolution),
+            linear,
         },
         ViewerFrame::Blank {
             composition_resolution,
@@ -3013,6 +3154,7 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
             gpu_frame: None,
             error: None,
             composition_resolution,
+            linear: None,
         },
         ViewerFrame::Error {
             message,
@@ -3022,6 +3164,7 @@ fn viewer_content(vf: ViewerFrame) -> ViewerContent {
             gpu_frame: None,
             error: Some(message),
             composition_resolution,
+            linear: None,
         },
     }
 }
@@ -3296,6 +3439,10 @@ impl Render for ViewerPanel {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                // Before the gesture match, not inside one of its arms: the
+                // readout follows the pointer whatever the pointer is doing,
+                // and several arms below return early.
+                this.track_readout_pointer(event.position, cx);
                 match event.pressed_button {
                     Some(MouseButton::Middle) => {
                         this.cancel_move(cx);
@@ -7968,6 +8115,112 @@ mod tests {
             snapshot,
             "the release found nothing to commit"
         );
+    }
+
+    /// **Moving the pointer must not evaluate anything** (`INSP-3`).
+    ///
+    /// The readout indexes the frame the panel already holds, so a pointer
+    /// move costs a lookup and a `format!`. The observation point is the one
+    /// `the_display_channel_never_changes_the_evaluation_request` uses — the
+    /// count of viewer evaluation requests — because that is what an overlay
+    /// declaring an evaluation target, or a readout implemented by asking the
+    /// worker, would move.
+    ///
+    /// Switching the readout on is the one thing here that *does* cost an
+    /// evaluation, and exactly one: the finished frames already in the cache
+    /// carry no float source, so they have to be finalized again.
+    #[gpui::test]
+    fn moving_the_pointer_never_asks_for_an_evaluation(cx: &mut TestAppContext) {
+        let (window, project, _comp, _layer) = shell_setup(cx);
+
+        let before = project.update(cx, |project, _| project.viewer_eval_requests());
+        project.update(cx, |project, cx| project.set_pixel_readout(true, cx));
+        let after_switch = project.update(cx, |project, _| project.viewer_eval_requests());
+        assert_eq!(
+            after_switch,
+            before + 1,
+            "switching the readout on must cost exactly one re-finalize"
+        );
+        // Already on: nothing to redo.
+        project.update(cx, |project, cx| project.set_pixel_readout(true, cx));
+        assert_eq!(
+            project.update(cx, |project, _| project.viewer_eval_requests()),
+            after_switch,
+            "switching the readout to the state it is already in re-evaluated"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // A frame arrived while the readout was on, so the panel holds
+                // its float source.
+                panel.linear = Some(Arc::new(FrameBuffer::from_f32(
+                    960,
+                    540,
+                    vec![0.5; 960 * 540 * 4],
+                )));
+                for x in 0..64 {
+                    let comp = (x as f32 * 30.0, x as f32 * 16.0);
+                    panel.track_readout_pointer(window_point(panel, comp), cx);
+                }
+                assert!(
+                    panel.readout_pointer.is_some(),
+                    "the pointer was never tracked, so this proves nothing"
+                );
+                // The overlay is being fed at the last position, i.e. the
+                // moves above exercised the path that would have evaluated.
+                assert!(
+                    panel.overlay_context(cx).pixel_readout.is_some(),
+                    "the readout was never fed, so this proves nothing"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            project.update(cx, |project, _| project.viewer_eval_requests()),
+            after_switch,
+            "moving the pointer asked for an evaluation"
+        );
+    }
+
+    /// With the readout off, a pointer move stores nothing — so it also
+    /// notifies nothing, and the panel does not re-render per mouse move for a
+    /// feature nobody switched on.
+    #[gpui::test]
+    fn the_pointer_is_not_tracked_while_the_readout_is_off(cx: &mut TestAppContext) {
+        let (window, project, _comp, _layer) = shell_setup(cx);
+        assert!(!project.update(cx, |project, _| project.pixel_readout()));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.track_readout_pointer(window_point(panel, (100.0, 100.0)), cx);
+                assert_eq!(panel.readout_pointer, None);
+                assert!(
+                    panel.overlay_context(cx).pixel_readout.is_none(),
+                    "the readout overlay was fed with the readout switched off"
+                );
+            })
+            .unwrap();
+    }
+
+    /// A pointer outside the canvas area has no readout, even when the
+    /// composition is zoomed far enough in to reach under the toolbar: the
+    /// panel is not drawing those pixels, so it must not report them.
+    #[gpui::test]
+    fn a_pointer_off_the_canvas_area_is_not_tracked(cx: &mut TestAppContext) {
+        let (window, project, _comp, _layer) = shell_setup(cx);
+        project.update(cx, |project, cx| project.set_pixel_readout(true, cx));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.track_readout_pointer(window_point(panel, (100.0, 100.0)), cx);
+                assert!(panel.readout_pointer.is_some());
+                // Below the canvas: the fixture's canvas is 1920x1080 at the
+                // window origin, so this is under it.
+                panel.track_readout_pointer(point(px(100.0), px(2000.0)), cx);
+                assert_eq!(panel.readout_pointer, None);
+            })
+            .unwrap();
     }
 
     /// The scale of `layer` as the panel currently sees it, for assertions

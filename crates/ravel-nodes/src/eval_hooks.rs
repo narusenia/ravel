@@ -138,15 +138,32 @@ impl GpuEvalHooks {
     /// Install the viewer display transform with a host-controlled display
     /// channel (`INSP-2`).
     ///
-    /// Order-independent with respect to [`Self::with_display_surface_mode`]:
-    /// whichever comes second keeps what the first installed, so a host can
-    /// name the two capabilities in either order without silently losing one.
+    /// Order-independent with respect to the other `with_display_*`
+    /// installers: whichever comes second keeps what the first installed, so a
+    /// host can name the capabilities in any order without silently losing one.
     pub fn with_display_channel(mut self, channel: Arc<AtomicU32>) -> Self {
         self.display = Some(
             self.display
                 .take()
                 .unwrap_or_default()
                 .with_channel(channel),
+        );
+        self
+    }
+
+    /// Install the viewer display transform with a host-controlled pixel
+    /// readout (`INSP-3`): while the cell is set, every finished frame carries
+    /// the linear frame it was made from, so the UI can report values without
+    /// re-evaluating or waiting on the GPU.
+    ///
+    /// Order-independent with respect to the other `with_display_*`
+    /// installers, for the same reason.
+    pub fn with_display_pixel_readout(mut self, readout: Arc<AtomicBool>) -> Self {
+        self.display = Some(
+            self.display
+                .take()
+                .unwrap_or_default()
+                .with_pixel_readout(readout),
         );
         self
     }
@@ -424,7 +441,7 @@ mod tests {
         EvalContext::new(0, FrameRate::new(30, 1), (32, 32))
     }
 
-    /// Both host capabilities survive, whichever order they are named in.
+    /// Every host capability survives, whichever order they are named in.
     ///
     /// Each installer used to build a fresh [`DisplayTransform`], so naming
     /// the second one threw the first away — a viewer stuck in RGB, or one
@@ -432,6 +449,10 @@ mod tests {
     /// happened to write (`INSP-2`). Neither shows up as a failure anywhere
     /// else: both fall back to a *working* transform, just not the one the
     /// host asked for.
+    ///
+    /// Every permutation rather than every adjacent pair: with three cells
+    /// (`INSP-3` added the readout) an installer that keeps only the cell
+    /// named immediately before it would still pass a two-order test.
     #[test]
     fn the_display_capabilities_do_not_overwrite_each_other() {
         let gpu = GpuContext::new_blocking().expect("GPU required");
@@ -439,23 +460,89 @@ mod tests {
         let channel = Arc::new(AtomicU32::new(
             ravel_core::color::DisplayChannel::Blue.to_u32(),
         ));
+        let readout = Arc::new(AtomicBool::new(true));
 
-        for hooks in [
-            GpuEvalHooks::new(gpu.clone())
-                .with_display_surface_mode(surface.clone())
-                .with_display_channel(channel.clone()),
-            GpuEvalHooks::new(gpu.clone())
-                .with_display_channel(channel.clone())
-                .with_display_surface_mode(surface.clone()),
+        type Install = fn(GpuEvalHooks, &Arc<AtomicBool>, &Arc<AtomicU32>) -> GpuEvalHooks;
+        let installers: [Install; 3] = [
+            |hooks, surface, _| hooks.with_display_surface_mode(surface.clone()),
+            |hooks, _, channel| hooks.with_display_channel(channel.clone()),
+            |hooks, readout, _| hooks.with_display_pixel_readout(readout.clone()),
+        ];
+        let cell = |index: usize| if index == 2 { &readout } else { &surface };
+
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
         ] {
+            let mut hooks = GpuEvalHooks::new(gpu.clone());
+            for index in order {
+                hooks = installers[index](hooks, cell(index), &channel);
+            }
             let display = hooks.display.as_ref().expect("no display transform");
             assert_eq!(
                 display.channel(),
                 ravel_core::color::DisplayChannel::Blue,
-                "the channel cell was replaced"
+                "{order:?}: the channel cell was replaced"
             );
-            assert!(display.zero_copy_surface(), "the surface cell was replaced");
+            assert!(
+                display.zero_copy_surface(),
+                "{order:?}: the surface cell was replaced"
+            );
+            assert!(
+                display.pixel_readout(),
+                "{order:?}: the readout cell was replaced"
+            );
         }
+    }
+
+    /// The readout's whole justification: **off costs nothing.**
+    ///
+    /// `GPUCOMP-9` shrank the viewer's readback from 16 bytes per pixel to 4
+    /// by finishing the frame on the GPU, and this unit brings the float frame
+    /// back only while the user is asking for values. A `linear` attached with
+    /// the cell clear would silently undo that for every session.
+    #[test]
+    fn the_linear_frame_rides_along_only_while_the_readout_is_on() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let readout = Arc::new(AtomicBool::new(false));
+        let mut hooks = GpuEvalHooks::new(gpu.clone())
+            .with_display_transform()
+            .with_display_pixel_readout(readout.clone());
+
+        let pool = crate::shared_texture_pool(&gpu);
+        let cpu = FrameBuffer::from_f32(4, 4, vec![0.25f32; 4 * 4 * 4]);
+        let value: Arc<dyn NodeData> =
+            Arc::new(GpuFrameBuffer::from_frame_buffer(gpu, &pool, &cpu).expect("upload"));
+
+        let finalized = |hooks: &mut GpuEvalHooks| {
+            let out = hooks
+                .finalize(&value, &ctx())
+                .expect("display transform ran");
+            out.downcast_ref::<crate::display::DisplayFrame>()
+                .expect("the viewer boundary yields display bytes")
+                .linear()
+                .cloned()
+        };
+
+        assert!(
+            finalized(&mut hooks).is_none(),
+            "a frame carried its float source with the readout off"
+        );
+
+        readout.store(true, std::sync::atomic::Ordering::Release);
+        let linear = finalized(&mut hooks).expect("the readout asked for the float source");
+        assert_eq!((linear.width, linear.height), (4, 4));
+        // The *evaluated* value, not the display-encoded byte: the readout
+        // reports what the graph produced.
+        let sample = linear.sample_rgba(0, 0).expect("inside the frame");
+        assert!(
+            (sample[0] - 0.25).abs() < 1e-3,
+            "the attached frame is not the linear input: {sample:?}"
+        );
     }
 
     /// The viewer boundary rasterizes on the GPU (issue MED-GPU-04): the

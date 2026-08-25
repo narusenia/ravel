@@ -56,6 +56,8 @@ channel_red = "赤チャンネルを表示"
 channel_green = "緑チャンネルを表示"
 channel_blue = "青チャンネルを表示"
 channel_alpha = "アルファチャンネルを表示"
+pixel_readout = "ピクセル値を表示"
+pixel_readout_format = "ピクセル値の尺度を切り替え"
 
 [menu.composition]
 _self = "コンポジション"
@@ -389,6 +391,12 @@ channel_alpha = "アルファ"
 # アルファをグレースケールで見るのと、同じ色にマットを掛けて見るのの違いは
 # DisplayChannel の doc を参照
 channel_alpha_matte = "アルファマット"
+# ピクセル値の読み取り（INSP-3）。読み取り行そのものは数値とチャンネルの
+# 頭文字なので翻訳しない。ここは機能名と 2 つの尺度の名前。
+pixel_readout = "ピクセル値"
+pixel_readout_format = "値の尺度"
+pixel_readout_float = "浮動小数"
+pixel_readout_byte = "8bit（0-255）"
 grid = "グリッド"
 safe_areas = "セーフエリア"
 rulers = "定規"

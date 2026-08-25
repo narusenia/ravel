@@ -367,6 +367,43 @@ impl FrameBuffer {
         }
     }
 
+    /// The four channel values of the pixel at `(x, y)`, or `None` when that
+    /// pixel is outside the buffer or the bytes do not reach it.
+    ///
+    /// One pixel, not a frame: [`FrameBuffer::as_f32`] decodes an `RgbaF16` or
+    /// `Rgba8` buffer into an owned `Vec` of every sample, which is the wrong
+    /// order of magnitude for a caller that wants a single value — the viewer's
+    /// pixel readout asks once per pointer move (`INSP-3`).
+    ///
+    /// A [`PixelFormat::MonoF32`] buffer answers with its one value in R, G and
+    /// B and an opaque alpha: a mask read as grey is what every viewer of one
+    /// shows, and returning it in R alone would report two of the three
+    /// channels as black.
+    pub fn sample_rgba(&self, x: u32, y: u32) -> Option<[f32; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let channels = self.format.channels();
+        let index = ((y as usize) * (self.width as usize) + x as usize) * channels;
+        let stride = self.format.bytes_per_pixel() / channels;
+        let byte = index * stride;
+        let bytes = self.data.get(byte..byte + channels * stride)?;
+        let at = |c: usize| -> f32 {
+            let b = &bytes[c * stride..(c + 1) * stride];
+            match self.format {
+                PixelFormat::RgbaF32 | PixelFormat::MonoF32 => {
+                    f32::from_le_bytes([b[0], b[1], b[2], b[3]])
+                }
+                PixelFormat::RgbaF16 => f16_to_f32(u16::from_le_bytes([b[0], b[1]])),
+                PixelFormat::Rgba8 => f32::from(b[0]) / 255.0,
+            }
+        };
+        Some(match self.format {
+            PixelFormat::MonoF32 => [at(0), at(0), at(0), 1.0],
+            _ => [at(0), at(1), at(2), at(3)],
+        })
+    }
+
     /// The same picture stored as [`PixelFormat::RgbaF16`], halving its
     /// footprint.
     ///
@@ -1046,6 +1083,70 @@ mod tests {
         assert!((slice[1] - 127.0 / 255.0).abs() < 1e-7);
         assert!((slice[2] - 128.0 / 255.0).abs() < 1e-7);
         assert_eq!(slice[3], 1.0);
+    }
+
+    /// One pixel out of every format, against what `as_f32` reports for the
+    /// same index. A per-format decode written twice is a decode that can
+    /// disagree with itself, and the readout would then show numbers no other
+    /// reader of the frame agrees with.
+    #[test]
+    fn sample_rgba_agrees_with_the_whole_buffer_decode() {
+        let f32_frame =
+            FrameBuffer::from_f32(2, 2, (0..16).map(|i| i as f32 / 16.0).collect::<Vec<_>>());
+        let f16_frame = f32_frame.to_rgba_f16();
+        let u8_frame = FrameBuffer {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8,
+            data: (0..16u8).map(|i| i * 17).collect::<Vec<_>>().into(),
+        };
+        let mono = FrameBuffer {
+            width: 2,
+            height: 2,
+            format: PixelFormat::MonoF32,
+            data: bytemuck::cast_slice(&[0.1f32, 0.2, 0.3, 0.4]).into(),
+        };
+
+        for frame in [&f32_frame, &f16_frame, &u8_frame] {
+            let all = frame.as_f32();
+            for y in 0..2 {
+                for x in 0..2 {
+                    let sample = frame.sample_rgba(x, y).expect("inside the buffer");
+                    let base = ((y * 2 + x) * 4) as usize;
+                    assert_eq!(
+                        sample,
+                        [all[base], all[base + 1], all[base + 2], all[base + 3]],
+                        "{:?} at ({x}, {y})",
+                        frame.format,
+                    );
+                }
+            }
+        }
+
+        // A single-channel buffer reads as grey, not as red over black.
+        assert_eq!(mono.sample_rgba(1, 1), Some([0.4, 0.4, 0.4, 1.0]));
+    }
+
+    /// The boundary in the buffer's own coordinates: the last pixel is inside
+    /// and one past it is not, on each axis independently — an `x > width`
+    /// bound would let the readout run into the next row.
+    #[test]
+    fn sample_rgba_stops_at_the_last_pixel() {
+        let frame = FrameBuffer::from_f32(2, 3, (0..24).map(|i| i as f32).collect::<Vec<_>>());
+        assert_eq!(frame.sample_rgba(0, 0), Some([0.0, 1.0, 2.0, 3.0]));
+        assert_eq!(frame.sample_rgba(1, 2), Some([20.0, 21.0, 22.0, 23.0]));
+        assert_eq!(frame.sample_rgba(2, 2), None, "x == width is outside");
+        assert_eq!(frame.sample_rgba(1, 3), None, "y == height is outside");
+        // Not only on the last row: `x == width` on any earlier row indexes
+        // the first pixel of the *next* row, which is inside the buffer — so
+        // a bound that let it through would answer with the wrong pixel
+        // rather than running off the end.
+        assert_eq!(
+            frame.sample_rgba(2, 0),
+            None,
+            "x == width must not wrap onto the next row"
+        );
+        assert_eq!(frame.sample_rgba(2, 1), None);
     }
 
     #[test]

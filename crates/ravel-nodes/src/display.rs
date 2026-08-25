@@ -65,6 +65,16 @@ pub struct DisplayFrame {
     bgra: Option<Arc<[u8]>>,
     /// The display-encoded texture the GPUI surface samples directly.
     gpu: Option<GpuFrameBuffer>,
+    /// The linear frame these display bytes were made from, present **only**
+    /// while the host has the pixel readout switched on (`INSP-3`).
+    ///
+    /// The readout needs the evaluated `f32`, and `CM-7` left the UI side with
+    /// display bytes alone. Attaching the source frame here rather than
+    /// answering a query per pointer move is what keeps the readout free of
+    /// both re-evaluation and a GPU wait on the UI thread; the price is the
+    /// 16-bytes-per-pixel readback `GPUCOMP-9` removed, paid only while the
+    /// readout is on.
+    linear: Option<Arc<FrameBuffer>>,
 }
 
 impl Clone for DisplayFrame {
@@ -74,6 +84,7 @@ impl Clone for DisplayFrame {
             height: self.height,
             bgra: self.bgra.clone(),
             gpu: self.gpu.clone(),
+            linear: self.linear.clone(),
         }
     }
 }
@@ -91,6 +102,7 @@ impl DisplayFrame {
             height,
             bgra: Some(bgra),
             gpu: None,
+            linear: None,
         }
     }
 
@@ -101,7 +113,18 @@ impl DisplayFrame {
             height: frame.height(),
             bgra: None,
             gpu: Some(frame),
+            linear: None,
         }
+    }
+
+    /// Attach the linear frame the display bytes were made from (`INSP-3`).
+    ///
+    /// Builder rather than a constructor argument because it is orthogonal to
+    /// which representation the display bytes take: both the zero-copy surface
+    /// and the readback road carry it when the readout is on.
+    pub fn with_linear(mut self, linear: Option<Arc<FrameBuffer>>) -> Self {
+        self.linear = linear;
+        self
     }
 
     /// Width in pixels of the evaluation buffer this came from.
@@ -130,6 +153,13 @@ impl DisplayFrame {
     pub fn gpu_frame(&self) -> Option<&GpuFrameBuffer> {
         self.gpu.as_ref()
     }
+
+    /// The linear frame these bytes were made from, when the host asked for
+    /// the pixel readout (`INSP-3`) — `None` otherwise, which is what makes
+    /// "off costs nothing" observable rather than promised.
+    pub fn linear(&self) -> Option<&Arc<FrameBuffer>> {
+        self.linear.as_ref()
+    }
 }
 
 impl NodeData for DisplayFrame {
@@ -148,6 +178,10 @@ impl NodeData for DisplayFrame {
     fn byte_size(&self) -> u64 {
         self.bgra.as_ref().map_or(0, |bgra| bgra.len() as u64)
             + self.gpu.as_ref().map_or(0, |frame| frame.byte_size())
+            // The readout copy is four times the display bytes, so leaving it
+            // out would make the output-stage cache hold four times what its
+            // budget says while the readout is on.
+            + self.linear.as_ref().map_or(0, |frame| frame.byte_size())
     }
 }
 
@@ -189,6 +223,15 @@ pub struct DisplayTransform {
     /// result a miss on a switch, and the composite this transforms does not
     /// depend on it at all.
     channel: Arc<AtomicU32>,
+    /// Whether to attach the linear source frame to every produced
+    /// [`DisplayFrame`] (`INSP-3`), shared with the host for the reason the
+    /// two cells above are: the user switches the readout on from the UI
+    /// thread and this transform reads it on the evaluation worker.
+    ///
+    /// Read once per frame, so switching it costs one re-finalize of the
+    /// frames already evaluated rather than a re-evaluation, and **nothing at
+    /// all** while it stays `false`.
+    pixel_readout: Arc<AtomicBool>,
 }
 
 impl Default for DisplayTransform {
@@ -206,6 +249,7 @@ impl DisplayTransform {
             lut_texture: None,
             zero_copy_surface: Arc::new(AtomicBool::new(false)),
             channel: Arc::new(AtomicU32::new(DisplayChannel::default().to_u32())),
+            pixel_readout: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -240,6 +284,18 @@ impl DisplayTransform {
         ravel_core::color::DisplayChannel::from_u32(
             self.channel.load(std::sync::atomic::Ordering::Acquire),
         )
+    }
+
+    /// A transform that attaches the linear source frame while `readout` is
+    /// set (`INSP-3`). Read once per frame, like [`Self::with_channel`].
+    pub fn with_pixel_readout(mut self, readout: Arc<AtomicBool>) -> Self {
+        self.pixel_readout = readout;
+        self
+    }
+
+    /// Whether the next frame will carry its linear source.
+    pub fn pixel_readout(&self) -> bool {
+        self.pixel_readout.load(Ordering::Acquire)
     }
 
     /// Whether the transform is producing a surface-mode frame.
@@ -299,10 +355,45 @@ impl DisplayTransform {
             }
             None => anyhow::bail!("display transform: expected a frame"),
         }
+        // Before the upload, from the value as it arrived: a CPU frame is
+        // already the answer, and taking it here rather than reading the
+        // uploaded texture back keeps the readout free for every processor
+        // that produced its frame on the CPU.
+        let linear = self.linear_copy(value);
         let image = gpu_util::ensure_gpu(ctx, pool, value)?;
         let result = self.transform(ctx, pool, &image);
         image.release(pool);
-        result
+        result.map(|frame| frame.with_linear(linear))
+    }
+
+    /// The linear frame the readout reads, or `None` when it is switched off.
+    ///
+    /// A GPU-resident input is read back whole — 16 bytes per pixel for the
+    /// `RgbaF32` working format, less for a frame that is already narrower
+    /// (`to_frame_buffer` keeps the texture's own format), which is the cost
+    /// `GPUCOMP-9` removed from this path and which this restores **only**
+    /// while the user is asking for values. A
+    /// region readback would be smaller, but `ravel-gpu` has no partial read
+    /// and adding one would either need a GPU wait per pointer move or put
+    /// that wait on the UI thread; neither is allowed, and the frame is
+    /// already on its way through the same submission.
+    fn linear_copy(&self, value: &dyn NodeData) -> Option<Arc<FrameBuffer>> {
+        if !self.pixel_readout.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Some(frame) = value.downcast_ref::<FrameBuffer>() {
+            return Some(Arc::new(frame.clone()));
+        }
+        let gpu = value.downcast_ref::<GpuFrameBuffer>()?;
+        match gpu.to_frame_buffer() {
+            Ok(frame) => Some(Arc::new(frame)),
+            // The picture is still fine; only the numbers are missing, so the
+            // readout goes quiet rather than the frame failing.
+            Err(err) => {
+                tracing::warn!(%err, "pixel readout readback failed");
+                None
+            }
+        }
     }
 
     /// The dispatch and readback, with `image` already acquired by the caller
@@ -412,6 +503,9 @@ impl DisplayTransform {
             height,
             bgra: Some(bgra),
             gpu: None,
+            // `run` attaches it: the linear source is taken from the value as
+            // it arrived, which this function no longer holds.
+            linear: None,
         })
     }
 

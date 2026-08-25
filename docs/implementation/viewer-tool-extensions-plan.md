@@ -165,7 +165,7 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 ## 非対象
 
 - **ピクセル精度のヒットテスト**（REQ-UI-011 の v2）。評価済みアルファを
-  読む必要があり、`viewer-inspection-plan.md` のピクセル読み取りと同じ
+  読む必要があり、`done/viewer-inspection-plan.md` のピクセル読み取りと同じ
   データ経路になるので、そちらが入ってから判断する
 - **殻変換が非恒等なレイヤーでの編集**（REQ-UI-011 の v2）。
   `done/viewer-overlay-manipulator-plan.md` の `OVL-7`（殻マニピュレータ）が

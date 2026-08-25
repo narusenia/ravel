@@ -37,7 +37,7 @@ Viewer の背景表示はセッション内でコンプ背景 / スクリーン�
 **セッション内の状態**として持つ（`.ravprj` にも `ui_state.json` にも
 書かない。同じプロジェクトを別の目的で開くたびに前回の検査モードが
 復元されると邪魔になる）。アルファマットだけはコマンドを持たず
-ツールバー専用（詳細は `viewer-inspection-plan.md` の `INSP-2`）。
+ツールバー専用（詳細は `done/viewer-inspection-plan.md` の `INSP-2`）。
 
 **ピクセル値の読み取り**は、ポインタ位置のコンプ座標とその点の RGBA を
 画面左下に出す。値は**評価結果そのもの**（リニア、表示変換前）で、表示形式は
@@ -54,7 +54,7 @@ f32（既定）と 8bit 換算を切り替えられる。8bit は同じ値を 0-
 ポインタ移動ごとに GPU 同期が要るか UI スレッドで GPU を待つことになるので
 採らない。切り替えはコマンド（`viewer.pixel_readout` /
 `viewer.pixel_readout_format`、`Alt+Shift+I` / `Alt+Shift+F`）とツールバーで、
-チャンネル同様**セッション内の状態**（詳細は `viewer-inspection-plan.md` の
+チャンネル同様**セッション内の状態**（詳細は `done/viewer-inspection-plan.md` の
 `INSP-3`）。ポインタ周辺の拡大表示（ルーペ）は非対象。
 
 **再生とキャッシュの状態**は、画面右上に 1 行で出す（`·` 区切り。左上は
@@ -85,7 +85,7 @@ f32（既定）と 8bit 換算を切り替えられる。8bit は同じ値を 0-
 UI フォントのまま。どの要素を出すかと 1 行の組み立ては
 `ravel_ui::panels::viewer::playback_status_text` にあり、要素ごとに
 プレースホルダ付きの 1 キーを引くので語順は訳側が決める（詳細は
-`viewer-inspection-plan.md` の `INSP-4`）。
+`done/viewer-inspection-plan.md` の `INSP-4`）。
 
 ## ビューポート操作
 

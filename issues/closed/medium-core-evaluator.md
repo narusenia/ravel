@@ -210,7 +210,7 @@ O(キャッシュサイズ) の走査が走る。
 Viewer 側で背景色っぽい quad を描く方式は採らない（書き出しで背景が消え、
 Viewer と出力が食い違う）。ハードコードされた黒 quad は撤去する。
 
-**引受先**: `docs/implementation/viewer-inspection-plan.md` の `INSP-1`
+**引受先**: `docs/implementation/done/viewer-inspection-plan.md` の `INSP-1`
 （チェッカーボード表示と同じ単位。背景の描き方をまとめて扱う）
 
 ---

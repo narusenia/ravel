@@ -17,6 +17,7 @@
 use crate::command::CommandId;
 use ravel_core::color::DisplayChannel;
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
 /// Preview resolution factor applied to the composition resolution before the
 /// viewer evaluates it.
@@ -266,6 +267,113 @@ pub fn pixel_readout_text(
         y.floor() as i64,
         channels.join("  ")
     )
+}
+
+/// What the Viewer's playback status line reads (`INSP-4`).
+///
+/// The cache band is borrowed: the overlay context this is filled from is
+/// rebuilt on every pointer move, and the band belongs to the panel's snapshot
+/// of it rather than to the line.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackStatusInputs<'a> {
+    /// Whether the transport is running. Two of the three elements are only
+    /// true while it is — see [`playback_status_text`].
+    pub playing: bool,
+    /// Frames the transport skipped since playback last started.
+    pub dropped_frames: u64,
+    /// The composition's own resolution, or `None` with no output.
+    pub resolution: Option<(u32, u32)>,
+    /// The resolution the frame on screen was evaluated at.
+    pub eval_resolution: Option<(u32, u32)>,
+    /// The active composition's cached frame ranges (`CACHE-6`); empty before
+    /// any evaluation completed.
+    pub cached_frames: &'a [Range<u64>],
+    /// Length of the active composition, `0` when there is none.
+    pub duration_frames: u64,
+}
+
+/// Separator between the status elements. A middle dot rather than a comma:
+/// the elements are independent readings, not a list of one thing.
+const STATUS_SEPARATOR: &str = " · ";
+
+/// The Viewer's playback status line, or `None` when there is nothing to say
+/// (`INSP-4`).
+///
+/// One line that answers "is the picture in front of me the truth?", from three
+/// readings that are each only worth showing when they are not:
+///
+/// - **dropped frames**, and only *while playing*: the count resets at the next
+///   play, so after a stop it describes a run that is over, and a HUD that kept
+///   it would report a problem the user can no longer see;
+/// - **the preview factor**, whenever the frame was evaluated coarser than the
+///   composition — a standing truth, so it does not depend on the transport;
+/// - **the cached share**, and only *while playing*: stopped, the Timeline's
+///   cache band is the source for this and says it per frame, so repeating it
+///   here would be a second, coarser copy of the same fact.
+///
+/// `tr` resolves a locale key, because this crate does not depend on i18n (the
+/// same split as [`ViewerResolution::label_key`]). Each element is one key with
+/// its own placeholder, so a translation decides its own word order instead of
+/// receiving translated fragments in an English one.
+pub fn playback_status_text(
+    status: PlaybackStatusInputs<'_>,
+    tr: impl Fn(&str) -> String,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if status.playing && status.dropped_frames > 0 {
+        parts.push(
+            tr("viewer.status_dropped").replace("{count}", &status.dropped_frames.to_string()),
+        );
+    }
+    if let Some(factor) = reduced_preview_factor(status.resolution, status.eval_resolution) {
+        parts.push(tr("viewer.status_preview").replace("{factor}", &tr(factor.label_key())));
+    }
+    if status.playing
+        && let Some(percent) = cached_percent(status.cached_frames, status.duration_frames)
+    {
+        parts.push(tr("viewer.status_cached").replace("{percent}", &percent.to_string()));
+    }
+    (!parts.is_empty()).then(|| parts.join(STATUS_SEPARATOR))
+}
+
+/// The factor `eval` stands to `comp` in, when it is coarser than `Full`.
+///
+/// Recovered by asking each factor what it would produce rather than dividing
+/// the two widths: [`ViewerResolution::apply`] rounds each axis up, so an odd
+/// composition width divides back to the wrong factor. `Full` first in
+/// [`ViewerResolution::ALL`] also settles the degenerate case where several
+/// factors agree (a 1x1 composition), and it settles it as "nothing to warn
+/// about", which is the truth there — no pixel was lost.
+fn reduced_preview_factor(
+    comp: Option<(u32, u32)>,
+    eval: Option<(u32, u32)>,
+) -> Option<ViewerResolution> {
+    let comp = comp?;
+    let eval = eval?;
+    let factor = ViewerResolution::ALL
+        .iter()
+        .copied()
+        .find(|factor| factor.apply(comp) == eval)?;
+    (factor != ViewerResolution::Full).then_some(factor)
+}
+
+/// Share of `duration_frames` the ranges cover, as a whole percent.
+///
+/// `None` — draw nothing — for both empty inputs: an empty band is the state
+/// before any evaluation, where `0%` would claim a measurement nobody took, and
+/// a zero-length composition has no denominator. The sum is clamped to the
+/// duration because a band is allowed to hold frames a shortened composition no
+/// longer has.
+fn cached_percent(ranges: &[Range<u64>], duration_frames: u64) -> Option<u32> {
+    if ranges.is_empty() || duration_frames == 0 {
+        return None;
+    }
+    let cached: u64 = ranges
+        .iter()
+        .map(|range| range.end.saturating_sub(range.start))
+        .sum();
+    let share = cached.min(duration_frames) as f64 / duration_frames as f64;
+    Some((share * 100.0).round() as u32)
 }
 
 #[cfg(test)]
@@ -670,5 +778,152 @@ mod tests {
                 assert_eq!(runs.load(Ordering::Relaxed), expected);
             }
         }
+    }
+
+    /// Locale keys stand in for their translations, so the assertions below
+    /// pin the line this crate composed rather than a copy of `en.toml`. The
+    /// placeholders are the real ones — a pattern that lost one shows up here
+    /// as an unfilled `{count}`. Unknown keys panic: a fourth element added
+    /// without a stand-in must not silently read as its key.
+    fn fake_tr(key: &str) -> String {
+        match key {
+            "viewer.status_dropped" => "dropped {count}",
+            "viewer.status_preview" => "{factor} res",
+            "viewer.status_cached" => "cached {percent}%",
+            "viewer.resolution_full" => "full",
+            "viewer.resolution_half" => "1/2",
+            "viewer.resolution_quarter" => "1/4",
+            other => panic!("status line asked for an unexpected key: {other}"),
+        }
+        .to_string()
+    }
+
+    /// A 1080p composition, whose preview factor is whatever `eval` says.
+    fn status_line(
+        playing: bool,
+        dropped_frames: u64,
+        eval: (u32, u32),
+        cached_frames: &[Range<u64>],
+        duration_frames: u64,
+    ) -> Option<String> {
+        playback_status_text(
+            PlaybackStatusInputs {
+                playing,
+                dropped_frames,
+                resolution: Some((1920, 1080)),
+                eval_resolution: Some(eval),
+                cached_frames,
+                duration_frames,
+            },
+            fake_tr,
+        )
+    }
+
+    const FULL: (u32, u32) = (1920, 1080);
+    const HALF: (u32, u32) = (960, 540);
+
+    /// The line exists to say the picture is not the truth. With nothing to
+    /// report it must not draw an empty frame of a HUD: no dropped frames, the
+    /// composition's own resolution, no cache measured yet.
+    #[test]
+    fn nothing_is_reported_when_every_reading_is_clean() {
+        assert_eq!(status_line(true, 0, FULL, &[], 300), None);
+        assert_eq!(status_line(false, 0, FULL, &[], 300), None);
+    }
+
+    /// The count resets at the next play, so after a stop it describes a run
+    /// that is over. Stopping is therefore also how the report clears.
+    #[test]
+    fn dropped_frames_are_reported_only_while_playing() {
+        assert_eq!(
+            status_line(true, 12, FULL, &[], 0).as_deref(),
+            Some("dropped 12")
+        );
+        assert_eq!(
+            status_line(false, 12, FULL, &[], 0),
+            None,
+            "a stopped transport reports a drop count nobody can still see"
+        );
+    }
+
+    /// A preview coarser than the composition is a standing truth about the
+    /// pixels on screen, so it is reported with the transport stopped too —
+    /// and never reported at `Full`, where nothing was lost.
+    #[test]
+    fn the_preview_factor_is_reported_only_when_it_is_coarser() {
+        assert_eq!(status_line(false, 0, FULL, &[], 300), None);
+        assert_eq!(
+            status_line(false, 0, HALF, &[], 300).as_deref(),
+            Some("1/2 res")
+        );
+        assert_eq!(
+            status_line(false, 0, (480, 270), &[], 300).as_deref(),
+            Some("1/4 res")
+        );
+    }
+
+    /// `ViewerResolution::apply` rounds each axis up, so an odd composition
+    /// width divides back to `1` — recovering the factor by division would
+    /// report a full-resolution preview of a half-resolution frame.
+    #[test]
+    fn an_odd_composition_width_still_names_its_factor() {
+        let line = playback_status_text(
+            PlaybackStatusInputs {
+                playing: false,
+                dropped_frames: 0,
+                resolution: Some((1921, 1081)),
+                eval_resolution: Some(ViewerResolution::Half.apply((1921, 1081))),
+                cached_frames: &[],
+                duration_frames: 300,
+            },
+            fake_tr,
+        );
+        assert_eq!(line.as_deref(), Some("1/2 res"));
+    }
+
+    /// Stopped, the Timeline's cache band is the source for this and says it
+    /// per frame; the line would only add a coarser second copy.
+    #[test]
+    fn the_cached_share_is_reported_only_while_playing() {
+        assert_eq!(
+            status_line(true, 0, FULL, &[0..75, 75..150], 300).as_deref(),
+            Some("cached 50%")
+        );
+        assert_eq!(status_line(false, 0, FULL, &[0..75, 75..150], 300), None);
+    }
+
+    /// Before the first evaluation the band is empty, and an emptied
+    /// composition has no frames to divide by. Neither may take the rest of
+    /// the line down with it.
+    #[test]
+    fn a_missing_cache_measurement_leaves_the_other_readings_intact() {
+        assert_eq!(
+            status_line(true, 3, HALF, &[], 300).as_deref(),
+            Some("dropped 3 · 1/2 res"),
+            "an empty band reports no share, not 0%"
+        );
+        assert_eq!(
+            status_line(true, 3, HALF, &[0..75, 75..150], 0).as_deref(),
+            Some("dropped 3 · 1/2 res")
+        );
+    }
+
+    /// A band may hold frames a shortened composition no longer has, and the
+    /// share is a share — never more than all of it.
+    #[test]
+    fn the_cached_share_is_clamped_to_the_composition() {
+        assert_eq!(
+            status_line(true, 0, FULL, &[0..250, 250..500], 300).as_deref(),
+            Some("cached 100%")
+        );
+    }
+
+    /// The whole line, in order, with one separator between neighbours.
+    #[test]
+    fn all_three_readings_join_into_one_line() {
+        assert_eq!(
+            status_line(true, 12, HALF, &[0..40, 50..74], 100).as_deref(),
+            Some("dropped 12 · 1/2 res · cached 64%")
+        );
     }
 }

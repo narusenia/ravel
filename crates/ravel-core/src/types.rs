@@ -1137,6 +1137,16 @@ mod tests {
         assert_eq!(frame.sample_rgba(1, 2), Some([20.0, 21.0, 22.0, 23.0]));
         assert_eq!(frame.sample_rgba(2, 2), None, "x == width is outside");
         assert_eq!(frame.sample_rgba(1, 3), None, "y == height is outside");
+        // Not only on the last row: `x == width` on any earlier row indexes
+        // the first pixel of the *next* row, which is inside the buffer — so
+        // a bound that let it through would answer with the wrong pixel
+        // rather than running off the end.
+        assert_eq!(
+            frame.sample_rgba(2, 0),
+            None,
+            "x == width must not wrap onto the next row"
+        );
+        assert_eq!(frame.sample_rgba(2, 1), None);
     }
 
     #[test]

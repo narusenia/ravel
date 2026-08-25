@@ -1566,6 +1566,16 @@ impl ViewerPanel {
             // their own (`INSP-4`): the status line only changes on frames the
             // viewer is already repainting for.
             playback_status: super::playback_status(cx),
+            // The selection and the factor in force, read from the one place
+            // that owns both (`ProjectState`). Their *difference* is what the
+            // status line reports, so they travel as a pair.
+            preview_factors: project.as_ref().map(|project| {
+                let project = project.read(cx);
+                (
+                    project.viewer_resolution(),
+                    project.effective_viewer_resolution(),
+                )
+            }),
             cached_frames: super::cache_band(cx),
             pixel_readout: self
                 .readout_pointer

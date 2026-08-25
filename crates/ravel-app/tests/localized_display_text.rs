@@ -392,8 +392,8 @@ fn the_playback_status_line_translates_every_element_it_shows() {
             PlaybackStatusInputs {
                 playing: true,
                 dropped_frames: 12,
-                resolution: Some((1920, 1080)),
-                eval_resolution: Some(ViewerResolution::Half.apply((1920, 1080))),
+                selected_factor: Some(ViewerResolution::Full),
+                effective_factor: Some(ViewerResolution::Half),
                 cached_frames: &[0..40, 50..74],
                 duration_frames: 100,
             },

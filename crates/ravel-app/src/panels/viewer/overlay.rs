@@ -42,8 +42,8 @@ use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
 use ravel_ui::panels::viewer::{
-    PixelReadoutFormat, PlaybackStatusInputs, comp_to_buffer_index, pixel_readout_text,
-    playback_status_text,
+    PixelReadoutFormat, PlaybackStatusInputs, ViewerResolution, comp_to_buffer_index,
+    pixel_readout_text, playback_status_text,
 };
 
 use crate::panels::{CanvasSelection, LayerSelection, PlaybackPosition, PlaybackStatus};
@@ -252,6 +252,13 @@ pub struct OverlayContext {
     /// `Option`: "stopped, nothing dropped" is a real reading, not a missing
     /// one.
     pub playback_status: PlaybackStatus,
+    /// The preview factor the user selected and the one actually in force
+    /// (`INSP-4`). The pair, not the pixel sizes: the status line reports the
+    /// adaptive downgrade (`VRES-4`), which is a difference between these two
+    /// and cannot be recovered from `resolution` and `eval_resolution` —
+    /// `ViewerResolution::apply` rounds each axis up, and the selection is not
+    /// in those numbers at all.
+    pub preview_factors: Option<(ViewerResolution, ViewerResolution)>,
     /// The active composition's cached frame ranges (`CACHE-6`), for the share
     /// the status line reports while playing. The band the Timeline draws, read
     /// through the same accessor, so the two never disagree about what is
@@ -2582,8 +2589,8 @@ impl PlaybackStatusOverlay {
             PlaybackStatusInputs {
                 playing: ctx.playback_status.playing,
                 dropped_frames: ctx.playback_status.dropped_frames,
-                resolution: ctx.resolution,
-                eval_resolution: ctx.eval_resolution,
+                selected_factor: ctx.preview_factors.map(|(selected, _)| selected),
+                effective_factor: ctx.preview_factors.map(|(_, effective)| effective),
                 cached_frames: &ctx.cached_frames,
                 duration_frames,
             },
@@ -2891,6 +2898,7 @@ mod tests {
         OverlayContext {
             pixel_readout: None,
             playback_status: PlaybackStatus::default(),
+            preview_factors: None,
             cached_frames: Vec::new(),
             resolution: Some((1920, 1080)),
             comp: None,

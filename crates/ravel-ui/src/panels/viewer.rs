@@ -281,10 +281,11 @@ pub struct PlaybackStatusInputs<'a> {
     pub playing: bool,
     /// Frames the transport skipped since playback last started.
     pub dropped_frames: u64,
-    /// The composition's own resolution, or `None` with no output.
-    pub resolution: Option<(u32, u32)>,
-    /// The resolution the frame on screen was evaluated at.
-    pub eval_resolution: Option<(u32, u32)>,
+    /// The preview factor the user chose, or `None` with no project open.
+    pub selected_factor: Option<ViewerResolution>,
+    /// The factor the frame on screen was actually evaluated at, which
+    /// `VRES-4`'s adaptive downgrade can drop below `selected_factor`.
+    pub effective_factor: Option<ViewerResolution>,
     /// The active composition's cached frame ranges (`CACHE-6`); empty before
     /// any evaluation completed.
     pub cached_frames: &'a [Range<u64>],
@@ -305,8 +306,14 @@ const STATUS_SEPARATOR: &str = " · ";
 /// - **dropped frames**, and only *while playing*: the count resets at the next
 ///   play, so after a stop it describes a run that is over, and a HUD that kept
 ///   it would report a problem the user can no longer see;
-/// - **the preview factor**, whenever the frame was evaluated coarser than the
-///   composition — a standing truth, so it does not depend on the transport;
+/// - **the preview factor**, and only while it is *below the one the user
+///   chose* — that is, while `VRES-4`'s adaptive downgrade is holding it down.
+///   The chosen factor is already named permanently by the toolbar, and a
+///   second permanent copy of it on the picture would be furniture: the default
+///   factor is `Half`, so "coarser than the composition" is the normal state
+///   and warning about it would train the user to ignore the line that also
+///   carries the drops. What is worth saying is that the picture is coarser
+///   *than they asked for*, which lasts about 120 ms;
 /// - **the cached share**, and only *while playing*: stopped, the Timeline's
 ///   cache band is the source for this and says it per frame, so repeating it
 ///   here would be a second, coarser copy of the same fact.
@@ -325,7 +332,8 @@ pub fn playback_status_text(
             tr("viewer.status_dropped").replace("{count}", &status.dropped_frames.to_string()),
         );
     }
-    if let Some(factor) = reduced_preview_factor(status.resolution, status.eval_resolution) {
+    if let Some(factor) = downgraded_preview_factor(status.selected_factor, status.effective_factor)
+    {
         parts.push(tr("viewer.status_preview").replace("{factor}", &tr(factor.label_key())));
     }
     if status.playing
@@ -336,25 +344,19 @@ pub fn playback_status_text(
     (!parts.is_empty()).then(|| parts.join(STATUS_SEPARATOR))
 }
 
-/// The factor `eval` stands to `comp` in, when it is coarser than `Full`.
+/// The effective factor, when something is holding it below the selected one.
 ///
-/// Recovered by asking each factor what it would produce rather than dividing
-/// the two widths: [`ViewerResolution::apply`] rounds each axis up, so an odd
-/// composition width divides back to the wrong factor. `Full` first in
-/// [`ViewerResolution::ALL`] also settles the degenerate case where several
-/// factors agree (a 1x1 composition), and it settles it as "nothing to warn
-/// about", which is the truth there — no pixel was lost.
-fn reduced_preview_factor(
-    comp: Option<(u32, u32)>,
-    eval: Option<(u32, u32)>,
+/// Compared against the *selection* rather than against `Full`, so the element
+/// reports the adaptive downgrade (`VRES-4`) and nothing else. Equal factors —
+/// including a deliberate `Quarter`, where the adaptive path is disabled
+/// because there is nowhere further to fall — are the picture the user asked
+/// for, and the toolbar already says which one that is.
+fn downgraded_preview_factor(
+    selected: Option<ViewerResolution>,
+    effective: Option<ViewerResolution>,
 ) -> Option<ViewerResolution> {
-    let comp = comp?;
-    let eval = eval?;
-    let factor = ViewerResolution::ALL
-        .iter()
-        .copied()
-        .find(|factor| factor.apply(comp) == eval)?;
-    (factor != ViewerResolution::Full).then_some(factor)
+    let effective = effective?;
+    (effective != selected?).then_some(effective)
 }
 
 /// Share of `duration_frames` the ranges cover, as a whole percent.
@@ -798,11 +800,13 @@ mod tests {
         .to_string()
     }
 
-    /// A 1080p composition, whose preview factor is whatever `eval` says.
+    /// The selected factor is the default (`Half`), so `effective` alone
+    /// decides whether the preview element has anything to report: `Half` is
+    /// the picture the user asked for, anything below it is the downgrade.
     fn status_line(
         playing: bool,
         dropped_frames: u64,
-        eval: (u32, u32),
+        effective: ViewerResolution,
         cached_frames: &[Range<u64>],
         duration_frames: u64,
     ) -> Option<String> {
@@ -810,8 +814,8 @@ mod tests {
             PlaybackStatusInputs {
                 playing,
                 dropped_frames,
-                resolution: Some((1920, 1080)),
-                eval_resolution: Some(eval),
+                selected_factor: Some(ViewerResolution::Half),
+                effective_factor: Some(effective),
                 cached_frames,
                 duration_frames,
             },
@@ -819,16 +823,16 @@ mod tests {
         )
     }
 
-    const FULL: (u32, u32) = (1920, 1080);
-    const HALF: (u32, u32) = (960, 540);
+    const ASKED: ViewerResolution = ViewerResolution::Half;
+    const DOWNGRADED: ViewerResolution = ViewerResolution::Quarter;
 
     /// The line exists to say the picture is not the truth. With nothing to
     /// report it must not draw an empty frame of a HUD: no dropped frames, the
-    /// composition's own resolution, no cache measured yet.
+    /// factor the user chose, no cache measured yet.
     #[test]
     fn nothing_is_reported_when_every_reading_is_clean() {
-        assert_eq!(status_line(true, 0, FULL, &[], 300), None);
-        assert_eq!(status_line(false, 0, FULL, &[], 300), None);
+        assert_eq!(status_line(true, 0, ASKED, &[], 300), None);
+        assert_eq!(status_line(false, 0, ASKED, &[], 300), None);
     }
 
     /// The count resets at the next play, so after a stop it describes a run
@@ -836,43 +840,61 @@ mod tests {
     #[test]
     fn dropped_frames_are_reported_only_while_playing() {
         assert_eq!(
-            status_line(true, 12, FULL, &[], 0).as_deref(),
+            status_line(true, 12, ASKED, &[], 0).as_deref(),
             Some("dropped 12")
         );
         assert_eq!(
-            status_line(false, 12, FULL, &[], 0),
+            status_line(false, 12, ASKED, &[], 0),
             None,
             "a stopped transport reports a drop count nobody can still see"
         );
     }
 
-    /// A preview coarser than the composition is a standing truth about the
-    /// pixels on screen, so it is reported with the transport stopped too —
-    /// and never reported at `Full`, where nothing was lost.
+    /// Only the adaptive downgrade is worth saying. The factor the user chose
+    /// is named permanently by the toolbar, and the default is already `Half`,
+    /// so reporting "coarser than the composition" would leave a warning on
+    /// screen forever — and a warning that never goes away is read as
+    /// furniture, including the drop count beside it. Reported with the
+    /// transport stopped too: the downgrade fires on edits and scrubs, not
+    /// only during playback.
     #[test]
-    fn the_preview_factor_is_reported_only_when_it_is_coarser() {
-        assert_eq!(status_line(false, 0, FULL, &[], 300), None);
+    fn the_preview_factor_is_reported_only_while_it_is_below_the_selection() {
+        assert_eq!(status_line(false, 0, ASKED, &[], 300), None);
         assert_eq!(
-            status_line(false, 0, HALF, &[], 300).as_deref(),
-            Some("1/2 res")
-        );
-        assert_eq!(
-            status_line(false, 0, (480, 270), &[], 300).as_deref(),
+            status_line(false, 0, DOWNGRADED, &[], 300).as_deref(),
             Some("1/4 res")
         );
     }
 
-    /// `ViewerResolution::apply` rounds each axis up, so an odd composition
-    /// width divides back to `1` — recovering the factor by division would
-    /// report a full-resolution preview of a half-resolution frame.
+    /// A deliberate `Quarter` is not a downgrade: `VRES-4` disables the
+    /// adaptive path there because there is nowhere further to fall, so the
+    /// two factors always agree and the element must stay quiet.
     #[test]
-    fn an_odd_composition_width_still_names_its_factor() {
+    fn a_deliberately_coarse_selection_reports_nothing() {
         let line = playback_status_text(
             PlaybackStatusInputs {
                 playing: false,
                 dropped_frames: 0,
-                resolution: Some((1921, 1081)),
-                eval_resolution: Some(ViewerResolution::Half.apply((1921, 1081))),
+                selected_factor: Some(ViewerResolution::Quarter),
+                effective_factor: Some(ViewerResolution::Quarter),
+                cached_frames: &[],
+                duration_frames: 300,
+            },
+            fake_tr,
+        );
+        assert_eq!(line, None);
+    }
+
+    /// A downgrade names the factor **now in force**, not the one it left: the
+    /// number on screen has to describe the pixels on screen.
+    #[test]
+    fn a_downgrade_from_full_names_the_factor_now_in_force() {
+        let line = playback_status_text(
+            PlaybackStatusInputs {
+                playing: false,
+                dropped_frames: 0,
+                selected_factor: Some(ViewerResolution::Full),
+                effective_factor: Some(ViewerResolution::Half),
                 cached_frames: &[],
                 duration_frames: 300,
             },
@@ -886,10 +908,10 @@ mod tests {
     #[test]
     fn the_cached_share_is_reported_only_while_playing() {
         assert_eq!(
-            status_line(true, 0, FULL, &[0..75, 75..150], 300).as_deref(),
+            status_line(true, 0, ASKED, &[0..75, 75..150], 300).as_deref(),
             Some("cached 50%")
         );
-        assert_eq!(status_line(false, 0, FULL, &[0..75, 75..150], 300), None);
+        assert_eq!(status_line(false, 0, ASKED, &[0..75, 75..150], 300), None);
     }
 
     /// Before the first evaluation the band is empty, and an emptied
@@ -898,13 +920,13 @@ mod tests {
     #[test]
     fn a_missing_cache_measurement_leaves_the_other_readings_intact() {
         assert_eq!(
-            status_line(true, 3, HALF, &[], 300).as_deref(),
-            Some("dropped 3 · 1/2 res"),
+            status_line(true, 3, DOWNGRADED, &[], 300).as_deref(),
+            Some("dropped 3 · 1/4 res"),
             "an empty band reports no share, not 0%"
         );
         assert_eq!(
-            status_line(true, 3, HALF, &[0..75, 75..150], 0).as_deref(),
-            Some("dropped 3 · 1/2 res")
+            status_line(true, 3, DOWNGRADED, &[0..75, 75..150], 0).as_deref(),
+            Some("dropped 3 · 1/4 res")
         );
     }
 
@@ -913,7 +935,7 @@ mod tests {
     #[test]
     fn the_cached_share_is_clamped_to_the_composition() {
         assert_eq!(
-            status_line(true, 0, FULL, &[0..250, 250..500], 300).as_deref(),
+            status_line(true, 0, ASKED, &[0..250, 250..500], 300).as_deref(),
             Some("cached 100%")
         );
     }
@@ -922,8 +944,8 @@ mod tests {
     #[test]
     fn all_three_readings_join_into_one_line() {
         assert_eq!(
-            status_line(true, 12, HALF, &[0..40, 50..74], 100).as_deref(),
-            Some("dropped 12 · 1/2 res · cached 64%")
+            status_line(true, 12, DOWNGRADED, &[0..40, 50..74], 100).as_deref(),
+            Some("dropped 12 · 1/4 res · cached 64%")
         );
     }
 }

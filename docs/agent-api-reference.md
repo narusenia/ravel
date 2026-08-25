@@ -2828,10 +2828,13 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   context is the caller's job, because where a replacement comes from is
   platform-specific (`GPULOSS-3` / `GPULOSS-4`). The order it enforces is the
   substance: move the fence to the retiring worker's `latest_generation()`,
-  discard the export queue, close the old worker's channels and join it **off
-  the UI thread**, only then build the new `GpuEvalHooks` + `EvalService` at
-  that same generation, then post one `Structural` request for the unchanged
-  document and playhead. The `SharedCacheBudget` is never rebuilt or zeroed —
+  take and cancel the export queue, close the old worker's channels, stop both
+  of those **off the UI thread**, only then build the new `GpuEvalHooks` +
+  `EvalService` at that same generation, then post one `Structural` request for
+  the unchanged document and playhead. It returns whether the swap started:
+  `false` means one is already running, which is what a polling detector
+  (`GPULOSS-3`) needs so it does not build a second replacement in the window
+  where the first has given up the UI thread. The `SharedCacheBudget` is never rebuilt or zeroed —
   the retired caches returning their reservations as they drop is what brings
   the usage back down, which is also why the replacement is not built before
   the join.
@@ -3217,11 +3220,14 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   only when the job completes and deleted whenever it does not. Dropping the
   service cancels every unfinished job — the answer to the question
   `RenderQueue`'s `Drop` leaves to the export UI.
-  `RenderService::discard_queue_for_new_gpu()` is that same answer for a GPU
-  device epoch change (`GPULOSS-2`): the unfinished jobs are cancelled and the
-  queue is dropped, so its second `GpuEvalHooks` does not carry the retiring
-  device into the new epoch. Nothing is resubmitted, and no queue is built
-  here — `ensure_queue` builds one on the current device at the next
+  `RenderService::take_queue_for_new_gpu() -> Option<RenderQueue>` is that same
+  answer for a GPU device epoch change (`GPULOSS-2`): the unfinished jobs are
+  cancelled and the queue is handed back for the caller to `shutdown()` — a
+  drop would not join, leaving the retired export evaluator, hooks and texture
+  pool charged to the shared budget while the replacement worker is built. The
+  wait is one render **frame**, not one render, because `cancel` stops a
+  running job at its next frame boundary. Nothing is resubmitted, and no queue
+  is built here — `ensure_queue` builds one on the current device at the next
   submission. `RenderServiceEvent`
   (`Completed` / `Failed` / `Warning`) becomes a workspace notification.
   `Warning` is the GUI's answer to `ravel-cli`'s warning stream, and a render

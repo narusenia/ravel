@@ -341,12 +341,20 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
   「2 つの GPU cache が 1 つの会計にぶら下がる」状態が一瞬でも生じる。
 - `SharedCacheBudget` は作り直さず、ゼロにも戻さない。旧 worker の thread が
   返ることで frame cache / node cache / hooks cache の reservation が返る。
-- export 側は `RenderService::discard_queue_for_new_gpu()` で未完了 job を
-  cancel して queue を捨てるだけとし、**render worker は join しない**。
-  join すると 1 frame 分の render 完了を待って recovery が止まるうえ、計画が
-  順序を保証しているのは評価 worker だからである。旧 render worker は channel の
-  close で自分で抜け、その時点で自分の cache を budget へ返す。再開は明示的な
-  再 submit のみで、自動再開はしない。
+- **再入ガード**: `restart_eval_worker` は stop と restart の間で UI thread を
+  手放すので、その窓でもう一度呼ばれると 2 本目は `self.eval` が既に `None` で、
+  generation を fence から拾って**もう一つ replacement を建てる**。
+  `ProjectState.eval_restart_in_progress` で 1 本に制限し、`restart_eval_on_gpu`
+  は「受け付けたか」を `bool` で返す。返す理由は、呼び出し側（`GPULOSS-3` は
+  polling で呼ぶ）が「もう頼んだ」を自前で覚えると同じ事実に authority が
+  2 つできるからである。
+- export 側は `RenderService::take_queue_for_new_gpu()` で未完了 job を cancel
+  して queue を**取り出し**、評価 worker の join と同じ background task の中で
+  `RenderQueue::shutdown()` する。**待ちの上限は 1 レンダリング分ではなく
+  1 フレーム分**である（`RenderQueue::cancel` の doc: 走っている job は次の
+  frame 境界で止まる）。drop では join しないので、旧 export の `Evaluator` /
+  `GpuEvalHooks` / texture pool が同じ budget にぶら下がったまま replacement が
+  建ってしまう。再開は明示的な再 submit のみで、自動再開はしない。
 - この単位が実装しないもの: Viewer の lease 破棄（`GPULOSS-5`）、
   プラットフォーム固有の loss 検出と polling（`GPULOSS-3` / `GPULOSS-4`）。
   `report_gpu_device_loss` の「再起動を促す」1 回通知は `GPULOSS-4` の担当なので
@@ -358,6 +366,13 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
   `<=` であること（継承した番号ちょうどの旧 epoch 結果が捨てられること）の 2 本。
   交換テストは実 worker thread が絡むため `cx.executor().allow_parking()` を
   使い、待ちは deadline で切っている。
+- 交換テストは旧 worker を `process()` の中で止めた状態で restart を呼ぶ
+  （gate は `AtomicBool` 2 本。processor が入口で `entered` を立て、`released`
+  を待つ）。idle な worker を相手にすると UI thread で join しても即返ってしまい、
+  完了条件「UI thread の join で待たない」が証明できないためである。
+  併せて、旧 render queue の hooks の drop が replacement の生成より前に
+  来ることをログの順序で固定し、新 epoch へ飛ぶ要求が `Structural` 1 回だけで
+  あることを hooks の hint 記録で固定している。
 
 ### GPULOSS-3
 

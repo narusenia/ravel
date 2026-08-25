@@ -2755,7 +2755,67 @@ mod tests {
         );
     }
 
-    /// [`FrameHooks`] that announce being built and being dropped.
+    /// Holds a worker inside `process()` until the test lets it out.
+    ///
+    /// A swap whose retired worker is already idle proves nothing: a `join()`
+    /// on the UI thread would return immediately and the test would still be
+    /// green. With this held, the retired worker is genuinely mid-evaluation
+    /// while the swap runs, so a UI-thread join would hang instead.
+    #[derive(Clone, Default)]
+    struct EvalGate {
+        entered: Arc<AtomicBool>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl EvalGate {
+        /// Block until the worker has reached `process()`.
+        fn await_entry(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !self.entered.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the worker never reached process()"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+        }
+    }
+
+    /// [`FrameSource`] that waits on a gate before producing its frame.
+    struct GatedFrameSource(Option<EvalGate>);
+
+    impl ravel_core::eval::NodeProcessor for GatedFrameSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+            _params: &ravel_core::eval::ResolvedParams,
+            _scope: &mut dyn ravel_core::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+            if let Some(gate) = &self.0 {
+                gate.entered.store(true, Ordering::Release);
+                // Bounded so a broken test fails rather than hangs the suite.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !gate.released.load(Ordering::Acquire) && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+            }
+            Ok(Arc::new(FrameBuffer::from_f32(
+                2,
+                2,
+                [1.0, 0.5, 0.0, 1.0].repeat(4),
+            )))
+        }
+    }
+
+    /// [`FrameHooks`] that announce being built and being dropped, record the
+    /// hints they were synced with, and optionally hold their evaluation open.
     ///
     /// The worker owns its hooks, so "dropped" is the moment its thread
     /// returned and gave the evaluator, the caches and — in production — the
@@ -2766,6 +2826,8 @@ mod tests {
         inner: FrameHooks,
         log: Arc<std::sync::Mutex<Vec<String>>>,
         tag: &'static str,
+        hints: Arc<std::sync::Mutex<Vec<InvalidationHint>>>,
+        gate: Option<EvalGate>,
     }
 
     impl EpochHooks {
@@ -2775,7 +2837,21 @@ mod tests {
                 inner: FrameHooks,
                 log: log.clone(),
                 tag,
+                hints: Arc::new(std::sync::Mutex::new(Vec::new())),
+                gate: None,
             }
+        }
+
+        /// Hold this worker's evaluation open until the gate is released.
+        fn gated(mut self, gate: EvalGate) -> Self {
+            self.gate = Some(gate);
+            self
+        }
+
+        /// Report every hint this worker is synced with into `hints`.
+        fn reporting_hints(mut self, hints: &Arc<std::sync::Mutex<Vec<InvalidationHint>>>) -> Self {
+            self.hints = hints.clone();
+            self
         }
     }
 
@@ -2793,10 +2869,15 @@ mod tests {
             &mut self,
             evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
             graph: &Graph,
-            document: Option<&Document>,
+            _document: Option<&Document>,
             hint: &InvalidationHint,
         ) {
-            self.inner.sync(evaluator, graph, document, hint);
+            self.hints.lock().unwrap().push(hint.clone());
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(GatedFrameSource(self.gate.clone())));
+                }
+            }
         }
 
         fn finalize(
@@ -2848,11 +2929,13 @@ mod tests {
         });
         cx.update(|cx| cx.set_global(crate::export::RenderServiceHandle(render.downgrade())));
 
-        // The old epoch: a worker, something evaluable, and a generation that
-        // is deliberately not zero — a replacement starting at zero is the
-        // failure this is about.
+        // The old epoch: a worker held inside `process()`, something
+        // evaluable, and a generation that is deliberately not zero — a
+        // replacement starting at zero is one of the failures this is about.
+        let gate = EvalGate::default();
         let retired_generation = project.update(cx, |project, cx| {
-            project.install_eval_worker(None, EpochHooks::new("old", &log), 0, cx);
+            let hooks = EpochHooks::new("old", &log).gated(gate.clone());
+            project.install_eval_worker(None, hooks, 0, cx);
             let comp = project.document().root_comp.expect("root comp");
             let document = ravel_ui::document::add_layer(project.document(), comp, content_layer())
                 .expect("add layer");
@@ -2864,10 +2947,22 @@ mod tests {
             retired_generation > 0,
             "the fixture never advanced the old worker's generation"
         );
+        // The retired worker is now *inside* its evaluation, and stays there
+        // until this test lets it out. Everything below therefore runs while
+        // there is a real in-flight evaluation to stop: a swap that joined on
+        // this thread would never get past the call.
+        gate.await_entry();
 
         let swap_log = log.clone();
-        project.update(cx, |project, cx| {
-            project.restart_eval_worker(None, move |_| EpochHooks::new("new", &swap_log), cx);
+        let new_hints = project.update(cx, |project, cx| {
+            let hints = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let reported = hints.clone();
+            let started = project.restart_eval_worker(
+                None,
+                move |_| EpochHooks::new("new", &swap_log).reporting_hints(&reported),
+                cx,
+            );
+            assert!(started, "the swap was refused");
             // Synchronously, before anything is awaited: the fence is what
             // stops the retired worker's in-flight results from landing on
             // the new epoch's viewer.
@@ -2879,7 +2974,12 @@ mod tests {
                 project.eval.is_none(),
                 "the retired worker is still installed"
             );
+            hints
         });
+
+        // Let the retired evaluation finish so its worker can notice the
+        // closed channel and return.
+        gate.release();
 
         // The join runs off the UI thread, so the rest arrives later.
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -2935,6 +3035,20 @@ mod tests {
                 "new built"
             ],
             "the replacement worker was built before the retired ones were gone"
+        );
+        // One request reached the new worker, and it was the Structural one
+        // the swap posts. More than one entry means something else asked too;
+        // none means the new epoch was never given anything to evaluate.
+        let hints = new_hints.lock().unwrap();
+        assert_eq!(
+            hints.len(),
+            1,
+            "the new epoch was synced {} times, not once: {hints:?}",
+            hints.len()
+        );
+        assert!(
+            matches!(hints[0], InvalidationHint::Structural),
+            "the swap's request was not Structural: {hints:?}"
         );
     }
 
@@ -3061,6 +3175,16 @@ mod tests {
             frame_width(cx),
             Some(8),
             "the new epoch's first frame was dropped on the inherited fence"
+        );
+
+        // The direct form of the same guarantee: with the new epoch's frame
+        // already on screen, a straggler carrying that generation must not
+        // overwrite it.
+        project.update(cx, |project, cx| published(project, cx, 6, 4));
+        assert_eq!(
+            frame_width(cx),
+            Some(8),
+            "a straggler overwrote the frame the new device produced"
         );
     }
 

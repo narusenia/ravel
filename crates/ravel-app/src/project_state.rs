@@ -2828,6 +2828,7 @@ mod tests {
         tag: &'static str,
         hints: Arc<std::sync::Mutex<Vec<InvalidationHint>>>,
         gate: Option<EvalGate>,
+        drop_delay: Option<Duration>,
     }
 
     impl EpochHooks {
@@ -2839,7 +2840,21 @@ mod tests {
                 tag,
                 hints: Arc::new(std::sync::Mutex::new(Vec::new())),
                 gate: None,
+                drop_delay: None,
             }
+        }
+
+        /// Take a visible moment to go away.
+        ///
+        /// This is what tells a **join** apart from a bare drop. Closing a
+        /// worker's channel and joining it are observationally identical while
+        /// the worker is idle — it exits before anything else is scheduled
+        /// either way. With the drop held open, a caller that joined has to
+        /// wait for it and a caller that only dropped runs straight on, so the
+        /// order the log records answers which one happened.
+        fn slow_drop(mut self) -> Self {
+            self.drop_delay = Some(Duration::from_millis(200));
+            self
         }
 
         /// Hold this worker's evaluation open until the gate is released.
@@ -2857,6 +2872,9 @@ mod tests {
 
     impl Drop for EpochHooks {
         fn drop(&mut self) {
+            if let Some(delay) = self.drop_delay {
+                std::thread::sleep(delay);
+            }
             self.log
                 .lock()
                 .unwrap()
@@ -2922,7 +2940,7 @@ mod tests {
         let render = cx.new(crate::export::RenderService::new);
         render.update(cx, |render, _| {
             render.install_queue_for_test(ravel_core::runtime::RenderQueue::spawn_with_budget(
-                EpochHooks::new("render", &log),
+                EpochHooks::new("render", &log).slow_drop(),
                 budget,
                 |_| {},
             ));
@@ -3025,17 +3043,24 @@ mod tests {
                 "the new epoch's caches are not charged to the session's budget"
             );
         });
+        // Both retired workers are gone *before* the replacement exists. The
+        // two drops race each other — they run on their own threads — so the
+        // invariant is "last", not a fixed sequence: nothing of the old epoch
+        // may still be charged to the budget when the new hooks build their
+        // texture pool on it.
+        let entries = log.lock().unwrap();
         assert_eq!(
-            log.lock().unwrap().as_slice(),
-            [
-                "render built",
-                "old built",
-                "render dropped",
-                "old dropped",
-                "new built"
-            ],
-            "the replacement worker was built before the retired ones were gone"
+            entries.last().map(String::as_str),
+            Some("new built"),
+            "the replacement worker was built before the retired ones were gone: {entries:?}"
         );
+        for retired in ["render dropped", "old dropped"] {
+            assert!(
+                entries.iter().any(|entry| entry == retired),
+                "{retired} never happened: {entries:?}"
+            );
+        }
+        drop(entries);
         // One request reached the new worker, and it was the Structural one
         // the swap posts. More than one entry means something else asked too;
         // none means the new epoch was never given anything to evaluate.

@@ -216,13 +216,14 @@ Timeline / MediaBin は準備中を表示、準備失敗は workspace notificati
 | `PTR-6` | Outliner の並べ替えと文書（`ui-spec.md` にポインタフィードバック節） |
 | `INSP-1` | `Composition.background_color` の配線とチェッカーボード（`MED-CORE-09`） |
 
-計画書は `done/pointer-feedback-plan.md` と `viewer-inspection-plan.md`。
+計画書は `done/pointer-feedback-plan.md` と `done/viewer-inspection-plan.md`。
 
 `INSP-1` をここに入れるのは**設定できるのに効かないフィールド**だから。
 `background_color` はコンプ設定フォームで編集でき、保存もされるのに、評価にも
 合成にも現れない（Viewer は黒 quad をハードコードしている）。同時に「アルファ 0 と
 黒を区別できない」も解消するので、チェッカーボード表示まで 1 単位で入れる。
-検査系の残り（`INSP-4` / `INSP-5`）はフェーズ E。
+検査系の残り（`INSP-2`〜`INSP-4`）は 2026-08-25 に済み、`INSP-5` の判断で
+スコープ 4 種は `viewer-scopes-plan.md`（`MON-*`）へ移した — そちらはフェーズ E。
 
 実施結果: Timeline / NodeEditor / Viewer の canvas は既存のヒットテストを再利用して
 hover とドラッグ中の操作意図をカーソルで示し、Outliner のレイヤー並べ替えも
@@ -850,7 +851,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `OVL-9` | モーションパス（軌跡表示 + キー位置のドラッグ） |
 | `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`done/viewer-snap-guides-plan.md`） |
 | `TOOLX-1〜5` | Hand / Zoom の実装、矩形選択、点編集、polygon / star（`viewer-tool-extensions-plan.md`） |
-| `INSP-4` / `INSP-5` | 再生とキャッシュの状態表示・スコープの判断（`viewer-inspection-plan.md`） |
+| `MON-1〜MON-7` | スコープ 4 種（波形 / ベクトル / ヒストグラム / パレード。`viewer-scopes-plan.md`） |
 | `INFO-1` | `InvalidationHint::Shell` |
 | `INFO-2` / `INFO-3` | `layer.info` / `comp.info` |
 | `INFO-4` | 情報ノードのポート選択 UI |
@@ -882,7 +883,7 @@ issue 側に「単位が引き受けた」と記録して個別には着手し�
 だけで、成分ラベルとリンクトグルは足していない。このフェーズで個別に直す。
 
 **このフェーズで Viewer 系の 4 計画が同時に動く**（`OVL-*` / `SNAP-*` /
-`TOOLX-*` / `INSP-*`）。全部が Viewer の入力経路と描画経路を触るので、
+`TOOLX-*` / `MON-*`。`INSP-*` は済み）。全部が Viewer の入力経路と描画経路を触るので、
 **`OVL-1`（オーバーレイ機構の抽出）を必ず先に通す** — 吸着線・矩形選択の枠・
 ピクセル値の表示はいずれも `OVL-1` のスクリーン空間描画に乗る前提で書かれている。
 `OVL-1` を飛ばすと 3 計画がそれぞれ描画経路を発明する。

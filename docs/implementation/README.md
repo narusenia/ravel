@@ -30,7 +30,6 @@ the design behind a unit.
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
-| `viewer-inspection-plan.md` | Composition background wiring, checkerboard, channel isolation, pixel readout, playback/cache status | INSP-1 done — 2026-07-30; INSP-2/INSP-3 done — 2026-08-25 | REQ-UI-004, REQ-LAYER-001 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
@@ -72,6 +71,7 @@ several plans here wait on its later units rather than on each other.
 | `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | `gpu-backend-plan.md` (GPUBK-9), `done/zero-copy-viewer-plan.md` (ZC-8) | REQ-GPU-001 |
 | `ofx-host-plan.md` | The OpenFX host: an isolated C++ process, the suites, and the GPU interop — **OFX defines no D3D12 path, so Windows has no zero-copy route** | `gpu-backend-plan.md` (GPUBK-8, merged), `plugin-system-plan.md` (PLUG-1) | REQ-PLUGIN-001, REQ-PROJ-002 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
+| `viewer-scopes-plan.md` | Waveform monitor, vectorscope, histogram and parade: the counted linear-frame tap the pixel readout already needs, one bounded summary per published frame, and the four panels that draw it | — | REQ-UI-004, REQ-UI-005 |
 
 `panel-placement-plan.md` (#181) is **superseded** by
 `done/free-pane-docking-plan.md`: the view-toggle problem is solved by
@@ -189,6 +189,7 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/viewer-inspection-plan.md` | Composition background wiring and the checkerboard, channel isolation, the pixel value readout, and the playback / cache status line; `INSP-5` decided the four scopes belong to a plan of their own (`viewer-scopes-plan.md`) | #213, #479, #480, #482 — 2026-08-25 | REQ-UI-004, REQ-LAYER-001 |
 | `done/viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, the picker and cycling command, the factor in `ui_state.json`, and the input-driven adaptive step | #300, #473, #474, #475, #476 — 2026-08-24 | REQ-UI-004 |
 | `done/media-import-plan.md` | Media import, asset references, MediaBin, the unified media node, the asset inspector with relink, and the offline marks | #469, #470 — 2026-08-21 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |
 | `done/render-warning-channel-plan.md` | Machine-readable warnings for what a render silently gets wrong: offline or unreadable media, and identifier parameters that are not static (`HIGH-34`, `HIGH-35` — both closed) | #467 — 2026-08-21 | — |

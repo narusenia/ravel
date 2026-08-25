@@ -52,6 +52,13 @@ node_param_values = "Show Parameter Values"
 cycle_preview_resolution = "Cycle Preview Resolution"
 fit = "Fit View"
 
+[menu.viewer]
+channel_rgb = "Show RGB"
+channel_red = "Show Red Channel"
+channel_green = "Show Green Channel"
+channel_blue = "Show Blue Channel"
+channel_alpha = "Show Alpha Channel"
+
 [menu.composition]
 _self = "Composition"
 new = "New Composition…"
@@ -380,6 +387,15 @@ resolution_quarter = "1/4"
 # Selected factor and the factor actually being evaluated, shown together
 # only while they differ.
 resolution_effective = "{selected} → {effective}"
+channel = "Display channel"
+channel_rgb = "RGB"
+channel_red = "Red"
+channel_green = "Green"
+channel_blue = "Blue"
+channel_alpha = "Alpha"
+# The alpha channel shown as grey, against the same colour with its matte
+# applied — see DisplayChannel.
+channel_alpha_matte = "Alpha matte"
 grid = "Grid"
 safe_areas = "Safe areas"
 rulers = "Rulers"

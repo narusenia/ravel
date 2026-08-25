@@ -541,6 +541,108 @@ pub fn to_display_rgba8(rgba: [f32; 4]) -> [u8; 4] {
     ]
 }
 
+// ===========================================================================
+// Display channel isolation
+// ===========================================================================
+
+/// Which channel of the composite the viewer shows (`INSP-2`, REQ-UI-004).
+///
+/// A **display** decision, not an evaluation one: the composite is untouched
+/// and only the transform that turns it into bytes for the screen looks
+/// different. Nothing here reaches the evaluator's cache identity, so
+/// switching modes redoes the transform and reuses every node result.
+///
+/// The discriminants are wire values. They cross into
+/// `crates/ravel-nodes/src/shaders/display_transform.wgsl` as a uniform and
+/// reach the evaluation worker through an `AtomicU32`, so the `CHANNEL_*`
+/// constants in that shader mirror them and
+/// [`from_u32`](DisplayChannel::from_u32) decides what an unrecognised value
+/// becomes.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum DisplayChannel {
+    /// The whole composite: colour through the display transform, alpha as
+    /// coverage. The default.
+    #[default]
+    Rgb = 0,
+    /// The red channel alone, as grey.
+    Red = 1,
+    /// The green channel alone, as grey.
+    Green = 2,
+    /// The blue channel alone, as grey.
+    Blue = 3,
+    /// The alpha channel alone, as grey. Answers *how much coverage is
+    /// here?*, so a fully transparent white area reads black and an opaque
+    /// black one reads white.
+    Alpha = 4,
+    /// The colour with its own matte applied — RGB multiplied by alpha in
+    /// linear light, shown opaque.
+    ///
+    /// The two alpha modes answer different questions, which is why both
+    /// exist. [`Alpha`](DisplayChannel::Alpha) shows the matte itself and
+    /// discards the colour; this one shows *what the frame contributes when
+    /// it is composited*, so a transparent area reads black however bright
+    /// its straight-alpha colour is. And it is not
+    /// [`Rgb`](DisplayChannel::Rgb) either: `Rgb` ignores the matte, so
+    /// colour hidden behind a zero alpha still shows there.
+    AlphaMatte = 5,
+}
+
+impl DisplayChannel {
+    /// Every mode, in the order the UI offers them.
+    pub const ALL: [DisplayChannel; 6] = [
+        Self::Rgb,
+        Self::Red,
+        Self::Green,
+        Self::Blue,
+        Self::Alpha,
+        Self::AlphaMatte,
+    ];
+
+    /// The wire value: the shader uniform and the host-to-worker cell.
+    pub fn to_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// The mode `value` names, or [`DisplayChannel::Rgb`] when it names none.
+    ///
+    /// The cell is written by the host and read by the worker, so the two can
+    /// disagree across a version; showing the composite is the honest answer
+    /// to a mode neither side recognises.
+    pub fn from_u32(value: u32) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|channel| channel.to_u32() == value)
+            .unwrap_or_default()
+    }
+}
+
+/// [`to_display_rgba8`] restricted to one channel (`INSP-2`).
+///
+/// Every mode routes through [`to_display_rgba8`], so an isolated channel
+/// carries exactly the code the composite would have shown for it — the
+/// isolation cannot drift from the transform, because it has no arithmetic of
+/// its own. In particular the colour channels pass through the transfer
+/// function and alpha never does: alpha is coverage, not light.
+///
+/// An isolated channel is grey (`R = G = B`) and opaque. Grey rather than a
+/// tinted channel because the point is to judge the *value*, which a red
+/// wash makes harder, and opaque because the mode exists to inspect alpha —
+/// a result that was itself transparent would be composited away.
+pub fn to_display_rgba8_channel(rgba: [f32; 4], channel: DisplayChannel) -> [u8; 4] {
+    let grey = |code: u8| [code, code, code, u8::MAX];
+    match channel {
+        DisplayChannel::Rgb => to_display_rgba8(rgba),
+        DisplayChannel::Red => grey(to_display_rgba8(rgba)[0]),
+        DisplayChannel::Green => grey(to_display_rgba8(rgba)[1]),
+        DisplayChannel::Blue => grey(to_display_rgba8(rgba)[2]),
+        DisplayChannel::Alpha => grey(to_display_rgba8(rgba)[3]),
+        DisplayChannel::AlphaMatte => {
+            to_display_rgba8([rgba[0] * rgba[3], rgba[1] * rgba[3], rgba[2] * rgba[3], 1.0])
+        }
+    }
+}
+
 /// The smallest linear value that displays as code `k`, for `k = 1..=255`.
 ///
 /// The colour channels of [`to_display_rgba8`] are a **monotonic** map from a
@@ -1361,6 +1463,99 @@ mod tests {
         // display as 188 too.
         assert_eq!(to_display_rgba8([0.0; 4])[3], 0);
         assert_eq!(to_display_rgba16([0.5, 0.5, 0.5, 0.5])[3], 32768);
+    }
+
+    /// `INSP-2`: the value each mode puts on the screen, written out.
+    ///
+    /// The numbers are the point. An isolated channel must carry the code the
+    /// composite would have shown for it, which is what pins the isolation to
+    /// the transform instead of to arithmetic of its own.
+    #[test]
+    fn each_display_channel_isolates_the_value_it_names() {
+        let pixel = [1.0, 0.5, 0.0, 0.5];
+        assert_eq!(
+            to_display_rgba8_channel(pixel, DisplayChannel::Rgb),
+            [255, 188, 0, 128],
+        );
+        assert_eq!(
+            to_display_rgba8_channel(pixel, DisplayChannel::Red),
+            [255, 255, 255, 255],
+        );
+        // 0.5 linear is 188 here for the same reason it is 188 in the
+        // composite: the isolated channel still passes the transfer function.
+        assert_eq!(
+            to_display_rgba8_channel(pixel, DisplayChannel::Green),
+            [188, 188, 188, 255],
+        );
+        assert_eq!(
+            to_display_rgba8_channel(pixel, DisplayChannel::Blue),
+            [0, 0, 0, 255],
+        );
+        // Alpha is coverage, not light: 0.5 coverage is 128, and a mode that
+        // ran it through the transfer function would say 188.
+        assert_eq!(
+            to_display_rgba8_channel(pixel, DisplayChannel::Alpha),
+            [128, 128, 128, 255],
+        );
+        // The matte multiplies in *linear* light: green becomes 0.5 * 0.5 =
+        // 0.25 linear, which displays as 137. Multiplying the encoded value
+        // instead would give 188 / 2 = 94.
+        assert_eq!(
+            to_display_rgba8_channel(pixel, DisplayChannel::AlphaMatte),
+            [188, 137, 0, 255],
+        );
+    }
+
+    /// The three modes that involve alpha answer three different questions,
+    /// and two pixels are enough to separate all three.
+    #[test]
+    fn the_alpha_modes_disagree_on_a_transparent_white_pixel() {
+        // Straight alpha: white that covers nothing.
+        let ghost = [1.0, 1.0, 1.0, 0.0];
+        // `Rgb` ignores the matte, so the colour is still white — this is the
+        // "is it black or is it transparent?" ambiguity the modes exist for.
+        assert_eq!(
+            to_display_rgba8_channel(ghost, DisplayChannel::Rgb),
+            [255, 255, 255, 0],
+        );
+        assert_eq!(
+            to_display_rgba8_channel(ghost, DisplayChannel::Alpha),
+            [0, 0, 0, 255],
+        );
+        assert_eq!(
+            to_display_rgba8_channel(ghost, DisplayChannel::AlphaMatte),
+            [0, 0, 0, 255],
+        );
+
+        // Opaque black separates the two alpha modes: full coverage of no
+        // light. `Alpha` reads white, the matte view reads black.
+        let solid = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(
+            to_display_rgba8_channel(solid, DisplayChannel::Alpha),
+            [255, 255, 255, 255],
+        );
+        assert_eq!(
+            to_display_rgba8_channel(solid, DisplayChannel::AlphaMatte),
+            [0, 0, 0, 255],
+        );
+    }
+
+    /// The mode crosses two boundaries as a `u32` — the shader uniform and
+    /// the cell the host shares with the evaluation worker — so the wire
+    /// value has to round trip, and a value from the other side of a version
+    /// change has to land on the composite rather than on a mode nobody
+    /// chose.
+    #[test]
+    fn the_channel_wire_value_round_trips_and_falls_back_to_rgb() {
+        for channel in DisplayChannel::ALL {
+            assert_eq!(DisplayChannel::from_u32(channel.to_u32()), channel);
+        }
+        // `ALL` is what the UI enumerates and what `from_u32` searches: a
+        // variant missing from it would be unreachable from both.
+        assert_eq!(DisplayChannel::ALL.len(), 6);
+        assert_eq!(DisplayChannel::from_u32(6), DisplayChannel::Rgb);
+        assert_eq!(DisplayChannel::from_u32(u32::MAX), DisplayChannel::Rgb);
+        assert_eq!(DisplayChannel::default(), DisplayChannel::Rgb);
     }
 
     /// What [`to_display_rgba8`] did before the boundary table: evaluate the

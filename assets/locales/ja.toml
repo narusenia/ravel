@@ -50,6 +50,13 @@ node_param_values = "パラメータ値を表示"
 cycle_preview_resolution = "プレビュー解像度を切り替え"
 fit = "全体表示"
 
+[menu.viewer]
+channel_rgb = "RGB を表示"
+channel_red = "赤チャンネルを表示"
+channel_green = "緑チャンネルを表示"
+channel_blue = "青チャンネルを表示"
+channel_alpha = "アルファチャンネルを表示"
+
 [menu.composition]
 _self = "コンポジション"
 new = "新規コンポジション…"
@@ -373,6 +380,15 @@ resolution_half = "1/2"
 resolution_quarter = "1/4"
 # 選択中の係数と、実際に評価している係数。違うときだけ並べて出す
 resolution_effective = "{selected} → {effective}"
+channel = "表示チャンネル"
+channel_rgb = "RGB"
+channel_red = "赤"
+channel_green = "緑"
+channel_blue = "青"
+channel_alpha = "アルファ"
+# アルファをグレースケールで見るのと、同じ色にマットを掛けて見るのの違いは
+# DisplayChannel の doc を参照
+channel_alpha_matte = "アルファマット"
 grid = "グリッド"
 safe_areas = "セーフエリア"
 rulers = "定規"

@@ -29,7 +29,7 @@ use ravel_gpu::{GpuContext, GpuDeviceState, GpuFrameBuffer, ShaderManager, Textu
 
 use crate::display::DisplayTransform;
 use ravel_media::frame_cache::MediaFrameCache;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
 pub struct GpuEvalHooks {
@@ -122,8 +122,32 @@ impl GpuEvalHooks {
     /// Install the viewer display transform with a host-controlled output
     /// mode. The flag is shared because the hooks run on the evaluation
     /// worker while the GPUI device capability is discovered by the host.
+    ///
+    /// Order-independent with respect to [`Self::with_display_channel`]:
+    /// whichever comes second keeps what the first installed.
     pub fn with_display_surface_mode(mut self, zero_copy_surface: Arc<AtomicBool>) -> Self {
-        self.display = Some(DisplayTransform::with_surface_mode(zero_copy_surface));
+        self.display = Some(
+            self.display
+                .take()
+                .unwrap_or_default()
+                .with_surface_cell(zero_copy_surface),
+        );
+        self
+    }
+
+    /// Install the viewer display transform with a host-controlled display
+    /// channel (`INSP-2`).
+    ///
+    /// Order-independent with respect to [`Self::with_display_surface_mode`]:
+    /// whichever comes second keeps what the first installed, so a host can
+    /// name the two capabilities in either order without silently losing one.
+    pub fn with_display_channel(mut self, channel: Arc<AtomicU32>) -> Self {
+        self.display = Some(
+            self.display
+                .take()
+                .unwrap_or_default()
+                .with_channel(channel),
+        );
         self
     }
 
@@ -398,6 +422,40 @@ mod tests {
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (32, 32))
+    }
+
+    /// Both host capabilities survive, whichever order they are named in.
+    ///
+    /// Each installer used to build a fresh [`DisplayTransform`], so naming
+    /// the second one threw the first away — a viewer stuck in RGB, or one
+    /// that never took the zero-copy surface, depending on the order the host
+    /// happened to write (`INSP-2`). Neither shows up as a failure anywhere
+    /// else: both fall back to a *working* transform, just not the one the
+    /// host asked for.
+    #[test]
+    fn the_display_capabilities_do_not_overwrite_each_other() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let surface = Arc::new(AtomicBool::new(true));
+        let channel = Arc::new(AtomicU32::new(
+            ravel_core::color::DisplayChannel::Blue.to_u32(),
+        ));
+
+        for hooks in [
+            GpuEvalHooks::new(gpu.clone())
+                .with_display_surface_mode(surface.clone())
+                .with_display_channel(channel.clone()),
+            GpuEvalHooks::new(gpu.clone())
+                .with_display_channel(channel.clone())
+                .with_display_surface_mode(surface.clone()),
+        ] {
+            let display = hooks.display.as_ref().expect("no display transform");
+            assert_eq!(
+                display.channel(),
+                ravel_core::color::DisplayChannel::Blue,
+                "the channel cell was replaced"
+            );
+            assert!(display.zero_copy_surface(), "the surface cell was replaced");
+        }
     }
 
     /// The viewer boundary rasterizes on the GPU (issue MED-GPU-04): the

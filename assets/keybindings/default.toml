@@ -42,6 +42,17 @@ toggle_outliner = "Alt+7"
 toggle_media_bin = "Alt+8"
 cycle_preview_resolution = "Alt+R"
 
+# Channel isolation (INSP-2). `Alt+Shift+<initial>` because the plain and
+# `Alt`-modified letters are taken by the Timeline's reveal keys and the
+# Viewer's tools, and because the modes are not an ordered axis one chord
+# could walk. The alpha *matte* view is toolbar-only.
+[viewer]
+channel_rgb = "Alt+Shift+P"
+channel_red = "Alt+Shift+R"
+channel_green = "Alt+Shift+G"
+channel_blue = "Alt+Shift+B"
+channel_alpha = "Alt+Shift+A"
+
 [composition]
 settings = "Cmd+K"
 

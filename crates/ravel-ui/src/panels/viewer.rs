@@ -14,6 +14,8 @@
 //! The factor is view state, not document content: it says how the user is
 //! looking at the composition right now, so it never reaches `.ravprj`.
 
+use crate::command::CommandId;
+use ravel_core::color::DisplayChannel;
 use serde::{Deserialize, Serialize};
 
 /// Preview resolution factor applied to the composition resolution before the
@@ -120,6 +122,40 @@ impl ViewerResolution {
     }
 }
 
+/// Locale key for a display channel's name (`INSP-2`).
+///
+/// A free function because [`DisplayChannel`] belongs to `ravel-core`, where
+/// the pixels are: the transform that isolates a channel is a colour
+/// operation, and the enum has to reach `ravel-nodes`, which does not depend
+/// on this crate. The UI vocabulary — what the mode is *called* — stays here,
+/// the same split [`ViewerResolution::label_key`] makes.
+pub fn display_channel_label_key(channel: DisplayChannel) -> &'static str {
+    match channel {
+        DisplayChannel::Rgb => "viewer.channel_rgb",
+        DisplayChannel::Red => "viewer.channel_red",
+        DisplayChannel::Green => "viewer.channel_green",
+        DisplayChannel::Blue => "viewer.channel_blue",
+        DisplayChannel::Alpha => "viewer.channel_alpha",
+        DisplayChannel::AlphaMatte => "viewer.channel_alpha_matte",
+    }
+}
+
+/// The channel `cmd` selects, `None` for every other command.
+///
+/// [`DisplayChannel::AlphaMatte`] is deliberately absent: it has no command
+/// (see [`CommandId::ViewerChannelRgb`]), so the host's dispatch cannot reach
+/// it and the toolbar menu is the only way in.
+pub fn display_channel_from_command(cmd: CommandId) -> Option<DisplayChannel> {
+    match cmd {
+        CommandId::ViewerChannelRgb => Some(DisplayChannel::Rgb),
+        CommandId::ViewerChannelRed => Some(DisplayChannel::Red),
+        CommandId::ViewerChannelGreen => Some(DisplayChannel::Green),
+        CommandId::ViewerChannelBlue => Some(DisplayChannel::Blue),
+        CommandId::ViewerChannelAlpha => Some(DisplayChannel::Alpha),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +216,37 @@ mod tests {
         // Two factors sharing a key makes the toolbar name the wrong one, and
         // the i18n coverage test cannot see it — both keys exist.
         assert_eq!(keys.len(), total, "two factors share a label key");
+    }
+
+    /// Every channel has a name of its own, and every mode a command exists
+    /// for is reachable from that command — with `AlphaMatte` the deliberate
+    /// exception, which this test states rather than assumes.
+    #[test]
+    fn display_channel_keys_are_distinct_and_commands_reach_every_mode_but_the_matte() {
+        let mut keys: Vec<_> = DisplayChannel::ALL
+            .iter()
+            .copied()
+            .map(display_channel_label_key)
+            .collect();
+        keys.sort_unstable();
+        let total = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "two channels share a label key");
+
+        let reachable: Vec<DisplayChannel> = CommandId::all()
+            .filter_map(display_channel_from_command)
+            .collect();
+        for channel in DisplayChannel::ALL {
+            assert_eq!(
+                reachable.contains(&channel),
+                channel != DisplayChannel::AlphaMatte,
+                "{channel:?} is reachable from a command when it should not be, \
+                 or unreachable when it should be",
+            );
+        }
+        // One command per mode: a second command mapped to the same channel
+        // would leave another one dead while every assertion above passed.
+        assert_eq!(reachable.len(), DisplayChannel::ALL.len() - 1);
     }
 
     #[test]

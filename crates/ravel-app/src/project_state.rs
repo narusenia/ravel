@@ -26,6 +26,7 @@ use crate::panels::viewer::overlay::{
 };
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
+use ravel_core::color::DisplayChannel;
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
 use ravel_core::eval::{EvalContext, Quality};
@@ -54,7 +55,7 @@ use ravel_ui::panels::viewer::ViewerResolution;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 /// When set, [`ProjectState::new`] skips spawning the background evaluation
@@ -351,6 +352,15 @@ pub struct ProjectState {
     /// Epoch [`Self::live_nodes`] was scanned at; `None` before the first
     /// scan (epoch 0 is a real document).
     live_nodes_epoch: Option<u64>,
+    /// Which channel of the composite the viewer shows (`INSP-2`).
+    ///
+    /// The cell **is** the state, not a copy of it: the display transform on
+    /// the evaluation worker reads the same `Arc`, so there is no second value
+    /// to drift. Session state like the preview factor, and narrower — not
+    /// even `ui_state.json` gets it, because reopening a project with last
+    /// week's inspection mode still applied is a bug report waiting to
+    /// happen (`viewer-inspection-plan.md`).
+    display_channel: Arc<AtomicU32>,
     /// Fraction of the composition resolution the viewer evaluates at
     /// (REQ-UI-004). View state, not document content: it is never written to
     /// the `.ravprj`, so opening somebody else's project does not import
@@ -560,6 +570,7 @@ impl ProjectState {
         // (`SET-8`).
         let cache_budget = SharedCacheBudget::new(app_settings::resolved(cx).cache_budget());
         let viewer_surface_enabled = Arc::new(AtomicBool::new(false));
+        let display_channel = Arc::new(AtomicU32::new(DisplayChannel::default().to_u32()));
         let (eval, gpu, startup_gpu_error) =
             if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
                 (None, None, None)
@@ -575,7 +586,8 @@ impl ProjectState {
                             // GPU (`CM-7`). The export worker deliberately does
                             // not: its own encode step needs the linear frame.
                             ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
-                                .with_display_surface_mode(viewer_surface_enabled.clone()),
+                                .with_display_surface_mode(viewer_surface_enabled.clone())
+                                .with_display_channel(display_channel.clone()),
                             budget.clone(),
                             update_tx,
                         );
@@ -634,6 +646,7 @@ impl ProjectState {
             structure_epoch: 0,
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
+            display_channel,
             viewer_resolution: ViewerResolution::default(),
             viewer_input_active: false,
             viewer_input_epoch: 0,
@@ -1732,6 +1745,53 @@ impl ProjectState {
             return;
         }
         self.viewer_resolution = resolution;
+        self.request_viewer_eval(InvalidationHint::None, cx);
+        cx.notify();
+    }
+
+    /// Which channel of the composite the viewer shows (`INSP-2`).
+    pub fn display_channel(&self) -> DisplayChannel {
+        DisplayChannel::from_u32(self.display_channel.load(Ordering::Acquire))
+    }
+
+    /// Show one channel of the composite on its own (`INSP-2`, REQ-UI-004).
+    ///
+    /// Three steps, and the middle one is the whole point:
+    ///
+    /// 1. store into the cell the worker's display transform reads;
+    /// 2. **drop every composition's finished frames.** The output-stage
+    ///    frame cache holds `finalize`'s result, which for the viewer is the
+    ///    display bytes — a hit would hand back the previous mode's picture
+    ///    and the switch would appear to do nothing until the user scrubbed.
+    ///    Every composition, not just the active one: the channel is
+    ///    viewer-wide, so frames another composition finished under the
+    ///    previous mode are just as stale and would surface the moment the
+    ///    user switched to it;
+    /// 3. request one evaluation with [`InvalidationHint::None`].
+    ///
+    /// The hint is `None` because the composite did not change and the node
+    /// results are all still valid. `Structural` here would throw away every
+    /// cached node to redo a byte conversion, which is what
+    /// `invalidating_the_finished_frames_refinalizes_without_reprocessing`
+    /// (in `ravel-core`) pins: the transform runs again, `process()` does
+    /// not.
+    pub fn set_display_channel(&mut self, channel: DisplayChannel, cx: &mut Context<Self>) {
+        if self.display_channel() == channel {
+            return;
+        }
+        self.display_channel
+            .store(channel.to_u32(), Ordering::Release);
+        // Every composition's finished frames, not just the active one's: the
+        // output-stage cache holds the **display bytes** `finalize` produced,
+        // and this setting is viewer-wide, so a frame finished under the
+        // previous channel is stale wherever it sits. Keeping the other
+        // compositions would show the old channel the moment the user
+        // switched to one of them, which is the whole failure this
+        // invalidation exists to prevent. The node-level caches are untouched,
+        // so what those frames cost again is the transform, not the graph.
+        if let Some(eval) = self.eval.as_ref() {
+            eval.frame_cache().clear();
+        }
         self.request_viewer_eval(InvalidationHint::None, cx);
         cx.notify();
     }
@@ -3533,6 +3593,237 @@ mod tests {
                 .unwrap()
                 .ctx;
             assert_eq!(ctx.resolution, comp_resolution);
+        });
+    }
+
+    /// `INSP-2`: the display channel is a *display* option, and two things
+    /// follow that this asserts.
+    ///
+    /// The evaluation request must be byte-identical in every mode — a mode
+    /// that reached [`EvalContext`] would turn each switch into a full
+    /// recompute of every node, which is exactly what the unit must not do.
+    /// And a switch must cost **one** evaluation: one to redo the transform,
+    /// and none at all when the mode asked for is already the one in effect.
+    ///
+    /// What the frame-cache invalidation itself buys is measured where it can
+    /// be observed —
+    /// `ravel_core`'s `invalidating_the_finished_frames_refinalizes_without_reprocessing`.
+    /// There is no evaluation worker in a headless test, so there is no cache
+    /// here to invalidate.
+    #[gpui::test]
+    fn the_display_channel_never_changes_the_evaluation_request(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            let request = |project: &mut ProjectState, cx: &mut Context<ProjectState>| {
+                project
+                    .build_viewer_request(0, &OverlayRegistry::builtin(), cx)
+                    .unwrap()
+                    .unwrap()
+                    .ctx
+            };
+
+            // The session opens on the composite: an inspection mode is never
+            // restored, so it can never be inherited either.
+            assert_eq!(project.display_channel(), DisplayChannel::Rgb);
+            let baseline = request(project, cx);
+            // The setup's own `Structural` is still pending — there is no
+            // worker to hand it to — and the assertion below is about what
+            // the *switch* asks for.
+            project.pending_hint = InvalidationHint::None;
+
+            for channel in DisplayChannel::ALL {
+                let before = project.viewer_eval_requests();
+                let already_active = project.display_channel() == channel;
+                project.set_display_channel(channel, cx);
+                assert_eq!(project.display_channel(), channel);
+
+                let expected = if already_active { before } else { before + 1 };
+                assert_eq!(
+                    project.viewer_eval_requests(),
+                    expected,
+                    "{channel:?} did not cost exactly one evaluation"
+                );
+                // With no worker the posted hint stays here, which is the only
+                // place it can be read. `Structural` would mark every node
+                // dirty to redo a byte conversion.
+                assert!(
+                    matches!(project.pending_hint, InvalidationHint::None),
+                    "{channel:?} asked for {:?} instead of no invalidation",
+                    project.pending_hint
+                );
+                // The same mode again is not a change, so it must not pay for
+                // a transform that would produce the picture already on
+                // screen.
+                project.set_display_channel(channel, cx);
+                assert_eq!(
+                    project.viewer_eval_requests(),
+                    expected,
+                    "{channel:?} re-evaluated for a mode already in effect"
+                );
+
+                assert_eq!(
+                    request(project, cx),
+                    baseline,
+                    "{channel:?} changed the evaluation request"
+                );
+            }
+        });
+    }
+
+    /// The finished frames of **every** composition go, not just the active
+    /// one's: the channel is viewer-wide, so a frame another composition
+    /// finished under the previous mode is just as stale, and switching to it
+    /// would hand those bytes straight back.
+    ///
+    /// Two compositions is the smallest fixture that can tell the two
+    /// invalidations apart — with one, dropping "the active composition" and
+    /// dropping everything look identical. The assertion reads the cache
+    /// directly rather than counting hits on a later evaluation: what the
+    /// call does to the cache is synchronous, while what a later evaluation
+    /// costs depends on read-ahead and on which frame the worker finishes
+    /// first (counting hits made this test flaky, 2 runs in 3).
+    #[gpui::test]
+    fn switching_the_display_channel_drops_every_compositions_frames(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+
+        let second = project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            let first = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), first, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            let second = ravel_core::id::CompId::next();
+            let composition = ravel_core::composition::Composition::new(
+                second,
+                "Second",
+                (64, 64),
+                FrameRate::new(30, 1),
+                30,
+            );
+            let document = project.document().clone().with_composition(composition);
+            let document =
+                ravel_ui::document::add_layer(&document, second, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            // Cache the second composition while it is the one being viewed,
+            // then leave it behind.
+            project.set_active_composition(Some(second), cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+            second
+        });
+
+        // The entry it has to keep until the channel changes.
+        let ctx = project.read_with(cx, |project, _| {
+            let comp = project.document().get_composition(second).unwrap();
+            project.viewer_eval_context(comp, 0)
+        });
+        let cached = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                !project
+                    .eval
+                    .as_ref()
+                    .unwrap()
+                    .frame_cache()
+                    .cached_ranges(second, &ctx)
+                    .is_empty()
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cached(cx) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never cached the second composition"
+            );
+            let _ = rx.try_recv();
+            std::thread::yield_now();
+        }
+
+        project.update(cx, |project, cx| {
+            let first = project.document().root_comp.unwrap();
+            project.set_active_composition(Some(first), cx);
+            project.set_display_channel(DisplayChannel::Alpha, cx);
+        });
+
+        assert!(
+            !cached(cx),
+            "a composition kept the frames it finished in the previous channel"
+        );
+    }
+
+    /// The other half of `INSP-2`'s switch, and the half a headless
+    /// `ProjectState` normally cannot see: the finished frames have to be
+    /// dropped, or the re-evaluation is a **cache hit** that hands back the
+    /// bytes of the previous mode. The evaluation request is identical in
+    /// every mode by design (the test above), which is exactly what makes
+    /// that hit certain.
+    ///
+    /// A real worker is installed here rather than waited for: with no
+    /// service there is no cache, and the property is about the cache. The
+    /// second evaluation must be a miss.
+    #[gpui::test]
+    fn switching_the_display_channel_drops_the_finished_frames(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+
+        project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+
+        let mut await_frame = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if rx.try_recv().is_ok() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the evaluation worker sent no result"
+                );
+                std::thread::yield_now();
+            }
+        };
+        await_frame();
+
+        let stats = |project: &ProjectState| project.eval.as_ref().unwrap().frame_cache().stats();
+        project.read_with(cx, |project, _| {
+            assert_eq!(stats(project).hits, 0, "the first evaluation was a hit");
+        });
+
+        project.update(cx, |project, cx| {
+            project.set_display_channel(DisplayChannel::Alpha, cx);
+        });
+        await_frame();
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                stats(project).hits,
+                0,
+                "the mode switch was served from the frame cache, so the \
+                 viewer kept the previous mode's picture"
+            );
         });
     }
 

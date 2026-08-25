@@ -2129,6 +2129,76 @@ mod tests {
         assert_eq!(service.frame_cache().stats().hits, 1);
     }
 
+    /// `INSP-2`: a viewer display option changes the *bytes*, not the
+    /// composite, and the switch has to cost exactly one re-finalize.
+    ///
+    /// This is the mechanism a display-channel switch uses: drop the output
+    /// stage's frames (they hold finished display bytes, so a hit would serve
+    /// the previous mode's picture) and request again with
+    /// [`InvalidationHint::None`]. What the request must **not** do is mark
+    /// anything dirty — the node results are still valid, and this is the
+    /// test that says so: `process()` never runs a second time while
+    /// `finalize` does.
+    #[test]
+    fn invalidating_the_finished_frames_refinalizes_without_reprocessing() {
+        let processed = Arc::new(AtomicUsize::new(0));
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks::new(processed.clone()).counting_finalize(finalized.clone()),
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        let graph = Graph::new()
+            .add_node(Node::new(node, "frame").with_output("out", DataTypeId::FRAME_BUFFER))
+            .unwrap();
+        let document = frame_document();
+
+        service.request(frame_request(
+            graph.clone(),
+            node,
+            0,
+            document.clone(),
+            InvalidationHint::Structural,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(processed.load(Ordering::SeqCst), 1);
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+
+        // What the host does when the user picks another display channel.
+        service.frame_cache().invalidate_comp(comp_id());
+        service.request(frame_request(
+            graph,
+            node,
+            0,
+            document,
+            InvalidationHint::None,
+        ));
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        assert!(update.results[0].1.is_ok(), "the frame came back empty");
+        assert_eq!(
+            finalized.load(Ordering::SeqCst),
+            2,
+            "the transform did not run again, so the viewer would keep the \
+             bytes of the previous mode"
+        );
+        assert_eq!(
+            processed.load(Ordering::SeqCst),
+            1,
+            "the node was evaluated again: a display option reached the \
+             evaluator's cache identity or marked something dirty"
+        );
+        assert!(
+            update.timings.is_empty(),
+            "the composite was recomputed: {:?}",
+            update.timings
+        );
+    }
+
     /// A `finalize` failure must not become a permanent one.
     ///
     /// The cache stores the *finalized* form and a hit never re-runs

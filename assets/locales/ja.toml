@@ -397,6 +397,11 @@ pixel_readout = "ピクセル値"
 pixel_readout_format = "値の尺度"
 pixel_readout_float = "浮動小数"
 pixel_readout_byte = "8bit（0-255）"
+# 再生状態の 1 行（INSP-4）。画面の絵が真実でない理由を並べる。
+# 要素ごとに 1 キー + プレースホルダなので語順は訳側が決める
+status_dropped = "ドロップ {count}"
+status_preview = "{factor} 解像度"
+status_cached = "キャッシュ {percent}%"
 grid = "グリッド"
 safe_areas = "セーフエリア"
 rulers = "定規"

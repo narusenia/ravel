@@ -629,6 +629,11 @@ impl PlaybackController {
             frame: update.frame,
             fps: self.transport.fps(),
         });
+        // The one place the drop count reaches the UI (`INSP-4`). Here rather
+        // than in the tick loop because every position change routes through
+        // this method — a stop has to clear the count's audience as reliably as
+        // a tick raises it.
+        panels::set_playback_status(update.playing, self.transport.dropped_frames(), cx);
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());
@@ -676,7 +681,19 @@ impl PlaybackController {
                             this.forward_transport(false, None, cx);
                         }
                     }
-                    !this.transport.is_playing()
+                    // The clock can also stop *itself*: a composition deleted
+                    // or emptied under a running transport resyncs onto a
+                    // zero-length clock, which `PlaybackClock::play` refuses
+                    // to start, and `tick_with` then publishes no position at
+                    // all. Say so before the loop exits, or the status line
+                    // keeps reporting a play segment that no longer exists
+                    // (`INSP-4`). Cheap to repeat: `set_playback_status`
+                    // compares before it writes.
+                    let stopped = !this.transport.is_playing();
+                    if stopped {
+                        panels::set_playback_status(false, this.transport.dropped_frames(), cx);
+                    }
+                    stopped
                 });
                 match finished {
                     Ok(true) | Err(_) => break,

@@ -405,6 +405,12 @@ pixel_readout = "Pixel values"
 pixel_readout_format = "Value scale"
 pixel_readout_float = "Float"
 pixel_readout_byte = "8-bit (0-255)"
+# Playback status line (INSP-4): the ways the picture on screen is not the
+# truth. One key per element with its own placeholder, so a translation
+# decides its own word order — the line joins whichever elements apply.
+status_dropped = "dropped {count}"
+status_preview = "{factor} res"
+status_cached = "cached {percent}%"
 grid = "Grid"
 safe_areas = "Safe areas"
 rulers = "Rulers"

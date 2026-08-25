@@ -187,6 +187,58 @@ fn transport_records_the_shared_playback_position(cx: &mut TestAppContext) {
     assert_eq!(position.frame, 0);
 }
 
+/// The Viewer's status line reads the transport through a global of its own
+/// (`INSP-4`), written on the one path that publishes a position — so a stop
+/// clears the report as reliably as a play raises it.
+#[gpui::test]
+fn transport_publishes_its_playing_state_for_the_viewer(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+
+    cx.dispatch_action(window.into(), workspace::PlaybackToggle);
+    let status = cx.update(|cx| panels::playback_status(cx));
+    assert!(status.playing);
+    assert_eq!(
+        status.dropped_frames, 0,
+        "a play segment that has not ticked yet has dropped nothing"
+    );
+
+    cx.dispatch_action(window.into(), workspace::PlaybackStop);
+    assert!(
+        !cx.update(|cx| panels::playback_status(cx)).playing,
+        "a stopped transport must not leave the status line claiming playback"
+    );
+}
+
+/// The clock can stop itself: with the composition gone, the tick loop's
+/// resync lands on a zero-length clock that `PlaybackClock::play` refuses to
+/// start, and no position is published for it. The status line must still stop
+/// claiming playback — otherwise it keeps a drop count from a segment that no
+/// longer exists on screen.
+#[gpui::test]
+fn a_composition_lost_under_playback_clears_the_status(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+
+    cx.dispatch_action(window.into(), workspace::PlaybackToggle);
+    assert!(cx.update(|cx| panels::playback_status(cx)).playing);
+
+    // No active composition: `playback_params` returns `None`, so the tick
+    // loop's resync syncs the clock to a duration of zero.
+    cx.update(|cx| panels::set_active_composition_for_tests(None, cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+
+    let status = cx.update(|cx| panels::playback_status(cx));
+    assert!(
+        !status.playing,
+        "a clock that stopped itself left the status line claiming playback"
+    );
+    assert_eq!(
+        transport_state(cx).1,
+        PlaybackState::Stopped,
+        "the premise: the resync stopped the clock without publishing"
+    );
+}
+
 /// A ruler scrub delegates the seek while the Timeline panel is still on the
 /// entity update stack; the controller must seek the clock without touching
 /// the timeline entity (reading it back panics with "already being updated").

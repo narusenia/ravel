@@ -2813,6 +2813,24 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   the global (node ids are reused across documents), so the global never
   outgrows the document and no readout is inherited by a reused id.
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
+- The viewer's playback status line (`INSP-4`) is one label, composed from
+  three readings of "the picture on screen is not the truth".
+  `panels::PlaybackStatus { playing, dropped_frames }` is a durable global
+  written only by `PlaybackController::publish_position` (through
+  `panels::set_playback_status`, which compares first) and read with
+  `panels::playback_status(cx) -> PlaybackStatus`; nothing observes it, because
+  a playing transport already repaints the viewer every frame (`HIGH-21`).
+  Which readings are worth showing, and how they read as one line, is
+  `ravel_ui::panels::viewer::playback_status_text(PlaybackStatusInputs {
+  playing, dropped_frames, selected_factor, effective_factor, cached_frames,
+  duration_frames }, tr) -> Option<String>`, where `tr` resolves a locale key
+  (one key with one placeholder per element) and `None` means "draw nothing".
+  The preview element compares the **two factors**, not the two pixel sizes:
+  it reports `VRES-4`'s adaptive downgrade (`effective_factor` below
+  `selected_factor`) and stays quiet at the factor the user chose, which the
+  toolbar already names. The cached share comes from the Timeline's own band
+  (`panels::cache_band(cx)`), so the two never disagree; the label sits in
+  `LabelPlacement::CanvasTopRight`, the only viewer corner no other HUD holds.
 - Settings apply path (`src/app_settings.rs`, `SET-1`): the one route from a
   settings file to running behaviour. `read_global_settings()` →
   `GlobalSettingsFile::resolved()` (before the GPUI app exists, so the locale is

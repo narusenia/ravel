@@ -27,7 +27,8 @@ use ravel_core::types::FrameRate;
 use ravel_ui::command::CommandId;
 use ravel_ui::keyframes::{CHANNEL_VALUE, property_rows};
 use ravel_ui::panels::viewer::{
-    ViewerResolution, display_channel_from_command, display_channel_label_key,
+    PlaybackStatusInputs, ViewerResolution, display_channel_from_command,
+    display_channel_label_key, playback_status_text,
 };
 use ravel_ui::properties::layer::{
     DURATION_FRAMES, SOURCE_AUDIO, SOURCE_NETWORK, SOURCE_NULL, sections_for_layer,
@@ -367,6 +368,65 @@ fn the_preview_resolution_label_distinguishes_selected_from_effective() {
                 );
             }
         }
+    }
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
+/// The Viewer's playback status line (`INSP-4`). Three things the lib tests
+/// cannot see, because they run with an empty i18n store where every `t!`
+/// returns its key:
+///
+/// - each element is a *translated* pattern, not the raw `viewer.status_*` key;
+/// - every placeholder is filled, so no `{count}` reaches the screen;
+/// - the number a translation carries is the number it was given — a `ja`
+///   pattern that dropped `{percent}` would still read as a sentence.
+#[test]
+fn the_playback_status_line_translates_every_element_it_shows() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_i18n();
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+
+        let line = playback_status_text(
+            PlaybackStatusInputs {
+                playing: true,
+                dropped_frames: 12,
+                selected_factor: Some(ViewerResolution::Full),
+                effective_factor: Some(ViewerResolution::Half),
+                cached_frames: &[0..40, 50..74],
+                duration_frames: 100,
+            },
+            ravel_i18n::translate,
+        )
+        .expect("three readings are not clean, so the line exists");
+
+        for key in [
+            "viewer.status_dropped",
+            "viewer.status_preview",
+            "viewer.status_cached",
+        ] {
+            assert!(
+                !line.contains(key),
+                "{locale}: {line:?} shows the raw key {key}"
+            );
+        }
+        assert!(
+            !line.contains('{'),
+            "{locale}: {line:?} left a placeholder unfilled"
+        );
+        assert!(
+            line.contains("12"),
+            "{locale}: {line:?} lost the drop count"
+        );
+        assert!(
+            line.contains(&ravel_i18n::translate(ViewerResolution::Half.label_key())),
+            "{locale}: {line:?} lost the preview factor"
+        );
+        assert!(
+            line.contains("64"),
+            "{locale}: {line:?} lost the cached share"
+        );
     }
     ravel_i18n::set_locale("en").expect("en catalog is shipped");
 }

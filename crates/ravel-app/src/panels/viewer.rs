@@ -1562,6 +1562,21 @@ impl ViewerPanel {
             // source along. A frame published while the readout was off has no
             // `linear`, so the readout stays quiet for the one frame between
             // switching it on and the re-finalized frame arriving.
+            // Both written outside this panel and read without an observer of
+            // their own (`INSP-4`): the status line only changes on frames the
+            // viewer is already repainting for.
+            playback_status: super::playback_status(cx),
+            // The selection and the factor in force, read from the one place
+            // that owns both (`ProjectState`). Their *difference* is what the
+            // status line reports, so they travel as a pair.
+            preview_factors: project.as_ref().map(|project| {
+                let project = project.read(cx);
+                (
+                    project.viewer_resolution(),
+                    project.effective_viewer_resolution(),
+                )
+            }),
+            cached_frames: super::cache_band(cx),
             pixel_readout: self
                 .readout_pointer
                 .zip(self.linear.clone())
@@ -2915,14 +2930,27 @@ impl ViewerPanel {
 /// label is placed through — the same pair the pointer is resolved with. `None`
 /// when there is no composition on screen, and such a label then has nowhere to
 /// sit and is dropped.
+///
+/// `mono` is the monospace family every label but the centered one is set in.
+/// Passed rather than read here because this is not a `Render` method and the
+/// family is the theme's ([`crate::fonts::mono_font`], so the Japanese
+/// fallback comes with it — the status line is translated).
 fn overlay_label_element(
     label: overlay::OverlayLabel,
     viewport: Option<(viewport::Rect, (u32, u32))>,
+    mono: &Font,
 ) -> Option<Div> {
-    let text = div()
-        .text_xs()
-        .text_color(label.color)
-        .child(label.text.clone());
+    let text = div().text_xs().text_color(label.color);
+    // Every label but one is a readout whose digits change under the pointer
+    // or the playhead, and proportional digits make the corner jitter while
+    // they do — the same reason the Timeline's ruler labels are monospaced.
+    // The centered label is the evaluation error, which is a sentence.
+    let text = if matches!(label.placement, LabelPlacement::CanvasCenter) {
+        text
+    } else {
+        text.font(mono.clone())
+    };
+    let text = text.child(label.text.clone());
     Some(match label.placement {
         LabelPlacement::CanvasCenter => div()
             .absolute()
@@ -2933,6 +2961,7 @@ fn overlay_label_element(
             .child(text),
         LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(text),
         LabelPlacement::CanvasBottomLeft => div().absolute().bottom_2().left_2().child(text),
+        LabelPlacement::CanvasTopRight => div().absolute().top_2().right_2().child(text),
         LabelPlacement::Comp(comp) => {
             let (rect, resolution) = viewport?;
             let (x, y) = comp_to_screen(comp, rect, resolution.0);
@@ -3353,10 +3382,11 @@ impl Render for ViewerPanel {
             )
         });
         let content = if !labels.is_empty() {
+            let mono = crate::fonts::mono_font(cx);
             content.children(
                 labels
                     .into_iter()
-                    .filter_map(|label| overlay_label_element(label, label_viewport)),
+                    .filter_map(|label| overlay_label_element(label, label_viewport, &mono)),
             )
         } else if self.composition_resolution.is_none() {
             content.child(

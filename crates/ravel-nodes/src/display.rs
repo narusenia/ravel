@@ -211,10 +211,17 @@ impl DisplayTransform {
 
     /// A transform whose output mode follows a host capability flag.
     pub fn with_surface_mode(zero_copy_surface: Arc<AtomicBool>) -> Self {
-        Self {
-            zero_copy_surface,
-            ..Self::new()
-        }
+        Self::new().with_surface_cell(zero_copy_surface)
+    }
+
+    /// Point an existing transform at another surface-mode cell.
+    ///
+    /// The builder form of [`Self::with_surface_mode`], so a caller that has
+    /// already installed one host capability can add the other without
+    /// rebuilding — which would silently drop the first (`INSP-2`).
+    pub fn with_surface_cell(mut self, zero_copy_surface: Arc<AtomicBool>) -> Self {
+        self.zero_copy_surface = zero_copy_surface;
+        self
     }
 
     /// A transform whose display channel follows a cell the host writes
@@ -223,6 +230,22 @@ impl DisplayTransform {
     pub fn with_channel(mut self, channel: Arc<AtomicU32>) -> Self {
         self.channel = channel;
         self
+    }
+
+    /// The channel the next frame will be shown in.
+    ///
+    /// The cell is what the host writes, so this reports the *current*
+    /// intention rather than what the last frame used.
+    pub fn channel(&self) -> ravel_core::color::DisplayChannel {
+        ravel_core::color::DisplayChannel::from_u32(
+            self.channel.load(std::sync::atomic::Ordering::Acquire),
+        )
+    }
+
+    /// Whether the transform is producing a surface-mode frame.
+    pub fn zero_copy_surface(&self) -> bool {
+        self.zero_copy_surface
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Install (or clear) the user's display LUT.

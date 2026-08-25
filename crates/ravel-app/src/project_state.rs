@@ -1759,10 +1759,14 @@ impl ProjectState {
     /// Three steps, and the middle one is the whole point:
     ///
     /// 1. store into the cell the worker's display transform reads;
-    /// 2. **drop the active composition's finished frames.** The output-stage
+    /// 2. **drop every composition's finished frames.** The output-stage
     ///    frame cache holds `finalize`'s result, which for the viewer is the
     ///    display bytes — a hit would hand back the previous mode's picture
-    ///    and the switch would appear to do nothing until the user scrubbed;
+    ///    and the switch would appear to do nothing until the user scrubbed.
+    ///    Every composition, not just the active one: the channel is
+    ///    viewer-wide, so frames another composition finished under the
+    ///    previous mode are just as stale and would surface the moment the
+    ///    user switched to it;
     /// 3. request one evaluation with [`InvalidationHint::None`].
     ///
     /// The hint is `None` because the composite did not change and the node
@@ -3681,7 +3685,11 @@ mod tests {
     ///
     /// Two compositions is the smallest fixture that can tell the two
     /// invalidations apart — with one, dropping "the active composition" and
-    /// dropping everything look identical.
+    /// dropping everything look identical. The assertion reads the cache
+    /// directly rather than counting hits on a later evaluation: what the
+    /// call does to the cache is synchronous, while what a later evaluation
+    /// costs depends on read-ahead and on which frame the worker finishes
+    /// first (counting hits made this test flaky, 2 runs in 3).
     #[gpui::test]
     fn switching_the_display_channel_drops_every_compositions_frames(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
@@ -3690,20 +3698,6 @@ mod tests {
         let budget = SharedCacheBudget::new(
             ravel_project::settings::ResolvedSettings::default().cache_budget(),
         );
-
-        let mut await_frame = || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                if rx.try_recv().is_ok() {
-                    return;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the evaluation worker sent no result"
-                );
-                std::thread::yield_now();
-            }
-        };
 
         let second = project.update(cx, |project, cx| {
             project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
@@ -3724,50 +3718,50 @@ mod tests {
             let document =
                 ravel_ui::document::add_layer(&document, second, content_layer()).unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
+
+            // Cache the second composition while it is the one being viewed,
+            // then leave it behind.
+            project.set_active_composition(Some(second), cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
             second
         });
-        await_frame();
 
-        // Fill the second composition's entry while it is the active one, then
-        // leave it behind.
-        project.update(cx, |project, cx| {
-            project.set_active_composition(Some(second), cx);
-            project.request_viewer_eval(InvalidationHint::None, cx);
+        // The entry it has to keep until the channel changes.
+        let ctx = project.read_with(cx, |project, _| {
+            let comp = project.document().get_composition(second).unwrap();
+            project.viewer_eval_context(comp, 0)
         });
-        await_frame();
-        let first = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
+        let cached = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                !project
+                    .eval
+                    .as_ref()
+                    .unwrap()
+                    .frame_cache()
+                    .cached_ranges(second, &ctx)
+                    .is_empty()
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cached(cx) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never cached the second composition"
+            );
+            let _ = rx.try_recv();
+            std::thread::yield_now();
+        }
+
         project.update(cx, |project, cx| {
+            let first = project.document().root_comp.unwrap();
             project.set_active_composition(Some(first), cx);
-            project.request_viewer_eval(InvalidationHint::None, cx);
-        });
-        await_frame();
-
-        project.update(cx, |project, cx| {
             project.set_display_channel(DisplayChannel::Alpha, cx);
         });
-        await_frame();
 
-        // Revisiting a composition is a hit in the ordinary course of things,
-        // so the count before the return is the baseline; what must not happen
-        // is one *more* hit after the channel changed.
-        let hits_before = project.read_with(cx, |project, _| {
-            project.eval.as_ref().unwrap().frame_cache().stats().hits
-        });
-
-        // Back to the composition that was cached under the previous channel.
-        project.update(cx, |project, cx| {
-            project.set_active_composition(Some(second), cx);
-            project.request_viewer_eval(InvalidationHint::None, cx);
-        });
-        await_frame();
-
-        project.read_with(cx, |project, _| {
-            assert_eq!(
-                project.eval.as_ref().unwrap().frame_cache().stats().hits,
-                hits_before,
-                "a composition kept the frames it finished in the previous channel"
-            );
-        });
+        assert!(
+            !cached(cx),
+            "a composition kept the frames it finished in the previous channel"
+        );
     }
 
     /// The other half of `INSP-2`'s switch, and the half a headless

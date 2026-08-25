@@ -2904,22 +2904,36 @@ mod tests {
                 cx,
             );
         };
+        let frame_width = |cx: &mut TestAppContext| {
+            cx.update(|cx| match cx.try_global::<crate::panels::ViewerFrame>() {
+                Some(crate::panels::ViewerFrame::Frame { image, .. }) => Some(image.width()),
+                _ => None,
+            })
+        };
+
+        // The state the swap leaves behind: the fence is the retired worker's
+        // generation, and nothing of the new epoch has arrived yet.
         project.update(cx, |project, cx| {
-            // The swap carried generation 5 over; its own request published 6.
             project.published_generation = 5;
-            published(project, cx, 6, 8);
-            // What the retired worker had already sent, at the number the
-            // swap inherited from it.
+            // What the retired worker had already sent — carrying **exactly**
+            // the number the swap inherited from it. This is the comparison
+            // the boundary creates: `<` would let it through, and ordinary
+            // latest-wins never produces the equality case.
             published(project, cx, 5, 4);
         });
-
-        let width = cx.update(|cx| match cx.global::<crate::panels::ViewerFrame>() {
-            crate::panels::ViewerFrame::Frame { image, .. } => image.width(),
-            other => panic!("expected a published frame, got {other:?}"),
-        });
         assert_eq!(
-            width, 8,
-            "an old-epoch result at the inherited generation overwrote the new epoch's frame"
+            frame_width(cx),
+            None,
+            "an old-epoch result at the inherited generation reached the viewer"
+        );
+
+        // And the new epoch's own first request, one past the fence, is not
+        // caught by it.
+        project.update(cx, |project, cx| published(project, cx, 6, 8));
+        assert_eq!(
+            frame_width(cx),
+            Some(8),
+            "the new epoch's first frame was dropped on the inherited fence"
         );
     }
 

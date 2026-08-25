@@ -3669,8 +3669,18 @@ impl Render for ViewerPanel {
                     }
                     Some(MouseButton::Left) => this.left_dragged(event, cx),
                     _ => {
-                        this.pan_drag = None;
-                        this.zoom_drag = None;
+                        // Repaint on the way out: the Zoom marquee is painted
+                        // from `zoom_drag`, and the hint block below returns
+                        // early whenever the pointer is off the composition or
+                        // the hint is unchanged. A release the window never
+                        // saw would otherwise leave the rectangle on screen
+                        // until something else repainted the panel. Both are
+                        // taken before the `||` so neither short-circuits.
+                        let had_pan = this.pan_drag.take().is_some();
+                        let had_zoom = this.zoom_drag.take().is_some();
+                        if had_pan || had_zoom {
+                            cx.notify();
+                        }
                         this.pen_point_ended(cx);
                         this.cancel_move(cx);
                         this.cancel_shape(cx);

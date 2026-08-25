@@ -121,7 +121,11 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 - カーソルは `tool_pointer_hint` に集約した（ツール → `ViewerPointerHint` の
   唯一の写像。`ToolState` の observer と `pointer_hint_at` の両方がここを引く）。
   Hand は `OpenHand`、押下中は既存の `viewer_drag_cursor` が `ClosedHand` に
-  し、Zoom は `Crosshair`
+  し、Zoom は `Crosshair`。ハンドルを持つオーバーレイは 4 つとも `is_active` を
+  `Select`（`PathEditOverlay` は `Select | Pen`）で閉じているので、Hand / Zoom の
+  ためにパネル側でもう一段ゲートを置く必要は無い — 置いても落とせるテストが
+  書けないため置いていない。約束と押下が一致することは
+  `pointer_hint_at` の実測でテストに固定してある
 - ドラッグ中の矩形は 1px の枠で描く。フィードバック無しの矩形ズームは
   「離すまで何も起きない」ジェスチャーになるため。`Escape` で取り消す
 

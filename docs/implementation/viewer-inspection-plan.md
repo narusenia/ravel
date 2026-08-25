@@ -1,6 +1,7 @@
 # Viewer の表示オプションと検査 実装計画
 
-> **Status**: INSP-1 complete — PR #213, 2026-07-30; INSP-2〜5 planned
+> **Status**: INSP-1 complete — PR #213, 2026-07-30; INSP-2 complete — PR #479,
+> 2026-08-25; INSP-3 complete — PR #480, 2026-08-25; INSP-4 / INSP-5 planned
 
 対象: Viewer で「出ている絵が本当に正しいか」を確かめる手段を用意する。
 背景色の配線、透過の可視化、チャンネル単独表示、ピクセル値の読み取り、

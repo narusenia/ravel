@@ -187,6 +187,28 @@ fn transport_records_the_shared_playback_position(cx: &mut TestAppContext) {
     assert_eq!(position.frame, 0);
 }
 
+/// The Viewer's status line reads the transport through a global of its own
+/// (`INSP-4`), written on the one path that publishes a position — so a stop
+/// clears the report as reliably as a play raises it.
+#[gpui::test]
+fn transport_publishes_its_playing_state_for_the_viewer(cx: &mut TestAppContext) {
+    let window = open_workspace(cx);
+
+    cx.dispatch_action(window.into(), workspace::PlaybackToggle);
+    let status = cx.update(|cx| panels::playback_status(cx));
+    assert!(status.playing);
+    assert_eq!(
+        status.dropped_frames, 0,
+        "a play segment that has not ticked yet has dropped nothing"
+    );
+
+    cx.dispatch_action(window.into(), workspace::PlaybackStop);
+    assert!(
+        !cx.update(|cx| panels::playback_status(cx)).playing,
+        "a stopped transport must not leave the status line claiming playback"
+    );
+}
+
 /// A ruler scrub delegates the seek while the Timeline panel is still on the
 /// entity update stack; the controller must seek the clock without touching
 /// the timeline entity (reading it back panics with "already being updated").

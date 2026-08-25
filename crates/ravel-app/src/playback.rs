@@ -681,7 +681,19 @@ impl PlaybackController {
                             this.forward_transport(false, None, cx);
                         }
                     }
-                    !this.transport.is_playing()
+                    // The clock can also stop *itself*: a composition deleted
+                    // or emptied under a running transport resyncs onto a
+                    // zero-length clock, which `PlaybackClock::play` refuses
+                    // to start, and `tick_with` then publishes no position at
+                    // all. Say so before the loop exits, or the status line
+                    // keeps reporting a play segment that no longer exists
+                    // (`INSP-4`). Cheap to repeat: `set_playback_status`
+                    // compares before it writes.
+                    let stopped = !this.transport.is_playing();
+                    if stopped {
+                        panels::set_playback_status(false, this.transport.dropped_frames(), cx);
+                    }
+                    stopped
                 });
                 match finished {
                     Ok(true) | Err(_) => break,

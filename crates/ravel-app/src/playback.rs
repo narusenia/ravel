@@ -629,6 +629,11 @@ impl PlaybackController {
             frame: update.frame,
             fps: self.transport.fps(),
         });
+        // The one place the drop count reaches the UI (`INSP-4`). Here rather
+        // than in the tick loop because every position change routes through
+        // this method — a stop has to clear the count's audience as reliably as
+        // a tick raises it.
+        panels::set_playback_status(update.playing, self.transport.dropped_frames(), cx);
         let project = cx
             .try_global::<crate::project_state::ProjectStateHandle>()
             .and_then(|handle| handle.0.upgrade());

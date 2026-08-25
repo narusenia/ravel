@@ -630,6 +630,54 @@ pub(crate) fn set_show_node_param_values(shown: bool, cx: &mut App) {
     cx.set_global(ShowNodeParamValuesState(shown));
 }
 
+/// Durable shared state: whether the transport is running, and how many frames
+/// it has dropped in the current play segment (`INSP-4`).
+///
+/// Written by [`crate::playback::PlaybackController`] on the one path that
+/// publishes a position, and **only when either value changed** (see
+/// [`set_playback_status`]). Read by the Viewer's status overlay.
+///
+/// Separate from [`PlaybackPosition`] rather than two more fields on it: that
+/// struct is assembled in twenty places (tests included), each of which would
+/// have to name a drop count it knows nothing about.
+///
+/// # Why nothing observes this global
+///
+/// The Viewer reads it while assembling its overlay snapshot instead of
+/// subscribing. During playback the drop count changes on the very frames the
+/// viewer is already repainting for — a subscription would add a second
+/// repaint per frame on top of the one the new frame causes, which is the
+/// shape of `HIGH-21`. The default — stopped, nothing dropped — is the honest
+/// reading before the first transport command, so absence needs no `Option`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackStatus {
+    pub playing: bool,
+    pub dropped_frames: u64,
+}
+
+impl Global for PlaybackStatus {}
+
+/// The transport's current state, defaulting to "stopped, nothing dropped".
+pub fn playback_status(cx: &App) -> PlaybackStatus {
+    cx.try_global::<PlaybackStatus>()
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Publish the transport's state. Writes only on a change, for the reason
+/// [`set_cache_band`] compares first: a playing transport publishes a position
+/// every frame, and most of those carry the same status as the last.
+pub(crate) fn set_playback_status(playing: bool, dropped_frames: u64, cx: &mut App) {
+    let status = PlaybackStatus {
+        playing,
+        dropped_frames,
+    };
+    if playback_status(cx) == status {
+        return;
+    }
+    cx.set_global(status);
+}
+
 /// Durable shared state: which frames of each composition the output-stage
 /// frame cache is currently holding — the Timeline's cache band (`CACHE-6`).
 ///

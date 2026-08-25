@@ -41,10 +41,14 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
-use ravel_ui::panels::viewer::{PixelReadoutFormat, comp_to_buffer_index, pixel_readout_text};
+use ravel_ui::panels::viewer::{
+    PixelReadoutFormat, PlaybackStatusInputs, comp_to_buffer_index, pixel_readout_text,
+    playback_status_text,
+};
 
-use crate::panels::{CanvasSelection, LayerSelection, PlaybackPosition};
+use crate::panels::{CanvasSelection, LayerSelection, PlaybackPosition, PlaybackStatus};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::{
@@ -95,6 +99,12 @@ pub mod priority {
     /// the drag in flight has snapped to, so it has to be readable over the
     /// bbox, the grips and the safe areas it lands on.
     pub const SNAP_GUIDES: i32 = 45;
+    /// A corner label like [`PIXEL_READOUT`], and in a corner of its own: it
+    /// grabs no pointer and shares its corner with nothing, so this number
+    /// decides no contest for text or for hits. It sits below the readout only
+    /// to keep the two corner labels in a stable, readable order in the
+    /// registry.
+    pub const PLAYBACK_STATUS: i32 = 47;
     /// Below the evaluation error and above everything drawn in composition
     /// space: the readout is a corner label that grabs nothing, so its order
     /// only decides which text wins the corner it sits in — and an error the
@@ -238,6 +248,15 @@ pub struct OverlayContext {
     /// makes "off shows nothing" structural instead of a condition an overlay
     /// has to remember to check.
     pub pixel_readout: Option<PixelReadout>,
+    /// Whether the transport runs and what it has dropped (`INSP-4`). Not an
+    /// `Option`: "stopped, nothing dropped" is a real reading, not a missing
+    /// one.
+    pub playback_status: PlaybackStatus,
+    /// The active composition's cached frame ranges (`CACHE-6`), for the share
+    /// the status line reports while playing. The band the Timeline draws, read
+    /// through the same accessor, so the two never disagree about what is
+    /// cached.
+    pub cached_frames: Vec<Range<u64>>,
 }
 
 /// Everything the pixel readout reads (`INSP-3`).
@@ -581,6 +600,10 @@ pub enum LabelPlacement {
     /// above it. Where the pixel readout sits: it updates on every pointer
     /// move, so it must not be anywhere the pointer goes.
     CanvasBottomLeft,
+    /// Pinned to the canvas area's top-right corner, the one corner no HUD or
+    /// readout already holds. Where the playback status line sits: it is a
+    /// standing report about the whole picture, not about a place in it.
+    CanvasTopRight,
     /// Anchored at a composition point, so the text travels with the element
     /// it annotates under pan and zoom. The panel converts through the same
     /// viewport the pointer is resolved with; a label outside the canvas is
@@ -942,6 +965,7 @@ impl OverlayRegistry {
             Box::new(PathEditOverlay),
             Box::new(super::guides::GuideOverlay),
             Box::new(super::snap::SnapGuideOverlay),
+            Box::new(PlaybackStatusOverlay),
             Box::new(PixelReadoutOverlay),
             Box::new(EvalErrorOverlay),
         ])
@@ -2530,6 +2554,70 @@ impl ViewerOverlay for PixelReadoutOverlay {
     }
 }
 
+/// The playback status line (`INSP-4`): the ways the picture on screen is not
+/// the truth — frames the transport dropped, a preview coarser than the
+/// composition, and how much of the composition is cached.
+///
+/// The overlay only gathers; which readings are worth showing and how they read
+/// as one line is [`playback_status_text`], where it is testable without a
+/// window.
+pub struct PlaybackStatusOverlay;
+
+impl PlaybackStatusOverlay {
+    pub const ID: OverlayId = OverlayId("viewer.playback_status");
+
+    /// The line, or `None` when every reading is clean. `is_active` and
+    /// `labels` both come through here, so the overlay cannot report itself
+    /// active and then draw nothing.
+    fn line(ctx: &OverlayContext) -> Option<String> {
+        // The denominator of the cached share. Resolved from the document
+        // rather than carried in the context: the composition on screen is
+        // already there, and its length is one field of it.
+        let duration_frames = ctx
+            .comp
+            .zip(ctx.document.as_ref())
+            .and_then(|(comp, document)| document.get_composition(comp))
+            .map_or(0, |comp| comp.duration_frames);
+        playback_status_text(
+            PlaybackStatusInputs {
+                playing: ctx.playback_status.playing,
+                dropped_frames: ctx.playback_status.dropped_frames,
+                resolution: ctx.resolution,
+                eval_resolution: ctx.eval_resolution,
+                cached_frames: &ctx.cached_frames,
+                duration_frames,
+            },
+            |key| ravel_i18n::t!(key),
+        )
+    }
+}
+
+impl ViewerOverlay for PlaybackStatusOverlay {
+    fn id(&self) -> OverlayId {
+        Self::ID
+    }
+
+    fn priority(&self) -> i32 {
+        priority::PLAYBACK_STATUS
+    }
+
+    fn is_active(&self, ctx: &OverlayContext) -> bool {
+        Self::line(ctx).is_some()
+    }
+
+    fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
+        Self::line(ctx)
+            .map(|text| {
+                vec![OverlayLabel {
+                    text: SharedString::from(text),
+                    color: ctx.colors.path,
+                    placement: LabelPlacement::CanvasTopRight,
+                }]
+            })
+            .unwrap_or_default()
+    }
+}
+
 pub struct EvalErrorOverlay;
 
 impl EvalErrorOverlay {
@@ -2741,9 +2829,69 @@ mod tests {
         assert_eq!(registry.eval_targets(&on), registry.eval_targets(&off));
     }
 
+    /// The status line is not reachable any other way: an unregistered overlay
+    /// draws nothing however many frames the transport drops.
+    #[test]
+    fn the_status_line_is_registered_with_the_builtins() {
+        assert!(
+            OverlayRegistry::builtin()
+                .overlay(PlaybackStatusOverlay::ID)
+                .is_some()
+        );
+    }
+
+    /// Composition resolution, stopped, nothing dropped: the line is a
+    /// warning, and a warning that is always on screen is furniture.
+    #[test]
+    fn a_clean_transport_draws_no_status_line() {
+        let ctx = base_context();
+        assert!(!PlaybackStatusOverlay.is_active(&ctx));
+        assert!(PlaybackStatusOverlay.labels(&ctx).is_empty());
+    }
+
+    /// The top-right corner, because the drag HUD holds the top-left and the
+    /// pixel readout the bottom-left: a label placed in either would print
+    /// over text that is already there.
+    #[test]
+    fn the_status_line_sits_in_the_free_corner() {
+        let mut ctx = base_context();
+        ctx.playback_status = PlaybackStatus {
+            playing: true,
+            dropped_frames: 12,
+        };
+        assert!(PlaybackStatusOverlay.is_active(&ctx));
+        let labels = PlaybackStatusOverlay.labels(&ctx);
+        assert_eq!(labels.len(), 1, "the status line is one label or none");
+        assert_eq!(labels[0].placement, LabelPlacement::CanvasTopRight);
+    }
+
+    /// The cached share divides by the composition on screen, and the context
+    /// carries that as a document rather than as a frame count — without the
+    /// lookup there is no denominator and the element disappears.
+    #[test]
+    fn the_cached_share_is_measured_against_the_composition_on_screen() {
+        let comp_id = CompId::next();
+        let comp = Composition::new(comp_id, "Comp", (1920, 1080), FrameRate::new(30, 1), 300);
+        let mut ctx = base_context();
+        ctx.playback_status = PlaybackStatus {
+            playing: true,
+            dropped_frames: 0,
+        };
+        ctx.cached_frames = vec![0..75, 75..150];
+        assert!(
+            !PlaybackStatusOverlay.is_active(&ctx),
+            "a band with no composition to divide by reports nothing"
+        );
+        ctx.comp = Some(comp_id);
+        ctx.document = Some(Document::default().with_composition(comp));
+        assert!(PlaybackStatusOverlay.is_active(&ctx));
+    }
+
     fn base_context() -> OverlayContext {
         OverlayContext {
             pixel_readout: None,
+            playback_status: PlaybackStatus::default(),
+            cached_frames: Vec::new(),
             resolution: Some((1920, 1080)),
             comp: None,
             playback: Some(PlaybackPosition::default()),

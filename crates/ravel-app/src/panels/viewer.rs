@@ -1562,6 +1562,11 @@ impl ViewerPanel {
             // source along. A frame published while the readout was off has no
             // `linear`, so the readout stays quiet for the one frame between
             // switching it on and the re-finalized frame arriving.
+            // Both written outside this panel and read without an observer of
+            // their own (`INSP-4`): the status line only changes on frames the
+            // viewer is already repainting for.
+            playback_status: super::playback_status(cx),
+            cached_frames: super::cache_band(cx),
             pixel_readout: self
                 .readout_pointer
                 .zip(self.linear.clone())
@@ -2933,6 +2938,7 @@ fn overlay_label_element(
             .child(text),
         LabelPlacement::CanvasTopLeft => div().absolute().top_2().left_2().child(text),
         LabelPlacement::CanvasBottomLeft => div().absolute().bottom_2().left_2().child(text),
+        LabelPlacement::CanvasTopRight => div().absolute().top_2().right_2().child(text),
         LabelPlacement::Comp(comp) => {
             let (rect, resolution) = viewport?;
             let (x, y) = comp_to_screen(comp, rect, resolution.0);

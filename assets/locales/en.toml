@@ -58,6 +58,8 @@ channel_red = "Show Red Channel"
 channel_green = "Show Green Channel"
 channel_blue = "Show Blue Channel"
 channel_alpha = "Show Alpha Channel"
+pixel_readout = "Show Pixel Values"
+pixel_readout_format = "Switch Pixel Value Scale"
 
 [menu.composition]
 _self = "Composition"
@@ -396,6 +398,13 @@ channel_alpha = "Alpha"
 # The alpha channel shown as grey, against the same colour with its matte
 # applied — see DisplayChannel.
 channel_alpha_matte = "Alpha matte"
+# Pixel readout (INSP-3). The readout line itself is numbers and the channel
+# initials, which need no translation; these name the feature and its two
+# scales.
+pixel_readout = "Pixel values"
+pixel_readout_format = "Value scale"
+pixel_readout_float = "Float"
+pixel_readout_byte = "8-bit (0-255)"
 grid = "Grid"
 safe_areas = "Safe areas"
 rulers = "Rulers"

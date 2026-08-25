@@ -2706,6 +2706,23 @@ mod tests {
         );
     }
 
+    /// Registered, not merely written. The panel draws through
+    /// [`OverlayRegistry::builtin`], so an overlay left out of that list is
+    /// silently dead in the application however well its own `labels()`
+    /// behaves — and every test that calls the overlay directly still passes.
+    #[test]
+    fn the_readout_is_one_of_the_builtin_overlays() {
+        let ctx = readout_context((2.0, 0.0), PixelReadoutFormat::Float);
+        let expected = readout_line(&ctx).expect("the readout has a line to draw");
+        assert!(
+            OverlayRegistry::builtin()
+                .labels(&ctx)
+                .iter()
+                .any(|label| label.text.as_ref() == expected),
+            "the readout label never reached the registry's list"
+        );
+    }
+
     /// The readout declares no evaluation target: it reads the frame already
     /// on screen. A target here would post an evaluation request on every
     /// pointer move, since the context is rebuilt per move.

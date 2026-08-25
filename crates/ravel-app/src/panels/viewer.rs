@@ -2920,14 +2920,27 @@ impl ViewerPanel {
 /// label is placed through — the same pair the pointer is resolved with. `None`
 /// when there is no composition on screen, and such a label then has nowhere to
 /// sit and is dropped.
+///
+/// `mono` is the monospace family every label but the centered one is set in.
+/// Passed rather than read here because this is not a `Render` method and the
+/// family is the theme's ([`crate::fonts::mono_font`], so the Japanese
+/// fallback comes with it — the status line is translated).
 fn overlay_label_element(
     label: overlay::OverlayLabel,
     viewport: Option<(viewport::Rect, (u32, u32))>,
+    mono: &Font,
 ) -> Option<Div> {
-    let text = div()
-        .text_xs()
-        .text_color(label.color)
-        .child(label.text.clone());
+    let text = div().text_xs().text_color(label.color);
+    // Every label but one is a readout whose digits change under the pointer
+    // or the playhead, and proportional digits make the corner jitter while
+    // they do — the same reason the Timeline's ruler labels are monospaced.
+    // The centered label is the evaluation error, which is a sentence.
+    let text = if matches!(label.placement, LabelPlacement::CanvasCenter) {
+        text
+    } else {
+        text.font(mono.clone())
+    };
+    let text = text.child(label.text.clone());
     Some(match label.placement {
         LabelPlacement::CanvasCenter => div()
             .absolute()
@@ -3359,10 +3372,11 @@ impl Render for ViewerPanel {
             )
         });
         let content = if !labels.is_empty() {
+            let mono = crate::fonts::mono_font(cx);
             content.children(
                 labels
                     .into_iter()
-                    .filter_map(|label| overlay_label_element(label, label_viewport)),
+                    .filter_map(|label| overlay_label_element(label, label_viewport, &mono)),
             )
         } else if self.composition_resolution.is_none() {
             content.child(

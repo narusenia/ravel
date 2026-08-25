@@ -312,6 +312,53 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
 - 実際の device loss は headless で再現しないため、ここで証明するのは lifecycle、
   ordering、stale result rejection、会計である。
 
+#### 実装メモ
+
+実装済み。入った口と、計画から動かした点だけを記す。
+
+- `EvalService::shutdown(self) -> Option<JoinHandle<()>>`
+  （`crates/ravel-core/src/runtime/eval_service.rs`）。停止指示は `Drop` と同じ
+  channel の close のままで、増えたのは handle だけである。`Drop` は join しない
+  現行の振る舞いを保つ。cancellation token は入れていない。
+- generation の初期値は `EvalServiceConfig.generation` で渡す。既定は 0 なので、
+  `spawn` / `spawn_with_budget` と既存の呼び出しの意味は変わらない。
+- 交換の入口は `ProjectState::restart_eval_on_gpu(GpuContext, cx)`
+  （`crates/ravel-app/src/project_state.rs`）。新しい context を**どこから得るか**
+  は呼び出し側の責任にした — それがプラットフォーム分岐（`GPULOSS-3` /
+  `GPULOSS-4`）そのものだからである。この単位は分岐を持たない。
+- 実体は `restart_eval_worker`（private）で、hooks の生成だけを factory に
+  切り出している。adapter を持たない headless でも、GPU hooks の代わりに stub
+  hooks を差して**この同じ経路**をテストできるようにするためである
+  （`spawn_viewer_eval_service` が既に hooks で generic なのと同じ理由）。
+- 順序: fence を旧 worker の `latest_generation()` へ上げる → export queue を
+  cancel して捨てる → 旧 worker の channel を閉じて **UI thread の外**で join →
+  そこで初めて new hooks + new `EvalService` を作る → 同じ Document・同じ
+  playhead で Structural request を 1 回出す。join は
+  `cx.background_spawn` の中で行い、完了後の続きを `this.update` で UI 側へ
+  戻している。
+- hooks の生成を join の後に置いたのは、`GpuEvalHooks` が texture pool と
+  decode cache を同じ budget に対して作るためである。join の前に作ると
+  「2 つの GPU cache が 1 つの会計にぶら下がる」状態が一瞬でも生じる。
+- `SharedCacheBudget` は作り直さず、ゼロにも戻さない。旧 worker の thread が
+  返ることで frame cache / node cache / hooks cache の reservation が返る。
+- export 側は `RenderService::discard_queue_for_new_gpu()` で未完了 job を
+  cancel して queue を捨てるだけとし、**render worker は join しない**。
+  join すると 1 frame 分の render 完了を待って recovery が止まるうえ、計画が
+  順序を保証しているのは評価 worker だからである。旧 render worker は channel の
+  close で自分で抜け、その時点で自分の cache を budget へ返す。再開は明示的な
+  再 submit のみで、自動再開はしない。
+- この単位が実装しないもの: Viewer の lease 破棄（`GPULOSS-5`）、
+  プラットフォーム固有の loss 検出と polling（`GPULOSS-3` / `GPULOSS-4`）。
+  `report_gpu_device_loss` の「再起動を促す」1 回通知は `GPULOSS-4` の担当なので
+  触っていない。したがって `restart_eval_on_gpu` を呼ぶ本番経路はまだ無い。
+- テスト: `eval_service.rs` に shutdown が in-flight 評価を待つこと・join 後に
+  budget の使用量が同じ authority に返ること・渡した generation を引き継ぐことの
+  3 本。`project_state.rs` に交換全体（旧 hooks の drop → 新 hooks の生成の順序、
+  generation の継承、新 epoch の frame が publish されること）と、fence の比較が
+  `<=` であること（継承した番号ちょうどの旧 epoch 結果が捨てられること）の 2 本。
+  交換テストは実 worker thread が絡むため `cx.executor().allow_parking()` を
+  使い、待ちは deadline で切っている。
+
 ### GPULOSS-3
 
 - GPUI が採用 device に持つ callback を Ravel が上書きしない。採用 device への

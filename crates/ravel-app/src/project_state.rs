@@ -791,12 +791,14 @@ impl ProjectState {
             .as_ref()
             .map_or(self.published_generation, EvalService::latest_generation);
         self.published_generation = generation;
-        // The export queue holds its own hooks — and its own texture pool —
-        // on the outgoing device. Cancel what is unfinished and drop it; a
-        // render is resumed by an explicit re-submission, never automatically.
-        if let Some(render) = crate::export::render_service(cx) {
-            render.update(cx, |render, _| render.discard_queue_for_new_gpu());
-        }
+        // The export queue holds its own hooks — and its own texture pool — on
+        // the outgoing device, so it has to be gone before the replacement is
+        // built, for the same accounting reason. Cancel the unfinished jobs
+        // here and take the queue; it is stopped below, beside the evaluation
+        // worker. A render is resumed by an explicit re-submission, never
+        // automatically.
+        let retiring_render = crate::export::render_service(cx)
+            .and_then(|render| render.update(cx, |render, _| render.take_queue_for_new_gpu()));
         let stopping = self.eval.take().and_then(EvalService::shutdown);
         let retiring_gpu = self.gpu.take();
         cx.spawn(async move |this, cx| {
@@ -804,6 +806,17 @@ impl ProjectState {
             // token the worker returns only after the evaluation it is in.
             use gpui::AppContext as _;
             cx.background_spawn(async move {
+                // `shutdown` rather than a drop, and the wait is bounded by
+                // one render **frame**, not one render: every unfinished job
+                // was cancelled above, and `RenderQueue::cancel` stops a
+                // running job at its next frame boundary. Dropping instead
+                // would not join (`RenderQueue`'s own `Drop` is documented as
+                // exactly that), which would leave the retired export
+                // evaluator, hooks and texture pool charged to the shared
+                // budget while the replacement is being built.
+                if let Some(queue) = retiring_render {
+                    queue.shutdown();
+                }
                 if let Some(handle) = stopping
                     && handle.join().is_err()
                 {
@@ -2821,6 +2834,20 @@ mod tests {
         let project = cx.new(ProjectState::new);
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
 
+        // A render queue on the outgoing device, so the export side's own
+        // hooks are part of the order under test. Built with stub hooks: what
+        // matters is *when* it is stopped, not what it renders.
+        let budget = project.read_with(cx, |project, _| project.cache_budget().clone());
+        let render = cx.new(crate::export::RenderService::new);
+        render.update(cx, |render, _| {
+            render.install_queue_for_test(ravel_core::runtime::RenderQueue::spawn_with_budget(
+                EpochHooks::new("render", &log),
+                budget,
+                |_| {},
+            ));
+        });
+        cx.update(|cx| cx.set_global(crate::export::RenderServiceHandle(render.downgrade())));
+
         // The old epoch: a worker, something evaluable, and a generation that
         // is deliberately not zero — a replacement starting at zero is the
         // failure this is about.
@@ -2900,8 +2927,14 @@ mod tests {
         });
         assert_eq!(
             log.lock().unwrap().as_slice(),
-            ["old built", "old dropped", "new built"],
-            "the replacement worker was built before the retired one was gone"
+            [
+                "render built",
+                "old built",
+                "render dropped",
+                "old dropped",
+                "new built"
+            ],
+            "the replacement worker was built before the retired ones were gone"
         );
     }
 

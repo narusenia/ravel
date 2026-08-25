@@ -2797,7 +2797,21 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `panels::ViewerReadoutFormat` global wrapping
   `ravel_ui::panels::viewer::PixelReadoutFormat::{Float, Byte}`, a UI-side
   `format!` that deliberately does **not** live on `ProjectState`: it never
-  reaches the worker. The `image` is a `panels::ViewerImage` — a
+  reaches the worker. The viewer's playback status line (`INSP-4`) is the same
+  shape: `panels::PlaybackStatus { playing, dropped_frames }` is a durable
+  global written only by `PlaybackController::publish_position` (through
+  `panels::set_playback_status`, which compares first) and read with
+  `panels::playback_status(cx) -> PlaybackStatus`; nothing observes it, because
+  a playing transport already repaints the viewer every frame (`HIGH-21`).
+  Which of the three readings — dropped frames, a preview coarser than the
+  composition, the cached share — are worth showing and how they read as one
+  line is `ravel_ui::panels::viewer::playback_status_text(PlaybackStatusInputs
+  { playing, dropped_frames, resolution, eval_resolution, cached_frames,
+  duration_frames }, tr) -> Option<String>`, where `tr` resolves a locale key
+  (one key with one placeholder per element) and `None` means "draw nothing".
+  The cached share comes from the Timeline's own band
+  (`panels::cache_band(cx)`), so the two never disagree; the label sits in
+  `LabelPlacement::CanvasTopRight`, the only viewer corner no other HUD holds. The `image` is a `panels::ViewerImage` — a
   straight-alpha BGRA `RenderImage` plus the evaluation buffer's dimensions —
   wrapped from the `ravel_nodes::DisplayFrame` the worker produced, by
   `ViewerImage::from_display_frame` **on the evaluation worker thread**

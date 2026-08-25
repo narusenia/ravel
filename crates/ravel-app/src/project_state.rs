@@ -3883,6 +3883,69 @@ mod tests {
         });
     }
 
+    /// Switching the pixel readout on has to drop the finished frames too
+    /// (`INSP-3`), and for a sharper reason than the channel switch: a frame
+    /// finished with the readout off carries **no float source at all**, so a
+    /// cache hit would leave the readout permanently blank on that frame
+    /// rather than merely showing the previous mode. Switching it off has the
+    /// mirror problem — the cached frames would keep the 16-bytes-a-pixel
+    /// copies the user just stopped paying for.
+    ///
+    /// A real worker is installed for the reason
+    /// `switching_the_display_channel_drops_the_finished_frames` installs one:
+    /// with no service there is no cache, and the property is about the cache.
+    #[gpui::test]
+    fn switching_the_pixel_readout_drops_the_finished_frames(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+
+        project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+
+        let mut await_frame = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if rx.try_recv().is_ok() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the evaluation worker sent no result"
+                );
+                std::thread::yield_now();
+            }
+        };
+        await_frame();
+
+        let stats = |project: &ProjectState| project.eval.as_ref().unwrap().frame_cache().stats();
+        project.read_with(cx, |project, _| {
+            assert_eq!(stats(project).hits, 0, "the first evaluation was a hit");
+        });
+
+        // On, then off: both directions leave the cached frames wrong.
+        for on in [true, false] {
+            project.update(cx, |project, cx| project.set_pixel_readout(on, cx));
+            await_frame();
+            project.read_with(cx, |project, _| {
+                assert_eq!(
+                    stats(project).hits,
+                    0,
+                    "switching the readout {on} was served from the frame cache,                      so the viewer kept a frame finished under the other setting"
+                );
+            });
+        }
+    }
+
     /// A document with one evaluable layer and `selected` as the preview
     /// factor: the starting point of every adaptive-resolution test. Returns
     /// the composition resolution, which is the basis the factor scales.

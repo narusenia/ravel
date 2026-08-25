@@ -1777,8 +1777,16 @@ impl ProjectState {
         }
         self.display_channel
             .store(channel.to_u32(), Ordering::Release);
-        if let (Some(eval), Some(comp)) = (self.eval.as_ref(), self.active_composition(cx)) {
-            eval.frame_cache().invalidate_comp(comp.id);
+        // Every composition's finished frames, not just the active one's: the
+        // output-stage cache holds the **display bytes** `finalize` produced,
+        // and this setting is viewer-wide, so a frame finished under the
+        // previous channel is stale wherever it sits. Keeping the other
+        // compositions would show the old channel the moment the user
+        // switched to one of them, which is the whole failure this
+        // invalidation exists to prevent. The node-level caches are untouched,
+        // so what those frames cost again is the transform, not the graph.
+        if let Some(eval) = self.eval.as_ref() {
+            eval.frame_cache().clear();
         }
         self.request_viewer_eval(InvalidationHint::None, cx);
         cx.notify();
@@ -3663,6 +3671,102 @@ mod tests {
                     "{channel:?} changed the evaluation request"
                 );
             }
+        });
+    }
+
+    /// The finished frames of **every** composition go, not just the active
+    /// one's: the channel is viewer-wide, so a frame another composition
+    /// finished under the previous mode is just as stale, and switching to it
+    /// would hand those bytes straight back.
+    ///
+    /// Two compositions is the smallest fixture that can tell the two
+    /// invalidations apart — with one, dropping "the active composition" and
+    /// dropping everything look identical.
+    #[gpui::test]
+    fn switching_the_display_channel_drops_every_compositions_frames(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+
+        let mut await_frame = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if rx.try_recv().is_ok() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the evaluation worker sent no result"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        let second = project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            let first = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), first, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+
+            let second = ravel_core::id::CompId::next();
+            let composition = ravel_core::composition::Composition::new(
+                second,
+                "Second",
+                (64, 64),
+                FrameRate::new(30, 1),
+                30,
+            );
+            let document = project.document().clone().with_composition(composition);
+            let document =
+                ravel_ui::document::add_layer(&document, second, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            second
+        });
+        await_frame();
+
+        // Fill the second composition's entry while it is the active one, then
+        // leave it behind.
+        project.update(cx, |project, cx| {
+            project.set_active_composition(Some(second), cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
+        await_frame();
+        let first = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
+        project.update(cx, |project, cx| {
+            project.set_active_composition(Some(first), cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
+        await_frame();
+
+        project.update(cx, |project, cx| {
+            project.set_display_channel(DisplayChannel::Alpha, cx);
+        });
+        await_frame();
+
+        // Revisiting a composition is a hit in the ordinary course of things,
+        // so the count before the return is the baseline; what must not happen
+        // is one *more* hit after the channel changed.
+        let hits_before = project.read_with(cx, |project, _| {
+            project.eval.as_ref().unwrap().frame_cache().stats().hits
+        });
+
+        // Back to the composition that was cached under the previous channel.
+        project.update(cx, |project, cx| {
+            project.set_active_composition(Some(second), cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+        });
+        await_frame();
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project.eval.as_ref().unwrap().frame_cache().stats().hits,
+                hits_before,
+                "a composition kept the frames it finished in the previous channel"
+            );
         });
     }
 

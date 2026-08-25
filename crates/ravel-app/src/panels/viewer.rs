@@ -1839,12 +1839,6 @@ impl ViewerPanel {
     fn pointer_hint_at(&self, position: Point<Pixels>, cx: &App) -> Option<ViewerPointerHint> {
         let pointer = self.comp_position(position)?;
         let tool = active_tool(cx);
-        // Hand and Zoom own the pointer wherever it sits (`left_mouse_down`),
-        // so no overlay handle or guide underneath them may promise a gesture
-        // the press will not run.
-        if matches!(tool, ravel_ui::ToolKind::Hand | ravel_ui::ToolKind::Zoom) {
-            return Some(tool_pointer_hint(tool));
-        }
         let radius = self.comp_hit_radius(8.0).unwrap_or(8.0);
 
         if tool == ravel_ui::ToolKind::Pen
@@ -8785,6 +8779,16 @@ mod tests {
                         !navigating || panel.handle_drag.is_none(),
                         "a navigation tool never grabs a handle"
                     );
+                    // And the cursor says so: every handle-bearing overlay
+                    // gates itself on `Select`, so the hint over the grip is
+                    // the tool's own — the press and the promise agree.
+                    if navigating {
+                        assert_eq!(
+                            panel.pointer_hint_at(window_point(panel, SE_GRIP), cx),
+                            Some(tool_pointer_hint(tool)),
+                            "{tool:?} must promise its own cursor over the shell grip"
+                        );
+                    }
                 })
                 .unwrap();
         }

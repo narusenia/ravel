@@ -398,6 +398,18 @@ pub struct EvalServiceConfig {
     pub budget: Option<crate::cache_budget::SharedCacheBudget>,
     /// Read-ahead policy, or `None` to evaluate only what is requested.
     pub read_ahead: Option<ReadAhead>,
+    /// Generation the first [`request`](EvalService::request) counts up from.
+    ///
+    /// Zero for a session's first worker. A worker that **replaces** another
+    /// one — a GPU device epoch swap, where the old worker is shut down and a
+    /// new one is built on the new device — starts from the old worker's
+    /// [`latest_generation`](EvalService::latest_generation) instead. The
+    /// consumer's fence is a generation, so a replacement that restarted at
+    /// zero would have every frame of the new epoch rejected as stale until
+    /// it caught up with the old numbering; carrying the number over is what
+    /// keeps [`cancel_pending`](EvalService::cancel_pending)'s meaning across
+    /// the boundary without a second token to pass around.
+    pub generation: u64,
 }
 
 /// What the worker picked up.
@@ -610,7 +622,7 @@ impl EvalService {
             hooks,
             EvalServiceConfig {
                 budget: Some(budget),
-                read_ahead: None,
+                ..EvalServiceConfig::default()
             },
             on_update,
         )
@@ -624,7 +636,11 @@ impl EvalService {
         H: EvalWorkerHooks,
         F: Fn(EvalUpdate) + Send + 'static,
     {
-        let EvalServiceConfig { budget, read_ahead } = config;
+        let EvalServiceConfig {
+            budget,
+            read_ahead,
+            generation: initial_generation,
+        } = config;
         let (tx, rx) = unbounded::<Request>();
         let (speculative_tx, speculative_rx) = unbounded::<EvalRequest>();
         let worker_speculative_tx = speculative_tx.clone();
@@ -975,7 +991,7 @@ impl EvalService {
         Self {
             tx: Some(tx),
             speculative: Some(speculative_tx),
-            generation: 0,
+            generation: initial_generation,
             worker: Some(worker),
             frames,
         }
@@ -1032,6 +1048,29 @@ impl EvalService {
     pub fn latest_generation(&self) -> u64 {
         self.generation
     }
+
+    /// Stop the worker and hand back its thread handle, so a caller that has
+    /// to know the worker is *gone* can wait for it.
+    ///
+    /// The stop order is the same one [`Drop`] gives — closing the channels —
+    /// because closing them **is** the order: the worker finishes the
+    /// evaluation it is in, fails its next `recv`, and returns. There is no
+    /// cancellation token, so the wait is at worst one evaluation long.
+    ///
+    /// What this adds over dropping is only the handle. Joining it is the
+    /// caller's business, and it must not happen on the UI thread — the
+    /// reason [`Drop`] deliberately does not join. The caller that needs it
+    /// is a device epoch swap: the old worker owns the old `Evaluator`, hooks
+    /// and texture pool, and until its thread has returned those are still
+    /// charged to the shared cache budget. Building the replacement before
+    /// then puts two GPU caches on one accounting authority.
+    ///
+    /// Returns `None` only if the worker handle was already taken.
+    pub fn shutdown(mut self) -> Option<JoinHandle<()>> {
+        drop(self.tx.take());
+        drop(self.speculative.take());
+        self.worker.take()
+    }
 }
 
 impl Drop for EvalService {
@@ -1039,7 +1078,10 @@ impl Drop for EvalService {
         // Closing the channel lets the worker finish its current evaluation
         // and exit on its own. Do NOT join here: the drop may happen on the
         // UI thread (panel teardown, layout rebuild) and a join would block
-        // it for up to one full evaluation.
+        // it for up to one full evaluation. A caller that has to *know* the
+        // worker is gone takes the handle with
+        // [`EvalService::shutdown`](EvalService::shutdown) and joins it
+        // somewhere it is allowed to block.
         drop(self.tx.take());
         drop(self.speculative.take());
         drop(self.worker.take());
@@ -1792,6 +1834,143 @@ mod tests {
         drop(service);
     }
 
+    /// `GPULOSS-2`: the epoch swap needs to know the old worker is *gone*,
+    /// and the only stop order is still the channel close — so the handle
+    /// must not come back joinable until the evaluation in flight has
+    /// finished. The gate holds `process()` open, which is exactly the
+    /// "recovery waits at worst one evaluation" case the plan accepts instead
+    /// of a cancellation token.
+    #[test]
+    fn shutdown_hands_back_a_handle_that_waits_out_the_running_evaluation() {
+        let (gate_tx, gate_rx) = unbounded();
+        let process_count = Arc::new(AtomicUsize::new(0));
+        let hooks = StubHooks {
+            gate: Some(gate_rx),
+            process_count: process_count.clone(),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn(hooks, |_| {});
+        let graph = Graph::new().add_node(value_node(1, 1.0)).unwrap();
+        service.request(req(graph, NodeId::new(1), InvalidationHint::None));
+        while process_count.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+
+        let handle = service.shutdown().expect("the worker handle");
+        assert!(
+            !handle.is_finished(),
+            "closing the channels abandoned the evaluation in flight"
+        );
+
+        // Only now can the evaluation complete — and the join must then
+        // return rather than block on a worker that never noticed the close.
+        let _ = gate_tx.send(());
+        handle.join().expect("the worker thread panicked");
+    }
+
+    /// `GPULOSS-2`: what the join is *for*. The worker's frame cache and node
+    /// cache are charged to the session's budget, and they are only handed
+    /// back when its thread returns. A swap that built the replacement before
+    /// then would put two GPU caches on one accounting authority — so the
+    /// budget after the join must be the same authority, emptied, not a new
+    /// one and not a reset.
+    #[test]
+    fn shutdown_returns_the_workers_caches_to_the_same_budget() {
+        use crate::cache_budget::Tier;
+
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 0,
+            ram_bytes: 1 << 20,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let limit_before = budget.stats().limit(Tier::Ram);
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn_with_budget(
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))),
+            budget.clone(),
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        let node = NodeId::new(1);
+        service.request(frame_request(
+            frame_graph(node),
+            node,
+            0,
+            frame_document(),
+            InvalidationHint::Structural,
+        ));
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            budget.stats().used(Tier::Ram) > 0,
+            "the worker's caches never reached the budget"
+        );
+
+        service
+            .shutdown()
+            .expect("the worker handle")
+            .join()
+            .expect("the worker thread panicked");
+
+        let stats = budget.stats();
+        assert_eq!(
+            stats.used(Tier::Ram),
+            0,
+            "the old worker's caches are still charged after its thread returned"
+        );
+        assert_eq!(
+            stats.limit(Tier::Ram),
+            limit_before,
+            "the budget was rebuilt or reset instead of being handed back to"
+        );
+    }
+
+    /// `GPULOSS-2`: a replacement worker starts where the one it replaces
+    /// stopped. The consumer fences on a generation, so a replacement that
+    /// restarted at zero would have every frame of the new epoch discarded as
+    /// stale — and the in-flight results of the old one, which are all at or
+    /// below the carried-over number, must still be discarded.
+    #[test]
+    fn the_configured_generation_carries_across_a_replacement() {
+        let (update_tx, update_rx) = unbounded();
+        let hooks = StubHooks {
+            gate: None,
+            process_count: Arc::new(AtomicUsize::new(0)),
+            thread_name: Arc::new(Mutex::new(None)),
+            hints: Arc::new(Mutex::new(Vec::new())),
+        };
+        let mut service = EvalService::spawn_with_config(
+            hooks,
+            EvalServiceConfig {
+                generation: 7,
+                ..EvalServiceConfig::default()
+            },
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+
+        assert_eq!(
+            service.latest_generation(),
+            7,
+            "the replacement did not inherit the generation it was given"
+        );
+        let graph = Graph::new().add_node(value_node(1, 1.0)).unwrap();
+        let generation = service.request(req(graph, NodeId::new(1), InvalidationHint::None));
+        assert_eq!(
+            generation, 8,
+            "the first request of the new epoch fell on the inherited fence"
+        );
+        let update = update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            update.generation, 8,
+            "the frame the new epoch publishes carries a stale generation"
+        );
+    }
+
     /// Emits 1.0 when the evaluator has a document, errors otherwise —
     /// mirrors the document dependency of the shell processors
     /// (`comp.network`, `layer.ref`).
@@ -2456,6 +2635,7 @@ mod tests {
                     idle: Duration::ZERO,
                     frames,
                 }),
+                generation: 0,
             },
             move |update| {
                 let _ = tx.send(update);

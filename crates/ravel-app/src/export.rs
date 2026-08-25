@@ -336,6 +336,26 @@ impl RenderService {
         }
     }
 
+    /// Give up the queue because the device it runs on is being replaced
+    /// (`GPULOSS-2`).
+    ///
+    /// Every unfinished job is cancelled first, for the reason the module note
+    /// gives: dropping the queue alone would let the worker render what is
+    /// already in it, on a device that is going away. Nothing is resubmitted —
+    /// a render resumes when the user asks for it again — and no new queue is
+    /// built here: [`Self::ensure_queue`] builds one on the current device at
+    /// the next submission, which is the same laziness a session that never
+    /// exports already relies on.
+    pub fn discard_queue_for_new_gpu(&mut self) {
+        let Some(queue) = self.queue.take() else {
+            return;
+        };
+        for job in self.rows.unfinished() {
+            queue.cancel(job);
+        }
+        tracing::info!("render queue discarded for a GPU device epoch change");
+    }
+
     /// Drop the rows of jobs that have stopped.
     pub fn clear_finished(&mut self, cx: &mut Context<Self>) {
         if self.rows.clear_finished() {

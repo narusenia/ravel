@@ -71,7 +71,10 @@ float formats, expanded for reduced precision; direct `.data[...]` indexing
 is lint-banned. **Code that indexes four channels per pixel (compositing,
 GPU/encoder upload) uses `fb.as_rgba_f32() -> Result<Cow<[f32]>,
 FrameFormatError>`**, which refuses a single-channel buffer and a length that
-disagrees with `width * height * 4`. Constructors: `FrameBuffer::new_zeroed(w, h)` (RgbaF32),
+disagrees with `width * height * 4`. **One pixel** is
+`fb.sample_rgba(x, y) -> Option<[f32; 4]>` — decoded per format without
+expanding the whole buffer, `None` outside it, and a `MonoF32` buffer reads as
+grey with an opaque alpha (the viewer's pixel readout, `INSP-3`). Constructors: `FrameBuffer::new_zeroed(w, h)` (RgbaF32),
 `FrameBuffer::from_f32(w, h, Vec<f32>)`, `FrameBuffer::with_format(w, h,
 fmt)`), `Scalar(f32)`, `Vec2(f32, f32)`,
 `Vec3`, `Vec4`, `Color { r, g, b, a }` (`Color::new`, `Color::WHITE`),
@@ -1604,7 +1607,8 @@ starved the viewer whenever one evaluation outlived one playback tick);
 rasterizes `Geometry` outputs for the Viewer. `.with_display_transform()`
 adds the viewer's display transform (`CM-7`): `finalize` then finishes the
 frame on the GPU and yields a `ravel_nodes::DisplayFrame` (display-encoded
-BGRA8, `width()` / `height()` / `bgra()`) instead of a linear `FrameBuffer`,
+BGRA8, `width()` / `height()` / `bgra()` / `linear()`) instead of a linear
+`FrameBuffer`,
 which shrinks the readback to four bytes a pixel. **Only the interactive
 viewer opts in** — the export worker and `ravel-cli` need the linear frame
 their own `to_output_space` step encodes. `set_display_lut(Option<CubeLut>)`
@@ -1613,7 +1617,12 @@ until `CM-8`. `.with_display_channel(Arc<AtomicU32>)` points the transform at
 a `DisplayChannel` cell the host writes (`INSP-2`) — read per dispatch, so a
 switch reaches the next frame; order-independent with
 `.with_display_surface_mode(Arc<AtomicBool>)`, which does the same for the
-zero-copy surface flag. A `Params` hint whose node
+zero-copy surface flag, and with
+`.with_display_pixel_readout(Arc<AtomicBool>)`, which makes every produced
+`DisplayFrame` carry `linear()` — a CPU copy of the frame the display bytes
+were made from, for the viewer's pixel readout (`INSP-3`). `None` whenever
+that cell is clear, so a session that never asks for values pays nothing.
+A `Params` hint whose node
 already has a processor reporting `rebuild_on_node_change() == false` is
 served by `Evaluator::invalidate_node` instead of a rebuild — a GPU
 processor's construction compiles a shader and creates a pipeline.
@@ -2758,7 +2767,8 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   composition output (`compile_composition` + Document-aware requests,
   REQ-LAYER-007); `request_viewer_eval(hint, cx)` posts one request at the
   shared `PlaybackPosition`. Eval results publish `ViewerFrame::{Blank {
-  composition_resolution }, Frame { image, composition_resolution }, Error
+  composition_resolution }, Frame { image, composition_resolution, linear },
+  GpuFrame { frame, composition_resolution, linear }, Error
   { message, composition_resolution }}`; the full composition resolution is
   deliberately separate from the reduced evaluation buffer so Viewer viewport
   geometry remains exact. The evaluation buffer size is
@@ -2777,7 +2787,17 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   display bytes, so a hit would serve the previous mode), and re-evaluates
   with `InvalidationHint::None` — the composite is unchanged, so no node
   result is thrown away. Session state only: it reaches neither the `.ravprj`
-  nor `ui_state.json`. The `image` is a `panels::ViewerImage` — a
+  nor `ui_state.json`. `ProjectState::{pixel_readout, set_pixel_readout}` are
+  the same three steps for the viewer's pixel value readout (`INSP-3`); while
+  it is on, the frame's `linear: Option<Arc<FrameBuffer>>` carries the
+  evaluated frame the display bytes were made from, and the readout indexes it
+  with `ravel_ui::panels::viewer::comp_to_buffer_index(comp, comp_res,
+  buffer_res) -> Option<(u32, u32)>` — so a pointer move costs neither an
+  evaluation nor a readback. The scale the values print on is the
+  `panels::ViewerReadoutFormat` global wrapping
+  `ravel_ui::panels::viewer::PixelReadoutFormat::{Float, Byte}`, a UI-side
+  `format!` that deliberately does **not** live on `ProjectState`: it never
+  reaches the worker. The `image` is a `panels::ViewerImage` — a
   straight-alpha BGRA `RenderImage` plus the evaluation buffer's dimensions —
   wrapped from the `ravel_nodes::DisplayFrame` the worker produced, by
   `ViewerImage::from_display_frame` **on the evaluation worker thread**

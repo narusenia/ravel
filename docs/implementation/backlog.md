@@ -30,8 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| MON-1 | リニアフレームの要求を数える（スコープ 4 種の土台） | `viewer-scopes-plan.md` |
-| TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
@@ -519,6 +517,10 @@ INSP-1 は**設定できるのに効かない**フィールドの解消なので
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | MON-1 | 🟡 | リニアフレームの要求を数える（読み取りとスコープで 1 本のコピーを共有） | — |
+> **スコープ 4 種は 2026-08-25 のユーザー判断で後回し**（作るコストの割に
+> 入れるものがない）。`MON-1` は依存が無く技術的には着手可能だが、
+> **上の「今すぐ着手できるもの」には載せていない** — 依存が解けていることと
+> 「今やるべきこと」は別。再開はユーザーの指示で。
 | MON-2 | ⬜ | 要約の計算（ヘッドレス、サンプル数上限つき） | MON-1 |
 | MON-3 | ⬜ | ヒストグラムパネル（要約の共有経路をここで通す） | MON-2 |
 | MON-4 | ⬜ | 波形モニタ | MON-2 |
@@ -565,7 +567,7 @@ format version もマイグレーションも増えていない（`Layer.audio` 
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| TOOLX-1 | 🟡 | Hand / Zoom ツールの実装（MED-APP-15） | — |
+| TOOLX-1 | ✅ | Hand / Zoom ツールの実装（MED-APP-15 closed、PR #484） | — |
 | TOOLX-2 | 🟡 | 矩形選択 | OVL-1 |
 | TOOLX-3 | ⬜ | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | — |
 | TOOLX-4 | ⬜ | polygon / star のドラッグ描画 | — |

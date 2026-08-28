@@ -101,6 +101,34 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 - 矩形ズームが縦横比を壊さないテスト
 - Hand / Zoom 中に選択やシェイプ描画が始まらないテスト
 
+**実装メモ**
+
+- 左ボタンの分岐は `ViewerPanel::left_mouse_down` の 1 か所（`ToolKind` の
+  網羅 `match`。腕を足さずに 7 つ目のツールを増やせない）。Hand / Zoom は
+  `overlay_handle_mouse_down` / `guide_mouse_down` の手前で分岐するので、
+  ナビゲーション中はオーバーレイハンドルもガイドも押下を受けない
+- パンは `pan_mouse_down` / `pan_dragged` / `pan_ended` の 1 経路。中ボタンの
+  リスナーも Hand の左押下も同じ `PanDrag` を使う（一時ハンドと常時ハンドは
+  `ToolState.active` の値でしか違わないので、経路の分岐は要らない）
+- ズームの倍率は `zoom_factor(dy) = exp(-dy * ZOOM_RATE_PER_PIXEL)` 1 本。
+  スクロールホイールはホイールの `dy` をそのまま渡し、Zoom のクリックは
+  `ZOOM_CLICK_TRAVEL`（= ホイール 10 ノッチ分の 200px、≈ 1.49 倍）を渡す。
+  別の倍率体系は作っていない
+- 矩形ズームは `ViewerViewport::zoom_to_rect` を新設した（既存の `zoom_toward`
+  のセマンティクスは変えていない）。短い側の比で合わせるので縦横比は保たれ、
+  矩形の中心がパネル中心へ来る。両軸とも `ZOOM_RECT_MIN_PIXELS`（8px）に
+  届かないドラッグはクリック扱い
+- カーソルは `tool_pointer_hint` に集約した（ツール → `ViewerPointerHint` の
+  唯一の写像。`ToolState` の observer と `pointer_hint_at` の両方がここを引く）。
+  Hand は `OpenHand`、押下中は既存の `viewer_drag_cursor` が `ClosedHand` に
+  し、Zoom は `Crosshair`。ハンドルを持つオーバーレイは 4 つとも `is_active` を
+  `Select`（`PathEditOverlay` は `Select | Pen`）で閉じているので、Hand / Zoom の
+  ためにパネル側でもう一段ゲートを置く必要は無い — 置いても落とせるテストが
+  書けないため置いていない。約束と押下が一致することは
+  `pointer_hint_at` の実測でテストに固定してある
+- ドラッグ中の矩形は 1px の枠で描く。フィードバック無しの矩形ズームは
+  「離すまで何も起きない」ジェスチャーになるため。`Escape` で取り消す
+
 ### TOOLX-2: 矩形選択
 
 - Select ツールで空白からドラッグしたときに矩形選択を開始する

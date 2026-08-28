@@ -191,25 +191,6 @@ authoritative なレジストリは `ProjectState` が所有している（Viewe
 
 ---
 
-## MED-APP-15 | debt | Hand / Zoom ツールが機能しない dead UI
-
-**該当**: `crates/ravel-app/src/panels/viewer.rs:1242-1249`, `:1795-1815`
-
-ツールバーは Hand / Zoom を提供し 'H' 押下で Hand に切り替わるが、
-Hand の左ドラッグパンも Zoom のクリックズームもハンドラが存在しない
-（中ボタンドラッグのみがパンし、それはどのツールでも動く）。
-選択すると左ボタン編集が無効化されるだけ。
-
-**修正方針**: Hand は左ドラッグをパン経路へ、Zoom はクリック / alt+クリックを `zoom_toward` へ
-ルーティングする。または実装まではツールを外す。
-
-**引受先**: `docs/implementation/viewer-tool-extensions-plan.md` の `TOOLX-1`
-（実装する方を採る）。`docs/implementation/done/pointer-feedback-plan.md` は
-この 2 ツールのカーソルを意図的に見送っており、`TOOLX-1` がカーソルも同時に付ける
-（機能が無いものに UI の約束をしないため）。
-
----
-
 ## MED-APP-17 | bug | カーブエディタの縦ズームが未実装で、Fit ボタンが何もしない
 
 **該当**: `crates/ravel-app/src/panels/timeline.rs:241`, `:345`, `:948-951`, `:2800-2802`

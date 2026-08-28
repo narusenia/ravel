@@ -840,3 +840,32 @@ GUI で調整した設定がそのまま効くという期待も裏切る。
 `ShellManipulator` の要求が畳み込まれることを検査する。
 
 ---
+
+---
+
+## MED-APP-15 | debt | Hand / Zoom ツールが機能しない dead UI
+
+**該当**: `crates/ravel-app/src/panels/viewer.rs:1242-1249`, `:1795-1815`
+
+> **解決済み**: `TOOLX-1`。Hand の左ドラッグは中ボタンと同じ `pan_mouse_down` /
+> `pan_dragged` / `pan_ended` へ、Zoom のクリックは `zoom_toward`、ドラッグは
+> 新設の `ViewerViewport::zoom_to_rect` へ流れる（`Alt`+クリックで縮小、倍率は
+> スクロールズームと同じ `zoom_factor` の段）。左ボタンがどのジェスチャーに
+> なるかは `ViewerPanel::left_mouse_down` の網羅 `match` 1 か所が決めるので、
+> Hand / Zoom 中は選択・シェイプ描画・ペン・オーバーレイハンドル・ガイドの
+> どれも始まらない。カーソルも同時に付いた（Hand = `OpenHand`、パン中 =
+> `ClosedHand`、Zoom = `Crosshair`）ので、`done/pointer-feedback-plan.md` の
+> 保留も解消している。
+
+ツールバーは Hand / Zoom を提供し 'H' 押下で Hand に切り替わるが、
+Hand の左ドラッグパンも Zoom のクリックズームもハンドラが存在しない
+（中ボタンドラッグのみがパンし、それはどのツールでも動く）。
+選択すると左ボタン編集が無効化されるだけ。
+
+**修正方針**: Hand は左ドラッグをパン経路へ、Zoom はクリック / alt+クリックを `zoom_toward` へ
+ルーティングする。または実装まではツールを外す。
+
+**引受先**: `docs/implementation/viewer-tool-extensions-plan.md` の `TOOLX-1`
+（実装する方を採る）。`docs/implementation/done/pointer-feedback-plan.md` は
+この 2 ツールのカーソルを意図的に見送っており、`TOOLX-1` がカーソルも同時に付ける
+（機能が無いものに UI の約束をしないため）。

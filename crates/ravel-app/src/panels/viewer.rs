@@ -59,6 +59,77 @@ struct PanDrag {
     offset_start: (f32, f32),
 }
 
+/// Zoom is exponential in pointer travel: `current * exp(-dy * RATE)` for a
+/// scroll of `dy` panel pixels. The Zoom tool's click names its own travel
+/// ([`ZOOM_CLICK_TRAVEL`]) and multiplies through this same function, so the
+/// tool lands on the wheel's ladder instead of introducing a second zoom scale.
+const ZOOM_RATE_PER_PIXEL: f32 = 0.002;
+
+/// The scroll travel one Zoom-tool click stands for: ten wheel notches of the
+/// `px(20.0)` line height, i.e. `exp(0.4)` ≈ 1.49x in, 0.67x out.
+const ZOOM_CLICK_TRAVEL: f32 = 200.0;
+
+/// A press that travels less than this on *either* axis is a click, not a
+/// rectangle. Without the floor a hand tremor becomes a two-pixel rectangle
+/// blown up to fill the panel — a jump to `MAX_ZOOM` nobody asked for.
+const ZOOM_RECT_MIN_PIXELS: f32 = 8.0;
+
+fn zoom_factor(dy: f32) -> f32 {
+    (-dy * ZOOM_RATE_PER_PIXEL).exp()
+}
+
+/// A Zoom-tool press. Which of the two gestures it is — a click zoom or a
+/// rectangle zoom — is only known when the button comes back up, so the press
+/// records and the release decides.
+#[derive(Clone, Copy)]
+struct ZoomDrag {
+    /// Panel-local pixels, where the press landed. Also the click's anchor:
+    /// the user aimed there, not wherever the pointer drifted to.
+    start: (f32, f32),
+    current: (f32, f32),
+    /// `Alt` was held on the press, so a click zooms out.
+    zoom_out: bool,
+}
+
+impl ZoomDrag {
+    /// The dragged rectangle in panel-local pixels, or `None` while the
+    /// gesture is still a click (see [`ZOOM_RECT_MIN_PIXELS`]).
+    fn rect(self) -> Option<viewport::Rect> {
+        let width = (self.current.0 - self.start.0).abs();
+        let height = (self.current.1 - self.start.1).abs();
+        (width >= ZOOM_RECT_MIN_PIXELS && height >= ZOOM_RECT_MIN_PIXELS).then_some(
+            viewport::Rect {
+                x: self.start.0.min(self.current.0),
+                y: self.start.1.min(self.current.1),
+                width,
+                height,
+            },
+        )
+    }
+}
+
+/// The active canvas tool. One reader for the Global, so every gesture asks
+/// the same question the same way.
+fn active_tool(cx: &App) -> ravel_ui::ToolKind {
+    cx.try_global::<ToolState>()
+        .map(|state| state.active)
+        .unwrap_or_default()
+}
+
+/// The cursor a tool promises where nothing under the pointer claims its own —
+/// the single place a tool becomes a hint, so the toolbar switch and the
+/// pointer hit test can never disagree.
+fn tool_pointer_hint(tool: ravel_ui::ToolKind) -> ViewerPointerHint {
+    match tool {
+        ravel_ui::ToolKind::Select => ViewerPointerHint::Empty,
+        ravel_ui::ToolKind::Pen | ravel_ui::ToolKind::Rect | ravel_ui::ToolKind::Ellipse => {
+            ViewerPointerHint::Drawing
+        }
+        ravel_ui::ToolKind::Hand => ViewerPointerHint::Hand,
+        ravel_ui::ToolKind::Zoom => ViewerPointerHint::Zoom,
+    }
+}
+
 #[derive(Clone)]
 struct MoveOrigin {
     node: NodeId,
@@ -211,16 +282,24 @@ pub enum ViewerPointerHint {
     Rotate,
     /// The layer shell's anchor marker.
     ShellAnchor,
+    /// The Hand tool: the picture can be dragged from anywhere.
+    Hand,
+    /// The Zoom tool: click or drag out a rectangle.
+    Zoom,
 }
 
 impl ViewerPointerHint {
     fn cursor(self) -> CursorStyle {
         match self {
             Self::Empty => CursorStyle::Arrow,
-            Self::Drawing | Self::PathTangent => CursorStyle::Crosshair,
+            // The Zoom tool aims at a point, like the drawing tools do.
+            // GPUI-CE has no magnifier cursor and no custom bitmaps.
+            Self::Drawing | Self::PathTangent | Self::Zoom => CursorStyle::Crosshair,
             // GPUI-CE has no generic `Move` cursor. OpenHand communicates the
-            // same grab-to-move affordance and matches the Node Editor.
-            Self::MovableBody => CursorStyle::OpenHand,
+            // same grab-to-move affordance and matches the Node Editor. The
+            // Hand tool is the literal case: the press closes it into
+            // `ClosedHand` through `viewer_drag_cursor`.
+            Self::MovableBody | Self::Hand => CursorStyle::OpenHand,
             // Both anchors are "a point you can pick up"; one glyph for both
             // keeps the promise consistent across overlays.
             Self::PathAnchor | Self::ShellAnchor => CursorStyle::PointingHand,
@@ -382,6 +461,7 @@ pub struct ViewerPanel {
     viewport_origin: Rc<Cell<(f32, f32)>>,
     viewport_size: Rc<Cell<(f32, f32)>>,
     pan_drag: Option<PanDrag>,
+    zoom_drag: Option<ZoomDrag>,
     move_drag: Option<MoveDrag>,
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
@@ -501,14 +581,7 @@ impl ViewerPanel {
             {
                 this.finalize_pen_session(false, cx);
             }
-            this.pointer_hint = if matches!(
-                state.active,
-                ravel_ui::ToolKind::Pen | ravel_ui::ToolKind::Rect | ravel_ui::ToolKind::Ellipse
-            ) {
-                ViewerPointerHint::Drawing
-            } else {
-                ViewerPointerHint::Empty
-            };
+            this.pointer_hint = tool_pointer_hint(state.active);
             cx.notify();
         });
         let selection_sub = cx.observe_global::<CanvasSelection>(|this, cx| {
@@ -657,6 +730,7 @@ impl ViewerPanel {
             viewport_origin: Rc::new(Cell::new((0.0, 0.0))),
             viewport_size: Rc::new(Cell::new((0.0, 0.0))),
             pan_drag: None,
+            zoom_drag: None,
             move_drag: None,
             shape_drag: None,
             pen_session: None,
@@ -785,13 +859,149 @@ impl ViewerPanel {
         cx.set_global(super::SelectedPropertiesTarget(target));
     }
 
-    fn select_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        if cx
-            .try_global::<ToolState>()
-            .map(|state| state.active)
-            .unwrap_or_default()
-            != ravel_ui::ToolKind::Select
+    /// What the left button means, decided in one place from the active tool.
+    ///
+    /// Hand and Zoom own the pointer outright, so a press under them reaches
+    /// neither an overlay handle nor a guide, a selection, a shape drag or the
+    /// pen. The `match` is exhaustive on purpose: a seventh tool cannot be
+    /// added without answering here.
+    fn left_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        match active_tool(cx) {
+            ravel_ui::ToolKind::Hand => self.pan_mouse_down(event, cx),
+            ravel_ui::ToolKind::Zoom => self.zoom_mouse_down(event, cx),
+            ravel_ui::ToolKind::Select
+            | ravel_ui::ToolKind::Pen
+            | ravel_ui::ToolKind::Rect
+            | ravel_ui::ToolKind::Ellipse => {
+                if !self.overlay_handle_mouse_down(event, cx) && !self.guide_mouse_down(event, cx) {
+                    self.select_mouse_down(event, cx);
+                    self.shape_mouse_down(event, cx);
+                    self.pen_mouse_down(event, cx);
+                }
+            }
+        }
+    }
+
+    /// Follow the pointer with whichever left-button gesture is live.
+    ///
+    /// The navigation drags come first: `pan_drag` and `zoom_drag` are only
+    /// ever set by the middle button or by Hand / Zoom, so while one of them
+    /// owns the pointer nothing else may start.
+    fn left_dragged(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.pan_dragged(event.position, cx) || self.zoom_dragged(event.position, cx) {
+            return;
+        }
+        if self.guide_drag.is_some() {
+            self.guide_dragged(event.position, drag_modifiers(&event.modifiers), cx);
+        } else if self.handle_drag.is_some() {
+            self.handle_dragged(event.position, drag_modifiers(&event.modifiers), cx);
+        } else if self
+            .pen_session
+            .as_ref()
+            .is_some_and(|session| session.active_point.is_some())
         {
+            self.pen_dragged(event.position, cx);
+        } else if self.shape_drag.is_some() {
+            self.shape_dragged(event, cx);
+        } else {
+            self.move_dragged(event.position, drag_modifiers(&event.modifiers), cx);
+        }
+    }
+
+    /// Begin a pan. The Hand tool's left press and the middle button — which
+    /// pans under any tool — are the same gesture, so the temporary hand
+    /// (`h` held), the toolbar hand and the middle button share this entry
+    /// point and the one [`PanDrag`] state.
+    fn pan_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.pen_point_ended(cx);
+        let Some(resolution) = self.composition_resolution else {
+            return;
+        };
+        let pointer_start = self.local_position(event.position);
+        let offset_start = self
+            .viewport
+            .begin_pan(self.viewport_size.get(), resolution);
+        self.pan_drag = Some(PanDrag {
+            pointer_start,
+            offset_start,
+        });
+        cx.notify();
+    }
+
+    /// Follow the pointer while panning. Reports whether the pan owns the
+    /// drag, so the left button's gesture chain stops before the move tool.
+    fn pan_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.pan_drag else {
+            return false;
+        };
+        let pointer = self.local_position(position);
+        self.viewport.set_offset((
+            drag.offset_start.0 + pointer.0 - drag.pointer_start.0,
+            drag.offset_start.1 + pointer.1 - drag.pointer_start.1,
+        ));
+        cx.notify();
+        true
+    }
+
+    fn pan_ended(&mut self, cx: &mut Context<Self>) {
+        if self.pan_drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Zoom tool press: record it. Nothing zooms yet — the release decides
+    /// whether this was a click or a rectangle.
+    fn zoom_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.pen_point_ended(cx);
+        let start = self.local_position(event.position);
+        self.zoom_drag = Some(ZoomDrag {
+            start,
+            current: start,
+            zoom_out: event.modifiers.alt,
+        });
+        cx.notify();
+    }
+
+    /// Size the zoom rectangle. Reports whether the zoom owns the drag.
+    fn zoom_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let current = self.local_position(position);
+        let Some(drag) = self.zoom_drag.as_mut() else {
+            return false;
+        };
+        drag.current = current;
+        cx.notify();
+        true
+    }
+
+    /// The release decides which zoom the press was: the dragged rectangle if
+    /// there is one, otherwise a click at the press point — `Alt` held on the
+    /// press zooms out. Both go through the viewport's anchored zoom on the
+    /// wheel's own multiplier ladder ([`zoom_factor`]).
+    fn zoom_ended(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.zoom_drag.take() else {
+            return;
+        };
+        cx.notify();
+        let Some(resolution) = self.composition_resolution else {
+            return;
+        };
+        let panel = self.viewport_size.get();
+        if let Some(rect) = drag.rect() {
+            self.viewport.zoom_to_rect(rect, panel, resolution);
+            return;
+        }
+        let travel = if drag.zoom_out {
+            ZOOM_CLICK_TRAVEL
+        } else {
+            -ZOOM_CLICK_TRAVEL
+        };
+        let requested = self.viewport.zoom(panel, resolution) * zoom_factor(travel);
+        self.viewport
+            .zoom_toward(requested, drag.start, panel, resolution);
+    }
+
+    fn select_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if active_tool(cx) != ravel_ui::ToolKind::Select {
             return;
         }
         let Some(pointer) = self.comp_position(event.position) else {
@@ -1127,11 +1337,7 @@ impl ViewerPanel {
     /// Rect/Ellipse tool mouse-down: record the pending drag. Nothing is
     /// created yet — a click without a drag must not touch the document.
     fn shape_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let tool = cx
-            .try_global::<ToolState>()
-            .map(|state| state.active)
-            .unwrap_or_default();
-        let Some(kind) = ShapeDrawKind::from_tool(tool) else {
+        let Some(kind) = ShapeDrawKind::from_tool(active_tool(cx)) else {
             return;
         };
         let Some(pointer) = self.comp_position(event.position) else {
@@ -1632,10 +1838,7 @@ impl ViewerPanel {
 
     fn pointer_hint_at(&self, position: Point<Pixels>, cx: &App) -> Option<ViewerPointerHint> {
         let pointer = self.comp_position(position)?;
-        let tool = cx
-            .try_global::<ToolState>()
-            .map(|state| state.active)
-            .unwrap_or_default();
+        let tool = active_tool(cx);
         let radius = self.comp_hit_radius(8.0).unwrap_or(8.0);
 
         if tool == ravel_ui::ToolKind::Pen
@@ -1673,16 +1876,7 @@ impl ViewerPanel {
             return Some(ViewerPointerHint::MovableBody);
         }
 
-        Some(
-            if matches!(
-                tool,
-                ravel_ui::ToolKind::Pen | ravel_ui::ToolKind::Rect | ravel_ui::ToolKind::Ellipse
-            ) {
-                ViewerPointerHint::Drawing
-            } else {
-                ViewerPointerHint::Empty
-            },
-        )
+        Some(tool_pointer_hint(tool))
     }
 
     /// The composition rectangle in composition units — the very extent
@@ -1717,12 +1911,7 @@ impl ViewerPanel {
     }
 
     fn pen_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        if cx
-            .try_global::<ToolState>()
-            .map(|state| state.active)
-            .unwrap_or_default()
-            != ravel_ui::ToolKind::Pen
-        {
+        if active_tool(cx) != ravel_ui::ToolKind::Pen {
             return;
         }
         let Some(pointer) = self.comp_position(event.position) else {
@@ -2054,12 +2243,7 @@ impl ViewerPanel {
         if !self.show_guides || self.guides_locked || self.pen_session.is_some() {
             return false;
         }
-        if cx
-            .try_global::<ToolState>()
-            .map(|state| state.active)
-            .unwrap_or_default()
-            != ravel_ui::ToolKind::Select
-        {
+        if active_tool(cx) != ravel_ui::ToolKind::Select {
             return false;
         }
         let Some(pointer) = self.comp_position(event.position) else {
@@ -3217,6 +3401,10 @@ impl Render for ViewerPanel {
         let viewport_size = self.viewport_size.clone();
         let background_mode = self.background_mode;
         let pointer_cursor = self.pointer_hint.cursor();
+        // The rectangle the Zoom drag has swept so far, in panel-local pixels.
+        // Without the band the gesture is invisible until the view jumps.
+        let zoom_marquee = self.zoom_drag.and_then(|drag| drag.rect());
+        let zoom_marquee_color = cx.theme().colors.primary;
         let active_drag_cursor = viewer_drag_cursor(
             self.pan_drag.is_some(),
             self.move_drag.is_some(),
@@ -3365,6 +3553,22 @@ impl Render for ViewerPanel {
                             window,
                         );
                     }
+                    if let Some(marquee) = zoom_marquee {
+                        window.paint_quad(
+                            outline(
+                                Bounds {
+                                    origin: point(
+                                        bounds.origin.x + px(marquee.x),
+                                        bounds.origin.y + px(marquee.y),
+                                    ),
+                                    size: size(px(marquee.width), px(marquee.height)),
+                                },
+                                zoom_marquee_color,
+                                BorderStyle::default(),
+                            )
+                            .border_widths(px(1.0)),
+                        );
+                    }
                     if let Some(cursor) = active_drag_cursor {
                         window.set_window_cursor_style(cursor);
                     }
@@ -3423,44 +3627,26 @@ impl Render for ViewerPanel {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.pen_point_ended(cx);
-                    let Some(resolution) = this.composition_resolution else {
-                        return;
-                    };
-                    let pointer_start = this.local_position(event.position);
-                    let offset_start = this
-                        .viewport
-                        .begin_pan(this.viewport_size.get(), resolution);
-                    this.pan_drag = Some(PanDrag {
-                        pointer_start,
-                        offset_start,
-                    });
-                    cx.notify();
+                    this.pan_mouse_down(event, cx);
                 }),
             )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    if !this.overlay_handle_mouse_down(event, cx)
-                        && !this.guide_mouse_down(event, cx)
-                    {
-                        this.select_mouse_down(event, cx);
-                        this.shape_mouse_down(event, cx);
-                        this.pen_mouse_down(event, cx);
-                    }
+                    this.left_mouse_down(event, cx);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Middle,
                 cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                    if this.pan_drag.take().is_some() {
-                        cx.notify();
-                    }
+                    this.pan_ended(cx);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.pan_ended(cx);
+                    this.zoom_ended(cx);
                     this.move_ended(cx);
                     this.shape_ended(cx);
                     this.pen_point_ended(cx);
@@ -3479,44 +3665,22 @@ impl Render for ViewerPanel {
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
                         this.cancel_guide_drag(cx);
-                        let Some(drag) = this.pan_drag else {
-                            return;
-                        };
-                        let pointer = this.local_position(event.position);
-                        this.viewport.set_offset((
-                            drag.offset_start.0 + pointer.0 - drag.pointer_start.0,
-                            drag.offset_start.1 + pointer.1 - drag.pointer_start.1,
-                        ));
-                        cx.notify();
+                        this.pan_dragged(event.position, cx);
                     }
-                    Some(MouseButton::Left) => {
-                        this.pan_drag = None;
-                        if this.guide_drag.is_some() {
-                            this.guide_dragged(
-                                event.position,
-                                drag_modifiers(&event.modifiers),
-                                cx,
-                            );
-                        } else if this.handle_drag.is_some() {
-                            this.handle_dragged(
-                                event.position,
-                                drag_modifiers(&event.modifiers),
-                                cx,
-                            );
-                        } else if this
-                            .pen_session
-                            .as_ref()
-                            .is_some_and(|s| s.active_point.is_some())
-                        {
-                            this.pen_dragged(event.position, cx);
-                        } else if this.shape_drag.is_some() {
-                            this.shape_dragged(event, cx);
-                        } else {
-                            this.move_dragged(event.position, drag_modifiers(&event.modifiers), cx);
-                        }
-                    }
+                    Some(MouseButton::Left) => this.left_dragged(event, cx),
                     _ => {
-                        this.pan_drag = None;
+                        // Repaint on the way out: the Zoom marquee is painted
+                        // from `zoom_drag`, and the hint block below returns
+                        // early whenever the pointer is off the composition or
+                        // the hint is unchanged. A release the window never
+                        // saw would otherwise leave the rectangle on screen
+                        // until something else repainted the panel. Both are
+                        // taken before the `||` so neither short-circuits.
+                        let had_pan = this.pan_drag.take().is_some();
+                        let had_zoom = this.zoom_drag.take().is_some();
+                        if had_pan || had_zoom {
+                            cx.notify();
+                        }
                         this.pen_point_ended(cx);
                         this.cancel_move(cx);
                         this.cancel_shape(cx);
@@ -3549,7 +3713,7 @@ impl Render for ViewerPanel {
                     return;
                 }
                 let current = this.viewport.zoom(this.viewport_size.get(), resolution);
-                let requested = current * (-dy * 0.002).exp();
+                let requested = current * zoom_factor(dy);
                 this.viewport.zoom_toward(
                     requested,
                     this.local_position(event.position),
@@ -3582,6 +3746,10 @@ impl Render for ViewerPanel {
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.guide_drag.is_some() {
                     this.cancel_guide_drag(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "escape" && this.zoom_drag.is_some() {
+                    this.zoom_drag = None;
+                    cx.notify();
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.pen_session.is_some() {
                     this.finalize_pen_session(false, cx);
@@ -8273,5 +8441,424 @@ mod tests {
             transform.scale[0].evaluate(0.0, &eval_ctx()),
             transform.scale[1].evaluate(0.0, &eval_ctx()),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Hand / Zoom tools (`TOOLX-1`)
+    // -----------------------------------------------------------------------
+
+    const FIXTURE_RES: (u32, u32) = (1920, 1080);
+
+    /// The window position of a panel-local pixel, read from the panel's
+    /// *current* viewport origin. The fixture's canvas moves as soon as the
+    /// window lays out for real, so a hardcoded window pixel drifts.
+    fn local_point(panel: &ViewerPanel, local: (f32, f32)) -> Point<Pixels> {
+        let origin = panel.viewport_origin.get();
+        point(px(local.0 + origin.0), px(local.1 + origin.1))
+    }
+
+    fn press_local(panel: &ViewerPanel, local: (f32, f32), modifiers: Modifiers) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: local_point(panel, local),
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    fn drag_local(panel: &ViewerPanel, local: (f32, f32)) -> MouseMoveEvent {
+        MouseMoveEvent {
+            position: local_point(panel, local),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn tool_state(active: ravel_ui::ToolKind) -> ToolState {
+        ToolState {
+            active,
+            ..ToolState::default()
+        }
+    }
+
+    /// Hand's left drag pans, and the temporary hand (`h` held) goes down the
+    /// same path as the toolbar hand — one `PanDrag`, one offset.
+    #[gpui::test]
+    fn the_hand_tool_pans_with_the_left_button(cx: &mut TestAppContext) {
+        for hand_hold in [false, true] {
+            // `_project` keeps the entity alive: `ProjectStateHandle` is weak.
+            let (window, _project, ..) = shell_setup(cx);
+            cx.update(|cx| {
+                cx.set_global(ToolState {
+                    active: ravel_ui::ToolKind::Hand,
+                    hand_hold,
+                    previous: ravel_ui::ToolKind::Select,
+                })
+            });
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let panel_size = panel.viewport_size.get();
+                    let before = panel.viewport.rect(panel_size, FIXTURE_RES);
+                    let press = press_local(panel, (400.0, 300.0), Modifiers::default());
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.pan_drag.is_some(), "hand_hold = {hand_hold}");
+                    let moved = drag_local(panel, (460.0, 280.0));
+                    panel.left_dragged(&moved, cx);
+
+                    let after = panel.viewport.rect(panel_size, FIXTURE_RES);
+                    assert_eq!(
+                        (after.x - before.x, after.y - before.y),
+                        (60.0, -20.0),
+                        "the picture follows the pointer (hand_hold = {hand_hold})"
+                    );
+
+                    panel.pan_ended(cx);
+                    assert!(panel.pan_drag.is_none());
+                })
+                .unwrap();
+        }
+    }
+
+    /// The middle button pans under *every* tool. `pan_mouse_down` is the one
+    /// entry point the middle-button listener calls unconditionally, so it
+    /// must not consult the active tool.
+    #[gpui::test]
+    fn the_middle_button_pans_under_every_tool(cx: &mut TestAppContext) {
+        for tool in [
+            ravel_ui::ToolKind::Select,
+            ravel_ui::ToolKind::Pen,
+            ravel_ui::ToolKind::Rect,
+            ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Hand,
+            ravel_ui::ToolKind::Zoom,
+        ] {
+            let (window, _project, ..) = shell_setup(cx);
+            cx.update(|cx| cx.set_global(tool_state(tool)));
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let panel_size = panel.viewport_size.get();
+                    let before = panel.viewport.rect(panel_size, FIXTURE_RES);
+                    let press = MouseDownEvent {
+                        button: MouseButton::Middle,
+                        position: local_point(panel, (400.0, 300.0)),
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    };
+                    panel.pan_mouse_down(&press, cx);
+                    let moved = local_point(panel, (370.0, 310.0));
+                    assert!(panel.pan_dragged(moved, cx));
+
+                    let after = panel.viewport.rect(panel_size, FIXTURE_RES);
+                    assert_eq!(
+                        (after.x - before.x, after.y - before.y),
+                        (-30.0, 10.0),
+                        "the middle button pans under {tool:?}"
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    /// The temporary hand still hands the tool back. This unit adds the pan the
+    /// hold performs; the transition itself must be untouched.
+    #[gpui::test]
+    fn the_hand_hold_returns_the_previous_tool(cx: &mut TestAppContext) {
+        let (window, _project, ..) = shell_setup(cx);
+        cx.update(|cx| cx.set_global(tool_state(ravel_ui::ToolKind::Rect)));
+        window
+            .update(cx, |panel, window, cx| {
+                panel.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+
+        let h = || Keystroke {
+            modifiers: Modifiers::default(),
+            key: "h".to_string(),
+            key_char: Some("h".to_string()),
+        };
+
+        visual.simulate_event(KeyDownEvent {
+            keystroke: h(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        let held = visual.update(|_window, cx| cx.global::<ToolState>().clone());
+        assert_eq!(held.active, ravel_ui::ToolKind::Hand);
+        assert!(held.hand_hold);
+        assert_eq!(held.previous, ravel_ui::ToolKind::Rect);
+
+        visual.simulate_event(KeyUpEvent { keystroke: h() });
+        let released = visual.update(|_window, cx| cx.global::<ToolState>().clone());
+        assert_eq!(
+            released.active,
+            ravel_ui::ToolKind::Rect,
+            "releasing `h` gives the tool back"
+        );
+        assert!(!released.hand_hold);
+    }
+
+    /// A Zoom click magnifies around the pointer — the same anchor rule the
+    /// scroll wheel uses — by one step of the wheel's own multiplier ladder.
+    /// `Alt` on the press turns the same click into the reciprocal.
+    #[gpui::test]
+    fn the_zoom_tool_click_magnifies_around_the_pointer(cx: &mut TestAppContext) {
+        for alt in [false, true] {
+            let (window, _project, ..) = shell_setup(cx);
+            cx.update(|cx| cx.set_global(tool_state(ravel_ui::ToolKind::Zoom)));
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let panel_size = panel.viewport_size.get();
+                    let pointer = local_point(panel, (400.0, 300.0));
+                    let before_comp = panel.comp_position(pointer).expect("inside the comp");
+                    let before_zoom = panel.viewport.zoom(panel_size, FIXTURE_RES);
+
+                    let press = press_local(
+                        panel,
+                        (400.0, 300.0),
+                        Modifiers {
+                            alt,
+                            ..Modifiers::default()
+                        },
+                    );
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.zoom_drag.is_some(), "the press only records");
+                    assert_eq!(
+                        panel.viewport.zoom(panel_size, FIXTURE_RES),
+                        before_zoom,
+                        "nothing zooms until the release"
+                    );
+                    panel.zoom_ended(cx);
+
+                    let after_zoom = panel.viewport.zoom(panel_size, FIXTURE_RES);
+                    let expected = if alt {
+                        zoom_factor(ZOOM_CLICK_TRAVEL)
+                    } else {
+                        zoom_factor(-ZOOM_CLICK_TRAVEL)
+                    };
+                    assert!(
+                        (after_zoom / before_zoom - expected).abs() < 1e-4,
+                        "alt = {alt}: {after_zoom} / {before_zoom} is not {expected}"
+                    );
+                    if alt {
+                        assert!(after_zoom < before_zoom, "Alt zooms out");
+                    } else {
+                        assert!(after_zoom > before_zoom, "a plain click zooms in");
+                    }
+
+                    let after_comp = panel.comp_position(pointer).expect("inside the comp");
+                    assert!(
+                        (after_comp.0 - before_comp.0).abs() < 0.01
+                            && (after_comp.1 - before_comp.1).abs() < 0.01,
+                        "the same composition pixel stays under the pointer: \
+                         {before_comp:?} became {after_comp:?}"
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    /// A drag frames the rectangle it swept; a press that barely moved is a
+    /// click, not a rectangle two pixels tall blown up to fill the panel.
+    #[gpui::test]
+    fn a_zoom_drag_frames_the_rectangle_and_a_tremor_is_a_click(cx: &mut TestAppContext) {
+        let (window, _project, ..) = shell_setup(cx);
+        cx.update(|cx| cx.set_global(tool_state(ravel_ui::ToolKind::Zoom)));
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let panel_size = panel.viewport_size.get();
+                let before = panel.viewport.rect(panel_size, FIXTURE_RES);
+                let drag = (500.0, 300.0);
+                let press = press_local(panel, (400.0, 300.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                let moved = drag_local(panel, (400.0 + drag.0, 300.0 + drag.1));
+                panel.left_dragged(&moved, cx);
+                panel.zoom_ended(cx);
+
+                let after = panel.viewport.rect(panel_size, FIXTURE_RES);
+                assert!(
+                    (after.width / after.height - before.width / before.height).abs() < 1e-3,
+                    "the rectangle zoom kept the composition's aspect ratio: \
+                     {before:?} became {after:?}"
+                );
+
+                // One scale for both axes, so the framed rectangle grows by the
+                // same factor the picture did. It has to end up inside the
+                // panel and flush against it on the limiting axis: contained,
+                // not cropped, and not left short of a fit either.
+                let scale = after.width / before.width;
+                let framed = (drag.0 * scale, drag.1 * scale);
+                assert!(
+                    framed.0 <= panel_size.0 + 0.01 && framed.1 <= panel_size.1 + 0.01,
+                    "the rectangle is contained: {framed:?} in {panel_size:?}"
+                );
+                assert!(
+                    (framed.0 - panel_size.0).abs() < 0.01
+                        || (framed.1 - panel_size.1).abs() < 0.01,
+                    "the rectangle fills the panel on one axis: \
+                     {framed:?} in {panel_size:?}"
+                );
+
+                // And its centre is the panel's centre.
+                let centre = (
+                    (after.x + (400.0 - before.x) / before.width * after.width) + framed.0 * 0.5,
+                    (after.y + (300.0 - before.y) / before.height * after.height) + framed.1 * 0.5,
+                );
+                assert!(
+                    (centre.0 - panel_size.0 * 0.5).abs() < 0.01
+                        && (centre.1 - panel_size.1 * 0.5).abs() < 0.01,
+                    "the framed centre landed at {centre:?}, not the panel centre"
+                );
+            })
+            .unwrap();
+
+        let (window, _project, ..) = shell_setup(cx);
+        cx.update(|cx| cx.set_global(tool_state(ravel_ui::ToolKind::Zoom)));
+        window
+            .update(cx, |panel, _window, cx| {
+                let panel_size = panel.viewport_size.get();
+                let before = panel.viewport.zoom(panel_size, FIXTURE_RES);
+                let press = press_local(panel, (400.0, 300.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                let moved = drag_local(panel, (404.0, 302.0));
+                panel.left_dragged(&moved, cx);
+                panel.zoom_ended(cx);
+
+                let after = panel.viewport.zoom(panel_size, FIXTURE_RES);
+                assert!(
+                    (after / before - zoom_factor(-ZOOM_CLICK_TRAVEL)).abs() < 1e-4,
+                    "a four-pixel drag is a click zoom, got {after} from {before}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Hand and Zoom own the press outright: it reaches no overlay handle, no
+    /// selection and no shape drag. The `Select` and `Rect` rows are the
+    /// control — they prove the same press does start those gestures.
+    #[gpui::test]
+    fn the_navigation_tools_take_the_press_from_every_editing_gesture(cx: &mut TestAppContext) {
+        for tool in [
+            ravel_ui::ToolKind::Select,
+            ravel_ui::ToolKind::Rect,
+            ravel_ui::ToolKind::Hand,
+            ravel_ui::ToolKind::Zoom,
+        ] {
+            let (window, _project, ..) = shell_setup(cx);
+            cx.update(|cx| cx.set_global(tool_state(tool)));
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_at(panel, SE_GRIP);
+                    panel.left_mouse_down(&press, cx);
+                    let navigating =
+                        matches!(tool, ravel_ui::ToolKind::Hand | ravel_ui::ToolKind::Zoom);
+                    assert_eq!(
+                        panel.handle_drag.is_some(),
+                        tool == ravel_ui::ToolKind::Select,
+                        "{tool:?} and the shell scale grip"
+                    );
+                    assert_eq!(
+                        panel.shape_drag.is_some(),
+                        tool == ravel_ui::ToolKind::Rect,
+                        "{tool:?} and the shape drag"
+                    );
+                    assert!(panel.move_drag.is_none());
+                    assert!(panel.pen_session.is_none());
+                    assert!(panel.guide_drag.is_none());
+                    assert_eq!(
+                        panel.pan_drag.is_some(),
+                        tool == ravel_ui::ToolKind::Hand,
+                        "{tool:?} and the pan"
+                    );
+                    assert_eq!(
+                        panel.zoom_drag.is_some(),
+                        tool == ravel_ui::ToolKind::Zoom,
+                        "{tool:?} and the zoom"
+                    );
+                    assert!(
+                        !navigating || panel.handle_drag.is_none(),
+                        "a navigation tool never grabs a handle"
+                    );
+                    // And the cursor says so: every handle-bearing overlay
+                    // gates itself on `Select`, so the hint over the grip is
+                    // the tool's own — the press and the promise agree.
+                    if navigating {
+                        assert_eq!(
+                            panel.pointer_hint_at(window_point(panel, SE_GRIP), cx),
+                            Some(tool_pointer_hint(tool)),
+                            "{tool:?} must promise its own cursor over the shell grip"
+                        );
+                    }
+                })
+                .unwrap();
+        }
+    }
+
+    /// The cursor a tool promises. `done/pointer-feedback-plan.md` held these
+    /// two back until the gestures existed; they exist now.
+    #[test]
+    fn the_navigation_tools_promise_their_own_cursors() {
+        assert_eq!(
+            tool_pointer_hint(ravel_ui::ToolKind::Hand).cursor(),
+            CursorStyle::OpenHand
+        );
+        assert_eq!(
+            tool_pointer_hint(ravel_ui::ToolKind::Zoom).cursor(),
+            CursorStyle::Crosshair
+        );
+        // A press closes the hand, whichever gesture opened the pan.
+        assert_eq!(
+            viewer_drag_cursor(true, false, false, false, None, None),
+            Some(CursorStyle::ClosedHand)
+        );
+        // And the editing tools keep the cursors they had.
+        assert_eq!(
+            tool_pointer_hint(ravel_ui::ToolKind::Select).cursor(),
+            CursorStyle::Arrow
+        );
+        assert_eq!(
+            tool_pointer_hint(ravel_ui::ToolKind::Rect).cursor(),
+            CursorStyle::Crosshair
+        );
+    }
+
+    /// The click / rectangle split, and the rectangle normalized whichever way
+    /// the drag was swept.
+    #[test]
+    fn a_zoom_press_becomes_a_rectangle_only_once_both_axes_clear_the_floor() {
+        let click = ZoomDrag {
+            start: (10.0, 10.0),
+            current: (14.0, 40.0),
+            zoom_out: false,
+        };
+        assert!(
+            click.rect().is_none(),
+            "one axis under the floor is still a click"
+        );
+
+        let swept_up_left = ZoomDrag {
+            start: (40.0, 40.0),
+            current: (10.0, 10.0),
+            zoom_out: false,
+        };
+        assert_eq!(
+            swept_up_left.rect(),
+            Some(viewport::Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 30.0,
+                height: 30.0,
+            })
+        );
     }
 }

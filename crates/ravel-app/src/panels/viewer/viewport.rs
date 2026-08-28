@@ -99,6 +99,34 @@ impl ViewerViewport {
         };
     }
 
+    /// Zoom so `target` — a rectangle in panel-local pixels — is contained by
+    /// the panel and centered in it.
+    ///
+    /// The scale is the *smaller* of the two panel/rectangle ratios, so a drag
+    /// of any shape keeps the composition's aspect ratio: the rectangle is
+    /// contained, never stretched to match the panel.
+    pub fn zoom_to_rect(&mut self, target: Rect, panel: (f32, f32), composition: (u32, u32)) {
+        if target.width <= 0.0 || target.height <= 0.0 {
+            return;
+        }
+        let old = self.rect(panel, composition);
+        if old.width <= 0.0 || old.height <= 0.0 {
+            return;
+        }
+        let old_zoom = self.zoom(panel, composition);
+        let zoom = (old_zoom * (panel.0 / target.width).min(panel.1 / target.height))
+            .clamp(MIN_ZOOM, MAX_ZOOM);
+        // Same anchor rule as `zoom_toward`, with the anchor moved to the
+        // middle of the view: the composition point under the rectangle's
+        // centre lands on the panel's centre.
+        let comp_x = (target.x + target.width * 0.5 - old.x) / old_zoom;
+        let comp_y = (target.y + target.height * 0.5 - old.y) / old_zoom;
+        self.mode = Mode::Explicit {
+            zoom,
+            offset: (panel.0 * 0.5 - comp_x * zoom, panel.1 * 0.5 - comp_y * zoom),
+        };
+    }
+
     pub fn begin_pan(&mut self, panel: (f32, f32), composition: (u32, u32)) -> (f32, f32) {
         let rect = self.rect(panel, composition);
         let zoom = self.zoom(panel, composition).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -160,6 +188,56 @@ mod tests {
         assert_eq!(viewport.zoom((100.0, 100.0), (100, 100)), MIN_ZOOM);
         viewport.zoom_toward(100.0, (50.0, 50.0), (100.0, 100.0), (100, 100));
         assert_eq!(viewport.zoom((100.0, 100.0), (100, 100)), MAX_ZOOM);
+    }
+
+    /// A rectangle zoom is a fit, not a stretch: one scale for both axes, the
+    /// narrower ratio wins, and the rectangle's centre ends up in the middle
+    /// of the panel.
+    #[test]
+    fn rect_zoom_contains_the_rectangle_without_stretching() {
+        let mut viewport = ViewerViewport::default();
+        let panel = (1000.0, 500.0);
+        let composition = (1000, 500);
+        viewport.zoom_to_rect(
+            Rect {
+                x: 100.0,
+                y: 100.0,
+                width: 400.0,
+                height: 100.0,
+            },
+            panel,
+            composition,
+        );
+
+        let rect = viewport.rect(panel, composition);
+        assert!(
+            (rect.width / rect.height - 2.0).abs() < 0.001,
+            "the composition keeps its 2:1 shape, got {rect:?}"
+        );
+        // 1000/400 = 2.5 contains the rectangle; 500/100 = 5 would crop it.
+        let zoom = viewport.zoom(panel, composition);
+        assert!((zoom - 2.5).abs() < 0.001, "got {zoom}");
+        assert!((rect.x + 300.0 * zoom - 500.0).abs() < 0.001);
+        assert!((rect.y + 150.0 * zoom - 250.0).abs() < 0.001);
+    }
+
+    /// A rectangle with no area is not a rectangle: a degenerate drag leaves
+    /// the viewport where it was rather than dividing by zero.
+    #[test]
+    fn rect_zoom_ignores_a_flat_rectangle() {
+        let mut viewport = ViewerViewport::default();
+        let before = viewport;
+        viewport.zoom_to_rect(
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 100.0,
+                height: 0.0,
+            },
+            (1000.0, 500.0),
+            (1000, 500),
+        );
+        assert_eq!(viewport, before);
     }
 
     #[test]

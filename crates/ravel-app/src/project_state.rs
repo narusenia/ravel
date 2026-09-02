@@ -761,6 +761,47 @@ impl ProjectState {
         )
     }
 
+    /// Take a replacement device the host renderer recovered onto, with the
+    /// zero-copy surface off across the swap (`GPULOSS-3`).
+    ///
+    /// The capability is the reason this exists rather than the caller calling
+    /// [`Self::restart_eval_on_gpu`] directly: zero-copy is only ever restored
+    /// **after** a rebuild has actually started, so a session that cannot get
+    /// one stays on CPU frames instead of handing a renderer textures from a
+    /// device nobody is evaluating on.
+    ///
+    /// Returns what the swap returned. `false` — one is already running — is
+    /// where the ordering earns its keep: the capability stays off, because
+    /// the swap in flight is the one that will restore it, and a poll that
+    /// turned it on here would announce a recovery that has not happened.
+    pub fn recover_on_replacement_gpu(&mut self, gpu: GpuContext, cx: &mut Context<Self>) -> bool {
+        self.swap_device_with_surface_off(move |this, cx| this.restart_eval_on_gpu(gpu, cx), cx)
+    }
+
+    /// The capability sequence around a device swap, with the swap itself left
+    /// to a closure.
+    ///
+    /// Not a generic for its own sake: building a [`GpuContext`] needs an
+    /// adapter, so a test on a machine without one could not reach this
+    /// ordering through [`Self::recover_on_replacement_gpu`] at all — and the
+    /// ordering (never restore what the swap did not accept) is the part that
+    /// is platform-independent and therefore the part a test can pin.
+    fn swap_device_with_surface_off<F>(&mut self, swap: F, cx: &mut Context<Self>) -> bool
+    where
+        F: FnOnce(&mut Self, &mut Context<Self>) -> bool,
+    {
+        // Idempotent: a loss the coordinator already observed turned this off
+        // some polls ago, and `configure_viewer_surface` compares first. It is
+        // repeated here for the loss that flipped and recovered between two
+        // polls, where this is the only place that lowers it.
+        self.configure_viewer_surface(false, cx);
+        if !swap(self, cx) {
+            return false;
+        }
+        self.configure_viewer_surface(true, cx);
+        true
+    }
+
     /// The device epoch swap, with the hooks left to a factory so a headless
     /// test can drive this exact path with stub hooks on a machine that has no
     /// adapter.
@@ -3521,6 +3562,62 @@ mod tests {
             1,
             "one loss was announced more than once"
         );
+    }
+
+    /// `GPULOSS-3`: the surface capability is off while the replacement device
+    /// is being taken, and comes back only because the rebuild started.
+    ///
+    /// The assertion inside the closure is the point. Restoring zero-copy is
+    /// correct *after* a swap and wrong *during* one, so a test that only read
+    /// the flag at the end would pass on an implementation that never lowered
+    /// it — and that implementation hands GPUI textures from a device the
+    /// worker is no longer evaluating on.
+    #[gpui::test]
+    fn taking_a_replacement_device_lowers_zero_copy_before_it_restores_it(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            let started = project.swap_device_with_surface_off(
+                |this, _cx| {
+                    assert!(
+                        !this.viewer_surface_enabled.load(Ordering::Acquire),
+                        "the swap ran with zero-copy still enabled on the outgoing device"
+                    );
+                    true
+                },
+                cx,
+            );
+            assert!(started, "the stub swap reported no start");
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "zero-copy stayed off after the rebuild started"
+            );
+        });
+    }
+
+    /// A swap that was refused leaves the capability where it belongs: off.
+    ///
+    /// `restart_eval_on_gpu` answers `false` when an epoch swap is already
+    /// running, which is the normal answer for every poll after the first one.
+    /// Restoring zero-copy on that answer would turn it back on in the middle
+    /// of the rebuild — before the new worker exists, on the strength of a
+    /// request that was ignored.
+    #[gpui::test]
+    fn a_refused_device_swap_leaves_zero_copy_off(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            let started = project.swap_device_with_surface_off(|_this, _cx| false, cx);
+            assert!(!started, "the stub swap was reported as started");
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a refused swap restored zero-copy"
+            );
+        });
     }
 
     /// `GPULOSS-4`: after the loss the evaluation keeps running and the viewer

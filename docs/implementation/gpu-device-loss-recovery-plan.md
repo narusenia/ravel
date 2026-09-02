@@ -444,13 +444,17 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
 - **未検証**: cfg の中の 3 関数は手元で 1 行もコンパイルされていない
   （CI の `check (windows-latest)` が唯一の検証者）。実際の device loss と
   zero-copy の復帰は実機確認が要る — 担当は `GPULOSS-5`。
-- **この単位で直していない食い違い**: 通知文
-  （`project.notice.gpu_lost_message` = 「このセッションでは GPU 評価は復帰
-  しない。再起動してほしい」）は paint 経路から従来どおり 1 回出るが、
-  Linux / Windows では**復帰するようになった**ので文面が実態と合わない。
-  通知の文面と発火条件は `report_gpu_device_loss` の側の話であり、
-  この単位が触ると macOS の腕（`GPULOSS-4` が確定させた経路）を巻き込む。
-  実機で復帰を確認する `GPULOSS-5` と同時に直すのが安全である。
+- **通知文を喪失の由来で分けた**（この単位で直した。当初は `GPULOSS-5` へ
+  送るつもりだったが、**復帰するようになった環境で「再起動してほしい」と
+  言い続けるのは嘘**なので先に直した）。`ProjectEvent::GpuDeviceLost` が
+  `GpuLossScope` を運び、`Adopted`（Linux / FreeBSD / Windows）は
+  「引き継ぐので再起動は不要」を Warning で、`SelfOwned`（macOS）は従来の
+  「このセッションでは復帰しないので再起動を」を Error で出す。
+  由来は severity ではなく**代わりの device に手が届くかどうか**で決まり、
+  2 つは実際には排他である — Ravel は自分が作った device にだけ loss
+  callback を登録し、それを作るのは採用する相手がいない環境だけ。
+  scope の判定は変異注入で確認済み（`Adopted` に固定すると
+  `a_self_owned_device_loss_settles_the_viewer_on_the_cpu_fallback` が落ちる）。
 
 ### GPULOSS-4
 

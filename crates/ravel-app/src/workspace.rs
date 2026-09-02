@@ -1084,10 +1084,20 @@ pub enum HostRecoveryStep {
     Nothing,
     /// Keep the zero-copy surface off, and ask the window to redraw.
     ///
-    /// The redraw is not cosmetic. GPUI rebuilds its renderer *inside* the
-    /// platform draw (`WgpuRenderer::recover` is called from `draw`), so an
-    /// idle window with a lost device never recovers on its own and never
-    /// produces the replacement this step is waiting for.
+    /// The redraw is not cosmetic, and the reason differs by platform:
+    ///
+    /// * **Linux / FreeBSD**: the renderer is rebuilt *inside* the draw
+    ///   (`WgpuRenderer::recover` is called from `PlatformWindow::draw` in the
+    ///   x11 and wayland windows), so an idle window with a lost device never
+    ///   recovers on its own and never produces the replacement this step
+    ///   waits for;
+    /// * **Windows**: the rebuild happens earlier, in the device-lost window
+    ///   message, but the fork then sets `force_render_after_recovery` so the
+    ///   *next* draw is the one that presents the recovered renderer. An idle
+    ///   window has no next draw until something asks for one.
+    ///
+    /// Either way the redraw is what moves the recovery forward, which is why
+    /// this step owns it rather than leaving it to whoever repaints next.
     Suspend,
     /// Adopt the device the renderer came back on and rebuild the evaluation
     /// pipeline against it.
@@ -1138,10 +1148,11 @@ pub fn host_recovery_step(observation: HostDeviceObservation) -> HostRecoverySte
 ///
 /// **A timer and not the paint**, because the paint stops. An idle window does
 /// not repaint, the worker keeps submitting to the dead device for as long as
-/// nobody looks, and GPUI rebuilds its renderer *inside* the platform draw —
-/// so the loss of an idle window is not repaired by anything either. The paint
-/// guard still reacts within one frame when a frame is in hand (`ZC-8`); this
-/// covers the case where nothing is being drawn at all.
+/// nobody looks, and the recovery itself needs a draw to make progress (see
+/// [`HostRecoveryStep::Suspend`] for the per-platform detail) — so the loss of
+/// an idle window is not repaired by anything either. The paint guard still
+/// reacts within one frame when a frame is in hand (`ZC-8`); this covers the
+/// case where nothing is being drawn at all.
 ///
 /// One second, reasoned rather than measured: the events are a driver reset
 /// (seconds), a renderer rebuild that needs a further draw, and an evaluation

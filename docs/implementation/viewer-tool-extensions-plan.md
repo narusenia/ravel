@@ -2,7 +2,7 @@
 
 > **Status**: TOOLX-1 complete — PR #484, 2026-08-28; TOOLX-2 complete —
 > PR #487, 2026-09-02; TOOLX-3 complete — PR #489, 2026-09-02;
-> TOOLX-4 / TOOLX-5 planned
+> TOOLX-4 complete — PR #491, 2026-09-02; TOOLX-5 planned
 
 対象: `done/tool-system-plan.md` が v1 として切り出した後の残り
 （REQ-UI-011 の v1.5 項目）と、機能が無いまま UI にあるツールの実装。

@@ -715,6 +715,8 @@ mod tests {
         for tool in [
             ToolKind::Rect,
             ToolKind::Ellipse,
+            ToolKind::Polygon,
+            ToolKind::Star,
             ToolKind::Pen,
             ToolKind::Hand,
             ToolKind::Zoom,

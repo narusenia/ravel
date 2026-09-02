@@ -333,6 +333,10 @@ impl RavelIcon {
             ravel_ui::ToolKind::Pen => Self::ToolPen,
             ravel_ui::ToolKind::Rect => Self::ToolRect,
             ravel_ui::ToolKind::Ellipse => Self::ToolEllipse,
+            // The node-header glyphs stand in for tool icons: the shapes are
+            // the same and a second pair of assets would only drift.
+            ravel_ui::ToolKind::Polygon => Self::NodeShapePolygon,
+            ravel_ui::ToolKind::Star => Self::NodeShapeStar,
             ravel_ui::ToolKind::Hand => Self::ToolHand,
             ravel_ui::ToolKind::Zoom => Self::ToolZoom,
         }
@@ -722,6 +726,31 @@ mod tests {
             RavelEmbed::get(path.as_ref()).is_some(),
             "missing embedded window chrome icon: {path}"
         );
+    }
+
+    /// Every tool has an icon of its own, and it is embedded.
+    ///
+    /// The toolbar is a row of glyphs with no text, so two tools sharing one
+    /// makes the strip unreadable — and a missing file renders as nothing at
+    /// all. The tools come from the command table so a new one is covered
+    /// without being listed again.
+    #[test]
+    fn every_tool_has_its_own_embedded_icon() {
+        let mut seen = std::collections::HashSet::new();
+        for tool in ravel_ui::command::CommandId::all().filter_map(ravel_ui::ToolKind::from_command)
+        {
+            let icon = RavelIcon::for_tool(tool);
+            let path = icon.path();
+            assert!(
+                seen.insert(path.clone()),
+                "{tool:?} shares its icon with another tool: {path}"
+            );
+            assert!(
+                RavelEmbed::get(path.as_ref()).is_some(),
+                "missing embedded icon for {tool:?}: {path}"
+            );
+        }
+        assert_eq!(seen.len(), 8, "a tool fell out of the command table");
     }
 
     #[test]

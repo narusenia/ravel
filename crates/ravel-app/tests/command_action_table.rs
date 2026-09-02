@@ -259,6 +259,81 @@ fn the_synthetic_application_menu_only_duplicates_headless_entries() {
     assert_eq!(rest, headless);
 }
 
+/// The Viewer's tool chords, in table order, and the proof that none of them
+/// collides with a global binding.
+///
+/// A tool shortcut is only usable if it reaches the Viewer, and a chord the
+/// global keymap already owns would be resolved by registration order instead
+/// (`MED-APP-31`'s class). Spelled out so adding a tool with an occupied
+/// letter fails here rather than on someone's keyboard.
+#[test]
+fn viewer_tool_keybindings_are_free_of_the_global_chords() {
+    let viewer_scope = format!(
+        "{} && !Input && !PopupMenu && !AppMenuBar",
+        ravel_app::panels::viewer::KEY_CONTEXT
+    );
+    let global_scope = ravel_app::workspace::workspace_binding_context();
+    let bindings = build_keybindings(&AppShell::default());
+
+    let chords = |scope: &str| -> Vec<(String, bool, String)> {
+        bindings
+            .iter()
+            .filter(|binding| {
+                binding
+                    .predicate()
+                    .is_some_and(|predicate| predicate.to_string() == scope)
+            })
+            .map(|binding| {
+                let keystroke = binding
+                    .keystrokes()
+                    .first()
+                    .expect("a binding has at least one keystroke")
+                    .inner();
+                (
+                    keystroke.key.to_string(),
+                    keystroke.modifiers.modified(),
+                    binding.action().name().to_owned(),
+                )
+            })
+            .collect()
+    };
+
+    let viewer = chords(&viewer_scope);
+    assert_eq!(
+        viewer,
+        [
+            ("v".to_owned(), false, "ravel::ToolSelect".to_owned()),
+            ("p".to_owned(), false, "ravel::ToolPen".to_owned()),
+            ("r".to_owned(), false, "ravel::ToolRect".to_owned()),
+            ("e".to_owned(), false, "ravel::ToolEllipse".to_owned()),
+            ("g".to_owned(), false, "ravel::ToolPolygon".to_owned()),
+            ("s".to_owned(), false, "ravel::ToolStar".to_owned()),
+            ("h".to_owned(), false, "ravel::ToolHand".to_owned()),
+            ("z".to_owned(), false, "ravel::ToolZoom".to_owned()),
+        ]
+    );
+
+    // Distinct within the context: two tools on one letter would make the
+    // second unreachable.
+    let mut keys: Vec<&str> = viewer.iter().map(|(key, ..)| key.as_str()).collect();
+    let unique = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), unique, "two Viewer tools share a chord");
+
+    // And free of the unmodified global chords, which match inside the Viewer
+    // too (`Space`, `K`, `B`, `N` …).
+    for (key, modified, action) in chords(&global_scope) {
+        if modified {
+            continue;
+        }
+        assert!(
+            !keys.contains(&key.as_str()),
+            "{action} already owns the unmodified chord {key:?} the Viewer tools need"
+        );
+    }
+}
+
 #[test]
 fn node_editor_keybindings_are_context_scoped() {
     // The panel's own context, narrowed out of an open menu the same way every

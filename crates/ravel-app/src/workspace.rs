@@ -145,6 +145,8 @@ macro_rules! for_each_command {
             ToolPen,
             ToolRect,
             ToolEllipse,
+            ToolPolygon,
+            ToolStar,
             ToolHand,
             ToolZoom,
             NodeSearchPalette,
@@ -597,6 +599,21 @@ pub const PANEL_BINDINGS: &[PanelBinding] = &[
     PanelBinding {
         command: CommandId::ToolEllipse,
         chord: "E",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    // Polygon and Star are radially symmetric shape tools; `G` (polyGon, since
+    // `P` is the Pen) and `S` are free of every other Viewer chord and of every
+    // global binding.
+    PanelBinding {
+        command: CommandId::ToolPolygon,
+        chord: "G",
+        panel: PanelKind::Viewer,
+        context: panels::viewer::KEY_CONTEXT,
+    },
+    PanelBinding {
+        command: CommandId::ToolStar,
+        chord: "S",
         panel: PanelKind::Viewer,
         context: panels::viewer::KEY_CONTEXT,
     },
@@ -1601,6 +1618,8 @@ impl RavelWorkspace {
                 | CommandId::ToolPen
                 | CommandId::ToolRect
                 | CommandId::ToolEllipse
+                | CommandId::ToolPolygon
+                | CommandId::ToolStar
                 | CommandId::ToolHand
                 | CommandId::ToolZoom => {
                     if let Some(tool) = ravel_ui::ToolKind::from_command(cmd) {

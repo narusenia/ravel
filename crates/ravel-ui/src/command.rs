@@ -180,6 +180,8 @@ pub enum CommandId {
     ToolPen,
     ToolRect,
     ToolEllipse,
+    ToolPolygon,
+    ToolStar,
     ToolHand,
     ToolZoom,
     // Node editor — opens the search palette in the focused editor
@@ -213,6 +215,8 @@ pub enum ToolKind {
     Pen,
     Rect,
     Ellipse,
+    Polygon,
+    Star,
     Hand,
     Zoom,
 }
@@ -224,6 +228,8 @@ impl ToolKind {
             Self::Pen => CommandId::ToolPen,
             Self::Rect => CommandId::ToolRect,
             Self::Ellipse => CommandId::ToolEllipse,
+            Self::Polygon => CommandId::ToolPolygon,
+            Self::Star => CommandId::ToolStar,
             Self::Hand => CommandId::ToolHand,
             Self::Zoom => CommandId::ToolZoom,
         }
@@ -235,6 +241,8 @@ impl ToolKind {
             CommandId::ToolPen => Some(Self::Pen),
             CommandId::ToolRect => Some(Self::Rect),
             CommandId::ToolEllipse => Some(Self::Ellipse),
+            CommandId::ToolPolygon => Some(Self::Polygon),
+            CommandId::ToolStar => Some(Self::Star),
             CommandId::ToolHand => Some(Self::Hand),
             CommandId::ToolZoom => Some(Self::Zoom),
             _ => None,
@@ -247,6 +255,8 @@ impl ToolKind {
             Self::Pen => "tool.pen",
             Self::Rect => "tool.rect",
             Self::Ellipse => "tool.ellipse",
+            Self::Polygon => "tool.polygon",
+            Self::Star => "tool.star",
             Self::Hand => "tool.hand",
             Self::Zoom => "tool.zoom",
         }
@@ -432,6 +442,8 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::ToolPen, "tool.pen"),
     (CommandId::ToolRect, "tool.rect"),
     (CommandId::ToolEllipse, "tool.ellipse"),
+    (CommandId::ToolPolygon, "tool.polygon"),
+    (CommandId::ToolStar, "tool.star"),
     (CommandId::ToolHand, "tool.hand"),
     (CommandId::ToolZoom, "tool.zoom"),
     (CommandId::NodeSearchPalette, "node.search_palette"),
@@ -550,6 +562,8 @@ impl CommandId {
             CommandId::ToolPen => "menu.tool.pen",
             CommandId::ToolRect => "menu.tool.rect",
             CommandId::ToolEllipse => "menu.tool.ellipse",
+            CommandId::ToolPolygon => "menu.tool.polygon",
+            CommandId::ToolStar => "menu.tool.star",
             CommandId::ToolHand => "menu.tool.hand",
             CommandId::ToolZoom => "menu.tool.zoom",
             CommandId::NodeSearchPalette => "menu.node.search_palette",
@@ -657,6 +671,66 @@ mod tests {
                 "LayerAdd command references unknown template {key:?}"
             );
         }
+    }
+
+    /// `command_id` and `from_command` are inverses.
+    ///
+    /// Two hand-written `match` arms per tool, and nothing makes them agree:
+    /// a tool whose `command_id` names another tool's command would switch to
+    /// the wrong tool from the toolbar while the chord still worked, which is
+    /// the kind of mismatch that reads as a flaky UI rather than a bug.
+    #[test]
+    fn tool_and_command_map_round_trip() {
+        let mut tools = 0;
+        for cmd in CommandId::all() {
+            if let Some(tool) = ToolKind::from_command(cmd) {
+                assert_eq!(
+                    tool.command_id(),
+                    cmd,
+                    "{tool:?} came from {cmd} but names a different command"
+                );
+                tools += 1;
+            }
+        }
+        assert_eq!(tools, 8, "a tool fell out of the command table");
+
+        // And the other direction: every tool's command maps back to it, so a
+        // tool missing from `from_command` cannot hide behind the loop above.
+        for tool in [
+            ToolKind::Select,
+            ToolKind::Pen,
+            ToolKind::Rect,
+            ToolKind::Ellipse,
+            ToolKind::Polygon,
+            ToolKind::Star,
+            ToolKind::Hand,
+            ToolKind::Zoom,
+        ] {
+            assert_eq!(
+                ToolKind::from_command(tool.command_id()),
+                Some(tool),
+                "{tool:?}'s command does not map back to it"
+            );
+        }
+    }
+
+    /// Every tool has a label key of its own.
+    ///
+    /// The toolbar uses the key as the button's element id as well as its
+    /// tooltip, so two tools sharing one would render the wrong name *and*
+    /// collide as elements. The tools come from the command table, so a new
+    /// one is covered without being listed again.
+    #[test]
+    fn every_tool_has_a_distinct_label_key() {
+        let mut seen = std::collections::HashSet::new();
+        for tool in CommandId::all().filter_map(ToolKind::from_command) {
+            assert!(
+                seen.insert(tool.label_key()),
+                "duplicate label key for {tool:?}: {:?}",
+                tool.label_key()
+            );
+        }
+        assert_eq!(seen.len(), 8, "a tool fell out of the command table");
     }
 
     #[test]

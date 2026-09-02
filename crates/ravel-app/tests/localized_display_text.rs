@@ -270,6 +270,48 @@ fn the_declarations_section_reads_as_sentences_in_every_locale() {
     ravel_i18n::set_locale("en").expect("en catalog is shipped");
 }
 
+/// Every canvas tool resolves to text through the real store, under both keys
+/// it is shown by: the toolbar tooltip (`tool.*`) and the command label the
+/// Preferences keybinding list shows for its chord (`menu.tool.*`).
+///
+/// This is the *runtime* half only. `translate` falls back to English, so a
+/// key missing from one catalog still returns text here — per-locale coverage
+/// is `ravel_ui`'s `i18n_coverage::all_tool_label_keys_in_catalog`, which reads
+/// the catalog files. What this adds is that the key is reachable through the
+/// loaded store at all, which a file check cannot say.
+///
+/// The tool list is derived from the command table rather than written out, so
+/// a tool added without locale strings fails here instead of putting a raw
+/// `tool.polygon` on the toolbar.
+#[test]
+fn every_canvas_tool_is_named_in_every_locale() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_i18n();
+
+    let tools: Vec<(ravel_ui::ToolKind, CommandId)> = CommandId::all()
+        .filter_map(|cmd| ravel_ui::ToolKind::from_command(cmd).map(|tool| (tool, cmd)))
+        .collect();
+    assert!(
+        tools.len() >= 8,
+        "the tool commands went missing from the table"
+    );
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("catalog is shipped");
+        for (tool, cmd) in &tools {
+            for key in [tool.label_key(), cmd.label_key()] {
+                assert_ne!(
+                    ravel_i18n::translate(key),
+                    key,
+                    "{locale}: {key} has no translation, so the UI shows the key"
+                );
+            }
+        }
+    }
+
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
 /// `INSP-2`'s locale criterion: every channel mode is named in every locale.
 ///
 /// The toolbar menu shows these names, so a missing key is a raw

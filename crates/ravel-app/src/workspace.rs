@@ -1133,6 +1133,119 @@ pub fn host_recovery_step(observation: HostDeviceObservation) -> HostRecoverySte
     }
 }
 
+/// How often the coordinator asks the adopted window's renderer where its
+/// device stands (`GPULOSS-3`).
+///
+/// **A timer and not the paint**, because the paint stops. An idle window does
+/// not repaint, the worker keeps submitting to the dead device for as long as
+/// nobody looks, and GPUI rebuilds its renderer *inside* the platform draw —
+/// so the loss of an idle window is not repaired by anything either. The paint
+/// guard still reacts within one frame when a frame is in hand (`ZC-8`); this
+/// covers the case where nothing is being drawn at all.
+///
+/// One second, reasoned rather than measured: the events are a driver reset
+/// (seconds), a renderer rebuild that needs a further draw, and an evaluation
+/// pipeline rebuild that dwarfs a second on its own, so a shorter interval buys
+/// nothing a user can perceive. A poll costs one flag read plus — only when the
+/// renderer has a context — an `Arc` clone of four handles, so it is not worth
+/// stretching further either.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+const HOST_DEVICE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One reading of the window Ravel adopted its device from.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+fn observe_host_device(window: &Window, cx: &gpui::App) -> HostDeviceObservation {
+    HostDeviceObservation {
+        adopted: cx.try_global::<AdoptedHostDevice>().is_some(),
+        lost: window.gpu_device_lost().unwrap_or(false),
+        context: host_context(window, cx),
+    }
+}
+
+/// Poll the window Ravel adopted its device from, and re-adopt the device its
+/// renderer recovers onto (`GPULOSS-3`, `issues/high/HIGH-33`).
+///
+/// **This window and no other.** The device came from this renderer, so a
+/// change of identity *here* is a recovery; the same reading from a second
+/// window on another GPU is just a second GPU, and re-adopting that one would
+/// migrate the whole session onto a device the first window cannot sample
+/// (which is why [`host_device_loss_detected`] refuses to call a mismatch a
+/// loss). Window lifecycle beyond this one is `GPULOSS-5`.
+///
+/// The task ends when the window does: the session's device is the one this
+/// window lent, and `AdoptedHostDevice` outlives neither.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+fn spawn_host_device_recovery(
+    window: &Window,
+    project: WeakEntity<crate::project_state::ProjectState>,
+    cx: &mut Context<RavelWorkspace>,
+) {
+    let handle = window.window_handle();
+    cx.spawn(async move |_this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(HOST_DEVICE_POLL_INTERVAL)
+                .await;
+            let polled = handle.update(cx, |_root, window, cx| {
+                match host_recovery_step(observe_host_device(window, cx)) {
+                    HostRecoveryStep::Nothing => Ok(()),
+                    HostRecoveryStep::Suspend => {
+                        // GPUI's recovery runs in the draw, so an idle window
+                        // has to be asked for one or the replacement device
+                        // this is waiting for is never built.
+                        window.refresh();
+                        project.update(cx, |project, cx| {
+                            // Idempotent by construction:
+                            // `configure_viewer_surface` compares before it
+                            // writes, so repeating it every second is a load
+                            // and a branch. No flag remembers that it was
+                            // done — a second authority on a fact
+                            // `ProjectState` already holds is the bug this
+                            // shape avoids.
+                            project.configure_viewer_surface(false, cx);
+                        })
+                    }
+                    HostRecoveryStep::Readopt => match host_gpu_context(window, cx) {
+                        // The adoption path, reused whole: it unpacks the
+                        // renderer's four objects, wraps them with
+                        // `interop::context_from_wgpu` and **replaces**
+                        // `AdoptedHostDevice`, so the old device is dropped
+                        // here rather than referenced for the rest of the
+                        // session. A second implementation of those three
+                        // steps is how the global would be left pointing at
+                        // the dead one.
+                        Some(gpu) => {
+                            tracing::warn!(
+                                "the window renderer recovered onto a new GPU device; rebuilding \
+                                 the evaluation pipeline on it"
+                            );
+                            project.update(cx, |project, cx| {
+                                // The `false` case (a swap already in flight)
+                                // needs nothing from here: it is refused
+                                // *inside*, where the capability is left off
+                                // for the swap that is already running to
+                                // restore.
+                                project.recover_on_replacement_gpu(gpu, cx);
+                            })
+                        }
+                        // The renderer changed shape, or gave up its context
+                        // between the observation and this call. Either way
+                        // there is nothing to adopt; the next poll reads a
+                        // context that is `Absent` and suspends.
+                        None => Ok(()),
+                    },
+                }
+                .is_ok()
+            });
+            // The window closed, or the session went with it.
+            if !matches!(polled, Ok(true)) {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
 /// macOS has no wgpu renderer to adopt from — `gpui_macos` is Metal-native, so
 /// Ravel picks its own device and `interop::context_from_native` checks the two
 /// landed on the same one (`ZC-2`).
@@ -1239,6 +1352,15 @@ impl RavelWorkspace {
         project.update(cx, |project, cx| {
             project.configure_viewer_surface(capability, cx);
         });
+        // The recovery coordinator (`GPULOSS-3`), armed only where a
+        // replacement device can actually be obtained *and* Ravel is running
+        // on a device this renderer lent it. A session on its own device has
+        // nothing here to coordinate: its loss goes through its own callback
+        // and settles on the CPU fallback (`GPULOSS-4`).
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+        if adopted_host_gpu {
+            spawn_host_device_recovery(window, project.downgrade(), cx);
+        }
         let playback = cx.new(|_| crate::playback::PlaybackController::new());
         cx.set_global(crate::playback::PlaybackControllerHandle(
             playback.downgrade(),

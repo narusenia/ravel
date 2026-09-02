@@ -128,6 +128,22 @@ intrusive list に変更。
 → 上限は打ち切り条件としてのみ使い、容量はストリーム長の見積り（`duration × rate`）で確保する。
 `HIGH-23` の準備経路の作り直しと同時に触るのが安い。
 
+**LOW-AUD-04 | debt | 合成の mute / solo 規則が `ravel-audio` に 3 つ目のコピーとして残っている**
+`crates/ravel-audio/src/mixdown.rs:249, 276`
+`desired_tracks` は `layer.muted || audio.audio_muted || (any_solo && !layer.solo)` を
+自前で組む。doc は「コンポジタの `active_layers` 規則に従う」と明言しているのに、
+**規則の実体を持っている**のがこの食い違いの本体。
+`TOOLX-3`（PR #489）で Viewer のヒットテストが同じ規則を要求したとき、
+`Composition::composites(&layer)` を公開して `compile.rs` の `active_layers` も
+それを引く形に寄せた（**判定の権威は 1 つ**）。音声だけが取り残されている。
+`!comp.composites(layer) || audio.audio_muted` は現在の式と厳密に等価
+（`!composites` = `muted || (any_solo && !solo)`）なので置き換えは 1 行だが、
+**別クレートの音声テスト群が動く**ので `TOOLX-3` の範囲外として見送った。
+→ 音声側を `composites` に寄せ、`any_solo` の自前計算を落とす。
+`desired_tracks` の doc から「規則に従う」を「規則を引く」に直す。
+
+---
+
 **LOW-AUD-03 | debt | オフラインミックスダウンの「1 アセット 1 デコード」が失敗時に成立しない**
 `crates/ravel-audio/src/offline.rs:113-115`（doc）・`:139-157`
 `mix_range` の `decoded` マップは**成功したデコードだけ**を覚える。

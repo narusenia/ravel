@@ -673,6 +673,25 @@ mod tests {
         }
     }
 
+    /// Every tool has a label key of its own.
+    ///
+    /// The toolbar uses the key as the button's element id as well as its
+    /// tooltip, so two tools sharing one would render the wrong name *and*
+    /// collide as elements. The tools come from the command table, so a new
+    /// one is covered without being listed again.
+    #[test]
+    fn every_tool_has_a_distinct_label_key() {
+        let mut seen = std::collections::HashSet::new();
+        for tool in CommandId::all().filter_map(ToolKind::from_command) {
+            assert!(
+                seen.insert(tool.label_key()),
+                "duplicate label key for {tool:?}: {:?}",
+                tool.label_key()
+            );
+        }
+        assert_eq!(seen.len(), 8, "a tool fell out of the command table");
+    }
+
     #[test]
     fn every_command_has_distinct_label_key() {
         let mut seen = std::collections::HashSet::new();

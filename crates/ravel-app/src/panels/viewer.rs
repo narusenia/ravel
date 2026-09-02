@@ -2285,6 +2285,14 @@ impl ViewerPanel {
     ///
     /// A click, not a gesture: there is nothing to preview, so the edit is
     /// committed at once and is one undo step by construction.
+    ///
+    /// Priority under the pointer: **a tangent handle, then the removal, then
+    /// the insertion.** A tangent's mark is drawn from the anchor, so a short
+    /// arm shares the anchor's grab radius and the press has to go to the arm
+    /// — a point with an arm shorter than the radius is therefore not
+    /// removable until the arm is pulled out, which is the cost of two marks
+    /// inside one radius. A point with no arms at all (the pen's plain click)
+    /// draws no tangent handle and stays removable.
     fn path_point_edit_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2333,6 +2341,24 @@ impl ViewerPanel {
         // path handles already carry (REQ-UI-011 leaves the transformed case
         // to v2).
         if !path.shell_identity {
+            return false;
+        }
+        // A **tangent** handle answers before the removal does. Its mark is
+        // drawn from the anchor, so a short arm sits inside the very radius
+        // the removal reaches with, and a press meant to bend the curve would
+        // delete the point instead — which is what a point the pen placed by
+        // clicking (no drag, so no arm at all until one is pulled out) is made
+        // of. The anchor's own handle deliberately does *not* win: a press on
+        // a point is a removal under the Pen. Asked through the registry's
+        // hit test, the same one the press below and the cursor already use,
+        // so there is no second notion of what the pointer is over.
+        let context = self.overlay_context(cx);
+        if matches!(
+            OverlayRegistry::builtin()
+                .hit_test_draggable(&context, pointer, self.comp_per_pixel())
+                .and_then(|handle| handle.id.path_handle_kind()),
+            Some(PathHandleKind::InTangent | PathHandleKind::OutTangent)
+        ) {
             return false;
         }
         let radius = self
@@ -10975,6 +11001,74 @@ mod tests {
             committed_path(&project, &network, node, cx),
             original,
             "one undo takes the whole insertion back"
+        );
+    }
+
+    /// A tangent handle answers the press before the removal does.
+    ///
+    /// `PathEditOverlay` draws a tangent's mark at `anchor + tangent`, so an
+    /// arm shorter than the 8px grab radius puts two marks inside one radius.
+    /// The press has to reach the arm — otherwise every attempt to bend the
+    /// curve at such a point would delete the point instead.
+    #[gpui::test]
+    fn a_press_on_a_tangent_bends_the_curve_instead_of_removing_the_point(cx: &mut TestAppContext) {
+        let original = vec![
+            // A 3-unit arm: its handle sits well inside the anchor's radius.
+            PathPoint {
+                p: Vec2(100.0, 100.0),
+                in_tan: Vec2(-3.0, 0.0),
+                out_tan: Vec2(3.0, 0.0),
+            },
+            corner_path_point((300.0, 100.0)),
+            corner_path_point((300.0, 300.0)),
+        ];
+        let (window, project, network, node) = pen_path_setup(cx, original.clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (103.0, 100.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.handle_drag.is_some(),
+                    "the tangent's own handle took the press"
+                );
+                // Which arm is a property of the registry's hit test (the
+                // first handle in range wins, not the nearest), and both arms
+                // of this point are in range. Either is a bend, which is what
+                // this press must not turn into a removal.
+                assert!(
+                    matches!(
+                        panel
+                            .handle_drag
+                            .as_ref()
+                            .and_then(|drag| drag.handle.id.path_handle_kind()),
+                        Some(PathHandleKind::InTangent | PathHandleKind::OutTangent)
+                    ),
+                    "and what it grabbed is an arm, not the anchor"
+                );
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            original,
+            "the point the arm belongs to is still there, untouched"
+        );
+
+        // The corner point has no arms, so it draws no tangent handle: the
+        // press on it is the removal it has always been.
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (300.0, 100.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            vec![original[0], original[2]],
+            "an anchor press still removes the point"
         );
     }
 

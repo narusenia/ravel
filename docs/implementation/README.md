@@ -30,7 +30,7 @@ the design behind a unit.
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
-| `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | GPULOSS-1 done; GPULOSS-2 done — 2026-09-02 | REQ-GPU-001 |
+| `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | GPULOSS-1 done; GPULOSS-2 / GPULOSS-4 done — 2026-09-02 | REQ-GPU-001 |
 | `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | TOOLX-1 done — 2026-08-28; TOOLX-2 / TOOLX-3 / TOOLX-4 done — 2026-09-02 | REQ-UI-011 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |

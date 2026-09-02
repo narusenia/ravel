@@ -1060,7 +1060,7 @@ CPU 側の 77%）。それを消す `GPU-5` を追加し、`GPU-2`（WGSL フィ
 | `PLUG-1〜4` | `ProcessorRegistry` と WGSL シェーダプラグイン |
 | `GPUBK-5〜8` | ラスタライズ / リードバック / シェーダ変換 / interop |
 | `GPUBK-4`, `GPUBK-9` | 生ハンドルの公開停止（façade の仕上げ）とデバイス共有。`GPUBK-9` は済み（#296）— 契約と受け口を先に固定し、**GPUI 側の配線は `ZC-8` が入れた**（wgpu-backed な Linux / FreeBSD / Windows は起動時にレンダラの context を採用。macOS は wgpu ではなく Metal ネイティブなので `ZC-2` の native interop 側。`architecture.md` の「UI フレームワークのフォーク方針」）。**デバイス喪失からの復帰は未実装**（`HIGH-33`） |
-| `GPULOSS-3〜5` | デバイス喪失・GPUI の device 交換を epoch として TexturePool、Viewer、export、window lifecycle へ伝播する（`gpu-device-loss-recovery-plan.md`）。`GPULOSS-1`（device state）と `GPULOSS-2`（評価 worker の交換）は済み。順序依存は継続。**実機の device loss は自動テストで完了しない。macOS は GPUI Metal 側の喪失を検出せず、安全側の CPU fallback に留める** |
+| `GPULOSS-3` / `GPULOSS-5` | デバイス喪失・GPUI の device 交換を epoch として TexturePool、Viewer、export、window lifecycle へ伝播する（`gpu-device-loss-recovery-plan.md`）。`GPULOSS-1`（device state）、`GPULOSS-2`（評価 worker の交換）、`GPULOSS-4`（macOS の安全側確定）は済み。**実機の device loss は自動テストで完了しない。macOS は同一 identity のままの喪失を問う口を持たないので、安全側の CPU fallback に留めた** |
 | `MED-GPU-07` | wgpu の二重化を解消する。済み（#292）— `GPUBK-9` / `GPUBK-14` が開いた |
 | `GPUBK-14` | **wgpu 直叩きの取り分を測る判断ゲート**。済み（#295）— Metal で測り、`GPUBK-10` を**見送りと判定** |
 | `GPUBK-10` | Metal バックエンド。**❌ 見送り**（バックエンド固有の取り分が 60 fps 予算の 0.1% 未満） |

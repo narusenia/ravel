@@ -1460,6 +1460,18 @@ impl ViewerPanel {
         } else {
             Vec::new()
         };
+        // The press is a click on empty space, and a click on empty space
+        // deselects — what `selection_after_click` does for the node scope,
+        // done here for the layer scope so a zero-distance drag means the same
+        // thing in both. The capture above is deliberately *before* this: a
+        // Shift sweep publishes the union with what was selected when the press
+        // landed, which is the `LOW-APP-03` trap.
+        //
+        // `set_layer_selection` drops a Properties target left pointing at the
+        // cleared layers, so nothing else has to be published here.
+        if !selection.is_empty() {
+            super::set_layer_selection(Vec::new(), cx);
+        }
         self.begin_box_select(
             pointer,
             BoxSelectTarget::Layers { comp, initial },
@@ -9904,5 +9916,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(live_box_select_owner(cx), None);
+    }
+
+    /// Completion criterion, layer scope: a zero-distance drag is a click, and
+    /// a click on empty space deselects. The press publishes it, exactly as the
+    /// node path does through `selection_after_click`.
+    #[gpui::test]
+    fn a_zero_distance_layer_box_clears_the_layer_selection(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, layers) = multi_layer_setup(cx);
+        assert_eq!(
+            cx.update(|cx| crate::panels::layer_selection(cx).layers().len()),
+            2
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Well outside both layer bboxes (-50..50 and 50..150 in x).
+                let press = press_comp(panel, (600.0, 600.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some(), "empty space sweeps");
+                assert!(panel.move_drag.is_none());
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "the press published the click's deselection"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.box_select_ended(window_point(panel, (600.0, 600.0)), cx);
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "and the release leaves the deselection alone"
+        );
+        assert_eq!(layers.len(), 2, "both layers still exist");
     }
 }

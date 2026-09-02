@@ -988,13 +988,21 @@ impl gpui::Global for AdoptedHostDevice {}
 /// report, or when it came back from a loss on a new device.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 pub fn host_device_unchanged(window: &Window, cx: &gpui::App) -> bool {
+    host_context(window, cx) == HostContext::Same
+}
+
+/// The renderer's context right now, placed against the device Ravel adopted.
+///
+/// The one reader of the fork's context on the observation side — the surface
+/// paint guard and the recovery coordinator ask the same question and must not
+/// answer it two ways. [`host_gpu_context`] unpacks the same tuple because it
+/// needs all four objects, not just the identity.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+fn host_context(window: &Window, cx: &gpui::App) -> HostContext {
     use std::sync::Arc;
 
-    let Some(adopted) = cx.try_global::<AdoptedHostDevice>() else {
-        return false;
-    };
     let Some(boxed) = window.gpu_context_full() else {
-        return false;
+        return HostContext::Absent;
     };
     let Ok(parts) = boxed.downcast::<(
         wgpu::Instance,
@@ -1002,9 +1010,17 @@ pub fn host_device_unchanged(window: &Window, cx: &gpui::App) -> bool {
         Arc<wgpu::Device>,
         Arc<wgpu::Queue>,
     )>() else {
-        return false;
+        // Not logged here: this runs on every surface paint and on every poll,
+        // and the adoption path already reports an unexpected shape once. A
+        // shape this code cannot read is a context it cannot have, which is
+        // what `Absent` means — treating it as a *replacement* would ask the
+        // adoption path to unpack the same tuple it just failed on.
+        return HostContext::Absent;
     };
-    *parts.2 == adopted.0
+    match cx.try_global::<AdoptedHostDevice>() {
+        Some(adopted) if *parts.2 == adopted.0 => HostContext::Same,
+        _ => HostContext::Replaced,
+    }
 }
 
 /// Whether the renderer Ravel adopted its device from reports that device lost.
@@ -1023,6 +1039,98 @@ pub fn host_device_unchanged(window: &Window, cx: &gpui::App) -> bool {
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 pub fn host_device_loss_detected(window: &Window, cx: &gpui::App) -> bool {
     cx.try_global::<AdoptedHostDevice>().is_some() && window.gpu_device_lost().unwrap_or(false)
+}
+
+/// The renderer's context, as the recovery coordinator sees it next to the
+/// device Ravel adopted (`GPULOSS-3`).
+///
+/// Platform-independent on purpose: reading it needs the fork's
+/// `cfg(linux / freebsd / windows)` methods, but *deciding* on it does not,
+/// and the decision is the part that can be tested on the machine this is
+/// written on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostContext {
+    /// The renderer has no context to report: it has not acquired one, it is
+    /// not wgpu-backed, a lost device is still recovering — or it handed back
+    /// a shape this code cannot read.
+    Absent,
+    /// The device Ravel adopted, and evaluates on.
+    Same,
+    /// A device other than the adopted one. After a recovery that is the
+    /// replacement; it is equally what a window on a second GPU reports, and
+    /// what a session that adopted no device at all sees, so on its own it is
+    /// not a reason to do anything.
+    Replaced,
+}
+
+/// One poll's reading of the window Ravel adopted its device from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostDeviceObservation {
+    /// Whether Ravel is evaluating on a device this window's renderer lent it.
+    pub adopted: bool,
+    /// The renderer's own device-lost flag (`None`, "the backend cannot know",
+    /// read as `false` — the same asymmetry [`host_device_loss_detected`]
+    /// uses).
+    pub lost: bool,
+    /// Which device the renderer reports right now.
+    pub context: HostContext,
+}
+
+/// What one observation asks the recovery coordinator to do (`GPULOSS-3`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostRecoveryStep {
+    /// Nothing: either Ravel evaluates on a device of its own, or the renderer
+    /// is still on the one it lent.
+    Nothing,
+    /// Keep the zero-copy surface off, and ask the window to redraw.
+    ///
+    /// The redraw is not cosmetic. GPUI rebuilds its renderer *inside* the
+    /// platform draw (`WgpuRenderer::recover` is called from `draw`), so an
+    /// idle window with a lost device never recovers on its own and never
+    /// produces the replacement this step is waiting for.
+    Suspend,
+    /// Adopt the device the renderer came back on and rebuild the evaluation
+    /// pipeline against it.
+    Readopt,
+}
+
+/// Decide what to do about the adopted device from one observation.
+///
+/// Pure, and outside the platform `cfg` that everything reading a window is
+/// inside, because a decision compiled on three operating systems Ravel is not
+/// developed on is one no local test can reach. The order of the tests is the
+/// design:
+///
+/// 1. **A session that adopted nothing is not this coordinator's business.**
+///    It runs on a device Ravel created, whose loss travels through its own
+///    callback and settles on the CPU fallback (`GPULOSS-4`) — and its
+///    renderer reports [`HostContext::Replaced`] from the first frame, because
+///    there is nothing for it to match. Testing identity before adoption would
+///    read that as a recovery and move the whole pipeline onto the renderer's
+///    device mid-session.
+/// 2. **The renderer's own flag outranks the identity.** While it reads lost
+///    the recovery has not finished, whatever context is reported alongside
+///    it, so there is nothing safe to adopt yet.
+/// 3. **The same device needs no swap.** A loss that flipped and recovered
+///    onto the same device between two polls leaves the pipeline valid;
+///    rebuilding it would throw away every cache in the session to arrive
+///    back where it started.
+///
+/// [`HostContext::Absent`] suspends rather than does nothing: the renderer has
+/// no device to report, so the one Ravel holds is not the renderer's current
+/// one, and that is precisely when zero-copy is unsafe.
+pub fn host_recovery_step(observation: HostDeviceObservation) -> HostRecoveryStep {
+    if !observation.adopted {
+        return HostRecoveryStep::Nothing;
+    }
+    if observation.lost {
+        return HostRecoveryStep::Suspend;
+    }
+    match observation.context {
+        HostContext::Absent => HostRecoveryStep::Suspend,
+        HostContext::Same => HostRecoveryStep::Nothing,
+        HostContext::Replaced => HostRecoveryStep::Readopt,
+    }
 }
 
 /// macOS has no wgpu renderer to adopt from — `gpui_macos` is Metal-native, so
@@ -2592,6 +2700,56 @@ mod tests {
                 "{:?} binds {}, which is one keystroke off macOS",
                 binding.command,
                 binding.chord
+            );
+        }
+    }
+
+    /// `GPULOSS-3`: every reading of the adopted window's renderer, and the
+    /// one thing the coordinator does about it.
+    ///
+    /// The whole table, because the platform arms that *read* the renderer are
+    /// compiled only on Linux / FreeBSD / Windows and this decision is the one
+    /// piece of the unit a test on any machine can hold still. Three rows
+    /// carry the reasoning:
+    ///
+    /// * `adopted: false` never acts, even when the renderer reports another
+    ///   device — that is a session evaluating on its own device, and the
+    ///   mismatch is the normal reading, not a recovery;
+    /// * `Same` while healthy does nothing — a loss that flipped and came back
+    ///   onto the same device must not cost the session its caches;
+    /// * `Absent` suspends and does not adopt — the renderer is mid-recovery
+    ///   and has nothing to hand over yet.
+    #[test]
+    fn the_recovery_step_follows_the_renderer_reading() {
+        use super::HostContext::{Absent, Replaced, Same};
+        use super::HostRecoveryStep::{Nothing, Readopt, Suspend};
+
+        let table = [
+            // (adopted, lost, context, step)
+            (false, false, Absent, Nothing),
+            (false, false, Same, Nothing),
+            (false, false, Replaced, Nothing),
+            (false, true, Absent, Nothing),
+            (false, true, Same, Nothing),
+            (false, true, Replaced, Nothing),
+            (true, false, Absent, Suspend),
+            (true, false, Same, Nothing),
+            (true, false, Replaced, Readopt),
+            (true, true, Absent, Suspend),
+            (true, true, Same, Suspend),
+            (true, true, Replaced, Suspend),
+        ];
+
+        for (adopted, lost, context, expected) in table {
+            let observation = super::HostDeviceObservation {
+                adopted,
+                lost,
+                context,
+            };
+            assert_eq!(
+                super::host_recovery_step(observation),
+                expected,
+                "{observation:?}"
             );
         }
     }

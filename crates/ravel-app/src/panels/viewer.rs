@@ -2341,9 +2341,11 @@ impl ViewerPanel {
         let points = match path_point_at(&path.points, pointer, radius) {
             Some(index) => match path_without_point(&path.points, index) {
                 Some(points) => points,
-                // The press was on the path, so it is taken either way: a path
-                // down to two points refuses to lose one instead of letting
-                // the click start an unrelated new path on top of it.
+                // The press was on the path, so it is taken either way: a
+                // refusal is this gesture's answer, not a pass to the next
+                // one. Falling through would hand the press to the anchor's
+                // own handle — the same 8px reach found it — and turn "this
+                // path cannot lose a point" into a silent move under the Pen.
                 None => return true,
             },
             None => match path_with_inserted_point(&path.points, path.closed, pointer, radius) {
@@ -11001,6 +11003,10 @@ mod tests {
                 let press = press_comp(panel, (100.0, 100.0), Modifiers::default());
                 panel.left_mouse_down(&press, cx);
                 assert!(panel.pen_session.is_none(), "and starts no new path");
+                assert!(
+                    panel.handle_drag.is_none(),
+                    "the refusal consumes the press: it must not fall through                      to the anchor's own handle drag"
+                );
             })
             .unwrap();
         cx.run_until_parked();

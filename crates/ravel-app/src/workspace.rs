@@ -1028,6 +1028,21 @@ pub fn host_device_loss_detected(window: &Window, cx: &gpui::App) -> bool {
 /// macOS has no wgpu renderer to adopt from — `gpui_macos` is Metal-native, so
 /// Ravel picks its own device and `interop::context_from_native` checks the two
 /// landed on the same one (`ZC-2`).
+///
+/// **And no way to ask that renderer about a loss.** `gpu_device_lost()` and
+/// `gpu_context_full()` exist on the fork's `PlatformWindow` only under
+/// `cfg(linux / freebsd / windows)`; `gpui_macos` implements neither, so there
+/// is no call to make rather than an answer of `None`. Two consequences, and
+/// this unit settles both on the safe side (`GPULOSS-4`):
+///
+/// * a loss or a recreation of GPUI's **own** Metal device is not detected by
+///   Ravel at all, and nothing in the tree claims otherwise. Whether the fork
+///   should expose a native loss status is `MED-APP-40`, deliberately left
+///   open;
+/// * there is no route to a replacement device either, which is why a
+///   self-owned loss disables zero-copy and stays on the CPU fallback instead
+///   of restarting the worker
+///   ([`ProjectState::report_gpu_device_loss`](crate::project_state::ProjectState::report_gpu_device_loss)).
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
 fn host_gpu_context(_window: &Window, _cx: &mut gpui::App) -> Option<ravel_gpu::GpuContext> {
     None
@@ -1059,6 +1074,19 @@ impl RavelWorkspace {
         // one Ravel runs on; the wgpu-backed platforms need no check because
         // the device came from the toolkit in the first place. Missing handles
         // and mismatches keep the CPU fallback available.
+        //
+        // **The macOS arm answers a question and keeps nothing.** The native
+        // pointer is borrowed for the duration of `native_device_matches` and
+        // never stored: the answer is a `bool`, so nothing on this side of
+        // `ravel_gpu::interop` outlives the window that lent the handle
+        // (`GPULOSS-4`). The wgpu-backed arm is the one that retains a device,
+        // and it retains a `wgpu::Device` through the interop boundary rather
+        // than a backend pointer.
+        //
+        // It is also the *only* GPU capability decision. Whether a lost device
+        // may still be sampled is not re-decided here — `ProjectState` owns
+        // that, and `configure_viewer_surface` refuses the `true` this hands it
+        // once the device is gone.
         let capability = {
             #[cfg(target_os = "macos")]
             {

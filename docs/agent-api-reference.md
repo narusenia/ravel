@@ -2844,6 +2844,19 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   the retired caches returning their reservations as they drop is what brings
   the usage back down, which is also why the replacement is not built before
   the join.
+  `ProjectState::report_gpu_device_loss(detected, cx)` is the single place the
+  session observes a loss and acts on it. `detected` carries the adopted-host
+  observation; a self-owned context needs no argument, because its own callback
+  has already put the answer in the `GpuDeviceState` the project holds beside
+  its context. The first observation emits `ProjectEvent::GpuDeviceLost` once
+  per session and, for a self-owned loss, turns the zero-copy surface off for
+  the rest of it — `configure_viewer_surface(true, cx)` is refused from then on
+  (`GPULOSS-4`), so a later capability re-check cannot hand the worker a dead
+  device. That is a CPU fallback and not a recovery: on macOS there is no route
+  to a replacement device (`gpu_context_full()` exists on the fork's
+  `PlatformWindow` only under `cfg(linux / freebsd / windows)`), so
+  `restart_eval_on_gpu` is deliberately **not** called there, and a loss of
+  GPUI's own Metal device is not detected at all (`MED-APP-40`).
 - The viewer's playback status line (`INSP-4`) is one label, composed from
   three readings of "the picture on screen is not the truth".
   `panels::PlaybackStatus { playing, dropped_frames }` is a durable global

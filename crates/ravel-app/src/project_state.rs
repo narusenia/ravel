@@ -255,6 +255,16 @@ pub struct ProjectState {
     /// REQ-GPU-001 puts the whole pipeline on one device, and `GpuContext` is
     /// cheap to clone precisely so a second consumer shares it.
     gpu: Option<GpuContext>,
+    /// The abstract device state of the context the workers run on — the same
+    /// `Arc` that context carries, so the loss callback Ravel registered on
+    /// its own device is visible here (`GPULOSS-1`).
+    ///
+    /// Held next to `gpu` rather than read out of it because the question this
+    /// object asks is about the *state*, not about the wgpu handles: a session
+    /// with no adapter has a state that is simply never lost, and a headless
+    /// test can drive the whole loss path by injecting into this one value on a
+    /// machine that has no device to kill.
+    gpu_state: ravel_gpu::GpuDeviceState,
     /// Whether the session has already announced its GPU device loss.
     ///
     /// Multiple frames can observe the same loss, but the workspace must show
@@ -623,6 +633,7 @@ impl ProjectState {
             registry,
             eval: None,
             gpu: None,
+            gpu_state: ravel_gpu::GpuDeviceState::new(),
             gpu_loss_notified: false,
             eval_restart_in_progress: false,
             viewer_surface_enabled,
@@ -708,6 +719,12 @@ impl ProjectState {
             generation,
             update_tx,
         ));
+        // The state travels with the device: a replacement epoch
+        // (`GPULOSS-3`) brings a state of its own, and a session without an
+        // adapter gets one that is never lost.
+        self.gpu_state = gpu
+            .as_ref()
+            .map_or_else(ravel_gpu::GpuDeviceState::new, GpuContext::device_state);
         self.gpu = gpu;
         self.published_generation = generation;
         cx.spawn(async move |this, cx| {
@@ -857,22 +874,54 @@ impl ProjectState {
     ///
     /// `detected` is used by the adopted-host path, where GPUI owns the loss
     /// callback and Ravel detects the device identity change at the Viewer
-    /// surface guard. Self-owned contexts additionally consult their shared
-    /// [`GpuContext`] state. The event is emitted once per session.
+    /// surface guard. A self-owned context needs no such argument: its own
+    /// loss callback has already put the answer in [`Self::gpu_state`], and
+    /// this is the **one** place that reads it and acts. The event is emitted
+    /// once per session.
+    ///
+    /// **A self-owned loss also turns the zero-copy surface off for good**
+    /// (`GPULOSS-4`). Ravel owns the device on macOS, so its callback is a
+    /// trustworthy signal, and a texture produced by a dead device is not
+    /// something any renderer may sample — the worker goes back to handing the
+    /// viewer CPU frames, which keeps a picture on screen. That is a fallback
+    /// and **not** a recovery: the device stays dead, the event still tells
+    /// the user to restart, and nothing here rebuilds the pipeline.
+    ///
+    /// In particular this does **not** call
+    /// [`Self::restart_eval_on_gpu`](Self::restart_eval_on_gpu). A replacement
+    /// device has to come from somewhere, and macOS has no such route: the
+    /// only route in the tree reads the wgpu-backed renderer's context, which
+    /// `gpui_macos` (Metal-native) does not have. Restarting here would build
+    /// a new worker on the **same dead device** and call it recovery.
+    /// `GPULOSS-3` owns the platforms where a replacement can actually be
+    /// obtained.
     pub fn report_gpu_device_loss(&mut self, detected: bool, cx: &mut Context<Self>) {
-        let self_owned_loss = self.gpu.as_ref().is_some_and(GpuContext::lost);
+        let self_owned_loss = self.gpu_state.lost();
         if (!detected && !self_owned_loss) || self.gpu_loss_notified {
             return;
         }
         self.gpu_loss_notified = true;
+        if self_owned_loss && self.viewer_surface_enabled.swap(false, Ordering::Release) {
+            tracing::warn!(
+                "GPU device lost; zero-copy viewer surface disabled for the rest of the session \
+                 (CPU fallback, not a recovery)"
+            );
+            cx.notify();
+        }
         cx.emit(ProjectEvent::GpuDeviceLost);
     }
 
     /// Configure whether the live GPUI host can sample the worker's output
     /// texture directly. A change requests one fresh viewer frame so an old
     /// CPU/GPU representation is not kept after a window/device transition.
+    ///
+    /// **A lost device can never sample again**, so `enabled` is ignored once
+    /// [`Self::gpu_state`] reports the loss (`GPULOSS-4`). Without that the
+    /// capability re-check a later window brings (`GPULOSS-5`) would hand the
+    /// worker back a device that is gone. A replacement epoch clears it by
+    /// bringing its own state, which is the only way zero-copy comes back.
     pub fn configure_viewer_surface(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.report_gpu_device_loss(false, cx);
+        let enabled = enabled && !self.gpu_state.lost();
         if self.viewer_surface_enabled.swap(enabled, Ordering::Release) == enabled {
             return;
         }
@@ -3308,6 +3357,234 @@ mod tests {
                 )
             }))
         );
+    }
+
+    /// Count the device-loss announcements a recorder has seen.
+    fn loss_events(
+        recorder: &gpui::Entity<ProjectEventRecorder>,
+        cx: &mut TestAppContext,
+    ) -> usize {
+        recorder.read_with(cx, |recorder, _| {
+            recorder
+                .0
+                .iter()
+                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost))
+                .count()
+        })
+    }
+
+    /// `GPULOSS-4`: the loss of the device Ravel owns itself takes zero-copy
+    /// away, permanently, and rebuilds nothing.
+    ///
+    /// Three properties in one sequence, because they are one decision:
+    ///
+    /// * the surface capability goes false, so the worker goes back to CPU
+    ///   frames and the viewer keeps a picture;
+    /// * no device epoch swap starts. macOS has no route to a replacement
+    ///   device, so a restart would build a new worker on the same dead one
+    ///   and call it a recovery;
+    /// * a later capability re-check cannot turn it back on. That is what
+    ///   makes this *settled* rather than a value the next window overwrites.
+    #[gpui::test]
+    fn a_self_owned_device_loss_settles_the_viewer_on_the_cpu_fallback(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let recorder = record_events(&project, cx);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the fixture never turned zero-copy on"
+            );
+
+            // Exactly what the loss callback Ravel registered on its own
+            // device does — the injection point `GPULOSS-1` exists for, so a
+            // machine with no device to kill can still drive this path.
+            assert!(
+                project
+                    .gpu_state
+                    .record_loss(ravel_gpu::GpuLossReason::Unknown),
+                "the injection recorded no first loss"
+            );
+            // Observed through an ordinary update path, not a poll: this is
+            // the one every document edit and playhead move goes through.
+            project.request_viewer_eval(InvalidationHint::None, cx);
+
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a dead device is still being asked for zero-copy frames"
+            );
+            assert!(
+                !project.eval_restart_in_progress,
+                "the loss started a device epoch swap on a platform with no replacement device"
+            );
+
+            // What a second window's capability detection would hand back.
+            project.configure_viewer_surface(true, cx);
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a capability re-check re-enabled zero-copy on a dead device"
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            loss_events(&recorder, cx),
+            1,
+            "the fallback was announced as something other than one loss"
+        );
+    }
+
+    /// An explicit teardown is not a loss: `record_loss` refuses
+    /// [`ravel_gpu::GpuLossReason::Destroyed`], so nothing downstream may
+    /// treat a device the owner destroyed as a session that lost its GPU.
+    ///
+    /// Without this, shutting a context down would take zero-copy away and
+    /// tell the user to restart — on the way out of a perfectly healthy
+    /// session.
+    #[gpui::test]
+    fn an_explicit_device_destruction_does_not_disable_the_surface(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let recorder = record_events(&project, cx);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            assert!(
+                !project
+                    .gpu_state
+                    .record_loss(ravel_gpu::GpuLossReason::Destroyed),
+                "an explicit destruction was recorded as a loss"
+            );
+            project.request_viewer_eval(InvalidationHint::None, cx);
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "an explicit destruction took the zero-copy surface away"
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            loss_events(&recorder, cx),
+            0,
+            "an explicit destruction was announced as a device loss"
+        );
+    }
+
+    /// The disable is one decision, taken once — not re-taken by every later
+    /// observation of the same loss.
+    ///
+    /// The flag is put back by hand here because nothing in the tree can put
+    /// it back: that is the point. With the one-shot guard gone, every
+    /// subsequent update path would re-run the decision, and "how many times
+    /// did this session lose its GPU" would stop having an answer — the same
+    /// reason the announcement is one-shot.
+    #[gpui::test]
+    fn a_repeat_loss_observation_does_not_disable_the_surface_again(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let recorder = record_events(&project, cx);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            project
+                .gpu_state
+                .record_loss(ravel_gpu::GpuLossReason::Unknown);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the first observation did not disable the surface"
+            );
+
+            // A repeat callback on the same device, and the flag forced back
+            // on behind the decision's back.
+            assert!(
+                !project
+                    .gpu_state
+                    .record_loss(ravel_gpu::GpuLossReason::Unknown),
+                "a repeat callback recorded a second loss"
+            );
+            project
+                .viewer_surface_enabled
+                .store(true, Ordering::Release);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the disable ran a second time for one loss"
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            loss_events(&recorder, cx),
+            1,
+            "one loss was announced more than once"
+        );
+    }
+
+    /// `GPULOSS-4`: after the loss the evaluation keeps running and the viewer
+    /// keeps getting frames — on the CPU road, from the worker that was
+    /// already there.
+    ///
+    /// A real worker thread takes part because "evaluation continues" is a
+    /// statement about the worker, not about `on_eval_update`: the failure
+    /// this rules out is a loss that retires the worker (or stops requesting
+    /// from it) and leaves the viewer holding the last frame the dead device
+    /// produced.
+    #[gpui::test]
+    fn evaluation_continues_after_a_device_loss_and_keeps_publishing(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        // A real worker sends its results through the production channel, so
+        // the scheduler is woken from a thread it does not own. The wait below
+        // is bounded by a deadline instead.
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(None, EpochHooks::new("lost", &log), 0, cx);
+            project.configure_viewer_surface(true, cx);
+            project
+                .gpu_state
+                .record_loss(ravel_gpu::GpuLossReason::Unknown);
+            let comp = project.document().root_comp.expect("root comp");
+            let document = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| project.published_generation) > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no frame was published after the device loss; log: {:?}",
+                log.lock().unwrap()
+            );
+            std::thread::yield_now();
+        }
+
+        project.read_with(cx, |project, cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<crate::panels::ViewerFrame>(),
+                    Some(crate::panels::ViewerFrame::Frame { .. })
+                ),
+                "the viewer lost its picture instead of falling back to a CPU frame"
+            );
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the frame that reached the viewer was asked for on the dead device"
+            );
+            assert!(
+                project.eval.is_some(),
+                "the loss retired the worker on a platform with no replacement device"
+            );
+        });
     }
 
     #[gpui::test]

@@ -397,6 +397,70 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
 - macOS の native handle は `ravel_gpu::interop` の外へ出ず、UI が native pointer を
   保持しない。
 
+#### 実装メモ
+
+- **観測点は 1 つ**: `ProjectState::report_gpu_device_loss`。`ProjectState` は
+  `gpu` の隣に `gpu_state: GpuDeviceState`（同じ `Arc`）を持ち、この関数だけが
+  それを読んで `viewer_surface_enabled` を落とす。既存の呼び出し元
+  （`request_viewer_eval`、Viewer paint の defer）がそのまま観測経路になるので、
+  **専用のポーリングは足していない**。`workspace.rs` の capability 判定は
+  起動時に一度 `configure_viewer_surface(capability)` を呼ぶだけで、喪失の可否を
+  再判定しない（authority を 2 つにしないため）。**代わりに毎回の paint が
+  照合する** — macOS は `with_surface_texture` が renderer の現在の device
+  ハンドルを毎フレーム受け取るので、identity が変わっていれば描かずに `false` を
+  返し、`surface_lost` の経路が capability を落として CPU フレームを 1 枚要求する。
+  つまり「専用の coordinator は無いが、対応プラットフォームでは paint が喪失
+  （と device の入れ替わり）を検査している」。
+- `gpu_state` を `gpu` から読み出さずに別フィールドで持つ理由は 2 つ。問いが
+  wgpu ハンドルではなく**抽象状態**についてのものであること、そして adapter の
+  無いマシンからでも `record_loss` で注入して経路全体を回せることである
+  （`GPULOSS-1` の設計意図）。`install_eval_worker` が device と一緒に差し替えるので、
+  `GPULOSS-3` の交換後は新しい state になる。
+- **`restart_eval_on_gpu` は呼ばない。** macOS には代わりの device を取る経路が無い
+  （`gpu_context_full()` は fork の `PlatformWindow` に
+  cfg(linux / freebsd / windows) でしか無く、`gpui_macos` は実装していない）。
+  呼べば同じ死んだ device に新しい worker を建てて「復旧」と名乗ることになる。
+  理由は `report_gpu_device_loss` の doc comment に書いてある。
+- **落とし方は片道**。`configure_viewer_surface` は `gpu_state.lost()` が立っている間
+  `enabled = true` を受け付けない。`GPULOSS-5` が持ち込む 2 枚目の window の
+  capability 再判定が、死んだ device に zero-copy を戻すのを防ぐ。戻る道は
+  「新しい epoch が自分の state を連れてくる」ことだけである。
+- **paint 側は capability を答えるだけ**。Viewer の surface guard は
+  `frame.device_state().lost()` を**サンプル前に**見て、死んだ device のテクスチャを
+  GPUI に渡さない（渡すのは undefined。`with_surface_texture` の device 照合は
+  「別 device」を弾くが「同じ device が死んだ」は弾かない）。拒否した後は既存の
+  `surface_lost` 経路が `configure_viewer_surface(false)` を通って CPU フレームを
+  1 枚要求する。defer の中の順序を capability → 通知に入れ替えたのはそのためで、
+  逆順だと通知側が先にフラグを落として要求が出なくなる。
+- **fallback は復旧ではない**: ログは「CPU fallback, not a recovery」と書き、
+  `ProjectEvent::GpuDeviceLost` の 1 回通知（再起動を促す）はそのまま出る。
+  `ui-impl-status.md` も同じ言葉で分けている。
+- **native handle**: macOS の capability 判定は `native_device_matches` を呼んで
+  `bool` を受けるだけで、`handles.device()` のポインタを `ravel-app` 側に保持しない。
+  新しい handle アクセサも足していないので `gpu-native-handle-escape` の
+  シンボル一覧は変更なし。
+- **GPUI Metal 側の loss は検出しない**を判別可能にした場所: `workspace.rs` の
+  macOS 用 `host_gpu_context` の doc comment、`viewer.rs` の
+  `host_device_loss = false` を置く cfg 腕のコメント、`docs/ui-impl-status.md` の
+  FrameBuffer 表示 / GPU テクスチャ共有の 2 行。fork へ口を足す可否は
+  `MED-APP-40` に切り出した（この単位では調査していない）。
+- テスト（`project_state.rs`）: 自前 device の loss で surface が落ちて CPU に
+  確定すること（再判定で戻らないこと・epoch swap が始まらないことを含む）、
+  `GpuLossReason::Destroyed` では落ちないこと、同じ loss の 2 回目の観測で
+  落とし方が繰り返されないこと、実 worker を立てた状態で loss 後も
+  `ViewerFrame::Frame` が publish され worker が生きていること。
+- **未検証**: 実際の device loss は macOS で起こす手段が無いので、証明しているのは
+  注入した state からの分岐であって Metal ドライバの実挙動ではない。実機確認は
+  `GPULOSS-5`。
+- **自動テストで守れていない 1 箇所**: Viewer paint 側の
+  `self_owned_device_loss ||` の短絡（死んだ device のフレームを
+  `paint_gpu_surface` に渡さない）。ヘッドレスからは踏めない — 実 adapter で作った
+  `GpuFrameBuffer` と生きた window の paint が必要で、両方が無いと `ViewerOutput::Gpu`
+  を組み立てられない。変異注入で確認済みの穴であり、計画上の担当は `GPULOSS-5`
+  （「device loss 中の描画停止」）である。ProjectState 側の 4 つの判定
+  （`lost()` の観測・`Destroyed` の除外・1 回きりの落とし方・capability 再判定の
+  拒否）は変異注入で 1 つずつ落ちることを確認した。
+
 ### GPULOSS-5
 
 - 次の自動テストが通る。

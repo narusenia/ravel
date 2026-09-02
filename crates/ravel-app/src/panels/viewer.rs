@@ -6524,14 +6524,14 @@ mod tests {
         let node = drawn_shape_node(
             fresh.clone(),
             ShapeDrawKind::Polygon,
-            radial_drag_geometry((300.0, 200.0), (330.0, 240.0)),
+            radial_drag_geometry((300.0, 200.0), (600.0, 600.0)),
         );
         let ctx = eval_ctx();
         assert_eq!(
             sample_vec2_param(&node, "center", 0, &ctx),
             Some((300.0, 200.0))
         );
-        assert_eq!(sample_float_param(&node, "radius", 0, &ctx), Some(50.0));
+        assert_eq!(sample_float_param(&node, "radius", 0, &ctx), Some(500.0));
         assert_eq!(
             param_value(&node, "sides"),
             param_value(&fresh, "sides"),
@@ -6548,7 +6548,9 @@ mod tests {
         let node = drawn_shape_node(
             fresh.clone(),
             ShapeDrawKind::Star,
-            radial_drag_geometry((300.0, 200.0), (330.0, 240.0)),
+            // 500, not 50: a radius that is a small multiple of a registry
+            // default lets a drag that overwrites that default pass unnoticed.
+            radial_drag_geometry((300.0, 200.0), (600.0, 600.0)),
         );
         let ctx = eval_ctx();
         assert_eq!(
@@ -6557,7 +6559,7 @@ mod tests {
         );
         assert_eq!(
             sample_float_param(&node, "outer_radius", 0, &ctx),
-            Some(50.0)
+            Some(500.0)
         );
         for key in ["inner_radius", "points"] {
             assert_eq!(

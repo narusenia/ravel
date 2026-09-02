@@ -2617,31 +2617,39 @@ impl ViewerOverlay for BoxSelectOverlay {
         ctx.box_select.is_some()
     }
 
-    /// Every geometry node of the candidates: the network's own when one is
-    /// open, and every layer of the composition when none is.
+    /// Every geometry node of the candidates: the open network's own, plus
+    /// every layer of the composition.
+    ///
+    /// The layers are declared under both scopes because this gesture only
+    /// ever starts on a press that grabbed nothing, and such a press may
+    /// resolve on release to a shape node in **another** layer (`TOOLX-3`) —
+    /// which cannot be measured without its bbox. That is exactly the
+    /// requirement's "only when the active layer missed" rule: a press that
+    /// did grab something starts no gesture here, so nothing extra is ever
+    /// declared for it. Duplicates between the two lists are dropped by
+    /// [`OverlayRegistry::eval_targets`], which is where "distinct" lives.
     fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget> {
         let (Some(document), Some(box_select)) = (ctx.document.as_ref(), ctx.box_select.as_ref())
         else {
             return Vec::new();
         };
-        match &box_select.scope {
-            BoxSelectScope::Nodes(network) => super::geometry::geometry_targets(document, network),
-            BoxSelectScope::Layers(comp) => {
-                let Some(composition) = document.get_composition(*comp) else {
-                    return Vec::new();
-                };
-                composition
-                    .layers
-                    .iter()
-                    .flat_map(|layer| {
-                        super::geometry::geometry_targets(
-                            document,
-                            &NetworkPath::layer(*comp, layer.id),
-                        )
-                    })
-                    .collect()
-            }
+        let (comp, mut targets) = match &box_select.scope {
+            BoxSelectScope::Nodes(network) => (
+                network.comp,
+                super::geometry::geometry_targets(document, network),
+            ),
+            BoxSelectScope::Layers(comp) => (*comp, Vec::new()),
+        };
+        let Some(composition) = document.get_composition(comp) else {
+            return targets;
+        };
+        for layer in &composition.layers {
+            targets.extend(super::geometry::geometry_targets(
+                document,
+                &NetworkPath::layer(comp, layer.id),
+            ));
         }
+        targets
     }
 
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {

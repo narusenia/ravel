@@ -1559,8 +1559,10 @@ impl ViewerPanel {
         };
         // A press that never travelled is a click, and the press already
         // published what a click means. Publishing a union here would put the
-        // selection the click cleared straight back.
+        // selection the click cleared straight back — but a click that grabbed
+        // nothing is the one chance to look in the other layers.
         if pointer == drag.start {
+            self.resolve_hit_fallback(pointer, &drag.target, cx);
             return;
         }
         let rect = box_rect(drag.start, pointer);
@@ -1586,6 +1588,54 @@ impl ViewerPanel {
                 super::publish_layer_properties_target(cx);
             }
         }
+    }
+
+    /// A click that grabbed nothing where it landed: pick the topmost shape
+    /// node under it from the composition's **other** layers (REQ-UI-011's
+    /// v1.5 fallback).
+    ///
+    /// Only reached from a zero-distance release of a box selection, which is
+    /// the one press that found nothing to grab — so the fallback is scoped to
+    /// "the active layer missed" without a condition of its own. The candidate
+    /// bboxes were declared by that same press ([`Self::begin_box_select`]),
+    /// which is why this can measure layers no selection ever asked for.
+    ///
+    /// Selecting a node moves the layer selection onto its layer, the way the
+    /// Outliner's node rows do: the network the selection names is the one the
+    /// next press hit-tests, and leaving several layers selected would send it
+    /// straight back into the multi-layer gesture.
+    ///
+    /// **The results arrive asynchronously**, so a click released before the
+    /// evaluation lands falls back to nothing. Same known limitation as the
+    /// box selection's first frames.
+    fn resolve_hit_fallback(
+        &mut self,
+        pointer: (f32, f32),
+        target: &BoxSelectTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let (comp, active) = match target {
+            // The open network was already tested by the press. Its layer is
+            // skipped rather than tested again: "another layer" is what the
+            // requirement asks for, and re-testing a layer whose subnet is
+            // open would silently close it.
+            BoxSelectTarget::Nodes { network, .. } => (network.comp, Some(network.layer)),
+            // No network was open, so no layer was active and every one of
+            // them is a candidate.
+            BoxSelectTarget::Layers { comp, .. } => (*comp, None),
+        };
+        // `set_layer_selection` stamps the *active* composition, so a switch
+        // mid-gesture would file this layer under one it does not belong to.
+        if self.active_comp(cx) != Some(comp) {
+            return;
+        }
+        let ctx = self.overlay_context(cx);
+        let Some((network, node)) = hit_test_other_layers(&ctx, comp, active, pointer) else {
+            return;
+        };
+        super::set_layer_selection(vec![network.layer], cx);
+        Self::publish_selection(network, HashSet::from([node]), cx);
+        cx.notify();
     }
 
     /// Drop the gesture without publishing anything (Escape, a deliberate tool
@@ -4371,6 +4421,41 @@ fn hit_test_shape_nodes(
         let bounds = geometry::evaluated_bounds(ctx, network, node.id)?;
         rect_contains(&to_comp_space(&shell, bounds), point).then_some(node.id)
     })
+}
+
+/// The topmost shape node under `point` in any layer of `comp` other than
+/// `active` (REQ-UI-011's v1.5 fallback).
+///
+/// Searched top-down, because that is the order the layers are composited in
+/// (`Composition::layers` runs bottom-to-top) — so the node this picks is the
+/// one drawn over the others, the rule [`hit_test_shape_nodes`] already
+/// follows inside a network with `metadata.z`.
+///
+/// Each layer is tested through its own shell, so a rotated or scaled layer is
+/// picked where it appears. What happens *after* the pick is still restricted:
+/// the move and draw gestures refuse a non-identity shell (REQ-UI-011 v2), so
+/// such a layer becomes selectable here without becoming editable.
+///
+/// A layer whose geometry has not been evaluated has no bbox and is skipped —
+/// the mechanism's "no result, no guessing" rule.
+fn hit_test_other_layers(
+    ctx: &OverlayContext,
+    comp: CompId,
+    active: Option<LayerId>,
+    point: (f32, f32),
+) -> Option<(NetworkPath, NodeId)> {
+    let document = ctx.document.as_ref()?;
+    let composition = document.get_composition(comp)?;
+    composition
+        .layers
+        .iter()
+        .rev()
+        .filter(|layer| Some(layer.id) != active)
+        .find_map(|layer| {
+            let network = NetworkPath::layer(comp, layer.id);
+            let node = hit_test_shape_nodes(ctx, &network, point)?;
+            Some((network, node))
+        })
 }
 
 fn selection_after_click(
@@ -9972,5 +10057,246 @@ mod tests {
             "and the release leaves the deselection alone"
         );
         assert_eq!(layers.len(), 2, "both layers still exist");
+    }
+
+    // -----------------------------------------------------------------------
+    // TOOLX-3: the hit-target fallback
+    // -----------------------------------------------------------------------
+
+    /// A composition holding one 40x40 square per `centers` entry, one layer
+    /// each in the given order — which is bottom-to-top, the order
+    /// `Composition::layers` is stored in — with every layer's geometry
+    /// evaluated the way the request → publish path delivers it.
+    fn stacked_layers_context(centers: &[(f32, f32)]) -> (OverlayContext, CompId, Vec<Layer>) {
+        use ravel_core::id::LayerId;
+
+        let layers: Vec<Layer> = centers
+            .iter()
+            .enumerate()
+            .map(|(index, center)| {
+                let network = Graph::new().add_node(square_node(*center, 40.0)).unwrap();
+                Layer::new(LayerId::next(), format!("L{index}"), network).with_time(0, 0, 300)
+            })
+            .collect();
+        let comp = comp_with_layers(layers.clone());
+        let mut values = HashMap::new();
+        for layer in &layers {
+            let path = NetworkPath::layer(comp.id, layer.id);
+            values.extend(evaluated_results(&layer.network, &path).values);
+        }
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            results: overlay::EvalResults::new(values),
+            document: Some(Document::default().with_composition(comp.clone())),
+            ..OverlayContext::default()
+        };
+        (ctx, comp.id, layers)
+    }
+
+    fn only_node(layer: &Layer) -> NodeId {
+        layer.network.nodes().next().expect("one node").id
+    }
+
+    /// The fallback searches the layers top-down and skips the one the press
+    /// already tested.
+    #[test]
+    fn the_fallback_picks_the_topmost_other_layer() {
+        // Three stacked squares, all covering the origin.
+        let (ctx, comp, layers) = stacked_layers_context(&[(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+
+        assert_eq!(
+            hit_test_other_layers(&ctx, comp, None, (0.0, 0.0)),
+            Some((
+                NetworkPath::layer(comp, layers[2].id),
+                only_node(&layers[2])
+            )),
+            "the topmost layer is the one drawn over the others"
+        );
+        assert_eq!(
+            hit_test_other_layers(&ctx, comp, Some(layers[2].id), (0.0, 0.0)),
+            Some((
+                NetworkPath::layer(comp, layers[1].id),
+                only_node(&layers[1])
+            )),
+            "the layer the press already tested is skipped"
+        );
+        assert_eq!(
+            hit_test_other_layers(&ctx, comp, None, (500.0, 500.0)),
+            None,
+            "nothing is under the pointer"
+        );
+    }
+
+    /// Completion criterion: the fallback's candidates are declared by the
+    /// press that missed — so a node-scope sweep asks for every layer of the
+    /// composition, not only the open network's, and stops asking on release.
+    #[test]
+    fn a_node_scope_sweep_declares_every_layers_candidates() {
+        let (mut ctx, comp, layers) = stacked_layers_context(&[(0.0, 0.0), (100.0, 0.0)]);
+        let open = NetworkPath::layer(comp, layers[0].id);
+        let other = NetworkPath::layer(comp, layers[1].id);
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Nodes(open.clone()),
+            rect: None,
+        });
+
+        let targets = OverlayRegistry::builtin().eval_targets(&ctx);
+        let document = ctx.document.clone().expect("a document");
+        for (network, why) in [
+            (&open, "the open network's own candidates"),
+            (&other, "and the layer the release may fall back to"),
+        ] {
+            let expected = geometry::geometry_targets(&document, network);
+            assert!(!expected.is_empty(), "{why}: the fixture measures nothing");
+            for target in expected {
+                assert!(targets.contains(&target), "{why}");
+            }
+        }
+
+        ctx.box_select = None;
+        assert!(
+            OverlayRegistry::builtin().eval_targets(&ctx).is_empty(),
+            "the declaration lives only as long as the gesture"
+        );
+    }
+
+    /// Completion criterion: a press that hits something inside the open
+    /// network never looks at the other layers — no sweep starts, so nothing
+    /// declares their candidates and nothing can fall back to them.
+    ///
+    /// `multi_layer_setup`'s bboxes are (-50, -50)-(50, 50) and
+    /// (50, -50)-(150, 50), so the column x = 50 is held by both: the pointer
+    /// is over the open network's node *and* over the layer above it.
+    #[gpui::test]
+    fn a_hit_in_the_open_network_never_looks_at_the_other_layers(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let network = NetworkPath::layer(comp_id, layers[0]);
+        let node = project.read_with(cx, |project, _| {
+            only_node(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layers[0])
+                    .unwrap(),
+            )
+        });
+        cx.update(|cx| {
+            // The manipulator's grips answer the pointer before any tool does,
+            // and one of them sits exactly on the shared column below.
+            crate::panels::clear_layer_selection(cx);
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::new(),
+            });
+        });
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (50.0, 0.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_none(), "a hit starts no sweep");
+                assert!(panel.move_drag.is_some(), "it moves what it hit");
+                assert!(
+                    overlay::box_select_candidates(cx).is_none(),
+                    "so nothing declares the other layers' bboxes"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            selected_nodes(cx),
+            HashSet::from([node]),
+            "the open network's node wins over the layer stacked above it"
+        );
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "and no other layer was selected"
+        );
+    }
+
+    /// A click that grabbed nothing selects the shape it landed on in another
+    /// layer, and the layer selection follows it.
+    ///
+    /// This is the `TOOLX-2` side effect: with several layers selected, a
+    /// press inside a layer whose shell is not the identity could move
+    /// nothing, so it counted as empty space and deselected everything. The
+    /// fallback turns it into a pick.
+    #[gpui::test]
+    fn a_click_inside_a_transformed_layer_selects_its_shape(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        project.update(cx, |project, cx| {
+            let doc =
+                ravel_ui::document::update_layer(project.document(), comp_id, layers[1], |layer| {
+                    layer.transform.rotation = AnimationChannel::constant(45.0)
+                })
+                .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+        let node = project.read_with(cx, |project, _| {
+            only_node(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layers[1])
+                    .unwrap(),
+            )
+        });
+        // The commit's re-request cleared the snapshot (no worker in tests).
+        publish_geometry_results(&project, cx);
+
+        // Inside the rotated layer's bbox and outside the other one's.
+        let hit = (140.0, 0.0);
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, hit, Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.move_drag.is_none(),
+                    "a transformed layer is still not movable"
+                );
+                assert!(
+                    panel.box_select.is_some(),
+                    "the press found nothing to grab"
+                );
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "the press published the click's deselection"
+        );
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.box_select_ended(window_point(panel, hit), cx);
+            })
+            .unwrap();
+
+        assert_eq!(
+            selected_nodes(cx),
+            HashSet::from([node]),
+            "the release fell back to the shape under the click"
+        );
+        assert_eq!(
+            cx.update(|cx| crate::panels::layer_selection(cx).layers().to_vec()),
+            vec![layers[1]],
+            "and the layer selection followed it, so the next press picks inside it"
+        );
+        assert_eq!(
+            cx.update(|cx| cx
+                .try_global::<CanvasSelection>()
+                .and_then(|selection| selection.path.clone())),
+            Some(NetworkPath::layer(comp_id, layers[1])),
+            "the found layer's network is the one that opened"
+        );
     }
 }

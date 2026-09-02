@@ -426,3 +426,47 @@ version が動き、この穴には当たらない。
 **検証**: 古い世代の結果を配達して、キャッシュに入らないことを落とすテスト。
 
 ---
+
+## MED-APP-40 | debt | macOS では GPUI 自身の Metal device の喪失を問う口が fork に無い
+
+**該当**: `crates/ravel-app/src/workspace.rs`（`host_gpu_context` / capability 判定の
+`#[cfg(target_os = "macos")]` 腕）、`crates/ravel-app/src/panels/viewer.rs`
+（`host_device_loss` を `false` に固定する `cfg(not(...))` 腕）、
+gpui fork の `crates/gpui/src/platform.rs`（`gpu_device_lost`）
+
+fork の `PlatformWindow::gpu_device_lost()` と `gpu_context_full()` は
+`#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]` の
+中にしか無く、`gpui_macos`（Metal ネイティブ）はどちらも実装していない。したがって
+macOS では**問う口自体が無い** — `None` が返るのではなく呼べない。
+
+結果として Ravel が macOS で検出できるのは**自前 wgpu device の喪失だけ**である
+（`GPULOSS-1` で登録した loss callback）。GPUI の Metal renderer / command queue 側の
+喪失と再生成は検出されない。`GPULOSS-4` はこれを安全側で確定させた: 自前 device が
+死んだら zero-copy を永久に切って CPU フレームで描き続ける（復旧ではない）。
+
+**実害**: 大きくない。Ravel と GPUI が同じ Metal device を共有している（`ZC-2` の
+`native_device_matches` がそれを確認している）ので、GPUI 側の device が死ぬ状況は
+Ravel 自前 context の callback も撃つ可能性が高く、そのときは検出できる。逆側の穴は
+「GPUI が自分の renderer を作り直して**別の** device に移った」場合で、このとき
+Ravel は zero-copy を止めない — surface 描画時の device 照合が Linux / Windows の
+`AdoptedHostDevice` 相当を macOS に持たないためである。`with_surface_texture` は
+`native_device_matches` を毎回通すので**別 device のテクスチャは描かれず** `false`
+が返って CPU fallback に落ちる。つまり不正なサンプリングは起きず、残るのは
+「気づかないまま zero-copy を試み続ける」ことだけ。
+
+**修正方針**: fork の `PlatformWindow` に「callback を上書きせず native device の
+identity / loss status を読む口」を macOS でも足せるか調べる（`gpui_macos` の
+`MetalRenderer` は `MTLDevice` を保持しているので identity は返せる。喪失は Metal に
+`MTLDeviceWasRemoved` 相当の通知があるかに依る）。足せるなら macOS も
+`GPULOSS-3` と同じ recovery coordinator に載せられる。足せないなら
+`GPULOSS-4` の安全側確定が macOS の最終形になる。
+
+**severity の根拠**: bug ではなく debt。安全側の fallback が既に入っていて、
+絵は出続け、不正なサンプリングも起きない。high でないのはデータ損失もクラッシュも
+無いため、low でないのは 1 プラットフォームが device 喪失検出を持たない状態が
+`GPULOSS-5`（macOS の実機確認）と macOS の recovery 実装をそのまま塞ぐため。
+
+**検証**: fork 側の調査が先。`gpui_macos` に口が付いたら、Linux / Windows と同じ
+identity 照合と loss polling のテストを macOS 腕に足す。
+
+---

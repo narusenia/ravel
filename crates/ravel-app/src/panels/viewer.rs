@@ -971,6 +971,10 @@ impl ViewerPanel {
     /// neither an overlay handle nor a guide, a selection, a shape drag or the
     /// pen. The `match` is exhaustive on purpose: a seventh tool cannot be
     /// added without answering here.
+    ///
+    /// The Pen's point insertion / removal comes before the overlay handles:
+    /// under that tool a press on an existing anchor *removes* it, so the
+    /// handle drag the same anchor offers must not answer first.
     fn left_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         match active_tool(cx) {
             ravel_ui::ToolKind::Hand => self.pan_mouse_down(event, cx),
@@ -979,7 +983,10 @@ impl ViewerPanel {
             | ravel_ui::ToolKind::Pen
             | ravel_ui::ToolKind::Rect
             | ravel_ui::ToolKind::Ellipse => {
-                if !self.overlay_handle_mouse_down(event, cx) && !self.guide_mouse_down(event, cx) {
+                if !self.path_point_edit_mouse_down(event, cx)
+                    && !self.overlay_handle_mouse_down(event, cx)
+                    && !self.guide_mouse_down(event, cx)
+                {
                     self.select_mouse_down(event, cx);
                     self.shape_mouse_down(event, cx);
                     self.pen_mouse_down(event, cx);
@@ -1559,8 +1566,10 @@ impl ViewerPanel {
         };
         // A press that never travelled is a click, and the press already
         // published what a click means. Publishing a union here would put the
-        // selection the click cleared straight back.
+        // selection the click cleared straight back — but a click that grabbed
+        // nothing is the one chance to look in the other layers.
         if pointer == drag.start {
+            self.resolve_hit_fallback(pointer, &drag.target, cx);
             return;
         }
         let rect = box_rect(drag.start, pointer);
@@ -1586,6 +1595,54 @@ impl ViewerPanel {
                 super::publish_layer_properties_target(cx);
             }
         }
+    }
+
+    /// A click that grabbed nothing where it landed: pick the topmost shape
+    /// node under it from the composition's **other** layers (REQ-UI-011's
+    /// v1.5 fallback).
+    ///
+    /// Only reached from a zero-distance release of a box selection, which is
+    /// the one press that found nothing to grab — so the fallback is scoped to
+    /// "the active layer missed" without a condition of its own. The candidate
+    /// bboxes were declared by that same press ([`Self::begin_box_select`]),
+    /// which is why this can measure layers no selection ever asked for.
+    ///
+    /// Selecting a node moves the layer selection onto its layer, the way the
+    /// Outliner's node rows do: the network the selection names is the one the
+    /// next press hit-tests, and leaving several layers selected would send it
+    /// straight back into the multi-layer gesture.
+    ///
+    /// **The results arrive asynchronously**, so a click released before the
+    /// evaluation lands falls back to nothing. Same known limitation as the
+    /// box selection's first frames.
+    fn resolve_hit_fallback(
+        &mut self,
+        pointer: (f32, f32),
+        target: &BoxSelectTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let (comp, active) = match target {
+            // The open network was already tested by the press. Its layer is
+            // skipped rather than tested again: "another layer" is what the
+            // requirement asks for, and re-testing a layer whose subnet is
+            // open would silently close it.
+            BoxSelectTarget::Nodes { network, .. } => (network.comp, Some(network.layer)),
+            // No network was open, so no layer was active and every one of
+            // them is a candidate.
+            BoxSelectTarget::Layers { comp, .. } => (*comp, None),
+        };
+        // `set_layer_selection` stamps the *active* composition, so a switch
+        // mid-gesture would file this layer under one it does not belong to.
+        if self.active_comp(cx) != Some(comp) {
+            return;
+        }
+        let ctx = self.overlay_context(cx);
+        let Some((network, node)) = hit_test_other_layers(&ctx, comp, active, pointer) else {
+            return;
+        };
+        super::set_layer_selection(vec![network.layer], cx);
+        Self::publish_selection(network, HashSet::from([node]), cx);
+        cx.notify();
     }
 
     /// Drop the gesture without publishing anything (Escape, a deliberate tool
@@ -2214,6 +2271,127 @@ impl ViewerPanel {
             selection_comp_rects(&ctx)
         };
         selected_body_pointer_hint(&rects, pointer).is_some()
+    }
+
+    /// Pen-tool press on the selected path: a press on one of its points
+    /// removes that point, a press on one of its segments inserts one there.
+    /// Reports whether the press was taken.
+    ///
+    /// The Pen tool alone, so the Select tool's handle drags are untouched —
+    /// a click that moved a point by zero must not delete it. This is the
+    /// pen's own vocabulary (a press on the path edits the path, a press
+    /// beside it starts a new one), and it is why the press is answered here
+    /// rather than through an overlay handle: removal has no drag.
+    ///
+    /// A click, not a gesture: there is nothing to preview, so the edit is
+    /// committed at once and is one undo step by construction.
+    ///
+    /// Priority under the pointer: **a tangent handle, then the removal, then
+    /// the insertion.** A tangent's mark is drawn from the anchor, so a short
+    /// arm shares the anchor's grab radius and the press has to go to the arm
+    /// — a point with an arm shorter than the radius is therefore not
+    /// removable until the arm is pulled out, which is the cost of two marks
+    /// inside one radius. A point with no arms at all (the pen's plain click)
+    /// draws no tangent handle and stays removable.
+    fn path_point_edit_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // A live pen session owns the pointer: its clicks extend the path it
+        // is drawing rather than edit the points already placed.
+        if active_tool(cx) != ravel_ui::ToolKind::Pen || self.pen_session.is_some() {
+            return false;
+        }
+        let (Some(pointer), Some(resolution)) = (
+            self.comp_position(event.position),
+            self.composition_resolution,
+        ) else {
+            return false;
+        };
+        let (Some(position), Some(selection)) = (
+            cx.try_global::<super::PlaybackPosition>().copied(),
+            cx.try_global::<CanvasSelection>().cloned(),
+        ) else {
+            return false;
+        };
+        let Some(network) = selection.path.clone() else {
+            return false;
+        };
+        let selected: Vec<_> = selection.nodes.iter().copied().collect();
+        let [node] = selected.as_slice() else {
+            return false;
+        };
+        let node = *node;
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let document = project.read(cx).document().clone();
+        let Some(path) = selected_path_overlay(
+            &selection,
+            &document,
+            position.frame,
+            position.fps,
+            resolution,
+        ) else {
+            return false;
+        };
+        // The edit writes node-local coordinates, so the comp-space pointer is
+        // only the same place under an identity shell — the restriction the
+        // path handles already carry (REQ-UI-011 leaves the transformed case
+        // to v2).
+        if !path.shell_identity {
+            return false;
+        }
+        // A **tangent** handle answers before the removal does. Its mark is
+        // drawn from the anchor, so a short arm sits inside the very radius
+        // the removal reaches with, and a press meant to bend the curve would
+        // delete the point instead — which is what a point the pen placed by
+        // clicking (no drag, so no arm at all until one is pulled out) is made
+        // of. The anchor's own handle deliberately does *not* win: a press on
+        // a point is a removal under the Pen. Asked through the registry's
+        // hit test, the same one the press below and the cursor already use,
+        // so there is no second notion of what the pointer is over.
+        let context = self.overlay_context(cx);
+        if matches!(
+            OverlayRegistry::builtin()
+                .hit_test_draggable(&context, pointer, self.comp_per_pixel())
+                .and_then(|handle| handle.id.path_handle_kind()),
+            Some(PathHandleKind::InTangent | PathHandleKind::OutTangent)
+        ) {
+            return false;
+        }
+        let radius = self
+            .comp_hit_radius(overlay::PathEditOverlay::HIT_RADIUS_PX)
+            .unwrap_or(overlay::PathEditOverlay::HIT_RADIUS_PX);
+        let points = match path_point_at(&path.points, pointer, radius) {
+            Some(index) => match path_without_point(&path.points, index) {
+                Some(points) => points,
+                // The press was on the path, so it is taken either way: a
+                // refusal is this gesture's answer, not a pass to the next
+                // one. Falling through would hand the press to the anchor's
+                // own handle — the same 8px reach found it — and turn "this
+                // path cannot lose a point" into a silent move under the Pen.
+                None => return true,
+            },
+            None => match path_with_inserted_point(&path.points, path.closed, pointer, radius) {
+                Some(points) => points,
+                // Not on the path at all: the pen's own gestures get the press.
+                None => return false,
+            },
+        };
+        if self.apply_path_points(&network, node, points, path.closed, cx)
+            && let Some(project) = self.project(cx)
+        {
+            project.update(cx, |project, cx| {
+                project.commit_document(
+                    project.document().clone(),
+                    InvalidationHint::Params(vec![node]),
+                    cx,
+                );
+            });
+        }
+        true
     }
 
     fn pen_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -4373,6 +4551,44 @@ fn hit_test_shape_nodes(
     })
 }
 
+/// The topmost shape node under `point` in any layer of `comp` other than
+/// `active` (REQ-UI-011's v1.5 fallback).
+///
+/// Searched top-down, because that is the order the layers are composited in
+/// (`Composition::layers` runs bottom-to-top) — so the node this picks is the
+/// one drawn over the others, the rule [`hit_test_shape_nodes`] already
+/// follows inside a network with `metadata.z`.
+///
+/// Each layer is tested through its own shell, so a rotated or scaled layer is
+/// picked where it appears. What happens *after* the pick is still restricted:
+/// the move and draw gestures refuse a non-identity shell (REQ-UI-011 v2), so
+/// such a layer becomes selectable here without becoming editable.
+///
+/// A layer whose geometry has not been evaluated has no bbox and is skipped —
+/// the mechanism's "no result, no guessing" rule. A layer that does not
+/// composite is skipped too: [`Composition::composites`] is the compositor's
+/// own rule (muted out, and non-soloed out while anything is soloed), asked
+/// rather than restated, so this can never pick a shape that is not on screen.
+fn hit_test_other_layers(
+    ctx: &OverlayContext,
+    comp: CompId,
+    active: Option<LayerId>,
+    point: (f32, f32),
+) -> Option<(NetworkPath, NodeId)> {
+    let document = ctx.document.as_ref()?;
+    let composition = document.get_composition(comp)?;
+    composition
+        .layers
+        .iter()
+        .rev()
+        .filter(|layer| Some(layer.id) != active && composition.composites(layer))
+        .find_map(|layer| {
+            let network = NetworkPath::layer(comp, layer.id);
+            let node = hit_test_shape_nodes(ctx, &network, point)?;
+            Some((network, node))
+        })
+}
+
 fn selection_after_click(
     current: &HashSet<NodeId>,
     hit: Option<NodeId>,
@@ -4490,24 +4706,241 @@ fn pen_close_pointer_hint(
     pen_should_close(points, pointer, radius).then_some(ViewerPointerHint::PenClose)
 }
 
+/// How far a point's two tangents may miss being reflections of each other
+/// and still count as one smooth handle, as a fraction of the longer arm.
+///
+/// Relative rather than absolute because these are f32 composition units: at
+/// the ~10^4 magnitudes a 4K composition reaches, one ulp is already ~10^-3,
+/// so a fixed epsilon would call a large symmetric handle asymmetric. A
+/// thousandth of a percent of the arm is far below the width of the line the
+/// handle is drawn as, and far above the rounding a save / load round trip can
+/// introduce.
+const TANGENT_SYMMETRY_TOLERANCE: f32 = 1e-4;
+
+/// Whether a point's tangents form one smooth handle: two arms pointing
+/// opposite ways.
+///
+/// Read off the values, with no flag stored anywhere — a point that *is*
+/// symmetric behaves as smooth and a point that is not behaves as split, so
+/// there is nothing to persist, migrate, or keep in sync with the geometry
+/// (the decision `viewer-tool-extensions-plan.md` records).
+///
+/// A point with no tangents at all (a corner the pen placed) is not smooth: it
+/// has no arms to mirror, and the overlay draws neither handle for it.
+fn tangents_are_symmetric(point: &PathPoint) -> bool {
+    let origin = (0.0, 0.0);
+    let sum = (
+        point.in_tan.0 + point.out_tan.0,
+        point.in_tan.1 + point.out_tan.1,
+    );
+    let reach = distance_squared((point.in_tan.0, point.in_tan.1), origin)
+        .max(distance_squared((point.out_tan.0, point.out_tan.1), origin))
+        .sqrt();
+    reach > 0.0 && distance_squared(sum, origin).sqrt() <= reach * TANGENT_SYMMETRY_TOLERANCE
+}
+
+/// The path with one handle of `index` moved by `delta`.
+///
+/// A tangent of a smooth point carries its opposite arm with it, mirrored, so
+/// the curve stays smooth through the anchor; `separate` (the `Alt` modifier)
+/// moves the grabbed arm alone. A point whose arms are already not
+/// reflections is *already* split, so it moves one arm whatever `separate`
+/// says — which is what makes `Alt` a one-way operation rather than a mode:
+/// the first `Alt` drag breaks the symmetry, and every later drag of that
+/// point is independent because the values say so.
+///
+/// The **delta** is mirrored, not the value: a point that was only nearly
+/// symmetric keeps its own arms rather than being silently squared up, and a
+/// drag back to the press point restores exactly what was there — which is
+/// what lets a zero-delta release skip both the commit and the revert.
 fn edited_path_points(
     original: &[PathPoint],
     index: usize,
     handle: PathHandleKind,
     delta: (f32, f32),
+    separate: bool,
 ) -> Vec<PathPoint> {
     let mut points = original.to_vec();
     let Some(point) = points.get_mut(index) else {
         return points;
     };
+    // Judged on the press-time values (`original`), which is also the frame
+    // the delta is measured from: a drag cannot argue itself out of the
+    // symmetry it started with, half way through.
+    let mirror = !separate && tangents_are_symmetric(point);
+    let opposite = (-delta.0, -delta.1);
     match handle {
         PathHandleKind::Point => {
             offset_vec2(&mut point.p, delta);
         }
-        PathHandleKind::InTangent => offset_vec2(&mut point.in_tan, delta),
-        PathHandleKind::OutTangent => offset_vec2(&mut point.out_tan, delta),
+        PathHandleKind::InTangent => {
+            offset_vec2(&mut point.in_tan, delta);
+            if mirror {
+                offset_vec2(&mut point.out_tan, opposite);
+            }
+        }
+        PathHandleKind::OutTangent => {
+            offset_vec2(&mut point.out_tan, delta);
+            if mirror {
+                offset_vec2(&mut point.in_tan, opposite);
+            }
+        }
     }
     points
+}
+
+// ---------------------------------------------------------------------------
+// Path point insertion and removal (REQ-UI-011 v1.5)
+// ---------------------------------------------------------------------------
+
+/// Samples per segment the segment hit test walks.
+///
+/// The closest point on a cubic is a fifth-degree root problem, and solving it
+/// would buy nothing here: the insertion **splits** the curve at the parameter
+/// this returns, so the shape is preserved exactly whatever `t` comes out —
+/// `t` only decides where along the curve the new point lands. 32 steps put
+/// that within a fraction of the handle drawn on it.
+const PATH_SEGMENT_SAMPLES: usize = 32;
+
+/// Which point of a path a press within `radius` grabs: the nearest one, so
+/// two points closer together than the radius still resolve to the one under
+/// the pointer.
+fn path_point_at(points: &[PathPoint], pointer: (f32, f32), radius: f32) -> Option<usize> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (index, distance_squared((point.p.0, point.p.1), pointer)))
+        .filter(|(_, distance)| *distance <= radius * radius)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+
+/// Anchor index pairs of every segment of a path, in drawing order. A closed
+/// path has one more: the one back to the start.
+fn path_segment_indices(len: usize, closed: bool) -> Vec<(usize, usize)> {
+    if len < 2 {
+        return Vec::new();
+    }
+    let mut segments: Vec<_> = (0..len - 1).map(|index| (index, index + 1)).collect();
+    if closed {
+        segments.push((len - 1, 0));
+    }
+    segments
+}
+
+/// One cubic segment of a path: the two anchors and, between them, the two
+/// control points their tangents place.
+type PathSegment = [(f32, f32); 4];
+
+/// The cubic between two anchors of a path.
+fn path_segment(points: &[PathPoint], from: usize, to: usize) -> PathSegment {
+    let (a, b) = (&points[from], &points[to]);
+    [
+        (a.p.0, a.p.1),
+        (a.p.0 + a.out_tan.0, a.p.1 + a.out_tan.1),
+        (b.p.0 + b.in_tan.0, b.p.1 + b.in_tan.1),
+        (b.p.0, b.p.1),
+    ]
+}
+
+fn lerp_point(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+}
+
+/// de Casteljau's construction at `t`: the two cubics the segment splits into.
+///
+/// A split, not a re-fit. The two halves trace exactly the curve the original
+/// traced — which is what makes inserting a point leave the shape alone.
+/// Deriving the new tangents from the neighbouring anchors instead (the
+/// obvious shortcut) moves the curve.
+///
+/// The construction's last point is also the curve's value at `t`, which is
+/// how the hit test below evaluates it: one formula, so the point a press
+/// lands on and the point it inserts cannot disagree.
+fn split_cubic(segment: &PathSegment, t: f32) -> (PathSegment, PathSegment) {
+    let a = lerp_point(segment[0], segment[1], t);
+    let b = lerp_point(segment[1], segment[2], t);
+    let c = lerp_point(segment[2], segment[3], t);
+    let d = lerp_point(a, b, t);
+    let e = lerp_point(b, c, t);
+    let f = lerp_point(d, e, t);
+    ([segment[0], a, d, f], [f, e, c, segment[3]])
+}
+
+/// The point on a path segment at `t`.
+fn cubic_at(segment: &PathSegment, t: f32) -> (f32, f32) {
+    split_cubic(segment, t).0[3]
+}
+
+/// The segment a press within `radius` landed on, and how far along it.
+fn path_segment_at(
+    points: &[PathPoint],
+    closed: bool,
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<(usize, usize, f32)> {
+    let mut best: Option<((usize, usize, f32), f32)> = None;
+    for (from, to) in path_segment_indices(points.len(), closed) {
+        let segment = path_segment(points, from, to);
+        for step in 0..=PATH_SEGMENT_SAMPLES {
+            let t = step as f32 / PATH_SEGMENT_SAMPLES as f32;
+            let distance = distance_squared(cubic_at(&segment, t), pointer);
+            if distance <= radius * radius && best.is_none_or(|(_, closest)| distance < closest) {
+                best = Some(((from, to, t), distance));
+            }
+        }
+    }
+    best.map(|(hit, _)| hit)
+}
+
+/// The path with a point inserted where a press within `radius` landed on it,
+/// or `None` when the press was not on the path.
+///
+/// The curve is unchanged: both neighbours' facing tangents are rewritten to
+/// the halves [`split_cubic`] produced, so the two segments together trace
+/// what the one segment traced.
+fn path_with_inserted_point(
+    points: &[PathPoint],
+    closed: bool,
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<Vec<PathPoint>> {
+    let (from, to, t) = path_segment_at(points, closed, pointer, radius)?;
+    let (left, right) = split_cubic(&path_segment(points, from, to), t);
+    let anchor = left[3];
+    let mut points = points.to_vec();
+    points[from].out_tan = Vec2(left[1].0 - left[0].0, left[1].1 - left[0].1);
+    points[to].in_tan = Vec2(right[2].0 - right[3].0, right[2].1 - right[3].1);
+    // `from + 1` is the end of the list for the closing segment, which is
+    // exactly where a point between the last anchor and the first belongs.
+    points.insert(
+        from + 1,
+        PathPoint {
+            p: Vec2(anchor.0, anchor.1),
+            in_tan: Vec2(left[2].0 - anchor.0, left[2].1 - anchor.1),
+            out_tan: Vec2(right[1].0 - anchor.0, right[1].1 - anchor.1),
+        },
+    );
+    Some(points)
+}
+
+/// The path with the point at `index` removed, or `None` when the path cannot
+/// spare it.
+///
+/// The neighbours keep their own tangents untouched. The curve across the gap
+/// changes — it has to, one of its ends is gone — but nothing else about the
+/// shape does, so re-inserting a point restores the neighbourhood instead of
+/// leaving the user to re-sculpt it.
+///
+/// Two points are the least a path can be (the pen discards a one-point
+/// session for the same reason), so a path down to two refuses.
+fn path_without_point(points: &[PathPoint], index: usize) -> Option<Vec<PathPoint>> {
+    if points.len() <= 2 || index >= points.len() {
+        return None;
+    }
+    let mut points = points.to_vec();
+    points.remove(index);
+    Some(points)
 }
 
 fn custom_path_node(mut node: Node, points: Vec<PathPoint>, closed: bool) -> Node {
@@ -6283,6 +6716,10 @@ mod tests {
         );
     }
 
+    /// Completion criterion: a point whose arms are **already** not
+    /// reflections moves one arm alone, with no modifier — the behaviour that
+    /// was there before the smooth handle existed, kept for every point the
+    /// user has already split.
     #[test]
     fn path_handle_editing_moves_only_the_requested_vector() {
         let original = vec![PathPoint {
@@ -6290,15 +6727,106 @@ mod tests {
             in_tan: Vec2(-3.0, 4.0),
             out_tan: Vec2(5.0, -6.0),
         }];
-        let edited = edited_path_points(&original, 0, PathHandleKind::OutTangent, (2.0, 3.0));
+        assert!(
+            !tangents_are_symmetric(&original[0]),
+            "the fixture is the already-split case"
+        );
+        let edited =
+            edited_path_points(&original, 0, PathHandleKind::OutTangent, (2.0, 3.0), false);
         assert_eq!(edited[0].p, original[0].p);
         assert_eq!(edited[0].in_tan, original[0].in_tan);
         assert_eq!(edited[0].out_tan, Vec2(7.0, -3.0));
 
-        let moved_point = edited_path_points(&original, 0, PathHandleKind::Point, (2.0, 3.0));
+        let moved_point =
+            edited_path_points(&original, 0, PathHandleKind::Point, (2.0, 3.0), false);
         assert_eq!(moved_point[0].p, Vec2(12.0, 23.0));
         assert_eq!(moved_point[0].in_tan, original[0].in_tan);
         assert_eq!(moved_point[0].out_tan, original[0].out_tan);
+    }
+
+    /// Completion criterion: dragging one tangent of a smooth point carries
+    /// the other one with it, mirrored — and `Alt` does not.
+    #[test]
+    fn a_smooth_points_tangents_move_together_until_alt_splits_them() {
+        let smooth = vec![smooth_path_point((10.0, 20.0), (30.0, 20.0))];
+        assert!(tangents_are_symmetric(&smooth[0]));
+
+        for (handle, expected_in, expected_out) in [
+            (
+                PathHandleKind::OutTangent,
+                Vec2(-22.0, -3.0),
+                Vec2(22.0, 3.0),
+            ),
+            (
+                PathHandleKind::InTangent,
+                Vec2(-18.0, 3.0),
+                Vec2(18.0, -3.0),
+            ),
+        ] {
+            let mirrored = edited_path_points(&smooth, 0, handle, (2.0, 3.0), false);
+            assert_eq!(
+                (mirrored[0].in_tan, mirrored[0].out_tan),
+                (expected_in, expected_out),
+                "the opposite arm follows the grabbed one, reflected"
+            );
+            assert_eq!(mirrored[0].p, smooth[0].p, "the anchor stays put");
+            assert!(
+                tangents_are_symmetric(&mirrored[0]),
+                "and the point is still smooth"
+            );
+        }
+
+        // Completion criterion: after an Alt drag the opposite tangent has not
+        // moved, and the point is split from then on.
+        let split = edited_path_points(&smooth, 0, PathHandleKind::OutTangent, (2.0, 3.0), true);
+        assert_eq!(
+            split[0].in_tan, smooth[0].in_tan,
+            "Alt leaves the opposite arm exactly where it was"
+        );
+        assert_eq!(split[0].out_tan, Vec2(22.0, 3.0));
+        assert!(!tangents_are_symmetric(&split[0]));
+
+        let again = edited_path_points(&split, 0, PathHandleKind::OutTangent, (1.0, 1.0), false);
+        assert_eq!(
+            again[0].in_tan, split[0].in_tan,
+            "a split point stays split without the modifier: no flag was needed to remember"
+        );
+
+        // A drag back to the press point restores the arms bit for bit, which
+        // is what lets a zero-delta release skip the commit and the revert.
+        assert_eq!(
+            edited_path_points(&smooth, 0, PathHandleKind::OutTangent, (0.0, 0.0), false),
+            smooth
+        );
+    }
+
+    /// The symmetry test tolerates the rounding f32 composition units carry,
+    /// and nothing more: a corner point has no arms to mirror, and a bend the
+    /// user can see is not "nearly symmetric".
+    #[test]
+    fn tangent_symmetry_is_read_off_the_values() {
+        let point = |in_tan: (f32, f32), out_tan: (f32, f32)| PathPoint {
+            p: Vec2(0.0, 0.0),
+            in_tan: Vec2(in_tan.0, in_tan.1),
+            out_tan: Vec2(out_tan.0, out_tan.1),
+        };
+        assert!(tangents_are_symmetric(&point((-10.0, -5.0), (10.0, 5.0))));
+        assert!(
+            tangents_are_symmetric(&point((-8000.0, 0.0), (7999.9995, 0.0))),
+            "one ulp at 4K magnitudes is still one smooth handle"
+        );
+        assert!(
+            !tangents_are_symmetric(&point((-10.0, 0.0), (10.0, 0.1))),
+            "a visible bend is a split point"
+        );
+        assert!(
+            !tangents_are_symmetric(&point((-10.0, 0.0), (5.0, 0.0))),
+            "arms of different lengths are not reflections"
+        );
+        assert!(
+            !tangents_are_symmetric(&corner_path_point((10.0, 20.0))),
+            "a corner has no arms at all"
+        );
     }
 
     #[test]
@@ -9972,5 +10500,730 @@ mod tests {
             "and the release leaves the deselection alone"
         );
         assert_eq!(layers.len(), 2, "both layers still exist");
+    }
+
+    // -----------------------------------------------------------------------
+    // TOOLX-3: the hit-target fallback
+    // -----------------------------------------------------------------------
+
+    /// A composition holding one 40x40 square per `centers` entry, one layer
+    /// each in the given order — which is bottom-to-top, the order
+    /// `Composition::layers` is stored in — with every layer's geometry
+    /// evaluated the way the request → publish path delivers it.
+    fn stacked_layers_context(centers: &[(f32, f32)]) -> (OverlayContext, CompId, Vec<Layer>) {
+        use ravel_core::id::LayerId;
+
+        let layers: Vec<Layer> = centers
+            .iter()
+            .enumerate()
+            .map(|(index, center)| {
+                let network = Graph::new().add_node(square_node(*center, 40.0)).unwrap();
+                Layer::new(LayerId::next(), format!("L{index}"), network).with_time(0, 0, 300)
+            })
+            .collect();
+        let comp = comp_with_layers(layers.clone());
+        let mut values = HashMap::new();
+        for layer in &layers {
+            let path = NetworkPath::layer(comp.id, layer.id);
+            values.extend(evaluated_results(&layer.network, &path).values);
+        }
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            results: overlay::EvalResults::new(values),
+            document: Some(Document::default().with_composition(comp.clone())),
+            ..OverlayContext::default()
+        };
+        (ctx, comp.id, layers)
+    }
+
+    fn only_node(layer: &Layer) -> NodeId {
+        layer.network.nodes().next().expect("one node").id
+    }
+
+    /// The fallback searches the layers top-down and skips the one the press
+    /// already tested.
+    #[test]
+    fn the_fallback_picks_the_topmost_other_layer() {
+        // Three stacked squares, all covering the origin.
+        let (ctx, comp, layers) = stacked_layers_context(&[(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+
+        assert_eq!(
+            hit_test_other_layers(&ctx, comp, None, (0.0, 0.0)),
+            Some((
+                NetworkPath::layer(comp, layers[2].id),
+                only_node(&layers[2])
+            )),
+            "the topmost layer is the one drawn over the others"
+        );
+        assert_eq!(
+            hit_test_other_layers(&ctx, comp, Some(layers[2].id), (0.0, 0.0)),
+            Some((
+                NetworkPath::layer(comp, layers[1].id),
+                only_node(&layers[1])
+            )),
+            "the layer the press already tested is skipped"
+        );
+        assert_eq!(
+            hit_test_other_layers(&ctx, comp, None, (500.0, 500.0)),
+            None,
+            "nothing is under the pointer"
+        );
+    }
+
+    /// Completion criterion: the fallback's candidates are declared by the
+    /// press that missed — so a node-scope sweep asks for every layer of the
+    /// composition, not only the open network's, and stops asking on release.
+    #[test]
+    fn a_node_scope_sweep_declares_every_layers_candidates() {
+        let (mut ctx, comp, layers) = stacked_layers_context(&[(0.0, 0.0), (100.0, 0.0)]);
+        let open = NetworkPath::layer(comp, layers[0].id);
+        let other = NetworkPath::layer(comp, layers[1].id);
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Nodes(open.clone()),
+            rect: None,
+        });
+
+        let targets = OverlayRegistry::builtin().eval_targets(&ctx);
+        let document = ctx.document.clone().expect("a document");
+        for (network, why) in [
+            (&open, "the open network's own candidates"),
+            (&other, "and the layer the release may fall back to"),
+        ] {
+            let expected = geometry::geometry_targets(&document, network);
+            assert!(!expected.is_empty(), "{why}: the fixture measures nothing");
+            for target in expected {
+                assert!(targets.contains(&target), "{why}");
+            }
+        }
+
+        ctx.box_select = None;
+        assert!(
+            OverlayRegistry::builtin().eval_targets(&ctx).is_empty(),
+            "the declaration lives only as long as the gesture"
+        );
+    }
+
+    /// Completion criterion: a press that hits something inside the open
+    /// network never looks at the other layers — no sweep starts, so nothing
+    /// declares their candidates and nothing can fall back to them.
+    ///
+    /// `multi_layer_setup`'s bboxes are (-50, -50)-(50, 50) and
+    /// (50, -50)-(150, 50), so the column x = 50 is held by both: the pointer
+    /// is over the open network's node *and* over the layer above it.
+    #[gpui::test]
+    fn a_hit_in_the_open_network_never_looks_at_the_other_layers(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let network = NetworkPath::layer(comp_id, layers[0]);
+        let node = project.read_with(cx, |project, _| {
+            only_node(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layers[0])
+                    .unwrap(),
+            )
+        });
+        cx.update(|cx| {
+            // The manipulator's grips answer the pointer before any tool does,
+            // and one of them sits exactly on the shared column below.
+            crate::panels::clear_layer_selection(cx);
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::new(),
+            });
+        });
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (50.0, 0.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_none(), "a hit starts no sweep");
+                assert!(panel.move_drag.is_some(), "it moves what it hit");
+                assert!(
+                    overlay::box_select_candidates(cx).is_none(),
+                    "so nothing declares the other layers' bboxes"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            selected_nodes(cx),
+            HashSet::from([node]),
+            "the open network's node wins over the layer stacked above it"
+        );
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "and no other layer was selected"
+        );
+    }
+
+    /// A click that grabbed nothing selects the shape it landed on in another
+    /// layer, and the layer selection follows it.
+    ///
+    /// This is the `TOOLX-2` side effect: with several layers selected, a
+    /// press inside a layer whose shell is not the identity could move
+    /// nothing, so it counted as empty space and deselected everything. The
+    /// fallback turns it into a pick.
+    #[gpui::test]
+    fn a_click_inside_a_transformed_layer_selects_its_shape(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        project.update(cx, |project, cx| {
+            let doc =
+                ravel_ui::document::update_layer(project.document(), comp_id, layers[1], |layer| {
+                    layer.transform.rotation = AnimationChannel::constant(45.0)
+                })
+                .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+        let node = project.read_with(cx, |project, _| {
+            only_node(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layers[1])
+                    .unwrap(),
+            )
+        });
+        // The commit's re-request cleared the snapshot (no worker in tests).
+        publish_geometry_results(&project, cx);
+
+        // Inside the rotated layer's bbox and outside the other one's.
+        let hit = (140.0, 0.0);
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, hit, Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.move_drag.is_none(),
+                    "a transformed layer is still not movable"
+                );
+                assert!(
+                    panel.box_select.is_some(),
+                    "the press found nothing to grab"
+                );
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "the press published the click's deselection"
+        );
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.box_select_ended(window_point(panel, hit), cx);
+            })
+            .unwrap();
+
+        assert_eq!(
+            selected_nodes(cx),
+            HashSet::from([node]),
+            "the release fell back to the shape under the click"
+        );
+        assert_eq!(
+            cx.update(|cx| crate::panels::layer_selection(cx).layers().to_vec()),
+            vec![layers[1]],
+            "and the layer selection followed it, so the next press picks inside it"
+        );
+        assert_eq!(
+            cx.update(|cx| cx
+                .try_global::<CanvasSelection>()
+                .and_then(|selection| selection.path.clone())),
+            Some(NetworkPath::layer(comp_id, layers[1])),
+            "the found layer's network is the one that opened"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TOOLX-3: path point insertion and removal
+    // -----------------------------------------------------------------------
+
+    /// A curve with tangents on both ends: the shape a naive re-fit would
+    /// flatten, so it is the fixture the insertion has to preserve.
+    fn curved_path() -> Vec<PathPoint> {
+        vec![
+            PathPoint {
+                p: Vec2(100.0, 100.0),
+                in_tan: Vec2(-30.0, 0.0),
+                out_tan: Vec2(60.0, -40.0),
+            },
+            PathPoint {
+                p: Vec2(300.0, 200.0),
+                in_tan: Vec2(-50.0, -70.0),
+                out_tan: Vec2(20.0, 10.0),
+            },
+        ]
+    }
+
+    fn assert_on_curve(actual: (f32, f32), expected: (f32, f32), what: &str) {
+        assert!(
+            (actual.0 - expected.0).abs() < 1e-3 && (actual.1 - expected.1).abs() < 1e-3,
+            "{what}: {actual:?} is not {expected:?}"
+        );
+    }
+
+    /// Completion criterion: inserting a point does not change the shape of
+    /// the path.
+    ///
+    /// Proved parametrically rather than by eye: splitting at `t` makes the
+    /// first new segment trace the original's `[0, t]` and the second its
+    /// `[t, 1]`, so every sample of the two halves has a matching sample on
+    /// the curve that was there before.
+    #[test]
+    fn inserting_a_point_does_not_move_the_curve() {
+        let original = curved_path();
+        let segment = path_segment(&original, 0, 1);
+        // Exactly on the curve, half way along it — which is one of the hit
+        // test's samples, so the split lands at t = 0.5.
+        let split = 0.5;
+        let pointer = cubic_at(&segment, split);
+
+        let inserted =
+            path_with_inserted_point(&original, false, pointer, 1.0).expect("a press on the curve");
+        assert_eq!(inserted.len(), 3, "one point was added");
+        assert_on_curve(
+            (inserted[1].p.0, inserted[1].p.1),
+            pointer,
+            "the new anchor sits where the press landed",
+        );
+        assert_eq!(
+            (inserted[0].p, inserted[2].p),
+            (original[0].p, original[1].p),
+            "the existing anchors did not move"
+        );
+        assert_eq!(
+            (inserted[0].in_tan, inserted[2].out_tan),
+            (original[0].in_tan, original[1].out_tan),
+            "and neither did the tangents facing away from the split"
+        );
+
+        let halves = [
+            (path_segment(&inserted, 0, 1), 0.0, split),
+            (path_segment(&inserted, 1, 2), split, 1.0),
+        ];
+        for (half, start, end) in halves {
+            for step in 0..=20 {
+                let u = step as f32 / 20.0;
+                assert_on_curve(
+                    cubic_at(&half, u),
+                    cubic_at(&segment, start + u * (end - start)),
+                    "the split traces the original curve",
+                );
+            }
+        }
+    }
+
+    /// Completion criterion: removing a point leaves the tangents of the
+    /// points beside it alone, and a path that is only two points refuses.
+    #[test]
+    fn removing_a_point_keeps_the_neighbours_tangents() {
+        let mut points = curved_path();
+        points.insert(
+            1,
+            PathPoint {
+                p: Vec2(200.0, 150.0),
+                in_tan: Vec2(-11.0, -12.0),
+                out_tan: Vec2(13.0, 14.0),
+            },
+        );
+
+        let after = path_without_point(&points, 1).expect("a three-point path can spare one");
+        assert_eq!(
+            after,
+            vec![points[0], points[2]],
+            "the neighbours survive untouched, tangents included"
+        );
+        assert_eq!(
+            path_without_point(&after, 0),
+            None,
+            "two points are the least a path can be"
+        );
+        assert_eq!(
+            path_without_point(&points, 3),
+            None,
+            "and an index past the end removes nothing"
+        );
+    }
+
+    /// The insertion goes where the closing segment is: between the last
+    /// anchor and the first, which is the end of the list.
+    #[test]
+    fn a_press_on_the_closing_segment_inserts_at_the_end() {
+        let points = vec![
+            corner_path_point((0.0, 0.0)),
+            corner_path_point((100.0, 0.0)),
+            corner_path_point((100.0, 100.0)),
+        ];
+        let pointer = (50.0, 50.0);
+
+        assert_eq!(
+            path_with_inserted_point(&points, false, pointer, 4.0),
+            None,
+            "an open path has no segment back to the start"
+        );
+        let inserted = path_with_inserted_point(&points, true, pointer, 4.0)
+            .expect("the closing segment runs under the pointer");
+        assert_eq!(inserted.len(), 4);
+        assert_on_curve(
+            (inserted[3].p.0, inserted[3].p.1),
+            pointer,
+            "the new point closes the path",
+        );
+    }
+
+    /// A press within reach of both a point and the segment through it picks
+    /// the point: removal is what the pointer is over.
+    #[test]
+    fn a_press_picks_the_nearest_point_within_reach() {
+        let points = vec![
+            corner_path_point((0.0, 0.0)),
+            corner_path_point((10.0, 0.0)),
+            corner_path_point((100.0, 0.0)),
+        ];
+        assert_eq!(path_point_at(&points, (6.0, 0.0), 8.0), Some(1));
+        assert_eq!(path_point_at(&points, (4.0, 0.0), 8.0), Some(0));
+        assert_eq!(path_point_at(&points, (50.0, 0.0), 8.0), None);
+    }
+
+    /// `shell_setup` with the layer's network replaced by one
+    /// `shape.custom_path` node holding `points`, selected, under the Pen.
+    fn pen_path_setup(
+        cx: &mut TestAppContext,
+        points: Vec<PathPoint>,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        NetworkPath,
+        NodeId,
+    ) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        let node = custom_path_node(
+            registry()
+                .create_node("shape.custom_path", NodeId::next())
+                .unwrap(),
+            points,
+            false,
+        );
+        let id = node.id;
+        project.update(cx, |project, cx| {
+            let graph = Graph::new().add_node(node).unwrap();
+            let doc =
+                ravel_ui::document::replace_network(project.document(), &network, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.update(|cx| {
+            cx.set_global(tool_state(ravel_ui::ToolKind::Pen));
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::from([id]),
+            });
+        });
+        (window, project, network, id)
+    }
+
+    fn committed_path(
+        project: &Entity<ProjectState>,
+        network: &NetworkPath,
+        node: NodeId,
+        cx: &mut TestAppContext,
+    ) -> Vec<PathPoint> {
+        project.read_with(cx, |project, _| {
+            let graph = ravel_ui::document::resolve_network(project.document(), network)
+                .expect("the network");
+            path_points(graph.node(node).expect("the path node"))
+                .expect("a points parameter")
+                .to_vec()
+        })
+    }
+
+    fn network_node_count(
+        project: &Entity<ProjectState>,
+        network: &NetworkPath,
+        cx: &mut TestAppContext,
+    ) -> usize {
+        project.read_with(cx, |project, _| {
+            ravel_ui::document::resolve_network(project.document(), network)
+                .expect("the network")
+                .nodes()
+                .count()
+        })
+    }
+
+    /// Completion criterion: the Pen inserts a point where it presses on the
+    /// path, and the whole edit is one undo step.
+    #[gpui::test]
+    fn the_pen_inserts_a_point_on_the_segment_in_one_undo_step(cx: &mut TestAppContext) {
+        let original = curved_path();
+        let (window, project, network, node) = pen_path_setup(cx, original.clone());
+        let pointer = cubic_at(&path_segment(&original, 0, 1), 0.5);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, pointer, Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.pen_session.is_none(),
+                    "a press on the path edits it instead of starting a new one"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let inserted = committed_path(&project, &network, node, cx);
+        assert_eq!(inserted.len(), 3, "the press inserted a point");
+        assert_eq!(
+            network_node_count(&project, &network, cx),
+            1,
+            "and created no second path node"
+        );
+        assert!(
+            !project.update(cx, |project, cx| project.revert_document(cx)),
+            "the click left no uncommitted preview behind — it is a committed \
+             step, so a cancel belonging to some other gesture cannot throw it \
+             away, and an unrelated commit cannot absorb it"
+        );
+        assert_eq!(
+            committed_path(&project, &network, node, cx).len(),
+            3,
+            "the inserted point survives the cancel of nothing"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            original,
+            "one undo takes the whole insertion back"
+        );
+    }
+
+    /// A tangent handle answers the press before the removal does.
+    ///
+    /// `PathEditOverlay` draws a tangent's mark at `anchor + tangent`, so an
+    /// arm shorter than the 8px grab radius puts two marks inside one radius.
+    /// The press has to reach the arm — otherwise every attempt to bend the
+    /// curve at such a point would delete the point instead.
+    #[gpui::test]
+    fn a_press_on_a_tangent_bends_the_curve_instead_of_removing_the_point(cx: &mut TestAppContext) {
+        let original = vec![
+            // A 3-unit arm: its handle sits well inside the anchor's radius.
+            PathPoint {
+                p: Vec2(100.0, 100.0),
+                in_tan: Vec2(-3.0, 0.0),
+                out_tan: Vec2(3.0, 0.0),
+            },
+            corner_path_point((300.0, 100.0)),
+            corner_path_point((300.0, 300.0)),
+        ];
+        let (window, project, network, node) = pen_path_setup(cx, original.clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (103.0, 100.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.handle_drag.is_some(),
+                    "the tangent's own handle took the press"
+                );
+                // Which arm is a property of the registry's hit test (the
+                // first handle in range wins, not the nearest), and both arms
+                // of this point are in range. Either is a bend, which is what
+                // this press must not turn into a removal.
+                assert!(
+                    matches!(
+                        panel
+                            .handle_drag
+                            .as_ref()
+                            .and_then(|drag| drag.handle.id.path_handle_kind()),
+                        Some(PathHandleKind::InTangent | PathHandleKind::OutTangent)
+                    ),
+                    "and what it grabbed is an arm, not the anchor"
+                );
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            original,
+            "the point the arm belongs to is still there, untouched"
+        );
+
+        // The corner point has no arms, so it draws no tangent handle: the
+        // press on it is the removal it has always been.
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (300.0, 100.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            vec![original[0], original[2]],
+            "an anchor press still removes the point"
+        );
+    }
+
+    /// The fallback picks out of what is **on screen**: a muted layer, and a
+    /// layer left out by another layer's solo, are not candidates.
+    ///
+    /// The rule is the compositor's own (`Composition::composites`), so this
+    /// pins the agreement rather than a second copy of it.
+    #[gpui::test]
+    fn the_fallback_skips_layers_that_do_not_composite(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let node = project.read_with(cx, |project, _| {
+            only_node(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layers[1])
+                    .unwrap(),
+            )
+        });
+        // No network open, so a press on empty space sweeps layers — and a
+        // release without travel falls back. (140, 0) is inside the second
+        // layer's bbox only.
+        let hit = (140.0, 0.0);
+        let click = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                crate::panels::clear_layer_selection(cx);
+                cx.set_global(CanvasSelection::default());
+            });
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, hit, Modifiers::default());
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.box_select.is_some(), "the press grabbed nothing");
+                })
+                .unwrap();
+            // The press posted a request, and with no worker that clears the
+            // snapshot the fallback reads its bboxes from.
+            publish_geometry_results(&project, cx);
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.box_select_ended(window_point(panel, hit), cx);
+                })
+                .unwrap();
+            selected_nodes(cx)
+        };
+
+        assert_eq!(
+            click(cx),
+            HashSet::from([node]),
+            "the visible layer's shape is picked"
+        );
+
+        for (label, mutate) in [
+            (
+                "muted",
+                (|layer: &mut Layer| layer.muted = true) as fn(&mut Layer),
+            ),
+            ("left out by another layer's solo", |layer: &mut Layer| {
+                layer.solo = false
+            }),
+        ] {
+            let (window_layer, other) = (layers[1], layers[0]);
+            project.update(cx, |project, cx| {
+                let mut doc = ravel_ui::document::update_layer(
+                    project.document(),
+                    comp_id,
+                    window_layer,
+                    |layer| {
+                        layer.muted = false;
+                        layer.solo = false;
+                        mutate(layer);
+                    },
+                )
+                .unwrap();
+                // The solo case needs someone else soloed; the mute case must
+                // not have one.
+                doc = ravel_ui::document::update_layer(&doc, comp_id, other, |layer| {
+                    layer.solo = label.starts_with("left out");
+                })
+                .unwrap();
+                project.commit_document(doc, InvalidationHint::Structural, cx);
+            });
+            cx.run_until_parked();
+            assert!(
+                click(cx).is_empty(),
+                "a layer {label} is not on screen, so it cannot be picked"
+            );
+        }
+    }
+
+    /// Completion criterion: the Pen removes the point it presses on, and the
+    /// press is still taken when the path cannot spare one — a refusal must
+    /// not fall through to "start a new path here".
+    #[gpui::test]
+    fn the_pen_removes_the_point_it_presses(cx: &mut TestAppContext) {
+        let mut original = curved_path();
+        original.insert(
+            1,
+            PathPoint {
+                p: Vec2(200.0, 150.0),
+                in_tan: Vec2(-11.0, -12.0),
+                out_tan: Vec2(13.0, 14.0),
+            },
+        );
+        let (window, project, network, node) = pen_path_setup(cx, original.clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (200.0, 150.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            vec![original[0], original[2]],
+            "the pressed point is gone and its neighbours are untouched"
+        );
+
+        // The path is down to two points: the next press on one of them is
+        // refused, and swallowed.
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (100.0, 100.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.pen_session.is_none(), "and starts no new path");
+                assert!(
+                    panel.handle_drag.is_none(),
+                    "the refusal consumes the press: it must not fall through                      to the anchor's own handle drag"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx).len(),
+            2,
+            "a two-point path keeps both"
+        );
+        assert_eq!(
+            network_node_count(&project, &network, cx),
+            1,
+            "and the refused press created nothing"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            original,
+            "one undo takes the whole removal back"
+        );
     }
 }

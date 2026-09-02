@@ -30,7 +30,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
+| TOOLX-3 | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | `viewer-tool-extensions-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -569,8 +569,8 @@ format version もマイグレーションも増えていない（`Layer.audio` 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | TOOLX-1 | ✅ | Hand / Zoom ツールの実装（MED-APP-15 closed、PR #484） | — |
-| TOOLX-2 | 🟡 | 矩形選択 | OVL-1 |
-| TOOLX-3 | ⬜ | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | — |
+| TOOLX-2 | ✅ | 矩形選択（PR #487） | OVL-1 |
+| TOOLX-3 | 🟡 | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | — |
 | TOOLX-4 | ⬜ | polygon / star のドラッグ描画 | — |
 | TOOLX-5 | ⬜ | ロケールと文書 | TOOLX-1〜4 |
 

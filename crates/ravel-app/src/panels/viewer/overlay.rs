@@ -1629,7 +1629,10 @@ pub struct PathEditOverlay;
 impl PathEditOverlay {
     pub const ID: OverlayId = OverlayId("viewer.path_edit");
     /// Screen-pixel grab radius of a path handle.
-    const HIT_RADIUS_PX: f32 = 8.0;
+    ///
+    /// Also the reach of the Pen tool's insert / remove press, so the point a
+    /// click removes is the one the pointer could have grabbed instead.
+    pub const HIT_RADIUS_PX: f32 = 8.0;
 
     fn overlay(&self, ctx: &OverlayContext) -> Option<super::PathOverlay> {
         if !matches!(ctx.tool, Some(ToolKind::Select | ToolKind::Pen)) {

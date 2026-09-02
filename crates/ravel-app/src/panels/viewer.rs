@@ -971,6 +971,10 @@ impl ViewerPanel {
     /// neither an overlay handle nor a guide, a selection, a shape drag or the
     /// pen. The `match` is exhaustive on purpose: a seventh tool cannot be
     /// added without answering here.
+    ///
+    /// The Pen's point insertion / removal comes before the overlay handles:
+    /// under that tool a press on an existing anchor *removes* it, so the
+    /// handle drag the same anchor offers must not answer first.
     fn left_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         match active_tool(cx) {
             ravel_ui::ToolKind::Hand => self.pan_mouse_down(event, cx),
@@ -979,7 +983,10 @@ impl ViewerPanel {
             | ravel_ui::ToolKind::Pen
             | ravel_ui::ToolKind::Rect
             | ravel_ui::ToolKind::Ellipse => {
-                if !self.overlay_handle_mouse_down(event, cx) && !self.guide_mouse_down(event, cx) {
+                if !self.path_point_edit_mouse_down(event, cx)
+                    && !self.overlay_handle_mouse_down(event, cx)
+                    && !self.guide_mouse_down(event, cx)
+                {
                     self.select_mouse_down(event, cx);
                     self.shape_mouse_down(event, cx);
                     self.pen_mouse_down(event, cx);
@@ -2264,6 +2271,99 @@ impl ViewerPanel {
             selection_comp_rects(&ctx)
         };
         selected_body_pointer_hint(&rects, pointer).is_some()
+    }
+
+    /// Pen-tool press on the selected path: a press on one of its points
+    /// removes that point, a press on one of its segments inserts one there.
+    /// Reports whether the press was taken.
+    ///
+    /// The Pen tool alone, so the Select tool's handle drags are untouched —
+    /// a click that moved a point by zero must not delete it. This is the
+    /// pen's own vocabulary (a press on the path edits the path, a press
+    /// beside it starts a new one), and it is why the press is answered here
+    /// rather than through an overlay handle: removal has no drag.
+    ///
+    /// A click, not a gesture: there is nothing to preview, so the edit is
+    /// committed at once and is one undo step by construction.
+    fn path_point_edit_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // A live pen session owns the pointer: its clicks extend the path it
+        // is drawing rather than edit the points already placed.
+        if active_tool(cx) != ravel_ui::ToolKind::Pen || self.pen_session.is_some() {
+            return false;
+        }
+        let (Some(pointer), Some(resolution)) = (
+            self.comp_position(event.position),
+            self.composition_resolution,
+        ) else {
+            return false;
+        };
+        let (Some(position), Some(selection)) = (
+            cx.try_global::<super::PlaybackPosition>().copied(),
+            cx.try_global::<CanvasSelection>().cloned(),
+        ) else {
+            return false;
+        };
+        let Some(network) = selection.path.clone() else {
+            return false;
+        };
+        let selected: Vec<_> = selection.nodes.iter().copied().collect();
+        let [node] = selected.as_slice() else {
+            return false;
+        };
+        let node = *node;
+        let Some(project) = self.project(cx) else {
+            return false;
+        };
+        let document = project.read(cx).document().clone();
+        let Some(path) = selected_path_overlay(
+            &selection,
+            &document,
+            position.frame,
+            position.fps,
+            resolution,
+        ) else {
+            return false;
+        };
+        // The edit writes node-local coordinates, so the comp-space pointer is
+        // only the same place under an identity shell — the restriction the
+        // path handles already carry (REQ-UI-011 leaves the transformed case
+        // to v2).
+        if !path.shell_identity {
+            return false;
+        }
+        let radius = self
+            .comp_hit_radius(overlay::PathEditOverlay::HIT_RADIUS_PX)
+            .unwrap_or(overlay::PathEditOverlay::HIT_RADIUS_PX);
+        let points = match path_point_at(&path.points, pointer, radius) {
+            Some(index) => match path_without_point(&path.points, index) {
+                Some(points) => points,
+                // The press was on the path, so it is taken either way: a path
+                // down to two points refuses to lose one instead of letting
+                // the click start an unrelated new path on top of it.
+                None => return true,
+            },
+            None => match path_with_inserted_point(&path.points, path.closed, pointer, radius) {
+                Some(points) => points,
+                // Not on the path at all: the pen's own gestures get the press.
+                None => return false,
+            },
+        };
+        if self.apply_path_points(&network, node, points, path.closed, cx)
+            && let Some(project) = self.project(cx)
+        {
+            project.update(cx, |project, cx| {
+                project.commit_document(
+                    project.document().clone(),
+                    InvalidationHint::Params(vec![node]),
+                    cx,
+                );
+            });
+        }
+        true
     }
 
     fn pen_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -4593,6 +4693,160 @@ fn edited_path_points(
         PathHandleKind::OutTangent => offset_vec2(&mut point.out_tan, delta),
     }
     points
+}
+
+// ---------------------------------------------------------------------------
+// Path point insertion and removal (REQ-UI-011 v1.5)
+// ---------------------------------------------------------------------------
+
+/// Samples per segment the segment hit test walks.
+///
+/// The closest point on a cubic is a fifth-degree root problem, and solving it
+/// would buy nothing here: the insertion **splits** the curve at the parameter
+/// this returns, so the shape is preserved exactly whatever `t` comes out —
+/// `t` only decides where along the curve the new point lands. 32 steps put
+/// that within a fraction of the handle drawn on it.
+const PATH_SEGMENT_SAMPLES: usize = 32;
+
+/// Which point of a path a press within `radius` grabs: the nearest one, so
+/// two points closer together than the radius still resolve to the one under
+/// the pointer.
+fn path_point_at(points: &[PathPoint], pointer: (f32, f32), radius: f32) -> Option<usize> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (index, distance_squared((point.p.0, point.p.1), pointer)))
+        .filter(|(_, distance)| *distance <= radius * radius)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+
+/// Anchor index pairs of every segment of a path, in drawing order. A closed
+/// path has one more: the one back to the start.
+fn path_segment_indices(len: usize, closed: bool) -> Vec<(usize, usize)> {
+    if len < 2 {
+        return Vec::new();
+    }
+    let mut segments: Vec<_> = (0..len - 1).map(|index| (index, index + 1)).collect();
+    if closed {
+        segments.push((len - 1, 0));
+    }
+    segments
+}
+
+/// One cubic segment of a path: the two anchors and, between them, the two
+/// control points their tangents place.
+type PathSegment = [(f32, f32); 4];
+
+/// The cubic between two anchors of a path.
+fn path_segment(points: &[PathPoint], from: usize, to: usize) -> PathSegment {
+    let (a, b) = (&points[from], &points[to]);
+    [
+        (a.p.0, a.p.1),
+        (a.p.0 + a.out_tan.0, a.p.1 + a.out_tan.1),
+        (b.p.0 + b.in_tan.0, b.p.1 + b.in_tan.1),
+        (b.p.0, b.p.1),
+    ]
+}
+
+fn lerp_point(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+}
+
+/// de Casteljau's construction at `t`: the two cubics the segment splits into.
+///
+/// A split, not a re-fit. The two halves trace exactly the curve the original
+/// traced — which is what makes inserting a point leave the shape alone.
+/// Deriving the new tangents from the neighbouring anchors instead (the
+/// obvious shortcut) moves the curve.
+///
+/// The construction's last point is also the curve's value at `t`, which is
+/// how the hit test below evaluates it: one formula, so the point a press
+/// lands on and the point it inserts cannot disagree.
+fn split_cubic(segment: &PathSegment, t: f32) -> (PathSegment, PathSegment) {
+    let a = lerp_point(segment[0], segment[1], t);
+    let b = lerp_point(segment[1], segment[2], t);
+    let c = lerp_point(segment[2], segment[3], t);
+    let d = lerp_point(a, b, t);
+    let e = lerp_point(b, c, t);
+    let f = lerp_point(d, e, t);
+    ([segment[0], a, d, f], [f, e, c, segment[3]])
+}
+
+/// The point on a path segment at `t`.
+fn cubic_at(segment: &PathSegment, t: f32) -> (f32, f32) {
+    split_cubic(segment, t).0[3]
+}
+
+/// The segment a press within `radius` landed on, and how far along it.
+fn path_segment_at(
+    points: &[PathPoint],
+    closed: bool,
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<(usize, usize, f32)> {
+    let mut best: Option<((usize, usize, f32), f32)> = None;
+    for (from, to) in path_segment_indices(points.len(), closed) {
+        let segment = path_segment(points, from, to);
+        for step in 0..=PATH_SEGMENT_SAMPLES {
+            let t = step as f32 / PATH_SEGMENT_SAMPLES as f32;
+            let distance = distance_squared(cubic_at(&segment, t), pointer);
+            if distance <= radius * radius && best.is_none_or(|(_, closest)| distance < closest) {
+                best = Some(((from, to, t), distance));
+            }
+        }
+    }
+    best.map(|(hit, _)| hit)
+}
+
+/// The path with a point inserted where a press within `radius` landed on it,
+/// or `None` when the press was not on the path.
+///
+/// The curve is unchanged: both neighbours' facing tangents are rewritten to
+/// the halves [`split_cubic`] produced, so the two segments together trace
+/// what the one segment traced.
+fn path_with_inserted_point(
+    points: &[PathPoint],
+    closed: bool,
+    pointer: (f32, f32),
+    radius: f32,
+) -> Option<Vec<PathPoint>> {
+    let (from, to, t) = path_segment_at(points, closed, pointer, radius)?;
+    let (left, right) = split_cubic(&path_segment(points, from, to), t);
+    let anchor = left[3];
+    let mut points = points.to_vec();
+    points[from].out_tan = Vec2(left[1].0 - left[0].0, left[1].1 - left[0].1);
+    points[to].in_tan = Vec2(right[2].0 - right[3].0, right[2].1 - right[3].1);
+    // `from + 1` is the end of the list for the closing segment, which is
+    // exactly where a point between the last anchor and the first belongs.
+    points.insert(
+        from + 1,
+        PathPoint {
+            p: Vec2(anchor.0, anchor.1),
+            in_tan: Vec2(left[2].0 - anchor.0, left[2].1 - anchor.1),
+            out_tan: Vec2(right[1].0 - anchor.0, right[1].1 - anchor.1),
+        },
+    );
+    Some(points)
+}
+
+/// The path with the point at `index` removed, or `None` when the path cannot
+/// spare it.
+///
+/// The neighbours keep their own tangents untouched. The curve across the gap
+/// changes — it has to, one of its ends is gone — but nothing else about the
+/// shape does, so re-inserting a point restores the neighbourhood instead of
+/// leaving the user to re-sculpt it.
+///
+/// Two points are the least a path can be (the pen discards a one-point
+/// session for the same reason), so a path down to two refuses.
+fn path_without_point(points: &[PathPoint], index: usize) -> Option<Vec<PathPoint>> {
+    if points.len() <= 2 || index >= points.len() {
+        return None;
+    }
+    let mut points = points.to_vec();
+    points.remove(index);
+    Some(points)
 }
 
 fn custom_path_node(mut node: Node, points: Vec<PathPoint>, closed: bool) -> Node {
@@ -10297,6 +10551,318 @@ mod tests {
                 .and_then(|selection| selection.path.clone())),
             Some(NetworkPath::layer(comp_id, layers[1])),
             "the found layer's network is the one that opened"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TOOLX-3: path point insertion and removal
+    // -----------------------------------------------------------------------
+
+    /// A curve with tangents on both ends: the shape a naive re-fit would
+    /// flatten, so it is the fixture the insertion has to preserve.
+    fn curved_path() -> Vec<PathPoint> {
+        vec![
+            PathPoint {
+                p: Vec2(100.0, 100.0),
+                in_tan: Vec2(-30.0, 0.0),
+                out_tan: Vec2(60.0, -40.0),
+            },
+            PathPoint {
+                p: Vec2(300.0, 200.0),
+                in_tan: Vec2(-50.0, -70.0),
+                out_tan: Vec2(20.0, 10.0),
+            },
+        ]
+    }
+
+    fn assert_on_curve(actual: (f32, f32), expected: (f32, f32), what: &str) {
+        assert!(
+            (actual.0 - expected.0).abs() < 1e-3 && (actual.1 - expected.1).abs() < 1e-3,
+            "{what}: {actual:?} is not {expected:?}"
+        );
+    }
+
+    /// Completion criterion: inserting a point does not change the shape of
+    /// the path.
+    ///
+    /// Proved parametrically rather than by eye: splitting at `t` makes the
+    /// first new segment trace the original's `[0, t]` and the second its
+    /// `[t, 1]`, so every sample of the two halves has a matching sample on
+    /// the curve that was there before.
+    #[test]
+    fn inserting_a_point_does_not_move_the_curve() {
+        let original = curved_path();
+        let segment = path_segment(&original, 0, 1);
+        // Exactly on the curve, half way along it — which is one of the hit
+        // test's samples, so the split lands at t = 0.5.
+        let split = 0.5;
+        let pointer = cubic_at(&segment, split);
+
+        let inserted =
+            path_with_inserted_point(&original, false, pointer, 1.0).expect("a press on the curve");
+        assert_eq!(inserted.len(), 3, "one point was added");
+        assert_on_curve(
+            (inserted[1].p.0, inserted[1].p.1),
+            pointer,
+            "the new anchor sits where the press landed",
+        );
+        assert_eq!(
+            (inserted[0].p, inserted[2].p),
+            (original[0].p, original[1].p),
+            "the existing anchors did not move"
+        );
+        assert_eq!(
+            (inserted[0].in_tan, inserted[2].out_tan),
+            (original[0].in_tan, original[1].out_tan),
+            "and neither did the tangents facing away from the split"
+        );
+
+        let halves = [
+            (path_segment(&inserted, 0, 1), 0.0, split),
+            (path_segment(&inserted, 1, 2), split, 1.0),
+        ];
+        for (half, start, end) in halves {
+            for step in 0..=20 {
+                let u = step as f32 / 20.0;
+                assert_on_curve(
+                    cubic_at(&half, u),
+                    cubic_at(&segment, start + u * (end - start)),
+                    "the split traces the original curve",
+                );
+            }
+        }
+    }
+
+    /// Completion criterion: removing a point leaves the tangents of the
+    /// points beside it alone, and a path that is only two points refuses.
+    #[test]
+    fn removing_a_point_keeps_the_neighbours_tangents() {
+        let mut points = curved_path();
+        points.insert(
+            1,
+            PathPoint {
+                p: Vec2(200.0, 150.0),
+                in_tan: Vec2(-11.0, -12.0),
+                out_tan: Vec2(13.0, 14.0),
+            },
+        );
+
+        let after = path_without_point(&points, 1).expect("a three-point path can spare one");
+        assert_eq!(
+            after,
+            vec![points[0], points[2]],
+            "the neighbours survive untouched, tangents included"
+        );
+        assert_eq!(
+            path_without_point(&after, 0),
+            None,
+            "two points are the least a path can be"
+        );
+        assert_eq!(
+            path_without_point(&points, 3),
+            None,
+            "and an index past the end removes nothing"
+        );
+    }
+
+    /// The insertion goes where the closing segment is: between the last
+    /// anchor and the first, which is the end of the list.
+    #[test]
+    fn a_press_on_the_closing_segment_inserts_at_the_end() {
+        let points = vec![
+            corner_path_point((0.0, 0.0)),
+            corner_path_point((100.0, 0.0)),
+            corner_path_point((100.0, 100.0)),
+        ];
+        let pointer = (50.0, 50.0);
+
+        assert_eq!(
+            path_with_inserted_point(&points, false, pointer, 4.0),
+            None,
+            "an open path has no segment back to the start"
+        );
+        let inserted = path_with_inserted_point(&points, true, pointer, 4.0)
+            .expect("the closing segment runs under the pointer");
+        assert_eq!(inserted.len(), 4);
+        assert_on_curve(
+            (inserted[3].p.0, inserted[3].p.1),
+            pointer,
+            "the new point closes the path",
+        );
+    }
+
+    /// A press within reach of both a point and the segment through it picks
+    /// the point: removal is what the pointer is over.
+    #[test]
+    fn a_press_picks_the_nearest_point_within_reach() {
+        let points = vec![
+            corner_path_point((0.0, 0.0)),
+            corner_path_point((10.0, 0.0)),
+            corner_path_point((100.0, 0.0)),
+        ];
+        assert_eq!(path_point_at(&points, (6.0, 0.0), 8.0), Some(1));
+        assert_eq!(path_point_at(&points, (4.0, 0.0), 8.0), Some(0));
+        assert_eq!(path_point_at(&points, (50.0, 0.0), 8.0), None);
+    }
+
+    /// `shell_setup` with the layer's network replaced by one
+    /// `shape.custom_path` node holding `points`, selected, under the Pen.
+    fn pen_path_setup(
+        cx: &mut TestAppContext,
+        points: Vec<PathPoint>,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        NetworkPath,
+        NodeId,
+    ) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        let node = custom_path_node(
+            registry()
+                .create_node("shape.custom_path", NodeId::next())
+                .unwrap(),
+            points,
+            false,
+        );
+        let id = node.id;
+        project.update(cx, |project, cx| {
+            let graph = Graph::new().add_node(node).unwrap();
+            let doc =
+                ravel_ui::document::replace_network(project.document(), &network, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.update(|cx| {
+            cx.set_global(tool_state(ravel_ui::ToolKind::Pen));
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::from([id]),
+            });
+        });
+        (window, project, network, id)
+    }
+
+    fn committed_path(
+        project: &Entity<ProjectState>,
+        network: &NetworkPath,
+        node: NodeId,
+        cx: &mut TestAppContext,
+    ) -> Vec<PathPoint> {
+        project.read_with(cx, |project, _| {
+            let graph = ravel_ui::document::resolve_network(project.document(), network)
+                .expect("the network");
+            path_points(graph.node(node).expect("the path node"))
+                .expect("a points parameter")
+                .to_vec()
+        })
+    }
+
+    fn network_node_count(
+        project: &Entity<ProjectState>,
+        network: &NetworkPath,
+        cx: &mut TestAppContext,
+    ) -> usize {
+        project.read_with(cx, |project, _| {
+            ravel_ui::document::resolve_network(project.document(), network)
+                .expect("the network")
+                .nodes()
+                .count()
+        })
+    }
+
+    /// Completion criterion: the Pen inserts a point where it presses on the
+    /// path, and the whole edit is one undo step.
+    #[gpui::test]
+    fn the_pen_inserts_a_point_on_the_segment_in_one_undo_step(cx: &mut TestAppContext) {
+        let original = curved_path();
+        let (window, project, network, node) = pen_path_setup(cx, original.clone());
+        let pointer = cubic_at(&path_segment(&original, 0, 1), 0.5);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, pointer, Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.pen_session.is_none(),
+                    "a press on the path edits it instead of starting a new one"
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let inserted = committed_path(&project, &network, node, cx);
+        assert_eq!(inserted.len(), 3, "the press inserted a point");
+        assert_eq!(
+            network_node_count(&project, &network, cx),
+            1,
+            "and created no second path node"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            original,
+            "one undo takes the whole insertion back"
+        );
+    }
+
+    /// Completion criterion: the Pen removes the point it presses on, and the
+    /// press is still taken when the path cannot spare one — a refusal must
+    /// not fall through to "start a new path here".
+    #[gpui::test]
+    fn the_pen_removes_the_point_it_presses(cx: &mut TestAppContext) {
+        let mut original = curved_path();
+        original.insert(
+            1,
+            PathPoint {
+                p: Vec2(200.0, 150.0),
+                in_tan: Vec2(-11.0, -12.0),
+                out_tan: Vec2(13.0, 14.0),
+            },
+        );
+        let (window, project, network, node) = pen_path_setup(cx, original.clone());
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (200.0, 150.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            vec![original[0], original[2]],
+            "the pressed point is gone and its neighbours are untouched"
+        );
+
+        // The path is down to two points: the next press on one of them is
+        // refused, and swallowed.
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (100.0, 100.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.pen_session.is_none(), "and starts no new path");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx).len(),
+            2,
+            "a two-point path keeps both"
+        );
+        assert_eq!(
+            network_node_count(&project, &network, cx),
+            1,
+            "and the refused press created nothing"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            committed_path(&project, &network, node, cx),
+            original,
+            "one undo takes the whole removal back"
         );
     }
 }

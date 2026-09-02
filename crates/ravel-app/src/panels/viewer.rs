@@ -8986,24 +8986,29 @@ mod tests {
                 })
                 .unwrap();
 
+            // The whole document, not a node count: a click must not touch
+            // *anything*, and counting two things leaves every other field of
+            // the document unwatched.
             project.read_with(cx, |project, _| {
-                let nodes = |doc: &Document| {
-                    ravel_ui::document::resolve_network(doc, &network)
-                        .map(|graph| graph.nodes().count())
-                };
                 assert_eq!(
-                    nodes(project.document()),
-                    nodes(&before),
-                    "{tool:?}: a click created a node"
+                    project.document(),
+                    &before,
+                    "{tool:?}: a click changed the document"
                 );
+            });
+            cx.update(|cx| {
+                let selection = cx
+                    .try_global::<CanvasSelection>()
+                    .cloned()
+                    .unwrap_or_default();
                 assert_eq!(
-                    project
-                        .document()
-                        .get_composition(comp_id)
-                        .unwrap()
-                        .layer_count(),
-                    before.get_composition(comp_id).unwrap().layer_count(),
-                    "{tool:?}: a click created a layer"
+                    selection.path.as_ref(),
+                    Some(&network),
+                    "{tool:?}: a click moved the open network"
+                );
+                assert!(
+                    selection.nodes.is_empty(),
+                    "{tool:?}: a click selected a node that was never created"
                 );
             });
         }
@@ -9027,10 +9032,7 @@ mod tests {
                     ..ToolState::default()
                 });
             });
-            let before = project.read_with(cx, |project, _| {
-                ravel_ui::document::resolve_network(project.document(), &network)
-                    .map(|graph| graph.nodes().count())
-            });
+            let before = project.read_with(cx, |project, _| project.document().clone());
 
             window
                 .update(cx, |panel, _window, cx| {
@@ -9063,19 +9065,90 @@ mod tests {
 
             project.read_with(cx, |project, _| {
                 assert_eq!(
-                    ravel_ui::document::resolve_network(project.document(), &network)
-                        .map(|graph| graph.nodes().count()),
-                    before,
-                    "{tool:?}: a zero-radius release left a node behind"
+                    project.document(),
+                    &before,
+                    "{tool:?}: a zero-radius release left something behind"
                 );
+            });
+        }
+    }
+
+    /// The real gesture is one undo step: press, drag, release, and a single
+    /// undo puts the document back exactly as it was.
+    ///
+    /// Through `left_mouse_down` / `left_dragged` / `shape_ended` — the entry
+    /// points the pointer listeners call — and against a whole-document
+    /// snapshot. The `DocumentStore` test beside `create_layer_with_drawn_shape`
+    /// pins the same property on the creation helper, which is not the same
+    /// claim: the gesture applies intermediate documents on every move, and
+    /// only this path can show that none of them became history.
+    #[gpui::test]
+    fn a_radial_gesture_is_one_undo_step(cx: &mut TestAppContext) {
+        for tool in [ravel_ui::ToolKind::Polygon, ravel_ui::ToolKind::Star] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::new(),
+                });
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..ToolState::default()
+                });
+            });
+            let before = project.read_with(cx, |project, _| project.document().clone());
+
+            let node = window
+                .update(cx, |panel, _window, cx| {
+                    panel.left_mouse_down(&press_at(panel, (655.0, 500.0)), cx);
+                    // Several moves: each one applies a document of its own, so
+                    // a commit hiding in the live-preview path would show up as
+                    // extra history below.
+                    for to in [(700.0, 560.0), (850.0, 750.0), (955.0, 900.0)] {
+                        panel.left_dragged(
+                            &MouseMoveEvent {
+                                position: window_point(panel, to),
+                                pressed_button: Some(MouseButton::Left),
+                                modifiers: Modifiers::default(),
+                            },
+                            cx,
+                        );
+                    }
+                    let node = panel
+                        .shape_drag
+                        .as_ref()
+                        .and_then(|drag| drag.created.as_ref())
+                        .expect("the drag created a shape")
+                        .node;
+                    panel.shape_ended(cx);
+                    node
+                })
+                .unwrap();
+
+            // The gesture really did commit something …
+            project.read_with(cx, |project, _| {
+                assert_ne!(project.document(), &before, "{tool:?}: nothing was created");
+                assert!(
+                    ravel_ui::document::resolve_network(project.document(), &network)
+                        .is_some_and(|graph| graph.node(node).is_some()),
+                    "{tool:?}: the drawn node is not in the committed document"
+                );
+            });
+
+            // … and *one* undo takes all of it away. Landing exactly on the
+            // pre-gesture document is what rules out an extra step: had any
+            // mid-drag document been committed, one undo would stop there
+            // instead. (The fixture's own layer commit is the step below this
+            // one, so "no undo remains" is not the assertion to make here.)
+            project.update(cx, |project, cx| {
+                assert!(project.undo(cx), "{tool:?}: the gesture left no undo step");
+            });
+            project.read_with(cx, |project, _| {
                 assert_eq!(
-                    project
-                        .document()
-                        .get_composition(comp_id)
-                        .unwrap()
-                        .layer_count(),
-                    1,
-                    "{tool:?}: a zero-radius release left a layer behind"
+                    project.document(),
+                    &before,
+                    "{tool:?}: one undo did not restore the pre-gesture document"
                 );
             });
         }

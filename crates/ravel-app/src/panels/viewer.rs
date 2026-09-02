@@ -46,8 +46,9 @@ use viewport::ViewerViewport;
 
 use super::param_edit::edited_vector_param;
 use overlay::{
-    ActiveDrag, DragModifiers, EvalResults, LabelPlacement, OverlayColors, OverlayContext,
-    OverlayEdit, OverlayHandle, OverlayPainter, OverlayRegistry, ShellHandle,
+    ActiveDrag, BoxSelect, BoxSelectScope, DragModifiers, EvalResults, LabelPlacement,
+    OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter, OverlayRegistry,
+    ShellHandle,
 };
 use snap::{SnapGuides, SnapLines};
 
@@ -105,6 +106,70 @@ impl ZoomDrag {
                 height,
             },
         )
+    }
+}
+
+/// What a box-selection drag picks from, and what was already selected when it
+/// started.
+///
+/// The two halves travel together because they have to match: a Shift drag
+/// publishes the union of the sweep and the selection as it stood at the press,
+/// and a union across selection models is not a thing. Capturing the start is
+/// the whole point — `LOW-APP-03` is the Node Editor publishing the box's
+/// contents alone and dropping what Shift promised to keep.
+#[derive(Clone)]
+enum BoxSelectTarget {
+    Nodes {
+        network: NetworkPath,
+        initial: HashSet<NodeId>,
+    },
+    Layers {
+        comp: CompId,
+        initial: Vec<LayerId>,
+    },
+}
+
+impl BoxSelectTarget {
+    fn scope(&self) -> BoxSelectScope {
+        match self {
+            Self::Nodes { network, .. } => BoxSelectScope::Nodes(network.clone()),
+            Self::Layers { comp, .. } => BoxSelectScope::Layers(*comp),
+        }
+    }
+
+    /// The composition the candidates live in. A drag cannot outlive it being
+    /// the one on screen.
+    fn comp(&self) -> CompId {
+        match self {
+            Self::Nodes { network, .. } => network.comp,
+            Self::Layers { comp, .. } => *comp,
+        }
+    }
+}
+
+/// A Select-tool press on empty space, sweeping a rectangle.
+///
+/// Nothing is decided until the release: the contents are recomputed there,
+/// from the evaluation results as they stand at that moment, because the
+/// candidate bboxes the drag asked for arrive asynchronously and the first
+/// frames of the gesture can legitimately see none of them.
+#[derive(Clone)]
+struct BoxSelectGesture {
+    /// Composition-space press point.
+    start: (f32, f32),
+    current: (f32, f32),
+    /// Shift was held on the press, so the sweep adds to `target`'s capture.
+    shift: bool,
+    target: BoxSelectTarget,
+}
+
+impl BoxSelectGesture {
+    /// The gesture as the overlays see it.
+    fn live(&self) -> BoxSelect {
+        BoxSelect {
+            scope: self.target.scope(),
+            rect: Some(box_rect(self.start, self.current)),
+        }
     }
 }
 
@@ -463,6 +528,11 @@ pub struct ViewerPanel {
     pan_drag: Option<PanDrag>,
     zoom_drag: Option<ZoomDrag>,
     move_drag: Option<MoveDrag>,
+    box_select: Option<BoxSelectGesture>,
+    /// This panel's identity, for the one piece of shared state a gesture of
+    /// its own writes: the box-selection scope
+    /// ([`Self::withdraw_box_select_candidates`]).
+    instance: ravel_ui::layout::PanelInstanceId,
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
     handle_drag: Option<OverlayHandleDrag>,
@@ -581,6 +651,16 @@ impl ViewerPanel {
             {
                 this.finalize_pen_session(false, cx);
             }
+            // The box selection follows the same rule: a deliberate switch away
+            // from Select ends the sweep — leaving it live would keep declaring
+            // candidate evaluation for a gesture no tool can finish — while the
+            // `h` hold is transient navigation that gives the tool back.
+            if this.box_select.is_some()
+                && state.active != ravel_ui::ToolKind::Select
+                && !state.hand_hold
+            {
+                this.cancel_box_select(cx);
+            }
             this.pointer_hint = tool_pointer_hint(state.active);
             cx.notify();
         });
@@ -663,6 +743,24 @@ impl ViewerPanel {
             }) {
                 this.cancel_handle_drag(cx);
             }
+            // A composition switch resets the layer selection
+            // (`set_active_composition`), so this observer is where a Viewer
+            // hears about it. A sweep whose candidates belong to a composition
+            // that is no longer on screen has to end: the release already
+            // refuses to publish into it, but the declaration would keep
+            // evaluating a network nobody is looking at.
+            //
+            // The node scope needs nothing further. A layer deleted under a
+            // live sweep leaves its network unresolvable, and the release then
+            // finds no bboxes and publishes the empty selection a click on
+            // nothing publishes — the same outcome, by the same rule.
+            if this
+                .box_select
+                .as_ref()
+                .is_some_and(|drag| Some(drag.target.comp()) != this.active_comp(cx))
+            {
+                this.cancel_box_select(cx);
+            }
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -715,6 +813,12 @@ impl ViewerPanel {
                 cx.drop_image(old, None);
             }
             this.gpu_frame.take();
+            // A panel dropped mid-drag would otherwise leave the candidate
+            // scope standing, and every later request would keep evaluating
+            // geometry for a gesture nobody is making.
+            if this.box_select.take().is_some() {
+                this.withdraw_box_select_candidates(cx);
+            }
         })
         .detach();
 
@@ -732,6 +836,8 @@ impl ViewerPanel {
             pan_drag: None,
             zoom_drag: None,
             move_drag: None,
+            box_select: None,
+            instance,
             shape_drag: None,
             pen_session: None,
             handle_drag: None,
@@ -903,6 +1009,8 @@ impl ViewerPanel {
             self.pen_dragged(event.position, cx);
         } else if self.shape_drag.is_some() {
             self.shape_dragged(event, cx);
+        } else if self.box_select.is_some() {
+            self.box_select_dragged(event.position, cx);
         } else {
             self.move_dragged(event.position, drag_modifiers(&event.modifiers), cx);
         }
@@ -1011,12 +1119,20 @@ impl ViewerPanel {
         // pick inside one — the gesture moves the selected layers instead.
         if super::layer_selection(cx).layers().len() >= 2 {
             self.layer_move_mouse_down(pointer, cx);
+            // The press landed outside every selected layer, so there is
+            // nothing to move: the drag sweeps a rectangle over the
+            // composition's layers instead.
+            if self.move_drag.is_none() {
+                self.begin_layer_box_select(pointer, event.modifiers.shift, cx);
+            }
             return;
         }
         let Some(selection) = cx.try_global::<CanvasSelection>().cloned() else {
             return;
         };
         let Some(network) = selection.path.clone() else {
+            // No network is open, so the layers are what a rectangle picks.
+            self.begin_layer_box_select(pointer, event.modifiers.shift, cx);
             return;
         };
         let Some(position) = cx.try_global::<super::PlaybackPosition>().copied() else {
@@ -1050,7 +1166,23 @@ impl ViewerPanel {
         // temporarily published a different target.
         Self::publish_selection(network.clone(), nodes.clone(), cx);
 
-        if event.modifiers.shift || hit.is_none() || !shell.is_identity() {
+        if hit.is_none() {
+            // Empty space inside the open network: sweep a rectangle over its
+            // nodes. `selection.nodes` is the set as it stood *before* the
+            // publish above, which is what a Shift sweep has to keep — the
+            // click it published for a press on nothing is an empty selection.
+            self.begin_box_select(
+                pointer,
+                BoxSelectTarget::Nodes {
+                    network,
+                    initial: selection.nodes.clone(),
+                },
+                event.modifiers.shift,
+                cx,
+            );
+            return;
+        }
+        if event.modifiers.shift || !shell.is_identity() {
             return;
         }
         let Some(graph) = ravel_ui::document::resolve_network(&document, &network) else {
@@ -1313,6 +1445,176 @@ impl ViewerPanel {
             });
         }
         cx.notify();
+    }
+
+    /// Start a layer-scope box selection: no network is open (or none can be
+    /// picked inside), so the composition's layers are the candidates.
+    fn begin_layer_box_select(&mut self, pointer: (f32, f32), shift: bool, cx: &mut Context<Self>) {
+        let Some(comp) = self.active_comp(cx) else {
+            return;
+        };
+        let selection = super::layer_selection(cx);
+        // A selection stamped with another composition cannot be added to.
+        let initial = if selection.comp() == Some(comp) {
+            selection.layers().to_vec()
+        } else {
+            Vec::new()
+        };
+        // The press is a click on empty space, and a click on empty space
+        // deselects — what `selection_after_click` does for the node scope,
+        // done here for the layer scope so a zero-distance drag means the same
+        // thing in both. The capture above is deliberately *before* this: a
+        // Shift sweep publishes the union with what was selected when the press
+        // landed, which is the `LOW-APP-03` trap.
+        //
+        // `set_layer_selection` drops a Properties target left pointing at the
+        // cleared layers, so nothing else has to be published here.
+        if !selection.is_empty() {
+            super::set_layer_selection(Vec::new(), cx);
+        }
+        self.begin_box_select(
+            pointer,
+            BoxSelectTarget::Layers { comp, initial },
+            shift,
+            cx,
+        );
+    }
+
+    /// Record the press and ask for the candidate bboxes.
+    ///
+    /// This gesture posts its own request here and **never again**: the
+    /// candidate set is fixed for the whole drag, so
+    /// [`OverlayRegistry::eval_targets`] keeps returning the same list and a
+    /// request per pointer move would buy nothing but work. That is the
+    /// promise — not that the press enqueues exactly one request in total,
+    /// which the paragraph below qualifies. The
+    /// hint is `None` because the document did not change: every value the
+    /// composition already evaluated stays cached and the candidates are the
+    /// only work this adds.
+    ///
+    /// The press also publishes a selection, whose observer posts a request of
+    /// its own — but **only when the selection actually changed**
+    /// ([`Self::request_overlay_eval`] returns early otherwise), and a press on
+    /// empty space with nothing selected changes nothing. That is the box
+    /// selection's main case, so this request cannot be left to the observer.
+    /// When both do fire, the second is free: the worker is latest-wins, so two
+    /// requests carrying the same hint coalesce into one evaluation.
+    fn begin_box_select(
+        &mut self,
+        pointer: (f32, f32),
+        target: BoxSelectTarget,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // This panel becomes the owner, taking the declaration over from
+        // another instance if one is still holding it: the pointer is one, so a
+        // drag standing elsewhere has lost its release and is stale. Refusing
+        // to start would strand this Viewer until the stale one is nudged;
+        // taking over is self-healing — the stale gesture is dropped by its own
+        // panel on its next idle pointer move, and the owner check below stops
+        // it withdrawing what this drag declared.
+        cx.set_global(overlay::BoxSelectDrag(Some(overlay::LiveBoxSelect {
+            panel: self.instance,
+            scope: target.scope(),
+        })));
+        self.box_select = Some(BoxSelectGesture {
+            start: pointer,
+            current: pointer,
+            shift,
+            target,
+        });
+        if let Some(project) = self.project(cx) {
+            project.update(cx, |project, cx| {
+                project.request_viewer_eval(InvalidationHint::None, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Size the marquee. Nothing is selected yet: the release decides.
+    fn box_select_dragged(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(pointer) = self.comp_position(position) else {
+            return;
+        };
+        let Some(drag) = self.box_select.as_mut() else {
+            return;
+        };
+        drag.current = pointer;
+        cx.notify();
+    }
+
+    /// The release publishes what the rectangle caught.
+    ///
+    /// Recomputed here rather than accumulated during the drag: the candidate
+    /// bboxes arrive asynchronously, so the frames the moves saw may have had
+    /// fewer of them than this frame does.
+    fn box_select_ended(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.box_select.take() else {
+            return;
+        };
+        self.withdraw_box_select_candidates(cx);
+        cx.notify();
+        let Some(pointer) = self.comp_position(position) else {
+            return;
+        };
+        // A press that never travelled is a click, and the press already
+        // published what a click means. Publishing a union here would put the
+        // selection the click cleared straight back.
+        if pointer == drag.start {
+            return;
+        }
+        let rect = box_rect(drag.start, pointer);
+        let ctx = self.overlay_context(cx);
+        match &drag.target {
+            BoxSelectTarget::Nodes { network, initial } => {
+                let inside = nodes_in_box(&ctx, network, rect);
+                Self::publish_selection(
+                    network.clone(),
+                    nodes_after_box(initial, inside, drag.shift),
+                    cx,
+                );
+            }
+            BoxSelectTarget::Layers { comp, initial } => {
+                // `set_layer_selection` stamps the *active* composition, so a
+                // switch mid-drag would file these ids under a composition
+                // they do not belong to.
+                if self.active_comp(cx) != Some(*comp) {
+                    return;
+                }
+                let inside = layers_in_box(&ctx, *comp, rect);
+                super::set_layer_selection(layers_after_box(initial, &inside, drag.shift), cx);
+                super::publish_layer_properties_target(cx);
+            }
+        }
+    }
+
+    /// Drop the gesture without publishing anything (Escape, a deliberate tool
+    /// switch, a composition switch, or the pointer turning up under another
+    /// button).
+    fn cancel_box_select(&mut self, cx: &mut Context<Self>) {
+        if self.box_select.take().is_some() {
+            self.withdraw_box_select_candidates(cx);
+            cx.notify();
+        }
+    }
+
+    /// Stop declaring this panel's box-select candidates — **only if this panel
+    /// still owns the declaration**.
+    ///
+    /// Several Viewers may be open (REQ-UI-005) and they share one Global, so an
+    /// unconditional clear would let one instance ending its gesture stop the
+    /// evaluation another instance's live drag is waiting for. That happens for
+    /// real: a release this window never received leaves a gesture standing
+    /// here while the next press starts one, and takes the ownership, in
+    /// another Viewer.
+    fn withdraw_box_select_candidates(&self, cx: &mut App) {
+        let owned = cx
+            .try_global::<overlay::BoxSelectDrag>()
+            .and_then(|drag| drag.0.as_ref())
+            .is_some_and(|live| live.panel == self.instance);
+        if owned {
+            cx.set_global(overlay::BoxSelectDrag(None));
+        }
     }
 
     /// Restore a selection captured before a cancelled shape creation,
@@ -1746,6 +2048,10 @@ impl ViewerPanel {
             } else {
                 SnapGuides::default()
             },
+            // From the panel's own gesture, not from the Global that carries
+            // the scope to the request path: with two Viewer instances open,
+            // the marquee belongs to the one the pointer is in.
+            box_select: self.box_select.as_ref().map(BoxSelectGesture::live),
             active_drag: self.handle_drag.as_ref().map(|drag| ActiveDrag {
                 handle: drag.handle.id,
                 press_document: drag.original_document.clone(),
@@ -3648,6 +3954,7 @@ impl Render for ViewerPanel {
                     this.pan_ended(cx);
                     this.zoom_ended(cx);
                     this.move_ended(cx);
+                    this.box_select_ended(event.position, cx);
                     this.shape_ended(cx);
                     this.pen_point_ended(cx);
                     this.handle_drag_ended(cx);
@@ -3662,6 +3969,7 @@ impl Render for ViewerPanel {
                 match event.pressed_button {
                     Some(MouseButton::Middle) => {
                         this.cancel_move(cx);
+                        this.cancel_box_select(cx);
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
                         this.cancel_guide_drag(cx);
@@ -3683,6 +3991,7 @@ impl Render for ViewerPanel {
                         }
                         this.pen_point_ended(cx);
                         this.cancel_move(cx);
+                        this.cancel_box_select(cx);
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
                         this.cancel_guide_drag(cx);
@@ -3746,6 +4055,9 @@ impl Render for ViewerPanel {
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.guide_drag.is_some() {
                     this.cancel_guide_drag(cx);
+                    cx.stop_propagation();
+                } else if event.keystroke.key.as_str() == "escape" && this.box_select.is_some() {
+                    this.cancel_box_select(cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key.as_str() == "escape" && this.zoom_drag.is_some() {
                     this.zoom_drag = None;
@@ -3921,6 +4233,112 @@ fn rect_contains(rect: &CompRect, point: (f32, f32)) -> bool {
         && point.0 <= rect.x + rect.w
         && point.1 >= rect.y
         && point.1 <= rect.y + rect.h
+}
+
+/// The rectangle a drag between two composition points swept, normalized so
+/// the extents are never negative — which is what makes a sweep to the left or
+/// upwards the same rectangle as one to the right or downwards.
+fn box_rect(start: (f32, f32), current: (f32, f32)) -> CompRect {
+    CompRect {
+        x: start.0.min(current.0),
+        y: start.1.min(current.1),
+        w: (current.0 - start.0).abs(),
+        h: (current.1 - start.1).abs(),
+    }
+}
+
+/// Whether two closed composition rectangles meet.
+///
+/// **Intersection, not containment**: a box selection catches what it touches,
+/// which is what makes a shape larger than the swept rectangle selectable at
+/// all. Closed on the boundary, the rule [`rect_contains`] already follows, so
+/// a rectangle whose edge lands exactly on a bbox's edge catches it — and a
+/// zero-extent bbox (a single placed point) is catchable, which a strict
+/// comparison would make impossible.
+///
+/// **Both rectangles are assumed normalized** (`w`, `h` >= 0), which is what
+/// every caller has: the swept rectangle comes from [`box_rect`], and a bbox
+/// comes from `geometry_bounds` / [`transform_rect`], both of which build their
+/// extents from a min/max pass. Normalizing here would write the opposite
+/// premise into the code — that a rectangle with negative extents can arrive —
+/// and no such rectangle exists.
+fn rects_overlap(a: &CompRect, b: &CompRect) -> bool {
+    a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
+}
+
+/// Every node of `network` whose evaluated bbox meets `rect`.
+///
+/// The same bounds the outline is drawn from and the click test picks by
+/// ([`node_comp_rect`]), so a sweep catches what the user can see. A node
+/// whose result has not arrived has no bbox and is not caught — the mechanism's
+/// "no result, no guessing" rule, which is why the release recomputes.
+fn nodes_in_box(ctx: &OverlayContext, network: &NetworkPath, rect: CompRect) -> HashSet<NodeId> {
+    let Some(document) = ctx.document.as_ref() else {
+        return HashSet::new();
+    };
+    let Some(graph) = ravel_ui::document::resolve_network(document, network) else {
+        return HashSet::new();
+    };
+    graph
+        .nodes()
+        .filter(|node| {
+            node_comp_rect(ctx, network, node.id).is_some_and(|bbox| rects_overlap(&bbox, &rect))
+        })
+        .map(|node| node.id)
+        .collect()
+}
+
+/// Every layer of `comp` whose evaluated bbox meets `rect`, in layer order.
+fn layers_in_box(ctx: &OverlayContext, comp: CompId, rect: CompRect) -> Vec<LayerId> {
+    let Some(document) = ctx.document.as_ref() else {
+        return Vec::new();
+    };
+    let Some(composition) = document.get_composition(comp) else {
+        return Vec::new();
+    };
+    composition
+        .layers
+        .iter()
+        .filter(|layer| {
+            layer_comp_rect(ctx, document, comp, layer.id)
+                .is_some_and(|bbox| rects_overlap(&bbox, &rect))
+        })
+        .map(|layer| layer.id)
+        .collect()
+}
+
+/// The node selection a released box publishes: the sweep, or its union with
+/// the press-time selection when Shift started the drag.
+///
+/// The union is the whole point of the Shift form. The Node Editor requires
+/// Shift to start its band and then publishes the band's contents alone
+/// (`LOW-APP-03`), which silently drops everything the user had selected; this
+/// is the same feature without that.
+fn nodes_after_box(
+    initial: &HashSet<NodeId>,
+    inside: HashSet<NodeId>,
+    shift: bool,
+) -> HashSet<NodeId> {
+    if shift {
+        initial.union(&inside).copied().collect()
+    } else {
+        inside
+    }
+}
+
+/// [`nodes_after_box`] for layers, which keep click order: the press-time
+/// selection first, then whatever the sweep added.
+fn layers_after_box(initial: &[LayerId], inside: &[LayerId], shift: bool) -> Vec<LayerId> {
+    if !shift {
+        return inside.to_vec();
+    }
+    let mut layers = initial.to_vec();
+    for id in inside {
+        if !layers.contains(id) {
+            layers.push(*id);
+        }
+    }
+    layers
 }
 
 fn selected_body_pointer_hint(
@@ -8860,5 +9278,699 @@ mod tests {
                 height: 30.0,
             })
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Box selection (`TOOLX-2`)
+    // -----------------------------------------------------------------------
+
+    /// Completion criterion: the rectangle picks by **intersection**, and the
+    /// boundary is closed — rectangles that merely touch count as meeting.
+    #[test]
+    fn a_box_catches_what_it_touches_boundary_included() {
+        let bbox = CompRect {
+            x: 50.0,
+            y: 50.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let sweep = |x: f32, y: f32, w: f32, h: f32| rects_overlap(&bbox, &CompRect { x, y, w, h });
+
+        // Crossing, and fully inside — neither is containment of the bbox.
+        assert!(sweep(100.0, 100.0, 200.0, 200.0));
+        assert!(sweep(60.0, 60.0, 10.0, 10.0));
+        // Larger than the bbox on every side.
+        assert!(sweep(0.0, 0.0, 300.0, 300.0));
+        // Edge-to-edge on each side: touching is meeting.
+        assert!(sweep(0.0, 50.0, 50.0, 10.0), "left edge touches");
+        assert!(sweep(150.0, 50.0, 50.0, 10.0), "right edge touches");
+        assert!(sweep(50.0, 0.0, 10.0, 50.0), "top edge touches");
+        assert!(sweep(50.0, 150.0, 10.0, 50.0), "bottom edge touches");
+        // Corner-to-corner, the tightest touch there is.
+        assert!(sweep(0.0, 0.0, 50.0, 50.0), "corners touch");
+        // One unit past each edge: no longer meeting.
+        assert!(!sweep(-50.0, 50.0, 99.0, 10.0));
+        assert!(!sweep(151.0, 50.0, 50.0, 10.0));
+        assert!(!sweep(50.0, -50.0, 10.0, 99.0));
+        assert!(!sweep(50.0, 151.0, 10.0, 50.0));
+        // A zero-extent sweep is still a rectangle, and a zero-extent bbox
+        // (one placed point) is still catchable.
+        assert!(sweep(100.0, 100.0, 0.0, 0.0));
+        assert!(rects_overlap(
+            &CompRect {
+                x: 60.0,
+                y: 60.0,
+                w: 0.0,
+                h: 0.0
+            },
+            &bbox
+        ));
+    }
+
+    /// A swept rectangle is the same rectangle whichever way it was swept.
+    #[test]
+    fn a_box_is_normalized_in_both_directions() {
+        let forward = box_rect((10.0, 20.0), (40.0, 60.0));
+        let backward = box_rect((40.0, 60.0), (10.0, 20.0));
+        assert_eq!(forward, backward);
+        assert_eq!(
+            (forward.x, forward.y, forward.w, forward.h),
+            (10.0, 20.0, 30.0, 40.0)
+        );
+    }
+
+    /// Completion criterion (`LOW-APP-03`): Shift keeps the selection the drag
+    /// started from and adds the sweep to it. Without Shift the sweep replaces.
+    #[test]
+    fn a_shift_box_publishes_the_union_and_a_plain_box_replaces() {
+        let (first, second, third) = (NodeId::next(), NodeId::next(), NodeId::next());
+        let initial = HashSet::from([first, second]);
+
+        assert_eq!(
+            nodes_after_box(&initial, HashSet::from([third]), true),
+            HashSet::from([first, second, third]),
+            "Shift adds the sweep to the press-time selection"
+        );
+        assert_eq!(
+            nodes_after_box(&initial, HashSet::new(), true),
+            initial,
+            "a Shift sweep that caught nothing keeps everything"
+        );
+        assert_eq!(
+            nodes_after_box(&initial, HashSet::from([third]), false),
+            HashSet::from([third]),
+            "without Shift the sweep is the whole selection"
+        );
+        assert!(nodes_after_box(&initial, HashSet::new(), false).is_empty());
+
+        let layers = vec![LayerId::next(), LayerId::next()];
+        let swept = vec![layers[1], LayerId::next()];
+        assert_eq!(
+            layers_after_box(&layers, &swept, true),
+            vec![layers[0], layers[1], swept[1]],
+            "Shift keeps click order and adds each layer once"
+        );
+        assert_eq!(layers_after_box(&layers, &swept, false), swept);
+        assert_eq!(layers_after_box(&layers, &[], true), layers);
+        assert!(layers_after_box(&layers, &[], false).is_empty());
+    }
+
+    /// Completion criterion: the candidate bboxes are declared **only while
+    /// the drag is live**. Nothing is selected in this context, so no other
+    /// overlay asks for anything — which is exactly the state a box drag has
+    /// to work from, and why declaring them permanently would evaluate every
+    /// network of the composition on every frame.
+    #[test]
+    fn candidate_targets_are_declared_only_while_the_box_drag_lives() {
+        let node = square_node((50.0, 50.0), 40.0);
+        let (mut ctx, network) = geometry_context(Graph::new().add_node(node).unwrap(), &[]);
+        let registry = OverlayRegistry::builtin();
+        assert!(
+            registry.eval_targets(&ctx).is_empty(),
+            "with nothing selected and no drag, nobody asks for geometry"
+        );
+
+        let sweep = Some(CompRect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        });
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Nodes(network.clone()),
+            rect: sweep,
+        });
+        assert_eq!(
+            registry.eval_targets(&ctx),
+            geometry::geometry_targets(ctx.document.as_ref().unwrap(), &network),
+            "the open network's geometry nodes are the candidates"
+        );
+
+        // No network open: every layer of the composition is a candidate.
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Layers(network.comp),
+            rect: sweep,
+        });
+        assert_eq!(
+            registry.eval_targets(&ctx),
+            geometry::geometry_targets(ctx.document.as_ref().unwrap(), &network),
+            "the fixture's one layer is the whole candidate set"
+        );
+
+        ctx.box_select = None;
+        assert!(
+            registry.eval_targets(&ctx).is_empty(),
+            "the release stops the declaration"
+        );
+    }
+
+    /// Completion criterion: the marquee is drawn through the overlay
+    /// mechanism, so it is registered in the builtin registry and paints as
+    /// composition-space primitives.
+    #[test]
+    fn the_marquee_is_painted_by_the_registered_overlay() {
+        let node = square_node((50.0, 50.0), 40.0);
+        let (mut ctx, network) = geometry_context(Graph::new().add_node(node).unwrap(), &[]);
+        let rect = CompRect {
+            x: 100.0,
+            y: 200.0,
+            w: 300.0,
+            h: 400.0,
+        };
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Nodes(network),
+            rect: Some(rect),
+        });
+
+        let frame = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1920.0), px(1080.0)),
+        };
+        let mut painter = OverlayPainter::new(frame, (1920, 1080));
+        OverlayRegistry::builtin().paint(&ctx, &mut painter);
+        let outline: Vec<_> = painter
+            .finish()
+            .into_iter()
+            .filter_map(|primitive| match primitive {
+                overlay::OverlayPrimitive::Quad { bounds, .. } => Some(bounds),
+                overlay::OverlayPrimitive::Stroke { .. } => None,
+            })
+            .collect();
+        assert_eq!(outline.len(), 4, "a 1px outline is four quads: {outline:?}");
+        assert!(
+            outline
+                .iter()
+                .any(|bounds| bounds.origin == point(px(rect.x), px(rect.y))
+                    && bounds.size.width == px(rect.w)),
+            "the top edge spans the swept rectangle: {outline:?}"
+        );
+    }
+
+    /// A press at a composition point, with modifiers.
+    fn press_comp(panel: &ViewerPanel, comp: (f32, f32), modifiers: Modifiers) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: window_point(panel, comp),
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// A left-button move to a composition point.
+    fn move_comp(panel: &ViewerPanel, comp: (f32, f32)) -> MouseMoveEvent {
+        MouseMoveEvent {
+            position: window_point(panel, comp),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn selected_nodes(cx: &mut TestAppContext) -> HashSet<NodeId> {
+        cx.update(|cx| {
+            cx.try_global::<CanvasSelection>()
+                .cloned()
+                .unwrap_or_default()
+                .nodes
+        })
+    }
+
+    /// With a network open, a drag from empty space sweeps its **nodes**: the
+    /// press declares the candidates, the release publishes what the rectangle
+    /// caught.
+    ///
+    /// The fixture's one node is a 40x20 rect at (100, 200), so its bbox is
+    /// (80, 190)-(120, 210).
+    #[gpui::test]
+    fn a_box_over_an_open_network_selects_the_nodes_it_caught(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::new(),
+            })
+        });
+        let node = project.read_with(cx, |project, _| {
+            project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .network
+                .nodes()
+                .next()
+                .unwrap()
+                .id
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.box_select.is_some(),
+                    "a press on empty space starts a sweep"
+                );
+                assert!(panel.move_drag.is_none(), "nothing was under the pointer");
+                assert!(
+                    !OverlayRegistry::builtin()
+                        .eval_targets(&panel.overlay_context(cx))
+                        .is_empty(),
+                    "the live drag declares the candidate bboxes"
+                );
+                assert!(
+                    overlay::box_select_candidates(cx).is_some(),
+                    "and the request path can see the scope"
+                );
+            })
+            .unwrap();
+        // The press posted a request, and with no worker that clears the
+        // snapshot: republish what an evaluation would have delivered.
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.left_dragged(&move_comp(panel, (60.0, 180.0)), cx);
+                panel.box_select_ended(window_point(panel, (60.0, 180.0)), cx);
+                assert!(panel.box_select.is_none(), "the release ends the gesture");
+                assert!(
+                    panel.overlay_context(cx).box_select.is_none(),
+                    "the marquee stops being drawn"
+                );
+                assert!(
+                    overlay::box_select_candidates(cx).is_none(),
+                    "and the candidates stop being declared"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            selected_nodes(cx),
+            HashSet::from([node]),
+            "the swept node is selected"
+        );
+    }
+
+    /// A sweep that catches nothing selects nothing — and a Shift sweep that
+    /// catches nothing keeps what was selected when it started
+    /// (`LOW-APP-03`), even though the press itself published the deselection
+    /// a click on empty space means.
+    #[gpui::test]
+    fn a_shift_box_keeps_the_selection_the_press_cleared(cx: &mut TestAppContext) {
+        for (modifiers, expect_kept) in [(Modifiers::default(), false), (shift(), true)] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            let node = project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer)
+                    .unwrap()
+                    .network
+                    .nodes()
+                    .next()
+                    .unwrap()
+                    .id
+            });
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::from([node]),
+                })
+            });
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, (400.0, 400.0), modifiers);
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.box_select.is_some());
+                })
+                .unwrap();
+            assert!(
+                selected_nodes(cx).is_empty(),
+                "the press published the click's deselection"
+            );
+            publish_geometry_results(&project, cx);
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    // Nowhere near the fixture's (80, 190)-(120, 210) bbox.
+                    panel.left_dragged(&move_comp(panel, (600.0, 600.0)), cx);
+                    panel.box_select_ended(window_point(panel, (600.0, 600.0)), cx);
+                })
+                .unwrap();
+
+            let expected = if expect_kept {
+                HashSet::from([node])
+            } else {
+                HashSet::new()
+            };
+            assert_eq!(selected_nodes(cx), expected, "shift = {}", modifiers.shift);
+        }
+    }
+
+    /// Completion criterion: a press that never travelled is a click, and the
+    /// click's deselection stands. Publishing the union on a zero-distance
+    /// Shift press would put the cleared selection straight back.
+    #[gpui::test]
+    fn a_zero_distance_box_leaves_the_click_deselection_alone(cx: &mut TestAppContext) {
+        for modifiers in [Modifiers::default(), shift()] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let node = project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer)
+                    .unwrap()
+                    .network
+                    .nodes()
+                    .next()
+                    .unwrap()
+                    .id
+            });
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(NetworkPath::layer(comp_id, layer)),
+                    nodes: HashSet::from([node]),
+                })
+            });
+            publish_geometry_results(&project, cx);
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, (400.0, 400.0), modifiers);
+                    panel.left_mouse_down(&press, cx);
+                    panel.box_select_ended(window_point(panel, (400.0, 400.0)), cx);
+                    assert!(panel.box_select.is_none());
+                })
+                .unwrap();
+            assert!(
+                selected_nodes(cx).is_empty(),
+                "a click deselects, whatever Shift a drag would have meant (shift = {})",
+                modifiers.shift
+            );
+        }
+    }
+
+    /// A press *on* a shape keeps the existing move gesture: the rectangle is
+    /// what empty space means, not what the Select tool always means.
+    #[gpui::test]
+    fn a_press_on_a_shape_moves_it_instead_of_sweeping(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        cx.update(|cx| {
+            // The shell manipulator's move grip sits on the bbox centre, and it
+            // answers the press before any tool does. This test is about the
+            // node gesture, so the layer selection that summons the manipulator
+            // is cleared and the network stays open.
+            crate::panels::clear_layer_selection(cx);
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+        // Both selection writes above posted a request, and with no worker that
+        // clears the snapshot the click test reads its bboxes from.
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The centre of the fixture's rect node.
+                let press = press_comp(panel, (100.0, 200.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.move_drag.is_some(),
+                    "a press on the shape starts the move gesture"
+                );
+                assert!(panel.box_select.is_none(), "and never a box selection");
+            })
+            .unwrap();
+    }
+
+    /// With no network open the sweep picks **layers**, and Shift adds them to
+    /// the selection the press started from.
+    ///
+    /// `multi_layer_setup`'s two layers hold one 100x100 rect each, centred at
+    /// (0, 0) and (100, 0): bboxes (-50, -50)-(50, 50) and (50, -50)-(150, 50).
+    /// The sweep below starts past the first one's right edge, so it catches
+    /// the second layer only.
+    #[gpui::test]
+    fn a_box_with_no_network_open_selects_layers(cx: &mut TestAppContext) {
+        for (modifiers, expected) in [(Modifiers::default(), 1), (shift(), 2)] {
+            let (window, project, _comp_id, layers) = multi_layer_setup(cx);
+            cx.update(|cx| {
+                crate::panels::set_layer_selection(vec![layers[0]], cx);
+                cx.set_global(CanvasSelection::default());
+            });
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, (60.0, -40.0), modifiers);
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.box_select.is_some(), "no network is open");
+                })
+                .unwrap();
+            publish_geometry_results(&project, cx);
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.left_dragged(&move_comp(panel, (140.0, 40.0)), cx);
+                    panel.box_select_ended(window_point(panel, (140.0, 40.0)), cx);
+                })
+                .unwrap();
+
+            let selected = cx.update(|cx| crate::panels::layer_selection(cx).layers().to_vec());
+            assert_eq!(
+                selected.len(),
+                expected,
+                "shift = {}, selected = {selected:?}",
+                modifiers.shift
+            );
+            assert!(selected.contains(&layers[1]), "the swept layer is selected");
+            assert_eq!(
+                selected.contains(&layers[0]),
+                modifiers.shift,
+                "the press-time selection survives exactly when Shift asked it to"
+            );
+        }
+    }
+
+    /// A second Viewer on the same project, with its own instance id — the
+    /// state REQ-UI-005 allows, and what the box-select Global has to survive.
+    fn extra_viewer(cx: &mut TestAppContext, instance: u64) -> WindowHandle<ViewerPanel> {
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(instance), window, cx)
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.composition_resolution = Some(FIXTURE_RES);
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+            })
+            .unwrap();
+        window
+    }
+
+    fn live_box_select_owner(cx: &mut TestAppContext) -> Option<ravel_ui::layout::PanelInstanceId> {
+        cx.update(|cx| {
+            cx.try_global::<overlay::BoxSelectDrag>()
+                .and_then(|drag| drag.0.as_ref())
+                .map(|live| live.panel)
+        })
+    }
+
+    /// One Viewer ending its gesture must not withdraw another Viewer's
+    /// candidate declaration: the Global is shared, the panels are not.
+    ///
+    /// The path is real — a release this window never received leaves a gesture
+    /// standing while the next press starts one in another Viewer — so the
+    /// second press takes the ownership and the first panel's release, arriving
+    /// late, has to be a no-op on the shared state.
+    #[gpui::test]
+    fn a_release_in_one_viewer_leaves_another_viewers_sweep_alone(cx: &mut TestAppContext) {
+        let (first, _project, comp_id, layer) = shell_setup(cx);
+        let second = extra_viewer(cx, 1);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+
+        first
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            Some(ravel_ui::layout::PanelInstanceId(0))
+        );
+
+        second
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (500.0, 500.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            Some(ravel_ui::layout::PanelInstanceId(1)),
+            "the new press takes the declaration over from the stale one"
+        );
+
+        // The first panel's release, arriving after the take-over.
+        first
+            .update(cx, |panel, _window, cx| {
+                panel.box_select_ended(window_point(panel, (400.0, 400.0)), cx);
+                assert!(panel.box_select.is_none());
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            Some(ravel_ui::layout::PanelInstanceId(1)),
+            "and does not withdraw the other Viewer's candidates"
+        );
+        second
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.box_select.is_some(), "the live sweep is untouched");
+                assert!(
+                    !OverlayRegistry::builtin()
+                        .eval_targets(&panel.overlay_context(cx))
+                        .is_empty()
+                );
+            })
+            .unwrap();
+    }
+
+    /// The sweep follows the pen session's rule: a deliberate tool switch ends
+    /// it, and the `h` hold — transient navigation that gives the tool back —
+    /// keeps it.
+    #[gpui::test]
+    fn a_tool_switch_ends_the_sweep_but_the_hand_hold_keeps_it(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+
+        cx.update(|cx| {
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Hand,
+                hand_hold: true,
+                previous: ravel_ui::ToolKind::Select,
+            })
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.box_select.is_some(),
+                    "the `h` hold is navigation, not a tool change"
+                );
+            })
+            .unwrap();
+        assert!(live_box_select_owner(cx).is_some());
+
+        cx.update(|cx| cx.set_global(tool_state(ravel_ui::ToolKind::Pen)));
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.box_select.is_none(), "a real switch ends the sweep");
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            None,
+            "and withdraws the candidates"
+        );
+    }
+
+    /// A composition switch ends the sweep. The release already refuses to
+    /// publish into a composition that left the screen, but the declaration
+    /// would keep evaluating a network nobody is looking at.
+    #[gpui::test]
+    fn a_composition_switch_ends_the_sweep(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| project.set_active_composition(None, cx));
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.box_select.is_none());
+            })
+            .unwrap();
+        assert_eq!(live_box_select_owner(cx), None);
+    }
+
+    /// Completion criterion, layer scope: a zero-distance drag is a click, and
+    /// a click on empty space deselects. The press publishes it, exactly as the
+    /// node path does through `selection_after_click`.
+    #[gpui::test]
+    fn a_zero_distance_layer_box_clears_the_layer_selection(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, layers) = multi_layer_setup(cx);
+        assert_eq!(
+            cx.update(|cx| crate::panels::layer_selection(cx).layers().len()),
+            2
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Well outside both layer bboxes (-50..50 and 50..150 in x).
+                let press = press_comp(panel, (600.0, 600.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some(), "empty space sweeps");
+                assert!(panel.move_drag.is_none());
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "the press published the click's deselection"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.box_select_ended(window_point(panel, (600.0, 600.0)), cx);
+            })
+            .unwrap();
+        assert!(
+            cx.update(|cx| crate::panels::layer_selection(cx).is_empty()),
+            "and the release leaves the deselection alone"
+        );
+        assert_eq!(layers.len(), 2, "both layers still exist");
     }
 }

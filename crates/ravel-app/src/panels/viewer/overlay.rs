@@ -29,7 +29,7 @@
 //! [`OverlayLabel`]s that the panel renders as elements, because GPUI shapes
 //! text through elements rather than through the canvas painter.
 
-use gpui::{Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
+use gpui::{App, Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
 use ravel_core::composition::Document;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::{EvalContext, PathSegment};
@@ -41,6 +41,7 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
+use ravel_ui::layout::PanelInstanceId;
 use ravel_ui::panels::viewer::{
     PixelReadoutFormat, PlaybackStatusInputs, ViewerResolution, comp_to_buffer_index,
     pixel_readout_text, playback_status_text,
@@ -99,6 +100,10 @@ pub mod priority {
     /// the drag in flight has snapped to, so it has to be readable over the
     /// bbox, the grips and the safe areas it lands on.
     pub const SNAP_GUIDES: i32 = 45;
+    /// Above every mark in composition space: the box-selection marquee is the
+    /// rectangle the pointer is sweeping right now, so nothing the sweep is
+    /// aimed at may cover it.
+    pub const BOX_SELECT: i32 = 46;
     /// A corner label like [`PIXEL_READOUT`], and in a corner of its own: it
     /// grabs no pointer and shares its corner with nothing, so this number
     /// decides no contest for text or for hits. It sits below the readout only
@@ -159,6 +164,73 @@ impl EvalResults {
 }
 
 impl Global for EvalResults {}
+
+/// Which candidates a live box-selection drag picks from (`TOOLX-2`).
+///
+/// The click test's own rule, as data: an open network means the drag picks
+/// nodes inside it, and no open network means it picks the composition's
+/// layers. No third selection model is introduced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BoxSelectScope {
+    Nodes(NetworkPath),
+    Layers(CompId),
+}
+
+/// The box-selection drag in flight, as the overlays see it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxSelect {
+    pub scope: BoxSelectScope,
+    /// The swept rectangle in composition space, or `None` in the context that
+    /// only collects evaluation targets — that one decides *which* candidates
+    /// have to be measured and draws nothing, so it has no rectangle to give.
+    pub rect: Option<CompRect>,
+}
+
+/// The Viewer instance holding the drag, and what it picks from.
+///
+/// The owner is what makes the Global safe with several Viewers open
+/// (REQ-UI-005): only the panel named here may withdraw the declaration, so
+/// one instance ending its gesture cannot stop the evaluation another one is
+/// waiting for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveBoxSelect {
+    pub panel: PanelInstanceId,
+    pub scope: BoxSelectScope,
+}
+
+/// Live gesture state: the Viewer's box-selection drag, or `None` while no
+/// drag is in flight.
+///
+/// A Global rather than a panel field because two snapshots have to agree on
+/// it. The panel builds its own [`OverlayContext`] for painting, but the one
+/// that collects evaluation targets is assembled by
+/// `ProjectState::overlay_context_for_request`, which has no access to panel
+/// state — and the candidate bboxes are exactly what has to be evaluated
+/// *because* a drag is happening. The scope, not the rectangle: it is fixed
+/// for the whole gesture, so the target list stays identical from the press to
+/// the release and a pointer move re-requests nothing.
+///
+/// A Viewer panel is the only writer. A press installs its own instance as the
+/// owner — the pointer is one, so a drag standing in another instance has lost
+/// its release and is stale — and the release, the cancel and the panel's
+/// teardown clear it **only when this panel still owns it**.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BoxSelectDrag(pub Option<LiveBoxSelect>);
+
+impl Global for BoxSelectDrag {}
+
+/// The live drag as the target-collecting context carries it: the scope with
+/// no rectangle. One function so the request path names one field and no
+/// caller invents a rectangle for a context that never paints. Which panel
+/// owns the drag does not reach the context — the request is the composition's,
+/// not a panel's.
+pub fn box_select_candidates(cx: &App) -> Option<BoxSelect> {
+    let live = cx.try_global::<BoxSelectDrag>()?.0.clone()?;
+    Some(BoxSelect {
+        scope: live.scope,
+        rect: None,
+    })
+}
 
 /// Everything the overlays are allowed to see, snapshotted once per render or
 /// once per pointer event. Fields are optional exactly where the underlying
@@ -233,6 +305,10 @@ pub struct OverlayContext {
     /// The gesture the pointer currently holds, or `None` when it is idle.
     /// Only the drag HUD reads it.
     pub active_drag: Option<ActiveDrag>,
+    /// The box-selection drag in flight, or `None` when none is (`TOOLX-2`).
+    /// The panel fills the rectangle; the target-collecting context fills the
+    /// scope alone.
+    pub box_select: Option<BoxSelect>,
     pub colors: OverlayColors,
     /// Scoped-target results belonging to the frame currently shown.
     pub results: EvalResults,
@@ -972,6 +1048,7 @@ impl OverlayRegistry {
             Box::new(PathEditOverlay),
             Box::new(super::guides::GuideOverlay),
             Box::new(super::snap::SnapGuideOverlay),
+            Box::new(BoxSelectOverlay),
             Box::new(PlaybackStatusOverlay),
             Box::new(PixelReadoutOverlay),
             Box::new(EvalErrorOverlay),
@@ -2499,6 +2576,81 @@ impl ViewerOverlay for ParamManipulator {
     }
 }
 
+/// The marquee of a box-selection drag, and the candidate bboxes it needs
+/// (`TOOLX-2`).
+///
+/// Its whole reason to exist is the second half. A rectangle picks what it
+/// *catches*, so it has to measure things nobody has selected — and a bbox is
+/// only measurable once the node that produces it has been evaluated. With
+/// nothing selected no other overlay asks for anything, which is precisely the
+/// state a box drag starts from.
+///
+/// Declared only while the drag is live, never permanently: standing targets
+/// for every layer of the composition would evaluate every network on every
+/// frame for a gesture that is not happening. The scope is fixed for the
+/// gesture, so [`OverlayRegistry::eval_targets`] returns the same list from the
+/// press to the release and the pointer moving costs no request.
+///
+/// The results arrive asynchronously, so the first frames of a drag can find
+/// no bboxes at all. That is why the release recomputes the contents rather
+/// than accumulating what the moves saw.
+pub struct BoxSelectOverlay;
+
+impl BoxSelectOverlay {
+    pub const ID: OverlayId = OverlayId("viewer.box_select");
+}
+
+impl ViewerOverlay for BoxSelectOverlay {
+    fn id(&self) -> OverlayId {
+        Self::ID
+    }
+
+    fn priority(&self) -> i32 {
+        priority::BOX_SELECT
+    }
+
+    /// Active on the *gesture*, not on the results — the rule
+    /// [`GeometryOverlay::is_active`] states, and for the same reason: an
+    /// inactive overlay is never asked for its targets, so an overlay waiting
+    /// for the evaluation it alone requests would wait forever.
+    fn is_active(&self, ctx: &OverlayContext) -> bool {
+        ctx.box_select.is_some()
+    }
+
+    /// Every geometry node of the candidates: the network's own when one is
+    /// open, and every layer of the composition when none is.
+    fn eval_targets(&self, ctx: &OverlayContext) -> Vec<EvalTarget> {
+        let (Some(document), Some(box_select)) = (ctx.document.as_ref(), ctx.box_select.as_ref())
+        else {
+            return Vec::new();
+        };
+        match &box_select.scope {
+            BoxSelectScope::Nodes(network) => super::geometry::geometry_targets(document, network),
+            BoxSelectScope::Layers(comp) => {
+                let Some(composition) = document.get_composition(*comp) else {
+                    return Vec::new();
+                };
+                composition
+                    .layers
+                    .iter()
+                    .flat_map(|layer| {
+                        super::geometry::geometry_targets(
+                            document,
+                            &NetworkPath::layer(*comp, layer.id),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
+        if let Some(rect) = ctx.box_select.as_ref().and_then(|drag| drag.rect) {
+            painter.stroke_comp_rect(rect, SELECTION_COLOR);
+        }
+    }
+}
+
 /// The latest evaluation error, centered over the canvas.
 ///
 /// Text is the one thing the canvas painter cannot express, so this overlay
@@ -2923,6 +3075,7 @@ mod tests {
             error: None,
             snap_guides: crate::panels::viewer::snap::SnapGuides::default(),
             active_drag: None,
+            box_select: None,
             colors: colors(),
             results: EvalResults::default(),
             // Absent by default so every overlay that does not read the

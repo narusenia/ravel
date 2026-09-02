@@ -2,6 +2,18 @@
 # Format: <rule> <file> <detail>
 # Every entry needs a comment explaining why it is allowed.
 
+# Live gesture state, not a one-shot event: Option<LiveBoxSelect> means "no
+# box-selection drag in flight" (`TOOLX-2`). The Viewer panel sets it on the
+# press and clears it on the release, and the value is *read repeatedly while
+# it stands* — by the panel's overlay snapshot and by the context
+# `ProjectState` assembles to collect evaluation targets, which is the whole
+# reason it cannot be a panel field. Nothing consumes it once. The payload
+# carries the owning `PanelInstanceId` beside the scope, which is what makes
+# one Global safe with several Viewers open (REQ-UI-005): only the panel that
+# owns the drag may withdraw it, so one Viewer's release cannot cancel
+# another's sweep.
+global-option-event crates/ravel-app/src/panels/viewer/overlay.rs BoxSelectDrag
+
 # Durable shared state: Option<PanelKind> means "no panel focused", not a
 # one-shot event. Kept in sync by GPUI focus events (Phase 3).
 global-option-event crates/ravel-app/src/panels/mod.rs FocusedPanelGlobal

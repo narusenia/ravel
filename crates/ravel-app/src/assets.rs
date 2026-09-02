@@ -728,6 +728,31 @@ mod tests {
         );
     }
 
+    /// Every tool has an icon of its own, and it is embedded.
+    ///
+    /// The toolbar is a row of glyphs with no text, so two tools sharing one
+    /// makes the strip unreadable — and a missing file renders as nothing at
+    /// all. The tools come from the command table so a new one is covered
+    /// without being listed again.
+    #[test]
+    fn every_tool_has_its_own_embedded_icon() {
+        let mut seen = std::collections::HashSet::new();
+        for tool in ravel_ui::command::CommandId::all().filter_map(ravel_ui::ToolKind::from_command)
+        {
+            let icon = RavelIcon::for_tool(tool);
+            let path = icon.path();
+            assert!(
+                seen.insert(path.clone()),
+                "{tool:?} shares its icon with another tool: {path}"
+            );
+            assert!(
+                RavelEmbed::get(path.as_ref()).is_some(),
+                "missing embedded icon for {tool:?}: {path}"
+            );
+        }
+        assert_eq!(seen.len(), 8, "a tool fell out of the command table");
+    }
+
     #[test]
     fn license_is_vendored_alongside_icons() {
         // ISC attribution must travel with the vendored SVGs.

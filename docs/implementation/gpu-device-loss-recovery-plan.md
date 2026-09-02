@@ -1,7 +1,8 @@
 # GPU デバイス喪失からの復旧計画
 
 > **Status**: GPULOSS-1 complete; GPULOSS-2 complete — PR #485, 2026-09-02;
-> GPULOSS-3〜5 planned — `HIGH-33`
+> GPULOSS-4 complete — PR #493, 2026-09-02; GPULOSS-3 / GPULOSS-5 planned —
+> `HIGH-33`
 >
 > この文書は設計ゲート用の実装計画である。今回の変更では `crates/` 配下の
 > コードを書かない。実装時はこの計画を単位ごとに分割し、各単位の完了条件を

@@ -850,7 +850,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `OVL-8` | ジオメトリ属性の空間可視化（矢印 / index / group 色分け） |
 | `OVL-9` | モーションパス（軌跡表示 + キー位置のドラッグ） |
 | `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`done/viewer-snap-guides-plan.md`） |
-| `TOOLX-2〜5` | 矩形選択、点編集、polygon / star（`viewer-tool-extensions-plan.md`。`TOOLX-1` の Hand / Zoom は 2026-08-28 に済み） |
+| `TOOLX-3〜5` | 点編集、polygon / star（`viewer-tool-extensions-plan.md`。`TOOLX-1` の Hand / Zoom と `TOOLX-2` の矩形選択は済み） |
 | `MON-1〜MON-7` | スコープ 4 種（波形 / ベクトル / ヒストグラム / パレード。`viewer-scopes-plan.md`）。**2026-08-25 のユーザー判断で後回し** — 作るコストの割に入れるものがない。依存は解けているが指示があるまで拾わない |
 | `INFO-1` | `InvalidationHint::Shell` |
 | `INFO-2` / `INFO-3` | `layer.info` / `comp.info` |

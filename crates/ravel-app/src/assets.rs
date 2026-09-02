@@ -333,6 +333,10 @@ impl RavelIcon {
             ravel_ui::ToolKind::Pen => Self::ToolPen,
             ravel_ui::ToolKind::Rect => Self::ToolRect,
             ravel_ui::ToolKind::Ellipse => Self::ToolEllipse,
+            // The node-header glyphs stand in for tool icons: the shapes are
+            // the same and a second pair of assets would only drift.
+            ravel_ui::ToolKind::Polygon => Self::NodeShapePolygon,
+            ravel_ui::ToolKind::Star => Self::NodeShapeStar,
             ravel_ui::ToolKind::Hand => Self::ToolHand,
             ravel_ui::ToolKind::Zoom => Self::ToolZoom,
         }

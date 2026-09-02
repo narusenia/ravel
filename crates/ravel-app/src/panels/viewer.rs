@@ -187,9 +187,11 @@ fn active_tool(cx: &App) -> ravel_ui::ToolKind {
 fn tool_pointer_hint(tool: ravel_ui::ToolKind) -> ViewerPointerHint {
     match tool {
         ravel_ui::ToolKind::Select => ViewerPointerHint::Empty,
-        ravel_ui::ToolKind::Pen | ravel_ui::ToolKind::Rect | ravel_ui::ToolKind::Ellipse => {
-            ViewerPointerHint::Drawing
-        }
+        ravel_ui::ToolKind::Pen
+        | ravel_ui::ToolKind::Rect
+        | ravel_ui::ToolKind::Ellipse
+        | ravel_ui::ToolKind::Polygon
+        | ravel_ui::ToolKind::Star => ViewerPointerHint::Drawing,
         ravel_ui::ToolKind::Hand => ViewerPointerHint::Hand,
         ravel_ui::ToolKind::Zoom => ViewerPointerHint::Zoom,
     }
@@ -969,7 +971,7 @@ impl ViewerPanel {
     ///
     /// Hand and Zoom own the pointer outright, so a press under them reaches
     /// neither an overlay handle nor a guide, a selection, a shape drag or the
-    /// pen. The `match` is exhaustive on purpose: a seventh tool cannot be
+    /// pen. The `match` is exhaustive on purpose: another tool cannot be
     /// added without answering here.
     ///
     /// The Pen's point insertion / removal comes before the overlay handles:
@@ -982,7 +984,9 @@ impl ViewerPanel {
             ravel_ui::ToolKind::Select
             | ravel_ui::ToolKind::Pen
             | ravel_ui::ToolKind::Rect
-            | ravel_ui::ToolKind::Ellipse => {
+            | ravel_ui::ToolKind::Ellipse
+            | ravel_ui::ToolKind::Polygon
+            | ravel_ui::ToolKind::Star => {
                 if !self.path_point_edit_mouse_down(event, cx)
                     && !self.overlay_handle_mouse_down(event, cx)
                     && !self.guide_mouse_down(event, cx)
@@ -2993,11 +2997,13 @@ impl ViewerPanel {
             .map(|s| s.active)
             .unwrap_or_default();
 
-        const TOOLS: [ravel_ui::ToolKind; 6] = [
+        const TOOLS: [ravel_ui::ToolKind; 8] = [
             ravel_ui::ToolKind::Select,
             ravel_ui::ToolKind::Pen,
             ravel_ui::ToolKind::Rect,
             ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Polygon,
+            ravel_ui::ToolKind::Star,
             ravel_ui::ToolKind::Hand,
             ravel_ui::ToolKind::Zoom,
         ];
@@ -8884,6 +8890,8 @@ mod tests {
         for tool in [
             ravel_ui::ToolKind::Rect,
             ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Polygon,
+            ravel_ui::ToolKind::Star,
             ravel_ui::ToolKind::Pen,
             ravel_ui::ToolKind::Hand,
             ravel_ui::ToolKind::Zoom,
@@ -9477,6 +9485,8 @@ mod tests {
             ravel_ui::ToolKind::Pen,
             ravel_ui::ToolKind::Rect,
             ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Polygon,
+            ravel_ui::ToolKind::Star,
             ravel_ui::ToolKind::Hand,
             ravel_ui::ToolKind::Zoom,
         ] {

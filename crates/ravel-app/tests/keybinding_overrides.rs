@@ -332,6 +332,8 @@ fn the_panel_binding_table_is_the_code_side_shortcut_set() {
             (CommandId::ToolPen, "P", PanelKind::Viewer),
             (CommandId::ToolRect, "R", PanelKind::Viewer),
             (CommandId::ToolEllipse, "E", PanelKind::Viewer),
+            (CommandId::ToolPolygon, "G", PanelKind::Viewer),
+            (CommandId::ToolStar, "S", PanelKind::Viewer),
             (CommandId::ToolHand, "H", PanelKind::Viewer),
             (CommandId::ToolZoom, "Z", PanelKind::Viewer),
         ]

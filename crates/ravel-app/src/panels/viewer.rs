@@ -9177,4 +9177,488 @@ mod tests {
             })
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Box selection (`TOOLX-2`)
+    // -----------------------------------------------------------------------
+
+    /// Completion criterion: the rectangle picks by **intersection**, and the
+    /// boundary is closed — rectangles that merely touch count as meeting.
+    #[test]
+    fn a_box_catches_what_it_touches_boundary_included() {
+        let bbox = CompRect {
+            x: 50.0,
+            y: 50.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let sweep = |x: f32, y: f32, w: f32, h: f32| rects_overlap(&bbox, &CompRect { x, y, w, h });
+
+        // Crossing, and fully inside — neither is containment of the bbox.
+        assert!(sweep(100.0, 100.0, 200.0, 200.0));
+        assert!(sweep(60.0, 60.0, 10.0, 10.0));
+        // Larger than the bbox on every side.
+        assert!(sweep(0.0, 0.0, 300.0, 300.0));
+        // Edge-to-edge on each side: touching is meeting.
+        assert!(sweep(0.0, 50.0, 50.0, 10.0), "left edge touches");
+        assert!(sweep(150.0, 50.0, 50.0, 10.0), "right edge touches");
+        assert!(sweep(50.0, 0.0, 10.0, 50.0), "top edge touches");
+        assert!(sweep(50.0, 150.0, 10.0, 50.0), "bottom edge touches");
+        // Corner-to-corner, the tightest touch there is.
+        assert!(sweep(0.0, 0.0, 50.0, 50.0), "corners touch");
+        // One unit past each edge: no longer meeting.
+        assert!(!sweep(-50.0, 50.0, 99.0, 10.0));
+        assert!(!sweep(151.0, 50.0, 50.0, 10.0));
+        assert!(!sweep(50.0, -50.0, 10.0, 99.0));
+        assert!(!sweep(50.0, 151.0, 10.0, 50.0));
+        // A zero-extent sweep is still a rectangle, and a zero-extent bbox
+        // (one placed point) is still catchable.
+        assert!(sweep(100.0, 100.0, 0.0, 0.0));
+        assert!(rects_overlap(
+            &CompRect {
+                x: 60.0,
+                y: 60.0,
+                w: 0.0,
+                h: 0.0
+            },
+            &bbox
+        ));
+    }
+
+    /// A swept rectangle is the same rectangle whichever way it was swept.
+    #[test]
+    fn a_box_is_normalized_in_both_directions() {
+        let forward = box_rect((10.0, 20.0), (40.0, 60.0));
+        let backward = box_rect((40.0, 60.0), (10.0, 20.0));
+        assert_eq!(forward, backward);
+        assert_eq!(
+            (forward.x, forward.y, forward.w, forward.h),
+            (10.0, 20.0, 30.0, 40.0)
+        );
+    }
+
+    /// Completion criterion (`LOW-APP-03`): Shift keeps the selection the drag
+    /// started from and adds the sweep to it. Without Shift the sweep replaces.
+    #[test]
+    fn a_shift_box_publishes_the_union_and_a_plain_box_replaces() {
+        let (first, second, third) = (NodeId::next(), NodeId::next(), NodeId::next());
+        let initial = HashSet::from([first, second]);
+
+        assert_eq!(
+            nodes_after_box(&initial, HashSet::from([third]), true),
+            HashSet::from([first, second, third]),
+            "Shift adds the sweep to the press-time selection"
+        );
+        assert_eq!(
+            nodes_after_box(&initial, HashSet::new(), true),
+            initial,
+            "a Shift sweep that caught nothing keeps everything"
+        );
+        assert_eq!(
+            nodes_after_box(&initial, HashSet::from([third]), false),
+            HashSet::from([third]),
+            "without Shift the sweep is the whole selection"
+        );
+        assert!(nodes_after_box(&initial, HashSet::new(), false).is_empty());
+
+        let layers = vec![LayerId::next(), LayerId::next()];
+        let swept = vec![layers[1], LayerId::next()];
+        assert_eq!(
+            layers_after_box(&layers, &swept, true),
+            vec![layers[0], layers[1], swept[1]],
+            "Shift keeps click order and adds each layer once"
+        );
+        assert_eq!(layers_after_box(&layers, &swept, false), swept);
+        assert_eq!(layers_after_box(&layers, &[], true), layers);
+        assert!(layers_after_box(&layers, &[], false).is_empty());
+    }
+
+    /// Completion criterion: the candidate bboxes are declared **only while
+    /// the drag is live**. Nothing is selected in this context, so no other
+    /// overlay asks for anything — which is exactly the state a box drag has
+    /// to work from, and why declaring them permanently would evaluate every
+    /// network of the composition on every frame.
+    #[test]
+    fn candidate_targets_are_declared_only_while_the_box_drag_lives() {
+        let node = square_node((50.0, 50.0), 40.0);
+        let (mut ctx, network) = geometry_context(Graph::new().add_node(node).unwrap(), &[]);
+        let registry = OverlayRegistry::builtin();
+        assert!(
+            registry.eval_targets(&ctx).is_empty(),
+            "with nothing selected and no drag, nobody asks for geometry"
+        );
+
+        let sweep = Some(CompRect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        });
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Nodes(network.clone()),
+            rect: sweep,
+        });
+        assert_eq!(
+            registry.eval_targets(&ctx),
+            geometry::geometry_targets(ctx.document.as_ref().unwrap(), &network),
+            "the open network's geometry nodes are the candidates"
+        );
+
+        // No network open: every layer of the composition is a candidate.
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Layers(network.comp),
+            rect: sweep,
+        });
+        assert_eq!(
+            registry.eval_targets(&ctx),
+            geometry::geometry_targets(ctx.document.as_ref().unwrap(), &network),
+            "the fixture's one layer is the whole candidate set"
+        );
+
+        ctx.box_select = None;
+        assert!(
+            registry.eval_targets(&ctx).is_empty(),
+            "the release stops the declaration"
+        );
+    }
+
+    /// Completion criterion: the marquee is drawn through the overlay
+    /// mechanism, so it is registered in the builtin registry and paints as
+    /// composition-space primitives.
+    #[test]
+    fn the_marquee_is_painted_by_the_registered_overlay() {
+        let node = square_node((50.0, 50.0), 40.0);
+        let (mut ctx, network) = geometry_context(Graph::new().add_node(node).unwrap(), &[]);
+        let rect = CompRect {
+            x: 100.0,
+            y: 200.0,
+            w: 300.0,
+            h: 400.0,
+        };
+        ctx.box_select = Some(BoxSelect {
+            scope: BoxSelectScope::Nodes(network),
+            rect: Some(rect),
+        });
+
+        let frame = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1920.0), px(1080.0)),
+        };
+        let mut painter = OverlayPainter::new(frame, (1920, 1080));
+        OverlayRegistry::builtin().paint(&ctx, &mut painter);
+        let outline: Vec<_> = painter
+            .finish()
+            .into_iter()
+            .filter_map(|primitive| match primitive {
+                overlay::OverlayPrimitive::Quad { bounds, .. } => Some(bounds),
+                overlay::OverlayPrimitive::Stroke { .. } => None,
+            })
+            .collect();
+        assert_eq!(outline.len(), 4, "a 1px outline is four quads: {outline:?}");
+        assert!(
+            outline
+                .iter()
+                .any(|bounds| bounds.origin == point(px(rect.x), px(rect.y))
+                    && bounds.size.width == px(rect.w)),
+            "the top edge spans the swept rectangle: {outline:?}"
+        );
+    }
+
+    /// A press at a composition point, with modifiers.
+    fn press_comp(panel: &ViewerPanel, comp: (f32, f32), modifiers: Modifiers) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: window_point(panel, comp),
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// A left-button move to a composition point.
+    fn move_comp(panel: &ViewerPanel, comp: (f32, f32)) -> MouseMoveEvent {
+        MouseMoveEvent {
+            position: window_point(panel, comp),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn selected_nodes(cx: &mut TestAppContext) -> HashSet<NodeId> {
+        cx.update(|cx| {
+            cx.try_global::<CanvasSelection>()
+                .cloned()
+                .unwrap_or_default()
+                .nodes
+        })
+    }
+
+    /// With a network open, a drag from empty space sweeps its **nodes**: the
+    /// press declares the candidates, the release publishes what the rectangle
+    /// caught.
+    ///
+    /// The fixture's one node is a 40x20 rect at (100, 200), so its bbox is
+    /// (80, 190)-(120, 210).
+    #[gpui::test]
+    fn a_box_over_an_open_network_selects_the_nodes_it_caught(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::new(),
+            })
+        });
+        let node = project.read_with(cx, |project, _| {
+            project
+                .document()
+                .get_composition(comp_id)
+                .unwrap()
+                .get_layer(layer)
+                .unwrap()
+                .network
+                .nodes()
+                .next()
+                .unwrap()
+                .id
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.box_select.is_some(),
+                    "a press on empty space starts a sweep"
+                );
+                assert!(panel.move_drag.is_none(), "nothing was under the pointer");
+                assert!(
+                    !OverlayRegistry::builtin()
+                        .eval_targets(&panel.overlay_context(cx))
+                        .is_empty(),
+                    "the live drag declares the candidate bboxes"
+                );
+                assert!(
+                    overlay::box_select_candidates(cx).is_some(),
+                    "and the request path can see the scope"
+                );
+            })
+            .unwrap();
+        // The press posted a request, and with no worker that clears the
+        // snapshot: republish what an evaluation would have delivered.
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.left_dragged(&move_comp(panel, (60.0, 180.0)), cx);
+                panel.box_select_ended(window_point(panel, (60.0, 180.0)), cx);
+                assert!(panel.box_select.is_none(), "the release ends the gesture");
+                assert!(
+                    panel.overlay_context(cx).box_select.is_none(),
+                    "the marquee stops being drawn"
+                );
+                assert!(
+                    overlay::box_select_candidates(cx).is_none(),
+                    "and the candidates stop being declared"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            selected_nodes(cx),
+            HashSet::from([node]),
+            "the swept node is selected"
+        );
+    }
+
+    /// A sweep that catches nothing selects nothing — and a Shift sweep that
+    /// catches nothing keeps what was selected when it started
+    /// (`LOW-APP-03`), even though the press itself published the deselection
+    /// a click on empty space means.
+    #[gpui::test]
+    fn a_shift_box_keeps_the_selection_the_press_cleared(cx: &mut TestAppContext) {
+        for (modifiers, expect_kept) in [(Modifiers::default(), false), (shift(), true)] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            let node = project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer)
+                    .unwrap()
+                    .network
+                    .nodes()
+                    .next()
+                    .unwrap()
+                    .id
+            });
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::from([node]),
+                })
+            });
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, (400.0, 400.0), modifiers);
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.box_select.is_some());
+                })
+                .unwrap();
+            assert!(
+                selected_nodes(cx).is_empty(),
+                "the press published the click's deselection"
+            );
+            publish_geometry_results(&project, cx);
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    // Nowhere near the fixture's (80, 190)-(120, 210) bbox.
+                    panel.left_dragged(&move_comp(panel, (600.0, 600.0)), cx);
+                    panel.box_select_ended(window_point(panel, (600.0, 600.0)), cx);
+                })
+                .unwrap();
+
+            let expected = if expect_kept {
+                HashSet::from([node])
+            } else {
+                HashSet::new()
+            };
+            assert_eq!(selected_nodes(cx), expected, "shift = {}", modifiers.shift);
+        }
+    }
+
+    /// Completion criterion: a press that never travelled is a click, and the
+    /// click's deselection stands. Publishing the union on a zero-distance
+    /// Shift press would put the cleared selection straight back.
+    #[gpui::test]
+    fn a_zero_distance_box_leaves_the_click_deselection_alone(cx: &mut TestAppContext) {
+        for modifiers in [Modifiers::default(), shift()] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let node = project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer)
+                    .unwrap()
+                    .network
+                    .nodes()
+                    .next()
+                    .unwrap()
+                    .id
+            });
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(NetworkPath::layer(comp_id, layer)),
+                    nodes: HashSet::from([node]),
+                })
+            });
+            publish_geometry_results(&project, cx);
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, (400.0, 400.0), modifiers);
+                    panel.left_mouse_down(&press, cx);
+                    panel.box_select_ended(window_point(panel, (400.0, 400.0)), cx);
+                    assert!(panel.box_select.is_none());
+                })
+                .unwrap();
+            assert!(
+                selected_nodes(cx).is_empty(),
+                "a click deselects, whatever Shift a drag would have meant (shift = {})",
+                modifiers.shift
+            );
+        }
+    }
+
+    /// A press *on* a shape keeps the existing move gesture: the rectangle is
+    /// what empty space means, not what the Select tool always means.
+    #[gpui::test]
+    fn a_press_on_a_shape_moves_it_instead_of_sweeping(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        cx.update(|cx| {
+            // The shell manipulator's move grip sits on the bbox centre, and it
+            // answers the press before any tool does. This test is about the
+            // node gesture, so the layer selection that summons the manipulator
+            // is cleared and the network stays open.
+            crate::panels::clear_layer_selection(cx);
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+        // Both selection writes above posted a request, and with no worker that
+        // clears the snapshot the click test reads its bboxes from.
+        publish_geometry_results(&project, cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // The centre of the fixture's rect node.
+                let press = press_comp(panel, (100.0, 200.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(
+                    panel.move_drag.is_some(),
+                    "a press on the shape starts the move gesture"
+                );
+                assert!(panel.box_select.is_none(), "and never a box selection");
+            })
+            .unwrap();
+    }
+
+    /// With no network open the sweep picks **layers**, and Shift adds them to
+    /// the selection the press started from.
+    ///
+    /// `multi_layer_setup`'s two layers hold one 100x100 rect each, centred at
+    /// (0, 0) and (100, 0): bboxes (-50, -50)-(50, 50) and (50, -50)-(150, 50).
+    /// The sweep below starts past the first one's right edge, so it catches
+    /// the second layer only.
+    #[gpui::test]
+    fn a_box_with_no_network_open_selects_layers(cx: &mut TestAppContext) {
+        for (modifiers, expected) in [(Modifiers::default(), 1), (shift(), 2)] {
+            let (window, project, _comp_id, layers) = multi_layer_setup(cx);
+            cx.update(|cx| {
+                crate::panels::set_layer_selection(vec![layers[0]], cx);
+                cx.set_global(CanvasSelection::default());
+            });
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, (60.0, -40.0), modifiers);
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.box_select.is_some(), "no network is open");
+                })
+                .unwrap();
+            publish_geometry_results(&project, cx);
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.left_dragged(&move_comp(panel, (140.0, 40.0)), cx);
+                    panel.box_select_ended(window_point(panel, (140.0, 40.0)), cx);
+                })
+                .unwrap();
+
+            let selected = cx.update(|cx| crate::panels::layer_selection(cx).layers().to_vec());
+            assert_eq!(
+                selected.len(),
+                expected,
+                "shift = {}, selected = {selected:?}",
+                modifiers.shift
+            );
+            assert!(selected.contains(&layers[1]), "the swept layer is selected");
+            assert_eq!(
+                selected.contains(&layers[0]),
+                modifiers.shift,
+                "the press-time selection survives exactly when Shift asked it to"
+            );
+        }
+    }
 }

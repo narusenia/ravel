@@ -331,6 +331,15 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 - ロケール（`tool.polygon` / `tool.star` と `menu.tool.*`、en / ja）は
   ラベルの無いツールを出荷しないためこの単位で入れた。散文の文書は
   `TOOLX-5` に残っている
+- **非有限の寸法のガードは `drag_geometry_degenerate` に置いた** —
+  rect / ellipse と放射ツールが共有する唯一の漏斗なので、呼び出し側に
+  散らさない。ポインタ座標は `screen_to_comp` を通り、そこはビューポート
+  矩形の幅で割るので、畳まれたパネルや退化した explicit zoom から
+  `NaN` / `Inf` が入りうる。`hypot` はそれを伝播するため、放射ツールでは
+  無効な図形がそのままコミットされてしまう（`NaN` の bbox は `TOOLX-2` が
+  先送りした穴に流れ込む）。0 の判定も `== 0.0` から `<= 0.0` に広げた —
+  今の生成側（`abs` / `hypot`）は負を返さないが、ガードが自分の前提を
+  狭める理由が無い
 
 ### TOOLX-5: ロケールと文書
 

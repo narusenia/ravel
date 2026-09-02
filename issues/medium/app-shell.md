@@ -446,13 +446,15 @@ macOS では**問う口自体が無い** — `None` が返るのではなく呼�
 
 **実害**: 大きくない。Ravel と GPUI が同じ Metal device を共有している（`ZC-2` の
 `native_device_matches` がそれを確認している）ので、GPUI 側の device が死ぬ状況は
-Ravel 自前 context の callback も撃つ可能性が高く、そのときは検出できる。逆側の穴は
-「GPUI が自分の renderer を作り直して**別の** device に移った」場合で、このとき
-Ravel は zero-copy を止めない — surface 描画時の device 照合が Linux / Windows の
-`AdoptedHostDevice` 相当を macOS に持たないためである。`with_surface_texture` は
-`native_device_matches` を毎回通すので**別 device のテクスチャは描かれず** `false`
-が返って CPU fallback に落ちる。つまり不正なサンプリングは起きず、残るのは
-「気づかないまま zero-copy を試み続ける」ことだけ。
+Ravel 自前 context の callback も撃つ可能性が高く、そのときは検出できる。「GPUI が自分の renderer を作り直して**別の** device に移った」場合は
+**検出できる** — `with_surface_texture` は renderer の現在の device ハンドルを
+毎フレーム受け取って `native_device_matches` を通すので、identity が変われば
+描かずに `false` を返し、`surface_lost` の経路が capability を落として CPU
+フレームを要求する。**残る穴は「identity が変わらないまま device が失われた」
+場合だけ** — Ravel 自前 context の callback は撃たれず（別の device なので）、
+GPUI 側にそれを問う口が無いので、zero-copy を試み続けて毎 paint が失敗する。
+不正なサンプリングは起きない（照合が弾く）ので、症状は「絵が出ない / 出るのが
+遅い」に留まる。
 
 **修正方針**: fork の `PlatformWindow` に「callback を上書きせず native device の
 identity / loss status を読む口」を macOS でも足せるか調べる（`gpui_macos` の

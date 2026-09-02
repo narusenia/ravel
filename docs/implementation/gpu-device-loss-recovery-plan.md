@@ -403,9 +403,14 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
   `gpu` の隣に `gpu_state: GpuDeviceState`（同じ `Arc`）を持ち、この関数だけが
   それを読んで `viewer_surface_enabled` を落とす。既存の呼び出し元
   （`request_viewer_eval`、Viewer paint の defer）がそのまま観測経路になるので、
-  **毎フレームのポーリングは足していない**。`workspace.rs` の capability 判定は
+  **専用のポーリングは足していない**。`workspace.rs` の capability 判定は
   起動時に一度 `configure_viewer_surface(capability)` を呼ぶだけで、喪失の可否を
-  再判定しない（authority を 2 つにしないため）。
+  再判定しない（authority を 2 つにしないため）。**代わりに毎回の paint が
+  照合する** — macOS は `with_surface_texture` が renderer の現在の device
+  ハンドルを毎フレーム受け取るので、identity が変わっていれば描かずに `false` を
+  返し、`surface_lost` の経路が capability を落として CPU フレームを 1 枚要求する。
+  つまり「専用の coordinator は無いが、対応プラットフォームでは paint が喪失
+  （と device の入れ替わり）を検査している」。
 - `gpu_state` を `gpu` から読み出さずに別フィールドで持つ理由は 2 つ。問いが
   wgpu ハンドルではなく**抽象状態**についてのものであること、そして adapter の
   無いマシンからでも `record_loss` で注入して経路全体を回せることである

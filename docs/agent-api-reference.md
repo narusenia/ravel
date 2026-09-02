@@ -998,6 +998,12 @@ Layer::local_frame_continuous(comp_frame: f64) -> f64   // channel sampling
     // Same formula; layer_matrix / world_matrix and the shell's opacity and
     // merge nodes take the continuous form so sub-frame contexts animate.
 Composition::{ancestors(&layer) -> Vec<&Layer>, descends_from(&layer, id)}
+Composition::composites(&layer) -> bool   // solo/mute: the ONE authority
+    // muted out; once any layer is soloed the non-soloed ones are out too.
+    // Time placement is not part of it (the shell handles that). The
+    // compositor's pre-pass (compile.rs `active_layers`) and the Viewer's
+    // hit-target fallback both ask this — a second copy of the rule would
+    // mean only one of them ever gets fixed.
 
 validate::{validate_precomp_cycles, validate_parenting_cycles,
     validate_layer_ref_cycles}   // layer.ref cycles incl. inside subnets

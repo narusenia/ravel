@@ -4675,22 +4675,85 @@ fn pen_close_pointer_hint(
     pen_should_close(points, pointer, radius).then_some(ViewerPointerHint::PenClose)
 }
 
+/// How far a point's two tangents may miss being reflections of each other
+/// and still count as one smooth handle, as a fraction of the longer arm.
+///
+/// Relative rather than absolute because these are f32 composition units: at
+/// the ~10^4 magnitudes a 4K composition reaches, one ulp is already ~10^-3,
+/// so a fixed epsilon would call a large symmetric handle asymmetric. A
+/// thousandth of a percent of the arm is far below the width of the line the
+/// handle is drawn as, and far above the rounding a save / load round trip can
+/// introduce.
+const TANGENT_SYMMETRY_TOLERANCE: f32 = 1e-4;
+
+/// Whether a point's tangents form one smooth handle: two arms pointing
+/// opposite ways.
+///
+/// Read off the values, with no flag stored anywhere — a point that *is*
+/// symmetric behaves as smooth and a point that is not behaves as split, so
+/// there is nothing to persist, migrate, or keep in sync with the geometry
+/// (the decision `viewer-tool-extensions-plan.md` records).
+///
+/// A point with no tangents at all (a corner the pen placed) is not smooth: it
+/// has no arms to mirror, and the overlay draws neither handle for it.
+fn tangents_are_symmetric(point: &PathPoint) -> bool {
+    let origin = (0.0, 0.0);
+    let sum = (
+        point.in_tan.0 + point.out_tan.0,
+        point.in_tan.1 + point.out_tan.1,
+    );
+    let reach = distance_squared((point.in_tan.0, point.in_tan.1), origin)
+        .max(distance_squared((point.out_tan.0, point.out_tan.1), origin))
+        .sqrt();
+    reach > 0.0 && distance_squared(sum, origin).sqrt() <= reach * TANGENT_SYMMETRY_TOLERANCE
+}
+
+/// The path with one handle of `index` moved by `delta`.
+///
+/// A tangent of a smooth point carries its opposite arm with it, mirrored, so
+/// the curve stays smooth through the anchor; `separate` (the `Alt` modifier)
+/// moves the grabbed arm alone. A point whose arms are already not
+/// reflections is *already* split, so it moves one arm whatever `separate`
+/// says — which is what makes `Alt` a one-way operation rather than a mode:
+/// the first `Alt` drag breaks the symmetry, and every later drag of that
+/// point is independent because the values say so.
+///
+/// The **delta** is mirrored, not the value: a point that was only nearly
+/// symmetric keeps its own arms rather than being silently squared up, and a
+/// drag back to the press point restores exactly what was there — which is
+/// what lets a zero-delta release skip both the commit and the revert.
 fn edited_path_points(
     original: &[PathPoint],
     index: usize,
     handle: PathHandleKind,
     delta: (f32, f32),
+    separate: bool,
 ) -> Vec<PathPoint> {
     let mut points = original.to_vec();
     let Some(point) = points.get_mut(index) else {
         return points;
     };
+    // Judged on the press-time values (`original`), which is also the frame
+    // the delta is measured from: a drag cannot argue itself out of the
+    // symmetry it started with, half way through.
+    let mirror = !separate && tangents_are_symmetric(point);
+    let opposite = (-delta.0, -delta.1);
     match handle {
         PathHandleKind::Point => {
             offset_vec2(&mut point.p, delta);
         }
-        PathHandleKind::InTangent => offset_vec2(&mut point.in_tan, delta),
-        PathHandleKind::OutTangent => offset_vec2(&mut point.out_tan, delta),
+        PathHandleKind::InTangent => {
+            offset_vec2(&mut point.in_tan, delta);
+            if mirror {
+                offset_vec2(&mut point.out_tan, opposite);
+            }
+        }
+        PathHandleKind::OutTangent => {
+            offset_vec2(&mut point.out_tan, delta);
+            if mirror {
+                offset_vec2(&mut point.in_tan, opposite);
+            }
+        }
     }
     points
 }
@@ -6622,6 +6685,10 @@ mod tests {
         );
     }
 
+    /// Completion criterion: a point whose arms are **already** not
+    /// reflections moves one arm alone, with no modifier — the behaviour that
+    /// was there before the smooth handle existed, kept for every point the
+    /// user has already split.
     #[test]
     fn path_handle_editing_moves_only_the_requested_vector() {
         let original = vec![PathPoint {
@@ -6629,15 +6696,106 @@ mod tests {
             in_tan: Vec2(-3.0, 4.0),
             out_tan: Vec2(5.0, -6.0),
         }];
-        let edited = edited_path_points(&original, 0, PathHandleKind::OutTangent, (2.0, 3.0));
+        assert!(
+            !tangents_are_symmetric(&original[0]),
+            "the fixture is the already-split case"
+        );
+        let edited =
+            edited_path_points(&original, 0, PathHandleKind::OutTangent, (2.0, 3.0), false);
         assert_eq!(edited[0].p, original[0].p);
         assert_eq!(edited[0].in_tan, original[0].in_tan);
         assert_eq!(edited[0].out_tan, Vec2(7.0, -3.0));
 
-        let moved_point = edited_path_points(&original, 0, PathHandleKind::Point, (2.0, 3.0));
+        let moved_point =
+            edited_path_points(&original, 0, PathHandleKind::Point, (2.0, 3.0), false);
         assert_eq!(moved_point[0].p, Vec2(12.0, 23.0));
         assert_eq!(moved_point[0].in_tan, original[0].in_tan);
         assert_eq!(moved_point[0].out_tan, original[0].out_tan);
+    }
+
+    /// Completion criterion: dragging one tangent of a smooth point carries
+    /// the other one with it, mirrored — and `Alt` does not.
+    #[test]
+    fn a_smooth_points_tangents_move_together_until_alt_splits_them() {
+        let smooth = vec![smooth_path_point((10.0, 20.0), (30.0, 20.0))];
+        assert!(tangents_are_symmetric(&smooth[0]));
+
+        for (handle, expected_in, expected_out) in [
+            (
+                PathHandleKind::OutTangent,
+                Vec2(-22.0, -3.0),
+                Vec2(22.0, 3.0),
+            ),
+            (
+                PathHandleKind::InTangent,
+                Vec2(-18.0, 3.0),
+                Vec2(18.0, -3.0),
+            ),
+        ] {
+            let mirrored = edited_path_points(&smooth, 0, handle, (2.0, 3.0), false);
+            assert_eq!(
+                (mirrored[0].in_tan, mirrored[0].out_tan),
+                (expected_in, expected_out),
+                "the opposite arm follows the grabbed one, reflected"
+            );
+            assert_eq!(mirrored[0].p, smooth[0].p, "the anchor stays put");
+            assert!(
+                tangents_are_symmetric(&mirrored[0]),
+                "and the point is still smooth"
+            );
+        }
+
+        // Completion criterion: after an Alt drag the opposite tangent has not
+        // moved, and the point is split from then on.
+        let split = edited_path_points(&smooth, 0, PathHandleKind::OutTangent, (2.0, 3.0), true);
+        assert_eq!(
+            split[0].in_tan, smooth[0].in_tan,
+            "Alt leaves the opposite arm exactly where it was"
+        );
+        assert_eq!(split[0].out_tan, Vec2(22.0, 3.0));
+        assert!(!tangents_are_symmetric(&split[0]));
+
+        let again = edited_path_points(&split, 0, PathHandleKind::OutTangent, (1.0, 1.0), false);
+        assert_eq!(
+            again[0].in_tan, split[0].in_tan,
+            "a split point stays split without the modifier: no flag was needed to remember"
+        );
+
+        // A drag back to the press point restores the arms bit for bit, which
+        // is what lets a zero-delta release skip the commit and the revert.
+        assert_eq!(
+            edited_path_points(&smooth, 0, PathHandleKind::OutTangent, (0.0, 0.0), false),
+            smooth
+        );
+    }
+
+    /// The symmetry test tolerates the rounding f32 composition units carry,
+    /// and nothing more: a corner point has no arms to mirror, and a bend the
+    /// user can see is not "nearly symmetric".
+    #[test]
+    fn tangent_symmetry_is_read_off_the_values() {
+        let point = |in_tan: (f32, f32), out_tan: (f32, f32)| PathPoint {
+            p: Vec2(0.0, 0.0),
+            in_tan: Vec2(in_tan.0, in_tan.1),
+            out_tan: Vec2(out_tan.0, out_tan.1),
+        };
+        assert!(tangents_are_symmetric(&point((-10.0, -5.0), (10.0, 5.0))));
+        assert!(
+            tangents_are_symmetric(&point((-8000.0, 0.0), (7999.9995, 0.0))),
+            "one ulp at 4K magnitudes is still one smooth handle"
+        );
+        assert!(
+            !tangents_are_symmetric(&point((-10.0, 0.0), (10.0, 0.1))),
+            "a visible bend is a split point"
+        );
+        assert!(
+            !tangents_are_symmetric(&point((-10.0, 0.0), (5.0, 0.0))),
+            "arms of different lengths are not reflections"
+        );
+        assert!(
+            !tangents_are_symmetric(&corner_path_point((10.0, 20.0))),
+            "a corner has no arms at all"
+        );
     }
 
     #[test]

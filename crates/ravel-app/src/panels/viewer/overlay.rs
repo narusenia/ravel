@@ -1734,11 +1734,14 @@ impl ViewerOverlay for PathEditOverlay {
         handles
     }
 
+    /// `Alt` splits the handle: the grabbed arm moves alone, and the point is
+    /// left asymmetric — which is how every later drag of it stays independent
+    /// without a flag being written anywhere ([`edited_path_points`]).
     fn drag(
         &self,
         handle: &OverlayHandle,
         delta: (f32, f32),
-        _modifiers: DragModifiers,
+        modifiers: DragModifiers,
         ctx: &OverlayContext,
     ) -> Option<OverlayEdit> {
         let (index, kind) = handle.id.path_point()?;
@@ -1750,7 +1753,8 @@ impl ViewerOverlay for PathEditOverlay {
         };
         let graph = ravel_ui::document::resolve_network(document, &network)?;
         let original = path_points(graph.node(*node)?)?;
-        let points: Vec<PathPoint> = edited_path_points(original, index, kind, delta);
+        let points: Vec<PathPoint> =
+            edited_path_points(original, index, kind, delta, modifiers.alt);
         Some(OverlayEdit::NodeParameter {
             network,
             node: *node,
@@ -4304,6 +4308,61 @@ mod tests {
             .drag(anchor, (7.0, -3.0), DragModifiers::default(), &ctx)
             .unwrap();
         assert_eq!(again, edit);
+    }
+
+    /// `Alt` reaches the path edit: the same tangent drag carries the opposite
+    /// arm with it plain, and moves it alone with the modifier held.
+    #[test]
+    fn alt_splits_a_smooth_points_tangents_through_the_handle_drag() {
+        let (ctx, node, comp_id, layer_id) = doc_with_node(path_node(vec![
+            PathPoint {
+                p: Vec2(100.0, 200.0),
+                in_tan: Vec2(-10.0, 0.0),
+                out_tan: Vec2(10.0, 0.0),
+            },
+            PathPoint {
+                p: Vec2(300.0, 400.0),
+                in_tan: Vec2(0.0, 0.0),
+                out_tan: Vec2(0.0, 0.0),
+            },
+        ]));
+        let handles = PathEditOverlay.handles(&ctx);
+        let tangent = handles
+            .iter()
+            .find(|handle| {
+                handle.id
+                    == OverlayHandleId::PathPoint {
+                        index: 0,
+                        kind: PathHandleKind::OutTangent,
+                    }
+            })
+            .expect("the smooth point offers a tangent handle");
+
+        let alt = DragModifiers {
+            alt: true,
+            ..DragModifiers::default()
+        };
+        for (modifiers, expected_in) in [
+            (DragModifiers::default(), Vec2(-14.0, -6.0)),
+            (alt, Vec2(-10.0, 0.0)),
+        ] {
+            let edit = PathEditOverlay
+                .drag(tangent, (4.0, 6.0), modifiers, &ctx)
+                .expect("a tangent drag writes the points parameter");
+            let updated = edit.apply(ctx.document.as_ref().unwrap()).unwrap();
+            let graph = ravel_ui::document::resolve_network(
+                &updated,
+                &NetworkPath::layer(comp_id, layer_id),
+            )
+            .unwrap();
+            let points = path_points(graph.node(node).unwrap()).unwrap();
+            assert_eq!(points[0].out_tan, Vec2(14.0, 6.0), "the grabbed arm moved");
+            assert_eq!(
+                points[0].in_tan, expected_in,
+                "alt = {}: the opposite arm",
+                modifiers.alt
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -136,6 +136,15 @@ impl BoxSelectTarget {
             Self::Layers { comp, .. } => BoxSelectScope::Layers(*comp),
         }
     }
+
+    /// The composition the candidates live in. A drag cannot outlive it being
+    /// the one on screen.
+    fn comp(&self) -> CompId {
+        match self {
+            Self::Nodes { network, .. } => network.comp,
+            Self::Layers { comp, .. } => *comp,
+        }
+    }
 }
 
 /// A Select-tool press on empty space, sweeping a rectangle.
@@ -642,6 +651,16 @@ impl ViewerPanel {
             {
                 this.finalize_pen_session(false, cx);
             }
+            // The box selection follows the same rule: a deliberate switch away
+            // from Select ends the sweep — leaving it live would keep declaring
+            // candidate evaluation for a gesture no tool can finish — while the
+            // `h` hold is transient navigation that gives the tool back.
+            if this.box_select.is_some()
+                && state.active != ravel_ui::ToolKind::Select
+                && !state.hand_hold
+            {
+                this.cancel_box_select(cx);
+            }
             this.pointer_hint = tool_pointer_hint(state.active);
             cx.notify();
         });
@@ -723,6 +742,24 @@ impl ViewerPanel {
                 })
             }) {
                 this.cancel_handle_drag(cx);
+            }
+            // A composition switch resets the layer selection
+            // (`set_active_composition`), so this observer is where a Viewer
+            // hears about it. A sweep whose candidates belong to a composition
+            // that is no longer on screen has to end: the release already
+            // refuses to publish into it, but the declaration would keep
+            // evaluating a network nobody is looking at.
+            //
+            // The node scope needs nothing further. A layer deleted under a
+            // live sweep leaves its network unresolvable, and the release then
+            // finds no bboxes and publishes the empty selection a click on
+            // nothing publishes — the same outcome, by the same rule.
+            if this
+                .box_select
+                .as_ref()
+                .is_some_and(|drag| Some(drag.target.comp()) != this.active_comp(cx))
+            {
+                this.cancel_box_select(cx);
             }
             this.request_overlay_eval(cx);
             cx.notify();
@@ -9785,5 +9822,87 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// The sweep follows the pen session's rule: a deliberate tool switch ends
+    /// it, and the `h` hold — transient navigation that gives the tool back —
+    /// keeps it.
+    #[gpui::test]
+    fn a_tool_switch_ends_the_sweep_but_the_hand_hold_keeps_it(cx: &mut TestAppContext) {
+        let (window, _project, comp_id, layer) = shell_setup(cx);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+
+        cx.update(|cx| {
+            cx.set_global(ToolState {
+                active: ravel_ui::ToolKind::Hand,
+                hand_hold: true,
+                previous: ravel_ui::ToolKind::Select,
+            })
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    panel.box_select.is_some(),
+                    "the `h` hold is navigation, not a tool change"
+                );
+            })
+            .unwrap();
+        assert!(live_box_select_owner(cx).is_some());
+
+        cx.update(|cx| cx.set_global(tool_state(ravel_ui::ToolKind::Pen)));
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.box_select.is_none(), "a real switch ends the sweep");
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            None,
+            "and withdraws the candidates"
+        );
+    }
+
+    /// A composition switch ends the sweep. The release already refuses to
+    /// publish into a composition that left the screen, but the declaration
+    /// would keep evaluating a network nobody is looking at.
+    #[gpui::test]
+    fn a_composition_switch_ends_the_sweep(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layer) = shell_setup(cx);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+
+        project.update(cx, |project, cx| project.set_active_composition(None, cx));
+        cx.run_until_parked();
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(panel.box_select.is_none());
+            })
+            .unwrap();
+        assert_eq!(live_box_select_owner(cx), None);
     }
 }

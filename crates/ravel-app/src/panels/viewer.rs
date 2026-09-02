@@ -6477,8 +6477,13 @@ mod tests {
             (f32::MAX, f32::MAX)
         )));
 
-        // A negative extent cannot come out of `abs` or `hypot` today, but the
-        // guard does not rely on that.
+        // A negative extent, and a non-finite centre beside finite extents,
+        // cannot come out of `drag_geometry` or `radial_drag_geometry` today:
+        // both derive the extents from the same coordinates as the centre, so
+        // a bad centre always poisons an extent as well. The guard does not
+        // rely on that — a producer that keeps the extents from elsewhere
+        // (a snapped centre, a numeric entry) would reach it — so the
+        // constructed cases are pinned directly.
         assert!(drag_geometry_degenerate(DragGeometry {
             center: (0.0, 0.0),
             half: (-1.0, 1.0),
@@ -6486,6 +6491,14 @@ mod tests {
         assert!(drag_geometry_degenerate(DragGeometry {
             center: (0.0, 0.0),
             half: (1.0, -1.0),
+        }));
+        assert!(drag_geometry_degenerate(DragGeometry {
+            center: (nan, 0.0),
+            half: (10.0, 10.0),
+        }));
+        assert!(drag_geometry_degenerate(DragGeometry {
+            center: (0.0, inf),
+            half: (10.0, 10.0),
         }));
     }
 

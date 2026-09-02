@@ -673,6 +673,47 @@ mod tests {
         }
     }
 
+    /// `command_id` and `from_command` are inverses.
+    ///
+    /// Two hand-written `match` arms per tool, and nothing makes them agree:
+    /// a tool whose `command_id` names another tool's command would switch to
+    /// the wrong tool from the toolbar while the chord still worked, which is
+    /// the kind of mismatch that reads as a flaky UI rather than a bug.
+    #[test]
+    fn tool_and_command_map_round_trip() {
+        let mut tools = 0;
+        for cmd in CommandId::all() {
+            if let Some(tool) = ToolKind::from_command(cmd) {
+                assert_eq!(
+                    tool.command_id(),
+                    cmd,
+                    "{tool:?} came from {cmd} but names a different command"
+                );
+                tools += 1;
+            }
+        }
+        assert_eq!(tools, 8, "a tool fell out of the command table");
+
+        // And the other direction: every tool's command maps back to it, so a
+        // tool missing from `from_command` cannot hide behind the loop above.
+        for tool in [
+            ToolKind::Select,
+            ToolKind::Pen,
+            ToolKind::Rect,
+            ToolKind::Ellipse,
+            ToolKind::Polygon,
+            ToolKind::Star,
+            ToolKind::Hand,
+            ToolKind::Zoom,
+        ] {
+            assert_eq!(
+                ToolKind::from_command(tool.command_id()),
+                Some(tool),
+                "{tool:?}'s command does not map back to it"
+            );
+        }
+    }
+
     /// Every tool has a label key of its own.
     ///
     /// The toolbar uses the key as the button's element id as well as its

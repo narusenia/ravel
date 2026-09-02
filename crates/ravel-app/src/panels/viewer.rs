@@ -3026,16 +3026,12 @@ impl ViewerPanel {
             .map(|s| s.active)
             .unwrap_or_default();
 
-        const TOOLS: [ravel_ui::ToolKind; 8] = [
-            ravel_ui::ToolKind::Select,
-            ravel_ui::ToolKind::Pen,
-            ravel_ui::ToolKind::Rect,
-            ravel_ui::ToolKind::Ellipse,
-            ravel_ui::ToolKind::Polygon,
-            ravel_ui::ToolKind::Star,
-            ravel_ui::ToolKind::Hand,
-            ravel_ui::ToolKind::Zoom,
-        ];
+        // Derived from the command table, not listed again: a tool with a
+        // chord but no button is a shortcut nobody can discover, and a second
+        // list is where that drift happens. The table's order is the strip's.
+        let tools = ravel_ui::command::CommandId::all()
+            .filter_map(ravel_ui::ToolKind::from_command)
+            .collect::<Vec<_>>();
 
         let entity = cx.entity().downgrade();
         let mut row = div()
@@ -3047,7 +3043,7 @@ impl ViewerPanel {
             .border_b_1()
             .border_color(cx.theme().colors.border);
 
-        for tool in TOOLS {
+        for tool in tools {
             let is_active = tool == active;
             let entity = entity.clone();
             let btn = Button::new(SharedString::from(tool.label_key()))

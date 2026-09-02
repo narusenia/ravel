@@ -41,6 +41,7 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
 use ravel_ui::ToolKind;
 use ravel_ui::document::NetworkPath;
+use ravel_ui::layout::PanelInstanceId;
 use ravel_ui::panels::viewer::{
     PixelReadoutFormat, PlaybackStatusInputs, ViewerResolution, comp_to_buffer_index,
     pixel_readout_text, playback_status_text,
@@ -185,8 +186,20 @@ pub struct BoxSelect {
     pub rect: Option<CompRect>,
 }
 
-/// Live gesture state: the scope of the Viewer's box-selection drag, or `None`
-/// while no drag is in flight.
+/// The Viewer instance holding the drag, and what it picks from.
+///
+/// The owner is what makes the Global safe with several Viewers open
+/// (REQ-UI-005): only the panel named here may withdraw the declaration, so
+/// one instance ending its gesture cannot stop the evaluation another one is
+/// waiting for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveBoxSelect {
+    pub panel: PanelInstanceId,
+    pub scope: BoxSelectScope,
+}
+
+/// Live gesture state: the Viewer's box-selection drag, or `None` while no
+/// drag is in flight.
 ///
 /// A Global rather than a panel field because two snapshots have to agree on
 /// it. The panel builds its own [`OverlayContext`] for painting, but the one
@@ -197,19 +210,26 @@ pub struct BoxSelect {
 /// for the whole gesture, so the target list stays identical from the press to
 /// the release and a pointer move re-requests nothing.
 ///
-/// The Viewer panel is the only writer: it sets the scope on the press and
-/// clears it on the release, the cancel, and its own teardown.
+/// A Viewer panel is the only writer. A press installs its own instance as the
+/// owner — the pointer is one, so a drag standing in another instance has lost
+/// its release and is stale — and the release, the cancel and the panel's
+/// teardown clear it **only when this panel still owns it**.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BoxSelectDrag(pub Option<BoxSelectScope>);
+pub struct BoxSelectDrag(pub Option<LiveBoxSelect>);
 
 impl Global for BoxSelectDrag {}
 
 /// The live drag as the target-collecting context carries it: the scope with
 /// no rectangle. One function so the request path names one field and no
-/// caller invents a rectangle for a context that never paints.
+/// caller invents a rectangle for a context that never paints. Which panel
+/// owns the drag does not reach the context — the request is the composition's,
+/// not a panel's.
 pub fn box_select_candidates(cx: &App) -> Option<BoxSelect> {
-    let scope = cx.try_global::<BoxSelectDrag>()?.0.clone()?;
-    Some(BoxSelect { scope, rect: None })
+    let live = cx.try_global::<BoxSelectDrag>()?.0.clone()?;
+    Some(BoxSelect {
+        scope: live.scope,
+        rect: None,
+    })
 }
 
 /// Everything the overlays are allowed to see, snapshotted once per render or

@@ -520,6 +520,10 @@ pub struct ViewerPanel {
     zoom_drag: Option<ZoomDrag>,
     move_drag: Option<MoveDrag>,
     box_select: Option<BoxSelectGesture>,
+    /// This panel's identity, for the one piece of shared state a gesture of
+    /// its own writes: the box-selection scope
+    /// ([`Self::withdraw_box_select_candidates`]).
+    instance: ravel_ui::layout::PanelInstanceId,
     shape_drag: Option<ShapeDrag>,
     pen_session: Option<PenSession>,
     handle_drag: Option<OverlayHandleDrag>,
@@ -776,7 +780,7 @@ impl ViewerPanel {
             // scope standing, and every later request would keep evaluating
             // geometry for a gesture nobody is making.
             if this.box_select.take().is_some() {
-                cx.set_global(overlay::BoxSelectDrag(None));
+                this.withdraw_box_select_candidates(cx);
             }
         })
         .detach();
@@ -796,6 +800,7 @@ impl ViewerPanel {
             zoom_drag: None,
             move_drag: None,
             box_select: None,
+            instance,
             shape_drag: None,
             pen_session: None,
             handle_drag: None,
@@ -1441,7 +1446,17 @@ impl ViewerPanel {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
-        cx.set_global(overlay::BoxSelectDrag(Some(target.scope())));
+        // This panel becomes the owner, taking the declaration over from
+        // another instance if one is still holding it: the pointer is one, so a
+        // drag standing elsewhere has lost its release and is stale. Refusing
+        // to start would strand this Viewer until the stale one is nudged;
+        // taking over is self-healing — the stale gesture is dropped by its own
+        // panel on its next idle pointer move, and the owner check below stops
+        // it withdrawing what this drag declared.
+        cx.set_global(overlay::BoxSelectDrag(Some(overlay::LiveBoxSelect {
+            panel: self.instance,
+            scope: target.scope(),
+        })));
         self.box_select = Some(BoxSelectGesture {
             start: pointer,
             current: pointer,
@@ -1477,7 +1492,7 @@ impl ViewerPanel {
         let Some(drag) = self.box_select.take() else {
             return;
         };
-        cx.set_global(overlay::BoxSelectDrag(None));
+        self.withdraw_box_select_candidates(cx);
         cx.notify();
         let Some(pointer) = self.comp_position(position) else {
             return;
@@ -1517,8 +1532,27 @@ impl ViewerPanel {
     /// turning up under another button).
     fn cancel_box_select(&mut self, cx: &mut Context<Self>) {
         if self.box_select.take().is_some() {
-            cx.set_global(overlay::BoxSelectDrag(None));
+            self.withdraw_box_select_candidates(cx);
             cx.notify();
+        }
+    }
+
+    /// Stop declaring this panel's box-select candidates — **only if this panel
+    /// still owns the declaration**.
+    ///
+    /// Several Viewers may be open (REQ-UI-005) and they share one Global, so an
+    /// unconditional clear would let one instance ending its gesture stop the
+    /// evaluation another instance's live drag is waiting for. That happens for
+    /// real: a release this window never received leaves a gesture standing
+    /// here while the next press starts one, and takes the ownership, in
+    /// another Viewer.
+    fn withdraw_box_select_candidates(&self, cx: &mut App) {
+        let owned = cx
+            .try_global::<overlay::BoxSelectDrag>()
+            .and_then(|drag| drag.0.as_ref())
+            .is_some_and(|live| live.panel == self.instance);
+        if owned {
+            cx.set_global(overlay::BoxSelectDrag(None));
         }
     }
 
@@ -9660,5 +9694,96 @@ mod tests {
                 "the press-time selection survives exactly when Shift asked it to"
             );
         }
+    }
+
+    /// A second Viewer on the same project, with its own instance id — the
+    /// state REQ-UI-005 allows, and what the box-select Global has to survive.
+    fn extra_viewer(cx: &mut TestAppContext, instance: u64) -> WindowHandle<ViewerPanel> {
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(instance), window, cx)
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.composition_resolution = Some(FIXTURE_RES);
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+            })
+            .unwrap();
+        window
+    }
+
+    fn live_box_select_owner(cx: &mut TestAppContext) -> Option<ravel_ui::layout::PanelInstanceId> {
+        cx.update(|cx| {
+            cx.try_global::<overlay::BoxSelectDrag>()
+                .and_then(|drag| drag.0.as_ref())
+                .map(|live| live.panel)
+        })
+    }
+
+    /// One Viewer ending its gesture must not withdraw another Viewer's
+    /// candidate declaration: the Global is shared, the panels are not.
+    ///
+    /// The path is real — a release this window never received leaves a gesture
+    /// standing while the next press starts one in another Viewer — so the
+    /// second press takes the ownership and the first panel's release, arriving
+    /// late, has to be a no-op on the shared state.
+    #[gpui::test]
+    fn a_release_in_one_viewer_leaves_another_viewers_sweep_alone(cx: &mut TestAppContext) {
+        let (first, _project, comp_id, layer) = shell_setup(cx);
+        let second = extra_viewer(cx, 1);
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(NetworkPath::layer(comp_id, layer)),
+                nodes: HashSet::new(),
+            })
+        });
+
+        first
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (400.0, 400.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            Some(ravel_ui::layout::PanelInstanceId(0))
+        );
+
+        second
+            .update(cx, |panel, _window, cx| {
+                let press = press_comp(panel, (500.0, 500.0), Modifiers::default());
+                panel.left_mouse_down(&press, cx);
+                assert!(panel.box_select.is_some());
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            Some(ravel_ui::layout::PanelInstanceId(1)),
+            "the new press takes the declaration over from the stale one"
+        );
+
+        // The first panel's release, arriving after the take-over.
+        first
+            .update(cx, |panel, _window, cx| {
+                panel.box_select_ended(window_point(panel, (400.0, 400.0)), cx);
+                assert!(panel.box_select.is_none());
+            })
+            .unwrap();
+        assert_eq!(
+            live_box_select_owner(cx),
+            Some(ravel_ui::layout::PanelInstanceId(1)),
+            "and does not withdraw the other Viewer's candidates"
+        );
+        second
+            .update(cx, |panel, _window, cx| {
+                assert!(panel.box_select.is_some(), "the live sweep is untouched");
+                assert!(
+                    !OverlayRegistry::builtin()
+                        .eval_targets(&panel.overlay_context(cx))
+                        .is_empty()
+                );
+            })
+            .unwrap();
     }
 }

@@ -109,7 +109,7 @@ about = "F1"
 
 | バインド | コンテキスト |
 |---|---|
-| `V` / `P` / `R` / `E` / `H` / `Z`（ツール切替） | Viewer |
+| `V` / `P` / `R` / `E` / `G` / `S` / `H` / `Z`（ツール切替） | Viewer |
 | `Cmd+D`（複製） | Node Editor、Timeline |
 | `F`（ビューをフィット） | Node Editor |
 | `L`（自動整列） | Node Editor |
@@ -128,8 +128,8 @@ GPUI の Action は修飾キーを運ばないので**コマンドを 2 本に�
 （`timeline.reveal_position` と `timeline.reveal_position_add`）。AE の
 二度押し（`UU` / `EE`）は `KeyChord` に表現が無いため `Alt+U` / `Alt+E` に
 割り当てた。挙動は [`timeline.md`](timeline.md) の「行の絞り込み」節。
-Viewer の `P` / `R` と Node Editor の `L` はキーコンテキストが違うので
-衝突しない。
+Viewer の `P` / `R` / `S` と Node Editor の `L` はキーコンテキストが違うので
+衝突しない。多角形が `G`（polyGon）なのは `P` がペンに埋まっているため。
 
 AE 相当のプレイヘッド操作（`Cmd+Shift+D` / `[` / `]` / `I` / `O`）も
 コンテキスト付きで登録する。どれも Timeline のレイヤー選択とプレイヘッドを

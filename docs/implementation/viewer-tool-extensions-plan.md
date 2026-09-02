@@ -299,6 +299,39 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 - 既存の rect / ellipse の生成経路が変わっていないテスト
 - 生成が 1 undo であるテスト
 
+**実装メモ**
+
+- **押下点が中心、ドラッグ距離（`hypot`）が外径**（`radial_drag_geometry`）。
+  矩形・楕円の `drag_geometry` は角から角の箱を作るので使っていない —
+  放射対称な図形を角から引くとポインタを動かすたびに中心が動き、図形が
+  カーソルの下で跳ねる。AE の polygon / star ツールも中心から引く
+- `DragGeometry` はそのまま使い、`half` の両成分に同じ外径を入れた。だから
+  `drag_geometry_degenerate`（どちらかの成分が 0）が「距離 0」の判定に
+  そのまま使え、0 距離のリリースが無効な図形をコミットしない既存の規約に
+  乗る。**判定を 2 つ持たない**ためで、`ShapeDrawKind` 側の分岐は
+  `is_radial()` の 1 つだけ
+- 書くパラメータは `shape.polygon` の `radius` と `shape.star` の
+  `outer_radius` **だけ**。`sides` / `inner_radius` / `points` はレジストリの
+  既定値のまま残す（計画のとおり、確定後に Properties で調整する）。
+  **星の外径のキーは `outer_radius`** で `radius` ではない
+- **修飾キーは足していない。** Shift（正形）と Alt（中心から）は放射対称な
+  図形では意味を持たない — 中心は既に押下点で、角度の拘束は回転パラメータを
+  ドラッグに載せる話になるのでこの単位の外。矩形・楕円の Shift / Alt の意味は
+  変えていない
+- **放射ドラッグはスナップしない**。中心は押下で固定され、ポインタに追従する
+  辺が無いので、補正はガイドが名指しした線ではなく外径を書き換えるだけになる
+  （Shift 中の描画がスナップしないのと同じ理由）
+- `ShapeDrawKind::from_tool` の `_ => None` を網羅 `match` に直した。ツールを
+  足したときに「描画に対応しないツール」を明示させるため
+- chord は Viewer キーコンテキストで `G`（polyGon。`P` はペン）と `S`。
+  どちらもグローバルの既定バインドと Viewer の既存 chord のどちらとも
+  衝突しない（`viewer_tool_keybindings_are_free_of_the_global_chords` が
+  機械的に確認する）。Timeline の `S`（Reveal Scale）とはキーコンテキストが
+  違うので衝突しない — `P` / `R` が既にそうなっているのと同じ
+- ロケール（`tool.polygon` / `tool.star` と `menu.tool.*`、en / ja）は
+  ラベルの無いツールを出荷しないためこの単位で入れた。散文の文書は
+  `TOOLX-5` に残っている
+
 ### TOOLX-5: ロケールと文書
 
 - 追加ツールと操作のロケール（en / ja）

@@ -256,14 +256,23 @@ impl MoveDrag {
 enum ShapeDrawKind {
     Rect,
     Ellipse,
+    Polygon,
+    Star,
 }
 
 impl ShapeDrawKind {
+    /// Exhaustive on purpose: a tool added without an answer here would
+    /// silently draw nothing.
     fn from_tool(tool: ravel_ui::ToolKind) -> Option<Self> {
         match tool {
             ravel_ui::ToolKind::Rect => Some(Self::Rect),
             ravel_ui::ToolKind::Ellipse => Some(Self::Ellipse),
-            _ => None,
+            ravel_ui::ToolKind::Polygon => Some(Self::Polygon),
+            ravel_ui::ToolKind::Star => Some(Self::Star),
+            ravel_ui::ToolKind::Select
+            | ravel_ui::ToolKind::Pen
+            | ravel_ui::ToolKind::Hand
+            | ravel_ui::ToolKind::Zoom => None,
         }
     }
 
@@ -271,12 +280,24 @@ impl ShapeDrawKind {
         match self {
             Self::Rect => "shape.rect",
             Self::Ellipse => "shape.ellipse",
+            Self::Polygon => "shape.polygon",
+            Self::Star => "shape.star",
+        }
+    }
+
+    /// Whether the shape is radially symmetric, and so drawn from its centre
+    /// out rather than corner to corner (`TOOLX-4`).
+    fn is_radial(self) -> bool {
+        match self {
+            Self::Rect | Self::Ellipse => false,
+            Self::Polygon | Self::Star => true,
         }
     }
 }
 
 /// Drag-derived shape extents in comp space: `center` plus the half extents
-/// (rect half width/height, ellipse radii).
+/// (rect half width/height, ellipse radii, and for a radial shape the outer
+/// radius in both components).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DragGeometry {
     center: (f32, f32),
@@ -293,8 +314,8 @@ struct CreatedShape {
     geo: DragGeometry,
 }
 
-/// Rect/Ellipse tool drag. The node is created on the first mouse move, not
-/// on mouse-down, so a plain click leaves the document (and the selection)
+/// Shape-tool drag. The node is created on the first mouse move, not on
+/// mouse-down, so a plain click leaves the document (and the selection)
 /// untouched.
 #[derive(Clone)]
 struct ShapeDrag {
@@ -1697,8 +1718,8 @@ impl ViewerPanel {
         cx.set_global(super::SelectedPropertiesTarget(target));
     }
 
-    /// Rect/Ellipse tool mouse-down: record the pending drag. Nothing is
-    /// created yet — a click without a drag must not touch the document.
+    /// Shape-tool mouse-down: record the pending drag. Nothing is created yet
+    /// — a click without a drag must not touch the document.
     fn shape_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some(kind) = ShapeDrawKind::from_tool(active_tool(cx)) else {
             return;
@@ -1785,15 +1806,23 @@ impl ViewerPanel {
         // the larger of the two deltas, which overwrites whichever axis had
         // just been snapped — the guide would name a line the drawn corner
         // misses. A constrained drag snaps nothing.
-        let corner = (!modifiers.shift).then(|| point_rect(pointer));
+        //
+        // A radial shape snaps nothing for the same reason: its centre is
+        // pinned at the press and no edge of it follows the pointer, so a
+        // correction there would only lie about the radius the drag asked for.
+        let corner = (!modifiers.shift && !drag.kind.is_radial()).then(|| point_rect(pointer));
         let snapped = self.snapped_delta(&drag.snap_lines, corner, (0.0, 0.0), modifiers);
         let pointer = (pointer.0 + snapped.0, pointer.1 + snapped.1);
-        let geo = drag_geometry(
-            drag.start,
-            pointer,
-            event.modifiers.shift,
-            event.modifiers.alt,
-        );
+        let geo = if drag.kind.is_radial() {
+            radial_drag_geometry(drag.start, pointer)
+        } else {
+            drag_geometry(
+                drag.start,
+                pointer,
+                event.modifiers.shift,
+                event.modifiers.alt,
+            )
+        };
         let Some(project) = self.project(cx) else {
             return;
         };
@@ -5004,6 +5033,26 @@ fn drag_geometry(start: (f32, f32), current: (f32, f32), shift: bool, alt: bool)
     }
 }
 
+/// Map a comp-space drag to the extents of a radially symmetric shape: the
+/// press point is the centre and the drag distance is the outer radius
+/// (`TOOLX-4`).
+///
+/// Not [`drag_geometry`]: a polygon or a star drawn corner to corner would move
+/// its own centre on every pointer move, so the shape would jump around under
+/// the cursor instead of growing out of the press. Both components carry the
+/// same radius, which is what makes the degenerate check below apply unchanged.
+///
+/// Shift and Alt carry no meaning here — the shape is already centred on the
+/// press, and constraining the *angle* means dragging a rotation parameter,
+/// which this unit does not do.
+fn radial_drag_geometry(start: (f32, f32), current: (f32, f32)) -> DragGeometry {
+    let radius = (current.0 - start.0).hypot(current.1 - start.1);
+    DragGeometry {
+        center: start,
+        half: (radius, radius),
+    }
+}
+
 /// A drag with a zero extent on either axis creates nothing: the resulting
 /// shape would be invisible.
 fn drag_geometry_degenerate(geo: DragGeometry) -> bool {
@@ -5023,6 +5072,15 @@ fn drawn_shape_node(mut node: Node, kind: ShapeDrawKind, geo: DragGeometry) -> N
         }
         ShapeDrawKind::Ellipse => {
             values.push(("radius", ParameterValue::vec2(geo.half.0, geo.half.1)));
+        }
+        // Only the outer radius: the side / point count and the star's inner
+        // radius keep the registry defaults and are adjusted in Properties
+        // after the shape is committed (`TOOLX-4`).
+        ShapeDrawKind::Polygon => {
+            values.push(("radius", ParameterValue::Float(geo.half.0)));
+        }
+        ShapeDrawKind::Star => {
+            values.push(("outer_radius", ParameterValue::Float(geo.half.0)));
         }
     }
     for (key, value) in values {
@@ -6408,6 +6466,117 @@ mod tests {
         );
     }
 
+    /// A radial shape is drawn from its centre: the press point *is* the
+    /// centre and the drag distance is the outer radius, in every direction.
+    #[test]
+    fn radial_drag_geometry_puts_the_outer_radius_at_the_drag_distance() {
+        // 3-4-5: a distance that is not either delta, so a stray `abs()` on
+        // one axis cannot pass.
+        for to in [
+            (330.0, 240.0),
+            (270.0, 240.0),
+            (330.0, 160.0),
+            (270.0, 160.0),
+        ] {
+            let geo = radial_drag_geometry((300.0, 200.0), to);
+            assert_eq!(geo.center, (300.0, 200.0), "the press point is the centre");
+            assert!(
+                (geo.half.0 - 50.0).abs() < 1e-3 && (geo.half.1 - 50.0).abs() < 1e-3,
+                "the drag distance is the outer radius: {geo:?}"
+            );
+        }
+
+        // And it is *not* the corner-to-corner box the rect tools use, whose
+        // centre drifts with the pointer.
+        let corner = drag_geometry((300.0, 200.0), (330.0, 240.0), false, false);
+        assert_ne!(corner.center, (300.0, 200.0));
+        assert_ne!(corner.half, (50.0, 50.0));
+    }
+
+    /// Both components carry the same radius, so the existing degenerate check
+    /// answers "zero distance" without a rule of its own.
+    #[test]
+    fn a_radial_drag_is_degenerate_only_at_zero_distance() {
+        assert!(drag_geometry_degenerate(radial_drag_geometry(
+            (10.0, 10.0),
+            (10.0, 10.0)
+        )));
+        // Along one axis only: a box drag would call this degenerate, a radial
+        // one must not.
+        assert!(!drag_geometry_degenerate(radial_drag_geometry(
+            (10.0, 10.0),
+            (50.0, 10.0)
+        )));
+        assert!(!drag_geometry_degenerate(radial_drag_geometry(
+            (10.0, 10.0),
+            (10.0, 11.0)
+        )));
+    }
+
+    /// The polygon takes the radius and nothing else: the side count is the
+    /// registry default until Properties changes it (`TOOLX-4`).
+    #[test]
+    fn drawn_polygon_takes_the_radius_and_keeps_the_side_count() {
+        let registry = registry();
+        let fresh = registry
+            .create_node("shape.polygon", NodeId::next())
+            .unwrap();
+        let node = drawn_shape_node(
+            fresh.clone(),
+            ShapeDrawKind::Polygon,
+            radial_drag_geometry((300.0, 200.0), (330.0, 240.0)),
+        );
+        let ctx = eval_ctx();
+        assert_eq!(
+            sample_vec2_param(&node, "center", 0, &ctx),
+            Some((300.0, 200.0))
+        );
+        assert_eq!(sample_float_param(&node, "radius", 0, &ctx), Some(50.0));
+        assert_eq!(
+            param_value(&node, "sides"),
+            param_value(&fresh, "sides"),
+            "the drag must not decide the side count"
+        );
+    }
+
+    /// The star takes the *outer* radius only: the inner radius and the point
+    /// count stay at the registry defaults.
+    #[test]
+    fn drawn_star_takes_the_outer_radius_and_keeps_the_other_defaults() {
+        let registry = registry();
+        let fresh = registry.create_node("shape.star", NodeId::next()).unwrap();
+        let node = drawn_shape_node(
+            fresh.clone(),
+            ShapeDrawKind::Star,
+            radial_drag_geometry((300.0, 200.0), (330.0, 240.0)),
+        );
+        let ctx = eval_ctx();
+        assert_eq!(
+            sample_vec2_param(&node, "center", 0, &ctx),
+            Some((300.0, 200.0))
+        );
+        assert_eq!(
+            sample_float_param(&node, "outer_radius", 0, &ctx),
+            Some(50.0)
+        );
+        for key in ["inner_radius", "points"] {
+            assert_eq!(
+                param_value(&node, key),
+                param_value(&fresh, key),
+                "the drag must not decide {key}"
+            );
+        }
+    }
+
+    /// The stored value of one parameter, for "the drag left this alone"
+    /// assertions that must not hardcode the registry default.
+    fn param_value(node: &Node, key: &str) -> Option<ParameterValue> {
+        node.parameters
+            .iter()
+            .find(|param| param.key == key)
+            .map(|param| param.value.clone())
+    }
+
     #[test]
     fn wiring_target_prefers_free_rasterize_deterministically() {
         let registry = registry();
@@ -6580,6 +6749,80 @@ mod tests {
             .unwrap();
         assert!(layer.has_frame_output());
         assert_eq!(doc.validate(), Ok(()));
+    }
+
+    /// The radial tools travel the same creation path as the box ones: the
+    /// Shape template's rect placeholder is dropped and the drawn node takes
+    /// the freed rasterize geometry input.
+    #[test]
+    fn a_drawn_radial_shape_replaces_the_template_placeholder() {
+        let registry = registry();
+        for (kind, type_key, radius_key) in [
+            (ShapeDrawKind::Polygon, "shape.polygon", "radius"),
+            (ShapeDrawKind::Star, "shape.star", "outer_radius"),
+        ] {
+            let (doc, _path) = doc_with_network(Graph::new());
+            let comp = doc.root_comp.unwrap();
+            let geo = radial_drag_geometry((100.0, 100.0), (130.0, 140.0));
+            let (doc, path, node_id) =
+                create_layer_with_drawn_shape(&doc, comp, &registry, kind, geo).unwrap();
+            let graph = ravel_ui::document::resolve_network(&doc, &path).unwrap();
+
+            assert!(graph.nodes().all(|n| n.type_key != "shape.rect"));
+            assert_eq!(graph.nodes().count(), 4, "{type_key}: rect out, shape in");
+            let node = graph.node(node_id).unwrap();
+            assert_eq!(node.type_key, type_key);
+            assert_eq!(
+                sample_float_param(node, radius_key, 0, &eval_ctx()),
+                Some(50.0)
+            );
+            let rasterize_id = graph
+                .nodes()
+                .find(|n| n.type_key == "rasterize")
+                .unwrap()
+                .id;
+            let outgoing: Vec<_> = graph.edges().filter(|e| e.source == node_id).collect();
+            assert_eq!(outgoing.len(), 1, "{type_key}: one auto-wired edge");
+            assert_eq!(outgoing[0].target, rasterize_id);
+            assert_eq!(outgoing[0].target_port, InputPortIndex(0));
+            assert_eq!(doc.validate(), Ok(()));
+        }
+    }
+
+    /// And they collapse into one undo step the same way — template layer,
+    /// node and wiring all unwind together.
+    #[test]
+    fn radial_shape_creation_is_one_undo_step() {
+        use ravel_ui::document::DocumentStore;
+        let registry = registry();
+        for kind in [ShapeDrawKind::Polygon, ShapeDrawKind::Star] {
+            let (doc, _path) = doc_with_network(Graph::new());
+            let original_layers = ravel_ui::document::root_composition(&doc)
+                .unwrap()
+                .layer_count();
+            let mut store = DocumentStore::new(doc);
+            let comp = store.document().root_comp.unwrap();
+            let geo = radial_drag_geometry((100.0, 100.0), (130.0, 140.0));
+            let (doc, _path, _node) =
+                create_layer_with_drawn_shape(store.document(), comp, &registry, kind, geo)
+                    .unwrap();
+            store.apply(doc.clone());
+            store.commit(doc);
+
+            let layers = |store: &DocumentStore| {
+                ravel_ui::document::root_composition(store.document())
+                    .unwrap()
+                    .layer_count()
+            };
+            assert_eq!(layers(&store), original_layers + 1);
+            assert!(store.undo());
+            assert_eq!(
+                layers(&store),
+                original_layers,
+                "{kind:?}: one undo removes it all"
+            );
+            assert!(!store.can_undo(), "{kind:?}: no intermediate steps remain");
+        }
     }
 
     /// The whole gesture — auto-created template layer, node, and wiring —
@@ -8559,6 +8802,212 @@ mod tests {
                 1
             );
         });
+    }
+
+    /// End to end for the radial tools: the press fixes the centre and the
+    /// pointer's distance from it becomes the outer radius on the created
+    /// node — and no snap correction gets between the two.
+    #[gpui::test]
+    fn a_radial_drag_writes_the_drag_distance_as_the_outer_radius(cx: &mut TestAppContext) {
+        for (tool, kind, radius_key) in [
+            (
+                ravel_ui::ToolKind::Polygon,
+                ShapeDrawKind::Polygon,
+                "radius",
+            ),
+            (
+                ravel_ui::ToolKind::Star,
+                ShapeDrawKind::Star,
+                "outer_radius",
+            ),
+        ] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::new(),
+                });
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..ToolState::default()
+                });
+            });
+
+            let node = window
+                .update(cx, |panel, _window, cx| {
+                    panel.shape_mouse_down(&press_at(panel, (655.0, 500.0)), cx);
+                    let event = MouseMoveEvent {
+                        // A 300 / 400 delta, so the distance (500) is neither
+                        // delta nor their sum. The x also lands five units
+                        // short of the composition centre at 960 — a candidate
+                        // a box drag would be pulled onto, which would make
+                        // the radius 503.2 instead.
+                        position: window_point(panel, (955.0, 900.0)),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    };
+                    panel.shape_dragged(&event, cx);
+                    assert_eq!(
+                        panel.snap_guides.x, None,
+                        "{tool:?}: a radial drag has no edge to snap"
+                    );
+                    let created = panel
+                        .shape_drag
+                        .as_ref()
+                        .and_then(|drag| drag.created.as_ref())
+                        .expect("the drag created a shape");
+                    let geo = created.geo;
+                    assert!(
+                        (geo.center.0 - 655.0).abs() < 1e-3 && (geo.center.1 - 500.0).abs() < 1e-3,
+                        "{tool:?}: the press point stayed the centre: {geo:?}"
+                    );
+                    assert!(
+                        (geo.half.0 - 500.0).abs() < 1e-3,
+                        "{tool:?}: the radius is the drag distance, not the delta: {geo:?}"
+                    );
+                    let node = created.node;
+                    panel.shape_ended(cx);
+                    assert!(panel.shape_drag.is_none(), "{tool:?}: the release ended it");
+                    node
+                })
+                .unwrap();
+
+            // On the committed document, not just the drag state.
+            project.read_with(cx, |project, _| {
+                let graph = ravel_ui::document::resolve_network(project.document(), &network)
+                    .expect("the layer network survived the commit");
+                let node = graph.node(node).expect("the drawn node was committed");
+                assert_eq!(node.type_key, kind.type_key());
+                assert_eq!(
+                    sample_float_param(node, radius_key, 0, &eval_ctx()),
+                    Some(500.0),
+                    "{tool:?}: the committed radius is the drag distance"
+                );
+            });
+        }
+    }
+
+    /// A press that never moves creates nothing: no node, no layer, and the
+    /// selection is the one the press found — the same rule the box tools keep.
+    #[gpui::test]
+    fn a_radial_press_without_a_move_leaves_the_document_alone(cx: &mut TestAppContext) {
+        for tool in [ravel_ui::ToolKind::Polygon, ravel_ui::ToolKind::Star] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::new(),
+                });
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..ToolState::default()
+                });
+            });
+            let before = project.read_with(cx, |project, _| project.document().clone());
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                    assert!(panel.shape_drag.is_some(), "{tool:?}: the press is pending");
+                    panel.shape_ended(cx);
+                })
+                .unwrap();
+
+            project.read_with(cx, |project, _| {
+                let nodes = |doc: &Document| {
+                    ravel_ui::document::resolve_network(doc, &network)
+                        .map(|graph| graph.nodes().count())
+                };
+                assert_eq!(
+                    nodes(project.document()),
+                    nodes(&before),
+                    "{tool:?}: a click created a node"
+                );
+                assert_eq!(
+                    project
+                        .document()
+                        .get_composition(comp_id)
+                        .unwrap()
+                        .layer_count(),
+                    before.get_composition(comp_id).unwrap().layer_count(),
+                    "{tool:?}: a click created a layer"
+                );
+            });
+        }
+    }
+
+    /// A drag that returns to the press point releases at zero radius, which
+    /// commits nothing: the invisible shape and any layer created for it are
+    /// rolled back.
+    #[gpui::test]
+    fn a_zero_distance_radial_release_commits_nothing(cx: &mut TestAppContext) {
+        for tool in [ravel_ui::ToolKind::Polygon, ravel_ui::ToolKind::Star] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::new(),
+                });
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..ToolState::default()
+                });
+            });
+            let before = project.read_with(cx, |project, _| {
+                ravel_ui::document::resolve_network(project.document(), &network)
+                    .map(|graph| graph.nodes().count())
+            });
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                    // A real move, so the node is created …
+                    let moved = MouseMoveEvent {
+                        position: window_point(panel, (600.0, 500.0)),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    };
+                    panel.shape_dragged(&moved, cx);
+                    assert!(
+                        panel
+                            .shape_drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.created.is_some()),
+                        "{tool:?}: the first move creates the node"
+                    );
+                    // … then back onto the press point, so the radius is zero.
+                    let back = MouseMoveEvent {
+                        position: window_point(panel, (500.0, 500.0)),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    };
+                    panel.shape_dragged(&back, cx);
+                    panel.shape_ended(cx);
+                    assert!(panel.shape_drag.is_none(), "{tool:?}: the gesture is over");
+                })
+                .unwrap();
+
+            project.read_with(cx, |project, _| {
+                assert_eq!(
+                    ravel_ui::document::resolve_network(project.document(), &network)
+                        .map(|graph| graph.nodes().count()),
+                    before,
+                    "{tool:?}: a zero-radius release left a node behind"
+                );
+                assert_eq!(
+                    project
+                        .document()
+                        .get_composition(comp_id)
+                        .unwrap()
+                        .layer_count(),
+                    1,
+                    "{tool:?}: a zero-radius release left a layer behind"
+                );
+            });
+        }
     }
 
     /// The drawing tools snap the corner they are dragging, so a shape drawn

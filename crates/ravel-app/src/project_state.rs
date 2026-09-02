@@ -22,7 +22,7 @@
 use crate::app_settings;
 use crate::panels::ViewerImage;
 use crate::panels::viewer::overlay::{
-    EvalResultKey, EvalResults, EvalTarget, OverlayContext, OverlayRegistry,
+    EvalResultKey, EvalResults, EvalTarget, OverlayContext, OverlayRegistry, box_select_candidates,
 };
 use gpui::{App, Context, EventEmitter, Global, WeakEntity};
 use ravel_core::cache_budget::SharedCacheBudget;
@@ -2175,6 +2175,11 @@ impl ProjectState {
                 .map(|state| state.active),
             results: cx.try_global::<EvalResults>().cloned().unwrap_or_default(),
             registry: Some(self.registry.clone()),
+            // The scope of the box-selection drag in flight (`TOOLX-2`). The
+            // candidate bboxes a rectangle picks by are exactly what nothing
+            // else has asked to be evaluated, and this is the only context
+            // where declaring them reaches the request.
+            box_select: box_select_candidates(cx),
             ..OverlayContext::default()
         }
     }

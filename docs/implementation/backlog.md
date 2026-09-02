@@ -74,7 +74,8 @@
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
-| GPULOSS-2 | epoch-aware な評価 worker の停止・再生成（`GPULOSS-1` ✅ で依存が解けた） | `gpu-device-loss-recovery-plan.md` |
+| GPULOSS-3 | GPUI 採用 wgpu device の loss polling・再採用（`GPULOSS-2` ✅ で依存が解けた） | `gpu-device-loss-recovery-plan.md` |
+| GPULOSS-4 | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | `gpu-device-loss-recovery-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -911,9 +912,9 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | GPULOSS-1 | ✅ | `ravel-gpu` の device state（epoch + lost）と自前 wgpu device の loss callback、喪失の一度だけのユーザー通知 | ZC-8 ✅, GPUBK-9 ✅ |
-| GPULOSS-2 | 🟡 | epoch-aware な評価 worker の停止・再生成と cache budget 維持 | GPULOSS-1 |
-| GPULOSS-3 | ⬜ | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows） | GPULOSS-1, GPULOSS-2 |
-| GPULOSS-4 | ⬜ | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | GPULOSS-1, GPULOSS-2 |
+| GPULOSS-2 | ✅ | epoch-aware な評価 worker の停止・再生成と cache budget 維持（PR #485） | GPULOSS-1 |
+| GPULOSS-3 | 🟡 | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows） | GPULOSS-1, GPULOSS-2 |
+| GPULOSS-4 | 🟡 | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | GPULOSS-1, GPULOSS-2 |
 | GPULOSS-5 | ⬜ | window lifecycle、export、Viewer lease、テスト、実機確認 | GPULOSS-2, GPULOSS-3, GPULOSS-4 |
 
 ### OFX ホスト

@@ -336,6 +336,40 @@ impl RenderService {
         }
     }
 
+    /// Cancel everything unfinished and hand the queue back, because the
+    /// device it runs on is being replaced (`GPULOSS-2`).
+    ///
+    /// The cancellation is what makes the handover cheap: dropping the queue
+    /// alone would let the worker render what is already in it, on a device
+    /// that is going away. The caller is expected to
+    /// [`shutdown`](RenderQueue::shutdown) the returned queue — dropping it
+    /// does not join, so the retired export evaluator, hooks and texture pool
+    /// would still be charged to the shared cache budget while the
+    /// replacement worker is built.
+    ///
+    /// Nothing is resubmitted — a render resumes when the user asks for it
+    /// again — and no new queue is built here: [`Self::ensure_queue`] builds
+    /// one on the current device at the next submission, which is the same
+    /// laziness a session that never exports already relies on.
+    pub fn take_queue_for_new_gpu(&mut self) -> Option<RenderQueue> {
+        let queue = self.queue.take()?;
+        for job in self.rows.unfinished() {
+            queue.cancel(job);
+        }
+        tracing::info!("render queue given up for a GPU device epoch change");
+        Some(queue)
+    }
+
+    /// Put a queue in place without a submission, for the swap-ordering test.
+    ///
+    /// Test-only for the same reason [`Self::record_for_test`] is: a queue
+    /// built the production way wants a GPU adapter, and the ordering under
+    /// test is about *when* the queue is stopped, not what it renders.
+    #[cfg(test)]
+    pub(crate) fn install_queue_for_test(&mut self, queue: RenderQueue) {
+        self.queue = Some(queue);
+    }
+
     /// Drop the rows of jobs that have stopped.
     pub fn clear_finished(&mut self, cx: &mut Context<Self>) {
         if self.rows.clear_finished() {

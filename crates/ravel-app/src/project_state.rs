@@ -260,6 +260,15 @@ pub struct ProjectState {
     /// Multiple frames can observe the same loss, but the workspace must show
     /// one durable notification only.
     gpu_loss_notified: bool,
+    /// Whether a GPU device epoch swap is between its stop and its restart.
+    ///
+    /// The swap gives up the UI thread to join the retired worker, so a second
+    /// request arriving in that window would find `eval` already `None`, read
+    /// the generation off the fence instead of off the retiring worker, and
+    /// build a **second** replacement — two workers, and whichever landed last
+    /// deciding which device the frame on screen came from. `GPULOSS-3` reaches
+    /// this by polling, so the second request is not hypothetical.
+    eval_restart_in_progress: bool,
     /// Host capability shared with the evaluation worker. It is false until
     /// the live GPUI window proves that both renderers use the same device;
     /// false also selects the worker-side CPU fallback on unsupported hosts.
@@ -537,9 +546,13 @@ impl ViewerUpdate {
 /// it is handed to the UI thread. Named, and generic over the hooks, so a test
 /// can drive the production wiring with stub hooks and assert which thread the
 /// conversion ran on.
+/// `generation` is where the worker's numbering starts — zero for a session's
+/// first worker, and the retiring worker's `latest_generation()` for one that
+/// replaces it on a new GPU device epoch (`GPULOSS-2`).
 fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
     hooks: H,
     budget: SharedCacheBudget,
+    generation: u64,
     updates: futures::channel::mpsc::UnboundedSender<ViewerUpdate>,
 ) -> EvalService {
     // Read-ahead is on here and nowhere else (`CACHE-9`): this is the one
@@ -549,6 +562,7 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
     let config = EvalServiceConfig {
         budget: Some(budget),
         read_ahead: Some(ReadAhead::default()),
+        generation,
     };
     EvalService::spawn_with_config(hooks, config, move |update| {
         let _ = updates.unbounded_send(ViewerUpdate::from_eval(update));
@@ -593,47 +607,6 @@ impl ProjectState {
         let viewer_surface_enabled = Arc::new(AtomicBool::new(false));
         let display_channel = Arc::new(AtomicU32::new(DisplayChannel::default().to_u32()));
         let pixel_readout = Arc::new(AtomicBool::new(false));
-        let (eval, gpu, startup_gpu_error) =
-            if EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
-                (None, None, None)
-            } else {
-                match host_gpu.map_or_else(GpuContext::new_blocking, Ok) {
-                    Ok(gpu_ctx) => {
-                        let (update_tx, mut update_rx) =
-                            futures::channel::mpsc::unbounded::<ViewerUpdate>();
-                        let budget = cache_budget.clone();
-                        let eval = spawn_viewer_eval_service(
-                            // The viewer is the one worker whose frames go to a
-                            // screen, so it is the one that finishes them on the
-                            // GPU (`CM-7`). The export worker deliberately does
-                            // not: its own encode step needs the linear frame.
-                            ravel_nodes::GpuEvalHooks::with_budget(gpu_ctx.clone(), budget.clone())
-                                .with_display_surface_mode(viewer_surface_enabled.clone())
-                                .with_display_channel(display_channel.clone())
-                                .with_display_pixel_readout(pixel_readout.clone()),
-                            budget.clone(),
-                            update_tx,
-                        );
-                        cx.spawn(async move |this, cx| {
-                            use futures::StreamExt as _;
-                            while let Some(update) = update_rx.next().await {
-                                if this
-                                    .update(cx, |this, cx| this.on_eval_update(update, cx))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                        })
-                        .detach();
-                        (Some(eval), Some(gpu_ctx), None)
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "GPU context initialization failed");
-                        (None, None, Some(error.to_string()))
-                    }
-                }
-            };
 
         let mut registry = NodeRegistry::new();
         register_builtins(&mut registry);
@@ -645,15 +618,16 @@ impl ProjectState {
         // document (REQ-UI-013).
         crate::panels::set_active_composition(store.document().root_comp, cx);
 
-        Self {
+        let mut this = Self {
             store,
             registry,
-            eval,
-            gpu,
+            eval: None,
+            gpu: None,
             gpu_loss_notified: false,
+            eval_restart_in_progress: false,
             viewer_surface_enabled,
             cache_budget,
-            startup_gpu_error,
+            startup_gpu_error: None,
             compiled: None,
             pending_hint: InvalidationHint::None,
             project_path: None,
@@ -675,7 +649,197 @@ impl ProjectState {
             viewer_input_active: false,
             viewer_input_epoch: 0,
             viewer_eval_requests: 0,
+        };
+        if !EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+            match host_gpu.map_or_else(GpuContext::new_blocking, Ok) {
+                Ok(gpu_ctx) => {
+                    let hooks = this.viewer_gpu_hooks(gpu_ctx.clone());
+                    this.install_eval_worker(Some(gpu_ctx), hooks, 0, cx);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "GPU context initialization failed");
+                    this.startup_gpu_error = Some(error.to_string());
+                }
+            }
         }
+        this
+    }
+
+    /// The viewer worker's GPU hooks on `gpu`: the device it evaluates on, the
+    /// session's cache budget, and the three display flags the UI toggles
+    /// while it runs.
+    ///
+    /// One place, because a device epoch swap has to build exactly these again
+    /// on the replacement device (`GPULOSS-2`). The flags are shared atomics,
+    /// so a worker built later observes whatever the UI has set without being
+    /// told what it missed.
+    ///
+    /// The viewer is the one worker whose frames go to a screen, so it is the
+    /// one that finishes them on the GPU (`CM-7`). The export worker
+    /// deliberately does not: its own encode step needs the linear frame.
+    fn viewer_gpu_hooks(&self, gpu: GpuContext) -> ravel_nodes::GpuEvalHooks {
+        ravel_nodes::GpuEvalHooks::with_budget(gpu, self.cache_budget.clone())
+            .with_display_surface_mode(self.viewer_surface_enabled.clone())
+            .with_display_channel(self.display_channel.clone())
+            .with_display_pixel_readout(self.pixel_readout.clone())
+    }
+
+    /// Put a freshly spawned evaluation worker in place and start draining its
+    /// results into [`Self::on_eval_update`].
+    ///
+    /// `generation` is where the worker's numbering starts, and the fence is
+    /// moved to the same value: for the session's first worker both are zero,
+    /// and for one replacing a retired worker both are that worker's
+    /// `latest_generation()` (`GPULOSS-2`). Every update the retired worker
+    /// left in flight is at or below that number, so the existing fence in
+    /// [`Self::on_eval_update`] discards them, while the new worker's first
+    /// request — one past it — is not discarded.
+    fn install_eval_worker<H: EvalWorkerHooks>(
+        &mut self,
+        gpu: Option<GpuContext>,
+        hooks: H,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let (update_tx, mut update_rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        self.eval = Some(spawn_viewer_eval_service(
+            hooks,
+            self.cache_budget.clone(),
+            generation,
+            update_tx,
+        ));
+        self.gpu = gpu;
+        self.published_generation = generation;
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(update) = update_rx.next().await {
+                if this
+                    .update(cx, |this, cx| this.on_eval_update(update, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Rebuild the evaluation pipeline on a replacement GPU device
+    /// (`GPULOSS-2`).
+    ///
+    /// `gpu` is the context the session runs on from now on; obtaining it is
+    /// the caller's job, because where a replacement comes from is
+    /// platform-specific (`GPULOSS-3`, `GPULOSS-4`).
+    ///
+    /// Returns whether the swap was started. `false` means one is already
+    /// running and this request was ignored — the answer a polling detector
+    /// (`GPULOSS-3`) needs, and the reason it is reported rather than kept
+    /// private: a caller that had to remember "I already asked" would be a
+    /// second authority on a fact this object already holds.
+    pub fn restart_eval_on_gpu(&mut self, gpu: GpuContext, cx: &mut Context<Self>) -> bool {
+        self.restart_eval_worker(
+            Some(gpu.clone()),
+            move |this| this.viewer_gpu_hooks(gpu),
+            cx,
+        )
+    }
+
+    /// The device epoch swap, with the hooks left to a factory so a headless
+    /// test can drive this exact path with stub hooks on a machine that has no
+    /// adapter.
+    ///
+    /// The order is the whole point and it is not negotiable:
+    ///
+    /// 1. raise the fence, so the old worker's in-flight updates are stale
+    ///    from here on and cannot overwrite the new epoch's frames;
+    /// 2. cancel and drop the export queue, a second `GpuEvalHooks` on the
+    ///    device that is going away;
+    /// 3. close the old worker's channels — that *is* the stop order, there is
+    ///    no cancellation token — and join it **off the UI thread**;
+    /// 4. only then build the replacement, because the retired worker's
+    ///    evaluator, hooks and texture pool are charged to the session's cache
+    ///    budget until its thread returns, and two GPU caches on one
+    ///    accounting authority is what the ordering exists to prevent;
+    /// 5. ask for one frame, so the new epoch has something to publish.
+    ///
+    /// The budget itself is never rebuilt or zeroed: it is the session's
+    /// accounting authority, and the old caches returning their reservations
+    /// as they drop is what brings the usage back down.
+    ///
+    /// Steps 3 and 4 are separated by an await, so the whole thing is guarded
+    /// against re-entry: see [`Self::eval_restart_in_progress`].
+    fn restart_eval_worker<H, F>(
+        &mut self,
+        gpu: Option<GpuContext>,
+        make_hooks: F,
+        cx: &mut Context<Self>,
+    ) -> bool
+    where
+        H: EvalWorkerHooks,
+        F: FnOnce(&Self) -> H + 'static,
+    {
+        if self.eval_restart_in_progress {
+            tracing::debug!("a GPU device epoch swap is already running; request ignored");
+            return false;
+        }
+        self.eval_restart_in_progress = true;
+        // The number both sides of the boundary agree on. Taken from the
+        // outgoing worker, not from the fence, because a request it has not
+        // reported yet is still newer than the last published frame.
+        let generation = self
+            .eval
+            .as_ref()
+            .map_or(self.published_generation, EvalService::latest_generation);
+        self.published_generation = generation;
+        // The export queue holds its own hooks — and its own texture pool — on
+        // the outgoing device, so it has to be gone before the replacement is
+        // built, for the same accounting reason. Cancel the unfinished jobs
+        // here and take the queue; it is stopped below, beside the evaluation
+        // worker. A render is resumed by an explicit re-submission, never
+        // automatically.
+        let retiring_render = crate::export::render_service(cx)
+            .and_then(|render| render.update(cx, |render, _| render.take_queue_for_new_gpu()));
+        let stopping = self.eval.take().and_then(EvalService::shutdown);
+        let retiring_gpu = self.gpu.take();
+        cx.spawn(async move |this, cx| {
+            // Off the UI thread, because this waits: without a cancellation
+            // token the worker returns only after the evaluation it is in.
+            use gpui::AppContext as _;
+            cx.background_spawn(async move {
+                // `shutdown` rather than a drop, and the wait is bounded by
+                // one render **frame**, not one render: every unfinished job
+                // was cancelled above, and `RenderQueue::cancel` stops a
+                // running job at its next frame boundary. Dropping instead
+                // would not join (`RenderQueue`'s own `Drop` is documented as
+                // exactly that), which would leave the retired export
+                // evaluator, hooks and texture pool charged to the shared
+                // budget while the replacement is being built.
+                if let Some(queue) = retiring_render {
+                    queue.shutdown();
+                }
+                if let Some(handle) = stopping
+                    && handle.join().is_err()
+                {
+                    tracing::error!("evaluation worker thread panicked during device recovery");
+                }
+                // Nothing of the old epoch is left to hand the device back.
+                drop(retiring_gpu);
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                // Only now: the hooks build a texture pool and a decode cache
+                // against the budget the retired ones have just given back.
+                let hooks = make_hooks(this);
+                this.install_eval_worker(gpu, hooks, generation, cx);
+                // Same document, same playhead — and no caches on the new
+                // device, so nothing else would ask for a frame.
+                this.request_viewer_eval(InvalidationHint::Structural, cx);
+                this.eval_restart_in_progress = false;
+                cx.notify();
+            });
+        })
+        .detach();
+        true
     }
 
     pub fn startup_gpu_error(&self) -> Option<&str> {
@@ -2538,7 +2702,7 @@ mod tests {
         let budget = SharedCacheBudget::new(
             ravel_project::settings::ResolvedSettings::default().cache_budget(),
         );
-        let mut service = spawn_viewer_eval_service(FrameHooks, budget, tx);
+        let mut service = spawn_viewer_eval_service(FrameHooks, budget, 0, tx);
 
         let node = NodeId::new(1);
         let graph = Graph::new()
@@ -2588,6 +2752,464 @@ mod tests {
             converted_on.name.as_deref(),
             Some("ravel-eval-service"),
             "the conversion must run on the evaluation worker"
+        );
+    }
+
+    /// Holds a worker inside `process()` until the test lets it out.
+    ///
+    /// A swap whose retired worker is already idle proves nothing: a `join()`
+    /// on the UI thread would return immediately and the test would still be
+    /// green. With this held, the retired worker is genuinely mid-evaluation
+    /// while the swap runs, so a UI-thread join would hang instead.
+    #[derive(Clone, Default)]
+    struct EvalGate {
+        entered: Arc<AtomicBool>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl EvalGate {
+        /// Block until the worker has reached `process()`.
+        fn await_entry(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !self.entered.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the worker never reached process()"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+        }
+    }
+
+    /// [`FrameSource`] that waits on a gate before producing its frame.
+    struct GatedFrameSource(Option<EvalGate>);
+
+    impl ravel_core::eval::NodeProcessor for GatedFrameSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+            _params: &ravel_core::eval::ResolvedParams,
+            _scope: &mut dyn ravel_core::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+            if let Some(gate) = &self.0 {
+                gate.entered.store(true, Ordering::Release);
+                // Bounded so a broken test fails rather than hangs the suite.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !gate.released.load(Ordering::Acquire) && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+            }
+            Ok(Arc::new(FrameBuffer::from_f32(
+                2,
+                2,
+                [1.0, 0.5, 0.0, 1.0].repeat(4),
+            )))
+        }
+    }
+
+    /// [`FrameHooks`] that announce being built and being dropped, record the
+    /// hints they were synced with, and optionally hold their evaluation open.
+    ///
+    /// The worker owns its hooks, so "dropped" is the moment its thread
+    /// returned and gave the evaluator, the caches and — in production — the
+    /// texture pool back. That moment is what a device epoch swap has to
+    /// observe *before* it builds the replacement, and an order is the only
+    /// thing an outcome assertion cannot see.
+    struct EpochHooks {
+        inner: FrameHooks,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+        tag: &'static str,
+        hints: Arc<std::sync::Mutex<Vec<InvalidationHint>>>,
+        gate: Option<EvalGate>,
+        drop_delay: Option<Duration>,
+    }
+
+    impl EpochHooks {
+        fn new(tag: &'static str, log: &Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+            log.lock().unwrap().push(format!("{tag} built"));
+            Self {
+                inner: FrameHooks,
+                log: log.clone(),
+                tag,
+                hints: Arc::new(std::sync::Mutex::new(Vec::new())),
+                gate: None,
+                drop_delay: None,
+            }
+        }
+
+        /// Take a visible moment to go away.
+        ///
+        /// This is what tells a **join** apart from a bare drop. Closing a
+        /// worker's channel and joining it are observationally identical while
+        /// the worker is idle — it exits before anything else is scheduled
+        /// either way. With the drop held open, a caller that joined has to
+        /// wait for it and a caller that only dropped runs straight on, so the
+        /// order the log records answers which one happened.
+        fn slow_drop(mut self) -> Self {
+            self.drop_delay = Some(Duration::from_millis(200));
+            self
+        }
+
+        /// Hold this worker's evaluation open until the gate is released.
+        fn gated(mut self, gate: EvalGate) -> Self {
+            self.gate = Some(gate);
+            self
+        }
+
+        /// Report every hint this worker is synced with into `hints`.
+        fn reporting_hints(mut self, hints: &Arc<std::sync::Mutex<Vec<InvalidationHint>>>) -> Self {
+            self.hints = hints.clone();
+            self
+        }
+    }
+
+    impl Drop for EpochHooks {
+        fn drop(&mut self) {
+            if let Some(delay) = self.drop_delay {
+                std::thread::sleep(delay);
+            }
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("{} dropped", self.tag));
+        }
+    }
+
+    impl EvalWorkerHooks for EpochHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
+            graph: &Graph,
+            _document: Option<&Document>,
+            hint: &InvalidationHint,
+        ) {
+            self.hints.lock().unwrap().push(hint.clone());
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(node.id, Arc::new(GatedFrameSource(self.gate.clone())));
+                }
+            }
+        }
+
+        fn finalize(
+            &mut self,
+            value: &Arc<dyn ravel_core::types::NodeData>,
+            ctx: &EvalContext,
+        ) -> Option<Arc<dyn ravel_core::types::NodeData>> {
+            self.inner.finalize(value, ctx)
+        }
+    }
+
+    /// `GPULOSS-2`: the whole epoch swap, on the production path, with stub
+    /// hooks standing in for the GPU ones so it runs on a machine with no
+    /// adapter.
+    ///
+    /// Three things at once, because they are one sequence:
+    ///
+    /// * the replacement is built only after the retired worker's thread has
+    ///   returned — the ordering that keeps two GPU caches off one budget;
+    /// * the new worker inherits the retired one's generation, and the fence
+    ///   moves with it, so the old epoch's leftovers stay stale;
+    /// * one request follows for the same document and playhead, and its
+    ///   frame is published rather than dropped on the inherited fence.
+    #[gpui::test]
+    fn a_device_epoch_swap_waits_for_the_old_worker_then_publishes_a_new_frame(
+        cx: &mut TestAppContext,
+    ) {
+        disable_background_eval_for_tests();
+        // Two real worker threads take part, and their results reach the UI
+        // through the production channel — so the update that ends the swap
+        // wakes the scheduler from a thread it does not own. That is what the
+        // determinism check forbids and what this test is *about*; the wait
+        // below is bounded by a deadline instead.
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        // A render queue on the outgoing device, so the export side's own
+        // hooks are part of the order under test. Built with stub hooks: what
+        // matters is *when* it is stopped, not what it renders.
+        let budget = project.read_with(cx, |project, _| project.cache_budget().clone());
+        let render = cx.new(crate::export::RenderService::new);
+        render.update(cx, |render, _| {
+            render.install_queue_for_test(ravel_core::runtime::RenderQueue::spawn_with_budget(
+                EpochHooks::new("render", &log).slow_drop(),
+                budget,
+                |_| {},
+            ));
+        });
+        cx.update(|cx| cx.set_global(crate::export::RenderServiceHandle(render.downgrade())));
+
+        // The old epoch: a worker held inside `process()`, something
+        // evaluable, and a generation that is deliberately not zero — a
+        // replacement starting at zero is one of the failures this is about.
+        let gate = EvalGate::default();
+        let retired_generation = project.update(cx, |project, cx| {
+            let hooks = EpochHooks::new("old", &log).gated(gate.clone());
+            project.install_eval_worker(None, hooks, 0, cx);
+            let comp = project.document().root_comp.expect("root comp");
+            let document = ravel_ui::document::add_layer(project.document(), comp, content_layer())
+                .expect("add layer");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+            project.eval.as_ref().expect("worker").latest_generation()
+        });
+        assert!(
+            retired_generation > 0,
+            "the fixture never advanced the old worker's generation"
+        );
+        // The retired worker is now *inside* its evaluation, and stays there
+        // until this test lets it out. Everything below therefore runs while
+        // there is a real in-flight evaluation to stop: a swap that joined on
+        // this thread would never get past the call.
+        gate.await_entry();
+
+        let swap_log = log.clone();
+        let new_hints = project.update(cx, |project, cx| {
+            let hints = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let reported = hints.clone();
+            let started = project.restart_eval_worker(
+                None,
+                move |_| EpochHooks::new("new", &swap_log).reporting_hints(&reported),
+                cx,
+            );
+            assert!(started, "the swap was refused");
+            // Synchronously, before anything is awaited: the fence is what
+            // stops the retired worker's in-flight results from landing on
+            // the new epoch's viewer.
+            assert_eq!(
+                project.published_generation, retired_generation,
+                "the fence did not move to the retired worker's generation"
+            );
+            assert!(
+                project.eval.is_none(),
+                "the retired worker is still installed"
+            );
+            hints
+        });
+
+        // Let the retired evaluation finish so its worker can notice the
+        // closed channel and return.
+        gate.release();
+
+        // The join runs off the UI thread, so the rest arrives later.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| project.published_generation) > retired_generation
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the new epoch published no frame; log: {:?}",
+                log.lock().unwrap()
+            );
+            std::thread::yield_now();
+        }
+
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                project.published_generation,
+                retired_generation + 1,
+                "the frame published was not the new epoch's first request"
+            );
+            assert_eq!(
+                project
+                    .eval
+                    .as_ref()
+                    .expect("new worker")
+                    .latest_generation(),
+                retired_generation + 1,
+                "the new worker did not inherit the generation"
+            );
+            // The session's budget is still the authority the new worker
+            // answers to. A replacement handed a budget of its own would
+            // leave this one at zero while a frame is on screen — two
+            // authorities, which is exactly what the plan forbids.
+            assert!(
+                project
+                    .cache_budget()
+                    .stats()
+                    .used(ravel_core::cache_budget::Tier::Ram)
+                    > 0,
+                "the new epoch's caches are not charged to the session's budget"
+            );
+        });
+        // Both retired workers are gone *before* the replacement exists. The
+        // two drops race each other — they run on their own threads — so the
+        // invariant is "last", not a fixed sequence: nothing of the old epoch
+        // may still be charged to the budget when the new hooks build their
+        // texture pool on it.
+        let entries = log.lock().unwrap();
+        assert_eq!(
+            entries.last().map(String::as_str),
+            Some("new built"),
+            "the replacement worker was built before the retired ones were gone: {entries:?}"
+        );
+        for retired in ["render dropped", "old dropped"] {
+            assert!(
+                entries.iter().any(|entry| entry == retired),
+                "{retired} never happened: {entries:?}"
+            );
+        }
+        drop(entries);
+        // One request reached the new worker, and it was the Structural one
+        // the swap posts. More than one entry means something else asked too;
+        // none means the new epoch was never given anything to evaluate.
+        let hints = new_hints.lock().unwrap();
+        assert_eq!(
+            hints.len(),
+            1,
+            "the new epoch was synced {} times, not once: {hints:?}",
+            hints.len()
+        );
+        assert!(
+            matches!(hints[0], InvalidationHint::Structural),
+            "the swap's request was not Structural: {hints:?}"
+        );
+    }
+
+    /// `GPULOSS-2`: a second swap request arriving while one is running is
+    /// refused, not honoured.
+    ///
+    /// The swap gives up the UI thread to join the retired worker, so a second
+    /// request in that window finds `eval` already `None`. Without a guard it
+    /// reads the generation off the fence rather than the retiring worker and
+    /// builds a **second** replacement — and whichever landed last decides
+    /// which device produced the frame on screen. `GPULOSS-3` reaches this by
+    /// polling, so the second request is a certainty rather than a race.
+    #[gpui::test]
+    fn a_second_swap_request_while_one_is_running_is_refused(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(None, EpochHooks::new("old", &log), 0, cx);
+        });
+
+        let (first_log, second_log) = (log.clone(), log.clone());
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(None, move |_| EpochHooks::new("new", &first_log), cx),
+                "the first swap was refused"
+            );
+            // Same turn, so the first swap has not reached its await yet —
+            // exactly the window a polling detector lands in.
+            assert!(
+                !project.restart_eval_worker(
+                    None,
+                    move |_| EpochHooks::new("extra", &second_log),
+                    cx
+                ),
+                "a second swap started while the first was still running"
+            );
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| !project.eval_restart_in_progress) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the swap never finished; log: {:?}",
+                log.lock().unwrap()
+            );
+            std::thread::yield_now();
+        }
+
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.iter().filter(|entry| *entry == "new built").count(),
+            1,
+            "the swap built more than one replacement worker: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|entry| entry.starts_with("extra")),
+            "the refused request built a worker anyway: {log:?}"
+        );
+        project.read_with(cx, |project, _| {
+            assert!(project.eval.is_some(), "the session has no worker left");
+        });
+    }
+
+    /// `GPULOSS-2`: the comparison at the fence is `<=`, not `<`.
+    ///
+    /// A swap hands the new worker the retired one's `latest_generation()`, so
+    /// the retired worker's last in-flight result carries **exactly** that
+    /// number. With a strict comparison it would pass the fence and overwrite
+    /// the frame the new device just produced — the one case the epoch
+    /// boundary creates and ordinary latest-wins never does.
+    #[gpui::test]
+    fn an_old_epoch_result_at_the_inherited_generation_is_dropped(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let published = |project: &mut ProjectState,
+                         cx: &mut Context<ProjectState>,
+                         generation: u64,
+                         size: u32| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(blank_display_frame(size, size)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        };
+        let frame_width = |cx: &mut TestAppContext| {
+            cx.update(|cx| match cx.try_global::<crate::panels::ViewerFrame>() {
+                Some(crate::panels::ViewerFrame::Frame { image, .. }) => Some(image.width()),
+                _ => None,
+            })
+        };
+
+        // The state the swap leaves behind: the fence is the retired worker's
+        // generation, and nothing of the new epoch has arrived yet.
+        project.update(cx, |project, cx| {
+            project.published_generation = 5;
+            // What the retired worker had already sent — carrying **exactly**
+            // the number the swap inherited from it. This is the comparison
+            // the boundary creates: `<` would let it through, and ordinary
+            // latest-wins never produces the equality case.
+            published(project, cx, 5, 4);
+        });
+        assert_eq!(
+            frame_width(cx),
+            None,
+            "an old-epoch result at the inherited generation reached the viewer"
+        );
+
+        // And the new epoch's own first request, one past the fence, is not
+        // caught by it.
+        project.update(cx, |project, cx| published(project, cx, 6, 8));
+        assert_eq!(
+            frame_width(cx),
+            Some(8),
+            "the new epoch's first frame was dropped on the inherited fence"
+        );
+
+        // The direct form of the same guarantee: with the new epoch's frame
+        // already on screen, a straggler carrying that generation must not
+        // overwrite it.
+        project.update(cx, |project, cx| published(project, cx, 6, 4));
+        assert_eq!(
+            frame_width(cx),
+            Some(8),
+            "a straggler overwrote the frame the new device produced"
         );
     }
 
@@ -3756,7 +4378,7 @@ mod tests {
         );
 
         let second = project.update(cx, |project, cx| {
-            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, 0, tx));
             let first = project.document().root_comp.unwrap();
             let document =
                 ravel_ui::document::add_layer(project.document(), first, content_layer()).unwrap();
@@ -3840,7 +4462,7 @@ mod tests {
         );
 
         project.update(cx, |project, cx| {
-            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, 0, tx));
             let comp_id = project.document().root_comp.unwrap();
             let document =
                 ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
@@ -3904,7 +4526,7 @@ mod tests {
         );
 
         project.update(cx, |project, cx| {
-            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, tx));
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, 0, tx));
             let comp_id = project.document().root_comp.unwrap();
             let document =
                 ravel_ui::document::add_layer(project.document(), comp_id, content_layer())

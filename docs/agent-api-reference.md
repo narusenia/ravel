@@ -1573,7 +1573,12 @@ EvalService::spawn_with_budget(hooks, SharedCacheBudget, on_update)
     // thread, so the budget has to be handed in at spawn
 EvalService::spawn_with_config(hooks, EvalServiceConfig, on_update)
 EvalServiceConfig { budget: Option<SharedCacheBudget>,
-                    read_ahead: Option<ReadAhead> }
+                    read_ahead: Option<ReadAhead>,
+                    generation: u64 }
+    // generation is where `request` starts counting: 0 for a session's first
+    // worker, the retiring worker's latest_generation() for one replacing it
+    // on a new GPU device epoch (GPULOSS-2). A replacement restarting at 0
+    // would have every frame of the new epoch dropped on the consumer's fence
 ReadAhead { idle: Duration, frames: u64 }   // CACHE-9; ::DEFAULT_IDLE 250ms,
     // ::DEFAULT_FRAMES 24. Off in spawn/spawn_with_budget: a render, a
     // benchmark and a test counting process() calls evaluate only what they
@@ -1589,6 +1594,11 @@ EvalService                  // the four below are EvalService, not ProcessorSyn
         // speculative evaluation also yields — see Evaluator::set_read_ahead
     .cancel_pending() / .latest_generation()
     .frame_cache() -> &SharedFrameCache       // shared with the worker
+    .shutdown(self) -> Option<JoinHandle<()>> // same stop order as Drop
+        // (closing the channels), plus the handle. Join it off the UI thread:
+        // the worker's evaluator, hooks and texture pool are charged to the
+        // shared budget until its thread returns, so a device epoch swap
+        // builds the replacement only after this join (GPULOSS-2)
 EvalOutput = Result<Arc<dyn NodeData>, EvalError>  // one target's outcome
 EvalUpdate { generation, frame, timings,          // worker thread; timings
     results: Vec<(NodeId, EvalOutput)> }
@@ -2813,6 +2823,21 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   the global (node ids are reused across documents), so the global never
   outgrows the document and no readout is inherited by a reused id.
   `disable_background_eval_for_tests()` keeps gpui tests deterministic.
+  `ProjectState::restart_eval_on_gpu(GpuContext, cx)` rebuilds the whole
+  evaluation pipeline on a replacement device (`GPULOSS-2`); obtaining that
+  context is the caller's job, because where a replacement comes from is
+  platform-specific (`GPULOSS-3` / `GPULOSS-4`). The order it enforces is the
+  substance: move the fence to the retiring worker's `latest_generation()`,
+  take and cancel the export queue, close the old worker's channels, stop both
+  of those **off the UI thread**, only then build the new `GpuEvalHooks` +
+  `EvalService` at that same generation, then post one `Structural` request for
+  the unchanged document and playhead. It returns whether the swap started:
+  `false` means one is already running, which is what a polling detector
+  (`GPULOSS-3`) needs so it does not build a second replacement in the window
+  where the first has given up the UI thread. The `SharedCacheBudget` is never rebuilt or zeroed —
+  the retired caches returning their reservations as they drop is what brings
+  the usage back down, which is also why the replacement is not built before
+  the join.
 - The viewer's playback status line (`INSP-4`) is one label, composed from
   three readings of "the picture on screen is not the truth".
   `panels::PlaybackStatus { playing, dropped_frames }` is a durable global
@@ -3194,7 +3219,16 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   frames are queued, to a `.part` name beside the destination that is renamed
   only when the job completes and deleted whenever it does not. Dropping the
   service cancels every unfinished job — the answer to the question
-  `RenderQueue`'s `Drop` leaves to the export UI. `RenderServiceEvent`
+  `RenderQueue`'s `Drop` leaves to the export UI.
+  `RenderService::take_queue_for_new_gpu() -> Option<RenderQueue>` is that same
+  answer for a GPU device epoch change (`GPULOSS-2`): the unfinished jobs are
+  cancelled and the queue is handed back for the caller to `shutdown()` — a
+  drop would not join, leaving the retired export evaluator, hooks and texture
+  pool charged to the shared budget while the replacement worker is built. The
+  wait is one render **frame**, not one render, because `cancel` stops a
+  running job at its next frame boundary. Nothing is resubmitted, and no queue
+  is built here — `ensure_queue` builds one on the current device at the next
+  submission. `RenderServiceEvent`
   (`Completed` / `Failed` / `Warning`) becomes a workspace notification.
   `Warning` is the GUI's answer to `ravel-cli`'s warning stream, and a render
   never drops sound quietly: `submit` asks

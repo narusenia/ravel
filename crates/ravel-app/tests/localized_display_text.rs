@@ -270,9 +270,15 @@ fn the_declarations_section_reads_as_sentences_in_every_locale() {
     ravel_i18n::set_locale("en").expect("en catalog is shipped");
 }
 
-/// Every canvas tool is named in every locale, under both keys it is shown by:
-/// the toolbar tooltip (`tool.*`) and the command label the Preferences
-/// keybinding list shows for its chord (`menu.tool.*`).
+/// Every canvas tool resolves to text through the real store, under both keys
+/// it is shown by: the toolbar tooltip (`tool.*`) and the command label the
+/// Preferences keybinding list shows for its chord (`menu.tool.*`).
+///
+/// This is the *runtime* half only. `translate` falls back to English, so a
+/// key missing from one catalog still returns text here — per-locale coverage
+/// is `ravel_ui`'s `i18n_coverage::all_tool_label_keys_in_catalog`, which reads
+/// the catalog files. What this adds is that the key is reachable through the
+/// loaded store at all, which a file check cannot say.
 ///
 /// The tool list is derived from the command table rather than written out, so
 /// a tool added without locale strings fails here instead of putting a raw

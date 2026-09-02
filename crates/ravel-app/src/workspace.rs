@@ -2574,11 +2574,24 @@ fn show_project_event(
             t!("project.notice.gpu_title"),
             format!("{}\n{error}", t!("project.notice.gpu_message")),
         ),
-        ProjectEvent::GpuDeviceLost => (
-            NotificationType::Error,
-            t!("project.notice.gpu_lost_title"),
-            t!("project.notice.gpu_lost_message").to_string(),
-        ),
+        // Two messages, because the two losses have different answers. An
+        // adopted device is re-adopted by the recovery coordinator
+        // (`GPULOSS-3`), so telling the user to restart would be a lie; a
+        // self-owned one has no replacement, so the restart is the honest
+        // instruction (`GPULOSS-4`). The severity follows: a session that
+        // repairs itself is a warning, one that cannot is an error.
+        ProjectEvent::GpuDeviceLost(scope) => match scope {
+            crate::project_state::GpuLossScope::Adopted => (
+                NotificationType::Warning,
+                t!("project.notice.gpu_lost_title"),
+                t!("project.notice.gpu_lost_recovering_message").to_string(),
+            ),
+            crate::project_state::GpuLossScope::SelfOwned => (
+                NotificationType::Error,
+                t!("project.notice.gpu_lost_title"),
+                t!("project.notice.gpu_lost_message").to_string(),
+            ),
+        },
         ProjectEvent::SaveFailed { path, error } => (
             NotificationType::Error,
             t!("project.notice.save_title"),

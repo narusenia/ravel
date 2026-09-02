@@ -102,6 +102,28 @@ pub struct NodeEvalTimings(pub HashMap<NodeId, Duration>);
 
 impl Global for NodeEvalTimings {}
 
+/// Whose GPU device died — the only thing that decides whether Ravel can
+/// carry on with GPU evaluation this session.
+///
+/// **This is not a severity.** Both are real losses; they differ in whether a
+/// replacement device is reachable:
+///
+/// * [`Self::Adopted`] — the device came from the window renderer
+///   (Linux / FreeBSD / Windows). GPUI rebuilds its renderer and Ravel
+///   re-adopts the replacement, so the pipeline comes back on its own
+///   (`GPULOSS-3`). Telling the user to restart here would be a lie.
+/// * [`Self::SelfOwned`] — the device is one Ravel created (macOS). There is
+///   no route to a replacement, so zero-copy is switched off and the session
+///   finishes on the CPU fallback (`GPULOSS-4`). Restarting is the only way
+///   back to GPU evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuLossScope {
+    /// A device adopted from the window renderer, which can be re-adopted.
+    Adopted,
+    /// A device Ravel created for itself, which cannot be replaced.
+    SelfOwned,
+}
+
 /// One-shot project operation feedback consumed by the owning workspace.
 /// Events keep UI delivery out of ProjectState and avoid a queued Global.
 #[derive(Clone, Debug)]
@@ -110,7 +132,10 @@ pub enum ProjectEvent {
         error: String,
     },
     /// The live device can no longer produce GPU evaluation frames.
-    GpuDeviceLost,
+    ///
+    /// The scope decides what the user is told, because it decides whether the
+    /// session can come back at all (`GPULOSS-3` / `GPULOSS-4`).
+    GpuDeviceLost(GpuLossScope),
     SaveFailed {
         path: PathBuf,
         error: String,
@@ -949,7 +974,17 @@ impl ProjectState {
             );
             cx.notify();
         }
-        cx.emit(ProjectEvent::GpuDeviceLost);
+        // The scope, not the severity: an adopted device is re-adopted by the
+        // coordinator (`GPULOSS-3`), a self-owned one has no replacement to
+        // take (`GPULOSS-4`). The two never overlap in practice — Ravel only
+        // registers a loss callback on a device it created itself, and it only
+        // creates one where there is nothing to adopt.
+        let scope = if self_owned_loss {
+            GpuLossScope::SelfOwned
+        } else {
+            GpuLossScope::Adopted
+        };
+        cx.emit(ProjectEvent::GpuDeviceLost(scope));
     }
 
     /// Configure whether the live GPUI host can sample the worker's output
@@ -3409,7 +3444,24 @@ mod tests {
             recorder
                 .0
                 .iter()
-                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost))
+                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost(_)))
+                .count()
+        })
+    }
+
+    /// Losses announced with a given scope. The scope is what picks the
+    /// message, so a test that only counted the events could not tell
+    /// "restart Ravel" from "no restart is needed".
+    fn gpu_losses_of_scope(
+        recorder: &gpui::Entity<ProjectEventRecorder>,
+        scope: GpuLossScope,
+        cx: &mut TestAppContext,
+    ) -> usize {
+        recorder.read_with(cx, |recorder, _| {
+            recorder
+                .0
+                .iter()
+                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost(s) if *s == scope))
                 .count()
         })
     }
@@ -3474,6 +3526,20 @@ mod tests {
             loss_events(&recorder, cx),
             1,
             "the fallback was announced as something other than one loss"
+        );
+        // The scope is what chooses the message. A self-owned loss has no
+        // replacement device, so the notice has to be the one that asks for a
+        // restart — announcing the recoverable message here would promise a
+        // repair that cannot happen on this platform.
+        assert_eq!(
+            gpu_losses_of_scope(&recorder, GpuLossScope::SelfOwned, cx),
+            1,
+            "a self-owned loss was announced as the recoverable kind"
+        );
+        assert_eq!(
+            gpu_losses_of_scope(&recorder, GpuLossScope::Adopted, cx),
+            0,
+            "a self-owned loss was announced as the recoverable kind"
         );
     }
 
@@ -3704,7 +3770,7 @@ mod tests {
                 recorder
                     .0
                     .iter()
-                    .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost))
+                    .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost(_)))
                     .count()
             }),
             1,

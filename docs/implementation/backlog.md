@@ -30,8 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| MON-1 | リニアフレームの要求を数える（スコープ 4 種の土台） | `viewer-scopes-plan.md` |
-| TOOLX-1 | Hand / Zoom ツールの実装（MED-APP-15） | `viewer-tool-extensions-plan.md` |
 | TOOLX-2 | 矩形選択 | `viewer-tool-extensions-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
@@ -76,7 +74,8 @@
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
-| GPULOSS-2 | epoch-aware な評価 worker の停止・再生成（`GPULOSS-1` ✅ で依存が解けた） | `gpu-device-loss-recovery-plan.md` |
+| GPULOSS-3 | GPUI 採用 wgpu device の loss polling・再採用（`GPULOSS-2` ✅ で依存が解けた） | `gpu-device-loss-recovery-plan.md` |
+| GPULOSS-4 | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | `gpu-device-loss-recovery-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -519,6 +518,10 @@ INSP-1 は**設定できるのに効かない**フィールドの解消なので
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | MON-1 | 🟡 | リニアフレームの要求を数える（読み取りとスコープで 1 本のコピーを共有） | — |
+> **スコープ 4 種は 2026-08-25 のユーザー判断で後回し**（作るコストの割に
+> 入れるものがない）。`MON-1` は依存が無く技術的には着手可能だが、
+> **上の「今すぐ着手できるもの」には載せていない** — 依存が解けていることと
+> 「今やるべきこと」は別。再開はユーザーの指示で。
 | MON-2 | ⬜ | 要約の計算（ヘッドレス、サンプル数上限つき） | MON-1 |
 | MON-3 | ⬜ | ヒストグラムパネル（要約の共有経路をここで通す） | MON-2 |
 | MON-4 | ⬜ | 波形モニタ | MON-2 |
@@ -565,7 +568,7 @@ format version もマイグレーションも増えていない（`Layer.audio` 
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| TOOLX-1 | 🟡 | Hand / Zoom ツールの実装（MED-APP-15） | — |
+| TOOLX-1 | ✅ | Hand / Zoom ツールの実装（MED-APP-15 closed、PR #484） | — |
 | TOOLX-2 | 🟡 | 矩形選択 | OVL-1 |
 | TOOLX-3 | ⬜ | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離 | — |
 | TOOLX-4 | ⬜ | polygon / star のドラッグ描画 | — |
@@ -909,9 +912,9 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | GPULOSS-1 | ✅ | `ravel-gpu` の device state（epoch + lost）と自前 wgpu device の loss callback、喪失の一度だけのユーザー通知 | ZC-8 ✅, GPUBK-9 ✅ |
-| GPULOSS-2 | 🟡 | epoch-aware な評価 worker の停止・再生成と cache budget 維持 | GPULOSS-1 |
-| GPULOSS-3 | ⬜ | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows） | GPULOSS-1, GPULOSS-2 |
-| GPULOSS-4 | ⬜ | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | GPULOSS-1, GPULOSS-2 |
+| GPULOSS-2 | ✅ | epoch-aware な評価 worker の停止・再生成と cache budget 維持（PR #485） | GPULOSS-1 |
+| GPULOSS-3 | 🟡 | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows） | GPULOSS-1, GPULOSS-2 |
+| GPULOSS-4 | 🟡 | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める | GPULOSS-1, GPULOSS-2 |
 | GPULOSS-5 | ⬜ | window lifecycle、export、Viewer lease、テスト、実機確認 | GPULOSS-2, GPULOSS-3, GPULOSS-4 |
 
 ### OFX ホスト

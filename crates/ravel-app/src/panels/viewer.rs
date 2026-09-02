@@ -1488,6 +1488,14 @@ impl ViewerPanel {
     /// hint is `None` because the document did not change: every value the
     /// composition already evaluated stays cached and the candidates are the
     /// only work this adds.
+    ///
+    /// The press also publishes a selection, whose observer posts a request of
+    /// its own — but **only when the selection actually changed**
+    /// ([`Self::request_overlay_eval`] returns early otherwise), and a press on
+    /// empty space with nothing selected changes nothing. That is the box
+    /// selection's main case, so this request cannot be left to the observer.
+    /// When both do fire, the second is free: the worker is latest-wins, so two
+    /// requests carrying the same hint coalesce into one evaluation.
     fn begin_box_select(
         &mut self,
         pointer: (f32, f32),
@@ -1577,8 +1585,9 @@ impl ViewerPanel {
         }
     }
 
-    /// Drop the gesture without publishing anything (Escape, or the pointer
-    /// turning up under another button).
+    /// Drop the gesture without publishing anything (Escape, a deliberate tool
+    /// switch, a composition switch, or the pointer turning up under another
+    /// button).
     fn cancel_box_select(&mut self, cx: &mut Context<Self>) {
         if self.box_select.take().is_some() {
             self.withdraw_box_select_candidates(cx);
@@ -4243,6 +4252,13 @@ fn box_rect(start: (f32, f32), current: (f32, f32)) -> CompRect {
 /// a rectangle whose edge lands exactly on a bbox's edge catches it — and a
 /// zero-extent bbox (a single placed point) is catchable, which a strict
 /// comparison would make impossible.
+///
+/// **Both rectangles are assumed normalized** (`w`, `h` >= 0), which is what
+/// every caller has: the swept rectangle comes from [`box_rect`], and a bbox
+/// comes from `geometry_bounds` / [`transform_rect`], both of which build their
+/// extents from a min/max pass. Normalizing here would write the opposite
+/// premise into the code — that a rectangle with negative extents can arrive —
+/// and no such rectangle exists.
 fn rects_overlap(a: &CompRect, b: &CompRect) -> bool {
     a.x <= b.x + b.w && b.x <= a.x + a.w && a.y <= b.y + b.h && b.y <= a.y + a.h
 }

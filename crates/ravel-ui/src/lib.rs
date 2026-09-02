@@ -58,10 +58,44 @@ mod i18n_coverage {
     use super::*;
 
     fn load_catalog() -> toml::Table {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/locales/en.toml");
-        let text = std::fs::read_to_string(path).expect("en.toml not found");
+        catalog("en")
+    }
+
+    /// One shipped catalog, parsed. The `t!` lookup falls back to English for a
+    /// missing key, so "the label is not a raw key" cannot see a translation
+    /// that never got written — only the file itself can.
+    fn catalog(locale: &str) -> toml::Table {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/locales")
+            .join(format!("{locale}.toml"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("{} not found", path.display()));
         text.parse::<toml::Table>()
-            .expect("en.toml is invalid TOML")
+            .unwrap_or_else(|_| panic!("{} is invalid TOML", path.display()))
+    }
+
+    /// Every canvas tool, named in **every** catalog under both keys it is
+    /// shown by: the toolbar tooltip and the command label the keybinding list
+    /// shows for its chord.
+    ///
+    /// The tools come from the command table rather than a second list, so a
+    /// tool added without locale strings fails here.
+    #[test]
+    fn all_tool_label_keys_in_every_catalog() {
+        for locale in ["en", "ja"] {
+            let catalog = catalog(locale);
+            for cmd in CommandId::all() {
+                let Some(tool) = ToolKind::from_command(cmd) else {
+                    continue;
+                };
+                for key in [tool.label_key(), cmd.label_key()] {
+                    assert!(
+                        has_key(&catalog, key),
+                        "{locale}.toml is missing the tool label key \"{key}\""
+                    );
+                }
+            }
+        }
     }
 
     fn has_key(table: &toml::Table, dotted_key: &str) -> bool {

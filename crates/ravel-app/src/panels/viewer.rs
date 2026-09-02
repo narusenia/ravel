@@ -4005,6 +4005,17 @@ impl Render for ViewerPanel {
                     // session.
                     #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
                     let host_device_loss = crate::workspace::host_device_loss_detected(window, cx);
+                    // **macOS cannot ask.** `gpui_macos` is Metal-native and
+                    // its `PlatformWindow` implements no `gpu_device_lost()` —
+                    // the method exists only under
+                    // `cfg(linux / freebsd / windows)` in the fork, so there is
+                    // nothing to call, not merely an answer of `None`. A loss or a
+                    // recreation on GPUI's own Metal renderer is therefore
+                    // **not detected by Ravel** (`GPULOSS-4`); `false` here
+                    // says "never observed", not "healthy". What Ravel does
+                    // detect is the loss of the device it owns itself, above.
+                    // Whether the fork should expose a native loss status is a
+                    // separate question (`MED-APP-40`).
                     #[cfg(not(any(
                         target_os = "linux",
                         target_os = "freebsd",
@@ -4014,8 +4025,20 @@ impl Render for ViewerPanel {
                     let mut surface_lost = false;
                     let mut self_owned_device_loss = false;
                     if let Some(frame) = gpu_frame.as_ref() {
+                        // Asked **before** the sample, not after: this frame's
+                        // texture belongs to the device that produced it, and
+                        // handing a renderer a texture from a dead device is
+                        // undefined. The panel outlives the frame's device by
+                        // exactly as long as it holds the frame, so "is that
+                        // device still alive" is part of the capability
+                        // question this guard answers (`GPULOSS-4`).
                         self_owned_device_loss = frame.device_state().lost();
-                        if !paint_gpu_surface(frame, frame_bounds, window, cx) {
+                        if self_owned_device_loss {
+                            tracing::warn!("viewer GPU device loss detected");
+                        }
+                        if self_owned_device_loss
+                            || !paint_gpu_surface(frame, frame_bounds, window, cx)
+                        {
                             // This window cannot sample the worker's texture — a
                             // second window on another device, or a device that
                             // changed under us. Painting nothing would leave the
@@ -4025,9 +4048,6 @@ impl Render for ViewerPanel {
                             tracing::warn!(
                                 "viewer GPU surface unavailable; falling back to the CPU frame"
                             );
-                        }
-                        if self_owned_device_loss {
-                            tracing::warn!("viewer GPU device loss detected");
                         }
                     }
                     // A self-owned context reports its loss through the shared
@@ -4043,10 +4063,16 @@ impl Render for ViewerPanel {
                     {
                         cx.defer(move |cx| {
                             project.update(cx, |project, cx| {
-                                project.report_gpu_device_loss(host_device_loss, cx);
+                                // Capability first, announcement second. Turning
+                                // the surface off is what asks for the CPU frame
+                                // that replaces the one this paint refused, and
+                                // the request it posts reports the loss on its
+                                // way through — so the order that ends with a
+                                // picture on screen is this one, not the reverse.
                                 if surface_lost {
                                     project.configure_viewer_surface(false, cx);
                                 }
+                                project.report_gpu_device_loss(host_device_loss, cx);
                             });
                         });
                     }

@@ -2844,6 +2844,29 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   the retired caches returning their reservations as they drop is what brings
   the usage back down, which is also why the replacement is not built before
   the join.
+  `ProjectState::recover_on_replacement_gpu(GpuContext, cx)` is what a
+  platform detector calls instead (`GPULOSS-3`): the same swap with the
+  zero-copy surface off across it, restored **only** when the swap reported it
+  started, so a `false` (one already running) leaves the capability to the
+  rebuild that is in flight. The detector for the adopted-host platforms is in
+  `workspace.rs` and is split in two on purpose. Reading the window needs the
+  fork's `cfg(linux / freebsd / windows)` methods; deciding does not, so
+  `workspace::host_recovery_step(HostDeviceObservation { adopted, lost,
+  context }) -> HostRecoveryStep` is plain code with a plain test. `HostContext`
+  is `Absent` (no context to report, including a shape the downcast cannot
+  read), `Same` (the adopted device) or `Replaced` (any other, which is also
+  what a session that adopted nothing and a window on a second GPU report).
+  `HostRecoveryStep` is `Nothing`, `Suspend` (keep zero-copy off **and refresh
+  the window** — GPUI rebuilds its renderer inside the platform draw, so an
+  idle window never recovers) or `Readopt`. Adoption is not re-implemented for
+  the recovery: the platform arm calls the same `host_gpu_context` startup
+  uses, which downcasts the renderer's four objects, wraps them with
+  `interop::context_from_wgpu` and **replaces** the `AdoptedHostDevice` global,
+  and `workspace::host_device_unchanged(window, cx)` — the viewer's per-paint
+  identity guard — is `host_context(window, cx) == HostContext::Same`. The poll
+  is a one-second timer on the window Ravel adopted from, and only that window:
+  the identity change is a recovery *there*, while the same reading from a
+  second window on another GPU is a second GPU.
   `ProjectState::report_gpu_device_loss(detected, cx)` is the single place the
   session observes a loss and acts on it. `detected` carries the adopted-host
   observation; a self-owned context needs no argument, because its own callback

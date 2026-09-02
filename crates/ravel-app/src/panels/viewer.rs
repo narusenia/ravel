@@ -1482,9 +1482,12 @@ impl ViewerPanel {
 
     /// Record the press and ask for the candidate bboxes.
     ///
-    /// The request is posted once, here. The candidate set is fixed for the
-    /// gesture, so [`OverlayRegistry::eval_targets`] keeps returning the same
-    /// list and a request per pointer move would buy nothing but work. The
+    /// This gesture posts its own request here and **never again**: the
+    /// candidate set is fixed for the whole drag, so
+    /// [`OverlayRegistry::eval_targets`] keeps returning the same list and a
+    /// request per pointer move would buy nothing but work. That is the
+    /// promise — not that the press enqueues exactly one request in total,
+    /// which the paragraph below qualifies. The
     /// hint is `None` because the document did not change: every value the
     /// composition already evaluated stays cached and the candidates are the
     /// only work this adds.

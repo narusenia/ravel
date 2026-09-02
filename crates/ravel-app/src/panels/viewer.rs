@@ -6603,7 +6603,7 @@ mod tests {
         assert_eq!(sample_float_param(&node, "radius", 0, &ctx), Some(500.0));
         assert_eq!(
             param_value(&node, "sides"),
-            param_value(&fresh, "sides"),
+            Some(registry_default(&fresh, "sides")),
             "the drag must not decide the side count"
         );
     }
@@ -6633,7 +6633,7 @@ mod tests {
         for key in ["inner_radius", "points"] {
             assert_eq!(
                 param_value(&node, key),
-                param_value(&fresh, key),
+                Some(registry_default(&fresh, key)),
                 "the drag must not decide {key}"
             );
         }
@@ -6646,6 +6646,18 @@ mod tests {
             .iter()
             .find(|param| param.key == key)
             .map(|param| param.value.clone())
+    }
+
+    /// The same value, but from a node straight out of the registry — and it
+    /// has to be there.
+    ///
+    /// Comparing two `Option`s would pass with both sides `None`, so a
+    /// misspelled key ("points" for the polygon's "sides", "radius" for the
+    /// star's "outer_radius" — both real mistakes made while writing this)
+    /// would assert nothing at all.
+    fn registry_default(fresh: &Node, key: &str) -> ParameterValue {
+        param_value(fresh, key)
+            .unwrap_or_else(|| panic!("{} has no {key:?} parameter", fresh.type_key))
     }
 
     #[test]

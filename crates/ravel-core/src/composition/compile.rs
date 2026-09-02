@@ -211,20 +211,14 @@ fn make_merge_node(comp_id: CompId, layer: &Layer) -> Node {
 // ===========================================================================
 
 /// Determine which layers are active after solo/mute filtering.
+///
+/// The rule itself lives on [`Composition::composites`], which is what the
+/// Viewer's hit test reads too: what composites and what can be picked off the
+/// screen have to be the same set.
 fn active_layers(comp: &Composition) -> Vec<&Layer> {
-    let any_solo = comp.layers.iter().any(|l| l.solo);
-
     comp.layers
         .iter()
-        .filter(|l| {
-            if l.muted {
-                return false;
-            }
-            if any_solo && !l.solo {
-                return false;
-            }
-            true
-        })
+        .filter(|layer| comp.composites(layer))
         .collect()
 }
 

@@ -4565,7 +4565,10 @@ fn hit_test_shape_nodes(
 /// such a layer becomes selectable here without becoming editable.
 ///
 /// A layer whose geometry has not been evaluated has no bbox and is skipped —
-/// the mechanism's "no result, no guessing" rule.
+/// the mechanism's "no result, no guessing" rule. A layer that does not
+/// composite is skipped too: [`Composition::composites`] is the compositor's
+/// own rule (muted out, and non-soloed out while anything is soloed), asked
+/// rather than restated, so this can never pick a shape that is not on screen.
 fn hit_test_other_layers(
     ctx: &OverlayContext,
     comp: CompId,
@@ -4578,7 +4581,7 @@ fn hit_test_other_layers(
         .layers
         .iter()
         .rev()
-        .filter(|layer| Some(layer.id) != active)
+        .filter(|layer| Some(layer.id) != active && composition.composites(layer))
         .find_map(|layer| {
             let network = NetworkPath::layer(comp, layer.id);
             let node = hit_test_shape_nodes(ctx, &network, point)?;
@@ -11070,6 +11073,95 @@ mod tests {
             vec![original[0], original[2]],
             "an anchor press still removes the point"
         );
+    }
+
+    /// The fallback picks out of what is **on screen**: a muted layer, and a
+    /// layer left out by another layer's solo, are not candidates.
+    ///
+    /// The rule is the compositor's own (`Composition::composites`), so this
+    /// pins the agreement rather than a second copy of it.
+    #[gpui::test]
+    fn the_fallback_skips_layers_that_do_not_composite(cx: &mut TestAppContext) {
+        let (window, project, comp_id, layers) = multi_layer_setup(cx);
+        let node = project.read_with(cx, |project, _| {
+            only_node(
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layers[1])
+                    .unwrap(),
+            )
+        });
+        // No network open, so a press on empty space sweeps layers — and a
+        // release without travel falls back. (140, 0) is inside the second
+        // layer's bbox only.
+        let hit = (140.0, 0.0);
+        let click = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                crate::panels::clear_layer_selection(cx);
+                cx.set_global(CanvasSelection::default());
+            });
+            window
+                .update(cx, |panel, _window, cx| {
+                    let press = press_comp(panel, hit, Modifiers::default());
+                    panel.left_mouse_down(&press, cx);
+                    assert!(panel.box_select.is_some(), "the press grabbed nothing");
+                })
+                .unwrap();
+            // The press posted a request, and with no worker that clears the
+            // snapshot the fallback reads its bboxes from.
+            publish_geometry_results(&project, cx);
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.box_select_ended(window_point(panel, hit), cx);
+                })
+                .unwrap();
+            selected_nodes(cx)
+        };
+
+        assert_eq!(
+            click(cx),
+            HashSet::from([node]),
+            "the visible layer's shape is picked"
+        );
+
+        for (label, mutate) in [
+            (
+                "muted",
+                (|layer: &mut Layer| layer.muted = true) as fn(&mut Layer),
+            ),
+            ("left out by another layer's solo", |layer: &mut Layer| {
+                layer.solo = false
+            }),
+        ] {
+            let (window_layer, other) = (layers[1], layers[0]);
+            project.update(cx, |project, cx| {
+                let mut doc = ravel_ui::document::update_layer(
+                    project.document(),
+                    comp_id,
+                    window_layer,
+                    |layer| {
+                        layer.muted = false;
+                        layer.solo = false;
+                        mutate(layer);
+                    },
+                )
+                .unwrap();
+                // The solo case needs someone else soloed; the mute case must
+                // not have one.
+                doc = ravel_ui::document::update_layer(&doc, comp_id, other, |layer| {
+                    layer.solo = label.starts_with("left out");
+                })
+                .unwrap();
+                project.commit_document(doc, InvalidationHint::Structural, cx);
+            });
+            cx.run_until_parked();
+            assert!(
+                click(cx).is_empty(),
+                "a layer {label} is not on screen, so it cannot be picked"
+            );
+        }
     }
 
     /// Completion criterion: the Pen removes the point it presses on, and the

@@ -505,6 +505,23 @@ impl Composition {
         self.layers.len()
     }
 
+    /// Whether `layer` takes part in the composite: a muted layer does not,
+    /// and once **any** layer is soloed the ones that are not drop out.
+    ///
+    /// The one authority on that rule. The compositor's solo/mute pre-pass
+    /// (`compile::compile_composition`) asks this, and so does anything that
+    /// has to agree with what is on screen — the Viewer's hit test picks
+    /// shapes out of layers, and picking one the composite left out would
+    /// select something invisible. Two copies of this rule would mean a
+    /// future where only one of them is fixed.
+    ///
+    /// Time placement is deliberately **not** part of it, exactly as it is
+    /// not part of the pre-pass: a layer outside the playhead's range still
+    /// composites, and the shell decides what that contributes.
+    pub fn composites(&self, layer: &Layer) -> bool {
+        !layer.muted && (layer.solo || !self.layers.iter().any(|l| l.solo))
+    }
+
     /// The layer's parent chain, nearest ancestor first.
     ///
     /// Solo / mute state is irrelevant here: parenting is a transform
@@ -1755,6 +1772,47 @@ mod tests {
 
     fn empty_layer(id: u64) -> Layer {
         Layer::new(LayerId::new(id), format!("Layer {id}"), Graph::new()).with_time(0, 0, 300)
+    }
+
+    /// The one authority on what composites: muted out, and once anything is
+    /// soloed the rest are out too. The compositor's pre-pass and the Viewer's
+    /// hit test both read this, so the truth table is pinned here.
+    #[test]
+    fn composites_follows_mute_and_solo() {
+        let plain = empty_layer(1);
+        let mut muted = empty_layer(2);
+        muted.muted = true;
+        let mut soloed = empty_layer(3);
+        soloed.solo = true;
+        let mut muted_solo = empty_layer(4);
+        muted_solo.muted = true;
+        muted_solo.solo = true;
+
+        let comp = test_comp()
+            .add_layer(plain.clone())
+            .add_layer(muted.clone());
+        assert!(comp.composites(&plain));
+        assert!(!comp.composites(&muted));
+
+        let soloing = comp.clone().add_layer(soloed.clone());
+        assert!(
+            !soloing.composites(&plain),
+            "one soloed layer drops every layer that is not"
+        );
+        assert!(soloing.composites(&soloed));
+        assert!(!soloing.composites(&muted));
+
+        let both = test_comp()
+            .add_layer(plain.clone())
+            .add_layer(muted_solo.clone());
+        assert!(
+            !both.composites(&muted_solo),
+            "mute wins over the layer's own solo"
+        );
+        assert!(
+            !both.composites(&plain),
+            "and the solo still drops the others"
+        );
     }
 
     fn keyframed_channel(keys: &[(u64, f32)]) -> AnimationChannel {

@@ -10957,6 +10957,17 @@ mod tests {
             1,
             "and created no second path node"
         );
+        assert!(
+            !project.update(cx, |project, cx| project.revert_document(cx)),
+            "the click left no uncommitted preview behind — it is a committed \
+             step, so a cancel belonging to some other gesture cannot throw it \
+             away, and an unrelated commit cannot absorb it"
+        );
+        assert_eq!(
+            committed_path(&project, &network, node, cx).len(),
+            3,
+            "the inserted point survives the cancel of nothing"
+        );
 
         project.update(cx, |project, cx| assert!(project.undo(cx)));
         cx.run_until_parked();

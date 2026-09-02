@@ -936,6 +936,24 @@ enum PendingProjectAction {
 /// the device is unavailable — hence the log.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 fn host_gpu_context(window: &Window, cx: &mut gpui::App) -> Option<ravel_gpu::GpuContext> {
+    let (context, adopted) = adoptable_host_gpu(window)?;
+    // Startup adopts unconditionally — there is no pipeline yet to refuse the
+    // device, so building the context *is* accepting it.
+    cx.set_global(adopted);
+    Some(context)
+}
+
+/// The renderer's device wrapped for Ravel, **without** recording it as the
+/// adopted one.
+///
+/// Two returns rather than one and a side effect, because a recovery may be
+/// refused (`GPULOSS-3`). `AdoptedHostDevice` is what the next poll compares
+/// against, so recording a device the session did not actually move onto
+/// destroys the retry: the poll would compare the new device with itself, read
+/// [`HostContext::Same`], and leave the pipeline on the previous device
+/// forever. The caller records it only once the swap has been accepted.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+fn adoptable_host_gpu(window: &Window) -> Option<(ravel_gpu::GpuContext, AdoptedHostDevice)> {
     use std::sync::Arc;
 
     if window.gpu_device_lost().unwrap_or(false) {
@@ -960,8 +978,7 @@ fn host_gpu_context(window: &Window, cx: &mut gpui::App) -> Option<ravel_gpu::Gp
         (*device).clone(),
         (*queue).clone(),
     );
-    cx.set_global(AdoptedHostDevice((*device).clone()));
-    Some(context)
+    Some((context, AdoptedHostDevice((*device).clone())))
 }
 
 /// The device Ravel adopted from the window renderer, kept so the viewer can
@@ -974,8 +991,10 @@ fn host_gpu_context(window: &Window, cx: &mut gpui::App) -> Option<ravel_gpu::Gp
 /// device is undefined and trips wgpu's uncaptured-error handler, so the viewer
 /// compares identity against this before every surface paint.
 ///
-/// Durable, window-independent state for the whole session — the pipeline is
-/// built on this device once and never rebuilt (`issues/high/HIGH-33`).
+/// Durable, window-independent state for the whole session, replaced only by
+/// a device the session actually moved onto: it is also what the recovery
+/// coordinator diffs against, so a device recorded here without the pipeline
+/// following it would end the retry rather than start one (`GPULOSS-3`).
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
 pub struct AdoptedHostDevice(pub wgpu::Device);
 
@@ -1017,8 +1036,27 @@ fn host_context(window: &Window, cx: &gpui::App) -> HostContext {
         // adoption path to unpack the same tuple it just failed on.
         return HostContext::Absent;
     };
-    match cx.try_global::<AdoptedHostDevice>() {
-        Some(adopted) if *parts.2 == adopted.0 => HostContext::Same,
+    host_context_for(
+        &*parts.2,
+        cx.try_global::<AdoptedHostDevice>()
+            .map(|adopted| &adopted.0),
+    )
+}
+
+/// Which of the two the pairing is: the device the renderer reports against
+/// the one Ravel recorded as adopted. [`HostContext::Absent`] is not reachable
+/// from here — that is the answer when there is no reported device to pair,
+/// and the caller has already returned by then.
+///
+/// Generic and outside the platform `cfg` so the retry that the recovery
+/// depends on can be stated in a test: while the adopted device stays the one
+/// the pipeline is really on, a renderer that has moved keeps reading
+/// [`HostContext::Replaced`], and [`host_recovery_step`] keeps asking for the
+/// swap. Record a device the session did not move onto and this answers
+/// [`HostContext::Same`] instead — the deadlock, not a retry.
+pub fn host_context_for<D: PartialEq>(reported: &D, adopted: Option<&D>) -> HostContext {
+    match adopted {
+        Some(adopted) if reported == adopted => HostContext::Same,
         _ => HostContext::Replaced,
     }
 }
@@ -1216,28 +1254,35 @@ fn spawn_host_device_recovery(
                             project.configure_viewer_surface(false, cx);
                         })
                     }
-                    HostRecoveryStep::Readopt => match host_gpu_context(window, cx) {
-                        // The adoption path, reused whole: it unpacks the
-                        // renderer's four objects, wraps them with
-                        // `interop::context_from_wgpu` and **replaces**
-                        // `AdoptedHostDevice`, so the old device is dropped
-                        // here rather than referenced for the rest of the
-                        // session. A second implementation of those three
-                        // steps is how the global would be left pointing at
-                        // the dead one.
-                        Some(gpu) => {
+                    HostRecoveryStep::Readopt => match adoptable_host_gpu(window) {
+                        // The startup adoption path, reused whole: it unpacks
+                        // the renderer's four objects and wraps them with
+                        // `interop::context_from_wgpu`. A second
+                        // implementation of those steps is how the two would
+                        // drift apart.
+                        Some((gpu, adopted)) => {
                             tracing::warn!(
                                 "the window renderer recovered onto a new GPU device; rebuilding \
                                  the evaluation pipeline on it"
                             );
-                            project.update(cx, |project, cx| {
-                                // The `false` case (a swap already in flight)
-                                // needs nothing from here: it is refused
-                                // *inside*, where the capability is left off
-                                // for the swap that is already running to
-                                // restore.
-                                project.recover_on_replacement_gpu(gpu, cx);
-                            })
+                            let accepted = project.update(cx, |project, cx| {
+                                project.recover_on_replacement_gpu(gpu, cx)
+                            });
+                            // **Only an accepted swap claims the device.** A
+                            // refusal (a swap already in flight) leaves the
+                            // global on the device the pipeline is actually
+                            // being built for, so the next poll reads
+                            // `Replaced` again and retries — the renderer can
+                            // change device twice while one swap is in
+                            // flight, and recording the second one here would
+                            // make the poll compare it with itself and never
+                            // adopt it. Replacing the global drops the device
+                            // it held, which is what keeps the old one from
+                            // being referenced for the rest of the session.
+                            if matches!(accepted, Ok(true)) {
+                                cx.set_global(adopted);
+                            }
+                            accepted.map(|_| ())
                         }
                         // The renderer changed shape, or gave up its context
                         // between the observation and this call. Either way
@@ -2898,6 +2943,60 @@ mod tests {
                 "{observation:?}"
             );
         }
+    }
+
+    /// `GPULOSS-3`: a refused swap has to be retried, and what makes the
+    /// retry happen is that the adopted device was **not** recorded.
+    ///
+    /// The renderer can change device twice while one swap is in flight (a
+    /// second loss during the rebuild). The device stand-ins are integers
+    /// because the only property in play is identity, which is also why this
+    /// can be tested at all — the real devices live behind the platform `cfg`.
+    ///
+    /// The second half is the bug this pins: record the device the swap
+    /// refused and the next poll compares it with itself, reads `Same`, and
+    /// asks for nothing. The pipeline then stays on the previous device for
+    /// the rest of the session, with no observation left that would notice.
+    #[test]
+    fn a_refused_swap_leaves_the_next_poll_asking_for_the_same_device() {
+        use super::HostContext::{Replaced, Same};
+        use super::HostRecoveryStep::{Nothing, Readopt};
+
+        let (adopted, in_flight, arrived) = (1_u32, 2_u32, 3_u32);
+        let step = |context| {
+            super::host_recovery_step(super::HostDeviceObservation {
+                adopted: true,
+                lost: false,
+                context,
+            })
+        };
+
+        // The first recovery: the renderer left the adopted device, and the
+        // swap onto it was accepted, so it becomes the adopted one.
+        assert_eq!(
+            super::host_context_for(&in_flight, Some(&adopted)),
+            Replaced
+        );
+        assert_eq!(step(Replaced), Readopt);
+
+        // A second recovery lands while that swap is still running, so it is
+        // refused — and because it was refused, the device it brought is not
+        // recorded. The next poll still sees a renderer that has moved.
+        assert_eq!(
+            super::host_context_for(&arrived, Some(&in_flight)),
+            Replaced,
+            "the poll after a refused swap stopped asking for the new device"
+        );
+        assert_eq!(step(Replaced), Readopt);
+
+        // What recording it regardless would have produced instead.
+        assert_eq!(super::host_context_for(&arrived, Some(&arrived)), Same);
+        assert_eq!(
+            step(Same),
+            Nothing,
+            "recording a refused device would still have been retried, which \
+             is not what the comparison can express"
+        );
     }
 
     #[test]

@@ -5051,8 +5051,28 @@ fn radial_drag_geometry(start: (f32, f32), current: (f32, f32)) -> DragGeometry 
 
 /// A drag with a zero extent on either axis creates nothing: the resulting
 /// shape would be invisible.
+///
+/// The finiteness check is not defensive noise. Pointer positions reach this
+/// through `screen_to_comp`, which divides by the viewport rectangle's width;
+/// a panel whose width has collapsed, or an explicit zoom that has degenerated,
+/// can hand a drag `Inf` or `NaN` coordinates, and `radial_drag_geometry`'s
+/// `hypot` propagates both. A committed shape with a `NaN` extent then feeds a
+/// `NaN` bbox into the hit test and the overlays, which is the class of bug
+/// `TOOLX-2` explicitly deferred — so it is stopped here instead.
+///
+/// This is the one funnel every drawing tool passes through (rect, ellipse and
+/// both radial tools), which is why the check lives here and not in the
+/// callers.
+///
+/// `<= 0.0` rather than `== 0.0`: neither producer emits a negative extent
+/// today (`abs` and `hypot`), but a guard must not narrow its own precondition.
 fn drag_geometry_degenerate(geo: DragGeometry) -> bool {
-    geo.half.0 == 0.0 || geo.half.1 == 0.0
+    !geo.center.0.is_finite()
+        || !geo.center.1.is_finite()
+        || !geo.half.0.is_finite()
+        || !geo.half.1.is_finite()
+        || geo.half.0 <= 0.0
+        || geo.half.1 <= 0.0
 }
 
 /// Overwrite a freshly created shape node's parameters with the drag
@@ -6414,6 +6434,59 @@ mod tests {
             true,
             false
         )));
+    }
+
+    /// A non-finite extent is degenerate too, on every path into the funnel.
+    ///
+    /// `screen_to_comp` divides by the viewport width, so a collapsed panel or
+    /// a degenerate explicit zoom can hand a drag `NaN` / `Inf` coordinates —
+    /// and a committed `NaN` extent becomes a `NaN` bbox in the hit test.
+    #[test]
+    fn a_non_finite_or_negative_extent_is_degenerate() {
+        let nan = f32::NAN;
+        let inf = f32::INFINITY;
+
+        // The box tools: a non-finite pointer on either axis.
+        for current in [(nan, 60.0), (60.0, nan), (inf, 60.0), (60.0, -inf)] {
+            assert!(
+                drag_geometry_degenerate(drag_geometry((10.0, 10.0), current, false, false)),
+                "a box drag to {current:?} was accepted"
+            );
+        }
+        // And a non-finite press, which puts the centre out of range even when
+        // the extents survive.
+        assert!(drag_geometry_degenerate(drag_geometry(
+            (nan, 10.0),
+            (60.0, 60.0),
+            false,
+            false
+        )));
+
+        // The radial tools: `hypot` propagates a non-finite coordinate, and
+        // overflows to `Inf` on a span no f32 can hold.
+        assert!(drag_geometry_degenerate(radial_drag_geometry(
+            (10.0, 10.0),
+            (nan, 60.0)
+        )));
+        assert!(drag_geometry_degenerate(radial_drag_geometry(
+            (nan, 10.0),
+            (60.0, 60.0)
+        )));
+        assert!(drag_geometry_degenerate(radial_drag_geometry(
+            (-f32::MAX, -f32::MAX),
+            (f32::MAX, f32::MAX)
+        )));
+
+        // A negative extent cannot come out of `abs` or `hypot` today, but the
+        // guard does not rely on that.
+        assert!(drag_geometry_degenerate(DragGeometry {
+            center: (0.0, 0.0),
+            half: (-1.0, 1.0),
+        }));
+        assert!(drag_geometry_degenerate(DragGeometry {
+            center: (0.0, 0.0),
+            half: (1.0, -1.0),
+        }));
     }
 
     #[test]
@@ -9003,6 +9076,79 @@ mod tests {
                         .layer_count(),
                     1,
                     "{tool:?}: a zero-radius release left a layer behind"
+                );
+            });
+        }
+    }
+
+    /// A drag whose pointer goes non-finite commits nothing, under the box
+    /// tools as much as the radial ones.
+    ///
+    /// The pointer travels through `screen_to_comp`, which divides by the
+    /// viewport width, so a collapsed panel is a real way to reach this. The
+    /// shape is created mid-gesture as usual — the guard is at the release,
+    /// where the whole creation is rolled back.
+    #[gpui::test]
+    fn a_non_finite_drag_commits_nothing_under_every_drawing_tool(cx: &mut TestAppContext) {
+        for tool in [
+            ravel_ui::ToolKind::Rect,
+            ravel_ui::ToolKind::Ellipse,
+            ravel_ui::ToolKind::Polygon,
+            ravel_ui::ToolKind::Star,
+        ] {
+            let (window, project, comp_id, layer) = shell_setup(cx);
+            let network = NetworkPath::layer(comp_id, layer);
+            cx.update(|cx| {
+                cx.set_global(CanvasSelection {
+                    path: Some(network.clone()),
+                    nodes: HashSet::new(),
+                });
+                cx.set_global(ToolState {
+                    active: tool,
+                    ..ToolState::default()
+                });
+            });
+            let before = project.read_with(cx, |project, _| project.document().clone());
+
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.shape_mouse_down(&press_at(panel, (500.0, 500.0)), cx);
+                    // A finite move first, so the node really exists before the
+                    // pointer goes bad — otherwise the guard would never be
+                    // asked anything.
+                    panel.shape_dragged(
+                        &MouseMoveEvent {
+                            position: window_point(panel, (700.0, 700.0)),
+                            pressed_button: Some(MouseButton::Left),
+                            modifiers: Modifiers::default(),
+                        },
+                        cx,
+                    );
+                    assert!(
+                        panel
+                            .shape_drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.created.is_some()),
+                        "{tool:?}: the finite move should have created the node"
+                    );
+                    panel.shape_dragged(
+                        &MouseMoveEvent {
+                            position: point(px(f32::NAN), px(f32::NAN)),
+                            pressed_button: Some(MouseButton::Left),
+                            modifiers: Modifiers::default(),
+                        },
+                        cx,
+                    );
+                    panel.shape_ended(cx);
+                    assert!(panel.shape_drag.is_none(), "{tool:?}: the gesture is over");
+                })
+                .unwrap();
+
+            project.read_with(cx, |project, _| {
+                assert_eq!(
+                    project.document(),
+                    &before,
+                    "{tool:?}: a non-finite drag left something behind"
                 );
             });
         }

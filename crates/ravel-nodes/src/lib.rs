@@ -128,6 +128,9 @@ pub fn processor_for_node(
 ) -> Option<Arc<dyn ravel_core::eval::NodeProcessor>> {
     let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node.type_key.as_str() {
         "attribute.set" => Some(Arc::new(attribute::AttributeSetProcessor::from_node(node))),
+        "attribute.delete" => Some(Arc::new(attribute::AttributeDeleteProcessor::from_node(
+            node,
+        ))),
         "attribute.promote" => Some(Arc::new(attribute::AttributePromoteProcessor::from_node(
             node,
         ))),

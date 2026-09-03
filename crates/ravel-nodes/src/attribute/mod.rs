@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
 use ravel_core::geometry::{
     AggregateMode, AttributeArray, AttributeValue, CurveUMode, Domain, Geometry, TransferMode,
-    attribute_set, attribute_transfer, curve_u, path_sample, promote_attribute,
+    attribute_delete, attribute_set, attribute_transfer, curve_u, path_sample, promote_attribute,
 };
 use ravel_core::graph::Node;
 use ravel_core::registry::builtin::{ATTRIBUTE_SET_DEFAULT_TYPE, attribute_set_value_defaults};
@@ -67,6 +67,37 @@ impl NodeProcessor for AttributeSetProcessor {
         let domain = domain_param(params, "domain", Domain::Point);
         let name = params.str_or("name", "value");
         Ok(Arc::new(attribute_set(geometry, domain, name, value)?))
+    }
+}
+
+/// `attribute.delete`: drops one column from the chosen domain.
+///
+/// A name the domain does not carry is a no-op; the position column of a
+/// position-carrying domain is an error, both decided by
+/// [`attribute_delete`].
+pub struct AttributeDeleteProcessor;
+
+impl AttributeDeleteProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for AttributeDeleteProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "attribute.delete")?;
+        Ok(Arc::new(attribute_delete(
+            geometry,
+            domain_param(params, "domain", Domain::Point),
+            params.str_or("name", "value"),
+        )?))
     }
 }
 
@@ -288,6 +319,7 @@ mod tests {
         let mut ev = Evaluator::new();
         let processor: Arc<dyn NodeProcessor> = match node.type_key.as_str() {
             "attribute.set" => Arc::new(AttributeSetProcessor::from_node(node)),
+            "attribute.delete" => Arc::new(AttributeDeleteProcessor::from_node(node)),
             "attribute.promote" => Arc::new(AttributePromoteProcessor::from_node(node)),
             "attribute.transfer" => Arc::new(AttributeTransferProcessor::from_node(node)),
             _ => panic!("unsupported test processor {}", node.type_key),
@@ -578,6 +610,91 @@ mod tests {
             };
             assert!(present, "domain = {domain:?} did not receive the attribute");
         }
+    }
+
+    /// `attribute.delete` reads the same four domain strings as
+    /// `attribute.set`, and touches only the one it was given. Every domain
+    /// carries the column, so a processor that ignored `domain` and always
+    /// used the default would leave one of the other three behind.
+    #[test]
+    fn declared_domain_options_reach_their_attribute_delete_domains() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let options = registry
+            .param_options("attribute.delete", "domain")
+            .unwrap()
+            .to_vec();
+        assert_eq!(options, ravel_core::registry::builtin::ATTRIBUTE_DOMAINS);
+
+        let mut geometry = geometry_with_domains();
+        geometry
+            .points_mut()
+            .insert("stagger_t", AttributeArray::F32(vec![3.5, -7.25, 11.75]))
+            .unwrap();
+        geometry
+            .primitive_attrs_mut()
+            .insert("stagger_t", AttributeArray::F32(vec![-2.75]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert("stagger_t", AttributeArray::F32(vec![6.25, -13.5]))
+            .unwrap();
+        geometry
+            .detail_mut()
+            .insert("stagger_t", AttributeArray::F32(vec![21.5]))
+            .unwrap();
+
+        for domain in options {
+            let mut node = registered_node("attribute.delete", 1);
+            set_string_param(&mut node, "domain", &domain);
+            set_string_param(&mut node, "name", "stagger_t");
+            let output = run_attribute_node(&node, &[Arc::new(geometry.clone())]);
+            let output = output.downcast_ref::<Geometry>().unwrap();
+            let present = [
+                ("point", output.points().get("stagger_t").is_some()),
+                (
+                    "primitive",
+                    output.primitive_attrs().get("stagger_t").is_some(),
+                ),
+                ("instance", output.instances().get("stagger_t").is_some()),
+                ("detail", output.detail().get("stagger_t").is_some()),
+            ];
+            for (name, still_there) in present {
+                assert_eq!(
+                    still_there,
+                    name != domain,
+                    "domain = {domain:?} left the {name} domain in the wrong state"
+                );
+            }
+        }
+    }
+
+    /// A name nothing wrote evaluates to the input geometry rather than an
+    /// error, so a graph whose upstream stopped writing a scratch column keeps
+    /// rendering.
+    #[test]
+    fn attribute_delete_of_a_missing_name_evaluates_to_the_input() {
+        let mut node = registered_node("attribute.delete", 1);
+        set_string_param(&mut node, "domain", "point");
+        set_string_param(&mut node, "name", "never_written");
+        let mut geometry = geometry_with_domains();
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![3.5, -7.25, 11.75]))
+            .unwrap();
+
+        let output = run_attribute_node(&node, &[Arc::new(geometry.clone())]);
+        let output = output.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(output.summary().points, geometry.summary().points);
+        assert_eq!(
+            output
+                .points()
+                .get("weight")
+                .unwrap()
+                .as_f32("weight")
+                .unwrap(),
+            &[3.5, -7.25, 11.75]
+        );
     }
 
     /// Every aggregate option is sent through the string parameter. The

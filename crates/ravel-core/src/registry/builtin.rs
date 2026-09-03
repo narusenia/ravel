@@ -161,6 +161,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(style_fill());
     reg.register(style_stroke());
     reg.register(style_dash());
+    reg.register(attribute_delete());
     reg.register(attribute_promote());
     reg.register(attribute_transfer());
     reg.register(attribute_path_sample());
@@ -507,6 +508,25 @@ fn style_dash() -> NodeTemplate {
         .with_param(string_parameter("pattern", ""))
         .with_param(float_parameter("offset", 0.0))
         .with_param_range("offset", -1e6..=1e6, -100.0..=100.0)
+}
+
+/// `attribute.delete`: drops one attribute column.
+///
+/// The mirror of [`attribute_set`], and what lets a modulation graph write a
+/// scratch column (`stagger_t` and friends) and keep it out of everything
+/// downstream. Deleting `P` from the point or instance domain is refused by
+/// the op, because both domains are validated on having one.
+fn attribute_delete() -> NodeTemplate {
+    NodeTemplate::new(
+        "attribute.delete",
+        "Attribute Delete",
+        NodeCategory::Geometry,
+    )
+    .with_input(geometry_input("geometry"))
+    .with_output(geometry_output())
+    .with_param(string_parameter("domain", "point"))
+    .with_param_options("domain", ATTRIBUTE_DOMAINS)
+    .with_param(string_parameter("name", "value"))
 }
 
 fn attribute_promote() -> NodeTemplate {
@@ -2186,10 +2206,13 @@ mod tests {
     fn closed_attribute_parameter_options_match_the_processor_contracts() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(
-            reg.param_options("attribute.set", "domain").unwrap(),
-            ATTRIBUTE_DOMAINS
-        );
+        for type_key in ["attribute.set", "attribute.delete"] {
+            assert_eq!(
+                reg.param_options(type_key, "domain").unwrap(),
+                ATTRIBUTE_DOMAINS,
+                "{type_key}.domain"
+            );
+        }
         for key in ["source_domain", "target_domain"] {
             assert_eq!(
                 reg.param_options("attribute.transfer", key).unwrap(),

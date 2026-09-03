@@ -1253,6 +1253,13 @@ description = "Writes the dash attributes; a dashed stroke draws on the CPU path
 pattern = "Alternating on/off run lengths in composition pixels, for example \"4,2\". Empty draws a solid stroke."
 offset = "Where the pattern starts along the path, in composition pixels."
 
+[node."attribute.delete"]
+label = "Attribute Delete"
+description = "Deletes an attribute column from a geometry domain. A name the domain does not carry is left alone."
+[node."attribute.delete".params]
+domain = "Domain to delete from (point, primitive, instance, detail)."
+name = "Attribute name to delete. The position attribute P cannot be deleted from the point or instance domain."
+
 [node."attribute.promote"]
 label = "Attribute Promote"
 description = "Aggregates an attribute into a coarser domain (for example per-point values into one detail value)."

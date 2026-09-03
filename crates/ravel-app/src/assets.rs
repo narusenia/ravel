@@ -230,6 +230,8 @@ pub enum RavelIcon {
     NodeScatterScatter,
     /// Node header/menu: `attribute.set`.
     NodeAttributeSet,
+    /// Node header/menu: `attribute.delete`.
+    NodeAttributeDelete,
     /// Node header/menu: `attribute.promote`.
     NodeAttributePromote,
     /// Node header/menu: `attribute.transfer`.
@@ -428,6 +430,7 @@ impl RavelIcon {
             "scatter.path_array" => Self::NodeScatterPathArray,
             "scatter.scatter" => Self::NodeScatterScatter,
             "attribute.set" => Self::NodeAttributeSet,
+            "attribute.delete" => Self::NodeAttributeDelete,
             "attribute.promote" => Self::NodeAttributePromote,
             "attribute.transfer" => Self::NodeAttributeTransfer,
             "attribute.path_sample" => Self::NodeAttributePathSample,
@@ -570,6 +573,7 @@ impl IconNamed for RavelIcon {
             Self::NodeScatterPathArray => "icons/waypoints.svg",
             Self::NodeScatterScatter => "icons/sparkles.svg",
             Self::NodeAttributeSet => "icons/tag.svg",
+            Self::NodeAttributeDelete => "icons/eraser.svg",
             Self::NodeAttributePromote => "icons/chevrons-up.svg",
             Self::NodeAttributeTransfer => "icons/replace.svg",
             Self::NodeAttributePathSample => "icons/route.svg",

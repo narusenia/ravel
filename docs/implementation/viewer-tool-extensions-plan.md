@@ -2,7 +2,7 @@
 
 > **Status**: TOOLX-1 complete — PR #484, 2026-08-28; TOOLX-2 complete —
 > PR #487, 2026-09-02; TOOLX-3 complete — PR #489, 2026-09-02;
-> TOOLX-4 complete — PR #491, 2026-09-02; TOOLX-5 planned
+> TOOLX-4 complete — PR #491, 2026-09-02; TOOLX-5 complete — 2026-09-03
 
 対象: `done/tool-system-plan.md` が v1 として切り出した後の残り
 （REQ-UI-011 の v1.5 項目）と、機能が無いまま UI にあるツールの実装。
@@ -352,6 +352,25 @@ undo・永続化・Properties 経路に乗る（`done/tool-system-plan.md` の�
 
 - 3 文書が実装と一致していること
 - `MED-APP-15` を issue 側で解消済みにし、引受先を記録すること
+
+**実装メモ**
+
+- **ロケールは足すものが無かった。** `tool.*` / `menu.tool.*` は `TOOLX-1` と
+  `TOOLX-4` が en / ja 同時に入れており、`crates/` の `t!` が引く全キーが
+  両ロケールに揃っている（キー集合の差分は空）。ツールの操作そのものは
+  ラベルを持たない — 押下と修飾キーは文字列を出さないので、この単位で
+  訳す対象は無い
+- **`ui-impl-status.md` の Viewer 表も各実装単位が更新済み**だった。
+  文書側で実際にずれていたのは 2 か所: `ui-spec.md` のポインタ
+  フィードバック表が「Hand / Zoom には操作が無いのでカーソルを割り当てない」と
+  言い続けていた（`TOOLX-1` が割り当てた）ことと、REQ-UI-011 の受入条件が
+  v1 の分まで未チェックのまま v1.5 の項目を持っていなかったこと
+- `MED-APP-15` は `TOOLX-1` の PR が `issues/closed/medium-app-shell.md` へ
+  移し、`**解決済み**` に引受先も書いてある（索引も両方一致）。この単位では
+  確認だけ
+- 計画そのものは全単位が済んだが、`done/` へは移していない — 移すと
+  backlog / roadmap / issues の参照を一括で書き換えることになり、この単位の
+  スコープ（文書と実装の一致）を超える
 
 ## 検証
 

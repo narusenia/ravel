@@ -571,7 +571,7 @@ format version もマイグレーションも増えていない（`Layer.audio` 
 | TOOLX-2 | ✅ | 矩形選択（PR #487） | OVL-1 |
 | TOOLX-3 | ✅ | ヒット対象のフォールバックと点の挿入 / 削除 / ハンドル分離（PR #489） | — |
 | TOOLX-4 | ✅ | polygon / star のドラッグ描画（PR #491） | — |
-| TOOLX-5 | 🟡 | ロケールと文書（ツールのラベルは TOOLX-1 / TOOLX-4 で入れたので、残りは仕様書の散文） | TOOLX-1〜4 ✅ |
+| TOOLX-5 | ✅ | ロケールと文書（ツールのラベルは TOOLX-1 / TOOLX-4 で入れたので、この単位は仕様書 / 要件 / 実装状況の散文だけ） | TOOLX-1〜4 ✅ |
 
 TOOLX-1 は `MED-APP-15` を引き受ける単位。`done/pointer-feedback-plan.md` が
 見送った Hand / Zoom のカーソルもここで入る。REQ-UI-011 が v1.5 / v2 に

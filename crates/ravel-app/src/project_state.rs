@@ -3475,15 +3475,11 @@ mod tests {
         let lease = Arc::new(FrameBuffer::from_f32(1, 1, vec![0.0; 4]));
         let watched = Arc::downgrade(&lease);
         project.update(cx, |project, cx| {
-            let display: Arc<dyn ravel_core::types::NodeData> = Arc::new(
-                ravel_nodes::DisplayFrame::new(2, 2, Arc::from(vec![0u8; 16]))
-                    .with_linear(Some(lease)),
-            );
             project.on_eval_update(
                 ViewerUpdate::from_eval(EvalUpdate {
                     generation: 1,
                     frame: 0,
-                    results: vec![(NodeId::next(), Ok(display))],
+                    results: vec![(NodeId::next(), Ok(display_frame_leasing(lease)))],
                     scoped: Vec::new(),
                     timings: Vec::new(),
                 }),
@@ -3596,6 +3592,178 @@ mod tests {
             "the new epoch's frame was dropped on the inherited fence"
         );
         await_swap(&project, cx);
+    }
+
+    /// A published display frame that carries `lease` beside its picture.
+    ///
+    /// The `Arc` stands in for the GPU lease a
+    /// [`crate::panels::ViewerFrame::GpuFrame`] holds: a real
+    /// `GpuFrameBuffer` needs an adapter to build, and both are released by
+    /// the same write to the global.
+    fn display_frame_leasing(lease: Arc<FrameBuffer>) -> Arc<dyn ravel_core::types::NodeData> {
+        Arc::new(
+            ravel_nodes::DisplayFrame::new(2, 2, Arc::from(vec![0u8; 16])).with_linear(Some(lease)),
+        )
+    }
+
+    /// `GPULOSS-5`, window lifecycle c): a session that goes away takes its
+    /// published frame with it.
+    ///
+    /// Closing the main window drops the workspace and with it the session,
+    /// but [`crate::panels::ViewerFrame`] is an application-wide global that
+    /// outlives every window. Left alone it would hold the retired session's
+    /// texture — a lease on a pool that is being torn down — for the *next*
+    /// session's Viewer to mirror and paint, and the paint guard would not
+    /// object: it compares the renderer's device against the device the new
+    /// session adopted, which is neither the old texture's nor a mismatch.
+    #[gpui::test]
+    fn a_released_session_takes_its_published_frame_with_it(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let lease = Arc::new(FrameBuffer::from_f32(1, 1, vec![0.0; 4]));
+        let watched = Arc::downgrade(&lease);
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(display_frame_leasing(lease)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        assert!(
+            watched.upgrade().is_some(),
+            "the fixture never put the lease in the published frame"
+        );
+
+        // The window closed: nothing holds the session any more. The release
+        // listener runs when the app next flushes its effects, which is what
+        // the empty update below is for.
+        drop(project);
+        cx.update(|_| {});
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "the retired session's frame is still the one a new window would show"
+            );
+        });
+        assert!(
+            watched.upgrade().is_none(),
+            "the retired session's lease outlived the session"
+        );
+    }
+
+    /// `GPULOSS-5`: a second window's capability check goes through the
+    /// session's one device and asks for nothing else.
+    ///
+    /// A detached window builds no session of its own — `window_host::open`
+    /// constructs a `WindowHost` with `session: None`, and the GPU context is
+    /// obtained exactly once, in `RavelWorkspace::new` — so all a second
+    /// window can do is answer the capability question for itself. What it
+    /// must **not** do is look like a device loss: a window on another GPU
+    /// mismatches from its first frame and its device never died, which is why
+    /// `workspace::host_device_loss_detected` refuses to call a mismatch a
+    /// loss. Three readings in the order a session meets them:
+    ///
+    /// * the second window's paint cannot sample, so it lowers the shared
+    ///   capability — and starts no device swap, so the session keeps the
+    ///   worker, the caches and the device it had;
+    /// * closing and reopening that window re-decides the capability against
+    ///   the same session, so a healthy device may have it back;
+    /// * a session whose own device has been lost keeps its state across the
+    ///   whole churn, so no later window can hand zero-copy back to it.
+    #[gpui::test]
+    fn a_second_windows_capability_check_never_swaps_the_sessions_device(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(None, EpochHooks::new("session", &log), 0, cx);
+            project.configure_viewer_surface(true, cx);
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the fixture never enabled the surface"
+            );
+        });
+
+        // The second window paints, finds it cannot sample the worker's
+        // texture, and falls back.
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(false, cx)
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the mismatching window did not reach the CPU fallback"
+            );
+            assert!(
+                !project.eval_restart_in_progress,
+                "a second window's device mismatch was taken for a device loss and \
+                 started an epoch swap"
+            );
+            assert!(
+                !project.restore_surface_after_swap,
+                "a second window's mismatch left a swap's surface intent behind"
+            );
+        });
+
+        // Reattached, then detached again: the same session answers again.
+        project.update(cx, |project, cx| project.configure_viewer_surface(true, cx));
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a healthy session could not get zero-copy back for a reopened window"
+            );
+        });
+
+        // The session's own device dies, and the window churn starts over.
+        project.update(cx, |project, cx| {
+            assert!(
+                project
+                    .gpu_state
+                    .record_loss(ravel_gpu::GpuLossReason::Unknown),
+                "the injected loss was not the first"
+            );
+            project.configure_viewer_surface(false, cx);
+            project.configure_viewer_surface(true, cx);
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a reopened window handed zero-copy back to a device that is gone"
+            );
+            assert!(
+                project.gpu_state.lost(),
+                "the window churn replaced the session's device state, so the capability \
+                 was decided against a device no window lent it"
+            );
+        });
+
+        // One worker for the whole sequence. A capability answer that rebuilt
+        // the pipeline would throw away the session's caches every time a
+        // window opened.
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.iter().filter(|entry| *entry == "session built").count(),
+            1,
+            "the session's worker was built more than once: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|entry| entry.ends_with("dropped")),
+            "the window churn retired the session's worker: {log:?}"
+        );
     }
 
     /// The paths where **no evaluation follows** — an emptied composition, one

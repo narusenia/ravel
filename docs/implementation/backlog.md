@@ -30,7 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| TOOLX-5 | ロケールと文書（TOOLX-1〜4 完了で依存が解けた） | `viewer-tool-extensions-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |

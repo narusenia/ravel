@@ -1519,3 +1519,12 @@ running = "Rendering"
 completed = "Done"
 cancelled = "Cancelled"
 failed = "Failed"
+
+# The startup splash's progress line, one label per step of
+# `splash::StartupStage`. Present tense and short: the line is one line wide,
+# under the logo lockup, and each label is up for a few hundred milliseconds.
+[splash]
+themes = "Loading themes…"
+settings = "Applying settings…"
+keybindings = "Loading keybindings…"
+layout = "Restoring workspace…"

@@ -448,3 +448,23 @@ gpui-component の `ThemeRegistry::reload()` は `themes` を clear → `default
 `ravel-gpu` の 0 件は `MED-GPU-07` のついでに潰したもので、他は手つかず。
 1 を採るなら残り 30 件の掃除が前提作業になる。**件数が少ないうちに決めた方が
 安い**（`ravel-app` が 13 件で最多、パネルが増えるほど伸びる）。
+
+**LOW-APP-23 | debt | スプラッシュを閉じた直後に gpui が毎起動 1 回 `window not found` を ERROR で出す**
+`crates/ravel-app/src/splash.rs`（`dismiss`）、fork の
+`gpui/src/window.rs`（`on_resize` / `on_moved` / `on_appearance_changed` の
+`handle.update(...).log_err()`）
+
+スプラッシュを閉じた直後、gpui 側のプラットフォームコールバックが**既に削除
+済みのウィンドウ**を更新しようとして `ERROR gpui::window: window not found` を
+1 行吐く。`remove_window()` は `removed` フラグを立てるだけで、コールバックの
+後続処理は正常に終わるので**動作には影響しない**。
+
+`cx.defer` で囲んでも消えない（コールバックはプラットフォーム側の都合で
+発火するので、アプリ側に発火順を決める手がない）。既存の分離ウィンドウの
+close 経路（`window_host::close`）も同じ形なので、**元からある挙動が
+起動時に毎回到達可能になった**もの。
+
+→ ERROR レベルなので**毎起動ログが 1 行汚れる**。直すなら fork 側で
+`log_err()` を「削除済みウィンドウなら黙る」形にする（`removed` フラグは
+既にあるので条件は書ける）。アプリ側では塞げない。
+

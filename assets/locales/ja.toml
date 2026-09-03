@@ -1507,3 +1507,11 @@ running = "レンダリング中"
 completed = "完了"
 cancelled = "中止"
 failed = "失敗"
+
+# 起動スプラッシュの進捗行。`splash::StartupStage` の各段に 1 つ。
+# ロゴロックアップの下に 1 行で出て、各ラベルの表示は数百ミリ秒なので短く。
+[splash]
+themes = "テーマを読み込み中…"
+settings = "設定を適用中…"
+keybindings = "キーバインドを読み込み中…"
+layout = "ワークスペースを復元中…"

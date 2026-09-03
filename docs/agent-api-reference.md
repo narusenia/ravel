@@ -2844,6 +2844,44 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   the retired caches returning their reservations as they drop is what brings
   the usage back down, which is also why the replacement is not built before
   the join.
+  `ProjectState::recover_on_replacement_gpu(GpuContext, cx)` is what a
+  platform detector calls instead (`GPULOSS-3`): the same swap with the
+  zero-copy surface **off across it**. Off happens there; back on happens in
+  the swap's completion, right after `install_eval_worker`, because
+  `restart_eval_on_gpu` returning `true` only means the swap was *queued* —
+  the retirement is joined after an await, and zero-copy enabled across that
+  gap offers the renderer the retired device's frame at the moment the
+  adopted-device global has already moved on, so the paint guard compares the
+  new device with itself and permits it. The caller therefore records an intent
+  (`restore_surface_after_swap`) that the completion consumes once; a refused
+  swap records nothing and leaves the capability to the rebuild in flight. That
+  field is not a second authority on "a swap is running" —
+  `eval_restart_in_progress` stays the only one. The detector for the adopted-host platforms is in
+  `workspace.rs` and is split in two on purpose. Reading the window needs the
+  fork's `cfg(linux / freebsd / windows)` methods; deciding does not, so
+  `workspace::host_recovery_step(HostDeviceObservation { adopted, lost,
+  context }) -> HostRecoveryStep` is plain code with a plain test. `HostContext`
+  is `Absent` (no context to report, including a shape the downcast cannot
+  read), `Same` (the adopted device) or `Replaced` (any other, which is also
+  what a session that adopted nothing and a window on a second GPU report).
+  `HostRecoveryStep` is `Nothing`, `Suspend` (keep zero-copy off **and refresh
+  the window** — GPUI rebuilds its renderer inside the platform draw, so an
+  idle window never recovers) or `Readopt`. Adoption is not re-implemented for
+  the recovery: startup's `host_gpu_context` and the platform arm both go
+  through `adoptable_host_gpu(window)`, which downcasts the renderer's four
+  objects and wraps them with `interop::context_from_wgpu` — but it *returns*
+  the `AdoptedHostDevice` rather than setting it, because **only a swap that
+  was accepted may claim the device**. The global is what the next poll
+  compares against, so recording a device the pipeline did not move onto makes
+  the next reading `Same` and ends the retry; leaving it alone makes the poll
+  after a refusal read `Replaced` and try again. That comparison is itself out
+  of the `cfg` as `workspace::host_context_for(reported, adopted) ->
+  HostContext`, and `workspace::host_device_unchanged(window, cx)` — the
+  viewer's per-paint identity guard — is
+  `host_context(window, cx) == HostContext::Same`. The poll
+  is a one-second timer on the window Ravel adopted from, and only that window:
+  the identity change is a recovery *there*, while the same reading from a
+  second window on another GPU is a second GPU.
   `ProjectState::report_gpu_device_loss(detected, cx)` is the single place the
   session observes a loss and acts on it. `detected` carries the adopted-host
   observation; a self-owned context needs no argument, because its own callback

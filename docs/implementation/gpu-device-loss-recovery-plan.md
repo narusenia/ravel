@@ -387,6 +387,113 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
   後の `Some` を `cargo check` / targeted test で確認する。実機の zero-copy は手動確認で
   別途証明する。
 
+#### 実装メモ
+
+- **判断は cfg の外**。対象コードは `cfg(linux / freebsd / windows)` の中にあり、
+  開発機（macOS）では 1 行もコンパイルされない。そこで cfg の中に置いたのは
+  **window に問う 3 つ**（`observe_host_device`、`host_context`、
+  `spawn_host_device_recovery`）だけにし、「その観測で何をするか」は
+  `workspace.rs` の cfg なしの純粋関数
+  `host_recovery_step(HostDeviceObservation) -> HostRecoveryStep` に出した。
+  この関数の 12 行の表（採用済み × `lost` × `HostContext::{Absent, Same, Replaced}`）が
+  手元で回る唯一の強い保証である。
+- **判定の順序が設計**: ①未採用なら何もしない（自前 device のセッションは
+  renderer と identity が最初から違う。ここで identity を先に見ると健全な
+  セッションをパイプラインごと renderer の device へ引っ越させる）、
+  ②renderer の `lost` フラグが identity より上位（立っている間は recovery が
+  終わっていない）、③`Same` なら交換しない（`lost` が 2 回の poll の間に立って
+  消えただけなら、パイプラインは有効なままでキャッシュを捨てる理由が無い）。
+  `Absent` は「何もしない」ではなく **suspend**（renderer が答える device が
+  無いなら、Ravel が持っている device は renderer の現在の device ではない）。
+- **polling は 1 秒のタイマー、置き場は採用元の window 1 枚だけ**。paint に
+  紐づけない理由は 2 つあり、idle な window は再描画されないので観測が止まる
+  こと、そして **GPUI の recovery は platform draw の中で走る**
+  （`WgpuRenderer::recover` は `draw` から呼ばれる）ので、idle な window は
+  そもそも復旧しないことである。だから suspend の副作用は
+  `configure_viewer_surface(false)` と **`window.refresh()`** の 2 つで、
+  後者が GPUI に「代わりの device を作る draw」を促す。間隔は実測ではなく
+  事象の時間尺で決めた（TDR は秒単位、renderer 再構築にはさらに draw 1 回、
+  評価パイプラインの再構築はそれより長い）。**採用元の window 以外を polling
+  しない**のは、別 GPU の 2 枚目の window の identity 不一致を recovery と
+  読み違えないため（`host_device_loss_detected` が不一致を loss と数えないのと
+  同じ理由）。window lifecycle は `GPULOSS-5`。
+- **再採用は起動時と同じ経路**（`adoptable_host_gpu`: downcast →
+  `context_from_wgpu`）。同じ手順を 2 つ書けば必ず食い違う。
+  `set_global(AdoptedHostDevice(..))` が古い device を落とすので、old device
+  への参照はそこで切れる（完了条件 3）。
+- **`AdoptedHostDevice` の記録は交換が受け付けられた時だけ**。当初は
+  `host_gpu_context` が context の構築と global の記録を一息に行っていたが、
+  それだと**再入で拒否された回も global が新しい device を記録する**。
+  renderer が B → C と 2 段で変わる場合（B の交換が in-flight のときに C が来る）
+  に詰む: global は C、C の交換は拒否、worker は B で完成 → 以後の poll は
+  「global の C」と「renderer の C」を比べて `Same` → `Nothing` を返すので、
+  **C は永久に採用されない**。これは安全側の劣化ではなく自己修復しない詰みで、
+  拒否された回に global を触らなければ次の poll がまた `Replaced` を見て
+  再試行する（新しい「保留中の交換」状態を作らずに済む）。そのため
+  `adoptable_host_gpu` は context と `AdoptedHostDevice` を**返すだけ**にし、
+  記録は呼び出し側が行う（起動時は「受け付けられた」に相当するので直後に記録）。
+  この再試行の連鎖は cfg の外の `host_context_for(reported, adopted)`
+  （identity 比較だけを取り出した generic）で表現でき、テストで固定してある。
+- **capability を落とすのと戻すのは別の時点**。
+  `ProjectState::recover_on_replacement_gpu` は
+  「`configure_viewer_surface(false)` → `restart_eval_on_gpu` →
+  受け付けられたら**意図だけを記録**（`restore_surface_after_swap`）」までで、
+  実際に戻すのは `restart_eval_worker` の完了側（`install_eval_worker` の直後）
+  である。当初は `restart_eval_on_gpu` が `true` を返した時点で戻していたが、
+  **`true` は「交換を予約した」でしかない**（旧 worker の join は await の後）。
+  その区間で zero-copy が有効だと、worker が 1 本も無いまま
+  `ViewerFrame` に残る**旧 epoch のフレーム**を paint しうる。しかも
+  `AdoptedHostDevice` は既に新 device へ差し替わっているので、
+  Linux / Windows の paint ガード（`host_device_unchanged`）は
+  「新 device と新 device」を比べて**変わっていないと答える** — `ZC-8` と
+  `GPULOSS-2` が避けている cross-device paint そのものになる。戻す時点を
+  完了側へ移すとこの区間が消え、`install_eval_worker` が gpu_state を
+  差し替えた**後**に判定されるので capability は新しい epoch に対して
+  判断される。`restore_surface_after_swap` は「交換中か」の 2 つ目の
+  authority ではない（それは `eval_restart_in_progress` のまま）。
+  「この交換は surface を取り戻す権利があるか」という別の問いで、
+  答えられるのは呼び出し側だけであり、完了側が 1 回消費する。
+  **coordinator 側にはどちらのフラグも持たない。**
+- **採用 device に callback を登録していないことの確認**: `ravel-gpu` の
+  `register_device_lost_callback` の呼び出しは `GpuContext::new` の 1 か所だけで
+  （`device.rs`）、`from_handles`（= `interop::context_from_wgpu`）は
+  「host が recovery を駆動する callback を持っているので登録しない」と doc に
+  書いたうえで登録していない。この単位でも新しく登録していない（完了条件 1）。
+- テスト: `workspace.rs` に `host_recovery_step` の 12 通りの表と、
+  「拒否された回のあと次の poll がまだ `Replaced` を返す」ことを
+  `host_context_for` で辿る 1 本（device は identity だけが問題なので整数で
+  代用する。誤った実装＝記録してしまう側が `Same` → `Nothing` に落ちることも
+  同じテストで固定してある）。`project_state.rs` に capability の 3 本
+  （交換が始まる**前**に落ちていること／`false` を返す交換では意図も残さない
+  こと／**実 worker を退役させて stub の replacement を建てる経路**で、
+  予約直後は false のまま・完了後に true になること）。変異注入は 9 か所
+  （採用済み判定・`lost` 判定・`Absent` の扱い・`Same` の扱い・identity 比較の
+  反転・交換前の落とし忘れ・拒否でも意図を残す・完了側が戻さない・予約時点で
+  戻す＝元のバグ）で 1 つずつ落ちることを確認した。
+- **未検証**: cfg の中の 4 関数（`observe_host_device`、`host_context`、
+  `adoptable_host_gpu`、`spawn_host_device_recovery`）は手元で 1 行も
+  コンパイルされない。CI の `check (windows-latest)` が唯一のコンパイル検証者で、
+  そこは緑である。**手元のテストで踏めない判定が 1 つ残る**:
+  coordinator 側の「受け付けられたときだけ `set_global`」の分岐そのもの
+  （`matches!(accepted, Ok(true))`）。cfg の中なので変異注入ができない。
+  代わりに、その分岐が守っている性質（拒否 → 次の poll がまだ `Replaced`）を
+  `host_context_for` のテストで固定し、cfg を一時的に macOS へ広げた
+  コンパイル実験（`observe_host_device` の本体と `AdoptedHostDevice` /
+  `adoptable_host_gpu` だけスタブ化）で `spawn_host_device_recovery` の
+  本体・借用・型が通ることを確認してある。実際の device loss と zero-copy の
+  復帰は実機確認が要る — 担当は `GPULOSS-5`。
+- **通知文を喪失の由来で分けた**（この単位で直した。当初は `GPULOSS-5` へ
+  送るつもりだったが、**復帰するようになった環境で「再起動してほしい」と
+  言い続けるのは嘘**なので先に直した）。`ProjectEvent::GpuDeviceLost` が
+  `GpuLossScope` を運び、`Adopted`（Linux / FreeBSD / Windows）は
+  「引き継ぐので再起動は不要」を Warning で、`SelfOwned`（macOS）は従来の
+  「このセッションでは復帰しないので再起動を」を Error で出す。
+  由来は severity ではなく**代わりの device に手が届くかどうか**で決まり、
+  2 つは実際には排他である — Ravel は自分が作った device にだけ loss
+  callback を登録し、それを作るのは採用する相手がいない環境だけ。
+  scope の判定は変異注入で確認済み（`Adopted` に固定すると
+  `a_self_owned_device_loss_settles_the_viewer_on_the_cpu_fallback` が落ちる）。
+
 ### GPULOSS-4
 
 - Ravel 自前 wgpu device の `lost` で zero-copy surface が無効化され、CPU fallback で

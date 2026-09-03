@@ -102,6 +102,28 @@ pub struct NodeEvalTimings(pub HashMap<NodeId, Duration>);
 
 impl Global for NodeEvalTimings {}
 
+/// Whose GPU device died — the only thing that decides whether Ravel can
+/// carry on with GPU evaluation this session.
+///
+/// **This is not a severity.** Both are real losses; they differ in whether a
+/// replacement device is reachable:
+///
+/// * [`Self::Adopted`] — the device came from the window renderer
+///   (Linux / FreeBSD / Windows). GPUI rebuilds its renderer and Ravel
+///   re-adopts the replacement, so the pipeline comes back on its own
+///   (`GPULOSS-3`). Telling the user to restart here would be a lie.
+/// * [`Self::SelfOwned`] — the device is one Ravel created (macOS). There is
+///   no route to a replacement, so zero-copy is switched off and the session
+///   finishes on the CPU fallback (`GPULOSS-4`). Restarting is the only way
+///   back to GPU evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuLossScope {
+    /// A device adopted from the window renderer, which can be re-adopted.
+    Adopted,
+    /// A device Ravel created for itself, which cannot be replaced.
+    SelfOwned,
+}
+
 /// One-shot project operation feedback consumed by the owning workspace.
 /// Events keep UI delivery out of ProjectState and avoid a queued Global.
 #[derive(Clone, Debug)]
@@ -110,7 +132,10 @@ pub enum ProjectEvent {
         error: String,
     },
     /// The live device can no longer produce GPU evaluation frames.
-    GpuDeviceLost,
+    ///
+    /// The scope decides what the user is told, because it decides whether the
+    /// session can come back at all (`GPULOSS-3` / `GPULOSS-4`).
+    GpuDeviceLost(GpuLossScope),
     SaveFailed {
         path: PathBuf,
         error: String,
@@ -279,6 +304,24 @@ pub struct ProjectState {
     /// deciding which device the frame on screen came from. `GPULOSS-3` reaches
     /// this by polling, so the second request is not hypothetical.
     eval_restart_in_progress: bool,
+    /// Whether the swap now in flight is meant to hand the zero-copy surface
+    /// back when it lands (`GPULOSS-3`).
+    ///
+    /// The intent has to outlive the request because the request only
+    /// *reserves* the swap: [`Self::restart_eval_worker`] returns as soon as
+    /// the retirement is queued, and the replacement worker is installed after
+    /// an await. Restoring the capability on that return would enable
+    /// zero-copy for the whole teardown — with no worker to produce a frame,
+    /// the viewer's last GPU frame belonging to the **retired** device, and the
+    /// adopted-device global already moved on, so the paint guard compares the
+    /// new device with itself and finds nothing wrong with sampling it. So the
+    /// caller records the intent and the completion consumes it.
+    ///
+    /// Not a second authority on "a swap is running" — that stays
+    /// [`Self::eval_restart_in_progress`]. This answers a different question,
+    /// which only the caller can: whether *this* swap is a recovery that
+    /// earned the surface back.
+    restore_surface_after_swap: bool,
     /// Host capability shared with the evaluation worker. It is false until
     /// the live GPUI window proves that both renderers use the same device;
     /// false also selects the worker-side CPU fallback on unsupported hosts.
@@ -636,6 +679,7 @@ impl ProjectState {
             gpu_state: ravel_gpu::GpuDeviceState::new(),
             gpu_loss_notified: false,
             eval_restart_in_progress: false,
+            restore_surface_after_swap: false,
             viewer_surface_enabled,
             cache_budget,
             startup_gpu_error: None,
@@ -761,6 +805,59 @@ impl ProjectState {
         )
     }
 
+    /// Take a replacement device the host renderer recovered onto, with the
+    /// zero-copy surface off across the swap (`GPULOSS-3`).
+    ///
+    /// The capability is the reason this exists rather than the caller calling
+    /// [`Self::restart_eval_on_gpu`] directly: zero-copy goes off here and
+    /// comes back **only when the replacement worker is running**, so a
+    /// session that cannot get one stays on CPU frames instead of handing a
+    /// renderer textures from a device nobody is evaluating on.
+    ///
+    /// Returns what the swap returned. `false` — one is already running — is
+    /// where the ordering earns its keep: the capability stays off and no
+    /// intent is recorded, because the swap in flight is the one that will
+    /// restore it, and a poll that turned it on here would announce a recovery
+    /// that has not happened.
+    pub fn recover_on_replacement_gpu(&mut self, gpu: GpuContext, cx: &mut Context<Self>) -> bool {
+        self.swap_device_with_surface_off(move |this, cx| this.restart_eval_on_gpu(gpu, cx), cx)
+    }
+
+    /// The capability sequence around a device swap, with the swap itself left
+    /// to a closure.
+    ///
+    /// This half only ever **lowers** the capability. Raising it belongs to
+    /// the completion inside [`Self::restart_eval_worker`], the one place that
+    /// knows the replacement worker exists; all this does is record that the
+    /// swap it started is entitled to it
+    /// ([`Self::restore_surface_after_swap`]).
+    ///
+    /// Not a generic for its own sake: building a [`GpuContext`] needs an
+    /// adapter, so a test on a machine without one could not reach this
+    /// ordering through [`Self::recover_on_replacement_gpu`] at all — and the
+    /// ordering (off before, back only after the worker lands, never for a
+    /// swap that was refused) is platform-independent, so it is the part a
+    /// test can pin.
+    fn swap_device_with_surface_off<F>(&mut self, swap: F, cx: &mut Context<Self>) -> bool
+    where
+        F: FnOnce(&mut Self, &mut Context<Self>) -> bool,
+    {
+        // Idempotent: a loss the coordinator already observed turned this off
+        // some polls ago, and `configure_viewer_surface` compares first. It is
+        // repeated here for the loss that flipped and recovered between two
+        // polls, where this is the only place that lowers it.
+        self.configure_viewer_surface(false, cx);
+        if !swap(self, cx) {
+            return false;
+        }
+        // After the call and not before: a refused swap must not leave an
+        // intent behind for the swap in flight to pick up. The completion
+        // cannot have run yet either — it is behind an await, so nothing has
+        // consumed the flag between here and there.
+        self.restore_surface_after_swap = true;
+        true
+    }
+
     /// The device epoch swap, with the hooks left to a factory so a headless
     /// test can drive this exact path with stub hooks on a machine that has no
     /// adapter.
@@ -777,7 +874,10 @@ impl ProjectState {
     ///    evaluator, hooks and texture pool are charged to the session's cache
     ///    budget until its thread returns, and two GPU caches on one
     ///    accounting authority is what the ordering exists to prevent;
-    /// 5. ask for one frame, so the new epoch has something to publish.
+    /// 5. hand the zero-copy surface back if the caller asked for it
+    ///    ([`Self::restore_surface_after_swap`]) — here, because here is where
+    ///    a worker on the new device first exists — and ask for one frame, so
+    ///    the new epoch has something to publish.
     ///
     /// The budget itself is never rebuilt or zeroed: it is the session's
     /// accounting authority, and the old caches returning their reservations
@@ -848,6 +948,15 @@ impl ProjectState {
                 // against the budget the retired ones have just given back.
                 let hooks = make_hooks(this);
                 this.install_eval_worker(gpu, hooks, generation, cx);
+                // Now, and not when the swap was requested: there is a worker
+                // to evaluate on the new device, and `install_eval_worker`
+                // has just replaced the device state this consults, so the
+                // capability is judged against the epoch it applies to
+                // (`GPULOSS-3`). Before the frame request, so the new epoch's
+                // first frame is already the zero-copy one.
+                if std::mem::take(&mut this.restore_surface_after_swap) {
+                    this.configure_viewer_surface(true, cx);
+                }
                 // Same document, same playhead — and no caches on the new
                 // device, so nothing else would ask for a frame.
                 this.request_viewer_eval(InvalidationHint::Structural, cx);
@@ -908,7 +1017,17 @@ impl ProjectState {
             );
             cx.notify();
         }
-        cx.emit(ProjectEvent::GpuDeviceLost);
+        // The scope, not the severity: an adopted device is re-adopted by the
+        // coordinator (`GPULOSS-3`), a self-owned one has no replacement to
+        // take (`GPULOSS-4`). The two never overlap in practice — Ravel only
+        // registers a loss callback on a device it created itself, and it only
+        // creates one where there is nothing to adopt.
+        let scope = if self_owned_loss {
+            GpuLossScope::SelfOwned
+        } else {
+            GpuLossScope::Adopted
+        };
+        cx.emit(ProjectEvent::GpuDeviceLost(scope));
     }
 
     /// Configure whether the live GPUI host can sample the worker's output
@@ -3368,7 +3487,24 @@ mod tests {
             recorder
                 .0
                 .iter()
-                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost))
+                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost(_)))
+                .count()
+        })
+    }
+
+    /// Losses announced with a given scope. The scope is what picks the
+    /// message, so a test that only counted the events could not tell
+    /// "restart Ravel" from "no restart is needed".
+    fn gpu_losses_of_scope(
+        recorder: &gpui::Entity<ProjectEventRecorder>,
+        scope: GpuLossScope,
+        cx: &mut TestAppContext,
+    ) -> usize {
+        recorder.read_with(cx, |recorder, _| {
+            recorder
+                .0
+                .iter()
+                .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost(s) if *s == scope))
                 .count()
         })
     }
@@ -3433,6 +3569,20 @@ mod tests {
             loss_events(&recorder, cx),
             1,
             "the fallback was announced as something other than one loss"
+        );
+        // The scope is what chooses the message. A self-owned loss has no
+        // replacement device, so the notice has to be the one that asks for a
+        // restart — announcing the recoverable message here would promise a
+        // repair that cannot happen on this platform.
+        assert_eq!(
+            gpu_losses_of_scope(&recorder, GpuLossScope::SelfOwned, cx),
+            1,
+            "a self-owned loss was announced as the recoverable kind"
+        );
+        assert_eq!(
+            gpu_losses_of_scope(&recorder, GpuLossScope::Adopted, cx),
+            0,
+            "a self-owned loss was announced as the recoverable kind"
         );
     }
 
@@ -3523,6 +3673,145 @@ mod tests {
         );
     }
 
+    /// `GPULOSS-3`: zero-copy is off **before** the teardown starts, and the
+    /// swap that started it is the one entitled to it back.
+    ///
+    /// The assertion inside the closure is the point. Lowering it afterwards
+    /// would leave a window in which the retiring device is still being
+    /// sampled, and a test that only read the flag at the end cannot tell the
+    /// two orders apart — nothing raises it in between either way.
+    #[gpui::test]
+    fn taking_a_replacement_device_lowers_zero_copy_before_the_swap_starts(
+        cx: &mut TestAppContext,
+    ) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            let started = project.swap_device_with_surface_off(
+                |this, _cx| {
+                    assert!(
+                        !this.viewer_surface_enabled.load(Ordering::Acquire),
+                        "the swap ran with zero-copy still enabled on the outgoing device"
+                    );
+                    true
+                },
+                cx,
+            );
+            assert!(started, "the stub swap reported no start");
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "zero-copy came back before a worker existed on the new device"
+            );
+            assert!(
+                project.restore_surface_after_swap,
+                "the swap that started recorded no claim to the surface"
+            );
+        });
+    }
+
+    /// A swap that was refused leaves the capability where it belongs: off,
+    /// and leaves **no claim** behind.
+    ///
+    /// `restart_eval_on_gpu` answers `false` when an epoch swap is already
+    /// running, which is the normal answer for every poll after the first one.
+    /// Recording an intent on that answer would hand the surface to the swap
+    /// in flight on the strength of a request that was ignored.
+    #[gpui::test]
+    fn a_refused_device_swap_leaves_zero_copy_off(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(true, cx);
+            let started = project.swap_device_with_surface_off(|_this, _cx| false, cx);
+            assert!(!started, "the stub swap was reported as started");
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a refused swap restored zero-copy"
+            );
+            assert!(
+                !project.restore_surface_after_swap,
+                "a refused swap left a claim for the swap in flight to consume"
+            );
+        });
+    }
+
+    /// `GPULOSS-3`: the surface comes back when the replacement worker is
+    /// **running**, not when the swap was accepted.
+    ///
+    /// `restart_eval_worker` only reserves the swap: it returns as soon as the
+    /// retirement is queued and installs the replacement after an await. The
+    /// real path is driven here — a worker retired and a stub replacement
+    /// built — because that gap is where the bug lives. Zero-copy enabled
+    /// across it means the viewer may hand GPUI the frame the **retired**
+    /// device produced, and on the adopted-host platforms the paint guard
+    /// cannot object: the adopted-device global has already moved to the new
+    /// device, so it compares that device with itself.
+    #[gpui::test]
+    fn zero_copy_returns_only_when_the_replacement_worker_is_running(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(None, EpochHooks::new("old", &log), 0, cx);
+            project.configure_viewer_surface(true, cx);
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the fixture never turned zero-copy on"
+            );
+        });
+
+        let hooks_log = log.clone();
+        project.update(cx, |project, cx| {
+            let started = project.swap_device_with_surface_off(
+                move |this, cx| {
+                    this.restart_eval_worker(None, move |_| EpochHooks::new("new", &hooks_log), cx)
+                },
+                cx,
+            );
+            assert!(started, "the swap was refused");
+            // Same turn: the retired worker is still being joined and there
+            // is no worker on the replacement device at all.
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "zero-copy was enabled while the session had no evaluation worker"
+            );
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| !project.eval_restart_in_progress) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the swap never finished; log: {:?}",
+                log.lock().unwrap()
+            );
+            std::thread::yield_now();
+        }
+
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.eval.is_some(),
+                "the swap left the session without a worker"
+            );
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the landed swap did not hand zero-copy back"
+            );
+            assert!(
+                !project.restore_surface_after_swap,
+                "the claim outlived the swap that made it"
+            );
+        });
+    }
+
     /// `GPULOSS-4`: after the loss the evaluation keeps running and the viewer
     /// keeps getting frames — on the CPU road, from the worker that was
     /// already there.
@@ -3607,7 +3896,7 @@ mod tests {
                 recorder
                     .0
                     .iter()
-                    .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost))
+                    .filter(|event| matches!(event, ProjectEvent::GpuDeviceLost(_)))
                     .count()
             }),
             1,

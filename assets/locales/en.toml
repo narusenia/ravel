@@ -152,10 +152,6 @@ attribute_spreadsheet = "Attribute Spreadsheet"
 
 [panel.timeline]
 _self = "Timeline"
-empty = "No tracks"
-add_video_track = "Add Video Track"
-add_audio_track = "Add Audio Track"
-remove_track = "Remove Track"
 
 [node_graph]
 no_network = "Select a layer in the Timeline or Outliner to show its network"
@@ -236,7 +232,7 @@ project = "Project"
 [settings.general]
 group = "Playback and startup"
 stop_returns_to_play_start = "Return to the play start on stop"
-stop_returns_to_play_start_description = "Stop puts the playhead back where playback began instead of rewinding to the first frame. With nothing played yet, the playhead stays where it is."
+stop_returns_to_play_start_description = "Stop puts the playhead back where playback began. With nothing played yet, the playhead stays where it is."
 startup_create_composition = "Create a composition at startup"
 startup_create_composition_description = "A new document opens with one empty composition. Turn this off to start with none and choose the format yourself in Composition ▸ New Composition…"
 
@@ -265,9 +261,9 @@ ui_description = "Applies immediately. Each language is named in itself."
 [settings.cache]
 group = "Memory and location"
 vram_limit = "Video memory limit (MiB)"
-vram_limit_description = "Total video memory cached frames and pooled textures may occupy together. Applies immediately; entries over the new limit are dropped as the next ones are cached."
+vram_limit_description = "Total video memory cached frames and pooled textures may occupy together. Applies immediately; entries over the limit are dropped in order."
 ram_limit = "Memory limit (MiB)"
-ram_limit_description = "Total system memory the caches may occupy. Applies immediately; entries over the new limit are dropped as the next ones are cached."
+ram_limit_description = "Total system memory the caches may occupy. Applies immediately; entries over the limit are dropped in order."
 sim_reserve = "Simulation reserve"
 sim_reserve_description = "Share of each limit held back for simulation state, between 0 and 1, so a long scrub cannot evict it."
 root = "Cache location"
@@ -283,7 +279,7 @@ frame_rate_description = "Used for new compositions created with nothing open. A
 # The read-only key assignment list on the Keybindings page.
 [settings.keybindings]
 group = "Key assignments"
-description = "Read-only. To change a shortcut, write keybindings.toml in the Ravel configuration folder; it applies on the next launch. Panel-only shortcuts are set in code and cannot be reassigned from a file."
+description = "Read-only. To change a shortcut, write keybindings.toml in the Ravel configuration folder; it applies on the next launch. Panel-only shortcuts cannot be reassigned."
 
 # Where a command's current chord came from.
 [settings.keybindings.origin]
@@ -500,8 +496,8 @@ group = "Group"
 float = "Float"
 int = "Integer"
 bool = "Boolean"
-vec2 = "Vector 2"
-vec3 = "Vector 3"
+vec2 = "Vec2"
+vec3 = "Vec3"
 color = "Color"
 geometry = "Geometry"
 field = "Field"
@@ -746,7 +742,7 @@ delete = "Delete"
 saved = "Saved layouts"
 empty = "No saved layouts yet."
 embed = "Embed the current layout in saved projects"
-embed_hint = "Off by default. When on, a saved .ravprj carries this layout; opening it applies the layout for that session only."
+embed_hint = "When on, a saved project carries this layout and opening it applies the layout for that session only."
 
 # ------------------------------------------------------------------
 # `ravel-cli` — the headless render front end. Every string a person

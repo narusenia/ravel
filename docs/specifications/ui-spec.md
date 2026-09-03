@@ -99,7 +99,7 @@ canvas 上のカーソルは既存の click / drag と同じヒットテスト�
 どのプリセットにも無いが、**17 種すべてに View メニューの表示トグルがある**ので
 プリセットに依らず出せる。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
-`done/viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
+`viewer-scopes-plan.md` の `MON-1〜7`、Text Editor は
 `typography-plan.md`、Shader Editor と Lua Console は REQ-CODE-001。
 
 Render Queue はどのプリセットにも無いが実装済みで、View メニューか

@@ -396,6 +396,6 @@ registry の「点からの半径」ヒットテストで表現できない）�
 | ピクセル精度のヒットテスト（今は評価済み AABB） | REQ-UI-011 の v2（`done/viewer-inspection-plan.md` のピクセル読み取りと同じデータ経路になるので、そちらの後に判断） |
 | 殻変換が非恒等なレイヤーでの編集（掴めるが編集は恒等な殻に限る） | REQ-UI-011 の v2（`OVL-7` の殻マニピュレータが入った後に再検討） |
 | パスアニメーション（点列の時間変化） | 設計メモのみ（`docs/implementation/path-channel-design.md`） |
-| スコープ 4 種（REQ-UI-004） | `INSP-5`（引き取り判断） |
+| スコープ 4 種（REQ-UI-004） | `MON-1〜7`（[`viewer-scopes-plan.md`](../../implementation/viewer-scopes-plan.md)。着手はユーザー判断で保留） |
 | 定規の数値ラベル、ピクセルグリッドへの吸着、回転の角度スナップ | 未計画 |
 | OCIO カラースペース、A/B 比較、外部モニタ出力 | 未計画（REQ-UI-004 の将来項目） |

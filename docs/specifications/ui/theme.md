@@ -80,5 +80,5 @@
 |---|---|
 | 色覚特性ごとのバリアント（v1 の `color_vision`） | `SET-15`（`settings-screen-plan.md`）。テーマ資産の追加が前提 |
 | ノード型ごとの色をテーマで指定する（v1 の `[colors.node_types]`） | 未計画。現在は `DataTypeId` ごとの色をコード側が持つ |
-| スコープの色（v1 の `[colors.scopes]`） | スコープ自体が未実装（`INSP-5`） |
+| スコープの色（v1 の `[colors.scopes]`） | スコープ自体が未実装（`MON-1〜7`、`viewer-scopes-plan.md`） |
 | UI スケーリング（`font.size` をユーザーが変える） | `SET-14`。パネルが px 直書きでどれだけ無視するかの調査が前提 |

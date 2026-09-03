@@ -1143,9 +1143,22 @@ mod layout_tests {
         );
 
         let advances = floats(&geometry, names::ADVANCE);
+        let untracked = floats(
+            &geist(
+                "ab cd\nef",
+                &LayoutParams {
+                    tracking: 0.0,
+                    ..params
+                },
+            ),
+            names::ADVANCE,
+        );
         assert!(
-            advances.iter().all(|advance| *advance > params.tracking),
-            "every advance carries the glyph plus the tracking: {advances:?}"
+            advances
+                .iter()
+                .zip(&untracked)
+                .all(|(advance, bare)| (advance - bare - params.tracking).abs() < 1e-3),
+            "every advance is the glyph's plus exactly the tracking: {advances:?} against {untracked:?}"
         );
 
         let rotations = floats(&geometry, names::ROT);

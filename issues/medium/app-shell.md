@@ -472,3 +472,60 @@ identity / loss status を読む口」を macOS でも足せるか調べる（`g
 identity 照合と loss polling のテストを macOS 腕に足す。
 
 ---
+
+## MED-APP-41 | debt | zero-copy の可否が session 全体で 1 個なので、別 GPU の 2 枚目の window が main window の zero-copy も落とす
+
+**該当**: `crates/ravel-app/src/project_state.rs`（`configure_viewer_surface` と
+`viewer_surface_enabled: Arc<AtomicBool>`）、`crates/ravel-app/src/panels/viewer.rs`
+（paint 側の capability 判定）
+
+`viewer_surface_enabled` は `ProjectState` が 1 本だけ持つ共有 atomic で、評価
+worker の `DisplayTransform` がそれを読んで「GPU テクスチャを出すか、CPU フレームを
+出すか」を決める。**出力の形が session に 1 つしかない**ので、window ごとに
+別の答えを持てない。
+
+結果、`gpu-device-loss-recovery-plan.md` の `GPULOSS-5` が完了条件に書いた
+「device mismatch ならその window だけ CPU fallback」は、実装では
+**session 全体が CPU fallback になる**。別 GPU に載った 2 枚目の window を開くと、
+main window の zero-copy も一緒に落ちる。
+
+**実害**: 小さい。絵は出続け（CPU 経路）、不正なサンプリングも起きない。マルチ GPU
+機で分離 window を使ったときに main window のプレビューが遅くなるだけである。
+
+**修正方針**: worker が 2 つの表現を同時に作るか、capability を window ごとに持って
+paint 側が選ぶ。どちらも「zero-copy の可否の権威を 2 つにしない」という
+`ZC-8` 以来の方針に触るので、per-window が実際に要る状況（マルチ GPU 機での分離
+window）が出てから決める。
+
+**severity の根拠**: bug ではなく debt。安全側の劣化であり、完了条件の記述が
+アーキテクチャより広かった。low でないのは、計画書の完了条件と実装が食い違って
+いる状態そのものが次の単位の設計を誤らせるため。
+
+## MED-APP-42 | bug | macOS の自前 device 喪失では、退役したフレームが Global に残り続けることがある
+
+**該当**: `crates/ravel-app/src/project_state.rs`（`report_gpu_device_loss`）、
+`crates/ravel-app/src/panels/mod.rs`（`ViewerFrame` global）
+
+`GPULOSS-5` は device epoch の交換（`restart_eval_worker`）と session の release で
+`ViewerFrame` を blank にした。しかし **macOS の自前 device 喪失の経路
+（`report_gpu_device_loss`）は blank しない** — zero-copy を切って CPU フレームを
+1 枚要求するだけである。
+
+要求が通れば次のフレームが上書きするので自己解消する。**要求が失敗する経路**
+（評価がエラーで返る、worker が既に居ない）では、死んだ device のテクスチャを
+運ぶ `GpuFrame` が global に残り続ける。paint 側の guard は identity 照合なので
+不正なサンプリングは起きないが、**退役した pool への lease が解放されない**。
+
+**実害**: 中程度。喪失時に一度だけ、そのフレーム分の VRAM が返らない。
+`GPULOSS-4` のテストが `ViewerFrame::Frame` の publish を期待しているので、
+blank を足すならそのテストの意図（「CPU フレームで描き続ける」）と両立させる形に
+する必要がある。
+
+**修正方針**: `report_gpu_device_loss` でも fence 付きで blank し、CPU フレームの
+要求が成功したときにそれが上書きされる形にする。`GPULOSS-4` のテストは
+「blank → CPU フレーム」の順を見るように書き換える。
+
+**severity の根拠**: bug。ただしクラッシュも不正な絵も起こさず、喪失という
+既に劣化した状態でしか踏めないので high ではない。low でないのは、GPU
+リソースが返らない経路を残すため。
+

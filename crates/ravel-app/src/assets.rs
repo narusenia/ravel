@@ -1,13 +1,17 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Embedded asset source: Ravel's own icons with a fallback to the
-//! gpui-component icon set.
+//! Embedded asset source: Ravel's own icons and startup artwork, with a
+//! fallback to the gpui-component icon set.
 //!
 //! Ravel icons are vendored Lucide SVGs (ISC licensed, see
 //! `assets/icons/LICENSE`) and small project-specific glyphs under
 //! `assets/icons/`. Only icons that are actually used are embedded. The
 //! `ui-design-impl` skill documents the vendoring procedure.
+//!
+//! `assets/splash/` holds the startup artwork [`crate::splash`] draws. It is
+//! embedded rather than read from disk because the splash is the first thing
+//! painted, before any path resolution has happened.
 
 use std::borrow::Cow;
 
@@ -17,10 +21,18 @@ use ravel_core::registry::NodeCategory;
 use ravel_ui::panel::PanelKind;
 use rust_embed::RustEmbed;
 
-/// Ravel-vendored icons, embedded at compile time.
+/// Ravel-vendored icons and the startup splash artwork, embedded at compile
+/// time.
+///
+/// The splash pattern is deliberately narrow. `assets/splash/` also holds
+/// `ravel-mark.svg`, the logo mark on its own, which is there for a future
+/// application icon and is *not* what the splash draws — the mark is already
+/// part of the artwork. `splash/*.png` leaves it out, so nothing in the binary
+/// can start resolving it by accident and no unused bytes ride along.
 #[derive(RustEmbed)]
 #[folder = "../../assets"]
 #[include = "icons/**/*.svg"]
+#[include = "splash/*.png"]
 struct RavelEmbed;
 
 /// Serves Ravel icons first, then falls back to the gpui-component asset set

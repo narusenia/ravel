@@ -151,23 +151,4 @@ mod tests {
         assert_eq!(font.weight, 400);
         assert!(!font.italic);
     }
-
-    /// One evaluation after another hands out the same `Arc`: the library's
-    /// cache is what keeps a per-frame graph from reloading the file and
-    /// re-warning about a fallback.
-    #[test]
-    fn repeated_evaluations_share_one_face() {
-        let first = evaluate(DEFAULT_FAMILY).expect("resolves");
-        let second = evaluate(DEFAULT_FAMILY).expect("resolves");
-        let first = first
-            .downcast_ref::<FontRef>()
-            .expect("text.font produces a FontRef");
-        let second = second
-            .downcast_ref::<FontRef>()
-            .expect("text.font produces a FontRef");
-        assert!(
-            Arc::ptr_eq(&first.data, &second.data),
-            "two evaluations must share one font file"
-        );
-    }
 }

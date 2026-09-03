@@ -620,21 +620,37 @@ mod tests {
         );
     }
 
-    /// Two queries that land on one file share its bytes, so selecting a
+    /// Two queries that land on one **file** share its bytes, so selecting a
     /// weight a family does not have costs no second copy of a 4.5 MB face.
+    ///
+    /// Driven from records that point at a real file on disk: the embedded
+    /// face answers out of `fallback_data`, which is one `Arc` whether or not
+    /// the file cache exists — a version of this test written against it
+    /// passes with the cache deleted.
     #[test]
-    fn queries_landing_on_one_face_share_its_bytes() {
-        let library = embedded_only();
-        let regular = library.resolve(&FontQuery::new("Geist", 400, false));
-        let heavy = library.resolve(&FontQuery::new("Geist", 900, false));
+    fn queries_landing_on_one_file_share_its_bytes() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("two-weights.ttf");
+        std::fs::write(&path, FALLBACK_FONT).expect("write the fixture face");
+
+        let mut library = embedded_only();
+        library.faces = vec![file_face("Test", 400, &path), file_face("Test", 700, &path)];
+
+        let regular = library.resolve(&FontQuery::new("Test", 400, false));
+        let bold = library.resolve(&FontQuery::new("Test", 700, false));
+        assert!(!regular.is_fallback && !bold.is_fallback);
+        assert_ne!(regular.weight, bold.weight, "two different faces");
         assert!(
-            !Arc::ptr_eq(&regular, &heavy),
-            "different queries are different entries"
+            Arc::ptr_eq(&regular.data, &bold.data),
+            "one font file must be read and held once"
         );
-        assert!(
-            Arc::ptr_eq(&regular.data, &heavy.data),
-            "one font file must be held once"
-        );
+    }
+
+    fn file_face(family: &str, weight: u16, path: &Path) -> FaceRecord {
+        FaceRecord {
+            path: Some(path.to_path_buf()),
+            ..face(family, weight, false)
+        }
     }
 
     /// A weight the family does not carry resolves to the nearest one it does

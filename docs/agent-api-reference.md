@@ -1353,6 +1353,10 @@ apply_field(&geo, &FieldApply, &field, &ctx) -> Result<Geometry>
 
 geometry::ops
 attribute_set / promote_attribute / attribute_transfer -> Result<Geometry>
+attribute_delete(&geo, Domain, name) -> Result<Geometry>
+    // drops one column; a name the domain does not carry is a no-op, not an
+    // error. `P` on Point/Instance is refused (RequiredAttribute): validate
+    // demands it, and it may be the column holding the element count
 bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in 2D
 path_sample(&geo, distance) -> Result<PathSample>   // planar only
 

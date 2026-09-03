@@ -705,6 +705,24 @@ impl ProjectState {
             viewer_input_epoch: 0,
             viewer_eval_requests: 0,
         };
+        // A retired session takes its published frame with it (`GPULOSS-5`).
+        // [`crate::panels::ViewerFrame`] is durable and app-wide, so closing
+        // the main window would otherwise leave this session's
+        // `GpuFrameBuffer` — a lease on a texture pool that is being torn
+        // down, on a device nothing evaluates on any more — in the global for
+        // the *next* session's window to pick up and paint. The adopted-host
+        // paint guard does not stop that: it compares the renderer's device
+        // against `AdoptedHostDevice`, which the new session has already
+        // replaced with its own, so it answers "unchanged" about a texture
+        // that belongs to neither device.
+        //
+        // The overlay snapshot goes for the same reason it goes on every other
+        // path that blanks the viewer: it annotates a frame that is gone.
+        cx.on_release(|_this, cx| {
+            cx.set_global(crate::panels::ViewerFrame::default());
+            cx.set_global(EvalResults::default());
+        })
+        .detach();
         if !EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
             match host_gpu.map_or_else(GpuContext::new_blocking, Ok) {
                 Ok(gpu_ctx) => {
@@ -865,7 +883,9 @@ impl ProjectState {
     /// The order is the whole point and it is not negotiable:
     ///
     /// 1. raise the fence, so the old worker's in-flight updates are stale
-    ///    from here on and cannot overwrite the new epoch's frames;
+    ///    from here on and cannot overwrite the new epoch's frames, and blank
+    ///    the viewer so nothing keeps a lease on the outgoing device's texture
+    ///    pool — or paints one (`GPULOSS-5`);
     /// 2. cancel and drop the export queue, a second `GpuEvalHooks` on the
     ///    device that is going away;
     /// 3. close the old worker's channels — that *is* the stop order, there is
@@ -908,6 +928,28 @@ impl ProjectState {
             .as_ref()
             .map_or(self.published_generation, EvalService::latest_generation);
         self.published_generation = generation;
+        // Give up the frame on screen, because holding it means holding a
+        // texture of the outgoing device (`GPULOSS-5`). The lease travels
+        // through the durable `ViewerFrame` global into every Viewer panel, so
+        // this one write is what releases the Global's clone and, through the
+        // panel's own observer, the panel's — before the retiring worker's
+        // texture pool is dropped, which is the order the pool teardown
+        // depends on.
+        //
+        // It is not only about accounting. The retiring epoch's `GpuFrame`
+        // stays paintable otherwise: the panel repaints it every frame, and on
+        // the adopted-host platforms the paint guard compares the *renderer's*
+        // device against `AdoptedHostDevice` — which the coordinator has
+        // already moved to the replacement — so it would answer "unchanged"
+        // and sample a texture from the device being retired.
+        //
+        // Fenced by the generation above, so the retiring worker's in-flight
+        // results cannot undo it, and replaced by the new epoch's first frame.
+        let blank = self.viewer_blank(cx);
+        cx.set_global(blank);
+        // The overlay snapshot describes the frame that just went away; the
+        // blank paths do the same for the same reason.
+        cx.set_global(EvalResults::default());
         // The export queue holds its own hooks — and its own texture pool — on
         // the outgoing device, so it has to be gone before the replacement is
         // built, for the same accounting reason. Cancel the unfinished jobs
@@ -3384,6 +3426,424 @@ mod tests {
             Some(8),
             "a straggler overwrote the frame the new device produced"
         );
+    }
+
+    /// Wait for a device epoch swap to finish, or fail the test.
+    ///
+    /// The replacement is installed behind an await on a background join, so
+    /// nothing after a swap request is observable until the executor has run.
+    fn await_swap(project: &Entity<ProjectState>, cx: &mut TestAppContext) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| !project.eval_restart_in_progress) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the device epoch swap never finished"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// `GPULOSS-5`: the swap gives up the frame on screen, and with it what the
+    /// retiring device lent it.
+    ///
+    /// [`crate::panels::ViewerFrame`] is a durable global, and a
+    /// [`crate::panels::ViewerFrame::GpuFrame`] in it is a live lease on the
+    /// retiring epoch's texture pool — held by the global and by every Viewer
+    /// panel that mirrored it. Keeping it across the swap does two kinds of
+    /// damage: the pool it leases from cannot be torn down cleanly, and the
+    /// panel goes on **painting** it, past a guard that compares the
+    /// renderer's device with the one the coordinator has already replaced and
+    /// therefore answers "unchanged".
+    ///
+    /// The lease under test is the `Arc` the same update carries beside the
+    /// picture, because a real `GpuFrameBuffer` needs an adapter to build.
+    /// It is released by the very same write to the global, which is the thing
+    /// the swap either does or does not do.
+    #[gpui::test]
+    fn a_device_swap_releases_the_viewers_frame_lease(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let lease = Arc::new(FrameBuffer::from_f32(1, 1, vec![0.0; 4]));
+        let watched = Arc::downgrade(&lease);
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(display_frame_leasing(lease)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        assert!(
+            watched.upgrade().is_some(),
+            "the fixture never put the lease in the published frame"
+        );
+
+        let swap_log = log.clone();
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(None, move |_| EpochHooks::new("new", &swap_log), cx),
+                "the swap was refused"
+            );
+        });
+
+        // Synchronously with the request, not after the replacement lands: the
+        // retiring pool is dropped while the join is still running, so a lease
+        // released any later than this is one the teardown had to work around.
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "the swap left the retiring epoch's frame on screen"
+            );
+        });
+        assert!(
+            watched.upgrade().is_none(),
+            "the retiring epoch's lease is still held after the swap started"
+        );
+        await_swap(&project, cx);
+    }
+
+    /// `GPULOSS-5`: the blank a swap publishes is fenced exactly like a frame.
+    ///
+    /// The blank is a direct write to the global rather than an evaluation
+    /// result, so nothing about it is ordered by itself. What protects it is
+    /// the fence the swap raises to the retiring worker's generation: the
+    /// retiring worker's last in-flight update carries **exactly** that
+    /// number, and if it landed the viewer would be showing a frame from the
+    /// device the session has just left — the one thing blanking was for.
+    #[gpui::test]
+    fn an_old_epoch_update_cannot_overwrite_the_recovery_blank(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let publish = |project: &mut ProjectState,
+                       cx: &mut Context<ProjectState>,
+                       generation: u64,
+                       size: u32| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(blank_display_frame(size, size)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        };
+        let frame_width = |cx: &mut TestAppContext| {
+            cx.update(|cx| match cx.try_global::<ViewerFrame>() {
+                Some(ViewerFrame::Frame { image, .. }) => Some(image.width()),
+                _ => None,
+            })
+        };
+
+        // A frame from the epoch about to be retired. With no worker installed
+        // the swap inherits the fence from the last published frame, which is
+        // the same number the retiring worker's own `latest_generation()` would
+        // have given it.
+        project.update(cx, |project, cx| publish(project, cx, 6, 4));
+        assert_eq!(frame_width(cx), Some(4), "the fixture published nothing");
+
+        let swap_log = log.clone();
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(None, move |_| EpochHooks::new("new", &swap_log), cx),
+                "the swap was refused"
+            );
+            // Same turn as the request, so the replacement — which is behind an
+            // await — cannot be what publishes anything below.
+            publish(project, cx, 6, 8);
+        });
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "an old-epoch update at the inherited generation overwrote the \
+                 blank the swap published"
+            );
+        });
+
+        // And the new epoch's own first frame, one past the fence, replaces it.
+        project.update(cx, |project, cx| publish(project, cx, 7, 8));
+        assert_eq!(
+            frame_width(cx),
+            Some(8),
+            "the new epoch's frame was dropped on the inherited fence"
+        );
+        await_swap(&project, cx);
+    }
+
+    /// A published display frame that carries `lease` beside its picture.
+    ///
+    /// The `Arc` stands in for the GPU lease a
+    /// [`crate::panels::ViewerFrame::GpuFrame`] holds: a real
+    /// `GpuFrameBuffer` needs an adapter to build, and both are released by
+    /// the same write to the global.
+    fn display_frame_leasing(lease: Arc<FrameBuffer>) -> Arc<dyn ravel_core::types::NodeData> {
+        Arc::new(
+            ravel_nodes::DisplayFrame::new(2, 2, Arc::from(vec![0u8; 16])).with_linear(Some(lease)),
+        )
+    }
+
+    /// `GPULOSS-5`, window lifecycle c): a session that goes away takes its
+    /// published frame with it.
+    ///
+    /// Closing the main window drops the workspace and with it the session,
+    /// but [`crate::panels::ViewerFrame`] is an application-wide global that
+    /// outlives every window. Left alone it would hold the retired session's
+    /// texture — a lease on a pool that is being torn down — for the *next*
+    /// session's Viewer to mirror and paint, and the paint guard would not
+    /// object: it compares the renderer's device against the device the new
+    /// session adopted, which is neither the old texture's nor a mismatch.
+    #[gpui::test]
+    fn a_released_session_takes_its_published_frame_with_it(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let lease = Arc::new(FrameBuffer::from_f32(1, 1, vec![0.0; 4]));
+        let watched = Arc::downgrade(&lease);
+        project.update(cx, |project, cx| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(display_frame_leasing(lease)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        assert!(
+            watched.upgrade().is_some(),
+            "the fixture never put the lease in the published frame"
+        );
+
+        // The window closed: nothing holds the session any more. The release
+        // listener runs when the app next flushes its effects, which is what
+        // the empty update below is for.
+        drop(project);
+        cx.update(|_| {});
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "the retired session's frame is still the one a new window would show"
+            );
+        });
+        assert!(
+            watched.upgrade().is_none(),
+            "the retired session's lease outlived the session"
+        );
+    }
+
+    /// `GPULOSS-5`: a second window's capability check goes through the
+    /// session's one device and asks for nothing else.
+    ///
+    /// A detached window builds no session of its own — `window_host::open`
+    /// constructs a `WindowHost` with `session: None`, and the GPU context is
+    /// obtained exactly once, in `RavelWorkspace::new` — so all a second
+    /// window can do is answer the capability question for itself. What it
+    /// must **not** do is look like a device loss: a window on another GPU
+    /// mismatches from its first frame and its device never died, which is why
+    /// `workspace::host_device_loss_detected` refuses to call a mismatch a
+    /// loss. Three readings in the order a session meets them:
+    ///
+    /// * the second window's paint cannot sample, so it lowers the shared
+    ///   capability — and starts no device swap, so the session keeps the
+    ///   worker, the caches and the device it had;
+    /// * closing and reopening that window re-decides the capability against
+    ///   the same session, so a healthy device may have it back;
+    /// * a session whose own device has been lost keeps its state across the
+    ///   whole churn, so no later window can hand zero-copy back to it.
+    #[gpui::test]
+    fn a_second_windows_capability_check_never_swaps_the_sessions_device(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        // The installed worker is a real thread, so it will touch the
+        // scheduler from off the test thread — every sibling test that builds
+        // one says so the same way.
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(None, EpochHooks::new("session", &log), 0, cx);
+            project.configure_viewer_surface(true, cx);
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the fixture never enabled the surface"
+            );
+        });
+
+        // The second window paints, finds it cannot sample the worker's
+        // texture, and falls back.
+        project.update(cx, |project, cx| {
+            project.configure_viewer_surface(false, cx)
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "the mismatching window did not reach the CPU fallback"
+            );
+            assert!(
+                !project.eval_restart_in_progress,
+                "a second window's device mismatch was taken for a device loss and \
+                 started an epoch swap"
+            );
+            assert!(
+                !project.restore_surface_after_swap,
+                "a second window's mismatch left a swap's surface intent behind"
+            );
+        });
+
+        // Reattached, then detached again: the same session answers again.
+        project.update(cx, |project, cx| project.configure_viewer_surface(true, cx));
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a healthy session could not get zero-copy back for a reopened window"
+            );
+        });
+
+        // The session's own device dies, and the window churn starts over.
+        project.update(cx, |project, cx| {
+            assert!(
+                project
+                    .gpu_state
+                    .record_loss(ravel_gpu::GpuLossReason::Unknown),
+                "the injected loss was not the first"
+            );
+            project.configure_viewer_surface(false, cx);
+            project.configure_viewer_surface(true, cx);
+        });
+        project.read_with(cx, |project, _| {
+            assert!(
+                !project.viewer_surface_enabled.load(Ordering::Acquire),
+                "a reopened window handed zero-copy back to a device that is gone"
+            );
+            assert!(
+                project.gpu_state.lost(),
+                "the window churn replaced the session's device state, so the capability \
+                 was decided against a device no window lent it"
+            );
+        });
+
+        // One worker for the whole sequence. A capability answer that rebuilt
+        // the pipeline would throw away the session's caches every time a
+        // window opened.
+        let log = log.lock().unwrap();
+        assert_eq!(
+            log.iter().filter(|entry| *entry == "session built").count(),
+            1,
+            "the session's worker was built more than once: {log:?}"
+        );
+        assert!(
+            !log.iter().any(|entry| entry.ends_with("dropped")),
+            "the window churn retired the session's worker: {log:?}"
+        );
+    }
+
+    /// `GPULOSS-5`: the export side follows the epoch, and the retiring device
+    /// is out of reach the moment the swap is accepted.
+    ///
+    /// [`crate::export::RenderService::ensure_queue`] builds its queue — a
+    /// second `GpuEvalHooks`, with a second texture pool on the same cache
+    /// budget — from [`ProjectState::gpu_context`] at the moment of a
+    /// submission. That single read is the whole of "the new epoch's queue
+    /// uses the new context", and what it needs is for the retiring context to
+    /// be gone from there **before** the swap gives up the UI thread: an
+    /// export submitted during the teardown would otherwise open a pool on the
+    /// device the session is leaving, charged to the budget the replacement is
+    /// about to be built against. The retired queue itself is cancelled and
+    /// stopped by the same swap (`take_queue_for_new_gpu`, pinned by
+    /// `a_device_epoch_swap_waits_for_the_old_worker_then_publishes_a_new_frame`).
+    ///
+    /// Needs an adapter: the two contexts have to be told apart, and the mark
+    /// is a loss injected into the retiring one — a state no replacement
+    /// context can carry, since each brings its own.
+    #[gpui::test]
+    fn only_the_new_epochs_context_is_left_for_a_render_queue(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let (Ok(retiring), Ok(replacement)) =
+            (GpuContext::new_blocking(), GpuContext::new_blocking())
+        else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(
+                Some(retiring.clone()),
+                EpochHooks::new("old", &log),
+                0,
+                cx,
+            );
+        });
+        assert!(
+            retiring.inject_device_loss(ravel_gpu::GpuLossReason::Unknown),
+            "the injected loss was not the first"
+        );
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.gpu_context().is_some_and(GpuContext::lost),
+                "the fixture did not put the session on the retiring device"
+            );
+        });
+
+        let swap_log = log.clone();
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(
+                    Some(replacement),
+                    move |_| EpochHooks::new("new", &swap_log),
+                    cx
+                ),
+                "the swap was refused"
+            );
+            assert!(
+                project.gpu_context().is_none(),
+                "an export submitted during the swap would build its queue on the \
+                 device the session is retiring"
+            );
+        });
+        await_swap(&project, cx);
+
+        project.read_with(cx, |project, _| {
+            let gpu = project.gpu_context().expect("the replacement device");
+            assert!(
+                !gpu.lost(),
+                "a queue built after the swap would still run on the retiring device"
+            );
+        });
     }
 
     /// The paths where **no evaluation follows** — an emptied composition, one

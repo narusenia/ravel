@@ -1393,6 +1393,21 @@ component = "Component of a multi-component attribute (x, y, z, w)."
 normalize = "Rescale the attribute's own min-max range onto 0-1."
 default = "Value used where the attribute is missing or unreadable."
 
+[node."field.time"]
+label = "Time Field"
+description = "Emits the evaluation clock as a field, so modulation animates."
+[node."field.time".params]
+mode = "Clock reading: continuous frame, seconds, or frame divided by duration."
+duration = "Frame count the normalized mode divides by."
+scale = "Multiplies the clock reading."
+offset = "Added after scaling."
+
+[node."field.constant"]
+label = "Constant Field"
+description = "Emits the same scalar everywhere; multiply by it to subtract or divide."
+[node."field.constant".params]
+value = "Value answered at every element."
+
 [node."field.apply"]
 label = "Apply Field"
 description = "Samples a field at each geometry element and writes the result into an attribute."

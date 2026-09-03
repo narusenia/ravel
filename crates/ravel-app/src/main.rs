@@ -72,6 +72,12 @@ fn main() {
             // gives `Root` a theme to read. Everything that comes *after* is a
             // startup stage the splash reports on.
             let splash = ravel_app::splash::open(cx);
+            // A launching application comes to the front, and until it does
+            // the splash is just a window behind whatever the user was already
+            // looking at — a progress report nobody can see. The main window
+            // activates again at the end of `bootstrap`, which is what raises
+            // *it*; this call is about the splash.
+            cx.activate(true);
             cx.spawn(async move |cx| bootstrap(splash, global_settings, cx).await)
                 .detach();
         });

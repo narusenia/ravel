@@ -661,7 +661,13 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
   表現を同時に作るか capability を window ごとに持つ必要があり、
   `viewer_surface_enabled` が 1 本の共有 atomic であることと
   「authority を 2 つにしない」方針の両方に反する。**この単位では変えず**、
-  観測として残す（安全側の劣化であり、破綻ではない）。
+  `MED-APP-41` に起票した（安全側の劣化であり、破綻ではない）。
+
+- **macOS の自前 device 喪失では退役フレームが残りうる**（`report_gpu_device_loss`
+  は blank しない）。CPU フレームの要求が成功すれば上書きされて自己解消するが、
+  要求が失敗する経路では死んだテクスチャが global に残る。`GPULOSS-4` のテストが
+  `ViewerFrame::Frame` の publish を期待しているのでこの単位では触らず、
+  `MED-APP-42` に起票した。
 
 - テスト: `frame.rs` に late lease drop 1 本（adapter 必須。`PooledTexture` は
   実テクスチャなので、adapter の無い環境では既存の兄弟テストと同じく skip する）。

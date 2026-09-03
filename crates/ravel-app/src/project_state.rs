@@ -3685,6 +3685,10 @@ mod tests {
     #[gpui::test]
     fn a_second_windows_capability_check_never_swaps_the_sessions_device(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
+        // The installed worker is a real thread, so it will touch the
+        // scheduler from off the test thread — every sibling test that builds
+        // one says so the same way.
+        cx.executor().allow_parking();
         let project = cx.new(ProjectState::new);
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
         project.update(cx, |project, cx| {

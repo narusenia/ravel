@@ -66,3 +66,21 @@ TDR（ドライバのリセット）やサスペンド / レジュームで現�
 `docs/implementation/done/zero-copy-viewer-plan.md` の `ZC-4` / `ZC-8` の完了条件
 「デバイス喪失・ウィンドウ再作成で破綻しない」は**この項目が閉じるまで
 満たされない**。
+
+## 現在地（2026-09-03）
+
+**修正方針の 1〜3 は実装済みで、`done/gpu-device-loss-recovery-plan.md` の
+`GPULOSS-1`〜`GPULOSS-5` が全部マージされている**（#485 / #493 / #495 / #500）。
+device state（epoch + lost）、評価 worker の epoch 交換、採用 device の
+ポーリングと再採用、macOS の安全側確定、pool lease と window lifecycle の
+後片付けまで入り、いずれも自動テストと変異注入で固定してある。
+
+**それでもこの項目を閉じないのは 4 が残っているため** — 実機の device loss で
+復帰するところを**誰も見ていない**。macOS には意図的に device を失わせる手段が
+無く、確認には Windows 実機（`Win+Ctrl+Shift+B` のドライバ再起動）が要る。
+手順は計画書の `GPULOSS-5` 節にある。
+
+派生して開いている項目: `MED-APP-40`（macOS は GPUI の Metal device の喪失を
+問う口を持たない）、`MED-APP-41`（zero-copy の可否が session 全体で 1 個）、
+`MED-APP-42`（自前 device 喪失では退役フレームが残りうる）。
+

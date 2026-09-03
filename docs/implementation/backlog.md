@@ -34,7 +34,6 @@
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
-| MOD-3 | 駆動ソース `field.time` / `field.constant` | `per-instance-modulation-plan.md` |
 | MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
@@ -73,7 +72,6 @@
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
-| GPULOSS-5 | window lifecycle、export、Viewer lease、テスト、実機確認（`GPULOSS-2` / `3` / `4` ✅ で依存が解けた。**実 device loss は Windows 実機でしか起こせない**） | `gpu-device-loss-recovery-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -572,9 +570,10 @@ format version もマイグレーションも増えていない（`Layer.audio` 
 | TOOLX-4 | ✅ | polygon / star のドラッグ描画（PR #491） | — |
 | TOOLX-5 | ✅ | ロケールと文書（ツールのラベルは TOOLX-1 / TOOLX-4 で入れたので、この単位は仕様書 / 要件 / 実装状況の散文だけ） | TOOLX-1〜4 ✅ |
 
-TOOLX-1 は `MED-APP-15` を引き受ける単位。`done/pointer-feedback-plan.md` が
-見送った Hand / Zoom のカーソルもここで入る。REQ-UI-011 が v1.5 / v2 に
-送った項目の引受先が無かったので、この計画がまとめて持つ。
+**この計画は閉じた**（`done/`）。TOOLX-1 は `MED-APP-15` を引き受ける単位で、
+`done/pointer-feedback-plan.md` が見送った Hand / Zoom のカーソルもここで入った。
+REQ-UI-011 が v2 に送った 3 項目（ピクセル精度のヒットテスト、殻変換が非恒等な
+レイヤーでの編集、パスアニメーション）は**引受先を持たないまま**である。
 
 ### ノードの発見性と説明
 
@@ -913,7 +912,11 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | GPULOSS-2 | ✅ | epoch-aware な評価 worker の停止・再生成と cache budget 維持（PR #485） | GPULOSS-1 |
 | GPULOSS-3 | ✅ | GPUI 採用 wgpu device の loss polling・再採用（Linux / FreeBSD / Windows。PR #495） | GPULOSS-1, GPULOSS-2 |
 | GPULOSS-4 | ✅ | macOS は自前 device の loss で zero-copy を無効化し CPU fallback に留める（PR #493、MED-APP-40 起票） | GPULOSS-1, GPULOSS-2 |
-| GPULOSS-5 | 🟡 | window lifecycle、export、Viewer lease、テスト、実機確認 | GPULOSS-2, GPULOSS-3, GPULOSS-4 |
+| GPULOSS-5 | ✅ | window lifecycle、export、Viewer lease、テスト（PR #500、MED-APP-41 / MED-APP-42 起票）。**実機の device loss 確認は未実施** — Windows 実機が要る | GPULOSS-2, GPULOSS-3, GPULOSS-4 |
+
+**この計画は閉じた**（`done/`）。`HIGH-33` は**開いたまま**にしている — 復旧の実装と
+自動テストは揃ったが、**実機の device loss で動くところを誰も見ていない**
+（macOS には起こす手段が無く、Windows 実機が要る）。
 
 ### OFX ホスト
 
@@ -954,7 +957,7 @@ MOD-1〜3 と並行できる。
 |---|---|---|---|
 | MOD-1 | ✅ | 合成モードと成分マスクと `group` | #188 |
 | MOD-2 | ✅ | `FieldSample` 構造体化 + `field.attribute` | #189 |
-| MOD-3 | 🟡 | 駆動ソース `field.time` / `field.constant` | MOD-2 |
+| MOD-3 | ✅ | 駆動ソース `field.time` / `field.constant`（PR #499） | MOD-2 |
 | MOD-4 | 🟡 | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
 | MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4, OPS-2 |
 

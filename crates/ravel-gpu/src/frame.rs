@@ -314,7 +314,7 @@ mod tests {
     /// A device epoch swap drops the retiring pool **before** the frames that
     /// leased from it: the GPUI completion clone of the last viewer frame is
     /// released by a draw that a dead device may never make, so the swap
-    /// cannot wait for it (`gpu-device-loss-recovery-plan.md`, "pool lease の
+    /// cannot wait for it (`done/gpu-device-loss-recovery-plan.md`, "pool lease の
     /// 順序制約"). Two things have to hold when that late drop finally runs.
     ///
     /// * Holding the frame must not have kept the retiring pool alive. The

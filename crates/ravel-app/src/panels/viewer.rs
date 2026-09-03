@@ -4780,7 +4780,7 @@ const TANGENT_SYMMETRY_TOLERANCE: f32 = 1e-4;
 /// Read off the values, with no flag stored anywhere — a point that *is*
 /// symmetric behaves as smooth and a point that is not behaves as split, so
 /// there is nothing to persist, migrate, or keep in sync with the geometry
-/// (the decision `viewer-tool-extensions-plan.md` records).
+/// (the decision `done/viewer-tool-extensions-plan.md` records).
 ///
 /// A point with no tangents at all (a corner the pen placed) is not smooth: it
 /// has no arms to mirror, and the overlay draws neither handle for it.

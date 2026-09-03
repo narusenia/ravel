@@ -108,10 +108,13 @@ async fn bootstrap(
     for stage in StartupStage::ALL {
         if let Some(splash) = &splash {
             cx.update(|cx| splash.show_stage(stage, cx));
+            // The frame carrying this label, before the work that would
+            // otherwise hold the main thread through it. Skipped when the
+            // platform refused the splash: there is nothing to paint, and
+            // waiting would only make a launch without a splash slower than
+            // the synchronous bootstrap was.
+            ravel_app::splash::stage_break(cx).await;
         }
-        // The frame carrying this label, before the work that would otherwise
-        // hold the main thread through it.
-        ravel_app::splash::stage_break(cx).await;
 
         cx.update(|cx| match stage {
             StartupStage::Themes => load_ravel_themes(cx),

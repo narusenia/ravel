@@ -3766,6 +3766,82 @@ mod tests {
         );
     }
 
+    /// `GPULOSS-5`: the export side follows the epoch, and the retiring device
+    /// is out of reach the moment the swap is accepted.
+    ///
+    /// [`crate::export::RenderService::ensure_queue`] builds its queue — a
+    /// second `GpuEvalHooks`, with a second texture pool on the same cache
+    /// budget — from [`ProjectState::gpu_context`] at the moment of a
+    /// submission. That single read is the whole of "the new epoch's queue
+    /// uses the new context", and what it needs is for the retiring context to
+    /// be gone from there **before** the swap gives up the UI thread: an
+    /// export submitted during the teardown would otherwise open a pool on the
+    /// device the session is leaving, charged to the budget the replacement is
+    /// about to be built against. The retired queue itself is cancelled and
+    /// stopped by the same swap (`take_queue_for_new_gpu`, pinned by
+    /// `a_device_epoch_swap_waits_for_the_old_worker_then_publishes_a_new_frame`).
+    ///
+    /// Needs an adapter: the two contexts have to be told apart, and the mark
+    /// is a loss injected into the retiring one — a state no replacement
+    /// context can carry, since each brings its own.
+    #[gpui::test]
+    fn only_the_new_epochs_context_is_left_for_a_render_queue(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let (Ok(retiring), Ok(replacement)) =
+            (GpuContext::new_blocking(), GpuContext::new_blocking())
+        else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        project.update(cx, |project, cx| {
+            project.install_eval_worker(
+                Some(retiring.clone()),
+                EpochHooks::new("old", &log),
+                0,
+                cx,
+            );
+        });
+        assert!(
+            retiring.inject_device_loss(ravel_gpu::GpuLossReason::Unknown),
+            "the injected loss was not the first"
+        );
+        project.read_with(cx, |project, _| {
+            assert!(
+                project.gpu_context().is_some_and(GpuContext::lost),
+                "the fixture did not put the session on the retiring device"
+            );
+        });
+
+        let swap_log = log.clone();
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(
+                    Some(replacement),
+                    move |_| EpochHooks::new("new", &swap_log),
+                    cx
+                ),
+                "the swap was refused"
+            );
+            assert!(
+                project.gpu_context().is_none(),
+                "an export submitted during the swap would build its queue on the \
+                 device the session is retiring"
+            );
+        });
+        await_swap(&project, cx);
+
+        project.read_with(cx, |project, _| {
+            let gpu = project.gpu_context().expect("the replacement device");
+            assert!(
+                !gpu.lost(),
+                "a queue built after the swap would still run on the retiring device"
+            );
+        });
+    }
+
     /// The paths where **no evaluation follows** — an emptied composition, one
     /// that stopped compiling — have to clear the band on their way out *and*
     /// forget the frame-cache version it was published at.

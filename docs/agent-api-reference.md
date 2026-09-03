@@ -45,7 +45,7 @@ InputPortIndex(pub u32) / OutputPortIndex(pub u32)
 
 Well-known `DataTypeId` constants: `FRAME_BUFFER=1`, `SCALAR=10`, `VEC2=11`,
 `VEC3=12`, `VEC4=13`, `COLOR=14`, `TIME_CODE=20`, `AUDIO_BUFFER=30`,
-`PLAIN_TEXT=40`, `GEOMETRY=50`, `FIELD=51`, `SCENE=52`.
+`PLAIN_TEXT=40`, `FONT=41`, `GEOMETRY=50`, `FIELD=51`, `SCENE=52`.
 
 ### `types` — data types and category traits
 
@@ -1471,6 +1471,34 @@ camera::DEFAULT_{DISTANCE, FOV_Y_DEGREES, ORTHOGRAPHIC_HEIGHT, NEAR, FAR}
 camera::MIN_CLIP_SPAN
 ```
 
+### `text` — font resolution (REQ-MOGRAPH-004)
+
+```rust
+FontQuery::new(family: &str, weight: u16, italic: bool)   // family is case-folded
+FontRef { family, weight, italic, data: Arc<Vec<u8>>, face_index, is_fallback }
+          // NodeData, DataTypeId::FONT
+
+FontLibrary::new(dirs: &[PathBuf])       // indexes the embedded face + those dirs
+    .resolve(&FontQuery) -> Arc<FontRef> // INFALLIBLE, memoised per query
+text::shared() -> &'static FontLibrary   // indexes the platform font dirs, once
+
+text::DEFAULT_FAMILY / FONT_WEIGHTS / FONT_STYLES  // the `text.font` params
+text::weight_from_name(&str) -> u16      // "semibold" -> 600, "350" -> 350, else 400
+text::style_is_italic(&str) -> bool
+```
+
+Selection reads the `name` and `OS/2` tables with `ttf-parser` — **no platform
+font API**, so `ravel-cli` links none (`AGENTS.md` on the two binaries). The
+cost is a one-time index of every installed font file on the first `resolve`
+(~1400 faces in a few hundred ms) and no family aliasing (`sans-serif`, a
+user's `fonts.conf`).
+
+`resolve` never fails: a family that is not installed answers with the face
+compiled into the binary, `is_fallback = true`, and one warning per distinct
+query. The same query returns the **same `Arc`**, and two queries landing on
+one file share its bytes — which is what keeps a per-frame graph from
+reloading a 4.5 MB face.
+
 ### `registry` — node templates for the editor
 
 ```rust
@@ -2102,6 +2130,7 @@ Current keys:
 | `field.constant` | CPU | emit `FieldValue` answering `value` everywhere (default `1.0`, the multiplicative identity — `0.0` is what an unconnected `FIELD` port already answers). How a field graph writes a subtraction or a division, there being no `field.subtract` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
+| `text.font` | CPU | `family` / `weight` / `style` → `FontRef` (`DataTypeId::FONT`), through `ravel_core::text::shared()`. **Never fails**: a family this machine does not have yields the built-in face with `is_fallback` set plus one warning, so a project authored elsewhere renders in the wrong font rather than erroring. Stateless — the library owns the index and both caches |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
 | `geometry.from_image` | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
 | `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |

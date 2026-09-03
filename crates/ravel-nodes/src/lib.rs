@@ -265,6 +265,8 @@ pub fn processor_for_node(
         builtin::FIELD_COMPOSE_VEC3 => Some(Arc::new(field::ComposeFieldProcessor::new(3))),
         builtin::FIELD_COMPOSE_VEC4 => Some(Arc::new(field::ComposeFieldProcessor::new(4))),
         "field.attribute" => Some(Arc::new(field::AttributeFieldProcessor::from_node(node))),
+        "field.time" => Some(Arc::new(field::TimeFieldProcessor)),
+        "field.constant" => Some(Arc::new(field::ConstantFieldProcessor)),
         "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
         // Shape generators
         "shape.rect" => Some(Arc::new(shape::RectProcessor::from_node(node))),

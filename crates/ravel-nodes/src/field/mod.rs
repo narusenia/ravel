@@ -8,8 +8,8 @@ use ravel_core::geometry::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
     ComposeField, ConstantField, CurlNoiseField, CurveRemapField, DirectionToField, Domain,
     ExpressionField, FalloffField, FalloffShape, FieldApply, FieldValue, Geometry, GradientField,
-    LengthField, MaxField, MultiplyField, NoiseField, RadialField, RampField, apply_field,
-    component_index,
+    LengthField, MaxField, MultiplyField, NoiseField, RadialField, RampField, TimeField, TimeMode,
+    apply_field, component_index,
 };
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
@@ -488,6 +488,57 @@ impl NodeProcessor for AttributeFieldProcessor {
     }
 }
 
+/// Emits a [`TimeField`]: the evaluation clock as a field.
+///
+/// **Always time-dependent.** The reasoning is `ExpressionFieldProcessor`'s,
+/// without the conditional: a `FieldValue` is lazy, so nothing downstream can
+/// tell that sampling it varies with the frame. Re-pulling this node every frame is
+/// what marks `field.apply` as `CacheMiss::InputFresh` through however many
+/// combinators sit between them; without it the whole chain caches as
+/// `TimeKey::TIMELESS` and the modulation freezes.
+pub struct TimeFieldProcessor;
+
+impl NodeProcessor for TimeFieldProcessor {
+    fn is_time_dependent(&self) -> bool {
+        true
+    }
+
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let default = TimeField::default();
+        Ok(Arc::new(FieldValue::new(
+            TimeField::new(TimeMode::parse(params.str_or("mode", "seconds")))
+                .with_duration(params.f32_or("duration", default.duration))
+                .with_scale(params.f32_or("scale", default.scale))
+                .with_offset(params.f32_or("offset", default.offset)),
+        )))
+    }
+}
+
+/// Emits a [`ConstantField`]: the same scalar everywhere.
+pub struct ConstantFieldProcessor;
+
+impl NodeProcessor for ConstantFieldProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(FieldValue::new(ConstantField(
+            params.f32_or("value", 1.0),
+        ))))
+    }
+}
+
 pub struct ApplyFieldProcessor;
 
 impl ApplyFieldProcessor {
@@ -592,6 +643,18 @@ mod tests {
             .downcast_ref::<FieldValue>()
             .unwrap()
             .sample(&FieldSample::positions_only(&[Vec2(0.25, 0.75)], &ctx()))
+            .as_f32("sample")
+            .unwrap()
+            .to_vec()
+    }
+
+    /// [`sample`] at a caller-chosen context, for the fields whose answer *is*
+    /// the context.
+    fn sample_at(value: &dyn NodeData, ctx: &EvalContext) -> Vec<f32> {
+        value
+            .downcast_ref::<FieldValue>()
+            .unwrap()
+            .sample(&FieldSample::positions_only(&[Vec2(0.25, 0.75)], ctx))
             .as_f32("sample")
             .unwrap()
             .to_vec()
@@ -1480,6 +1543,132 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.inner.process(node, ctx, inputs, params, scope)
         }
+    }
+
+    // ---- field.time / field.constant ---------------------------------------
+
+    /// Half a frame past frame 18 at 24 fps: no mode can match another by
+    /// accident, and a quantised clock cannot match at all.
+    fn subframe_ctx() -> EvalContext {
+        let mut ctx = EvalContext::new(18, FrameRate::new(24, 1), (1920, 1080));
+        ctx.time = 18.5 / 24.0;
+        ctx
+    }
+
+    #[test]
+    fn time_processor_reads_node_parameters() {
+        let node = Node::new(NodeId::new(1), "field.time")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("mode", ParameterValue::String("normalized".into()))
+            .with_param("duration", ParameterValue::Float(74.0))
+            .with_param("scale", ParameterValue::Float(3.0))
+            .with_param("offset", ParameterValue::Float(-0.5));
+
+        let value = run(&node, Arc::new(TimeFieldProcessor), &[]);
+
+        // 18.5 / 74 = 0.25, then × 3 − 0.5. The default duration (300) would
+        // give −0.315, and the frame mode 55.0.
+        assert_eq!(sample_at(value.as_ref(), &subframe_ctx()), vec![0.25]);
+    }
+
+    #[test]
+    fn time_processor_defaults_to_seconds() {
+        let node = Node::new(NodeId::new(1), "field.time").with_output("field", DataTypeId::FIELD);
+
+        let value = run(&node, Arc::new(TimeFieldProcessor), &[]);
+
+        // Seconds, unscaled: the frame mode would answer 18.5.
+        assert_eq!(
+            sample_at(value.as_ref(), &subframe_ctx()),
+            vec![(18.5 / 24.0) as f32]
+        );
+    }
+
+    #[test]
+    fn constant_processor_reads_its_value() {
+        let node = Node::new(NodeId::new(1), "field.constant")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("value", ParameterValue::Float(-2.75));
+
+        let value = run(&node, Arc::new(ConstantFieldProcessor), &[]);
+
+        assert_eq!(sample(value.as_ref()), vec![-2.75]);
+    }
+
+    #[test]
+    fn constant_processor_defaults_to_the_multiplicative_identity() {
+        // Zero is what an *unconnected* field port already answers, so a
+        // constant node has to default to something a `multiply` leaves alone.
+        let node =
+            Node::new(NodeId::new(1), "field.constant").with_output("field", DataTypeId::FIELD);
+
+        let value = run(&node, Arc::new(ConstantFieldProcessor), &[]);
+
+        assert_eq!(sample(value.as_ref()), vec![1.0]);
+    }
+
+    #[test]
+    fn a_constant_field_node_is_not_time_dependent() {
+        assert!(!ConstantFieldProcessor.is_time_dependent());
+    }
+
+    /// A cache failure, so it needs the evaluator and **one** evaluator across
+    /// both frames: a fresh one per frame cannot serve a stale entry and would
+    /// pass with the bug present.
+    ///
+    /// The `FieldValue` this node emits is lazy and identical every frame, so
+    /// nothing downstream can see that sampling it moves. Only
+    /// `is_time_dependent` re-pulls it, and only that re-pull marks
+    /// `field.apply` as having a fresh input.
+    #[test]
+    fn a_time_field_re_evaluates_when_the_frame_advances() {
+        let time = Node::new(NodeId::new(2), "field.time")
+            .with_output("field", DataTypeId::FIELD)
+            .with_param("mode", ParameterValue::String("frame".into()));
+        let apply = apply_node(3);
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(time.clone())
+            .unwrap()
+            .add_node(apply.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(1),
+            )
+            .unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(StubSource(weighted_point())));
+        ev.register(NodeId::new(2), Arc::new(TimeFieldProcessor));
+        ev.register(
+            NodeId::new(3),
+            Arc::new(ApplyFieldProcessor::from_node(&apply)),
+        );
+
+        let at_zero = ev.evaluate(&graph, NodeId::new(3), &frame_ctx(0)).unwrap();
+        let at_seven = ev.evaluate(&graph, NodeId::new(3), &frame_ctx(7)).unwrap();
+
+        assert_eq!(weight_of(&at_zero), 0.0);
+        assert_eq!(
+            weight_of(&at_seven),
+            7.0,
+            "the picture froze: the time field was served from the timeless cache"
+        );
     }
 
     #[test]

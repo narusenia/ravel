@@ -1381,6 +1381,21 @@ component = "多成分アトリビュートの成分（x / y / z / w）。"
 normalize = "アトリビュート自身の最小〜最大を 0〜1 に写し直す。"
 default = "アトリビュートが無い・読めない場所で使う値。"
 
+[node."field.time"]
+label = "タイムフィールド"
+description = "評価時刻をフィールドとして返す。変調をアニメーションさせる駆動源。"
+[node."field.time".params]
+mode = "時刻の読み方（連続フレーム / 秒 / 長さで割った正規化値）。"
+duration = "正規化モードで割るフレーム数。"
+scale = "時刻に掛ける倍率。"
+offset = "倍率を掛けた後に足す値。"
+
+[node."field.constant"]
+label = "定数フィールド"
+description = "どこでも同じスカラーを返す。掛けることで減算・除算を表す。"
+[node."field.constant".params]
+value = "全要素で返す値。"
+
 [node."field.apply"]
 label = "フィールド適用"
 description = "ジオメトリの各要素でフィールドをサンプルし、アトリビュートに書き込む。"

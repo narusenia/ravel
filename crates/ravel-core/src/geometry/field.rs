@@ -137,12 +137,138 @@ impl NodeData for FieldValue {
 /// what an unconnected `FIELD` port evaluates to — see `zero_value` in
 /// `ravel-nodes`. Answering with a `Scalar` instead would hand a value of the
 /// wrong type to a node that had declared what it accepts.
+///
+/// It is also what the `field.constant` node emits, which is how a field
+/// graph writes a subtraction or a division: there is no `field.subtract`,
+/// only `field.multiply` against a constant.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConstantField(pub f32);
 
 impl Field for ConstantField {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         AttributeArray::F32(vec![self.0; input.len()])
+    }
+
+    fn byte_size(&self) -> u64 {
+        size_of::<Self>() as u64
+    }
+}
+
+/// Which reading of the evaluation clock [`TimeField`] answers with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimeMode {
+    /// Continuous frame position ([`EvalContext::sample_frame`]).
+    Frame,
+    /// Seconds on the timeline being evaluated ([`EvalContext::time`]).
+    ///
+    /// The default: it is the reading that does not change meaning when the
+    /// composition's frame rate does.
+    #[default]
+    Seconds,
+    /// Frame position divided by [`TimeField::duration`].
+    Normalized,
+}
+
+impl TimeMode {
+    /// Parse a parameter string; anything unrecognised falls back to
+    /// `Seconds`, which is the registry template's default.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "frame" => Self::Frame,
+            "normalized" => Self::Normalized,
+            _ => Self::Seconds,
+        }
+    }
+}
+
+/// The evaluation clock as a field: one value for the whole batch.
+///
+/// The driving source that makes modulation animate. Composed with
+/// [`AttributeField`] through the existing arithmetic fields it also writes
+/// per-element time offsets — `t - index * delay` is
+/// `field.time` + `field.attribute(index)` × `field.constant(-delay)` — which
+/// is why there is no dedicated stagger node.
+///
+/// Reads the clock **at sample time**, not when the node built it, so a
+/// `FieldValue` handed on across frames still answers for the frame being
+/// evaluated. The node still reports `is_time_dependent()`: its recompute is
+/// what marks `field.apply` downstream as needing one (a lazy field is
+/// otherwise cached as `TimeKey::TIMELESS`, the same trap `field.expression`
+/// documents).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimeField {
+    pub mode: TimeMode,
+    /// Frame count [`TimeMode::Normalized`] divides by; ignored by the other
+    /// modes.
+    ///
+    /// A field cannot see the composition it is evaluated for — an
+    /// [`EvalContext`] carries the frame, not the timeline's length — so the
+    /// span the normalization is against is stated on the node.
+    pub duration: f32,
+    pub scale: f32,
+    pub offset: f32,
+}
+
+impl Default for TimeField {
+    fn default() -> Self {
+        Self {
+            mode: TimeMode::default(),
+            // 300 frames: what a composition is long when nothing else says
+            // (`CompositionSettings::FALLBACK_DURATION`). The registry
+            // template repeats the number rather than depending on the UI
+            // crate for it.
+            duration: 300.0,
+            scale: 1.0,
+            offset: 0.0,
+        }
+    }
+}
+
+impl TimeField {
+    pub fn new(mode: TimeMode) -> Self {
+        Self {
+            mode,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_duration(mut self, duration: f32) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    pub fn with_offset(mut self, offset: f32) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// The clock reading this field answers with for `ctx`.
+    ///
+    /// A `duration` that is not a positive number normalizes to `0.0` rather
+    /// than to an infinity or a NaN: a span of zero frames has no position
+    /// within it, the same answer [`AttributeField`]'s `normalize` gives a
+    /// column of no width.
+    pub fn value(&self, ctx: &EvalContext) -> f32 {
+        let reading = match self.mode {
+            TimeMode::Frame => ctx.sample_frame(),
+            TimeMode::Seconds => ctx.time,
+            TimeMode::Normalized if self.duration > 0.0 => {
+                ctx.sample_frame() / self.duration as f64
+            }
+            TimeMode::Normalized => 0.0,
+        };
+        reading as f32 * self.scale + self.offset
+    }
+}
+
+impl Field for TimeField {
+    fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
+        AttributeArray::F32(vec![self.value(input.ctx); input.len()])
     }
 
     fn byte_size(&self) -> u64 {
@@ -2140,6 +2266,16 @@ mod tests {
             .to_vec()
     }
 
+    /// [`scalar_sample`] against a caller-chosen context, for the fields whose
+    /// answer *is* the context.
+    fn scalar_sample_at(field: &dyn Field, positions: &[Vec2], ctx: &EvalContext) -> Vec<f32> {
+        field
+            .sample(&FieldSample::positions_only(positions, ctx))
+            .as_f32("sample")
+            .unwrap()
+            .to_vec()
+    }
+
     /// Sample a field against a whole attribute set, the way `apply_field` does.
     fn sample_with(field: &dyn Field, attributes: &AttributeSet) -> Vec<f32> {
         let positions = attributes.get(names::P).unwrap().as_vec2(names::P).unwrap();
@@ -3417,6 +3553,158 @@ mod tests {
             result.points().get(names::ROT).unwrap().as_f32(names::ROT),
             Ok(&[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0][..])
         );
+    }
+
+    // ---- field.time / field.constant ---------------------------------------
+
+    /// A context sitting half a frame past frame 18 at 24 fps, so a mode that
+    /// quantises the clock or reads the wrong axis cannot match by accident.
+    fn subframe_ctx() -> EvalContext {
+        let mut ctx = EvalContext::new(18, FrameRate::new(24, 1), (1920, 1080));
+        ctx.time = 18.5 / 24.0;
+        ctx
+    }
+
+    #[test]
+    fn time_field_answers_the_continuous_frame_position() {
+        let field = TimeField::new(TimeMode::Frame);
+
+        assert_eq!(field.value(&subframe_ctx()), 18.5);
+    }
+
+    #[test]
+    fn time_field_answers_seconds() {
+        let field = TimeField::new(TimeMode::Seconds);
+
+        assert_eq!(field.value(&subframe_ctx()), (18.5 / 24.0) as f32);
+    }
+
+    #[test]
+    fn time_field_normalizes_against_its_declared_duration() {
+        // 74 frames is nothing like the 300-frame default, so a field that
+        // ignored the parameter would answer 0.0616… instead of 0.25.
+        let field = TimeField::new(TimeMode::Normalized).with_duration(74.0);
+
+        assert_eq!(field.value(&subframe_ctx()), 0.25);
+    }
+
+    #[test]
+    fn time_field_normalizes_a_zero_duration_to_zero() {
+        // No span means no position within it; the alternative is an infinity
+        // that spreads silently into whatever attribute this modulates.
+        for duration in [0.0, -74.0, f32::NAN] {
+            let field = TimeField::new(TimeMode::Normalized).with_duration(duration);
+
+            assert_eq!(field.value(&subframe_ctx()), 0.0, "duration {duration}");
+        }
+    }
+
+    #[test]
+    fn time_field_scales_then_offsets() {
+        let field = TimeField::new(TimeMode::Frame)
+            .with_scale(3.0)
+            .with_offset(-0.5);
+
+        // Scale first: offsetting first would give 54.0.
+        assert_eq!(field.value(&subframe_ctx()), 55.0);
+    }
+
+    #[test]
+    fn time_field_is_pure_in_its_context() {
+        let field = TimeField::new(TimeMode::Seconds).with_scale(2.5);
+        let positions = [Vec2(0.0, 0.0), Vec2(7.0, -3.0)];
+
+        // Same context twice: identical, and identical across positions —
+        // the clock is not a function of where an element sits.
+        let first = scalar_sample_at(&field, &positions, &subframe_ctx());
+        assert_eq!(first, scalar_sample_at(&field, &positions, &subframe_ctx()));
+        assert_eq!(first, vec![first[0]; 2]);
+
+        // A different context, a different answer.
+        let later = subframe_ctx().with_frame(30);
+        assert_ne!(first, scalar_sample_at(&field, &positions, &later));
+    }
+
+    #[test]
+    fn time_mode_parses_and_falls_back_to_seconds() {
+        assert_eq!(TimeMode::parse("frame"), TimeMode::Frame);
+        assert_eq!(TimeMode::parse("seconds"), TimeMode::Seconds);
+        assert_eq!(TimeMode::parse("normalized"), TimeMode::Normalized);
+        assert_eq!(TimeMode::parse("Frame"), TimeMode::Seconds);
+        assert_eq!(TimeMode::parse(""), TimeMode::Seconds);
+        assert_eq!(TimeMode::default(), TimeMode::Seconds);
+    }
+
+    #[test]
+    fn constant_field_answers_its_value_for_every_element() {
+        let field = ConstantField(-2.75);
+
+        assert_eq!(
+            scalar_sample_at(&field, &[Vec2(0.0, 0.0), Vec2(5.0, 5.0)], &subframe_ctx()),
+            vec![-2.75, -2.75]
+        );
+    }
+
+    /// `field.attribute(index, normalize) → multiply(field.constant) →
+    /// add(field.time) → apply(rot, add)`: the stagger the unit exists for.
+    ///
+    /// Every element shares a position, so a per-element difference can only
+    /// come from `index`; evaluating two frames shows the whole pattern
+    /// moving with the clock while the spacing between elements stays put.
+    #[test]
+    fn a_time_and_constant_composition_staggers_rotation_per_element() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 4]);
+        geometry
+            .points_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1, 2, 3]))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.0; 4]))
+            .unwrap();
+
+        // t - index_normalized * 0.5, in seconds.
+        let delay = MultiplyField {
+            left: FieldValue::new(AttributeField::new(names::INDEX).with_normalize(true)),
+            right: FieldValue::new(ConstantField(-0.5)),
+        };
+        let staggered = AddField {
+            left: FieldValue::new(TimeField::new(TimeMode::Seconds)),
+            right: FieldValue::new(delay),
+        };
+        let spec = FieldApply::new(Domain::Point, names::ROT).with_combine(CombineMode::Add);
+
+        let rot_at = |ctx: &EvalContext| -> Vec<f32> {
+            apply_field(&geometry, &spec, &staggered, ctx)
+                .unwrap()
+                .points()
+                .get(names::ROT)
+                .unwrap()
+                .as_f32(names::ROT)
+                .unwrap()
+                .to_vec()
+        };
+
+        let early = rot_at(&subframe_ctx());
+        let late = rot_at(&subframe_ctx().with_frame(42));
+
+        // Per element: the normalized index scaled by the delay.
+        for (index, value) in early.iter().enumerate() {
+            let expected = (18.5 / 24.0) as f32 - index as f32 / 3.0 * 0.5;
+            assert!(
+                (value - expected).abs() < 1e-6,
+                "element {index}: {value} != {expected}"
+            );
+        }
+        // The stagger is a phase, so advancing the clock shifts every element
+        // by the same amount and leaves the spacing alone.
+        let shift = 42.0 / 24.0 - 18.5 / 24.0;
+        for (index, (early, late)) in early.iter().zip(&late).enumerate() {
+            assert!(
+                (late - early - shift as f32).abs() < 1e-6,
+                "element {index}: {early} -> {late}"
+            );
+        }
     }
 
     // ---- combine modes, component masks and groups -------------------------

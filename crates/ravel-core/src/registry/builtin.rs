@@ -184,6 +184,8 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_compose(FIELD_COMPOSE_VEC3, "Field Compose Vec3", 3));
     reg.register(field_compose(FIELD_COMPOSE_VEC4, "Field Compose Vec4", 4));
     reg.register(field_attribute());
+    reg.register(field_time());
+    reg.register(field_constant());
     reg.register(field_apply());
 }
 
@@ -752,6 +754,42 @@ fn field_attribute() -> NodeTemplate {
         })
         .with_param(float_parameter("default", 0.0))
         .with_param_range("default", -1e9..=1e9, -10.0..=10.0)
+}
+
+/// Readings of the evaluation clock offered by `field.time`.
+/// Mirrors [`crate::geometry::TimeMode`].
+pub const FIELD_TIME_MODES: [&str; 3] = ["frame", "seconds", "normalized"];
+
+/// `field.time`: the evaluation clock as a field.
+///
+/// The driving source that makes modulation animate. `duration` is read by
+/// the `normalized` mode alone — a field is handed the frame being evaluated,
+/// never the length of the timeline it belongs to, so the span to normalize
+/// against is stated here (300 frames, the fallback composition duration).
+fn field_time() -> NodeTemplate {
+    NodeTemplate::new("field.time", "Time Field", NodeCategory::Field)
+        .with_output(field_output())
+        .with_param(string_parameter("mode", "seconds"))
+        .with_param_options("mode", FIELD_TIME_MODES)
+        .with_param(float_parameter("duration", 300.0))
+        .with_param(float_parameter("scale", 1.0))
+        .with_param(float_parameter("offset", 0.0))
+        .with_param_range("duration", 0.0..=1e9, 1.0..=1000.0)
+        .with_param_range("scale", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("offset", -1e9..=1e9, -10.0..=10.0)
+}
+
+/// `field.constant`: the same scalar everywhere.
+///
+/// How a field graph writes a subtraction or a division: there is no
+/// `field.subtract`, only `field.multiply` against this. The default is the
+/// multiplicative identity — `0.0` is already what an unconnected `FIELD`
+/// port answers, so a constant node defaulting to it would be a no-op.
+fn field_constant() -> NodeTemplate {
+    NodeTemplate::new("field.constant", "Constant Field", NodeCategory::Field)
+        .with_output(field_output())
+        .with_param(float_parameter("value", 1.0))
+        .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
 }
 
 /// How `field.apply` combines a sampled value with the existing one.
@@ -1908,7 +1946,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 80);
+        assert_eq!(reg.all_templates().count(), 82);
     }
 
     #[test]
@@ -1917,7 +1955,7 @@ mod tests {
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
-        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 21);
+        assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);

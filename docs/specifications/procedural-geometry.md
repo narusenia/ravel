@@ -314,6 +314,9 @@ pub struct FieldSample<'a> {
   フィールド**で、スカラーフィールドではグレースケールにしかならない
   `Cd` / `stroke_color` の変調に色相を与える）、
   画像サンプラ（FrameBuffer を UV 参照）、Lua 式、
+  時刻（`field.time`。`frame` / `seconds` / `normalized` を `scale` /
+  `offset` 付きで返す。変調をアニメーションさせる駆動源）、
+  定数（`field.constant`。`multiply` と組んで減算・除算を表す）、
   オーディオ由来スカラー（REQ-MEDIA-003 と接続）。
 - 合成: Add / Multiply / Max / Blend ノードで `Field` 同士を結合。
 - 消費地点: 属性変調ノード（`attr = field(P)`）、パーティクルフォース、

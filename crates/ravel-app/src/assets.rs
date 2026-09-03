@@ -286,6 +286,10 @@ pub enum RavelIcon {
     NodeFieldComposeVec4,
     /// Node header/menu: `field.attribute`.
     NodeFieldAttribute,
+    /// Node header/menu: `field.time`.
+    NodeFieldTime,
+    /// Node header/menu: `field.constant`.
+    NodeFieldConstant,
     /// Node header/menu: `field.apply`.
     NodeFieldApply,
     /// Category fallback: `NodeCategory::Geometry`.
@@ -451,6 +455,8 @@ impl RavelIcon {
             "field.compose.vec3" => Self::NodeFieldComposeVec3,
             "field.compose.vec4" => Self::NodeFieldComposeVec4,
             "field.attribute" => Self::NodeFieldAttribute,
+            "field.time" => Self::NodeFieldTime,
+            "field.constant" => Self::NodeFieldConstant,
             "field.apply" => Self::NodeFieldApply,
             _ => category.map(Self::for_category).unwrap_or(Self::NodeGraph),
         }
@@ -596,6 +602,10 @@ impl IconNamed for RavelIcon {
             Self::NodeFieldComposeVec3 => "icons/axis-3d.svg",
             Self::NodeFieldComposeVec4 => "icons/boxes.svg",
             Self::NodeFieldAttribute => "icons/hash.svg",
+            // The clock the Time category is already drawn with, and an
+            // equals sign for the constant.
+            Self::NodeFieldTime => "icons/clock.svg",
+            Self::NodeFieldConstant => "icons/equal.svg",
             Self::NodeFieldApply => "icons/paintbrush.svg",
             Self::CategoryGeometry => "icons/shapes.svg",
             Self::CategoryScene => "icons/orbit.svg",

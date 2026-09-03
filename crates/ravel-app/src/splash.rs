@@ -19,15 +19,18 @@
 //! opened before the settings are installed and dismissed as soon as the main
 //! window exists, so there is nothing for it to react to.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, Styled as _, Window, WindowBounds, WindowHandle, WindowOptions, div, img,
-    px, rgb,
+    App, AppContext as _, AssetSource as _, Bounds, Context, Entity, IntoElement,
+    ParentElement as _, Pixels, Render, RenderImage, SharedString, Size, Styled as _, Window,
+    WindowBounds, WindowHandle, WindowOptions, div, img, px, rgb,
 };
 use gpui_component::Root;
 use ravel_i18n::t;
+use smallvec::SmallVec;
 
 /// The splash window's logical size.
 ///
@@ -84,11 +87,18 @@ const SPLASH_FONT_FAMILY: &str = "Geist";
 
 /// How long each stage's label stays up at minimum.
 ///
-/// Without a pause the stages finish inside one frame and the progress line is
-/// never painted at all. This is a legibility floor, not a fake progress bar:
-/// a stage that takes longer than this simply takes longer, and the label is
-/// up for the whole of it.
-const STAGE_DWELL: Duration = Duration::from_millis(110);
+/// Two things make this a number rather than zero. Without any pause the
+/// stages finish inside a single frame and the progress line is never painted
+/// at all — awaiting a timer is what returns the main thread to the platform
+/// so the frame can be drawn. And with only a frame's worth of pause the
+/// labels are a flicker: on this machine the four stages' real work totals
+/// well under a second, so a label that is up for 16 ms cannot be read.
+///
+/// A legibility floor, not a fake progress bar: a stage that takes longer than
+/// this simply takes longer and its label is up for the whole of it. Four
+/// stages puts the floor on the whole splash at about a second. Tune it here
+/// if the artwork or the stage list changes; nothing else reads it.
+const STAGE_DWELL: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Startup stages
@@ -198,6 +208,13 @@ pub fn hand_off_to_main<C>(
 pub struct SplashScreen {
     stage: StartupStage,
     version: SharedString,
+    /// Decoded up front rather than named as a path. `img("<path>")` resolves
+    /// through GPUI's *asynchronous* image cache, so the artwork lands a frame
+    /// or more after the window does — at this window's roughly one-second
+    /// lifetime that is a visible white card at launch, which is the one thing
+    /// a brand splash must not be. `None` if the artwork could not be decoded;
+    /// the text still draws on white.
+    artwork: Option<Arc<RenderImage>>,
 }
 
 impl SplashScreen {
@@ -205,8 +222,44 @@ impl SplashScreen {
         Self {
             stage: StartupStage::ALL[0],
             version: version_line().into(),
+            artwork: decode_artwork(),
         }
     }
+}
+
+/// Decodes the embedded artwork into the straight-alpha BGRA [`RenderImage`]
+/// the `img` element consumes.
+///
+/// The bytes come from the one asset source rather than a second
+/// `include_bytes!`, so the PNG is in the binary once and `assets.rs` stays
+/// the only place that says what is embedded. The conversion is the same one
+/// the MediaBin thumbnails use.
+fn decode_artwork() -> Option<Arc<RenderImage>> {
+    let bytes = match crate::assets::RavelAssets.load(SPLASH_ARTWORK) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            tracing::warn!(path = SPLASH_ARTWORK, "the splash artwork is not embedded");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = SPLASH_ARTWORK, "could not read the splash artwork");
+            return None;
+        }
+    };
+    let mut pixels = match image::load_from_memory(&bytes) {
+        Ok(image) => image.into_rgba8(),
+        Err(error) => {
+            tracing::warn!(%error, path = SPLASH_ARTWORK, "the splash artwork is not a readable image");
+            return None;
+        }
+    };
+    for pixel in pixels.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(SmallVec::from_elem(
+        image::Frame::new(pixels),
+        1,
+    ))))
 }
 
 impl Render for SplashScreen {
@@ -219,7 +272,9 @@ impl Render for SplashScreen {
             .bg(gpui::white())
             .font_family(SPLASH_FONT_FAMILY)
             .text_size(TEXT_SIZE)
-            .child(img(SPLASH_ARTWORK).absolute().inset_0().size_full())
+            .when_some(self.artwork.clone(), |this, artwork| {
+                this.child(img(artwork).absolute().inset_0().size_full())
+            })
             .child(
                 div()
                     .absolute()
@@ -479,11 +534,10 @@ mod tests {
     /// the PNG's would resample the whole brand asset.
     #[test]
     fn the_window_is_half_the_artwork() {
-        let bytes = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/splash/splash@2x.png"
-        ))
-        .expect("the splash artwork is shipped");
+        let bytes = crate::assets::RavelAssets
+            .load(SPLASH_ARTWORK)
+            .expect("the asset source is readable")
+            .expect("the splash artwork is embedded");
         // PNG IHDR: 8-byte signature, 4-byte length, 4-byte type, then the
         // big-endian width and height.
         let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());

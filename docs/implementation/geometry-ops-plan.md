@@ -148,6 +148,29 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
 - `field.attribute(index) → apply` と組んで stagger の順序が変わる
   結合テスト。
 
+**実装時の決定（`Primitive::Path` が連続範囲であることの帰結）**:
+`geometry.connect`（単位 12）と同じ制約に当たる。`Primitive::Path` は
+`verts: Range<usize>` で連続した点の並びしか張れないため、ポイントドメインの
+置換がプリミティブを跨ぐと `verts` はそのままで形が変わる。よって
+`geometry.sort` は次の形にした。
+
+- **ポイントドメインの置換は各プリミティブの頂点範囲の内側に閉じる**
+  （範囲の外の点はまとめて 1 つの範囲として扱う）。プリミティブが無い点群は
+  全体が 1 範囲なので自由に並ぶ ＝ stagger が要求する経路はそのまま通る。
+  複数パスを持つジオメトリは各パスの頂点だけが並び替わる
+- `Primitive::Mesh` は三角形インデックスが `verts.start` 相対なので、
+  ポイントドメインの並べ替えは明示エラー（`RequiresPathPrimitives`）。
+  プリミティブドメインの並べ替えは `Primitive` 値ごと動くので mesh も安全
+- プリミティブドメインは `P` を持たないので、位置モードの基準は
+  **そのプリミティブの点の重心**。単位 4 の `measure` が bounds を書けば
+  そちらからも参照できる
+- 属性モードのキーは F32 / I32 / Bool / Str はその値、ベクタと色は
+  **第 1 成分**（Houdini の Sort と同じ既定）
+- **降順パラメータは持たない。** `reverse` モードでもう 1 回並べれば済む
+- `random` のハッシュは `scatter.*` と同一の実装を共有する
+  （`geometry::ops::element_hash` に移し、`scatter` が import する）
+- ノードのアイコンは `assets/icons/arrow-down-up.svg`（Lucide v0.462.0）
+
 ### 単位 3: `geometry.resample`
 
 - `length` / `segments` / `keep_corners`。

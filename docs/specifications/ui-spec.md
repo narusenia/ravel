@@ -13,7 +13,7 @@
 | Viewer（オーバーレイ機構・マニピュレータ） | [ui/viewer.md](ui/viewer.md) |
 | Properties Inspector | [ui/properties.md](ui/properties.md) |
 | Media Bin | [ui/media-bin.md](ui/media-bin.md) |
-| 属性スプレッドシート | [ui/attribute-spreadsheet.md](ui/attribute-spreadsheet.md) |
+| アトリビュートスプレッドシート | [ui/attribute-spreadsheet.md](ui/attribute-spreadsheet.md) |
 | 書き出しダイアログ / Render Queue | [ui/render-queue.md](ui/render-queue.md) |
 | テーマ | [ui/theme.md](ui/theme.md) |
 | キーバインド | [ui/keybindings.md](ui/keybindings.md) |
@@ -85,7 +85,7 @@ canvas 上のカーソルは既存の click / drag と同じヒットテスト�
 | Viewer | プレビュー表示とツール操作 | ✅ | 全プリセット |
 | Properties Inspector | 選択対象（レイヤー / ノード / コンプ / メディア）の編集 | ✅ | Edit, Node, Motion |
 | Media Bin | プロジェクトのメディアアセット管理 | ✅ | Edit |
-| 属性スプレッドシート | 選択ノードが評価したジオメトリ属性の行×列検査 | ✅ | （どのプリセットにも無い） |
+| アトリビュートスプレッドシート | 選択ノードが評価したジオメトリのアトリビュートの行×列検査 | ✅ | （どのプリセットにも無い） |
 | Dopesheet | 打点一覧の独立パネル | 🔲 | Node, Motion, Color |
 | Scopes (Waveform / Vectorscope / Histogram / Parade) | 波形・ベクトルスコープ・ヒストグラム・パレード | 🔲 | Color |
 | Text Editor | タイポグラフィ編集 | 🔲 | Motion |
@@ -95,7 +95,7 @@ canvas 上のカーソルは既存の click / drag と同じヒットテスト�
 
 `🔲` のパネルのうち Dopesheet / スコープ 4 種 / Text Editor は
 ワークスペースプリセット（`assets/workspaces/*.toml`）が実際に配置しており、
-開くとプレースホルダが出る。Shader Editor / Lua Console / 属性スプレッドシートは
+開くとプレースホルダが出る。Shader Editor / Lua Console / アトリビュートスプレッドシートは
 どのプリセットにも無いが、**17 種すべてに View メニューの表示トグルがある**ので
 プリセットに依らず出せる。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
@@ -104,7 +104,7 @@ Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 
 
 Render Queue はどのプリセットにも無いが実装済みで、View メニューか
 `File ▸ Export…` の後に開く。仕様は [ui/render-queue.md](ui/render-queue.md)。
-属性スプレッドシートも同じくどのプリセットにも無く、View メニューから開く。
+アトリビュートスプレッドシートも同じくどのプリセットにも無く、View メニューから開く。
 仕様は [ui/attribute-spreadsheet.md](ui/attribute-spreadsheet.md)。
 
 ## サブグラフ

@@ -9,14 +9,22 @@
 //! - [`font`] — *which face, and where are its bytes*. Face indexing,
 //!   selection, and the caches that make a resolved [`FontRef`] shared
 //!   (typography-plan unit 1).
+//! - [`layout`] — *where does each character go*. Shaping, line breaking,
+//!   glyph outlines, and the per-character instance geometry the rasterizer
+//!   stamps (typography-plan unit 2).
 //!
 //! Everything here is pure Rust and touches no platform API, which is what
 //! lets `ravel-cli` render text without linking a font or window library
 //! (`AGENTS.md`, the two shipped binaries).
 
 mod font;
+mod layout;
 
 pub use font::{
     DEFAULT_FAMILY, FONT_STYLES, FONT_WEIGHTS, FontLibrary, FontQuery, FontRef, shared,
     style_is_italic, weight_from_name,
+};
+pub use layout::{
+    Align, DEFAULT_SIZE, LayoutParams, TEXT_ALIGNS, TEXT_ANCHORS, TextError, VerticalAnchor,
+    layout_text,
 };

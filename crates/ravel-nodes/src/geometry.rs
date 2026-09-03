@@ -1951,6 +1951,65 @@ mod tests {
         }
     }
 
+    /// `domain` decides which elements move. A point sort and an instance
+    /// sort of the same geometry therefore disagree, which is what a node
+    /// that ignored the parameter could not show.
+    #[test]
+    fn the_domain_parameter_picks_which_elements_move() {
+        let mut geometry = Geometry::from_points(vec![Vec2(19.0, 0.0), Vec2(-3.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![20, 21]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(41.0, 0.0), Vec2(-17.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::ID, AttributeArray::I32(vec![30, 31]))
+            .unwrap();
+        let geometry = Arc::new(geometry);
+        let ids = |geometry: &Geometry, domain: Domain| {
+            geometry
+                .attribute_set(domain)
+                .get(names::ID)
+                .unwrap()
+                .as_i32(names::ID)
+                .unwrap()
+                .to_vec()
+        };
+
+        let by_point = eval_sort(
+            &[("domain", ParameterValue::String("point".into()))],
+            geometry.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ids(&by_point, Domain::Point), [21, 20]);
+        assert_eq!(
+            ids(&by_point, Domain::Instance),
+            [30, 31],
+            "a point sort leaves the instances where they were"
+        );
+
+        let by_instance = eval_sort(
+            &[("domain", ParameterValue::String("instance".into()))],
+            geometry,
+            None,
+        )
+        .unwrap();
+        assert_eq!(ids(&by_instance, Domain::Instance), [31, 30]);
+        assert_eq!(
+            ids(&by_instance, Domain::Point),
+            [20, 21],
+            "an instance sort leaves the points where they were"
+        );
+    }
+
     /// `random` reads `seed`, so two seeds give two orders and one seed
     /// repeats.
     #[test]

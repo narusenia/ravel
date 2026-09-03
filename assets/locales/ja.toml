@@ -45,7 +45,7 @@ text_editor = "テキストエディタ"
 shader_editor = "シェーダエディタ"
 lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
-attribute_spreadsheet = "属性スプレッドシート"
+attribute_spreadsheet = "アトリビュートスプレッドシート"
 node_param_values = "パラメータ値を表示"
 cycle_preview_resolution = "プレビュー解像度を切り替え"
 fit = "全体表示"
@@ -145,14 +145,10 @@ text_editor = "テキストエディタ"
 shader_editor = "シェーダエディタ"
 lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
-attribute_spreadsheet = "属性スプレッドシート"
+attribute_spreadsheet = "アトリビュートスプレッドシート"
 
 [panel.timeline]
 _self = "タイムライン"
-empty = "トラックなし"
-add_video_track = "ビデオトラックを追加"
-add_audio_track = "オーディオトラックを追加"
-remove_track = "トラックを削除"
 
 [node_graph]
 no_network = "タイムラインまたはアウトライナーでレイヤーを選択するとネットワークが表示されます"
@@ -233,9 +229,9 @@ project = "プロジェクト"
 [settings.general]
 group = "再生と起動"
 stop_returns_to_play_start = "停止したら再生開始位置へ戻す"
-stop_returns_to_play_start_description = "停止したとき、先頭フレームへ巻き戻す代わりに再生を始めたフレームへ戻ります。一度も再生していない場合は再生ヘッドを動かしません。"
+stop_returns_to_play_start_description = "停止したとき、再生を始めたフレームへ戻ります。一度も再生していない場合は再生ヘッドを動かしません。"
 startup_create_composition = "起動時にコンポジションを作る"
-startup_create_composition_description = "新しいドキュメントを空のコンポジション 1 つで開きます。オフにするとコンポジションを持たない状態で始まり、書式は コンポジション ▸ 新規コンポジション… で自分で決めます。"
+startup_create_composition_description = "新しいドキュメントを空のコンポジション 1 つで開きます。オフにするとコンポジションを持たない状態で始まり、コンポジション ▸ 新規コンポジション… で自分で作ります。"
 
 # 環境設定 ▸ 外観。テーマ名はテーマ資産に入っている文字列なので翻訳しない。
 [settings.appearance]
@@ -261,9 +257,9 @@ ui_description = "すぐに反映されます。各言語はその言語自身�
 [settings.cache]
 group = "メモリと置き場"
 vram_limit = "ビデオメモリ上限 (MiB)"
-vram_limit_description = "キャッシュしたフレームとテクスチャプールが合わせて使えるビデオメモリの総量。すぐに反映され、新しい上限を超えた分は次のキャッシュが作られるときに捨てられます。"
+vram_limit_description = "キャッシュしたフレームとテクスチャプールが合わせて使えるビデオメモリの総量。すぐに反映され、上限を超えた分は順に捨てられます。"
 ram_limit = "メモリ上限 (MiB)"
-ram_limit_description = "キャッシュが使えるシステムメモリの総量。すぐに反映され、新しい上限を超えた分は次のキャッシュが作られるときに捨てられます。"
+ram_limit_description = "キャッシュが使えるシステムメモリの総量。すぐに反映され、上限を超えた分は順に捨てられます。"
 sim_reserve = "シミュレーション予約率"
 sim_reserve_description = "各上限のうちシミュレーションの状態のために取っておく割合（0〜1）。長いスクラブでシミュレーションが追い出されないようにします。"
 root = "キャッシュの置き場"
@@ -278,7 +274,7 @@ frame_rate_description = "何も開いていない状態で作成したコンポ
 # キーバインドページの読み取り専用の一覧。
 [settings.keybindings]
 group = "キーの割り当て"
-description = "読み取り専用です。ショートカットを変更するには Ravel の設定フォルダに keybindings.toml を置いてください。次回の起動から反映されます。パネル固有のショートカットはコード側で決まっており、ファイルからは変更できません。"
+description = "読み取り専用です。ショートカットを変更するには Ravel の設定フォルダに keybindings.toml を置いてください。次回の起動から反映されます。パネル内だけで効くショートカットは変更できません。"
 
 # 各コマンドの現在の割り当ての由来。
 [settings.keybindings.origin]
@@ -337,7 +333,7 @@ duplicate = "レイヤーを複製"
 delete = "レイヤーを削除"
 
 [attribute_spreadsheet]
-# 左端の合成列の見出し。ドメイン内の要素番号で、属性ではない
+# 左端の合成列の見出し。ドメイン内の要素番号で、アトリビュートではない
 row = "#"
 
 [attribute_spreadsheet.domain]
@@ -347,13 +343,13 @@ instance = "インスタンス"
 detail = "ディテール"
 
 [attribute_spreadsheet.empty]
-no_selection = "ノードを選択するとジオメトリ属性を表示します"
+no_selection = "ノードを選択するとジオメトリのアトリビュートを表示します"
 no_geometry_output = "このノードはジオメトリを出力しません"
 pending = "評価中…"
 no_elements = "このドメインに要素はありません"
 
 [media_bin]
-empty = "メディアアセットなし — ファイル > インポートまたはドラッグ&ドロップで追加"
+empty = "メディアアセットなし — ファイル ▸ 読み込み… またはドラッグ＆ドロップで追加"
 search = "検索"
 offline = "オフライン"
 
@@ -376,7 +372,7 @@ in_use = "このアセットはプロジェクトのレイヤーで使用中で�
 [viewer]
 no_output = "出力なし — コンポジションにレイヤーを追加"
 eval_error = "評価エラー"
-display_transform_failed = "表示変換が実行されなかったため、このフレームを表示できない。詳細はログを参照"
+display_transform_failed = "表示変換が実行されなかったため、このフレームを表示できません。詳細はログを確認してください"
 fit = "フィット"
 actual_size = "等倍 (100%)"
 resolution = "プレビュー解像度"
@@ -414,10 +410,10 @@ guides_clear = "ガイドを消去"
 geometry_bounds = "選択バウンディングボックス"
 geometry_points = "ジオメトリの点"
 geometry_paths = "ジオメトリのパス"
-geometry_attrs = "ジオメトリ属性"
+geometry_attrs = "ジオメトリのアトリビュート"
 geometry_arrows = "矢印"
 geometry_arrows_off = "矢印: 非表示"
-geometry_indices = "要素 index ラベル"
+geometry_indices = "要素インデックスのラベル"
 geometry_groups = "グループ色分け"
 field = "フィールド"
 field_off = "フィールド: 非表示"
@@ -449,7 +445,7 @@ empty = "ノード未選択"
 layers = "選択レイヤー"
 layer = "レイヤー"
 composition = "コンポジション"
-transform = "トランスフォーム"
+transform = "変換"
 timing = "タイミング"
 compositing = "合成"
 audio = "オーディオ"
@@ -476,7 +472,7 @@ port = "入力ポート公開を切替"
 exposed = "このパラメータをプロジェクトの入力として公開"
 exposed_remove = "このパラメータをプロジェクトの入力から取り下げる"
 expression = "このパラメータの式を切替"
-expression_blocked = "式はこのパラメータの駆動元（キーフレーム・ノード出力・ブレンド）を置き換えてしまう。先に解除すること。"
+expression_blocked = "式を使うと、このパラメータの駆動元（キーフレーム・ノード出力・ブレンド）が置き換わります。先に解除してください。"
 
 [properties.ports]
 new_name = "新しいポート名"
@@ -491,9 +487,9 @@ group = "グループ"
 float = "浮動小数"
 int = "整数"
 bool = "真偽値"
-vec2 = "ベクトル 2"
-vec3 = "ベクトル 3"
-color = "カラー"
+vec2 = "Vec2"
+vec3 = "Vec3"
+color = "色"
 geometry = "ジオメトリ"
 field = "フィールド"
 frame_buffer = "フレームバッファ"
@@ -547,7 +543,7 @@ input = "入力"
 output = "出力"
 input_range = "入力範囲"
 output_range = "出力範囲"
-pinned_input = "両端は入力が固定 — 編集できるのは出力のみ。定義域を広げるにはこの端より外側に点を追加、狭めるにはこの端を削除（3 点以上のとき）"
+pinned_input = "両端は入力が固定 — 編集できるのは出力のみ。定義域はこの端の外に点を追加すると広がり、この端を削除すると狭まります"
 
 [properties.ramp]
 expand = "グラデーションエディタを開く — ダブルクリックでストップを追加・削除、ドラッグで移動、クリックで選択"
@@ -737,7 +733,7 @@ delete = "削除"
 saved = "保存済みレイアウト"
 empty = "保存済みレイアウトはありません。"
 embed = "保存するプロジェクトに現在のレイアウトを埋め込む"
-embed_hint = "既定はオフ。オンにすると保存した .ravprj がこのレイアウトを持ち、開いたときそのセッションだけに適用される。"
+embed_hint = "オンにすると、保存したプロジェクトがこのレイアウトを持ち、開いたときそのセッションにだけ適用されます。"
 
 # ------------------------------------------------------------------
 # `ravel-cli`（ヘッドレス書き出し）。コマンドラインで人が読む文字列のみ。
@@ -816,7 +812,7 @@ description = "固定のスカラー値を出力する。"
 value = "出力する値。"
 
 [node."constant.color"]
-label = "RGBカラー"
+label = "RGB カラー"
 description = "固定の RGBA カラーを出力する。"
 [node."constant.color".params]
 color = "出力するカラー。"
@@ -1001,14 +997,14 @@ description = "2 つのジオメトリを 1 つに結合する。"
 label = "コネクト"
 description = "点を増やさずにパスで結ぶ。入力のプリミティブは置き換わる。"
 [node."geometry.connect".params]
-mode = "結ぶ点と順序。index 順・近傍チェーン・グループの要素のいずれか。"
-group = "グループモードが読む Bool 型のポイント属性名。"
+mode = "結ぶ点と順序。インデックス順・近傍チェーン・グループの要素のいずれか。"
+group = "グループモードが読む Bool 型のポイントアトリビュート名。"
 interpolation = "直線か、隣接点から推定したベジェ接線か。"
 closed = "パスを閉じる。"
 
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
-description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。矩形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"
+description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"
 
 [node."scene.add"]
 label = "シーン追加"
@@ -1079,8 +1075,8 @@ stroke_width = "ストローク幅（ピクセル。0 でストロークなし�
 color = "描画色。要素の Cd/alpha アトリビュートと接続された color 入力が優先される。"
 
 [node."shape.rect"]
-label = "矩形"
-description = "矩形を作成する。"
+label = "長方形"
+description = "長方形を作成する。"
 [node."shape.rect".params]
 center = "中心位置（ピクセル）。"
 width = "幅（ピクセル）。"
@@ -1095,7 +1091,7 @@ radius = "軸ごとの半径（ピクセル）。"
 segments = "輪郭を近似する線分の数。"
 
 [node."shape.polygon"]
-label = "ポリゴン"
+label = "多角形"
 description = "正多角形を作成する。"
 [node."shape.polygon".params]
 center = "中心位置（ピクセル）。"
@@ -1281,7 +1277,7 @@ target = "ターゲットジオメトリが未接続のときに使うターゲ�
 
 [node."field.curl_noise"]
 label = "カールフローフィールド"
-description = "既存の simplex ノイズから決定的で発散ゼロのフロー場を作る。"
+description = "既存のシンプレックスノイズから決定的で発散ゼロのフロー場を作る。"
 [node."field.curl_noise".params]
 seed = "ノイズの乱数シード。"
 frequency = "ノイズの空間周波数。"
@@ -1329,8 +1325,8 @@ in_max = "ランプの終端に対応する入力値。"
 label = "エクスプレッションフィールド"
 description = "テキスト式で定義するフィールド。各サンプル位置で式を評価する。"
 [node."field.expression".params]
-expression = "式のテキスト。`@P` がサンプル位置、`@name` がジオメトリ属性を指す。"
-default = "式が答えられない場合に返す値。コンパイルできないソース、およびサンプル対象のジオメトリが持たない属性。"
+expression = "式のテキスト。`@P` がサンプル位置、`@name` がジオメトリのアトリビュートを指す。"
+default = "式が答えられない場合に返す値。ソースがコンパイルできないとき、およびサンプル対象のジオメトリがそのアトリビュートを持たないときに使う。"
 
 [node."field.add"]
 label = "フィールド加算"
@@ -1352,29 +1348,29 @@ amount = "混合比: 0 で左入力、1 で右入力。"
 
 [node."field.length"]
 label = "フィールド長さ"
-description = "ベクタ場の大きさをスカラー場として返す。ゼロベクトルは 0。"
+description = "ベクトル場の大きさをスカラー場として返す。ゼロベクトルは 0。"
 
 [node."field.angle"]
 label = "フィールド角度"
-description = "ベクタ場の向きをラジアン（atan2(y, x)、-π〜π）で返す。回転アトリビュートに繋げる形。ゼロベクトルは 0。"
+description = "ベクトル場の向きをラジアン（atan2(y, x)、-π〜π）で返す。回転アトリビュートに繋げる形。ゼロベクトルは 0。"
 
 [node."field.component"]
 label = "フィールド成分"
-description = "ベクタ場の 1 成分をスカラー場として読む。"
+description = "ベクトル場の 1 成分をスカラー場として読む。"
 [node."field.component".params]
 component = "読む成分（x / y / z / w）。フィールドが持たない成分は 0。"
 
 [node."field.compose.vec2"]
 label = "フィールド合成 Vec2"
-description = "スカラー場 2 本から 2 成分のベクタ場を作る。"
+description = "スカラー場 2 本から 2 成分のベクトル場を作る。"
 
 [node."field.compose.vec3"]
 label = "フィールド合成 Vec3"
-description = "スカラー場 3 本から 3 成分のベクタ場を作る。"
+description = "スカラー場 3 本から 3 成分のベクトル場を作る。"
 
 [node."field.compose.vec4"]
 label = "フィールド合成 Vec4"
-description = "スカラー場 4 本から 4 成分のベクタ場を作る。"
+description = "スカラー場 4 本から 4 成分のベクトル場を作る。"
 
 [node."field.attribute"]
 label = "アトリビュートフィールド"

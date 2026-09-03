@@ -6028,6 +6028,7 @@ dependencies = [
  "tracing-appender",
  "tracing-log",
  "tracing-subscriber",
+ "ttf-parser",
 ]
 
 [[package]]

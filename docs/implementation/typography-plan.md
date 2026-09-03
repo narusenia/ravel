@@ -152,6 +152,33 @@ GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-p
 - 未解決ファミリでフォールバックが返り `Err` にならないテスト。
 - 同一パラメータで同一 `Arc` が返る（キャッシュ）テスト。
 
+#### 実装メモ
+
+実装済み。**この節が指定した `font-kit` は使っていない。**
+
+- **`font-kit` を採らなかった理由**: 依存ツリーの `font-kit` は
+  `zed-font-kit` で、`Cargo.lock` を見ると到達経路は `gpui` と `gpui_macos`
+  だけである（ワークスペースの `gpui_platform = { features = ["font-kit"] }`
+  はその 2 つのためのもの）。`ravel-core` や `ravel-nodes` から使うには
+  GUI クレートへの依存が要り、**`ravel-cli` に CoreText / DirectWrite /
+  fontconfig がリンクされる** — `AGENTS.md` が `cargo build -p ravel-cli` で
+  守っている性質を壊す。計画時点ではこの到達経路を見ていなかった
+- **代わりに `ttf-parser` で `name` / `OS/2` テーブルを読み、プラットフォームの
+  フォントディレクトリを走査する**。純 Rust で、`ravel-cli` のリンクは
+  変わらない（`otool -L` で確認済み）。新規パッケージの追加はゼロ
+  （`ttf-parser 0.25` は `rustybuzz` / `swash` 経由で既に木にあった）
+- **捨てたもの**: ファミリのエイリアス解決（`sans-serif` のような総称名、
+  ユーザーの `fonts.conf`）。**単位 3（Properties のフォント選択 UI）で
+  総称名が要るなら、そこは GUI 側なので `gpui` のフォント一覧を使える** —
+  core に font-kit を持ち込む理由にはならない
+- **フォールバックは `assets/fonts/Geist-Regular.ttf` を `include_bytes!` で
+  埋め込み、通常のフェイスとしても索引に入れた**（実在ファミリの解決テストが
+  CI のフォント事情に依存しなくなる）。フォントファイルは追加していないので
+  ライセンス表記の位置も変わっていない
+- **プロジェクト埋め込みフォント（`AssetPath`）は入れていない** — 評価時に
+  プロジェクトルートが届かないので絶対パスしか解決できない半端な
+  パラメータになる。UI からファイルを指す経路ができる単位 3 と同時に入れる
+
 ### 単位 2: シェイピングとレイアウト → インスタンスジオメトリ
 
 - rustybuzz でシェイプ、unicode-linebreak で折り返し、

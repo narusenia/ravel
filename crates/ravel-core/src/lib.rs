@@ -22,5 +22,6 @@ pub mod registry;
 pub mod runtime;
 pub mod scene;
 pub mod subgraph_template;
+pub mod text;
 pub mod types;
 pub mod undo;

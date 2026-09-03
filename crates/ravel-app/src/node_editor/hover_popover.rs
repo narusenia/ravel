@@ -187,6 +187,7 @@ pub fn data_type_name(data_type: DataTypeId) -> String {
         DataTypeId::TIME_CODE => "node_graph.popover.port_type.time_code",
         DataTypeId::AUDIO_BUFFER => "node_graph.popover.port_type.audio_buffer",
         DataTypeId::PLAIN_TEXT => "node_graph.popover.port_type.plain_text",
+        DataTypeId::FONT => "node_graph.popover.port_type.font",
         DataTypeId::GEOMETRY => "node_graph.popover.port_type.geometry",
         DataTypeId::FIELD => "node_graph.popover.port_type.field",
         DataTypeId::SCENE => "node_graph.popover.port_type.scene",

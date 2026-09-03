@@ -22,6 +22,7 @@ bincode = { workspace = true }
 ron = { workspace = true }
 bytemuck = { workspace = true }
 earcut = { workspace = true }
+ttf-parser = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

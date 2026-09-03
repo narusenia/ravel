@@ -180,6 +180,7 @@ plain_text = "テキスト"
 geometry = "ジオメトリ"
 field = "フィールド"
 scene = "シーン"
+font = "フォント"
 
 [panel.node_graph_menu]
 add_node = "ノードを追加"
@@ -1428,6 +1429,14 @@ create_if_missing = "対象アトリビュートが無いとき、失敗せず�
 target = "対象"
 blend = "合成"
 scope = "適用範囲"
+
+[node."text.font"]
+label = "フォント"
+description = "フォントファミリ・ウェイト・スタイルを解決してテキストノード用のフォントフェイスを返す。この環境に無いファミリは同梱フェイスへフォールバックし、評価は失敗させず警告のみを残す。"
+[node."text.font".params]
+family = "フォントファミリ名。インストール済みフェイスと同梱フェイスに対し大文字小文字を無視して照合する。"
+weight = "フェイスのウェイト。ファミリが実際に持つ中で最も近いウェイトを使う。"
+style = "直立体か斜体か。"
 
 [export]
 title = "書き出し"

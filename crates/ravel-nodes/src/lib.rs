@@ -33,6 +33,7 @@ pub mod scene;
 pub mod shape;
 pub mod style;
 pub mod subnet;
+pub mod text;
 pub mod transform;
 pub mod vector;
 
@@ -139,6 +140,7 @@ pub fn processor_for_node(
         ))),
         "attribute.path_sample" => Some(Arc::new(attribute::PathSampleProcessor::from_node(node))),
         "attribute.curveu" => Some(Arc::new(attribute::CurveUProcessor::from_node(node))),
+        "text.font" => Some(Arc::new(text::FontProcessor::from_node(node))),
         "style.fill" => Some(Arc::new(style::StyleFillProcessor::from_node(node))),
         "style.stroke" => Some(Arc::new(style::StyleStrokeProcessor::from_node(node))),
         "style.dash" => Some(Arc::new(style::StyleDashProcessor::from_node(node))),

@@ -865,7 +865,9 @@ impl ProjectState {
     /// The order is the whole point and it is not negotiable:
     ///
     /// 1. raise the fence, so the old worker's in-flight updates are stale
-    ///    from here on and cannot overwrite the new epoch's frames;
+    ///    from here on and cannot overwrite the new epoch's frames, and blank
+    ///    the viewer so nothing keeps a lease on the outgoing device's texture
+    ///    pool — or paints one (`GPULOSS-5`);
     /// 2. cancel and drop the export queue, a second `GpuEvalHooks` on the
     ///    device that is going away;
     /// 3. close the old worker's channels — that *is* the stop order, there is
@@ -908,6 +910,28 @@ impl ProjectState {
             .as_ref()
             .map_or(self.published_generation, EvalService::latest_generation);
         self.published_generation = generation;
+        // Give up the frame on screen, because holding it means holding a
+        // texture of the outgoing device (`GPULOSS-5`). The lease travels
+        // through the durable `ViewerFrame` global into every Viewer panel, so
+        // this one write is what releases the Global's clone and, through the
+        // panel's own observer, the panel's — before the retiring worker's
+        // texture pool is dropped, which is the order the pool teardown
+        // depends on.
+        //
+        // It is not only about accounting. The retiring epoch's `GpuFrame`
+        // stays paintable otherwise: the panel repaints it every frame, and on
+        // the adopted-host platforms the paint guard compares the *renderer's*
+        // device against `AdoptedHostDevice` — which the coordinator has
+        // already moved to the replacement — so it would answer "unchanged"
+        // and sample a texture from the device being retired.
+        //
+        // Fenced by the generation above, so the retiring worker's in-flight
+        // results cannot undo it, and replaced by the new epoch's first frame.
+        let blank = self.viewer_blank(cx);
+        cx.set_global(blank);
+        // The overlay snapshot describes the frame that just went away; the
+        // blank paths do the same for the same reason.
+        cx.set_global(EvalResults::default());
         // The export queue holds its own hooks — and its own texture pool — on
         // the outgoing device, so it has to be gone before the replacement is
         // built, for the same accounting reason. Cancel the unfinished jobs

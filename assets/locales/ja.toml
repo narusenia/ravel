@@ -1002,6 +1002,16 @@ group = "グループモードが読む Bool 型のポイントアトリビュ�
 interpolation = "直線か、隣接点から推定したベジェ接線か。"
 closed = "パスを閉じる。"
 
+[node."geometry.sort"]
+label = "ソート"
+description = "1 つのドメインの要素を並べ替え、index を振り直す。id やその他のアトリビュートは要素に付いたまま移動する。"
+[node."geometry.sort".params]
+domain = "並べ替える要素。ポイントの並べ替えは各プリミティブの頂点範囲の内側に留まる。"
+mode = "並べ替えの基準。x・y・中心からの距離・path 入力に沿った弧長・シード・アトリビュート値・格納順の反転のいずれか。"
+center = "radial モードが距離を測る中心。"
+seed = "random モードのシード。同じシードなら同じ順序になる。"
+attribute = "attribute モードが読むアトリビュート名。ベクトルや色は第 1 成分で並べる。"
+
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
 description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"

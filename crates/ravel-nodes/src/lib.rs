@@ -239,6 +239,7 @@ pub fn processor_for_node(
         "geometry.connect" => Some(Arc::new(geometry::GeometryConnectProcessor::from_node(
             node,
         ))),
+        "geometry.sort" => Some(Arc::new(geometry::GeometrySortProcessor::from_node(node))),
         "geometry.from_image" => Some(Arc::new(geometry::GeometryFromImageProcessor::from_node(
             node,
         ))),

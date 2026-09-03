@@ -3,6 +3,8 @@
 
 //! Pure, copy-on-write operations over geometry attributes and paths.
 
+use std::ops::Range;
+
 use thiserror::Error;
 
 use super::{
@@ -55,6 +57,13 @@ pub enum GeometryOpError {
     },
     #[error("geometry has no non-degenerate path to sample")]
     InvalidPath,
+    /// Two primitives claim the same point, so a reordering of the point
+    /// domain would permute it twice.
+    #[error("{operation} cannot reorder points: primitive vertex runs overlap at point {point}")]
+    OverlappingVertexRuns {
+        operation: &'static str,
+        point: usize,
+    },
 }
 
 pub fn attribute_set(
@@ -241,17 +250,18 @@ pub fn attribute_transfer(
     Ok(result)
 }
 
-/// Samples the first path primitive at an absolute, clamped arc length.
+/// The vertices of the first path primitive and whether it is closed.
 ///
-/// Arc length along a 3D polyline has no agreed definition yet (the frame it
-/// would return is ambiguous), so a geometry with `Vec3` positions is an
-/// explicit error rather than a silent projection onto xy. A mesh has no arc
-/// length at all, so it is rejected the same way instead of being skipped —
-/// silently sampling the first path of a mixed geometry would answer a
-/// question the caller did not ask.
-pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, GeometryOpError> {
-    let points = positions(geometry, Domain::Point)?.require_planar("attribute.path_sample")?;
-    geometry.require_paths("attribute.path_sample")?;
+/// Shared by every operation defined on "the" path of a geometry, so they all
+/// pick the same primitive and reject the same inputs: 3D positions have no
+/// agreed polyline arc length, a mesh has none at all, and a run of fewer
+/// than two vertices spans no segment.
+fn first_path<'a>(
+    geometry: &'a Geometry,
+    operation: &'static str,
+) -> Result<(&'a [Vec2], bool), GeometryOpError> {
+    let points = positions(geometry, Domain::Point)?.require_planar(operation)?;
+    geometry.require_paths(operation)?;
     let (range, closed) = geometry
         .primitives()
         .first()
@@ -266,6 +276,19 @@ pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, Geo
     if path.len() < 2 {
         return Err(GeometryOpError::InvalidPath);
     }
+    Ok((path, closed))
+}
+
+/// Samples the first path primitive at an absolute, clamped arc length.
+///
+/// Arc length along a 3D polyline has no agreed definition yet (the frame it
+/// would return is ambiguous), so a geometry with `Vec3` positions is an
+/// explicit error rather than a silent projection onto xy. A mesh has no arc
+/// length at all, so it is rejected the same way instead of being skipped —
+/// silently sampling the first path of a mixed geometry would answer a
+/// question the caller did not ask.
+pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, GeometryOpError> {
+    let (path, closed) = first_path(geometry, "attribute.path_sample")?;
     let mut segments = Vec::with_capacity(path.len());
     for index in 1..path.len() {
         push_segment(&mut segments, path[index - 1], path[index]);
@@ -623,6 +646,385 @@ fn path_parameters(path: &[Vec2], closed: bool, mode: CurveUMode) -> Vec<f32> {
         return vec![0.0; path.len()];
     }
     at_vertex.iter().map(|length| length / total).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Sort
+// ---------------------------------------------------------------------------
+
+/// What [`sort`] orders the elements of a domain by.
+///
+/// Every mode is **ascending**; descending is `sort` again with
+/// [`SortMode::Reverse`], which composes without a second parameter on every
+/// mode.
+#[derive(Clone, Copy, Debug)]
+pub enum SortMode<'a> {
+    /// Ascending x of the element's position.
+    X,
+    /// Ascending y of the element's position.
+    Y,
+    /// Ascending distance from `center`, measured in three components (a 2D
+    /// geometry reads `z = 0`, so `center.z` simply offsets every element by
+    /// the same amount).
+    Radial { center: Vec3 },
+    /// Ascending arc length of the closest projection onto the first path
+    /// primitive of `path` — the ordering "along this curve".
+    AlongPath { path: &'a Geometry },
+    /// A shuffle keyed by `seed`, decided by the same hash `scatter.*` places
+    /// its points with, so one seed means one arrangement across both.
+    Random { seed: u32 },
+    /// Ascending value of the named attribute column of the sorted domain.
+    Attribute(&'a str),
+    /// Storage order, reversed.
+    Reverse,
+}
+
+/// The comparable key of every element, in storage order.
+enum SortKeys {
+    /// `f64` rather than `f32` so a [`SortMode::Random`] hash is exact: a
+    /// `u32` past 2^24 does not survive a round trip through `f32`, and two
+    /// elements whose hashes collided there would be ordered by their index
+    /// instead of by the seed.
+    Num(Vec<f64>),
+    Text(Vec<String>),
+}
+
+impl SortKeys {
+    fn len(&self) -> usize {
+        match self {
+            Self::Num(keys) => keys.len(),
+            Self::Text(keys) => keys.len(),
+        }
+    }
+
+    /// Element indices in ascending key order. The sort is stable, so equal
+    /// keys keep their storage order and the result is deterministic on every
+    /// input — which is what makes `sort(random)` reproducible.
+    fn order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.len()).collect();
+        match self {
+            Self::Num(keys) => order.sort_by(|a, b| keys[*a].total_cmp(&keys[*b])),
+            Self::Text(keys) => order.sort_by(|a, b| keys[*a].cmp(&keys[*b])),
+        }
+        order
+    }
+}
+
+/// The deterministic per-element hash the procedural nodes share.
+///
+/// `scatter.*` places its points with it and [`SortMode::Random`] shuffles
+/// with it, so the two agree on what a seed means. Not a general-purpose
+/// hash: it is a fixed part of those nodes' output, and changing it changes
+/// every scattered layout that has ever been saved.
+pub fn element_hash(seed: u32, index: u32) -> u32 {
+    let mut hash = seed.wrapping_mul(0x9E37_79B9).wrapping_add(index);
+    hash = (hash ^ (hash >> 16)).wrapping_mul(0x045D_9F3B);
+    hash = (hash ^ (hash >> 16)).wrapping_mul(0x045D_9F3B);
+    hash ^ (hash >> 16)
+}
+
+/// Reorders the elements of one domain and renumbers `index`.
+///
+/// Every attribute column of `domain` is selected through the **same**
+/// permutation, so a value stays attached to the element it described —
+/// `id` included, which is what makes it the identity that survives a sort.
+/// `index` is the storage slot rather than a value, so it is renumbered to
+/// `0..n` afterwards (and only when the domain already carries one: a sort
+/// does not invent columns). The other domains, the instance sources, and the
+/// detail attributes pass through untouched — an instance keeps the source it
+/// stamped because `source_index` travels with it like any other column.
+///
+/// **The point domain is permuted inside each primitive's vertex run.** A
+/// [`Primitive::Path`] spans a *contiguous* run of points
+/// (`geometry::container`), so a permutation that moved a point out of its run
+/// would silently rebuild the shape; confining it keeps every `verts` range
+/// valid and byte-identical. A point cloud with no primitives is therefore one
+/// run and sorts freely — which is the case the stagger orderings care about —
+/// and a geometry of paths sorts the vertices within each path. A mesh is an
+/// explicit error instead: its triangle indices are relative to `verts.start`,
+/// so moving its points would reface it.
+///
+/// Fewer than two elements is a no-op that returns the input unchanged, which
+/// is also the whole of the detail domain: it holds exactly one element and
+/// therefore has no order to change.
+pub fn sort(
+    geometry: &Geometry,
+    domain: Domain,
+    mode: SortMode<'_>,
+) -> Result<Geometry, GeometryOpError> {
+    let count = domain_count(geometry, domain);
+    if count < 2 {
+        return Ok(geometry.clone());
+    }
+    if domain == Domain::Point {
+        geometry.require_paths("geometry.sort")?;
+    }
+
+    let order = match mode {
+        SortMode::Reverse => (0..count).rev().collect(),
+        mode => {
+            let keys = sort_keys(geometry, domain, mode)?;
+            if keys.len() != count {
+                return Err(GeometryError::LengthMismatch {
+                    name: "geometry.sort keys".into(),
+                    expected: count,
+                    actual: keys.len(),
+                }
+                .into());
+            }
+            keys.order()
+        }
+    };
+    let order = match domain {
+        Domain::Point => within_runs(&order, &vertex_runs(geometry, count)?),
+        _ => order,
+    };
+
+    let mut result = geometry.clone();
+    for (name, column) in geometry.attribute_set(domain).iter() {
+        result
+            .attribute_set_mut(domain)
+            .insert(name.as_str(), select_values(column, order.iter().copied()))?;
+    }
+    if domain == Domain::Primitive {
+        let permuted = order
+            .iter()
+            .map(|index| geometry.primitives()[*index].clone())
+            .collect();
+        result.set_primitives(permuted);
+    }
+    let renumber = result
+        .attribute_set(domain)
+        .get(names::INDEX)
+        .is_some_and(|column| matches!(column.as_ref(), AttributeArray::I32(_)));
+    if renumber {
+        result.attribute_set_mut(domain).insert(
+            names::INDEX,
+            AttributeArray::I32((0..count as i32).collect()),
+        )?;
+    }
+    result.validate()?;
+    Ok(result)
+}
+
+/// The key of every element of `domain` under `mode`.
+fn sort_keys(
+    geometry: &Geometry,
+    domain: Domain,
+    mode: SortMode<'_>,
+) -> Result<SortKeys, GeometryOpError> {
+    let numeric = |values: Vec<f64>| Ok(SortKeys::Num(values));
+    match mode {
+        SortMode::X => numeric(
+            element_positions(geometry, domain)?
+                .iter()
+                .map(|position| position.0 as f64)
+                .collect(),
+        ),
+        SortMode::Y => numeric(
+            element_positions(geometry, domain)?
+                .iter()
+                .map(|position| position.1 as f64)
+                .collect(),
+        ),
+        SortMode::Radial { center } => numeric(
+            element_positions(geometry, domain)?
+                .iter()
+                .map(|position| distance_squared(*position, center) as f64)
+                .collect(),
+        ),
+        SortMode::AlongPath { path } => {
+            let (polyline, closed) = first_path(path, "geometry.sort")?;
+            numeric(path_projections(
+                &element_positions(geometry, domain)?,
+                polyline,
+                closed,
+            ))
+        }
+        SortMode::Random { seed } => numeric(
+            (0..domain_count(geometry, domain))
+                .map(|index| f64::from(element_hash(seed, index as u32)))
+                .collect(),
+        ),
+        SortMode::Attribute(name) => attribute_keys(geometry, domain, name),
+        // The caller reverses storage order directly; there is no key.
+        SortMode::Reverse => Ok(SortKeys::Num(Vec::new())),
+    }
+}
+
+/// One position per element of `domain`.
+///
+/// Points and instances have a `P` column. The primitive domain has none —
+/// nothing writes one — so a primitive's position is the mean of its own
+/// points, which is what "sort the shapes left to right" means. A primitive
+/// with no vertices has no centroid and reads as the origin rather than
+/// failing the whole sort.
+fn element_positions(geometry: &Geometry, domain: Domain) -> Result<Vec<Vec3>, GeometryOpError> {
+    if domain != Domain::Primitive {
+        return Ok(positions(geometry, domain)?.iter3().collect());
+    }
+    let points = positions(geometry, Domain::Point)?;
+    Ok(geometry
+        .primitives()
+        .iter()
+        .map(|primitive| {
+            let mut sum = Vec3(0.0, 0.0, 0.0);
+            let mut vertices = 0.0f32;
+            for vertex in primitive.verts().clone() {
+                if let Some(point) = points.get3(vertex) {
+                    sum = Vec3(sum.0 + point.0, sum.1 + point.1, sum.2 + point.2);
+                    vertices += 1.0;
+                }
+            }
+            if vertices == 0.0 {
+                Vec3(0.0, 0.0, 0.0)
+            } else {
+                Vec3(sum.0 / vertices, sum.1 / vertices, sum.2 / vertices)
+            }
+        })
+        .collect())
+}
+
+/// Keys read from a named attribute column of `domain`.
+///
+/// A vector or colour has no order of its own, so its **first** component is
+/// the key — the component Houdini's Sort reads by default, and the one that
+/// makes `Cd` sort by red and a `Vec2` sort by x.
+fn attribute_keys(
+    geometry: &Geometry,
+    domain: Domain,
+    name: &str,
+) -> Result<SortKeys, GeometryOpError> {
+    let column = geometry
+        .attribute_set(domain)
+        .get(name)
+        .ok_or_else(|| GeometryError::AttributeNotFound { name: name.into() })?;
+    macro_rules! first_component {
+        ($values:expr, $component:tt) => {
+            SortKeys::Num(
+                $values
+                    .iter()
+                    .map(|value| value.$component as f64)
+                    .collect(),
+            )
+        };
+    }
+    Ok(match column.as_ref() {
+        AttributeArray::F32(values) => SortKeys::Num(values.iter().map(|v| *v as f64).collect()),
+        AttributeArray::I32(values) => {
+            SortKeys::Num(values.iter().map(|v| f64::from(*v)).collect())
+        }
+        AttributeArray::Bool(values) => {
+            SortKeys::Num(values.iter().map(|v| f64::from(u8::from(*v))).collect())
+        }
+        AttributeArray::Str(values) => SortKeys::Text(values.clone()),
+        AttributeArray::Vec2(values) => first_component!(values, 0),
+        AttributeArray::Vec3(values) => first_component!(values, 0),
+        AttributeArray::Vec4(values) => first_component!(values, 0),
+        AttributeArray::Color(values) => first_component!(values, r),
+    })
+}
+
+/// Arc length along `polyline` of the closest projection of each element.
+///
+/// Planar by construction: the polyline is 2D (see [`first_path`]) and a 3D
+/// element projects onto xy, because "how far along the curve" is a question
+/// about the curve's own parameter and depth cannot move it.
+fn path_projections(elements: &[Vec3], polyline: &[Vec2], closed: bool) -> Vec<f64> {
+    let mut edges: Vec<(Vec2, Vec2)> = polyline.windows(2).map(|pair| (pair[0], pair[1])).collect();
+    if closed && let (Some(last), Some(first)) = (polyline.last(), polyline.first()) {
+        edges.push((*last, *first));
+    }
+    elements
+        .iter()
+        .map(|element| {
+            let target = Vec2(element.0, element.1);
+            let (mut closest, mut at) = (f32::MAX, 0.0f32);
+            let mut travelled = 0.0f32;
+            for (start, end) in &edges {
+                let edge = Vec2(end.0 - start.0, end.1 - start.1);
+                let length_squared = edge.0 * edge.0 + edge.1 * edge.1;
+                // A duplicated point makes a zero-length edge: it projects
+                // onto its own start and advances nothing.
+                let t = if length_squared <= f32::EPSILON {
+                    0.0
+                } else {
+                    (((target.0 - start.0) * edge.0 + (target.1 - start.1) * edge.1)
+                        / length_squared)
+                        .clamp(0.0, 1.0)
+                };
+                let projection = Vec2(start.0 + edge.0 * t, start.1 + edge.1 * t);
+                let distance = planar_distance_squared(projection, target);
+                let length = length_squared.sqrt();
+                if distance < closest {
+                    closest = distance;
+                    at = travelled + length * t;
+                }
+                travelled += length;
+            }
+            f64::from(at)
+        })
+        .collect()
+}
+
+/// The point index space split into the runs a permutation may not cross:
+/// one per primitive, plus the gaps between and around them.
+///
+/// Overlapping runs would let a point be permuted twice, which is silent data
+/// corruption rather than a wrong picture, so they are an error. Nothing
+/// produces them today — every generator writes sequential runs and
+/// `geometry.merge` shifts them — and this is what keeps that true.
+fn vertex_runs(geometry: &Geometry, count: usize) -> Result<Vec<Range<usize>>, GeometryOpError> {
+    let mut runs: Vec<Range<usize>> = geometry
+        .primitives()
+        .iter()
+        .map(|primitive| primitive.verts().clone())
+        .filter(|run| !run.is_empty())
+        .collect();
+    if runs.is_empty() {
+        // No primitive claims a point, so the whole domain is one run and a
+        // point cloud sorts freely.
+        runs.push(0..count);
+    }
+    runs.sort_by_key(|run| run.start);
+    let mut blocks = Vec::with_capacity(runs.len() * 2 + 1);
+    let mut cursor = 0;
+    for run in runs {
+        if run.start < cursor {
+            return Err(GeometryOpError::OverlappingVertexRuns {
+                operation: "geometry.sort",
+                point: run.start,
+            });
+        }
+        if cursor < run.start {
+            blocks.push(cursor..run.start);
+        }
+        cursor = run.end;
+        blocks.push(run);
+    }
+    if cursor < count {
+        blocks.push(cursor..count);
+    }
+    Ok(blocks)
+}
+
+/// `order` restricted to each run: the run's own elements, in the order they
+/// appear globally, placed back into the run's own slots.
+///
+/// ponytail: O(runs × count), one filtering pass per run. Bucketing the order
+/// by run in a single pass is the upgrade if a composition ever holds enough
+/// primitives for this to show.
+fn within_runs(order: &[usize], runs: &[Range<usize>]) -> Vec<usize> {
+    let mut placed: Vec<usize> = (0..order.len()).collect();
+    for run in runs {
+        let mut sorted = order.iter().copied().filter(|index| run.contains(index));
+        for slot in run.clone() {
+            placed[slot] = sorted
+                .next()
+                .expect("a run has exactly as many elements as slots");
+        }
+    }
+    placed
 }
 
 /// Bounding-box center of point positions, falling back to instance positions
@@ -1332,6 +1734,7 @@ fn normalize(value: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn bounds_center_prefers_points_then_falls_back_to_instances() {
@@ -2391,6 +2794,610 @@ mod tests {
             SparseWeights::of(small, &targets, None).stride,
             small.len(),
             "a small source still blends every point"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sort
+    // -----------------------------------------------------------------------
+
+    /// Four points whose x, y, and radial orders are all different, tagged
+    /// with an `id` the permutation can be read off.
+    fn sortable_points() -> Geometry {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(17.0, 3.0),
+            Vec2(-5.0, 11.0),
+            Vec2(8.0, -7.0),
+            Vec2(2.0, 29.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![90, 91, 92, 93]))
+            .unwrap();
+        geometry
+    }
+
+    /// The `id` column of a domain, which reads back as the permutation the
+    /// sort applied.
+    fn ids(geometry: &Geometry, domain: Domain) -> Vec<i32> {
+        geometry
+            .attribute_set(domain)
+            .get(names::ID)
+            .unwrap()
+            .as_i32(names::ID)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// One open path from `(0, 0)` to `(30, 40)`: 50 units long, and diagonal
+    /// so that the arc length of a projection is neither an x nor a y order.
+    fn diagonal_path() -> Geometry {
+        let mut path = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(30.0, 40.0)]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        path
+    }
+
+    #[test]
+    fn each_positional_mode_orders_the_points_its_own_way() {
+        let geometry = sortable_points();
+        for (mode, expected) in [
+            (SortMode::X, [91, 93, 92, 90]),
+            (SortMode::Y, [92, 90, 91, 93]),
+            (
+                SortMode::Radial {
+                    center: Vec3(8.0, 3.0, 0.0),
+                },
+                [90, 92, 91, 93],
+            ),
+            (SortMode::Reverse, [93, 92, 91, 90]),
+        ] {
+            let result = sort(&geometry, Domain::Point, mode).unwrap();
+            assert_eq!(ids(&result, Domain::Point), expected, "{mode:?}");
+            // The storage slot is renumbered; `id` is the identity that
+            // survives, and the input is untouched.
+            assert_eq!(
+                result
+                    .points()
+                    .get(names::INDEX)
+                    .unwrap()
+                    .as_i32(names::INDEX)
+                    .unwrap(),
+                &[0, 1, 2, 3],
+                "{mode:?}"
+            );
+            assert_eq!(ids(&geometry, Domain::Point), [90, 91, 92, 93], "{mode:?}");
+        }
+    }
+
+    /// `along_path` orders by arc length of the closest projection, which on
+    /// a diagonal is neither the x nor the y order of these three points.
+    #[test]
+    fn along_path_orders_by_the_projected_arc_length() {
+        let mut geometry = Geometry::from_points(vec![
+            // Projects at 18 of 50 units.
+            Vec2(30.0, 0.0),
+            // Projects at 32.
+            Vec2(0.0, 40.0),
+            // Projects at 0.5, and is the closest to the path of the three.
+            Vec2(3.0, 4.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![70, 71, 72]))
+            .unwrap();
+        let path = diagonal_path();
+
+        let result = sort(
+            &geometry,
+            Domain::Point,
+            SortMode::AlongPath { path: &path },
+        )
+        .unwrap();
+
+        assert_eq!(ids(&result, Domain::Point), [72, 70, 71]);
+        // Not the x order (71, 72, 70) and not the y order (70, 72, 71).
+        assert_ne!(
+            ids(
+                &sort(&geometry, Domain::Point, SortMode::X).unwrap(),
+                Domain::Point
+            ),
+            ids(&result, Domain::Point)
+        );
+        assert_ne!(
+            ids(
+                &sort(&geometry, Domain::Point, SortMode::Y).unwrap(),
+                Domain::Point
+            ),
+            ids(&result, Domain::Point)
+        );
+    }
+
+    /// The shuffle is the shared `element_hash` order, so one seed means one
+    /// arrangement and a second run reproduces it exactly.
+    #[test]
+    fn random_is_the_seeded_hash_order_and_reproduces() {
+        let mut geometry =
+            Geometry::from_points((0..8).map(|i| Vec2(i as f32 * 13.0 - 40.0, 5.5)).collect());
+        geometry
+            .points_mut()
+            .insert(
+                names::ID,
+                AttributeArray::I32(vec![60, 61, 62, 63, 64, 65, 66, 67]),
+            )
+            .unwrap();
+
+        let seeded = |seed| sort(&geometry, Domain::Point, SortMode::Random { seed }).unwrap();
+        let mut expected: Vec<usize> = (0..8).collect();
+        expected.sort_by_key(|index| element_hash(7, *index as u32));
+
+        assert_eq!(
+            ids(&seeded(7), Domain::Point),
+            expected.iter().map(|i| 60 + *i as i32).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            ids(&seeded(7), Domain::Point),
+            ids(&seeded(7), Domain::Point)
+        );
+        assert_ne!(
+            ids(&seeded(7), Domain::Point),
+            ids(&seeded(8), Domain::Point)
+        );
+        assert_ne!(
+            ids(&seeded(7), Domain::Point),
+            [60, 61, 62, 63, 64, 65, 66, 67],
+            "a shuffle that leaves storage order alone is not a shuffle"
+        );
+    }
+
+    /// Every column type answers a key: the scalars by value, the strings
+    /// lexicographically, and a vector or colour by its first component.
+    #[test]
+    fn sorting_by_an_attribute_reads_every_column_type() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(1.5, 2.5), Vec2(3.5, 4.5), Vec2(5.5, 6.5)]);
+        let color = |r: f32| Color {
+            r,
+            g: 0.42,
+            b: 0.42,
+            a: 1.0,
+        };
+        for (name, column) in [
+            ("f32", AttributeArray::F32(vec![2.5, -1.25, 7.75])),
+            ("i32", AttributeArray::I32(vec![30, -10, 70])),
+            ("bool", AttributeArray::Bool(vec![true, false, true])),
+            (
+                "str",
+                AttributeArray::Str(vec!["mango".into(), "apple".into(), "zebra".into()]),
+            ),
+            (
+                "vec2",
+                AttributeArray::Vec2(vec![Vec2(2.5, 9.0), Vec2(-1.25, 9.0), Vec2(7.75, 9.0)]),
+            ),
+            (
+                "vec3",
+                AttributeArray::Vec3(vec![
+                    Vec3(2.5, 9.0, 9.0),
+                    Vec3(-1.25, 9.0, 9.0),
+                    Vec3(7.75, 9.0, 9.0),
+                ]),
+            ),
+            (
+                "vec4",
+                AttributeArray::Vec4(vec![
+                    Vec4(2.5, 9.0, 9.0, 9.0),
+                    Vec4(-1.25, 9.0, 9.0, 9.0),
+                    Vec4(7.75, 9.0, 9.0, 9.0),
+                ]),
+            ),
+            (
+                "color",
+                AttributeArray::Color(vec![color(0.6), color(0.1), color(0.9)]),
+            ),
+        ] {
+            geometry.points_mut().insert(name, column).unwrap();
+        }
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![50, 51, 52]))
+            .unwrap();
+
+        for name in ["f32", "i32", "bool", "str", "vec2", "vec3", "vec4", "color"] {
+            let result = sort(&geometry, Domain::Point, SortMode::Attribute(name)).unwrap();
+            assert_eq!(
+                ids(&result, Domain::Point),
+                [51, 50, 52],
+                "sorted by {name}"
+            );
+        }
+
+        assert!(matches!(
+            sort(&geometry, Domain::Point, SortMode::Attribute("absent")),
+            Err(GeometryOpError::Geometry(
+                GeometryError::AttributeNotFound { .. }
+            ))
+        ));
+    }
+
+    /// A column left behind by the permutation would silently detach its
+    /// values from the elements they describe, so every type in every element
+    /// domain is checked against the one permutation the key implies.
+    #[test]
+    fn every_column_of_every_domain_moves_by_the_same_permutation() {
+        /// Ascending `rank` puts the elements in this order.
+        const EXPECTED: [usize; 4] = [1, 3, 0, 2];
+
+        for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+            let mut geometry = Geometry::from_points(vec![
+                Vec2(1.5, 2.5),
+                Vec2(3.5, 4.5),
+                Vec2(5.5, 6.5),
+                Vec2(7.5, 8.5),
+            ]);
+            // The primitive domain needs four primitives to sort. The point
+            // domain must stay free of them: a primitive pins its own points
+            // into a run, which is what
+            // `a_point_sort_stays_inside_each_primitives_vertex_run` covers.
+            if domain == Domain::Primitive {
+                for vertex in 0..4 {
+                    geometry.push_primitive(Primitive::Path {
+                        verts: vertex..vertex + 1,
+                        closed: false,
+                    });
+                }
+            }
+            let color = |r: f32, g: f32| Color {
+                r,
+                g,
+                b: 0.375,
+                a: 0.875,
+            };
+            for (name, column) in [
+                ("rank", AttributeArray::I32(vec![30, 10, 40, 20])),
+                (
+                    names::P,
+                    AttributeArray::Vec2(vec![
+                        Vec2(11.5, 12.5),
+                        Vec2(13.5, 14.5),
+                        Vec2(15.5, 16.5),
+                        Vec2(17.5, 18.5),
+                    ]),
+                ),
+                ("f32", AttributeArray::F32(vec![7.5, 8.25, 9.125, 10.0625])),
+                (
+                    "vec3",
+                    AttributeArray::Vec3(vec![
+                        Vec3(1.25, 2.25, 3.25),
+                        Vec3(4.25, 5.25, 6.25),
+                        Vec3(7.25, 8.25, 9.25),
+                        Vec3(10.25, 11.25, 12.25),
+                    ]),
+                ),
+                (
+                    "vec4",
+                    AttributeArray::Vec4(vec![
+                        Vec4(0.125, 1.125, 2.125, 3.125),
+                        Vec4(4.125, 5.125, 6.125, 7.125),
+                        Vec4(8.125, 9.125, 10.125, 11.125),
+                        Vec4(12.125, 13.125, 14.125, 15.125),
+                    ]),
+                ),
+                (
+                    "color",
+                    AttributeArray::Color(vec![
+                        color(0.125, 0.25),
+                        color(0.375, 0.5),
+                        color(0.625, 0.75),
+                        color(0.875, 0.9375),
+                    ]),
+                ),
+                (names::ID, AttributeArray::I32(vec![41, 42, 43, 44])),
+                ("bool", AttributeArray::Bool(vec![true, false, true, false])),
+                (
+                    "str",
+                    AttributeArray::Str(vec![
+                        "alpha".into(),
+                        "bravo".into(),
+                        "charlie".into(),
+                        "delta".into(),
+                    ]),
+                ),
+            ] {
+                geometry
+                    .attribute_set_mut(domain)
+                    .insert(name, column)
+                    .unwrap();
+            }
+
+            let result = sort(&geometry, domain, SortMode::Attribute("rank")).unwrap();
+
+            macro_rules! assert_permuted {
+                ($accessor:ident, $name:expr) => {{
+                    let before = geometry
+                        .attribute_set(domain)
+                        .get($name)
+                        .unwrap()
+                        .$accessor($name)
+                        .unwrap()
+                        .to_vec();
+                    let after = result
+                        .attribute_set(domain)
+                        .get($name)
+                        .unwrap()
+                        .$accessor($name)
+                        .unwrap();
+                    let expected: Vec<_> =
+                        EXPECTED.iter().map(|slot| before[*slot].clone()).collect();
+                    assert_eq!(
+                        after,
+                        expected.as_slice(),
+                        "{:?} column {} did not follow the permutation",
+                        domain,
+                        $name
+                    );
+                }};
+            }
+            assert_permuted!(as_i32, "rank");
+            assert_permuted!(as_vec2, names::P);
+            assert_permuted!(as_f32, "f32");
+            assert_permuted!(as_vec3, "vec3");
+            assert_permuted!(as_vec4, "vec4");
+            assert_permuted!(as_color, "color");
+            assert_permuted!(as_i32, names::ID);
+            assert_permuted!(as_bool, "bool");
+            assert_permuted!(as_str, "str");
+        }
+    }
+
+    /// A path spans a contiguous run, so the permutation is confined to it:
+    /// the two paths sort their own vertices and neither borrows the other's.
+    #[test]
+    fn a_point_sort_stays_inside_each_primitives_vertex_run() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(10.0, 1.0),
+            Vec2(2.0, 1.0),
+            Vec2(6.0, 1.0),
+            Vec2(8.0, 2.0),
+            Vec2(4.0, 2.0),
+            Vec2(12.0, 2.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![80, 81, 82, 83, 84, 85]))
+            .unwrap();
+        for verts in [0..3, 3..6] {
+            geometry.push_primitive(Primitive::Path {
+                verts,
+                closed: false,
+            });
+        }
+
+        let result = sort(&geometry, Domain::Point, SortMode::X).unwrap();
+
+        assert_eq!(ids(&result, Domain::Point), [81, 82, 80, 84, 83, 85]);
+        assert_eq!(
+            result
+                .positions(Domain::Point)
+                .unwrap()
+                .unwrap()
+                .planar()
+                .unwrap()
+                .iter()
+                .map(|p| p.0)
+                .collect::<Vec<_>>(),
+            // Sorted within each run — a global sort would read
+            // 2, 4, 6, 8, 10, 12 and would have moved points between paths.
+            [2.0, 6.0, 10.0, 4.0, 8.0, 12.0]
+        );
+        assert_eq!(result.primitives(), geometry.primitives());
+        result.validate().unwrap();
+    }
+
+    /// Reordering the primitive domain moves the primitives themselves, so
+    /// the vertex runs stay attached to the primitive that owns them.
+    #[test]
+    fn a_primitive_sort_moves_the_primitives_with_their_attributes() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(20.0, 0.0),
+            Vec2(24.0, 0.0),
+            Vec2(2.0, 0.0),
+            Vec2(6.0, 0.0),
+        ]);
+        for verts in [0..2, 2..4] {
+            geometry.push_primitive(Primitive::Path {
+                verts,
+                closed: false,
+            });
+        }
+        geometry
+            .primitive_attrs_mut()
+            .insert(
+                "tag",
+                AttributeArray::Str(vec!["far".into(), "near".into()]),
+            )
+            .unwrap();
+
+        // Centroid x is 22 for the first primitive and 4 for the second, so
+        // ascending x swaps them.
+        let result = sort(&geometry, Domain::Primitive, SortMode::X).unwrap();
+
+        assert_eq!(
+            result.primitives(),
+            &[
+                Primitive::Path {
+                    verts: 2..4,
+                    closed: false
+                },
+                Primitive::Path {
+                    verts: 0..2,
+                    closed: false
+                },
+            ]
+        );
+        assert_eq!(
+            result
+                .primitive_attrs()
+                .get("tag")
+                .unwrap()
+                .as_str("tag")
+                .unwrap(),
+            &["near".to_owned(), "far".to_owned()]
+        );
+        // The points did not move: only the primitives did.
+        assert_eq!(
+            result
+                .positions(Domain::Point)
+                .unwrap()
+                .unwrap()
+                .planar()
+                .unwrap(),
+            [
+                Vec2(20.0, 0.0),
+                Vec2(24.0, 0.0),
+                Vec2(2.0, 0.0),
+                Vec2(6.0, 0.0)
+            ]
+        );
+        result.validate().unwrap();
+    }
+
+    /// An instance keeps the source it stamps: `source_index` travels with it
+    /// and the source list itself is left exactly as it came in.
+    #[test]
+    fn instances_keep_the_source_they_stamp() {
+        let sources: Vec<Arc<Geometry>> = (1..=3)
+            .map(|count| {
+                Arc::new(Geometry::from_points(
+                    (0..count).map(|i| Vec2(i as f32 * 3.5, 1.75)).collect(),
+                ))
+            })
+            .collect();
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(31.0, 0.0), Vec2(-7.0, 0.0), Vec2(13.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![2, 0, 1]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1, 2]))
+            .unwrap();
+        geometry.set_instance_sources(sources.clone());
+
+        let result = sort(&geometry, Domain::Instance, SortMode::X).unwrap();
+
+        assert_eq!(
+            result
+                .instances()
+                .get(names::SOURCE_INDEX)
+                .unwrap()
+                .as_i32(names::SOURCE_INDEX)
+                .unwrap(),
+            // x order is -7, 13, 31, so the selectors follow: 0, 1, 2.
+            &[0, 1, 2]
+        );
+        assert_eq!(
+            result
+                .instances()
+                .get(names::INDEX)
+                .unwrap()
+                .as_i32(names::INDEX)
+                .unwrap(),
+            &[0, 1, 2]
+        );
+        assert_eq!(result.sources().len(), 3);
+        for (before, after) in sources.iter().zip(result.sources()) {
+            assert!(
+                after
+                    .geometry()
+                    .is_some_and(|source| Arc::ptr_eq(source, before)),
+                "the source list is not the sort's to rewrite"
+            );
+        }
+        result.validate().unwrap();
+    }
+
+    /// A mesh's triangle indices are relative to its vertex run, so moving
+    /// its points would reface it; that is an error, not a reordering.
+    #[test]
+    fn a_point_sort_refuses_a_mesh_and_overlapping_runs() {
+        let mut mesh = Geometry::from_points(vec![Vec2(9.5, 0.0), Vec2(1.5, 0.0), Vec2(5.5, 4.0)]);
+        mesh.push_mesh(0..3, &[0, 1, 2]);
+        assert!(matches!(
+            sort(&mesh, Domain::Point, SortMode::X),
+            Err(GeometryOpError::Geometry(
+                GeometryError::RequiresPathPrimitives { .. }
+            ))
+        ));
+
+        let mut overlapping = Geometry::from_points(vec![
+            Vec2(9.5, 0.0),
+            Vec2(1.5, 0.0),
+            Vec2(5.5, 4.0),
+            Vec2(3.5, 8.0),
+        ]);
+        for verts in [0..3, 1..4] {
+            overlapping.push_primitive(Primitive::Path {
+                verts,
+                closed: false,
+            });
+        }
+        assert!(matches!(
+            sort(&overlapping, Domain::Point, SortMode::X),
+            Err(GeometryOpError::OverlappingVertexRuns { point: 1, .. })
+        ));
+    }
+
+    /// A domain too short to reorder, and the detail domain that holds one
+    /// element by definition, come back unchanged rather than erroring — an
+    /// animated element count passes through both every frame.
+    #[test]
+    fn a_domain_with_nothing_to_reorder_passes_through() {
+        // An empty geometry has no `P` column to read a key out of, so the
+        // guard is what makes an empty frame a pass-through rather than an
+        // error.
+        assert_eq!(
+            sort(&Geometry::new(), Domain::Point, SortMode::X)
+                .unwrap()
+                .point_count(),
+            0
+        );
+
+        let single = Geometry::from_points(vec![Vec2(6.25, -3.75)]);
+        assert_eq!(
+            sort(&single, Domain::Point, SortMode::X)
+                .unwrap()
+                .positions(Domain::Point)
+                .unwrap()
+                .unwrap()
+                .planar()
+                .unwrap(),
+            [Vec2(6.25, -3.75)]
+        );
+
+        let mut detail = sortable_points();
+        detail
+            .detail_mut()
+            .insert("label", AttributeArray::Str(vec!["kept".into()]))
+            .unwrap();
+        let result = sort(&detail, Domain::Detail, SortMode::X).unwrap();
+        assert_eq!(ids(&result, Domain::Point), [90, 91, 92, 93]);
+        assert_eq!(
+            result
+                .detail()
+                .get("label")
+                .unwrap()
+                .as_str("label")
+                .unwrap(),
+            &["kept".to_owned()]
         );
     }
 }

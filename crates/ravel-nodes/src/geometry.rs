@@ -1,8 +1,9 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Geometry-level operations (CPU-only): `geometry.transform` and
-//! `geometry.merge`.
+//! Geometry-level operations (CPU-only): `geometry.transform`,
+//! `geometry.merge`, `geometry.connect`, `geometry.sort`, and
+//! `geometry.from_image`.
 //!
 //! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
@@ -11,7 +12,7 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceImage, InstanceSource, bounds_center, connect, names,
+    InstanceImage, InstanceSource, SortMode, bounds_center, connect, names, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
@@ -447,6 +448,53 @@ impl NodeProcessor for GeometryConnectProcessor {
             interpolation,
             params.bool_or("closed", false),
         )?))
+    }
+}
+
+/// `geometry.sort`: reorder the elements of one domain and renumber `index`.
+///
+/// `domain` picks which elements move, `mode` decides the order. `center`,
+/// `seed`, `attribute`, and the `path` input each belong to one mode and are
+/// ignored by the others; only `along_path` requires its input, because an
+/// order along a curve with no curve has no meaning.
+pub struct GeometrySortProcessor;
+
+impl GeometrySortProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for GeometrySortProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.sort")?;
+        let domain = crate::attribute::domain_param(params, "domain", Domain::Point);
+        let attribute = params.str_or("attribute", "");
+        let center = params.vec3_or("center", [0.0, 0.0, 0.0]);
+        let mode = match params.str_or("mode", "x") {
+            "y" => SortMode::Y,
+            "radial" => SortMode::Radial {
+                center: Vec3(center[0], center[1], center[2]),
+            },
+            "along_path" => SortMode::AlongPath {
+                path: geometry_input(inputs, 1, "geometry.sort")
+                    .context("geometry.sort: mode \"along_path\" needs a path on input 1")?,
+            },
+            "random" => SortMode::Random {
+                seed: params.i32_or("seed", 0) as u32,
+            },
+            "attribute" => SortMode::Attribute(attribute),
+            "reverse" => SortMode::Reverse,
+            _ => SortMode::X,
+        };
+        Ok(Arc::new(sort(geometry, domain, mode)?))
     }
 }
 
@@ -1788,5 +1836,339 @@ mod tests {
     #[test]
     fn is_not_time_dependent() {
         assert!(!GeometryTransformProcessor.is_time_dependent());
+    }
+
+    /// Runs `geometry.sort` with `params`, optionally with `path` on input 1.
+    fn eval_sort(
+        params: &[(&str, ParameterValue)],
+        geo: Arc<Geometry>,
+        path: Option<Arc<Geometry>>,
+    ) -> anyhow::Result<Geometry> {
+        let source =
+            Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY);
+        let path_source =
+            Node::new(NodeId::new(3), "test.path").with_output("out", DataTypeId::GEOMETRY);
+        let mut node = Node::new(NodeId::new(2), "geometry.sort")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("path", &[DataTypeId::GEOMETRY])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let mut graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(path_source)
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        if path.is_some() {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(2),
+                    NodeId::new(3),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(1),
+                )
+                .unwrap();
+        }
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(geo)));
+        ev.register(
+            NodeId::new(3),
+            Arc::new(Fixed(path.unwrap_or_else(|| Arc::new(Geometry::new())))),
+        );
+        ev.register(NodeId::new(2), Arc::new(GeometrySortProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx())?;
+        Ok(output.downcast_ref::<Geometry>().unwrap().clone())
+    }
+
+    /// Six points whose creation order is none of x order, y order or radial
+    /// order, tagged so the permutation reads back off `id`.
+    fn scrambled_points() -> Arc<Geometry> {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(23.0, 7.0),
+            Vec2(-9.0, 31.0),
+            Vec2(11.0, -13.0),
+            Vec2(37.0, 19.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![10, 11, 12, 13]))
+            .unwrap();
+        Arc::new(geometry)
+    }
+
+    fn sorted_ids(geometry: &Geometry) -> Vec<i32> {
+        geometry
+            .points()
+            .get(names::ID)
+            .unwrap()
+            .as_i32(names::ID)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// Every `mode` string the template offers reaches its own ordering, and
+    /// an unknown one falls back to `x` rather than failing the evaluation.
+    #[test]
+    fn every_sort_mode_parameter_reaches_its_ordering() {
+        let mode = |value: &str| ParameterValue::String(value.into());
+        for (params, expected) in [
+            (vec![("mode", mode("x"))], vec![11, 12, 10, 13]),
+            (vec![("mode", mode("y"))], vec![12, 10, 13, 11]),
+            (
+                vec![
+                    ("mode", mode("radial")),
+                    ("center", ParameterValue::vec3(23.0, 7.0, 0.0)),
+                ],
+                vec![10, 13, 12, 11],
+            ),
+            (vec![("mode", mode("reverse"))], vec![13, 12, 11, 10]),
+            (
+                vec![("mode", mode("attribute")), ("attribute", mode(names::ID))],
+                vec![10, 11, 12, 13],
+            ),
+            // Unknown modes and domains warn and fall back rather than
+            // failing a frame.
+            (vec![("mode", mode("sideways"))], vec![11, 12, 10, 13]),
+            (
+                vec![("mode", mode("x")), ("domain", mode("nowhere"))],
+                vec![11, 12, 10, 13],
+            ),
+        ] {
+            let result = eval_sort(&params, scrambled_points(), None).unwrap();
+            assert_eq!(sorted_ids(&result), expected, "{params:?}");
+        }
+    }
+
+    /// `domain` decides which elements move. A point sort and an instance
+    /// sort of the same geometry therefore disagree, which is what a node
+    /// that ignored the parameter could not show.
+    #[test]
+    fn the_domain_parameter_picks_which_elements_move() {
+        let mut geometry = Geometry::from_points(vec![Vec2(19.0, 0.0), Vec2(-3.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![20, 21]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(41.0, 0.0), Vec2(-17.0, 0.0)]),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::ID, AttributeArray::I32(vec![30, 31]))
+            .unwrap();
+        let geometry = Arc::new(geometry);
+        let ids = |geometry: &Geometry, domain: Domain| {
+            geometry
+                .attribute_set(domain)
+                .get(names::ID)
+                .unwrap()
+                .as_i32(names::ID)
+                .unwrap()
+                .to_vec()
+        };
+
+        let by_point = eval_sort(
+            &[("domain", ParameterValue::String("point".into()))],
+            geometry.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ids(&by_point, Domain::Point), [21, 20]);
+        assert_eq!(
+            ids(&by_point, Domain::Instance),
+            [30, 31],
+            "a point sort leaves the instances where they were"
+        );
+
+        let by_instance = eval_sort(
+            &[("domain", ParameterValue::String("instance".into()))],
+            geometry,
+            None,
+        )
+        .unwrap();
+        assert_eq!(ids(&by_instance, Domain::Instance), [31, 30]);
+        assert_eq!(
+            ids(&by_instance, Domain::Point),
+            [20, 21],
+            "an instance sort leaves the points where they were"
+        );
+    }
+
+    /// `random` reads `seed`, so two seeds give two orders and one seed
+    /// repeats.
+    #[test]
+    fn the_random_sort_mode_reads_the_seed_parameter() {
+        let sorted = |seed: i32| {
+            sorted_ids(
+                &eval_sort(
+                    &[
+                        ("mode", ParameterValue::String("random".into())),
+                        ("seed", ParameterValue::Int(seed)),
+                    ],
+                    scrambled_points(),
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(sorted(4321), sorted(4321));
+        assert_ne!(sorted(4321), sorted(1234));
+    }
+
+    /// `along_path` reads input 1, and says so when nothing is wired to it —
+    /// an order along a curve with no curve is not a silent identity.
+    #[test]
+    fn the_along_path_mode_requires_the_path_input() {
+        // 50 units long, and angled so that the projected arc lengths of the
+        // four points are 1, 11.4, 22.6 and 41 — no tie, and neither the x
+        // nor the y order.
+        let mut path = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(40.0, 30.0)]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let params = [("mode", ParameterValue::String("along_path".into()))];
+
+        let wired = eval_sort(&params, scrambled_points(), Some(Arc::new(path))).unwrap();
+        assert_eq!(sorted_ids(&wired), [12, 11, 10, 13]);
+
+        let error = eval_sort(&params, scrambled_points(), None).expect_err("no path is wired");
+        assert!(
+            format!("{error:#}").contains("along_path"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    /// The stagger case the sort exists for: `field.attribute("index")` reads
+    /// the storage slot, so reordering the points changes which point gets
+    /// which value — the same graph, a different animation order.
+    #[test]
+    fn sorting_changes_the_order_a_field_reads_index_in() {
+        let staggered = |sort_mode: Option<&str>| {
+            let source =
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY);
+            let sort_node = Node::new(NodeId::new(2), "geometry.sort")
+                .with_input("geometry", &[DataTypeId::GEOMETRY])
+                .with_input("path", &[DataTypeId::GEOMETRY])
+                .with_output("geometry", DataTypeId::GEOMETRY)
+                .with_param(
+                    "mode",
+                    ParameterValue::String(sort_mode.unwrap_or("x").into()),
+                );
+            let field = Node::new(NodeId::new(3), "field.attribute")
+                .with_output("field", DataTypeId::FIELD)
+                .with_param("name", ParameterValue::String(names::INDEX.into()))
+                .with_param("component", ParameterValue::String("x".into()));
+            let apply = Node::new(NodeId::new(4), "field.apply")
+                .with_input("geometry", &[DataTypeId::GEOMETRY])
+                .with_input("field", &[DataTypeId::FIELD])
+                .with_output("geometry", DataTypeId::GEOMETRY)
+                .with_param("domain", ParameterValue::String("point".into()))
+                .with_param("target", ParameterValue::String(names::PSCALE.into()))
+                .with_param("combine", ParameterValue::String("set".into()));
+
+            let mut graph = Graph::new()
+                .add_node(source)
+                .unwrap()
+                .add_node(sort_node)
+                .unwrap()
+                .add_node(field)
+                .unwrap()
+                .add_node(apply)
+                .unwrap();
+            // With no sort in the chain the geometry reaches `apply` straight
+            // from the source, which is the comparison the test is making.
+            let (upstream, edges) = match sort_mode {
+                Some(_) => (NodeId::new(2), vec![(1, NodeId::new(1), NodeId::new(2), 0)]),
+                None => (NodeId::new(1), Vec::new()),
+            };
+            for (edge, from, to, port) in edges {
+                graph = graph
+                    .add_edge(
+                        EdgeId::new(edge),
+                        from,
+                        OutputPortIndex(0),
+                        to,
+                        InputPortIndex(port),
+                    )
+                    .unwrap();
+            }
+            graph = graph
+                .add_edge(
+                    EdgeId::new(10),
+                    upstream,
+                    OutputPortIndex(0),
+                    NodeId::new(4),
+                    InputPortIndex(0),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(11),
+                    NodeId::new(3),
+                    OutputPortIndex(0),
+                    NodeId::new(4),
+                    InputPortIndex(1),
+                )
+                .unwrap();
+
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(1), Arc::new(Fixed(scrambled_points())));
+            ev.register(NodeId::new(2), Arc::new(GeometrySortProcessor));
+            ev.register(
+                NodeId::new(3),
+                Arc::new(crate::field::AttributeFieldProcessor::from_node(
+                    &Node::new(NodeId::new(3), "field.attribute"),
+                )),
+            );
+            ev.register(
+                NodeId::new(4),
+                Arc::new(crate::field::ApplyFieldProcessor::from_node(&Node::new(
+                    NodeId::new(4),
+                    "field.apply",
+                ))),
+            );
+            let output = ev.evaluate(&graph, NodeId::new(4), &ctx()).unwrap();
+            let geometry = output.downcast_ref::<Geometry>().unwrap();
+            let scales = geometry
+                .points()
+                .get(names::PSCALE)
+                .unwrap()
+                .as_f32(names::PSCALE)
+                .unwrap()
+                .to_vec();
+            // Read back per `id`, so the two chains are compared by point
+            // identity rather than by storage slot.
+            let mut paired: Vec<(i32, f32)> =
+                sorted_ids(geometry).into_iter().zip(scales).collect();
+            paired.sort_by_key(|(id, _)| *id);
+            paired
+        };
+
+        // Without a sort, `index` is creation order: id 10 is first.
+        assert_eq!(
+            staggered(None),
+            [(10, 0.0), (11, 1.0), (12, 2.0), (13, 3.0)]
+        );
+        // Sorted by x, the leftmost point (id 11) leads instead.
+        assert_eq!(
+            staggered(Some("x")),
+            [(10, 2.0), (11, 0.0), (12, 1.0), (13, 3.0)]
+        );
     }
 }

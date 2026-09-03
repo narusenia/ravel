@@ -136,6 +136,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_transform());
     reg.register(geometry_merge());
     reg.register(geometry_connect());
+    reg.register(geometry_sort());
     reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
@@ -1369,6 +1370,43 @@ fn geometry_connect() -> NodeTemplate {
         })
 }
 
+/// `geometry.sort`: reorder the elements of one domain and renumber `index`.
+///
+/// The `path` input is only read by `mode = "along_path"`, and `center` /
+/// `seed` / `attribute` likewise sit inert until the mode that reads them is
+/// selected — the same shape `geometry.connect`'s `group` has.
+///
+/// Every mode is ascending; descending is a second sort with
+/// `mode = "reverse"`, which is why there is no direction parameter.
+fn geometry_sort() -> NodeTemplate {
+    NodeTemplate::new("geometry.sort", "Sort", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_input(geometry_input("path"))
+        .with_output(geometry_output())
+        // Detail holds exactly one element, so it has no order to change.
+        .with_param(string_parameter("domain", "point"))
+        .with_param_options("domain", ["point", "primitive", "instance"])
+        .with_param(string_parameter("mode", "x"))
+        .with_param_options(
+            "mode",
+            [
+                "x",
+                "y",
+                "radial",
+                "along_path",
+                "random",
+                "attribute",
+                "reverse",
+            ],
+        )
+        .with_param(channel3_parameter("center", 0.0, 0.0, 0.0))
+        .with_param(int_parameter("seed", 0))
+        .with_param(string_parameter("attribute", ""))
+        .with_param_range("center", -1e9..=1e9, -1000.0..=1000.0)
+        .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_role("center", ParamRole::Position)
+}
+
 fn scene_input(name: &str) -> InputPort {
     InputPort {
         name: name.into(),
@@ -1946,14 +1984,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 82);
+        assert_eq!(reg.all_templates().count(), 83);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 23);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 24);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

@@ -2618,6 +2618,17 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   (`handle`, `window_id_of`, `main`, `detached`, `window_bounds`). Every host
   observes its own window's bounds and records them into the layout
   (`layout_persist::record_placement`) without any I/O.
+- Startup: `main.rs` opens the splash (`splash::open`) after
+  `gpui_component::init` + `fonts::init` + `cx.activate(true)`, then runs the
+  disk-bound stages in `bootstrap`, an async task iterating
+  `splash::StartupStage::ALL` (Themes → Settings → Keybindings → Layout) with
+  `splash::stage_break(cx).await` before each so the frame carrying the new
+  label is painted. `splash::hand_off_to_main(cx, open_main, dismiss, quit)`
+  is the only place the main-window/splash order lives — with
+  `QuitMode::LastWindowClosed`, dismissing the splash first quits during
+  startup. The splash artwork is decoded to a `RenderImage` up front
+  (`img("<path>")` would land a frame late) and the window carries no title
+  bar, no session state, and no observers.
 - Layout persistence: `layout_persist` (layout_persist.rs) owns the
   `LayoutPersistence` global around `ravel_ui::layout_doc::LayoutStore`.
   `install(cx)` reads `<config>/ravel/layout.toml` once during bootstrap and

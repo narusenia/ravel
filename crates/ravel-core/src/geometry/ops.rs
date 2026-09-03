@@ -64,6 +64,8 @@ pub enum GeometryOpError {
         operation: &'static str,
         point: usize,
     },
+    #[error("the {name} attribute is required on the {domain:?} domain and cannot be deleted")]
+    RequiredAttribute { name: &'static str, domain: Domain },
 }
 
 pub fn attribute_set(
@@ -171,6 +173,36 @@ fn keep_unselected(
         }
     }
     Ok(())
+}
+
+/// Drops the `name` column from `domain` (REQ-CORE-010's "delete"), leaving
+/// every other column shared with the input.
+///
+/// A name the domain does not carry is a no-op rather than an error: a
+/// modulation graph deletes its scratch columns downstream of wherever they
+/// were written, and an upstream edit that stops writing one must not turn the
+/// whole evaluation red.
+///
+/// `P` is refused on the two position-carrying domains. `Geometry::validate`
+/// demands it wherever the domain has elements, so the delete would either
+/// fail validation or — when `P` was the only column left — silently empty the
+/// domain out from under the caller.
+pub fn attribute_delete(
+    geometry: &Geometry,
+    domain: Domain,
+    name: &str,
+) -> Result<Geometry, GeometryOpError> {
+    if name == names::P && matches!(domain, Domain::Point | Domain::Instance) {
+        return Err(GeometryOpError::RequiredAttribute {
+            name: names::P,
+            domain,
+        });
+    }
+    let mut result = geometry.clone();
+    if result.attribute_set_mut(domain).remove(name).is_some() {
+        result.validate()?;
+    }
+    Ok(result)
 }
 
 /// Cross-domain promotion reduces to one value and broadcasts it. Detail
@@ -1780,6 +1812,86 @@ mod tests {
                 .unwrap(),
             &[0.75, 0.75]
         );
+    }
+
+    /// Deleting one column leaves the input untouched and every surviving
+    /// column pointing at the *same* allocation, so a scratch column can be
+    /// dropped from a heavy geometry without copying it.
+    #[test]
+    fn delete_drops_one_column_and_keeps_the_rest_shared() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(13.0, -5.0), Vec2(-2.5, 7.25), Vec2(31.0, 11.75)]);
+        geometry
+            .points_mut()
+            .insert("stagger_t", AttributeArray::F32(vec![3.5, -7.25, 11.75]))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert("keep", AttributeArray::F32(vec![-1.5, 2.75, 6.25]))
+            .unwrap();
+
+        let result = attribute_delete(&geometry, Domain::Point, "stagger_t").unwrap();
+
+        assert!(result.points().get("stagger_t").is_none());
+        assert!(geometry.points().get("stagger_t").is_some());
+        assert_eq!(result.point_count(), 3);
+        for name in ["keep", names::P, names::INDEX] {
+            let before = geometry.points().get(name).unwrap();
+            let after = result.points().get(name).unwrap();
+            assert!(Arc::ptr_eq(before, after), "{name} was copied, not shared");
+        }
+    }
+
+    /// A name the domain does not carry is a no-op, not an error: an upstream
+    /// edit that stops writing a column must not turn the graph red.
+    #[test]
+    fn delete_of_a_missing_attribute_changes_nothing() {
+        let mut geometry = Geometry::from_points(vec![Vec2(4.5, -6.5), Vec2(9.25, 2.0)]);
+        geometry
+            .points_mut()
+            .insert("weight", AttributeArray::F32(vec![-3.25, 8.5]))
+            .unwrap();
+
+        let result = attribute_delete(&geometry, Domain::Point, "never_written").unwrap();
+
+        assert_eq!(result.summary().points, geometry.summary().points);
+        assert!(Arc::ptr_eq(
+            geometry.points().get("weight").unwrap(),
+            result.points().get("weight").unwrap()
+        ));
+    }
+
+    /// `P` carries the placement the position-carrying domains are validated
+    /// on, so its delete is refused there — and only there.
+    #[test]
+    fn delete_refuses_the_position_column_of_a_position_domain() {
+        let mut geometry = Geometry::from_points(vec![Vec2(21.5, -13.25), Vec2(-8.75, 4.5)]);
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(101.5, -202.25)]))
+            .unwrap();
+        geometry
+            .detail_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(17.5, 23.25)]))
+            .unwrap();
+
+        for domain in [Domain::Point, Domain::Instance] {
+            let error = attribute_delete(&geometry, domain, names::P).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    GeometryOpError::RequiredAttribute { name, domain: refused }
+                        if name == names::P && refused == domain
+                ),
+                "{domain:?} produced {error}"
+            );
+        }
+
+        // Detail is not a position domain: nothing validates a `P` there, so
+        // the same name is an ordinary column and deletes like one.
+        let result = attribute_delete(&geometry, Domain::Detail, names::P).unwrap();
+        assert!(result.detail().get(names::P).is_none());
+        assert!(result.points().get(names::P).is_some());
     }
 
     /// A group restricts the write to the elements it flags; the others keep

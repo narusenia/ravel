@@ -1241,6 +1241,13 @@ description = "破線のアトリビュートを書き込む。破線のとき�
 pattern = "実線・空白の長さを交互に並べた列（コンポジション画素）。例: \"4,2\"。空なら実線。"
 offset = "パスに沿ったパターンの開始位置（コンポジション画素）。"
 
+[node."attribute.delete"]
+label = "アトリビュート削除"
+description = "ジオメトリのドメインからアトリビュート列を削除する。そのドメインに無い名前は何もしない。"
+[node."attribute.delete".params]
+domain = "削除するドメイン（point / primitive / instance / detail）。"
+name = "削除するアトリビュート名。位置アトリビュート P は point / instance ドメインからは削除できない。"
+
 [node."attribute.promote"]
 label = "アトリビュート昇格"
 description = "アトリビュートを集約して粗いドメインへ移す（例: ポイントごとの値を 1 つの detail 値へ）。"

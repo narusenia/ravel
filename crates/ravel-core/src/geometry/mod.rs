@@ -20,7 +20,8 @@ pub use field::{
     ComposeField, ConstantField, CurlNoiseField, CurveRemapField, DirectionToField,
     ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError,
     FieldExpressionError, FieldSample, FieldValue, GradientField, ImageSamplerField, LengthField,
-    MaxField, MultiplyField, NoiseField, RadialField, RampField, apply_field, component_index,
+    MaxField, MultiplyField, NoiseField, RadialField, RampField, TimeField, TimeMode, apply_field,
+    component_index,
 };
 pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,

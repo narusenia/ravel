@@ -310,6 +310,8 @@ pub enum RavelIcon {
     NodeFieldApply,
     /// Node header/menu: `text.font`.
     NodeTextFont,
+    /// Node header/menu: `text.layout`.
+    NodeTextLayout,
     /// Category fallback: `NodeCategory::Geometry`.
     CategoryGeometry,
     /// Category fallback: `NodeCategory::Scene`.
@@ -479,6 +481,7 @@ impl RavelIcon {
             "field.constant" => Self::NodeFieldConstant,
             "field.apply" => Self::NodeFieldApply,
             "text.font" => Self::NodeTextFont,
+            "text.layout" => Self::NodeTextLayout,
             _ => category.map(Self::for_category).unwrap_or(Self::NodeGraph),
         }
     }
@@ -633,6 +636,7 @@ impl IconNamed for RavelIcon {
             // The same glyph the Text Editor panel uses: a letterform is what
             // a font is, in both places.
             Self::NodeTextFont => "icons/type.svg",
+            Self::NodeTextLayout => "icons/align-left.svg",
             Self::CategoryGeometry => "icons/shapes.svg",
             Self::CategoryScene => "icons/orbit.svg",
             Self::CategoryField => "icons/activity.svg",

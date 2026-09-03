@@ -3428,6 +3428,176 @@ mod tests {
         );
     }
 
+    /// Wait for a device epoch swap to finish, or fail the test.
+    ///
+    /// The replacement is installed behind an await on a background join, so
+    /// nothing after a swap request is observable until the executor has run.
+    fn await_swap(project: &Entity<ProjectState>, cx: &mut TestAppContext) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| !project.eval_restart_in_progress) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the device epoch swap never finished"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// `GPULOSS-5`: the swap gives up the frame on screen, and with it what the
+    /// retiring device lent it.
+    ///
+    /// [`crate::panels::ViewerFrame`] is a durable global, and a
+    /// [`crate::panels::ViewerFrame::GpuFrame`] in it is a live lease on the
+    /// retiring epoch's texture pool — held by the global and by every Viewer
+    /// panel that mirrored it. Keeping it across the swap does two kinds of
+    /// damage: the pool it leases from cannot be torn down cleanly, and the
+    /// panel goes on **painting** it, past a guard that compares the
+    /// renderer's device with the one the coordinator has already replaced and
+    /// therefore answers "unchanged".
+    ///
+    /// The lease under test is the `Arc` the same update carries beside the
+    /// picture, because a real `GpuFrameBuffer` needs an adapter to build.
+    /// It is released by the very same write to the global, which is the thing
+    /// the swap either does or does not do.
+    #[gpui::test]
+    fn a_device_swap_releases_the_viewers_frame_lease(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let lease = Arc::new(FrameBuffer::from_f32(1, 1, vec![0.0; 4]));
+        let watched = Arc::downgrade(&lease);
+        project.update(cx, |project, cx| {
+            let display: Arc<dyn ravel_core::types::NodeData> = Arc::new(
+                ravel_nodes::DisplayFrame::new(2, 2, Arc::from(vec![0u8; 16]))
+                    .with_linear(Some(lease)),
+            );
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation: 1,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(display))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        assert!(
+            watched.upgrade().is_some(),
+            "the fixture never put the lease in the published frame"
+        );
+
+        let swap_log = log.clone();
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(None, move |_| EpochHooks::new("new", &swap_log), cx),
+                "the swap was refused"
+            );
+        });
+
+        // Synchronously with the request, not after the replacement lands: the
+        // retiring pool is dropped while the join is still running, so a lease
+        // released any later than this is one the teardown had to work around.
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "the swap left the retiring epoch's frame on screen"
+            );
+        });
+        assert!(
+            watched.upgrade().is_none(),
+            "the retiring epoch's lease is still held after the swap started"
+        );
+        await_swap(&project, cx);
+    }
+
+    /// `GPULOSS-5`: the blank a swap publishes is fenced exactly like a frame.
+    ///
+    /// The blank is a direct write to the global rather than an evaluation
+    /// result, so nothing about it is ordered by itself. What protects it is
+    /// the fence the swap raises to the retiring worker's generation: the
+    /// retiring worker's last in-flight update carries **exactly** that
+    /// number, and if it landed the viewer would be showing a frame from the
+    /// device the session has just left — the one thing blanking was for.
+    #[gpui::test]
+    fn an_old_epoch_update_cannot_overwrite_the_recovery_blank(cx: &mut TestAppContext) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        cx.executor().allow_parking();
+        let project = cx.new(ProjectState::new);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let publish = |project: &mut ProjectState,
+                       cx: &mut Context<ProjectState>,
+                       generation: u64,
+                       size: u32| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(blank_display_frame(size, size)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                }),
+                cx,
+            );
+        };
+        let frame_width = |cx: &mut TestAppContext| {
+            cx.update(|cx| match cx.try_global::<ViewerFrame>() {
+                Some(ViewerFrame::Frame { image, .. }) => Some(image.width()),
+                _ => None,
+            })
+        };
+
+        // A frame from the epoch about to be retired. With no worker installed
+        // the swap inherits the fence from the last published frame, which is
+        // the same number the retiring worker's own `latest_generation()` would
+        // have given it.
+        project.update(cx, |project, cx| publish(project, cx, 6, 4));
+        assert_eq!(frame_width(cx), Some(4), "the fixture published nothing");
+
+        let swap_log = log.clone();
+        project.update(cx, |project, cx| {
+            assert!(
+                project.restart_eval_worker(None, move |_| EpochHooks::new("new", &swap_log), cx),
+                "the swap was refused"
+            );
+            // Same turn as the request, so the replacement — which is behind an
+            // await — cannot be what publishes anything below.
+            publish(project, cx, 6, 8);
+        });
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    cx.try_global::<ViewerFrame>(),
+                    Some(ViewerFrame::Blank { .. })
+                ),
+                "an old-epoch update at the inherited generation overwrote the \
+                 blank the swap published"
+            );
+        });
+
+        // And the new epoch's own first frame, one past the fence, replaces it.
+        project.update(cx, |project, cx| publish(project, cx, 7, 8));
+        assert_eq!(
+            frame_width(cx),
+            Some(8),
+            "the new epoch's frame was dropped on the inherited fence"
+        );
+        await_swap(&project, cx);
+    }
+
     /// The paths where **no evaluation follows** — an emptied composition, one
     /// that stopped compiling — have to clear the band on their way out *and*
     /// forget the frame-cache version it was published at.

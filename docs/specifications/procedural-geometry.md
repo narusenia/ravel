@@ -292,6 +292,11 @@ Path を要求する」ことがメッセージだけで分かる形にする。
 /// 位置（と任意の入力属性）から値への純関数。バッチ評価が基本。
 pub trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
+
+    /// 自身とラップしているフィールドを含むおおよそのバイト数。
+    /// `FieldValue` の `NodeData::byte_size` を通じてキャッシュ予算に載る。
+    /// **既定実装は置かない**（`0` は黙った過少計上になる）。
+    fn byte_size(&self) -> u64;
 }
 
 /// フィールドが読める入力。追加してもシグネチャを壊さないよう構造体で渡す。
@@ -313,7 +318,10 @@ pub struct FieldSample<'a> {
   `in_max` で正規化しストップ列で色を引く。**数値から色を作れる唯一の
   フィールド**で、スカラーフィールドではグレースケールにしかならない
   `Cd` / `stroke_color` の変調に色相を与える）、
-  画像サンプラ（FrameBuffer を UV 参照）、Lua 式、
+  画像サンプラ（FrameBuffer を UV 参照、未実装）、
+  式（`field.expression`。要素ごとに評価する REQ-CORE-015 で、言語は
+  REQ-CORE-014 と共通の専用スカラー式言語。**Lua ではない** —
+  Lua は REQ-CODE-001 のコード Layer 専用）、
   時刻（`field.time`。`frame` / `seconds` / `normalized` を `scale` /
   `offset` 付きで返す。変調をアニメーションさせる駆動源）、
   定数（`field.constant`。`multiply` と組んで減算・除算を表す）、
@@ -321,6 +329,50 @@ pub struct FieldSample<'a> {
 - 合成: Add / Multiply / Max / Blend ノードで `Field` 同士を結合。
 - 消費地点: 属性変調ノード（`attr = field(P)`）、パーティクルフォース、
   per-instance パラメータ変調、統一チャネル値ソース（REQ-CORE-007）。
+
+### 変調の書き戻し（`field.apply`）
+
+サンプルした値を既存の属性列へ書き戻す規約。`apply_field` と
+`FieldApply` が実装する。
+
+**合成モード**は `Set` / `Add` / `Multiply` / `Min` / `Max` の 5 種。
+`amount` は合成結果への補間率として全モード共通に作用する。
+
+```text
+result = existing + (combine(existing, sampled) - existing) * amount
+```
+
+- 既定は `Set`。この式に入れると `existing + (sampled - existing) * amount`
+  となり、単純なブレンドと項まで一致する。独立した `Blend` モードは
+  持たない（`Set` + `amount` と同じものになる）。
+- `amount` は `0..=1` にクランプする。**`amount = 0` は入力列をそのまま
+  返す**（ビット等価）。ゼロ補間でも合成演算を先に評価すると `-0.0` が
+  `+0.0` に化け、中間値が溢れた場合は `inf * 0 = NaN` になるため。
+
+**成分マスク**（`components`）は、スカラーフィールドを多成分属性へ適用する
+ときに書き換える成分を選ぶ。成分は位置で解決するので `x`/`r`、`y`/`g`、
+`z`/`b`、`w`/`a` は同じ枠を指し、`"xy"` / `"rgb"` / `"a"` のように並べる。
+
+- **未指定は「対象型が決める」**。Color / Vec4 は `rgb`（アルファを保つ）、
+  それ以外は全成分。スカラー値は選択された全成分へブロードキャストされる
+  ので、既定でアルファも書くと「暗くすると同時に透明になる」。
+  アルファを動かすには `a`（または `rgba`）を明示する。
+- 対象型に無い成分だけを指定した場合（`Vec2` に `"z"`）は黙って no-op に
+  せず、警告して全成分へフォールバックする（group 名と同じ規約）。
+- 逆方向（ベクタフィールド → スカラー属性）は無い。スカラー以外の
+  フィールドは既存列との**型完全一致**を要求する。
+
+**変調できる型**は `F32` / `Vec2` / `Vec3` / `Vec4` / `Color`。
+`I32` / `Bool` / `Str` は成分を持たないので
+`FieldError::UnsupportedAttributeType` で拒否する。判定は `amount` の
+評価より前に行うので、`amount = 0` でも同じエラーになる。
+
+対象列が無い場合は既定で作る（`create_if_missing`）。`stroke_color` /
+`stroke_width` のように誰かが変調するまで存在しない属性を、前段に
+`attribute.set` を挟まずに変調できるようにするため。
+
+どの要素に作用するかは group が決める（下記「要素スコープ」）。`amount` は
+soft な重み付け、`group` は hard な適用可否で直交する。
 
 ## ステートフル評価（sim キャッシュ）
 
@@ -450,10 +502,10 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 | 箇所 | 改修 | 状況 |
 |------|------|------|
 | `ravel-core/src/types.rs` | `GeometricData` 実装型の追加 | ✅ `Geometry` が実装（geometry/container.rs） |
-| `ravel-core/src/geometry/`（新設） | Geometry / AttributeSet / Field | ✅ 実装済み（画像サンプラ・Lua 式は placeholder） |
+| `ravel-core/src/geometry/`（新設） | Geometry / AttributeSet / Field | ✅ 実装済み（式フィールドは REQ-CORE-015 の式言語で実装済み、画像サンプラは未） |
 | `ravel-core/src/eval.rs` | sim キャッシュ、`StatefulProcessor` 統合 | 🔲 未着手（TASK-041） |
 | `ravel-core/src/registry/builtin.rs` | シェイプ系の出力型変更 + 新ノード登録 | ✅ shape / scatter / attribute / field / rasterize テンプレート登録済み |
-| `ravel-nodes` | シェイプ processor のジオメトリ化、Rasterize、属性・フィールド群 | ✅ shape / scatter / attribute / field と rasterize の GPU + CPU reference processor 実装済み（Lua 式は placeholder） |
+| `ravel-nodes` | シェイプ processor のジオメトリ化、Rasterize、属性・フィールド群 | ✅ shape / scatter / attribute / field と rasterize の GPU + CPU reference processor 実装済み |
 | `ravel-core/src/composition/compile.rs` | Shape/Text Layer ソースの展開先変更 | 🔶 Shape は `ShapeGeometry → Rasterize` 展開済み、Text は未 |
 | `ravel-app`（Node Editor / Properties） | 新型のポート色/接続判定、属性検査 UI | 🔶 GEOMETRY/FIELD ポート色・Viewer 表示は実装済み、属性検査 UI（TASK-047）は未 |
 

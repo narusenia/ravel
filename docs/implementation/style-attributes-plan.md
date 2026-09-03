@@ -29,7 +29,7 @@ CPU 経路は `blend_coverage(pixels, &fill_cov, color)` と
 ### 3. 変調システムから外れている
 
 `field.apply` は属性にしか作用しないため、フィールドで線幅を駆動できない。
-`per-instance-modulation-plan.md` が用意する変調層の資産が、見た目の
+`done/per-instance-modulation-plan.md` が用意する変調層の資産が、見た目の
 パラメータには一切効かない。
 
 `procedural-geometry.md` の設計原則 1「固定機能のリピーターを作らない」に

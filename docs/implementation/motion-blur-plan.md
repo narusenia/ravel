@@ -133,7 +133,7 @@ sim はサブフレーム状態を持たないため、N 回評価しても同�
 
 副次的な効果:
 
-- `per-instance-modulation-plan.md` が「`sample` が `u64` しか取らず量子化
+- `done/per-instance-modulation-plan.md` が「`sample` が `u64` しか取らず量子化
   される」ことを理由に採った時間オフセットの回避設計が不要になる。
 - FX-5 のタイムリマップが整数フレームに丸めずに済む。
 - 24fps コンプに 30fps 素材を載せたときの補間が正しくなる。

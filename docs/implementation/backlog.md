@@ -34,13 +34,12 @@
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
-| MOD-4 | `attribute.delete`（属性列の削除） | `per-instance-modulation-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
-| OPS-2 | `geometry.sort`（並べ替え） | `geometry-ops-plan.md` |
+| TYPE-1 | フォント解決（依存なし。`TYPE-5` / `TYPE-7` だけが `MOD-5` ✅ 待ちだった） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
 | OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
@@ -338,7 +337,7 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | OPS-1 | 🟡 | `geometry.blast`（要素削除） | — |
-| OPS-2 | 🟡 | `geometry.sort`（並べ替え） | — |
+| OPS-2 | ✅ | `geometry.sort`（並べ替え。PR #503） | — |
 | OPS-3 | 🟡 | `geometry.resample` | — |
 | OPS-4 | 🟡 | `geometry.measure`（bounds / size 含む） | — |
 | OPS-5 | 🟡 | `geometry.switch` / `geometry.null` | — |
@@ -958,8 +957,13 @@ MOD-1〜3 と並行できる。
 | MOD-1 | ✅ | 合成モードと成分マスクと `group` | #188 |
 | MOD-2 | ✅ | `FieldSample` 構造体化 + `field.attribute` | #189 |
 | MOD-3 | ✅ | 駆動ソース `field.time` / `field.constant`（PR #499） | MOD-2 |
-| MOD-4 | 🟡 | `attribute.delete`（属性**列**の削除。要素削除は OPS-1） | — |
-| MOD-5 | ⬜ | ゴールデン検証と文書更新 | MOD-1〜4, OPS-2 |
+| MOD-4 | ✅ | `attribute.delete`（アトリビュート**列**の削除。要素削除は OPS-1。PR #502） | — |
+| MOD-5 | ✅ | ゴールデン検証と文書更新（PR #504。REQ-MOGRAPH-001 の受入条件が 7/7 に） | MOD-1〜4, OPS-2 |
+
+**この計画は閉じた**（`done/`）。REQ-MOGRAPH-001 の受入条件は 7/7 で、
+残っていた「パラメータに式を設定できる」は REQ-CORE-014 の専用式言語で
+達成済み（Lua ではない。Lua は REQ-CODE-001 のコード Layer 専用で未達だが、
+per-instance 変調はそれに依存しない）。
 
 ### フリードッキング（旧: パネル配置 #181 を吸収）
 
@@ -999,7 +1003,7 @@ SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| TYPE-1 | ⬜ | フォント解決 | — |
+| TYPE-1 | 🟡 | フォント解決 | — |
 | TYPE-2 | ⬜ | シェーピングとレイアウト → インスタンスジオメトリ | TYPE-1 |
 | TYPE-3 | ⬜ | レイヤーテンプレートと Properties | TYPE-2 |
 | TYPE-4 | ⬜ | パス沿い配置 | TYPE-2 |

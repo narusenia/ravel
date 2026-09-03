@@ -575,7 +575,7 @@ impl GeoStage {
 /// Builds the phase-0 chain for `stage` at `count` instances.
 ///
 /// `field.apply` writes into the instance `P` column, which is what
-/// per-instance modulation does in practice (`per-instance-modulation-plan.md`)
+/// per-instance modulation does in practice (`done/per-instance-modulation-plan.md`)
 /// and what forces every element through the field evaluator.
 fn geo_graph(registry: &NodeRegistry, count: usize, stage: GeoStage) -> Graph {
     let (count_x, count_y) = grid_dims(count);

@@ -42,7 +42,7 @@ Houdini で group が効くのは Blast とセットだから。「この group 
 ならず、構造を作る道具にならない。反復も同じで、ピースごとに処理しても
 不要なピースを落とせない。
 
-**`attribute.delete`（`per-instance-modulation-plan.md` MOD-4）は
+**`attribute.delete`（`done/per-instance-modulation-plan.md` MOD-4）は
 属性列の削除であって、要素の削除ではない。** 全くの別物。
 
 ### stagger の質が `index` の生成順に縛られる
@@ -53,7 +53,7 @@ Houdini で group が効くのは Blast とセットだから。「この group 
 モーショングラフィックスで実際に欲しいのは「左から」「中心から外へ」
 「ランダムに」「パス沿いに」。Houdini の Sort SOP に相当するものが要る。
 
-`per-instance-modulation-plan.md` が stagger を主要ユースケースに
+`done/per-instance-modulation-plan.md` が stagger を主要ユースケースに
 挙げているのに、**その表現力の上限を `index` の生成順が決めてしまう**。
 
 ## 決定事項
@@ -80,7 +80,7 @@ Ravel は group 規約が Bool 属性なので 1 つで足りる。
 `reverse`。
 
 これで stagger が「左から」「中心から」「ランダムに」になる。
-**`per-instance-modulation-plan.md` の stagger はこのノードとセットで
+**`done/per-instance-modulation-plan.md` の stagger はこのノードとセットで
 初めて実用になる。**
 
 ### Resample はパス専用

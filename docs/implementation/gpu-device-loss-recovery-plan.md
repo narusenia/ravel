@@ -604,6 +604,95 @@ producer も consumer も無く、単調増加を確かめる unit test 以外�
   検出できる具体的な test hook は現時点で未確認であり、GPULOSS-4 が「検出しない」と
   決めた範囲をそのまま手動報告へ残す。
 
+#### 実装メモ
+
+5 つの完了条件のうち **実装を足したのは 2 つだけ**で、残りは既に成立していた。
+既に成立していたものは「なぜ成立しているか」をコードで確かめてテストで固定した。
+
+- **足した実装 1: 交換の開始時に viewer を blank にする**
+  （`restart_eval_worker`、fence を上げた直後）。`ViewerFrame` は durable な
+  global で、`GpuFrame` が入っていれば**退役する epoch の texture pool への
+  lease** である。持ち主は global と、それを observe している各 Viewer panel。
+  会計の話だけではない: panel は毎 frame それを**描き続ける**うえ、採用経路の
+  paint guard は「renderer の device」と `AdoptedHostDevice`（coordinator が
+  既に交換後の device へ差し替えている）を比べるので **`Same` と答える** —
+  `ZC-8` が避けている cross-device paint そのものになる。`viewer_surface_enabled`
+  は worker 側のフラグなので、これを落としても**既に publish 済みのフレーム**の
+  paint は止まらない。plan の不変条件の 2 番（「Viewer の Global、panel、
+  frame cache、old worker の送信待ち結果を old epoch として破棄する」）が
+  そのままこの穴だった。
+- **足した実装 2: session の release で `ViewerFrame` を捨てる**
+  （`ProjectState::new_on_host_gpu` の `cx.on_release`）。window lifecycle の
+  c)（main window を閉じて新しい session を開く）で、global は app 全体の寿命を
+  持つので**退役した session のテクスチャが次の session の window に残る**。
+  ここも paint guard は止められない（新 session が `AdoptedHostDevice` を
+  自分の device に差し替えるので、比較は「新 device と新 device」になる）。
+- **既に成立: dead texture が new pool に戻らない**。`PooledHandle` は
+  `Weak<Mutex<TexturePool>>` しか持たないので（`frame.rs`）、old pool の `Arc` が
+  消えた後の遅い drop は upgrade に失敗してテクスチャを捨てる。new pool は別
+  allocation なので、そこへ戻る経路はそもそも無い。テストで固定したのは
+  「frame を持っていても old pool を延命させない」方（強参照に変えると落ちる）。
+- **既に成立: frame cache の old lease**。frame cache は old `EvalService` の
+  持ち物で、`shutdown(self)` と worker thread の終了で reservation ごと返る。
+  交換は new hooks を建てる前に join するので、順序は既に正しい
+  （`GPULOSS-2` の budget assertion がそこを見ている）。
+- **既に成立: old epoch update が new epoch を上書きしない**。generation fence
+  （`on_eval_update` の `<=`）と `GPULOSS-2` の継承で足りている。この単位で
+  足したのは「**blank も** fence に守られている」ことの固定で、blank は
+  評価結果ではなく直接の global 書き込みなので、それ自体には順序が無い。
+- **既に成立: 2 枚目の window が session の GPU context を別々に作らない**。
+  context を取るのは `RavelWorkspace::new` の `host_gpu_context` 1 か所で、
+  `RavelWorkspace` を建てるのは `window_host::main_root` だけ。detached window
+  （`window_host::open`）は `HostSpec { session: None }` の `WindowHost` しか
+  作らない。したがって a) と b) は session を 1 つも増やさず、capability を
+  答えるだけである。
+- **既に成立: old `RenderQueue` の cancel / drop**。`take_queue_for_new_gpu` が
+  未完了 job を cancel して queue を取り出し、評価 worker の join と同じ
+  background task で `shutdown()` する（`GPULOSS-2`）。この単位で固定したのは
+  「次の queue が使う device」の方で、`ensure_queue` は submit の時点で
+  `gpu_context()` を 1 回読むだけなので、**交換が受理された時点で退役 device が
+  そこから消えている**ことが保証になる（`restart_eval_worker` は `self.gpu` を
+  同期的に take する）。
+
+- **`configure_viewer_surface` は session 全体の 1 個の権威のまま**。完了条件の
+  「device mismatch ならその window だけ CPU fallback」は、実装では
+  **session 全体が CPU fallback になる**。別 GPU の 2 枚目の window が
+  main window の zero-copy も落とす。per-window にするには worker が 2 つの
+  表現を同時に作るか capability を window ごとに持つ必要があり、
+  `viewer_surface_enabled` が 1 本の共有 atomic であることと
+  「authority を 2 つにしない」方針の両方に反する。**この単位では変えず**、
+  観測として残す（安全側の劣化であり、破綻ではない）。
+
+- テスト: `frame.rs` に late lease drop 1 本（adapter 必須。`PooledTexture` は
+  実テクスチャなので、adapter の無い環境では既存の兄弟テストと同じく skip する）。
+  `project_state.rs` に 5 本 — lease の解放、blank の fence、session release、
+  2 枚目の window の capability、交換後に残る context。最後の 1 本も adapter 必須
+  で、2 つの `GpuContext` を区別する印として退役側に loss を注入している。
+  lease は `Arc` を `Weak` で見張る形にした（実 `GpuFrameBuffer` は adapter が
+  無いと作れず、`ViewerFrame` の同じ variant が運ぶ `Arc<FrameBuffer>` は
+  **同じ global 書き込みで**解放されるため）。
+
+- **未実施 / 踏めなかった判定**:
+  - 実機の device loss は macOS では起こせない（plan の表のとおり）。
+    Windows 実機 / Parallels Linux / FreeBSD の手動確認は**この単位では未実施**。
+    headless で証明したのは state, lifecycle, stale update, budget, pool order まで。
+  - `cfg(linux / freebsd / windows)` の中は手元で 1 行もコンパイルされない
+    （`observe_host_device`、`host_context`、`adoptable_host_gpu`、
+    `spawn_host_device_recovery`、`paint_gpu_surface` の wgpu 腕、
+    `host_device_loss_detected`）。`GPULOSS-3` の「受理された時だけ
+    `set_global`」の分岐も同じ理由で変異注入できない。
+  - Viewer paint 側の `self_owned_device_loss ||` の短絡（`GPULOSS-4` が
+    「自動テストで守れていない 1 箇所」と書いたもの）は**この単位でも
+    ヘッドレスから踏めない**。実 adapter の `GpuFrameBuffer` と生きた window の
+    paint の両方が要る。代わりに、そのフレームが**そもそも残らない**ように
+    した（実装 1 と 2）ので、退役 epoch のフレームが paint に届く経路自体が
+    狭くなっている。
+  - `take_queue_for_new_gpu` の `queue.cancel(job)` ループそれ自体は
+    自動テストで観測できていない。`RenderQueue` の cancel は共有 state への
+    記録で、それを読む口は `ravel-core` の `#[cfg(test)]` にしかなく、
+    `Cancelled` イベントを出させるには実 job（encoder と出力先）が要る。
+    production API をテストのために増やすより、観測として残す方を選んだ。
+
 ## やらないこと / 見送る選択肢
 
 - **採用 device への二重 callback 登録**: wgpu-core の実装は callback を replace する

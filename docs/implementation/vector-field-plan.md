@@ -8,7 +8,7 @@
 カール noise を可能にする。関連要件: REQ-CORE-012、REQ-MOGRAPH-001、
 REQ-MOGRAPH-002。
 
-**前提**: `per-instance-modulation-plan.md` の単位 2（`FieldSample` 構造体化）。
+**前提**: `done/per-instance-modulation-plan.md` の単位 2（`FieldSample` 構造体化）。
 
 ## 問題
 
@@ -33,7 +33,7 @@ Vec2 フィールドを Vec2 属性へ適用するぶんには通る。`blend_ar
 二項合成が `scalar_values()` で強制変換していること（`field.rs:344`）だけ。
 
 つまり**インターフェース変更は不要**で、実装の追加と合成側の多相化で済む。
-`per-instance-modulation-plan.md` に書いた「フィールドはスカラー場という
+`done/per-instance-modulation-plan.md` に書いた「フィールドはスカラー場という
 性質を保つ」という決定は、この事実を踏まえて**撤回する**。
 
 ## 決定事項
@@ -498,7 +498,7 @@ registry に Vec を出力するテンプレートが 1 つも無い（`constant
   1 点を向く。本計画の目的の検証。
 - **フロー場のゴールデンテスト**: `curl_noise → apply(P, add)` で
   ポイント群が渦を巻く。
-- `per-instance-modulation-plan.md` の「スカラー場に限る」決定を撤回する
+- `done/per-instance-modulation-plan.md` の「スカラー場に限る」決定を撤回する
   記述に差し替え。
 - `gpu-resident-geometry-plan.md` の該当記述を修正。
 - `docs/specifications/procedural-geometry.md` のフィールド節を更新。

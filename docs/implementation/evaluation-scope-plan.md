@@ -210,7 +210,7 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 - `group` パラメータを既存のジオメトリ op に追加:
   `attribute.set` / `attribute.promote` / `geometry.transform`。
   **`field.apply` は対象外** — 同じ規約を
-  `per-instance-modulation-plan.md` の単位 1 が先に入れる（規約はここで
+  `done/per-instance-modulation-plan.md` の単位 1 が先に入れる（規約はここで
   決着しているので、あちらは待つ必要がない）。
 - 空文字列 = 全要素。対象外要素は入力値を通す。
 - registry テンプレートとロケール。

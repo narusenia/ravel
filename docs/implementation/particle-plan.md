@@ -8,7 +8,7 @@ REQ-GPU-001。
 
 **前提**:
 - `stateful-eval-plan.md`（REQ-CORE-011）— sim キャッシュが無いと成立しない。
-- `per-instance-modulation-plan.md` — フォースはフィールドとして接続する。
+- `done/per-instance-modulation-plan.md` — フォースはフィールドとして接続する。
 
 ## 問題
 

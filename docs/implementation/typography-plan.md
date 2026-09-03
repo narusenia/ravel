@@ -6,7 +6,7 @@
 REQ-CORE-007（統一アニメーションチャネル）、REQ-CORE-010（属性）、
 REQ-CORE-012（フィールド）。
 
-**前提**: `per-instance-modulation-plan.md`。文字単位アニメーションを
+**前提**: `done/per-instance-modulation-plan.md`。文字単位アニメーションを
 専用機構ではなくフィールド変調で実現する設計なので、変調層が先に要る。
 
 ## 問題
@@ -126,7 +126,7 @@ path geometry ─→ text.on_path ──────────┘
 `perf-baseline.md` に記録する。ここが 16.6 ms を超えるなら
 グリフキャッシュの設計を見直す（GPU 化ではなく）。
 
-GPU が効くとすれば、文字単位変調（`per-instance-modulation-plan.md`）と
+GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-plan.md`）と
 `text.to_path` 後の輪郭点へのフィールド適用（単位 5）で、これは
 `gpu-resident-geometry-plan.md` が担う。**本計画は GPU 常駐ジオメトリが
 入っても書き換えが要らない形**にする — グリフ輪郭を

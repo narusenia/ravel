@@ -82,3 +82,63 @@ fsync をバッチ / 非同期にして実際に配線する。(b) 計画がで�
 
 ---
 
+## MED-CORE-09 | debt | テンプレートとプロセッサの対応を機械的に確かめるテストが無いので、登録忘れは「置けるが評価されない」ノードになる
+
+**該当**: `crates/ravel-nodes/src/lib.rs`（`processor_for_node` の巨大な
+`match`）、`crates/ravel-core/src/registry/builtin.rs`（`register_builtins`）
+
+ノードを足すには 2 か所に書く必要がある — レジストリに `NodeTemplate` を、
+`processor_for_node` に `type_key` の腕を。**片方を忘れてもコンパイルは通る**。
+テンプレートだけ足すと、Add Node に出て配線もできるが評価だけが `None` を
+返すノードができる。`docs/dev/add-node.md` は「忘れやすいもの」として
+名指ししているが、**コード側のガードは無い**。
+
+同種の抜けは他の資産では塞がれている: ロケールは
+`all_builtin_templates_have_a_label_in_every_locale` が全テンプレートを走査し、
+アイコンは `every_node_template_icon_is_embedded` が走査し、テンプレート数は
+`register_all_builtins` が数える。**評価経路だけが走査されていない。**
+
+**実害**: 中程度。壊れ方は「ノードを置いたのに何も出ない」で、原因が
+レジストリと処理系の食い違いだと分かるまで時間を食う。データは壊れない。
+
+**なぜ素朴なテストが書けないか**: `processor_for_node` は `GpuContext` を
+要求するので、「全テンプレートを回して `Some` が返ることを確かめる」テストは
+GPU アダプタが無い環境で通らない。
+
+**修正方針**: アダプタを要らない形にする。案としては、(a) `type_key` の
+集合を宣言的に持って両側から突き合わせる、(b) プロセッサ構築を GPU 依存から
+切り離して「構築できるか」だけを問える関数を出す、(c) アダプタ必須の
+スイープテストにして CI の GPU 有無で skip する。**(a) が最も安い**
+（`processor_for_node` の `match` の腕を配列から生成するか、逆に配列を
+match から導く）。
+
+**severity の根拠**: bug ではなく debt（現在の登録は全部揃っている）。
+low でないのは、`docs/dev/add-node.md` 自身が警告している穴が
+**ノードを足すたびに踏まれる可能性を持ち続ける**ため。2026-09-03 の
+`MOD-3` / `MOD-4` / `OPS-2` の実装で**3 回独立に指摘された**。
+
+## MED-CORE-10 | bug | ドメインパラメータの選択肢を宣言していないノードがあり、タイポが既定値に黙って吸われる
+
+**該当**: `crates/ravel-core/src/registry/builtin.rs`（`attribute.promote` の
+`source_domain` / `target_domain`、`attribute.curveu`）
+
+`attribute.set` / `attribute.transfer` / `attribute.delete` は
+`with_param_options(ATTRIBUTE_DOMAINS)` を宣言しているので、Properties は
+選択肢から選ぶ UI になる。**`attribute.promote` の 2 つのドメイン
+パラメータと `attribute.curveu` は宣言していない**ので自由入力になり、
+綴りを間違えると `domain_param` の警告 + 既定フォールバックで
+**黙って別のドメインに書き込む**。
+
+既存テスト（`closed_attribute_parameter_options_match_the_processor_contracts`）
+は `promote` の `aggregate` しか見ていないので、この抜けを捕まえない。
+
+**実害**: 小さいが黙っている。プロジェクトを保存すると誤ったドメイン名が
+そのまま残り、開き直しても同じ既定に吸われ続ける。
+
+**修正方針**: 3 パラメータに `with_param_options` を足し、既存テストの
+走査対象を「ドメインを取る全パラメータ」に広げる。
+
+**severity の根拠**: bug（誤った入力が無言で別の意味になる）。low でないのは
+永続化された値が黙って別解釈されるため、high でないのは誤りが 1 ノードに
+閉じ、データが壊れないため。
+

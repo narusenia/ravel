@@ -32,7 +32,7 @@ Properties では `PropertyField::String` になり、`"0:0,0.5:0.8,1:1"` を
 ロード時変換が拾う。**残っているのは Properties 側の受け皿**（単位 2）で、
 現状は読み取り専用サマリ（`N points`）が出るだけ。
 
-`field.curve_remap` は変調の中核ノードで、`per-instance-modulation-plan.md` が
+`field.curve_remap` は変調の中核ノードで、`done/per-instance-modulation-plan.md` が
 用意する変調層の要になる。
 
 ### 2. カラーランプの置き場所が無い

@@ -28,7 +28,6 @@ the design behind a unit.
 | `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | units 1–4 done — 2026-07-26 | REQ-MEDIA-002, REQ-MEDIA-003 |
 | `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | unit 1 done — 2026-07-27 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
-| `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
@@ -36,7 +35,7 @@ the design behind a unit.
 ## Planned
 
 Ordered by dependency. The REQ-MOGRAPH work now runs through
-`per-instance-modulation-plan.md`, which is already in progress above —
+`done/per-instance-modulation-plan.md`, which is already in progress above —
 several plans here wait on its later units rather than on each other.
 
 | File | Subject | Depends on | Related requirements |
@@ -52,13 +51,13 @@ several plans here wait on its later units rather than on each other.
 | `path-shading-plan.md` | The CPU per-pixel path evaluator, vertex-colour interpolation along a stroke, and `stroke_align` — the three things blocked on zeno returning coverage and nothing else | `style-attributes-plan.md` unit 6 (merged) | REQ-MOGRAPH-001, REQ-RENDER-001, REQ-CORE-012 |
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, the green cache bar, layer-scoped invalidation and idle read-ahead — **the cross-cutting cache charter**; what is left is the disk tier (`CACHE-11`, measurement-gated) and the f16 pixel loops (`CACHE-Y`) | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
-| `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
+| `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
 | `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache | — | REQ-CORE-011 |
-| `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
+| `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
 | `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed** | — | REQ-CORE-009, REQ-GPU-001/003 |
 | `style-attributes-plan.md` | Fill and stroke as per-element attributes | — | REQ-CORE-010, REQ-MOGRAPH-001 |
-| `vector-field-plan.md` | Vector fields — look-at, curl noise, flow — **units 5 and 7a merged** | `per-instance-modulation-plan.md` | REQ-CORE-012 |
+| `vector-field-plan.md` | Vector fields — look-at, curl noise, flow — **units 5 and 7a merged** | `done/per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |
 | `layer-shell-wiring-plan.md` | Wire the declared-but-unused `track_matte` and `time_remap` | — | REQ-LAYER, REQ-CORE-001 |
 | `ci-cache-plan.md` | Move the CI cache to sccache + Cloudflare R2 — **two platforms' `target/` archives cannot both fit the 10 GB limit, so every merge evicts the other** | — (needs an R2 bucket and repository secrets) | — |
@@ -187,6 +186,7 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, the `field.time` / `field.constant` driving sources, `attribute.delete`, and the CPU rasterize goldens that check off REQ-MOGRAPH-001 | #188, #189, #499, #502, #504 — 2026-09-03 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `done/gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle; `HIGH-33` stays open because no real device loss has been exercised on hardware | #485, #493, #495, #500 — 2026-09-03 | REQ-GPU-001 |
 | `done/viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, the hit fallback and path point editing, polygon/star drawing, and the specification catch-up — took over MED-APP-15 | #484, #487, #489, #491, #497 — 2026-09-03 | REQ-UI-011 |
 | `done/viewer-inspection-plan.md` | Composition background wiring and the checkerboard, channel isolation, the pixel value readout, and the playback / cache status line; `INSP-5` decided the four scopes belong to a plan of their own (`viewer-scopes-plan.md`) | #213, #479, #480, #482 — 2026-08-25 | REQ-UI-004, REQ-LAYER-001 |

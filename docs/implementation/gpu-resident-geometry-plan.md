@@ -9,7 +9,7 @@
 限定する。関連要件: REQ-CORE-009、REQ-GPU-001、REQ-GPU-003、
 REQ-CORE-005。
 
-**順序**: `per-instance-modulation-plan.md` の後、`particle-plan.md` の前。
+**順序**: `done/per-instance-modulation-plan.md` の後、`particle-plan.md` の前。
 変調でフィールドと属性のインターフェースが固まってから GPU に写し、
 最初の実利用者であるパーティクルに間に合わせる。
 
@@ -84,7 +84,7 @@ CPU 経路が本番で動いていて剥がすのが高い。
 | D | C → `rasterize`（GPU）まで含む end-to-end | 同上 |
 
 各シナリオで **CPU 評価時間・アップロード時間・GPU 時間**を分けて記録する。
-シナリオ B / C は `per-instance-modulation-plan.md` の完了が前提
+シナリオ B / C は `done/per-instance-modulation-plan.md` の完了が前提
 （未完了なら手組みのフィールドチェーンで代用する）。
 
 ### 判断基準
@@ -222,7 +222,7 @@ REQ-GPU-003 の「フィールドの WGSL 評価」に相当。
   `field.attribute` / `field.constant` / 二項合成の WGSL 版。
   ベクタ場（`vector-field-plan.md`）が入っている場合は戻り値が
   `vec2<f32>` になるだけで、1 フィールド = 1 WGSL 関数の構造は変わらない。
-- `field.apply` の combine（`per-instance-modulation-plan.md` 単位 1 の
+- `field.apply` の combine（`done/per-instance-modulation-plan.md` 単位 1 の
   `CombineMode` と成分マスク）を 1 カーネルにまとめる。
 
 **完了条件**

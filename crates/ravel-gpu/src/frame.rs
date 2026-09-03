@@ -309,6 +309,64 @@ mod tests {
         );
     }
 
+    /// `GPULOSS-5`: the pool teardown order, seen from the lease's side.
+    ///
+    /// A device epoch swap drops the retiring pool **before** the frames that
+    /// leased from it: the GPUI completion clone of the last viewer frame is
+    /// released by a draw that a dead device may never make, so the swap
+    /// cannot wait for it (`gpu-device-loss-recovery-plan.md`, "pool lease の
+    /// 順序制約"). Two things have to hold when that late drop finally runs.
+    ///
+    /// * Holding the frame must not have kept the retiring pool alive. The
+    ///   pool holds the retiring `GpuContext` and its idle textures are
+    ///   charged to the session's cache budget, so a strong reference here
+    ///   would keep a whole dead epoch resident behind the replacement.
+    /// * The dead texture must not reach the replacement pool. It belongs to
+    ///   the previous device; handing it back out is what would put it under
+    ///   the new device's dispatches.
+    #[test]
+    fn a_late_lease_drop_does_not_reach_the_replacement_pool() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let old_pool = Arc::new(Mutex::new(TexturePool::new(ctx.clone(), 64 * 1024 * 1024)));
+        let texture = old_pool.lock().unwrap().acquire(rw_key(8, 8));
+        let frame = GpuFrameBuffer::new(ctx.clone(), &old_pool, texture, 8, 8);
+        // What a renderer still holds when the epoch ends.
+        let completion = frame.completion_signal();
+
+        // The swap's order: the pool is retired while the leases are still out.
+        let retired = Arc::downgrade(&old_pool);
+        drop(old_pool);
+        assert!(
+            retired.upgrade().is_none(),
+            "an outstanding frame kept the retired pool alive, so the retiring \
+             device and its budget reservations outlive their epoch"
+        );
+
+        // The replacement epoch's pool: a distinct allocation, which is what
+        // makes the late drops below harmless rather than a cross-device reuse.
+        let new_pool = Arc::new(Mutex::new(TexturePool::new(ctx, 64 * 1024 * 1024)));
+        drop(frame);
+        drop(completion);
+        assert_eq!(
+            new_pool.lock().unwrap().idle_count(),
+            0,
+            "a texture from the retired device was returned to the replacement pool"
+        );
+
+        // And the replacement allocates for itself rather than serving
+        // something it never owned.
+        let replacement = new_pool.lock().unwrap().acquire(rw_key(8, 8));
+        assert_eq!(
+            new_pool.lock().unwrap().total_created(),
+            1,
+            "the replacement pool served a texture it did not create"
+        );
+        drop(replacement);
+    }
+
     #[test]
     fn completion_signal_keeps_texture_until_renderer_releases_it() {
         let Some(ctx) = GpuContext::new_blocking().ok() else {

@@ -376,6 +376,10 @@ impl DataTypeId {
     pub const TIME_CODE: Self = Self(20);
     pub const AUDIO_BUFFER: Self = Self(30);
     pub const PLAIN_TEXT: Self = Self(40);
+    /// A resolved font face ([`crate::text::FontRef`]). Numbered beside
+    /// `PLAIN_TEXT` because it belongs to the same text domain: a font is
+    /// what the text nodes need alongside the string itself.
+    pub const FONT: Self = Self(41);
     pub const GEOMETRY: Self = Self(50);
     pub const FIELD: Self = Self(51);
     /// A 3D scene ([`crate::scene::Scene`]): objects, their transforms, and

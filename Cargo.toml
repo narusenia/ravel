@@ -77,6 +77,13 @@ im = { version = "15", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 smol_str = "0.3"
 zeno = "0.3"
+# Font face metadata for `ravel_core::text` (family, weight, slant) and the
+# glyph outlines the later typography units read. Already in the tree behind
+# `rustybuzz` and `swash` at this exact version, so naming it here adds a
+# direct edge rather than a crate — and it is pure Rust, which is why font
+# resolution can live in `ravel-core` without `ravel-cli` linking a platform
+# font API (`docs/implementation/typography-plan.md`, unit 1).
+ttf-parser = "0.25"
 # Polygon triangulation (`geometry::triangulate`). GeoRust's port of mapbox
 # earcut: `MIT OR Apache-2.0`, `num-traits` its only dependency, and the
 # `Earcut` instance keeps its scratch buffers between calls so a per-frame

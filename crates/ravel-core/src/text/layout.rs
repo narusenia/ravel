@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ttf_parser::{GlyphId, OutlineBuilder};
 use unicode_bidi::ParagraphBidiInfo;
@@ -601,6 +602,28 @@ fn cluster_geometry(
 // Layout
 // ===========================================================================
 
+/// Where the time of one [`layout_text_timed`] call went.
+///
+/// The three stages the typography plan's baseline asks to be told apart.
+/// `shaping` is rustybuzz turning characters into positioned glyphs;
+/// `outlines` is reading the glyph contours out of the face, once per
+/// **distinct** cluster; `placement` is everything else — line breaking,
+/// alignment, and writing the attribute columns.
+///
+/// Timing is always collected rather than switched on: it is three clock
+/// reads per layout plus two per distinct cluster, microseconds against a
+/// call that shapes a paragraph, and it means the perf harness measures
+/// exactly the code a frame runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutTiming {
+    /// rustybuzz, per paragraph.
+    pub shaping: Duration,
+    /// Glyph contour extraction, once per distinct cluster.
+    pub outlines: Duration,
+    /// The remainder: line breaking, alignment, attribute columns.
+    pub placement: Duration,
+}
+
 /// Lay `text` out in `font` and return the per-character instance geometry
 /// (typography-plan unit 2).
 ///
@@ -621,6 +644,21 @@ pub fn layout_text(
     text: &str,
     params: &LayoutParams,
 ) -> Result<Geometry, TextError> {
+    layout_text_timed(font, text, params).map(|(geometry, _)| geometry)
+}
+
+/// [`layout_text`], reporting where the time went.
+///
+/// The measurement entry point (`examples/text_layout_baseline.rs`); the
+/// layout itself is identical, so a number it reports is a number a frame
+/// pays.
+pub fn layout_text_timed(
+    font: &FontRef,
+    text: &str,
+    params: &LayoutParams,
+) -> Result<(Geometry, LayoutTiming), TextError> {
+    let started = Instant::now();
+    let mut timing = LayoutTiming::default();
     let face =
         rustybuzz::Face::from_slice(&font.data, font.face_index).ok_or(TextError::FaceParse)?;
     let upem = face.units_per_em();
@@ -643,7 +681,9 @@ pub fn layout_text(
         // A CRLF document leaves the CR at the end of the paragraph, where it
         // would shape into a visible cluster.
         let paragraph = paragraph.strip_suffix('\r').unwrap_or(paragraph);
+        let shaping = Instant::now();
         let clusters = shape_paragraph(&face, paragraph);
+        timing.shaping += shaping.elapsed();
         let breaks = break_offsets(paragraph);
         lines.extend(wrap_paragraph(
             &clusters,
@@ -709,7 +749,10 @@ pub fn layout_text(
                 Some(&index) => index,
                 None => {
                     let index = sources.len();
-                    sources.push(Arc::new(cluster_geometry(&face, &cluster.glyphs, scale)?));
+                    let outline = Instant::now();
+                    let geometry = cluster_geometry(&face, &cluster.glyphs, scale)?;
+                    timing.outlines += outline.elapsed();
+                    sources.push(Arc::new(geometry));
                     by_glyphs.insert(cluster.glyphs.clone(), index);
                     index
                 }
@@ -756,7 +799,14 @@ pub fn layout_text(
     instances.insert(names::ADVANCE, AttributeArray::F32(advances))?;
     instances.insert(names::SOURCE_INDEX, AttributeArray::I32(source_indices))?;
     geometry.set_instance_sources(sources);
-    Ok(geometry)
+    // Placement is the remainder rather than its own clock, so the three
+    // stages always sum to the call: a stage nobody instrumented shows up
+    // here instead of vanishing.
+    timing.placement = started
+        .elapsed()
+        .saturating_sub(timing.shaping)
+        .saturating_sub(timing.outlines);
+    Ok((geometry, timing))
 }
 
 #[cfg(test)]

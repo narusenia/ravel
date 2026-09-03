@@ -336,6 +336,30 @@ span を非有限にして全要素を無警告でゼロに潰す。どちらも
   add(field.time) → curve_remap → apply(rot, add)` の結合テストが
   インスタンスごとに異なる `rot` を出す（= stagger 成立）。
 
+> **`normalized` の基準と `field.time` の時間依存（実装時 2026-09-03）**。
+> 2 点が実装で決まった。
+>
+> 1. **`normalized` は node の `duration`（フレーム数）で割る。**
+>    `EvalContext` はフレームだけを運び、評価対象コンポジションの長さを
+>    持たない（`Composition::duration_frames` は Document 側）。
+>    `scope.document()` から辿ることはできるが、コンポ設定の変更は
+>    キャッシュ識別子に入っていないので黙って陳腐化する。基準を node の
+>    パラメータに置けばフィールドは `ctx` と自分のパラメータだけの純関数の
+>    まま。既定は 300（`CompositionSettings::FALLBACK_DURATION` と同じ数字を
+>    core 側に書き写している。core から UI クレートは参照しない）。
+>    非正・NaN の `duration` は `0.0` に落とす（無限大を下流へ流さない）。
+> 2. **`field.time` は常に `is_time_dependent()` を返す。**
+>    `TimeField` は sample 時の `ctx` を読むので `FieldValue` 自体は
+>    毎フレーム同一のオブジェクトで、下流からは変化が見えない。
+>    `field.expression` が同じ罠を文書化している（`TimeKey::TIMELESS` で
+>    `field.apply` ごとキャッシュされ絵が止まる）。node を毎フレーム
+>    再 pull させることが `CacheMiss::InputFresh` の唯一の発生源。
+>
+> `field.constant` の `value` の既定は `1.0`（乗算の単位元）。`0.0` は
+> 未接続の `FIELD` ポートが既に返す値なので、既定にすると no-op になる。
+> `ConstantField` は core に既存だったので、この単位で core に増えたのは
+> `TimeField` / `TimeMode` だけ。
+
 ### 単位 4: `attribute.delete`（REQ-CORE-010 の取りこぼし）
 
 REQ-CORE-010 は属性の「読み書き・追加・**削除**」を求めているが、削除だけ

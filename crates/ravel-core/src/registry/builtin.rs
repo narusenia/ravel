@@ -189,6 +189,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_time());
     reg.register(field_constant());
     reg.register(field_apply());
+    reg.register(text_font());
 }
 
 fn geometry_input(name: &str) -> InputPort {
@@ -1973,6 +1974,29 @@ fn shape_custom_path() -> NodeTemplate {
         })
 }
 
+/// `text.font`: resolves a family, weight, and style into a font face.
+///
+/// Utility rather than Geometry: the node produces a value, not geometry —
+/// `text.layout` is the one that turns a string and this face into glyph
+/// instances (`docs/implementation/typography-plan.md`).
+///
+/// A family the machine does not have does **not** fail the evaluation. The
+/// node answers with the built-in face and one warning, so opening someone
+/// else's project renders text in the wrong font rather than rendering an
+/// error (`ravel_core::text`).
+fn text_font() -> NodeTemplate {
+    NodeTemplate::new("text.font", "Font", NodeCategory::Utility)
+        .with_output(OutputPort {
+            name: "font".into(),
+            data_type: DataTypeId::FONT,
+        })
+        .with_param(string_parameter("family", crate::text::DEFAULT_FAMILY))
+        .with_param(string_parameter("weight", "regular"))
+        .with_param_options("weight", crate::text::FONT_WEIGHTS)
+        .with_param(string_parameter("style", "normal"))
+        .with_param_options("style", crate::text::FONT_STYLES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2004,7 +2028,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 84);
+        assert_eq!(reg.all_templates().count(), 85);
     }
 
     #[test]
@@ -2017,7 +2041,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 25);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 26);
     }
 
     /// Each `field.compose` arity declares one `FIELD` input per component,

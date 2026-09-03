@@ -183,6 +183,7 @@ plain_text = "Text"
 geometry = "Geometry"
 field = "Field"
 scene = "Scene"
+font = "Font"
 
 [panel.node_graph_menu]
 add_node = "Add Node"
@@ -1440,6 +1441,14 @@ create_if_missing = "Create the attribute when the geometry does not have it yet
 target = "Target"
 blend = "Blend"
 scope = "Scope"
+
+[node."text.font"]
+label = "Font"
+description = "Resolves a font family, weight, and style into a font face for the text nodes. A family this machine does not have falls back to the bundled face and logs a warning instead of failing the evaluation."
+[node."text.font".params]
+family = "Font family name, matched case-insensitively against the installed and bundled faces."
+weight = "Face weight. The nearest weight the family actually carries is used."
+style = "Upright or slanted face."
 
 [export]
 title = "Export"

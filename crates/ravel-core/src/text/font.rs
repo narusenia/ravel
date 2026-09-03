@@ -45,7 +45,7 @@ use crate::types::NodeData;
 /// lives beside the file in `assets/fonts/` and has to travel with any release
 /// bundle). Regular alone: it costs ~123 KiB in every binary including
 /// `ravel-cli`, and a fallback needs one face, not a family.
-const FALLBACK_FONT: &[u8] = include_bytes!("../../../assets/fonts/Geist-Regular.ttf");
+const FALLBACK_FONT: &[u8] = include_bytes!("../../../../assets/fonts/Geist-Regular.ttf");
 
 /// The family a new `text.font` node asks for.
 ///

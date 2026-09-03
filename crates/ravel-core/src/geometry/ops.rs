@@ -3360,6 +3360,16 @@ mod tests {
     /// animated element count passes through both every frame.
     #[test]
     fn a_domain_with_nothing_to_reorder_passes_through() {
+        // An empty geometry has no `P` column to read a key out of, so the
+        // guard is what makes an empty frame a pass-through rather than an
+        // error.
+        assert_eq!(
+            sort(&Geometry::new(), Domain::Point, SortMode::X)
+                .unwrap()
+                .point_count(),
+            0
+        );
+
         let single = Geometry::from_points(vec![Vec2(6.25, -3.75)]);
         assert_eq!(
             sort(&single, Domain::Point, SortMode::X)

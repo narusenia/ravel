@@ -865,7 +865,7 @@ Hand の左ドラッグパンも Zoom のクリックズームもハンドラが
 **修正方針**: Hand は左ドラッグをパン経路へ、Zoom はクリック / alt+クリックを `zoom_toward` へ
 ルーティングする。または実装まではツールを外す。
 
-**引受先**: `docs/implementation/viewer-tool-extensions-plan.md` の `TOOLX-1`
+**引受先**: `docs/implementation/done/viewer-tool-extensions-plan.md` の `TOOLX-1`
 （実装する方を採る）。`docs/implementation/done/pointer-feedback-plan.md` は
 この 2 ツールのカーソルを意図的に見送っており、`TOOLX-1` がカーソルも同時に付ける
 （機能が無いものに UI の約束をしないため）。

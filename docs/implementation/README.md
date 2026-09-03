@@ -30,8 +30,6 @@ the design behind a unit.
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `per-instance-modulation-plan.md` | Field-driven per-instance attribute modulation, `attribute.delete` | units 1–2 done — 2026-07-28 | REQ-MOGRAPH-001, REQ-CORE-010, REQ-CORE-012 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
-| `gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle | GPULOSS-1 done; GPULOSS-2 / GPULOSS-3 / GPULOSS-4 done — 2026-09-03 | REQ-GPU-001 |
-| `viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, path point editing, polygon/star drawing — takes over MED-APP-15 | TOOLX-1 done — 2026-08-28; TOOLX-2 / TOOLX-3 / TOOLX-4 done — 2026-09-02; TOOLX-5 done — 2026-09-03 | REQ-UI-011 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |
 | `settings-screen-plan.md` | Settings dialog, the 4-layer apply path, theme/locale/keybinding reachability | SET-1–7 done — 2026-08-03; SET-8/SET-16 done — 2026-08-10; SET-9–SET-15 gated on their features | REQ-PROJ-004, REQ-UI-006/007 |
 
@@ -189,6 +187,8 @@ textured-rectangle behaviour; only the route to it changes.
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/gpu-device-loss-recovery-plan.md` | Recover adopted and owned GPU devices across the evaluator, texture pools, viewer, export queue, and window lifecycle; `HIGH-33` stays open because no real device loss has been exercised on hardware | #485, #493, #495, #500 — 2026-09-03 | REQ-GPU-001 |
+| `done/viewer-tool-extensions-plan.md` | Hand/Zoom tools, box selection, the hit fallback and path point editing, polygon/star drawing, and the specification catch-up — took over MED-APP-15 | #484, #487, #489, #491, #497 — 2026-09-03 | REQ-UI-011 |
 | `done/viewer-inspection-plan.md` | Composition background wiring and the checkerboard, channel isolation, the pixel value readout, and the playback / cache status line; `INSP-5` decided the four scopes belong to a plan of their own (`viewer-scopes-plan.md`) | #213, #479, #480, #482 — 2026-08-25 | REQ-UI-004, REQ-LAYER-001 |
 | `done/viewer-preview-resolution-plan.md` | Preview resolution factor (`Full`/`1/2`/`1/4`) replacing the hidden `VIEWER_MAX_DIM` cap, the picker and cycling command, the factor in `ui_state.json`, and the input-driven adaptive step | #300, #473, #474, #475, #476 — 2026-08-24 | REQ-UI-004 |
 | `done/media-import-plan.md` | Media import, asset references, MediaBin, the unified media node, the asset inspector with relink, and the offline marks | #469, #470 — 2026-08-21 | REQ-UI-008, REQ-UI-010, REQ-PROJ-001 |

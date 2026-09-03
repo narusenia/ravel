@@ -484,7 +484,7 @@ worker の `DisplayTransform` がそれを読んで「GPU テクスチャを出�
 出すか」を決める。**出力の形が session に 1 つしかない**ので、window ごとに
 別の答えを持てない。
 
-結果、`gpu-device-loss-recovery-plan.md` の `GPULOSS-5` が完了条件に書いた
+結果、`done/gpu-device-loss-recovery-plan.md` の `GPULOSS-5` が完了条件に書いた
 「device mismatch ならその window だけ CPU fallback」は、実装では
 **session 全体が CPU fallback になる**。別 GPU に載った 2 枚目の window を開くと、
 main window の zero-copy も一緒に落ちる。

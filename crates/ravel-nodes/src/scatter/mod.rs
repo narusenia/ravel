@@ -14,7 +14,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, names,
+    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, element_hash as hash,
+    names,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2};
@@ -430,14 +431,6 @@ impl NodeProcessor for ScatterProcessor {
         attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
-}
-
-/// Deterministic hash (Wang hash variant).
-fn hash(seed: u32, index: u32) -> u32 {
-    let mut h = seed.wrapping_mul(0x9E37_79B9).wrapping_add(index);
-    h = (h ^ (h >> 16)).wrapping_mul(0x045D_9F3B);
-    h = (h ^ (h >> 16)).wrapping_mul(0x045D_9F3B);
-    h ^ (h >> 16)
 }
 
 fn hash_to_f32(h: u32) -> f32 {

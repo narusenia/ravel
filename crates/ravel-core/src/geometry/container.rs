@@ -500,6 +500,14 @@ impl Geometry {
         self.primitives.push(prim);
     }
 
+    /// Replaces the primitive list wholesale. For the element operations that
+    /// reorder or remove primitives, which have to keep the list and the
+    /// primitive attribute columns in step — building it up with
+    /// [`Self::push_primitive`] would leave the old ones in front.
+    pub(crate) fn set_primitives(&mut self, primitives: Vec<Primitive>) {
+        self.primitives = primitives;
+    }
+
     /// The shared triangle index buffer backing every [`Primitive::Mesh`].
     pub fn indices(&self) -> &[u32] {
         &self.indices

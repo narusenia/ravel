@@ -65,11 +65,13 @@ canvas 上のカーソルは既存の click / drag と同じヒットテスト�
 |---|---|---|
 | Timeline | ルーラー / トリム端=`ResizeLeftRight`、バー=`OpenHand`、ロック=`OperationNotAllowed`、キー / グラフアンカー=`PointingHand`、グラフ接線 / 空白=`Crosshair` | スクラブ / トリム=`ResizeLeftRight`、移動=`ClosedHand`、並べ替え=`ResizeUpDown`、範囲 / 接線=`Crosshair` |
 | Node Graph Editor | ポート / 空白=`Crosshair`、ノード=`OpenHand`、エッジ=`PointingHand` | 接続=`Crosshair`（スナップ時 `DragLink`）、ノード移動 / パン=`ClosedHand`、矩形選択=`Crosshair` |
-| Viewer | 描画=`Crosshair`、選択本体=`OpenHand`、パスアンカー=`PointingHand`、接線=`Crosshair`、閉路可能な始点=`DragCopy` | パン / 本体 / アンカー=`ClosedHand`、描画 / 接線=`Crosshair` |
+| Viewer | 描画=`Crosshair`、選択本体=`OpenHand`、パスアンカー=`PointingHand`、接線=`Crosshair`、閉路可能な始点=`DragCopy`、殻のスケール=`Resize*`（4 方向）、殻の回転=`DragLink`、殻のアンカー=`PointingHand`、Hand ツール=`OpenHand`、Zoom ツール=`Crosshair` | パン / 本体 / アンカー=`ClosedHand`、描画 / 接線 / Zoom の矩形=`Crosshair` |
 | Outliner | 行=`PointingHand` | レイヤー並べ替え=`ResizeUpDown` |
 
-Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する操作が未実装のため
-カーソルを割り当てない。
+カーソルは操作の約束なので、動作を持たない対象には割り当てない — Viewer で
+残っているのは**ノード選択 bbox の 8 個の印**（飾り。同じ位置に出る殻マニピュレータの
+グリップは別の印で、そちらはカーソルを持つ）。Hand / Zoom は `TOOLX-1` で
+ジェスチャーが付いたので割り当ててある。
 
 ## パネル一覧
 
@@ -97,7 +99,7 @@ Viewer の Hand / Zoom ツールと bbox の 8 ハンドルには、対応する
 どのプリセットにも無いが、**17 種すべてに View メニューの表示トグルがある**ので
 プリセットに依らず出せる。担当計画:
 Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
-`done/viewer-inspection-plan.md` の `INSP-5`（引き取り判断）、Text Editor は
+`viewer-scopes-plan.md` の `MON-1〜7`、Text Editor は
 `typography-plan.md`、Shader Editor と Lua Console は REQ-CODE-001。
 
 Render Queue はどのプリセットにも無いが実装済みで、View メニューか

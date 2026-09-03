@@ -744,15 +744,16 @@ pub fn element_hash(seed: u32, index: u32) -> u32 {
 /// explicit error instead: its triangle indices are relative to `verts.start`,
 /// so moving its points would reface it.
 ///
-/// Fewer than two elements — and the detail domain, which has exactly one —
-/// is a no-op that returns the input unchanged.
+/// Fewer than two elements is a no-op that returns the input unchanged, which
+/// is also the whole of the detail domain: it holds exactly one element and
+/// therefore has no order to change.
 pub fn sort(
     geometry: &Geometry,
     domain: Domain,
     mode: SortMode<'_>,
 ) -> Result<Geometry, GeometryOpError> {
     let count = domain_count(geometry, domain);
-    if domain == Domain::Detail || count < 2 {
+    if count < 2 {
         return Ok(geometry.clone());
     }
     if domain == Domain::Point {

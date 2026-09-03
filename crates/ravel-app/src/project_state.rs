@@ -705,6 +705,24 @@ impl ProjectState {
             viewer_input_epoch: 0,
             viewer_eval_requests: 0,
         };
+        // A retired session takes its published frame with it (`GPULOSS-5`).
+        // [`crate::panels::ViewerFrame`] is durable and app-wide, so closing
+        // the main window would otherwise leave this session's
+        // `GpuFrameBuffer` — a lease on a texture pool that is being torn
+        // down, on a device nothing evaluates on any more — in the global for
+        // the *next* session's window to pick up and paint. The adopted-host
+        // paint guard does not stop that: it compares the renderer's device
+        // against `AdoptedHostDevice`, which the new session has already
+        // replaced with its own, so it answers "unchanged" about a texture
+        // that belongs to neither device.
+        //
+        // The overlay snapshot goes for the same reason it goes on every other
+        // path that blanks the viewer: it annotates a frame that is gone.
+        cx.on_release(|_this, cx| {
+            cx.set_global(crate::panels::ViewerFrame::default());
+            cx.set_global(EvalResults::default());
+        })
+        .detach();
         if !EVAL_DISABLED_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
             match host_gpu.map_or_else(GpuContext::new_blocking, Ok) {
                 Ok(gpu_ctx) => {

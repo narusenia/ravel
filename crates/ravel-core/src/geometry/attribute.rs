@@ -280,6 +280,16 @@ impl AttributeSet {
         Ok(self.columns.insert(name, Arc::new(column)))
     }
 
+    /// Removes the column for `name`, returning it when it was there.
+    ///
+    /// Dropping a column cannot break the set's uniform length, so unlike
+    /// [`insert`](Self::insert) this never fails. Removing the *last* column
+    /// takes the set's [`element_count`](Self::element_count) to zero, which
+    /// is why `Geometry` refuses to delete a position column.
+    pub fn remove(&mut self, name: &str) -> Option<Arc<AttributeArray>> {
+        self.columns.remove(name)
+    }
+
     /// Returns a mutable column, cloning only that column when it is shared.
     ///
     /// The caller must not change the column's length: uniform length across

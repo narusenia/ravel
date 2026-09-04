@@ -71,7 +71,7 @@
   （`MED-CORE-04` は 2026-08-03 に再判定して未解決へ戻した。デシリアライズ経路は
   `HIGH-26` で閉じたが、評価側の再帰が残るので未解決のまま。
   [`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
-- [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07`
+- [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07` `10`
 - [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `02` `03` `04` `05` `06`
   （未解決分は `MED-UI-07` のみ。
   [`../medium/ui-rendering.md`](../medium/ui-rendering.md)）

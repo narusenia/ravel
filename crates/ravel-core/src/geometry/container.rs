@@ -317,6 +317,103 @@ impl InstanceSource {
     }
 }
 
+/// Instance nesting guard: instances-of-instances beyond this depth are
+/// skipped rather than recursed (the spec limits stateful/sim nesting
+/// similarly).
+///
+/// One constant for the whole instance model: `rasterize` stops drawing at
+/// this depth and [`ops::expand_instances`](super::ops::expand_instances)
+/// stops flattening at it, so a nesting too deep to draw is also one too deep
+/// to convert — the picture and the geometry agree about what exists.
+pub const MAX_INSTANCE_DEPTH: u32 = 4;
+
+/// The affine placement one instance applies to its source: scale, then
+/// rotate, then translate.
+///
+/// The single definition of that composition, because two consumers have to
+/// agree on it exactly. `rasterize` reads it per instance while it draws, and
+/// [`ops::expand_instances`](super::ops::expand_instances) bakes it into the
+/// points when an instance geometry is flattened into one geometry; a text
+/// drawn as instances and the same text converted to paths have to land on
+/// the same pixels.
+///
+/// The columns are [`names::P`], [`names::ROT`] and [`names::SCALE`], each
+/// defaulting to the identity when the instance domain does not carry it.
+/// Two-dimensional: the 3D placement (`orient` / `scale3`) is a later unit,
+/// and a caller handed 3D positions raises
+/// [`GeometryError::RequiresPlanarP`] rather than projecting them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InstanceTransform {
+    /// Where the instance sits, in the coordinate space of the geometry that
+    /// owns the instance domain.
+    pub offset: Vec2,
+    /// Turn in radians, applied after [`Self::scale`].
+    pub rot: f32,
+    /// Per-axis scale, applied before [`Self::rot`].
+    pub scale: Vec2,
+}
+
+impl InstanceTransform {
+    /// The placement that changes nothing.
+    pub const IDENTITY: Self = Self {
+        offset: Vec2(0.0, 0.0),
+        rot: 0.0,
+        scale: Vec2(1.0, 1.0),
+    };
+
+    /// A point placed: scaled about the source origin, turned, then moved.
+    pub fn apply(&self, p: Vec2) -> Vec2 {
+        let scaled = Vec2(p.0 * self.scale.0, p.1 * self.scale.1);
+        let (sin, cos) = self.rot.sin_cos();
+        Vec2(
+            self.offset.0 + scaled.0 * cos - scaled.1 * sin,
+            self.offset.1 + scaled.0 * sin + scaled.1 * cos,
+        )
+    }
+
+    /// A *difference* placed: scaled and turned, but not moved.
+    ///
+    /// Bezier tangents ([`names::IN_TAN`] / [`names::OUT_TAN`]) are offsets
+    /// from their own point rather than positions, so this is what carries a
+    /// glyph's curves through an expansion. Translating them instead would
+    /// pull every control point to the instance's origin.
+    pub fn apply_vector(&self, v: Vec2) -> Vec2 {
+        let scaled = Vec2(v.0 * self.scale.0, v.1 * self.scale.1);
+        let (sin, cos) = self.rot.sin_cos();
+        Vec2(
+            scaled.0 * cos - scaled.1 * sin,
+            scaled.0 * sin + scaled.1 * cos,
+        )
+    }
+
+    /// `outer ∘ inner`: the placement of an instance nested inside another.
+    ///
+    /// **Not the exact composition of the two affine maps.** The result is
+    /// again a scale-rotate-translate, so the turns add and the scales
+    /// multiply per axis; the true composition of a non-uniform scale with
+    /// two different turns is a shear, which this representation cannot
+    /// hold. Exact whenever either scale is uniform or either turn is zero,
+    /// which covers every instance geometry the built-in nodes produce (a
+    /// `scatter` writes a uniform scale, `text.layout` writes no turn at
+    /// all). This is the composition `rasterize` has always drawn; it is
+    /// stated here rather than fixed so that expanding a nesting and drawing
+    /// it stay the same picture.
+    pub fn compose(outer: Self, inner: Self) -> Self {
+        Self {
+            offset: outer.apply(inner.offset),
+            rot: outer.rot + inner.rot,
+            scale: Vec2(outer.scale.0 * inner.scale.0, outer.scale.1 * inner.scale.1),
+        }
+    }
+
+    /// The mean absolute scale, which is what a stroke width scales by: a
+    /// stroke has one width, so a non-uniform scale has to collapse to one
+    /// number somewhere.
+    pub fn uniform_scale(&self) -> f32 {
+        (self.scale.0.abs() + self.scale.1.abs()) * 0.5
+    }
+}
+
 /// The attribute domain an operation targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Domain {
@@ -1402,5 +1499,101 @@ mod tests {
                 .iter()
                 .any(|(n, t)| n == names::INDEX && *t == AttributeType::I32)
         );
+    }
+
+    /// The placement is scale, then rotate, then translate — in that order.
+    /// Any other order puts a scaled instance somewhere else entirely.
+    #[test]
+    fn an_instance_transform_scales_then_turns_then_moves() {
+        let placement = InstanceTransform {
+            offset: Vec2(10.0, -4.0),
+            rot: std::f32::consts::FRAC_PI_2,
+            scale: Vec2(3.0, 2.0),
+        };
+        // (1, 0) scales to (3, 0), turns a quarter turn to (0, 3), and moves.
+        let placed = placement.apply(Vec2(1.0, 0.0));
+        assert!(
+            (placed.0 - 10.0).abs() < 1e-5 && (placed.1 - (-1.0)).abs() < 1e-5,
+            "scale-rotate-translate puts it at (10, -1), not {placed:?}"
+        );
+        // Translating before rotating would land at (0 + 3*cos - (-4)*sin,
+        // ...) = (4, 6) instead, so the two orders are distinguishable here.
+    }
+
+    /// A tangent is a difference, so it takes the linear part of the
+    /// placement and none of the translation.
+    #[test]
+    fn an_instance_transform_carries_a_vector_without_the_translation() {
+        let placement = InstanceTransform {
+            offset: Vec2(100.0, 100.0),
+            rot: std::f32::consts::FRAC_PI_2,
+            scale: Vec2(2.0, 2.0),
+        };
+        let carried = placement.apply_vector(Vec2(1.0, 0.0));
+        assert!(
+            (carried.0 - 0.0).abs() < 1e-5 && (carried.1 - 2.0).abs() < 1e-5,
+            "a tangent scales and turns but does not move: {carried:?}"
+        );
+    }
+
+    /// `compose(outer, inner)` has to equal applying `inner` and then
+    /// `outer`, which is what makes nested instances land where the two
+    /// separate walks would put them.
+    #[test]
+    fn composing_two_instance_transforms_equals_applying_them_in_turn() {
+        // Uniform scales, which is where the representation is exact — see
+        // `compose`'s own note about the shear it cannot hold.
+        let outer = InstanceTransform {
+            offset: Vec2(7.0, -3.0),
+            rot: 0.4,
+            scale: Vec2(1.5, 1.5),
+        };
+        let inner = InstanceTransform {
+            offset: Vec2(-2.0, 6.0),
+            rot: -0.9,
+            scale: Vec2(2.0, 2.0),
+        };
+        let composed = InstanceTransform::compose(outer, inner);
+        for point in [Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(-4.0, 2.5)] {
+            let stepwise = outer.apply(inner.apply(point));
+            let direct = composed.apply(point);
+            assert!(
+                (stepwise.0 - direct.0).abs() < 1e-3 && (stepwise.1 - direct.1).abs() < 1e-3,
+                "{point:?}: stepwise {stepwise:?} != composed {direct:?}"
+            );
+        }
+        // The offset rule holds whatever the scales are: a nested instance
+        // sits where its parent's placement puts its own origin.
+        let skewed = InstanceTransform::compose(
+            InstanceTransform {
+                scale: Vec2(1.5, 0.5),
+                ..outer
+            },
+            inner,
+        );
+        let expected = InstanceTransform {
+            scale: Vec2(1.5, 0.5),
+            ..outer
+        }
+        .apply(inner.offset);
+        assert_eq!(skewed.offset, expected);
+    }
+
+    #[test]
+    fn the_identity_instance_transform_moves_nothing() {
+        let point = Vec2(3.0, -8.0);
+        assert_eq!(InstanceTransform::IDENTITY.apply(point), point);
+        assert_eq!(InstanceTransform::IDENTITY.apply_vector(point), point);
+        assert_eq!(InstanceTransform::IDENTITY.uniform_scale(), 1.0);
+    }
+
+    /// A mirrored scale still scales a stroke by a positive width.
+    #[test]
+    fn a_mirrored_instance_transform_has_a_positive_uniform_scale() {
+        let mirrored = InstanceTransform {
+            scale: Vec2(-4.0, 2.0),
+            ..InstanceTransform::IDENTITY
+        };
+        assert_eq!(mirrored.uniform_scale(), 3.0);
     }
 }

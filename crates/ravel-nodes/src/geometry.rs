@@ -746,7 +746,7 @@ mod tests {
         );
         assert_eq!(depth, 2, "from_image → scatter is two levels");
         assert!(
-            depth < crate::rasterize::MAX_INSTANCE_DEPTH,
+            depth < ravel_core::geometry::MAX_INSTANCE_DEPTH,
             "two levels stay inside the rasterizer's limit"
         );
     }

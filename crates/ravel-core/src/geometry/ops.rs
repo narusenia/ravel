@@ -3,12 +3,14 @@
 
 //! Pure, copy-on-write operations over geometry attributes and paths.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use thiserror::Error;
 
 use super::{
-    AttributeArray, AttributeType, Domain, Geometry, GeometryError, Positions, Primitive, names,
+    AttrName, AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError,
+    InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive, names,
 };
 use crate::types::{Color, Vec2, Vec3, Vec4};
 
@@ -1763,6 +1765,394 @@ fn normalize(value: Vec2) -> Vec2 {
     Vec2(value.0 / length, value.1 / length)
 }
 
+// ---------------------------------------------------------------------------
+// Instance expansion (typography-plan unit 5)
+// ---------------------------------------------------------------------------
+
+/// The instance columns [`expand_instances`] consumes rather than passes down.
+///
+/// `P` / `rot` / `scale` become the placement baked into the points, and
+/// `source_index` names a source list the expanded geometry no longer has;
+/// keeping any of them on the Point domain would describe a placement that
+/// has already happened. Everything else — `index`, `Cd`, and the
+/// per-character columns `text.layout` writes — descends.
+///
+/// The 3D placement columns are listed too: they are not read yet (the
+/// expansion is planar, like the instance path in `rasterize`), and a Point
+/// domain that carried an unapplied `orient` would be a trap once they are.
+fn is_placement_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        names::P | names::ROT | names::SCALE | names::SCALE3 | names::ORIENT | names::SOURCE_INDEX
+    )
+}
+
+/// Flattens an instance geometry into one geometry of points and primitives.
+///
+/// Each instance's placement ([`InstanceTransform`]: `P` / `rot` / `scale`)
+/// is baked into the copy of its source that instance contributes, and the
+/// instance's remaining attributes descend onto the Point and Primitive
+/// domains of that copy — so a per-character attribute `text.layout` wrote on
+/// the Instance domain (`char_index`, `char_progress`, …) becomes something a
+/// Point-domain field can read, which is what lets a field distort the glyph
+/// outlines themselves (REQ-MOGRAPH-004, typography-plan unit 5).
+///
+/// `in_tan` / `out_tan` are carried through with the linear part of the
+/// placement only, because a tangent is a difference and not a position. That
+/// is what keeps a glyph's curves curved after the expansion instead of
+/// leaving control points behind at the instance origin.
+///
+/// **Contour order is load-bearing.** The geometry's own primitives come
+/// first, unplaced, then one contiguous block per instance, each in its
+/// source's own order. `rasterize` fills a *run of consecutive* same-style
+/// closed paths as one non-zero region, which is what opens the counter of an
+/// `o`; interleaving two characters' contours would put a counter in a
+/// different run from its outer contour and fill the hole in.
+///
+/// Where a source and its instance both carry a column, **the source's own
+/// value wins** and the instance's is dropped, which is how `rasterize`
+/// narrows a style per element. Two consequences worth knowing:
+///
+/// * An instance `Cd` / `alpha` *tints* what it draws in the rasterizer but
+///   only *fills in* a missing color here, so expanding a tinted instance of
+///   an already-coloured source loses the tint. Glyph outlines carry no
+///   colour, so text is unaffected.
+/// * Detail attributes are the host's wholesale (`dash`, `cap`, `join`,
+///   `anchor`); a source's own detail is dropped, as it is in
+///   `geometry.merge`.
+///
+/// A geometry with no instances, or none that can be placed, is returned as
+/// it is — the operation is idempotent, so a `text.to_path` on an already
+/// flat geometry is a pass-through rather than an error.
+pub fn expand_instances(geometry: &Geometry) -> Result<Geometry, GeometryOpError> {
+    expand_at(geometry, 0)
+}
+
+fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpError> {
+    let instances = geometry.instances();
+    if instances.element_count() == 0 || geometry.sources().is_empty() {
+        return Ok(geometry.clone());
+    }
+    // An instance domain without positions places nothing. The rasterizer
+    // draws no instance in that case, and the flattening has to agree about
+    // what exists rather than inventing an origin for each.
+    let Some(offsets) = geometry.positions(Domain::Instance) else {
+        return Ok(without_instances(geometry));
+    };
+    let offsets = offsets?.require_planar("instance expansion")?.to_vec();
+    let rots = geometry
+        .instances()
+        .get(names::ROT)
+        .map(|column| column.as_f32(names::ROT).map(<[f32]>::to_vec))
+        .transpose()?;
+    let scales = geometry
+        .instances()
+        .get(names::SCALE)
+        .map(|column| column.as_vec2(names::SCALE).map(<[Vec2]>::to_vec))
+        .transpose()?;
+    let source_indices = geometry
+        .instances()
+        .get(names::SOURCE_INDEX)
+        .map(|column| column.as_i32(names::SOURCE_INDEX).map(<[i32]>::to_vec))
+        .transpose()?;
+
+    // The blocks, in the order they land in the output: the geometry's own
+    // elements first, then one per instance. Nested instances are expanded
+    // before their own placement is composed onto them, so a block is always
+    // flat by the time it is appended.
+    let mut blocks: Vec<(Cow<'_, Geometry>, InstanceTransform, Option<usize>)> =
+        vec![(Cow::Borrowed(geometry), InstanceTransform::IDENTITY, None)];
+    if depth >= MAX_INSTANCE_DEPTH {
+        tracing::warn!(
+            "instance expansion: nesting deeper than {MAX_INSTANCE_DEPTH}, dropping {} instances",
+            offsets.len()
+        );
+    } else {
+        for (index, offset) in offsets.iter().enumerate() {
+            // An image source has no contour to convert, so it cannot become
+            // path geometry. Dropping it beats erroring: a `scatter` that
+            // stamps both pictures and shapes still converts its shapes.
+            let Some(source) =
+                select_source(geometry.sources(), source_indices.as_deref(), index).geometry()
+            else {
+                tracing::warn!(
+                    "instance expansion: instance {index} stamps an image, not a geometry"
+                );
+                continue;
+            };
+            let placement = InstanceTransform {
+                offset: *offset,
+                rot: rots.as_ref().map_or(0.0, |values| values[index]),
+                scale: scales
+                    .as_ref()
+                    .map_or(InstanceTransform::IDENTITY.scale, |values| values[index]),
+            };
+            blocks.push((
+                Cow::Owned(expand_at(source, depth + 1)?),
+                placement,
+                Some(index),
+            ));
+        }
+    }
+
+    let mut points = ColumnAccumulator::default();
+    let mut primitive_attrs = ColumnAccumulator::default();
+    let mut out = Geometry::new();
+    // Where each block's points landed, so the placement can be baked into
+    // them once every column exists.
+    let mut point_ranges = Vec::with_capacity(blocks.len());
+    for (block, placement, instance) in &blocks {
+        let inherited = instance.map(|index| (instances, index));
+        let point_count = block.point_count();
+        let start = points.len;
+        points.push(block.points(), inherited, point_count)?;
+        primitive_attrs.push(block.primitive_attrs(), inherited, block.primitive_count())?;
+        point_ranges.push((start..start + point_count, *placement));
+
+        let index_offset = out.extend_indices(block.indices());
+        for primitive in block.primitives() {
+            out.push_primitive(primitive.shifted(start, index_offset));
+        }
+    }
+
+    *out.points_mut() = points.into_set()?;
+    *out.primitive_attrs_mut() = primitive_attrs.into_set()?;
+    // Detail is not a concatenable domain, so the host's wins wholesale —
+    // the same rule `geometry.merge` applies.
+    *out.detail_mut() = geometry.detail().clone();
+    bake_placements(out.points_mut(), &point_ranges)?;
+    // `index` is creation order *within a domain*, so an expansion has to
+    // renumber it the way `sort` does after a permutation: the glyph
+    // sources each brought their own 0..n, and the instances brought a
+    // character number. Neither is the new domain's creation order. What a
+    // point still knows about its character is `char_index` and
+    // `char_progress`, which is what the plan put them there for.
+    renumber_index(&mut out, Domain::Point)?;
+    renumber_index(&mut out, Domain::Primitive)?;
+    Ok(out)
+}
+
+/// Rewrites `index` on `domain` as that domain's own creation order, when it
+/// carries an `I32` one. The rule [`sort`] applies after a permutation.
+fn renumber_index(geometry: &mut Geometry, domain: Domain) -> Result<(), GeometryError> {
+    let renumber = geometry
+        .attribute_set(domain)
+        .get(names::INDEX)
+        .is_some_and(|column| matches!(column.as_ref(), AttributeArray::I32(_)));
+    if !renumber {
+        return Ok(());
+    }
+    let count = domain_count(geometry, domain) as i32;
+    geometry
+        .attribute_set_mut(domain)
+        .insert(names::INDEX, AttributeArray::I32((0..count).collect()))?;
+    Ok(())
+}
+
+/// The geometry's own points, primitives and detail, with the instance domain
+/// and its sources dropped.
+///
+/// The answer for an instance domain that cannot be placed: the output of an
+/// expansion is flat by definition, so the instances cannot be carried
+/// through even when nothing could be made of them.
+fn without_instances(geometry: &Geometry) -> Geometry {
+    let mut out = geometry.clone();
+    *out.instances_mut() = AttributeSet::new();
+    out.set_sources(Vec::new());
+    out
+}
+
+/// The source instance `index` stamps: `source_index` clamped into the list.
+///
+/// The rasterizer's rule ([`select_instance_source`] there), because the two
+/// have to reach the same source for the same instance: an out-of-range index
+/// selects the last source rather than skipping the instance.
+fn select_source<'a>(
+    sources: &'a [InstanceSource],
+    source_indices: Option<&[i32]>,
+    index: usize,
+) -> &'a InstanceSource {
+    let selected = source_indices.map_or(0, |indices| indices[index].max(0) as usize);
+    &sources[selected.min(sources.len() - 1)]
+}
+
+/// Rewrites `P`, `in_tan` and `out_tan` of each block with that block's
+/// placement.
+///
+/// After the columns are concatenated rather than during, so that a block
+/// whose source did not carry tangents still has the zero rows the
+/// accumulator filled in — a placement applied to a zero tangent leaves it
+/// zero, which is what a corner point means.
+fn bake_placements(
+    points: &mut AttributeSet,
+    blocks: &[(Range<usize>, InstanceTransform)],
+) -> Result<(), GeometryError> {
+    if blocks
+        .iter()
+        .all(|(_, placement)| *placement == InstanceTransform::IDENTITY)
+    {
+        return Ok(());
+    }
+    if points.get(names::P).is_some() {
+        let column = points.make_mut(names::P)?;
+        let values = column.as_vec2_mut(names::P)?;
+        for (range, placement) in blocks {
+            for value in &mut values[range.clone()] {
+                *value = placement.apply(*value);
+            }
+        }
+    }
+    for name in [names::IN_TAN, names::OUT_TAN] {
+        if points.get(name).is_none() {
+            continue;
+        }
+        let column = points.make_mut(name)?;
+        let values = column.as_vec2_mut(name)?;
+        for (range, placement) in blocks {
+            for value in &mut values[range.clone()] {
+                *value = placement.apply_vector(*value);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Concatenates attribute sets of differing shape, one block at a time.
+///
+/// A name a block does not carry is filled with that column type's zero for
+/// the block's rows (the fill rule `geometry.merge` uses), and a name first
+/// seen partway through is back-filled the same way. Column order follows
+/// first appearance, so the output does not depend on `HashMap` iteration
+/// order.
+#[derive(Default)]
+struct ColumnAccumulator {
+    columns: Vec<(AttrName, AttributeArray)>,
+    len: usize,
+}
+
+impl ColumnAccumulator {
+    /// Appends `count` rows.
+    ///
+    /// `own` is the block's own column set and wins where names collide;
+    /// `inherited` is the instance domain and the row inside it whose values
+    /// broadcast over every row this block contributes.
+    fn push(
+        &mut self,
+        own: &AttributeSet,
+        inherited: Option<(&AttributeSet, usize)>,
+        count: usize,
+    ) -> Result<(), GeometryError> {
+        let mut rows: Vec<(&AttrName, Cow<'_, AttributeArray>)> = own
+            .iter()
+            .map(|(name, column)| (name, Cow::Borrowed(column.as_ref())))
+            .collect();
+        if let Some((instances, index)) = inherited {
+            rows.extend(
+                instances
+                    .iter()
+                    .filter(|(name, _)| {
+                        !is_placement_attribute(name) && own.get(name.as_str()).is_none()
+                    })
+                    .map(|(name, column)| {
+                        (
+                            name,
+                            Cow::Owned(select_values(column, std::iter::repeat_n(index, count))),
+                        )
+                    }),
+            );
+        }
+
+        let block = |name: &AttrName| {
+            rows.iter()
+                .find(|(row_name, _)| *row_name == name)
+                .map(|(_, column)| column.as_ref())
+        };
+        for (name, accumulated) in &mut self.columns {
+            append_rows(name, accumulated, block(name), count)?;
+        }
+        for (name, column) in &rows {
+            if self.columns.iter().any(|(seen, _)| seen == *name) {
+                continue;
+            }
+            let mut accumulated = empty_like(column);
+            // The rows accumulated before this name appeared.
+            append_rows(name, &mut accumulated, None, self.len)?;
+            append_rows(name, &mut accumulated, Some(column), count)?;
+            self.columns.push(((*name).clone(), accumulated));
+        }
+        self.len += count;
+        Ok(())
+    }
+
+    fn into_set(self) -> Result<AttributeSet, GeometryError> {
+        let mut set = AttributeSet::new();
+        for (name, column) in self.columns {
+            set.insert(name, column)?;
+        }
+        Ok(set)
+    }
+}
+
+/// An empty column of the same type.
+fn empty_like(column: &AttributeArray) -> AttributeArray {
+    macro_rules! empty {
+        ($variant:ident) => {
+            AttributeArray::$variant(Vec::new())
+        };
+    }
+    match column {
+        AttributeArray::F32(_) => empty!(F32),
+        AttributeArray::Vec2(_) => empty!(Vec2),
+        AttributeArray::Vec3(_) => empty!(Vec3),
+        AttributeArray::Vec4(_) => empty!(Vec4),
+        AttributeArray::Color(_) => empty!(Color),
+        AttributeArray::I32(_) => empty!(I32),
+        AttributeArray::Bool(_) => empty!(Bool),
+        AttributeArray::Str(_) => empty!(Str),
+    }
+}
+
+/// Appends `count` rows onto `into`: `from`'s values when the block carries
+/// the column, and the column type's zero otherwise.
+///
+/// A same-name column of a different type is a type error rather than a
+/// silent conversion, exactly as it is in `geometry.merge`.
+fn append_rows(
+    name: &str,
+    into: &mut AttributeArray,
+    from: Option<&AttributeArray>,
+    count: usize,
+) -> Result<(), GeometryError> {
+    macro_rules! append {
+        ($values:expr, $variant:ident, $zero:expr) => {{
+            match from {
+                None => $values.extend(std::iter::repeat_n($zero, count)),
+                Some(AttributeArray::$variant(block)) => {
+                    $values.extend(block.iter().cloned());
+                }
+                Some(other) => {
+                    return Err(GeometryError::TypeMismatch {
+                        name: name.into(),
+                        expected: AttributeType::$variant,
+                        actual: other.attr_type(),
+                    });
+                }
+            }
+            Ok(())
+        }};
+    }
+    match into {
+        AttributeArray::F32(values) => append!(values, F32, 0.0),
+        AttributeArray::Vec2(values) => append!(values, Vec2, Vec2(0.0, 0.0)),
+        AttributeArray::Vec3(values) => append!(values, Vec3, Vec3(0.0, 0.0, 0.0)),
+        AttributeArray::Vec4(values) => append!(values, Vec4, Vec4(0.0, 0.0, 0.0, 0.0)),
+        AttributeArray::Color(values) => append!(values, Color, Color::TRANSPARENT),
+        AttributeArray::I32(values) => append!(values, I32, 0),
+        AttributeArray::Bool(values) => append!(values, Bool, false),
+        AttributeArray::Str(values) => append!(values, Str, String::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3511,5 +3901,667 @@ mod tests {
                 .unwrap(),
             &["kept".to_owned()]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Instance expansion (typography-plan unit 5)
+    // -----------------------------------------------------------------------
+
+    /// A source with two closed contours and curved control points, standing
+    /// in for a glyph: an outer contour and its counter, plus the tangents
+    /// `text.layout` writes.
+    ///
+    /// Values are deliberately off every default — no unit scale, no zero
+    /// tangent, no origin-centred point — so a step the expansion forgets
+    /// cannot be mistaken for a default that happened to be right.
+    fn glyph_source() -> Geometry {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(2.0, 0.0),
+            Vec2(2.0, 6.0),
+            Vec2(6.0, 6.0),
+            // The counter.
+            Vec2(3.0, 1.0),
+            Vec2(3.0, 4.0),
+            Vec2(5.0, 4.0),
+        ]);
+        geometry
+            .points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![
+                    Vec2(0.5, -0.25),
+                    Vec2(0.0, 0.0),
+                    Vec2(0.0, 0.0),
+                    Vec2(-0.75, 0.0),
+                    Vec2(0.0, 0.0),
+                    Vec2(0.0, 0.0),
+                ]),
+            )
+            .expect("in_tan is one value per point");
+        geometry
+            .points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![
+                    Vec2(0.0, 1.5),
+                    Vec2(0.0, 0.0),
+                    Vec2(0.0, 0.0),
+                    Vec2(0.0, 2.25),
+                    Vec2(0.0, 0.0),
+                    Vec2(0.0, 0.0),
+                ]),
+            )
+            .expect("out_tan is one value per point");
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: true,
+        });
+        geometry.push_primitive(Primitive::Path {
+            verts: 3..6,
+            closed: true,
+        });
+        geometry
+    }
+
+    /// A three-character text layout over `glyph_source`: distinct offsets,
+    /// turns and scales, plus the per-character columns unit 2 writes.
+    fn laid_out_text() -> Geometry {
+        let mut geometry = Geometry::new();
+        let instances = geometry.instances_mut();
+        instances
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(40.0, 90.0), Vec2(70.0, 90.0), Vec2(100.0, 90.0)]),
+            )
+            .expect("three offsets");
+        instances
+            .insert(
+                names::ROT,
+                AttributeArray::F32(vec![0.0, std::f32::consts::FRAC_PI_2, -0.75]),
+            )
+            .expect("three turns");
+        instances
+            .insert(
+                names::SCALE,
+                AttributeArray::Vec2(vec![Vec2(2.0, 2.0), Vec2(3.0, 3.0), Vec2(1.5, 0.5)]),
+            )
+            .expect("three scales");
+        instances
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1, 2]))
+            .expect("three indices");
+        instances
+            .insert(names::CHAR_INDEX, AttributeArray::I32(vec![0, 1, 2]))
+            .expect("three char indices");
+        instances
+            .insert(names::WORD_INDEX, AttributeArray::I32(vec![3, 3, 4]))
+            .expect("three word indices");
+        instances
+            .insert(names::LINE_INDEX, AttributeArray::I32(vec![7, 7, 7]))
+            .expect("three line indices");
+        instances
+            .insert(
+                names::CHAR_PROGRESS,
+                AttributeArray::F32(vec![0.0, 0.5, 1.0]),
+            )
+            .expect("three progresses");
+        instances
+            .insert(names::ADVANCE, AttributeArray::F32(vec![30.0, 30.0, 26.5]))
+            .expect("three advances");
+        geometry.set_instance_source(Some(Arc::new(glyph_source())));
+        geometry
+    }
+
+    fn vec2_column(geometry: &Geometry, name: &str) -> Vec<Vec2> {
+        geometry
+            .points()
+            .get(name)
+            .unwrap_or_else(|| panic!("the expansion writes {name}"))
+            .as_vec2(name)
+            .expect("a Vec2 column")
+            .to_vec()
+    }
+
+    fn i32_column(set: &AttributeSet, name: &str) -> Vec<i32> {
+        set.get(name)
+            .unwrap_or_else(|| panic!("the expansion writes {name}"))
+            .as_i32(name)
+            .expect("an I32 column")
+            .to_vec()
+    }
+
+    /// The first completion criterion of typography-plan unit 5: the expanded
+    /// point count is the sum of the glyph outlines' own point counts.
+    #[test]
+    fn expanding_instances_sums_the_point_count_of_every_source() {
+        let text = laid_out_text();
+        let expanded = expand_instances(&text).expect("the layout expands");
+        let source_points: usize = (0..text.instance_count())
+            .map(|_| glyph_source().point_count())
+            .sum();
+        assert_eq!(source_points, 18, "three glyphs of six points");
+        assert_eq!(expanded.point_count(), source_points);
+        assert_eq!(
+            expanded.primitive_count(),
+            2 * text.instance_count(),
+            "every contour of every glyph has to survive"
+        );
+        // Flat: the output is geometry, not instances of geometry.
+        assert_eq!(expanded.instance_count(), 0);
+        assert!(expanded.sources().is_empty());
+    }
+
+    /// The placement is baked, not dropped: `P`, `rot` and `scale` all move
+    /// the outline points.
+    #[test]
+    fn an_instances_placement_is_baked_into_its_outline_points() {
+        let expanded = expand_instances(&laid_out_text()).expect("the layout expands");
+        let positions = vec2_column(&expanded, names::P);
+        let source = glyph_source();
+        let source_positions = source
+            .points()
+            .get(names::P)
+            .expect("P")
+            .as_vec2(names::P)
+            .expect("Vec2")
+            .to_vec();
+
+        let placements = [
+            InstanceTransform {
+                offset: Vec2(40.0, 90.0),
+                rot: 0.0,
+                scale: Vec2(2.0, 2.0),
+            },
+            InstanceTransform {
+                offset: Vec2(70.0, 90.0),
+                rot: std::f32::consts::FRAC_PI_2,
+                scale: Vec2(3.0, 3.0),
+            },
+            InstanceTransform {
+                offset: Vec2(100.0, 90.0),
+                rot: -0.75,
+                scale: Vec2(1.5, 0.5),
+            },
+        ];
+        for (instance, placement) in placements.iter().enumerate() {
+            for (vertex, source_position) in source_positions.iter().enumerate() {
+                let expected = placement.apply(*source_position);
+                let actual = positions[instance * source_positions.len() + vertex];
+                assert!(
+                    (actual.0 - expected.0).abs() < 1e-4 && (actual.1 - expected.1).abs() < 1e-4,
+                    "instance {instance} vertex {vertex}: {actual:?} is not {expected:?}"
+                );
+            }
+        }
+        // And the three glyphs are not on top of each other, which a dropped
+        // offset would make them.
+        assert!(
+            positions[0] != positions[6] && positions[6] != positions[12],
+            "the three glyphs have to land in three places: {positions:?}"
+        );
+    }
+
+    /// A tangent is a difference: the turn and the scale reach it, the offset
+    /// does not. Translating it would drag every control point to the
+    /// instance origin and straighten the glyph.
+    #[test]
+    fn tangents_take_the_linear_part_of_the_placement_only() {
+        let expanded = expand_instances(&laid_out_text()).expect("the layout expands");
+        let in_tans = vec2_column(&expanded, names::IN_TAN);
+        let out_tans = vec2_column(&expanded, names::OUT_TAN);
+
+        // Instance 0: scale 2, no turn.
+        assert!(
+            (in_tans[0].0 - 1.0).abs() < 1e-5 && (in_tans[0].1 - (-0.5)).abs() < 1e-5,
+            "an unturned tangent only scales: {:?}",
+            in_tans[0]
+        );
+        // Instance 1 (points 6..12): scale 3 and a quarter turn, so
+        // (0, 1.5) becomes (-4.5, 0).
+        assert!(
+            (out_tans[6].0 - (-4.5)).abs() < 1e-4 && out_tans[6].1.abs() < 1e-4,
+            "a turned tangent turns: {:?}",
+            out_tans[6]
+        );
+        // Zero stays zero: a corner point stays a corner.
+        assert_eq!(in_tans[1], Vec2(0.0, 0.0));
+        assert_eq!(in_tans[7], Vec2(0.0, 0.0));
+        // No tangent is anywhere near the instance offsets (40, 70, 100).
+        for tangent in in_tans.iter().chain(&out_tans) {
+            assert!(
+                tangent.0.abs() < 20.0 && tangent.1.abs() < 20.0,
+                "a tangent carrying the offset: {tangent:?}"
+            );
+        }
+    }
+
+    /// The second completion criterion of unit 5: the per-character columns
+    /// `text.layout` wrote on the Instance domain reach the Point domain, so
+    /// a Point-domain field can read them.
+    #[test]
+    fn per_character_attributes_descend_to_the_point_and_primitive_domains() {
+        let expanded = expand_instances(&laid_out_text()).expect("the layout expands");
+        // Six points per glyph, three glyphs: every point of a character
+        // carries that character's own value.
+        let expected = |per_character: [i32; 3]| -> Vec<i32> {
+            per_character
+                .iter()
+                .flat_map(|value| std::iter::repeat_n(*value, 6))
+                .collect()
+        };
+        for (name, per_character) in [
+            (names::CHAR_INDEX, [0, 1, 2]),
+            (names::WORD_INDEX, [3, 3, 4]),
+            (names::LINE_INDEX, [7, 7, 7]),
+        ] {
+            assert_eq!(
+                i32_column(expanded.points(), name),
+                expected(per_character),
+                "{name} did not descend onto every point of its own character"
+            );
+            // Primitive domain too: `rasterize` resolves a path's style from
+            // there, so a per-character attribute that stopped at the points
+            // could not colour a character. Two contours per glyph.
+            assert_eq!(
+                i32_column(expanded.primitive_attrs(), name),
+                per_character
+                    .iter()
+                    .flat_map(|value| std::iter::repeat_n(*value, 2))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        // `index` is the exception: it is creation order within a domain, so
+        // the expansion renumbers it the way `sort` does rather than letting
+        // either the glyph's or the character's numbering through.
+        assert_eq!(
+            i32_column(expanded.points(), names::INDEX),
+            (0..18).collect::<Vec<_>>()
+        );
+        let progress = expanded
+            .points()
+            .get(names::CHAR_PROGRESS)
+            .expect("char_progress descends")
+            .as_f32(names::CHAR_PROGRESS)
+            .expect("an F32 column")
+            .to_vec();
+        assert_eq!(progress[0], 0.0);
+        assert_eq!(progress[6], 0.5);
+        assert_eq!(progress[12], 1.0);
+        assert!(
+            expanded.points().get(names::ADVANCE).is_some(),
+            "advance descends like the rest"
+        );
+    }
+
+    /// The placement columns do **not** descend. A Point-domain `rot` or
+    /// `scale` would describe a placement that has already been applied, and
+    /// `source_index` would name a source list the expansion no longer has.
+    #[test]
+    fn the_placement_columns_do_not_descend_onto_the_points() {
+        let mut text = laid_out_text();
+        text.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 0, 0]))
+            .expect("three source indices");
+        let expanded = expand_instances(&text).expect("the layout expands");
+        for name in [names::ROT, names::SCALE, names::SOURCE_INDEX] {
+            assert!(
+                expanded.points().get(name).is_none(),
+                "{name} is the placement, and the placement is baked in"
+            );
+            assert!(expanded.primitive_attrs().get(name).is_none());
+        }
+        // `P` is there, but it is the outline point rather than the
+        // character origin.
+        let positions = vec2_column(&expanded, names::P);
+        assert_ne!(positions[0], Vec2(40.0, 90.0));
+    }
+
+    /// The contour-order invariant `rasterize` depends on: one character's
+    /// contours are contiguous and in the source's own order.
+    ///
+    /// The rasterizer fills a *run of consecutive* same-style closed paths as
+    /// one non-zero region, which is what opens the counter of an `o`
+    /// (`rasterize`'s `FillRun`). Interleaving two characters' contours would
+    /// separate a counter from its outer contour whenever the two characters
+    /// differ in style, and the hole would fill in.
+    #[test]
+    fn every_characters_contours_stay_consecutive_and_in_order() {
+        let expanded = expand_instances(&laid_out_text()).expect("the layout expands");
+        let per_point = i32_column(expanded.points(), names::CHAR_INDEX);
+
+        // Which character each primitive belongs to, read from the points it
+        // is built from rather than from the primitive's own column, so the
+        // two have to agree.
+        let mut owners = Vec::new();
+        for primitive in expanded.primitives() {
+            let verts = primitive.verts();
+            let owner = per_point[verts.start];
+            assert!(
+                verts.clone().all(|vertex| per_point[vertex] == owner),
+                "a primitive spans two characters: {verts:?}"
+            );
+            owners.push(owner);
+        }
+        assert_eq!(
+            owners,
+            vec![0, 0, 1, 1, 2, 2],
+            "each character's contours have to sit together, in order"
+        );
+        // And the vertex runs march forward, which is what "consecutive"
+        // means for the point domain the runs index into.
+        let starts: Vec<usize> = expanded
+            .primitives()
+            .iter()
+            .map(|primitive| primitive.verts().start)
+            .collect();
+        assert!(
+            starts.windows(2).all(|pair| pair[0] < pair[1]),
+            "the contours are out of order: {starts:?}"
+        );
+    }
+
+    /// A geometry with nothing to expand comes back as it is, so a
+    /// `text.to_path` on an already-flat geometry is a pass-through.
+    #[test]
+    fn a_geometry_without_instances_expands_to_itself() {
+        let flat = glyph_source();
+        let expanded = expand_instances(&flat).expect("a flat geometry expands");
+        assert_eq!(expanded.point_count(), flat.point_count());
+        assert_eq!(expanded.primitive_count(), flat.primitive_count());
+        assert_eq!(
+            vec2_column(&expanded, names::P),
+            vec2_column(&flat, names::P)
+        );
+        // Idempotent: expanding the expansion changes nothing either.
+        let again =
+            expand_instances(&expand_instances(&laid_out_text()).expect("once")).expect("twice");
+        let once = expand_instances(&laid_out_text()).expect("once");
+        assert_eq!(vec2_column(&again, names::P), vec2_column(&once, names::P));
+    }
+
+    /// A source's own column wins over the instance's, which is how
+    /// `rasterize` narrows a style per element.
+    #[test]
+    fn a_sources_own_column_wins_over_the_instances() {
+        let mut source = glyph_source();
+        source
+            .points_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.25; 6]))
+            .expect("one alpha per point");
+        let mut text = laid_out_text();
+        text.set_instance_source(Some(Arc::new(source)));
+        text.instances_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.9, 0.9, 0.9]))
+            .expect("three alphas");
+
+        let expanded = expand_instances(&text).expect("the layout expands");
+        let alpha = expanded
+            .points()
+            .get(names::ALPHA)
+            .expect("alpha")
+            .as_f32(names::ALPHA)
+            .expect("an F32 column")
+            .to_vec();
+        assert_eq!(alpha, vec![0.25; 18], "the source's own alpha has to win");
+    }
+
+    /// Sources with different columns concatenate with typed-zero fill,
+    /// rather than the first source's schema deciding for the rest.
+    #[test]
+    fn sources_with_different_columns_fill_with_typed_zeros() {
+        let mut plain = Geometry::from_points(vec![Vec2(1.0, 1.0), Vec2(2.0, 2.0)]);
+        plain.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let mut labelled = Geometry::from_points(vec![Vec2(3.0, 3.0)]);
+        labelled
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![8.0]))
+            .expect("one pscale");
+
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(50.0, 0.0), Vec2(0.0, 50.0)]),
+            )
+            .expect("three offsets");
+        // The source *without* `pscale` goes first, so the column appears
+        // partway through and has to be back-filled for the rows already
+        // accumulated as well as forward-filled for the ones after it.
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1, 0]))
+            .expect("three source indices");
+        geometry.set_instance_sources(vec![Arc::new(plain), Arc::new(labelled)]);
+
+        let expanded = expand_instances(&geometry).expect("mixed sources expand");
+        assert_eq!(expanded.point_count(), 2 + 1 + 2);
+        let pscale = expanded
+            .points()
+            .get(names::PSCALE)
+            .expect("pscale survives")
+            .as_f32(names::PSCALE)
+            .expect("an F32 column")
+            .to_vec();
+        assert_eq!(
+            pscale,
+            vec![0.0, 0.0, 8.0, 0.0, 0.0],
+            "the sources that have no pscale fill with the typed zero"
+        );
+        expanded
+            .validate()
+            .expect("every column has to be as long as the point domain");
+    }
+
+    /// An out-of-range `source_index` selects the last source, the rule the
+    /// rasterizer uses, so what is drawn and what is expanded agree.
+    #[test]
+    fn an_out_of_range_source_index_clamps_to_the_last_source() {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]),
+            )
+            .expect("two offsets");
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![-3, 7]))
+            .expect("two source indices");
+        // Three sources of distinct sizes, and an over-range index a
+        // wrap-around would send to the *middle* one (7 % 3 = 1) rather than
+        // the last: clamping and wrapping are told apart here.
+        let single = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        let double = Geometry::from_points(vec![Vec2(0.0, 1.0); 2]);
+        let quintuple = Geometry::from_points(vec![Vec2(1.0, 1.0); 5]);
+        geometry.set_instance_sources(vec![
+            Arc::new(single),
+            Arc::new(double),
+            Arc::new(quintuple),
+        ]);
+
+        let expanded = expand_instances(&geometry).expect("clamped indices expand");
+        // A negative index clamps to the first source (one point), an index
+        // past the end to the last (five points).
+        assert_eq!(expanded.point_count(), 1 + 5);
+    }
+
+    /// Instances of instances compose their placements, so a nested source
+    /// lands where the rasterizer's own nested walk would draw it.
+    #[test]
+    fn nested_instances_compose_their_placements() {
+        let leaf = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        let mut inner = Geometry::new();
+        inner
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(4.0, 0.0)]))
+            .expect("one offset");
+        inner
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(3.0, 3.0)]))
+            .expect("one scale");
+        inner.set_instance_source(Some(Arc::new(leaf)));
+
+        let mut outer = Geometry::new();
+        outer
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 100.0)]))
+            .expect("one offset");
+        outer
+            .instances_mut()
+            .insert(
+                names::ROT,
+                AttributeArray::F32(vec![std::f32::consts::FRAC_PI_2]),
+            )
+            .expect("one turn");
+        outer.set_instance_source(Some(Arc::new(inner)));
+
+        let expanded = expand_instances(&outer).expect("nesting expands");
+        assert_eq!(expanded.point_count(), 1);
+        // Inner puts the leaf point at 4 + 3 = 7 on x; the outer quarter
+        // turn takes (7, 0) to (0, 7) and then moves it to (0, 107).
+        let placed = vec2_column(&expanded, names::P)[0];
+        assert!(
+            placed.0.abs() < 1e-3 && (placed.1 - 107.0).abs() < 1e-3,
+            "the two placements did not compose: {placed:?}"
+        );
+    }
+
+    /// Nesting past the guard drops the instances rather than recursing for
+    /// ever, and the answer is still flat.
+    #[test]
+    fn nesting_past_the_depth_guard_drops_the_instances() {
+        let mut level = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        for _ in 0..=MAX_INSTANCE_DEPTH {
+            let mut next = Geometry::new();
+            next.instances_mut()
+                .insert(names::P, AttributeArray::Vec2(vec![Vec2(1.0, 0.0)]))
+                .expect("one offset");
+            next.set_instance_source(Some(Arc::new(level)));
+            level = next;
+        }
+        let expanded = expand_instances(&level).expect("a deep nesting still answers");
+        assert_eq!(expanded.instance_count(), 0, "the answer has to be flat");
+        assert!(expanded.sources().is_empty());
+        assert_eq!(
+            expanded.point_count(),
+            0,
+            "the level past the guard contributes nothing"
+        );
+    }
+
+    /// A geometry's own points and primitives keep their place at the front,
+    /// unplaced, so a merge of text and a shape keeps drawing both.
+    #[test]
+    fn a_geometrys_own_elements_come_before_its_instances() {
+        let mut geometry = Geometry::from_points(vec![Vec2(-5.0, -5.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..1,
+            closed: false,
+        });
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(60.0, 60.0)]))
+            .expect("one offset");
+        geometry.set_instance_source(Some(Arc::new(Geometry::from_points(vec![Vec2(1.0, 2.0)]))));
+
+        let expanded = expand_instances(&geometry).expect("a host with its own points expands");
+        let positions = vec2_column(&expanded, names::P);
+        assert_eq!(
+            positions,
+            vec![Vec2(-5.0, -5.0), Vec2(61.0, 62.0)],
+            "the host's own point stays where it was, in front"
+        );
+    }
+
+    /// A mesh source expands with its index blob rebased, the same way
+    /// `geometry.merge` moves one.
+    #[test]
+    fn a_mesh_source_expands_with_its_indices() {
+        // Two windings, so an index range that was not rebased reads the
+        // other source's triangle instead of its own.
+        let quad = |triangles: &[u32]| {
+            let mut mesh = Geometry::from_points(vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(0.0, 4.0),
+                Vec2(4.0, 4.0),
+            ]);
+            mesh.push_mesh(0..4, triangles);
+            Arc::new(mesh)
+        };
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(10.0, 0.0), Vec2(0.0, 10.0)]),
+            )
+            .expect("two offsets");
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1]))
+            .expect("two source indices");
+        geometry.set_instance_sources(vec![quad(&[0, 1, 2]), quad(&[3, 2, 1])]);
+
+        let expanded = expand_instances(&geometry).expect("a mesh source expands");
+        assert_eq!(expanded.point_count(), 8);
+        assert_eq!(expanded.primitive_count(), 2);
+        assert_eq!(expanded.indices(), &[0, 1, 2, 3, 2, 1]);
+        let triangles: Vec<&[u32]> = expanded
+            .primitives()
+            .iter()
+            .map(|primitive| {
+                expanded
+                    .mesh_indices(primitive)
+                    .expect("both primitives are meshes")
+            })
+            .collect();
+        assert_eq!(
+            triangles,
+            vec![&[0u32, 1, 2][..], &[3u32, 2, 1][..]],
+            "each mesh has to read its own triangle, not the first blob's"
+        );
+        expanded
+            .validate()
+            .expect("the expansion is valid geometry");
+    }
+
+    /// 3D instance positions are an error, not a silent projection onto xy —
+    /// the rule the position dimension table sets.
+    #[test]
+    fn three_dimensional_instance_positions_are_rejected() {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec3(vec![Vec3(1.0, 2.0, 3.0)]))
+            .expect("one 3D offset");
+        geometry.set_instance_source(Some(Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0)]))));
+
+        let error = expand_instances(&geometry).expect_err("a 3D placement has no 2D answer");
+        assert!(
+            format!("{error}").contains("2D positions"),
+            "the error has to name the dimension: {error}"
+        );
+    }
+
+    /// An instance domain with no `P` places nothing, exactly as the
+    /// rasterizer draws nothing for it, and the answer is still flat.
+    #[test]
+    fn an_instance_domain_without_positions_expands_to_the_host_alone() {
+        let mut geometry = Geometry::from_points(vec![Vec2(7.0, 7.0)]);
+        geometry
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0, 1]))
+            .expect("two indices");
+        geometry.set_instance_source(Some(Arc::new(glyph_source())));
+
+        let expanded = expand_instances(&geometry).expect("a placeless instance domain expands");
+        assert_eq!(expanded.point_count(), 1);
+        assert_eq!(expanded.instance_count(), 0);
+        assert!(expanded.sources().is_empty());
     }
 }

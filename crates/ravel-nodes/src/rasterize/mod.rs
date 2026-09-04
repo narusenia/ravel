@@ -55,7 +55,8 @@
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AttributeSet, Domain, Geometry, InstanceImage, InstanceSource, Primitive, names,
+    AttributeSet, Domain, Geometry, InstanceImage, InstanceSource, InstanceTransform,
+    MAX_INSTANCE_DEPTH, Primitive, names,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
@@ -78,9 +79,6 @@ use crate::gpu_util;
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 
-/// Instance nesting guard: instances-of-instances beyond this depth are
-/// skipped rather than recursed (spec limits stateful/sim nesting similarly).
-pub(crate) const MAX_INSTANCE_DEPTH: u32 = 4;
 const DEFAULT_POINT_RADIUS: f32 = 2.0;
 
 /// The `data0[0]` discriminant an image quad carries, beside `1.0` for a path
@@ -160,7 +158,17 @@ fn stroke_margin(width: f32, join: Join) -> f32 {
 /// pixels of scan and does not depend on that second rule staying true.
 const ZENO_MITER_LIMIT: f32 = 4.0;
 
-/// Per-element placement accumulated while expanding instances.
+/// Per-element placement accumulated while expanding instances: the shared
+/// [`InstanceTransform`] plus the multiplicative tint, which only drawing
+/// has.
+///
+/// The transform is spread over three fields rather than nested because the
+/// draw paths read the components one at a time (the GPU quad records write
+/// `offset` / `rot` / `scale` into a uniform, the image sampler inverts
+/// them). The arithmetic is **not** duplicated here — [`Self::transform`]
+/// hands the components to the core type, which is the one definition of
+/// scale-then-rotate-then-translate, so a rasterized geometry and one
+/// flattened by `ops::expand_instances` cannot drift apart.
 #[derive(Clone, Copy)]
 struct Placement {
     offset: Vec2,
@@ -172,9 +180,9 @@ struct Placement {
 impl Placement {
     fn identity() -> Self {
         Self {
-            offset: Vec2(0.0, 0.0),
-            rot: 0.0,
-            scale: Vec2(1.0, 1.0),
+            offset: InstanceTransform::IDENTITY.offset,
+            rot: InstanceTransform::IDENTITY.rot,
+            scale: InstanceTransform::IDENTITY.scale,
             tint: Color::new(1.0, 1.0, 1.0, 1.0),
         }
     }
@@ -187,17 +195,21 @@ impl Placement {
         }
     }
 
+    /// The placement without its tint, as the core instance model states it.
+    fn transform(&self) -> InstanceTransform {
+        InstanceTransform {
+            offset: self.offset,
+            rot: self.rot,
+            scale: self.scale,
+        }
+    }
+
     fn apply(&self, p: Vec2) -> Vec2 {
-        let scaled = Vec2(p.0 * self.scale.0, p.1 * self.scale.1);
-        let (sin, cos) = self.rot.sin_cos();
-        Vec2(
-            self.offset.0 + scaled.0 * cos - scaled.1 * sin,
-            self.offset.1 + scaled.0 * sin + scaled.1 * cos,
-        )
+        self.transform().apply(p)
     }
 
     fn uniform_scale(&self) -> f32 {
-        (self.scale.0.abs() + self.scale.1.abs()) * 0.5
+        self.transform().uniform_scale()
     }
 }
 
@@ -1559,10 +1571,11 @@ fn sample_bilinear(pixels: &ImagePixels<'_>, u: f32, v: f32) -> Option<Color> {
 
 /// Composes an outer placement with an instance-local one (outer ∘ local).
 fn compose(outer: Placement, local: Placement) -> Placement {
+    let transform = InstanceTransform::compose(outer.transform(), local.transform());
     Placement {
-        offset: outer.apply(local.offset),
-        rot: outer.rot + local.rot,
-        scale: Vec2(outer.scale.0 * local.scale.0, outer.scale.1 * local.scale.1),
+        offset: transform.offset,
+        rot: transform.rot,
+        scale: transform.scale,
         tint: Color::new(
             outer.tint.r * local.tint.r,
             outer.tint.g * local.tint.g,

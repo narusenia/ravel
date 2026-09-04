@@ -12,7 +12,8 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceImage, InstanceSource, SortMode, bounds_center, connect, names, sort,
+    InstanceImage, InstanceSource, InstanceTransform, SortMode, bounds_center, connect, names,
+    sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
@@ -128,6 +129,34 @@ impl NodeProcessor for GeometryTransformProcessor {
         let mut out = geometry.clone();
         if out.points().get(names::P).is_some() {
             transform_positions(out.points_mut(), &apply, &apply3)?;
+        }
+        // Bezier tangents are **offsets from their point**, so they take the
+        // linear part of the transform and none of the translation — the same
+        // distinction `InstanceTransform::apply_vector` draws for an expanded
+        // instance, which is why the placement type states it once instead of
+        // this node spelling a second rotation matrix. Leaving them behind is
+        // what turned a rotated circle into an egg (`MED-GPU-10`): the points
+        // moved and their control offsets did not.
+        //
+        // The pivot does not enter a difference. A 3D rotation would take a
+        // planar tangent out of its plane and the column cannot hold that, so
+        // only the planar part is applied; paths are planar by construction
+        // (`require_planar`), and a Vec3 geometry carrying tangents is not a
+        // shape this node can honour either way.
+        let linear = InstanceTransform {
+            offset: Vec2(0.0, 0.0),
+            rot: rotation,
+            scale,
+        };
+        if !planar_identity {
+            for name in [names::IN_TAN, names::OUT_TAN] {
+                if out.points().get(name).is_none() {
+                    continue;
+                }
+                for tangent in out.points_mut().make_mut(name)?.as_vec2_mut(name)? {
+                    *tangent = linear.apply_vector(*tangent);
+                }
+            }
         }
         if out.detail().get(names::ANCHOR).is_some() {
             for anchor in out
@@ -875,6 +904,99 @@ mod tests {
                 closed: false,
             }
         ));
+    }
+
+    /// A path's bezier tangents follow the transform's **linear part**.
+    ///
+    /// They are offsets from their point, so a rotation turns them, a scale
+    /// stretches them, and a translation must not touch them. Leaving them
+    /// behind is what made a rotated circle an egg (`MED-GPU-10`): the points
+    /// moved and their control offsets stayed put. The values are asserted
+    /// against the analytic result rather than against a rendering, because
+    /// the defect is in the column and shows up in every consumer of it.
+    #[test]
+    fn a_transform_turns_and_stretches_the_bezier_tangents() {
+        let tangent = Vec2(3.0, 0.0);
+        let mut geo = Geometry::from_points(vec![Vec2(10.0, 4.0), Vec2(-6.0, 12.0)]);
+        for name in [names::IN_TAN, names::OUT_TAN] {
+            geo.points_mut()
+                .insert(name, AttributeArray::Vec2(vec![tangent, tangent]))
+                .unwrap();
+        }
+        geo.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let geo = Arc::new(geo);
+
+        // A quarter turn about Z: (3, 0) becomes (0, 3).
+        let turned = eval_transform(
+            &[
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("use_centroid", ParameterValue::Bool(false)),
+            ],
+            geo.clone(),
+        );
+        let turned = turned.downcast_ref::<Geometry>().unwrap();
+        for name in [names::IN_TAN, names::OUT_TAN] {
+            let tans = turned.points().get(name).unwrap().as_vec2(name).unwrap();
+            for t in tans {
+                assert!(
+                    t.0.abs() < 1e-4 && (t.1 - 3.0).abs() < 1e-4,
+                    "{name} has to turn with the points: {t:?}"
+                );
+            }
+        }
+
+        // A non-uniform scale stretches each axis on its own.
+        let stretched = eval_transform(
+            &[
+                ("scale", ParameterValue::vec3(2.5, 0.5, 1.0)),
+                ("use_centroid", ParameterValue::Bool(false)),
+            ],
+            geo.clone(),
+        );
+        let stretched = stretched.downcast_ref::<Geometry>().unwrap();
+        let tans = stretched
+            .points()
+            .get(names::OUT_TAN)
+            .unwrap()
+            .as_vec2(names::OUT_TAN)
+            .unwrap();
+        assert!(
+            (tans[0].0 - 7.5).abs() < 1e-4 && tans[0].1.abs() < 1e-4,
+            "the tangent takes the scale it was given: {:?}",
+            tans[0]
+        );
+
+        // A translation moves the points and leaves the offsets alone: this is
+        // the half `apply` would get wrong if the tangents went through it.
+        let moved = eval_transform(
+            &[
+                ("translate", ParameterValue::vec3(40.0, -17.0, 0.0)),
+                ("use_centroid", ParameterValue::Bool(false)),
+            ],
+            geo.clone(),
+        );
+        let moved = moved.downcast_ref::<Geometry>().unwrap();
+        let tans = moved
+            .points()
+            .get(names::IN_TAN)
+            .unwrap()
+            .as_vec2(names::IN_TAN)
+            .unwrap();
+        assert_eq!(
+            tans[0], tangent,
+            "a translation cannot reach a difference: {:?}",
+            tans[0]
+        );
+        let positions = moved
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        assert_eq!(positions[0], Vec2(50.0, -13.0), "the point still moves");
     }
 
     fn eval_transform(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Arc<dyn NodeData> {

@@ -23,6 +23,9 @@ ron = { workspace = true }
 bytemuck = { workspace = true }
 earcut = { workspace = true }
 ttf-parser = { workspace = true }
+rustybuzz = { workspace = true }
+unicode-bidi = { workspace = true }
+unicode-linebreak = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

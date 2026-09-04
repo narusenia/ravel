@@ -84,6 +84,16 @@ zeno = "0.3"
 # resolution can live in `ravel-core` without `ravel-cli` linking a platform
 # font API (`docs/implementation/typography-plan.md`, unit 1).
 ttf-parser = "0.25"
+# Text shaping, line breaking and bidirectional resolution for
+# `ravel_core::text::layout` (`docs/implementation/typography-plan.md`, unit
+# 2). All three are pure Rust and already in the tree at these versions —
+# `rustybuzz` behind `usvg`, the two `unicode-*` crates behind `cosmic-text` —
+# so naming them here adds direct edges rather than crates, and none of them
+# reaches a platform API. `rustybuzz::Face` derefs to `ttf_parser::Face`, which
+# is why glyph outlines need no fourth crate.
+rustybuzz = "0.20"
+unicode-bidi = "0.3"
+unicode-linebreak = "0.1"
 # Polygon triangulation (`geometry::triangulate`). GeoRust's port of mapbox
 # earcut: `MIT OR Apache-2.0`, `num-traits` its only dependency, and the
 # `Earcut` instance keeps its scratch buffers between calls so a per-frame

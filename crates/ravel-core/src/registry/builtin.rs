@@ -190,6 +190,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_constant());
     reg.register(field_apply());
     reg.register(text_font());
+    reg.register(text_layout());
 }
 
 fn geometry_input(name: &str) -> InputPort {
@@ -1997,6 +1998,50 @@ fn text_font() -> NodeTemplate {
         .with_param_options("style", crate::text::FONT_STYLES)
 }
 
+/// `text.layout`: a string and a face become one instance per character.
+///
+/// Geometry rather than Utility: the output *is* geometry, in the same shape
+/// `scatter.*` produces — an instance domain plus the glyph outlines in
+/// `instance_sources` — so `rasterize` draws it, `geometry.merge` merges it,
+/// and a field modulates it without any of them knowing what text is
+/// (`docs/implementation/typography-plan.md`, unit 2).
+///
+/// Per-character animation is **not** a parameter here. The node writes
+/// `char_index` / `word_index` / `line_index` / `char_progress` / `advance`,
+/// and `field.attribute` → `field.curve_remap` → `field.apply` does the
+/// staggering; a Range Selector data model would be a second animation system
+/// beside the one the unified channels already provide.
+fn text_layout() -> NodeTemplate {
+    NodeTemplate::new("text.layout", "Text Layout", NodeCategory::Geometry)
+        .with_input(InputPort {
+            name: "font".into(),
+            accepted_types: vec![DataTypeId::FONT],
+            is_param: false,
+            is_variadic: false,
+        })
+        .with_output(geometry_output())
+        .with_param(string_parameter("text", ""))
+        .with_param(float_parameter("size", crate::text::DEFAULT_SIZE))
+        .with_param(float_parameter("tracking", 0.0))
+        // Zero is not "no leading": it means the face's own
+        // `ascender - descender + line_gap`, which is the only default that
+        // stays right when the font changes.
+        .with_param(float_parameter("leading", 0.0))
+        .with_param(string_parameter("align", crate::text::TEXT_ALIGNS[0]))
+        .with_param_options("align", crate::text::TEXT_ALIGNS)
+        // Zero disables wrapping, so a title breaks only where its string does.
+        .with_param(float_parameter("wrap_width", 0.0))
+        .with_param(string_parameter("anchor", crate::text::TEXT_ANCHORS[0]))
+        .with_param_options("anchor", crate::text::TEXT_ANCHORS)
+        .with_param_range("size", 0.0..=10000.0, 8.0..=400.0)
+        .with_param_range("tracking", -1000.0..=1000.0, -20.0..=100.0)
+        .with_param_range("leading", 0.0..=10000.0, 0.0..=400.0)
+        .with_param_range("wrap_width", 0.0..=100000.0, 0.0..=2000.0)
+        .with_param_group("content", ["text"])
+        .with_param_group("metrics", ["size", "tracking", "leading"])
+        .with_param_group("paragraph", ["align", "wrap_width", "anchor"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2028,14 +2073,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 85);
+        assert_eq!(reg.all_templates().count(), 86);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 25);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 26);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

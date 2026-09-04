@@ -1450,6 +1450,22 @@ family = "Font family name, matched case-insensitively against the installed and
 weight = "Face weight. The nearest weight the family actually carries is used."
 style = "Upright or slanted face."
 
+[node."text.layout"]
+label = "Text Layout"
+description = "Shapes a string in a font face and lays it out as one instance per character, with the glyph outlines as instance sources. Each character carries char_index, word_index, line_index, char_progress and advance, so a field modulates the text without a text-specific animation system."
+[node."text.layout".params]
+text = "The string to lay out. A newline starts a new line."
+size = "Em size in composition pixels."
+tracking = "Extra advance after every character, in composition pixels."
+leading = "Baseline-to-baseline distance in composition pixels. Zero uses the face's own line height."
+align = "Where each line sits against the origin: starting at it, centred on it, ending at it, or stretched to the wrap width."
+wrap_width = "Wrap lines longer than this many composition pixels. Zero wraps only at the newlines in the string."
+anchor = "Which horizontal line of the block lands on y = 0: the first baseline, or the top, middle or bottom of the block."
+[node."text.layout".group]
+content = "Content"
+metrics = "Metrics"
+paragraph = "Paragraph"
+
 [export]
 title = "Export"
 submit = "Export"

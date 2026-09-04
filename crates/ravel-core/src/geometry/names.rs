@@ -76,6 +76,27 @@ pub const JOIN_ROUND: i32 = 1;
 /// Straight line between the segments ([`JOIN`]).
 pub const JOIN_BEVEL: i32 = 2;
 
+/// Character number **within its line** (I32, Instance), written by
+/// `text.layout` (REQ-MOGRAPH-004). Distinct from [`INDEX`], which counts
+/// through the whole string: a per-line number is what drives a stagger that
+/// restarts on each line.
+pub const CHAR_INDEX: &str = "char_index";
+/// Word number through the whole string (I32, Instance), written by
+/// `text.layout`. Whitespace carries the number of the word it follows.
+pub const WORD_INDEX: &str = "word_index";
+/// Line number (I32, Instance), written by `text.layout`.
+pub const LINE_INDEX: &str = "line_index";
+/// Normalised position through the whole string, `0..1` (F32, Instance),
+/// written by `text.layout`. Present so a stagger needs
+/// `field.attribute("char_progress")` alone rather than an `index` divided by
+/// a character count the graph has no way to read.
+pub const CHAR_PROGRESS: &str = "char_progress";
+/// Pen advance of one character in composition pixels (F32, Instance),
+/// written by `text.layout`: how far the pen moved past this character,
+/// tracking and justification included. Horizontal while writing is
+/// horizontal; the direction turns with the writing mode.
+pub const ADVANCE: &str = "advance";
+
 /// Particle age in frames (F32, Point).
 pub const AGE: &str = "age";
 /// Particle lifetime in frames (F32, Point).
@@ -133,6 +154,11 @@ mod tests {
                 U,
                 IN_TAN,
                 OUT_TAN,
+                CHAR_INDEX,
+                WORD_INDEX,
+                LINE_INDEX,
+                CHAR_PROGRESS,
+                ADVANCE,
             ],
             [
                 "P",
@@ -161,6 +187,11 @@ mod tests {
                 "u",
                 "in_tan",
                 "out_tan",
+                "char_index",
+                "word_index",
+                "line_index",
+                "char_progress",
+                "advance",
             ]
         );
     }

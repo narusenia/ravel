@@ -6019,6 +6019,7 @@ dependencies = [
  "log",
  "rayon",
  "ron",
+ "rustybuzz",
  "serde",
  "smol_str",
  "tempfile",
@@ -6029,6 +6030,8 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "ttf-parser",
+ "unicode-bidi",
+ "unicode-linebreak",
 ]
 
 [[package]]

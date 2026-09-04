@@ -1471,7 +1471,7 @@ camera::DEFAULT_{DISTANCE, FOV_Y_DEGREES, ORTHOGRAPHIC_HEIGHT, NEAR, FAR}
 camera::MIN_CLIP_SPAN
 ```
 
-### `text` — font resolution (REQ-MOGRAPH-004)
+### `text` — font resolution and layout (REQ-MOGRAPH-004)
 
 ```rust
 FontQuery::new(family: &str, weight: u16, italic: bool)   // family is case-folded
@@ -1492,6 +1492,40 @@ font API**, so `ravel-cli` links none (`AGENTS.md` on the two binaries). The
 cost is a one-time index of every installed font file on the first `resolve`
 (~1400 faces in a few hundred ms) and no family aliasing (`sans-serif`, a
 user's `fonts.conf`).
+
+```rust
+LayoutParams { size, tracking, leading, align, wrap_width, anchor }  // Copy
+Align::{Left, Center, Right, Justify}    // ::from_name(&str), anything else Left
+VerticalAnchor::{Baseline, Top, Center, Bottom}                 // ::from_name
+text::TEXT_ALIGNS / TEXT_ANCHORS / DEFAULT_SIZE  // the `text.layout` params
+
+text::layout_text(&FontRef, &str, &LayoutParams) -> Result<Geometry, TextError>
+text::layout_text_timed(..) -> Result<(Geometry, LayoutTiming), TextError>
+LayoutTiming { shaping, outlines, placement }   // Durations; the perf harness
+```
+
+Layout is `rustybuzz` (shaping) + `unicode-linebreak` (wrapping) +
+`unicode-bidi` (direction runs) + `ttf-parser` (outlines, reached through
+`rustybuzz::Face`'s `Deref`) — **not** cosmic-text, whose layout layer hands
+back coverage rather than outlines and cluster boundaries, and **not** swash
+or zeno, which the plan named before it was clear the shaped face already
+parses the contours. All pure Rust, all already in the tree: unit 2 added
+three direct edges and **zero** packages to `Cargo.lock`.
+
+One instance per **grapheme cluster**, not per `char`: `ﬁ` is one instance of
+two codepoints. Whitespace is an instance except where it trails a line;
+`\n` never is. Positions are composition pixels, so glyph outlines are
+mirrored (font units are Y-up, composition space Y-down) and each cluster's
+outline sits in `instance_sources` **once per distinct cluster**, addressed by
+`source_index`. Outlines keep their curves as `in_tan` / `out_tan` cubics,
+which `rasterize` already flattens.
+
+Two ceilings, both stated in the module: bidi reordering is per paragraph
+rather than per line (exact for single-direction paragraphs), and a paragraph
+is shaped once with the lines cut out of that result (a kerning pair spanning
+a break keeps its mid-line width; harfbuzz's `UNSAFE_TO_BREAK` is the upgrade
+path). Costs are in `docs/implementation/perf-baseline.md` — 0.28 ms for 1000
+characters uncached, 1.7% of a 60 fps frame, so there is no glyph cache.
 
 `resolve` never fails: a family that is not installed answers with the face
 compiled into the binary, `is_fallback = true`, and one warning per distinct
@@ -2131,6 +2165,7 @@ Current keys:
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `text.font` | CPU | `family` / `weight` / `style` → `FontRef` (`DataTypeId::FONT`), through `ravel_core::text::shared()`. **Never fails**: a family this machine does not have yields the built-in face with `is_fallback` set plus one warning, so a project authored elsewhere renders in the wrong font rather than erroring. Stateless — the library owns the index and both caches |
+| `text.layout` | CPU | `FontRef` + `text` / `size` / `tracking` / `leading` / `align` / `wrap_width` / `anchor` → Geometry of one instance per grapheme cluster, glyph outlines in `instance_sources` (one per distinct cluster, addressed by `source_index`) — the same output shape `scatter.*` produces, so the existing instance path in `rasterize` draws it. Writes `index` / `P` / `rot` / `scale` plus `char_index` (per line) / `word_index` / `line_index` / `char_progress` (0..1) / `advance`; per-character animation is `field.attribute` → `field.curve_remap` → `field.apply`, not a parameter here. An unconnected `font` input resolves `DEFAULT_FAMILY` rather than failing |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
 | `geometry.from_image` | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
 | `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |

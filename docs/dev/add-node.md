@@ -13,8 +13,10 @@
       `label`（必須）と `description` / `params.<name>`（任意）を追加
 - [ ] `crates/ravel-app/src/assets.rs` の `RavelIcon::for_node_type` に
       `type_key` のアイコンを 1 行追加（SVG が新規なら Lucide から
-      `assets/icons/` へ vendoring。手順は `ui-design-impl` スキル。
-      未登録でもカテゴリ既定アイコンにフォールバックするのでビルドは壊れない）
+      `assets/icons/` へ vendoring。手順は `ui-design-impl` スキル）。
+      **必須**: `every_node_template_icon_is_embedded` が全テンプレートに
+      固有のアイコンを要求するので、カテゴリ既定へのフォールバックは
+      テスト失敗になる
 - [ ] `crates/ravel-nodes/src/<領域>/` に `NodeProcessor` の実装を追加
 - [ ] `crates/ravel-nodes/src/lib.rs` の `processor_for_node` の `match` に
       `type_key` を追加

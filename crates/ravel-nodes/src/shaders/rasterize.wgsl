@@ -13,7 +13,9 @@ struct DrawItem {
     // stroke color (`stroke_color`, else the fill color)
     stroke_color: vec4<f32>,
     // kind (0 sprite, 1 path, 2 image), then per kind:
-    //   path:   vertex start, vertex count, closed flag
+    //   path:   vertex start, vertex count, closed flag — the count spans
+    //           every contour of the item and the `CONTOUR_BREAK` sentinels
+    //           between them
     //   sprite: center x, center y, radius
     //   image:  placement offset x, offset y, rotation
     data0: vec4<f32>,
@@ -69,22 +71,69 @@ fn segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return distance(p, a + t * ab);
 }
 
+/// Whether a vertex is the sentinel that separates two contours of one draw
+/// item rather than a point on a path (`CONTOUR_BREAK`, `f32::MAX`). False for
+/// a NaN, so a malformed position is not read as a break.
+fn is_contour_break(v: vec2<f32>) -> bool {
+    return v.x >= 3.0e38;
+}
+
 /// Fill coverage in `x`, stroke coverage in `y`: the two carry different
 /// colors now, so they cannot be unioned here any more.
+///
+/// One item can hold several contours — a glyph's outer outline plus its
+/// counters — laid out back to back in `path_vertices` and separated by
+/// `CONTOUR_BREAK`. The winding number is accumulated across all of them,
+/// which is what makes the counter of an `o` a hole rather than more ink, and
+/// every contour closes onto **its own** first vertex, so no segment ever
+/// bridges two of them.
 fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
     let start = u32(item.data0.y);
     let count = u32(item.data0.z);
     let closed = item.data0.w > 0.5;
     let fill = item.data1.x > 0.5 && closed;
     let stroke_width = item.data1.y;
-    let segment_count = select(count - 1u, count, closed);
 
     var winding = 0i;
     var min_distance = 1e20;
-    for (var i = 0u; i < segment_count; i += 1u) {
-        let next = select(i + 1u, 0u, i + 1u == count);
+    // Where the contour being walked began, relative to `start`.
+    var contour_start = 0u;
+    var i = 0u;
+    loop {
+        if i >= count {
+            break;
+        }
         let a = path_vertices[start + i];
-        let b = path_vertices[start + next];
+        if is_contour_break(a) {
+            i += 1u;
+            contour_start = i;
+            continue;
+        }
+        let next = i + 1u;
+        // The segment leaving `a`: the next vertex, or — at the end of the
+        // contour — back to its first vertex when the run is closed. An open
+        // path has no such wrap, so its last vertex starts no segment.
+        var b = a;
+        var has_segment = false;
+        if next < count {
+            let candidate = path_vertices[start + next];
+            if is_contour_break(candidate) {
+                if closed {
+                    b = path_vertices[start + contour_start];
+                    has_segment = true;
+                }
+            } else {
+                b = candidate;
+                has_segment = true;
+            }
+        } else if closed {
+            b = path_vertices[start + contour_start];
+            has_segment = true;
+        }
+        i = next;
+        if !has_segment {
+            continue;
+        }
         min_distance = min(min_distance, segment_distance(p, a, b));
 
         let cross = (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y);

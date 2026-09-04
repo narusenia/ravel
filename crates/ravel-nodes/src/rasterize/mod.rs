@@ -3,6 +3,39 @@
 
 //! Geometry → FrameBuffer rasterization (GPU and CPU reference paths).
 //!
+//! # Fill runs
+//!
+//! **Consecutive closed paths of one geometry that resolve to the same style
+//! fill as a single non-zero region.** A letter is not one path: an `o` is its
+//! outer contour plus a counter wound the other way, and a rule evaluated per
+//! path can only ever add the counter's area back, which fills the hole in.
+//! The style is the resolved one — the fill flag, the stroke width and the two
+//! colors after [`element_style`] and [`element_colors`] have applied the
+//! primitive's own attributes — so a path that differs in any of them starts a
+//! new run and paints over its neighbours as before. Runs are *consecutive*,
+//! which is what keeps painter's order intact.
+//!
+//! What that changes, case by case:
+//!
+//! - **Disjoint shapes** (two rectangles that do not touch): unchanged. The
+//!   non-zero union of shapes that share no pixel is the same set as the two
+//!   fills.
+//! - **Overlapping shapes of one style**: still both filled — the overlap has
+//!   winding 2, which is non-zero. What does change is a *translucent* pair:
+//!   the shapes used to blend twice over each other and darken where they
+//!   crossed, and one non-zero region blends once. That is the correct
+//!   reading of one shape with two contours, and the only visible difference
+//!   this grouping makes outside of holes.
+//! - **Nested shapes** (a contour inside another, wound against it): the hole
+//!   the non-zero rule asks for. This is the behaviour the grouping exists
+//!   for.
+//! - **Different styles**: separate runs, drawn in order, exactly as before.
+//!
+//! Both paths implement it: the CPU one concatenates zeno commands into one
+//! [`FillRun`] mask, and the GPU one packs the contours of a [`PathRun`] back
+//! to back in the shared vertex buffer, separated by [`CONTOUR_BREAK`], for a
+//! fragment shader that accumulates one winding number across all of them.
+//!
 //! Paths are filled/stroked through `zeno` with antialiased coverage; loose
 //! points (those not referenced by a `Primitive::Path`) draw as analytic-AA
 //! circle sprites. Instances expand their source geometry
@@ -818,6 +851,84 @@ fn push_image_item<'a>(
     });
 }
 
+/// Separates the contours of one grouped path draw inside the shared vertex
+/// buffer, so a run of closed paths reaches the shader as one shape without a
+/// second storage binding to describe where each contour ends.
+///
+/// `f32::MAX` cannot be a device-space vertex — the coordinates come from
+/// geometry positions through [`Placement::apply`] — and the shader's test
+/// (`>= 3.0e38`) is false for a NaN, so a malformed position cannot be read as
+/// a break either. The shader never uses a break vertex as a segment endpoint,
+/// which is what keeps the stroke's distance field free of edges that jump
+/// between contours.
+const CONTOUR_BREAK: [f32; 2] = [f32::MAX, f32::MAX];
+
+/// The grouped path draw being accumulated for the GPU: where its first
+/// contour starts in the shared vertex buffer, the union of the contours'
+/// bounds, and the style every contour in it shares.
+///
+/// The mirror of [`FillRun`] on the CPU side, and it groups on the same key
+/// for the same reason: the fragment shader counts one winding number per
+/// draw item, so a glyph whose counter is a separate item can only fill it in.
+struct PathRun {
+    key: RunKey,
+    closed: bool,
+    /// Index of the run's first vertex in the shared buffer.
+    start: usize,
+    /// `uniform_scale` of the placement, applied to the stroke width.
+    scale: f32,
+    bounds: [f32; 4],
+}
+
+impl PathRun {
+    fn new(key: RunKey, closed: bool, start: usize, scale: f32) -> Self {
+        Self {
+            key,
+            closed,
+            start,
+            scale,
+            bounds: [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+        }
+    }
+
+    fn grow(&mut self, point: Vec2) {
+        self.bounds[0] = self.bounds[0].min(point.0);
+        self.bounds[1] = self.bounds[1].min(point.1);
+        self.bounds[2] = self.bounds[2].max(point.0);
+        self.bounds[3] = self.bounds[3].max(point.1);
+    }
+
+    /// Emit the run's draw item. `vertex_end` is where the shared buffer has
+    /// got to, so the item's vertex count spans every contour **and** the
+    /// breaks between them.
+    fn push_item(mut self, vertex_end: usize, items: &mut Vec<DrawItem>) {
+        let scaled_stroke = self.key.stroke_width * self.scale;
+        let padding = if scaled_stroke > 0.0 {
+            scaled_stroke * 0.5 + 1.0
+        } else {
+            1.0
+        };
+        expand_bounds(&mut self.bounds, padding);
+        items.push(DrawItem {
+            bounds: self.bounds,
+            color: color_array(self.key.color),
+            stroke_color: color_array(self.key.stroke_color),
+            data0: [
+                1.0,
+                self.start as f32,
+                (vertex_end - self.start) as f32,
+                u32::from(self.closed) as f32,
+            ],
+            data1: [u32::from(self.key.fill) as f32, scaled_stroke, 0.0, 0.0],
+        });
+    }
+}
+
 fn flatten_geometry<'a>(
     geo: &'a Geometry,
     placement: Placement,
@@ -833,56 +944,54 @@ fn flatten_geometry<'a>(
         .and_then(|c| c.as_vec2(names::P).ok())
         .unwrap_or_default();
 
+    let mut run: Option<PathRun> = None;
     for (prim_index, prim) in geo.primitives().iter().enumerate() {
         // `ensure_planar_paths` refused meshes at the node entry, so this skip
         // never fires; it keeps the walk total without a panic.
         let Primitive::Path { verts, closed } = prim else {
             continue;
         };
-        let style = element_style(style, geo.primitive_attrs(), prim_index);
+        let element = element_style(style, geo.primitive_attrs(), prim_index);
         if verts.len() < 2
             || verts.end > positions.len()
-            || (!style.fill && style.stroke_width <= 0.0)
+            || (!element.fill && element.stroke_width <= 0.0)
         {
             continue;
         }
-        let start = vertices.len();
-        let mut bounds = [
-            f32::INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-        ];
-        let polyline = path_polyline(geo, positions, verts, *closed);
-        for position in &polyline {
+        let (color, stroke_color) =
+            element_colors(element, geo.primitive_attrs(), prim_index, placement.tint);
+        let key = RunKey {
+            fill: element.fill,
+            stroke_width: element.stroke_width,
+            color,
+            stroke_color,
+        };
+
+        let joins = run
+            .as_ref()
+            .is_some_and(|current| *closed && current.closed && current.key == key);
+        if joins {
+            vertices.push(CONTOUR_BREAK);
+        } else {
+            if let Some(previous) = run.take() {
+                previous.push_item(vertices.len(), items);
+            }
+            run = Some(PathRun::new(
+                key,
+                *closed,
+                vertices.len(),
+                placement.uniform_scale(),
+            ));
+        }
+        let current = run.as_mut().expect("a run exists for the current path");
+        for position in &path_polyline(geo, positions, verts, *closed) {
             let point = placement.apply(*position);
             vertices.push([point.0, point.1]);
-            bounds[0] = bounds[0].min(point.0);
-            bounds[1] = bounds[1].min(point.1);
-            bounds[2] = bounds[2].max(point.0);
-            bounds[3] = bounds[3].max(point.1);
+            current.grow(point);
         }
-        let scaled_stroke = style.stroke_width * placement.uniform_scale();
-        let padding = if scaled_stroke > 0.0 {
-            scaled_stroke * 0.5 + 1.0
-        } else {
-            1.0
-        };
-        expand_bounds(&mut bounds, padding);
-        let (color, stroke_color) =
-            element_colors(style, geo.primitive_attrs(), prim_index, placement.tint);
-        items.push(DrawItem {
-            bounds,
-            color: color_array(color),
-            stroke_color: color_array(stroke_color),
-            data0: [
-                1.0,
-                start as f32,
-                polyline.len() as f32,
-                u32::from(*closed) as f32,
-            ],
-            data1: [u32::from(style.fill) as f32, scaled_stroke, 0.0, 0.0],
-        });
+    }
+    if let Some(previous) = run.take() {
+        previous.push_item(vertices.len(), items);
     }
 
     let radii = float_column(geo.points(), names::PSCALE);
@@ -1087,68 +1196,101 @@ fn raster_geometry(
     raster_instances(geo, placement, depth, canvas, style, images);
 }
 
-fn raster_paths(
-    geo: &Geometry,
-    positions: &[Vec2],
-    placement: Placement,
-    canvas: &mut Canvas<'_>,
-    style: Style,
-) {
-    let (width, height) = (canvas.width, canvas.height);
-    for (prim_index, prim) in geo.primitives().iter().enumerate() {
-        // Unreachable for meshes: see the twin walk in `flatten_geometry`.
-        let Primitive::Path { verts, closed } = prim else {
-            continue;
-        };
-        if verts.len() < 2 || verts.end > positions.len() {
-            continue;
-        }
+/// What has to match for two closed paths to fill as one non-zero region:
+/// the fill flag and stroke width the style resolved to, and the two colors.
+///
+/// Compared by value, so a primitive that carries its own `Cd`, `alpha`,
+/// `fill`, `stroke_width` or `stroke_color` attribute leaves the run its
+/// neighbours are in ([`element_style`] / [`element_colors`] are what resolve
+/// them).
+#[derive(Clone, Copy, PartialEq)]
+struct RunKey {
+    fill: bool,
+    stroke_width: f32,
+    color: Color,
+    stroke_color: Color,
+}
 
-        let polyline = path_polyline(geo, positions, verts, *closed);
-        let mut commands = Vec::with_capacity(polyline.len() + 1);
-        let mut min = Vec2(f32::INFINITY, f32::INFINITY);
-        let mut max = Vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
+/// A run of consecutive same-style closed paths, drawn as **one** shape.
+///
+/// A glyph is several closed paths — the outer contour plus its counters,
+/// wound the other way — so a mask per path can only ever add area and the
+/// hole in an `o` fills in. Accumulating the commands and evaluating
+/// `Fill::NonZero` once over all of them is what opens the counter, and it is
+/// the CPU half of the contract in this module's header.
+struct FillRun<'a> {
+    key: RunKey,
+    /// Open paths never join a run: they cannot bound a non-zero region, and
+    /// this is the flag that keeps `Fill::NonZero` off them.
+    closed: bool,
+    shape: StrokeShape<'a>,
+    /// `uniform_scale` of the placement, applied to the stroke width at draw.
+    scale: f32,
+    commands: Vec<Command>,
+    min: Vec2,
+    max: Vec2,
+}
+
+impl<'a> FillRun<'a> {
+    fn new(key: RunKey, closed: bool, shape: StrokeShape<'a>, scale: f32) -> Self {
+        Self {
+            key,
+            closed,
+            shape,
+            scale,
+            commands: Vec::new(),
+            min: Vec2(f32::INFINITY, f32::INFINITY),
+            max: Vec2(f32::NEG_INFINITY, f32::NEG_INFINITY),
+        }
+    }
+
+    /// Append one contour, already in device space. Each keeps its own
+    /// `MoveTo`, and a closed one its own `Close`, so zeno sees separate
+    /// subpaths of one shape rather than a polyline that jumps between them.
+    fn push_contour(&mut self, polyline: &[Vec2], placement: Placement) {
         for (i, p) in polyline.iter().enumerate() {
             let v = placement.apply(*p);
-            min = Vec2(min.0.min(v.0), min.1.min(v.1));
-            max = Vec2(max.0.max(v.0), max.1.max(v.1));
+            self.min = Vec2(self.min.0.min(v.0), self.min.1.min(v.1));
+            self.max = Vec2(self.max.0.max(v.0), self.max.1.max(v.1));
             let v = Vector::new(v.0, v.1);
-            commands.push(if i == 0 {
+            self.commands.push(if i == 0 {
                 Command::MoveTo(v)
             } else {
                 Command::LineTo(v)
             });
         }
-        if *closed {
-            commands.push(Command::Close);
+        if self.closed {
+            self.commands.push(Command::Close);
         }
+    }
 
-        let style = element_style(style, geo.primitive_attrs(), prim_index);
-        let (color, stroke_color) =
-            element_colors(style, geo.primitive_attrs(), prim_index, placement.tint);
-
-        if style.fill && *closed {
-            Mask::new(commands.as_slice())
+    fn render(&self, canvas: &mut Canvas<'_>) {
+        let (width, height) = (canvas.width, canvas.height);
+        if self.key.fill && self.closed {
+            Mask::new(self.commands.as_slice())
                 .size(width, height)
                 .style(Fill::NonZero)
                 .render_into(canvas.coverage, None);
             // One pixel of margin: the fill is antialiased, so the outermost
             // covered pixel is the one the boundary passes through.
-            canvas.blend_coverage(coverage_rect((min, max), 1.0, width, height), color);
+            canvas.blend_coverage(
+                coverage_rect((self.min, self.max), 1.0, width, height),
+                self.key.color,
+            );
         }
-        if style.stroke_width > 0.0 {
+        if self.key.stroke_width > 0.0 {
             // Round caps/joins are the default because they match the GPU
             // stroke, which is an unsigned distance to the polyline
             // (inherently round at caps and joins). Anything else the `cap` /
             // `join` / `dash` attributes ask for is drawn here, on the CPU
             // path the node routes to for exactly that reason.
-            let stroke_width = style.stroke_width * placement.uniform_scale();
+            let stroke_width = self.key.stroke_width * self.scale;
             let mut stroke = Stroke::new(stroke_width);
-            stroke.cap(style.shape.cap).join(style.shape.join);
-            if !style.shape.dashes.is_empty() {
-                stroke.dash(style.shape.dashes, style.shape.dash_offset);
+            stroke.cap(self.shape.cap).join(self.shape.join);
+            if !self.shape.dashes.is_empty() {
+                stroke.dash(self.shape.dashes, self.shape.dash_offset);
             }
-            Mask::new(commands.as_slice())
+            Mask::new(self.commands.as_slice())
                 .size(width, height)
                 .style(stroke)
                 .render_into(canvas.coverage, None);
@@ -1158,14 +1300,64 @@ fn raster_paths(
             // next primitive's coverage.
             canvas.blend_coverage(
                 coverage_rect(
-                    (min, max),
-                    stroke_margin(stroke_width, style.shape.join),
+                    (self.min, self.max),
+                    stroke_margin(stroke_width, self.shape.join),
                     width,
                     height,
                 ),
-                stroke_color,
+                self.key.stroke_color,
             );
         }
+    }
+}
+
+fn raster_paths(
+    geo: &Geometry,
+    positions: &[Vec2],
+    placement: Placement,
+    canvas: &mut Canvas<'_>,
+    style: Style,
+) {
+    let mut run: Option<FillRun<'_>> = None;
+    for (prim_index, prim) in geo.primitives().iter().enumerate() {
+        // Unreachable for meshes: see the twin walk in `flatten_geometry`.
+        let Primitive::Path { verts, closed } = prim else {
+            continue;
+        };
+        if verts.len() < 2 || verts.end > positions.len() {
+            continue;
+        }
+
+        let element = element_style(style, geo.primitive_attrs(), prim_index);
+        let (color, stroke_color) =
+            element_colors(element, geo.primitive_attrs(), prim_index, placement.tint);
+        let key = RunKey {
+            fill: element.fill,
+            stroke_width: element.stroke_width,
+            color,
+            stroke_color,
+        };
+
+        let joins = run
+            .as_ref()
+            .is_some_and(|current| *closed && current.closed && current.key == key);
+        if !joins {
+            if let Some(previous) = run.take() {
+                previous.render(canvas);
+            }
+            run = Some(FillRun::new(
+                key,
+                *closed,
+                element.shape,
+                placement.uniform_scale(),
+            ));
+        }
+        let current = run.as_mut().expect("a run exists for the current path");
+        let polyline = path_polyline(geo, positions, verts, *closed);
+        current.push_contour(&polyline, placement);
+    }
+    if let Some(previous) = run.take() {
+        previous.render(canvas);
     }
 }
 

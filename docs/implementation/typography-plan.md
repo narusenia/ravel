@@ -300,6 +300,46 @@ GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-p
 - `field.noise` → `field.apply(P)` で輪郭が歪むゴールデンテスト。
   **受入条件「変換ジオメトリがフィールドの影響を受ける」の検証。**
 
+#### 実装メモ
+
+実装済み。`text.to_path` ノード（パラメータ無し、入力 1 出力 1）+
+`ravel_core::geometry::ops::expand_instances`。
+
+- **展開は `text` 固有ではない。** `expand_instances` は任意のインスタンス
+  ジオメトリを平らにする。`text.` 名前空間に置いたのは用途がそれだから
+  であって、`scatter.*` の出力もそのまま展開できる。インスタンスを
+  持たないジオメトリは素通しなので冪等
+- **配置の定義を 1 箇所にまとめた。** `rasterize` が持っていた
+  scale → rotate → translate の式を
+  `ravel_core::geometry::InstanceTransform` に出し、`rasterize` の
+  `Placement` はそれに委譲する形にした。展開した絵とラスタライズした絵が
+  一致することは「同じ関数を呼ぶ」で担保する（式を 2 つ持たない）。
+  `MAX_INSTANCE_DEPTH` も core に移し、描けない深さと展開できない深さを
+  揃えた
+- **接線は `apply_vector`**（回転とスケールのみ、平行移動なし）。
+  `in_tan` / `out_tan` は点からの差分なので、平行移動を掛けると
+  全制御点がインスタンス原点に引き寄せられて字形が壊れる。
+  なお **`geometry.transform` は接線を変換していない**（既存の穴。
+  回転・スケールで曲線パスの制御点が取り残される）
+- **輪郭の順序は契約である。** 自分の要素が先、その後にインスタンス 1 つ
+  ずつが連続ブロックとして並ぶ。`rasterize` は**連続する**同スタイルの
+  閉パスを 1 回のノンゼロ巻き数で塗るので（#510）、2 文字の輪郭を
+  混ぜると counter が別の run に落ちて穴が塗り潰される。
+  `crates/ravel-nodes/tests/text_to_path_golden.rs` の
+  `a_glyph_counter_stays_a_hole_after_the_conversion` が、**文字ごとに
+  色を変えた** `oo` で守っている（1 色だと順序が効かないので守れない）
+- **衝突したアトリビュートはソース側が勝つ**（`rasterize` の
+  `element_style` と同じ規約）。**天井**: インスタンスの `Cd` / `alpha` は
+  ラスタライザでは *乗算* されるのに、ここでは欠けている色を *埋める*
+  だけなので、色付きソースへのティントは展開で失われる。グリフ輪郭は色を
+  持たないのでテキストには影響しない
+- **`index` は展開後に振り直す**（`sort` と同じ規約）。グリフ内の点番号でも
+  文字番号でもなく、新しい Point ドメインの生成順が正しい。点から文字を
+  たどる手がかりは `char_index` / `char_progress`
+- **`P` は 2D のみ**。3D のインスタンス位置は `RequiresPlanarP` で
+  エラーにする（黙って xy へ射影しない）。画像インスタンスは輪郭を
+  持たないので警告して飛ばす
+
 ### 単位 6: 縦書きと禁則処理
 
 - `vert` / `vrt2` GSUB フィーチャの適用（rustybuzz）。

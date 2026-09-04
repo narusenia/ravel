@@ -4327,14 +4327,17 @@ mod tests {
                 AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(50.0, 0.0), Vec2(0.0, 50.0)]),
             )
             .expect("three offsets");
+        // The source *without* `pscale` goes first, so the column appears
+        // partway through and has to be back-filled for the rows already
+        // accumulated as well as forward-filled for the ones after it.
         geometry
             .instances_mut()
-            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![1, 0, 1]))
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1, 0]))
             .expect("three source indices");
         geometry.set_instance_sources(vec![Arc::new(plain), Arc::new(labelled)]);
 
         let expanded = expand_instances(&geometry).expect("mixed sources expand");
-        assert_eq!(expanded.point_count(), 1 + 2 + 1);
+        assert_eq!(expanded.point_count(), 2 + 1 + 2);
         let pscale = expanded
             .points()
             .get(names::PSCALE)
@@ -4344,9 +4347,12 @@ mod tests {
             .to_vec();
         assert_eq!(
             pscale,
-            vec![8.0, 0.0, 0.0, 8.0],
-            "the source that has no pscale fills with the typed zero"
+            vec![0.0, 0.0, 8.0, 0.0, 0.0],
+            "the sources that have no pscale fill with the typed zero"
         );
+        expanded
+            .validate()
+            .expect("every column has to be as long as the point domain");
     }
 
     /// An out-of-range `source_index` selects the last source, the rule the
@@ -4363,16 +4369,24 @@ mod tests {
             .expect("two offsets");
         geometry
             .instances_mut()
-            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![-3, 9]))
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![-3, 7]))
             .expect("two source indices");
+        // Three sources of distinct sizes, and an over-range index a
+        // wrap-around would send to the *middle* one (7 % 3 = 1) rather than
+        // the last: clamping and wrapping are told apart here.
         let single = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
-        let triple = Geometry::from_points(vec![Vec2(0.0, 1.0); 3]);
-        geometry.set_instance_sources(vec![Arc::new(single), Arc::new(triple)]);
+        let double = Geometry::from_points(vec![Vec2(0.0, 1.0); 2]);
+        let quintuple = Geometry::from_points(vec![Vec2(1.0, 1.0); 5]);
+        geometry.set_instance_sources(vec![
+            Arc::new(single),
+            Arc::new(double),
+            Arc::new(quintuple),
+        ]);
 
         let expanded = expand_instances(&geometry).expect("clamped indices expand");
         // A negative index clamps to the first source (one point), an index
-        // past the end to the last (three points).
-        assert_eq!(expanded.point_count(), 1 + 3);
+        // past the end to the last (five points).
+        assert_eq!(expanded.point_count(), 1 + 5);
     }
 
     /// Instances of instances compose their placements, so a nested source
@@ -4467,8 +4481,18 @@ mod tests {
     /// `geometry.merge` moves one.
     #[test]
     fn a_mesh_source_expands_with_its_indices() {
-        let mut mesh = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(4.0, 0.0), Vec2(0.0, 4.0)]);
-        mesh.push_mesh(0..3, &[0, 1, 2]);
+        // Two windings, so an index range that was not rebased reads the
+        // other source's triangle instead of its own.
+        let quad = |triangles: &[u32]| {
+            let mut mesh = Geometry::from_points(vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(0.0, 4.0),
+                Vec2(4.0, 4.0),
+            ]);
+            mesh.push_mesh(0..4, triangles);
+            Arc::new(mesh)
+        };
         let mut geometry = Geometry::new();
         geometry
             .instances_mut()
@@ -4477,12 +4501,30 @@ mod tests {
                 AttributeArray::Vec2(vec![Vec2(10.0, 0.0), Vec2(0.0, 10.0)]),
             )
             .expect("two offsets");
-        geometry.set_instance_source(Some(Arc::new(mesh)));
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1]))
+            .expect("two source indices");
+        geometry.set_instance_sources(vec![quad(&[0, 1, 2]), quad(&[3, 2, 1])]);
 
         let expanded = expand_instances(&geometry).expect("a mesh source expands");
-        assert_eq!(expanded.point_count(), 6);
+        assert_eq!(expanded.point_count(), 8);
         assert_eq!(expanded.primitive_count(), 2);
-        assert_eq!(expanded.indices(), &[0, 1, 2, 0, 1, 2]);
+        assert_eq!(expanded.indices(), &[0, 1, 2, 3, 2, 1]);
+        let triangles: Vec<&[u32]> = expanded
+            .primitives()
+            .iter()
+            .map(|primitive| {
+                expanded
+                    .mesh_indices(primitive)
+                    .expect("both primitives are meshes")
+            })
+            .collect();
+        assert_eq!(
+            triangles,
+            vec![&[0u32, 1, 2][..], &[3u32, 2, 1][..]],
+            "each mesh has to read its own triangle, not the first blob's"
+        );
         expanded
             .validate()
             .expect("the expansion is valid geometry");

@@ -240,3 +240,43 @@ Windows / Linux の CI が通ること（EGL パッチを捨てるので Linux �
 `metal::QueueShared::raw` が private で OFX に `id<MTLCommandQueue>` を
 渡せない件 — `gpu-backend-plan.md` の `GPUBK-8` 節）、フォークに戻す前に
 **gpui-ce 側も同じ rev に揃える**こと。片側だけ動かすとこの状態に戻る。
+
+## MED-GPU-10 | bug | `geometry.transform` がベジェ接線を変換しないので、回転・スケールで曲線の形が壊れる
+
+**該当**: `crates/ravel-nodes/src/geometry.rs`（`GeometryTransformProcessor`）
+
+`geometry.transform` が書き換えるのは Point ドメインの `P`、Detail の
+`anchor`、Instance の `P` / `rot` / `scale` だけで、**`in_tan` / `out_tan` を
+触らない**。パスの制御点は「点からのオフセット」なので、点だけ回して接線を
+置き去りにすると**曲線の形が変わる** — 90 度回した円が卵になり、
+拡大した曲線は制御点だけ元の長さのまま残る。
+
+**これはテキスト以前からあるバグ**である。`shape.custom_path`
+（`done/viewer-tool-extensions-plan.md` の `TOOLX-3`、ペンツールの出力）が
+接線を持つので、**ペンで描いた曲線を `geometry.transform` に通すと壊れる**。
+`text.layout`（`TYPE-2`）の輪郭も接線を持つようになったので、踏みやすくなった。
+
+**直し方は既にリポジトリの中にある**: `TYPE-5`（PR #511）が
+`InstanceTransform::apply_vector` を入れた — 「差分は回転とスケールだけ、
+平行移動は掛けない」という変換で、接線に必要なのはまさにこれである。
+`geometry.transform` の `apply` の隣に同じ線形部分を持たせ、
+`in_tan` / `out_tan` の列があれば通す。
+
+**severity の根拠**: bug。データは壊れないが**出る絵が間違う**。high でないのは
+接線を持つジオメトリを `geometry.transform` に通したときだけで、
+既定のシェイプ（rect / ellipse / polygon / star）は接線を持たないため。
+low でないのは、ペンツールで描いた曲線という**ユーザーが直接作ったもの**が
+黙って変形するため。
+
+**関連**: `MED-GPU-09`（`Placement::compose` のアフィン近似）は
+`TYPE-5` の実装で**独立に再発見された** — 同じ穴に別の入口から 2 回当たって
+いるので、`InstanceTransform` に寄せた今が直しやすい。
+
+**解決済み**: PR #514 で `geometry.transform` が `in_tan` / `out_tan` に変換の
+線形部分を掛けるようにした。`TYPE-5`（#511）が入れた
+`InstanceTransform::apply_vector`（差分は回転とスケールだけ、平行移動は掛けない）を
+再利用したので、回転行列がこのノードに 2 本目として生えていない。
+`a_transform_turns_and_stretches_the_bezier_tangents` が四分回転・非一様スケール・
+平行移動の 3 つを解析値で固定し、「接線の変換を落とす」と「`apply_vector` の
+代わりに `apply` を使う」の変異でどちらも落ちることを確認済み。
+

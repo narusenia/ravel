@@ -42,7 +42,6 @@
 | KIT-0 | **ゲート**: 上流の 2 機能を `gpui-ce-ravel` へ前送りし、`gpui-component` の残差を測る（Ravel を触らない） | `gpui-kit-migration-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | TYPE-4 | パス沿い配置（`TYPE-2` ✅） | `typography-plan.md` |
-| TYPE-5 | `text.to_path` とフィールド被変調（`TYPE-2` / `MOD-5` ✅ で依存が解けた） | `typography-plan.md` |
 | TYPE-6 | 縦書きと禁則処理（`TYPE-2` ✅） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
@@ -1030,9 +1029,9 @@ SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触
 | TYPE-2 | ✅ | シェーピングとレイアウト → インスタンスジオメトリ（PR #508。**初めてテキストが出た**） | TYPE-1 |
 | TYPE-3 | 🟡 | レイヤーテンプレートと Properties | TYPE-2 |
 | TYPE-4 | 🟡 | パス沿い配置 | TYPE-2 |
-| TYPE-5 | 🟡 | `text.to_path` とフィールド被変調 | TYPE-2, MOD-5 |
+| TYPE-5 | ✅ | `text.to_path` とフィールド被変調（PR #511。配置の式を `InstanceTransform` としてコアに集約） | TYPE-2, MOD-5 |
 | TYPE-6 | 🟡 | 縦書きと禁則処理 | TYPE-2 |
-| TYPE-7 | ⬜ | ノードプリセットと文書更新 | TYPE-3, TYPE-5, MOD-5 |
+| TYPE-7 | ⬜ | ノードプリセットと文書更新（`TYPE-3` 待ち） | TYPE-3, TYPE-5 ✅, MOD-5 ✅ |
 
 `TYPE-1` / `TYPE-2` は済み（#506 / #508）。`MOD-5` も済んだので**残る 5 単位は
 すべて着手可能**。`TYPE-2` の時点で分かった天井が 2 つある — 双方向の並べ替えが

@@ -1,6 +1,6 @@
 # GPUI Kit 移行計画（gpui-ce → gpui-pre、gpui-base の採用）
 
-> **Status**: 計画のみ — 2026-09-04（調査は済み。`KIT-0` が go/no-go のゲート）
+> **Status**: 計画のみ — 2026-09-04（**ゲートを実測して当初の前提を撤回した**。下の「ゲートの実測」節が正）
 
 対象: Ravel が立つ GPUI 実装と、UI コンポーネント層の土台。
 関連要件: REQ-UI-002/003/013（UI の作り込み）、REQ-GPU-001（device 共有）。
@@ -41,7 +41,13 @@ Ravel は **gpui-ce**（コミュニティフォーク）に立っている。
 `-reqwest-client` の兄弟すべてを揃える必要がある（gpui-ce に対応物が
 無いものもある）。
 
-**帰結: 今の構成のままだと Ravel は `gpui-component` 0.5.x に永久固定される。**
+**ただしこれは「既定の解決では噛み合わない」という話で、ハードな要求ではない。**
+`gpui-kit` の**フォーク**を作ってその `Cargo.toml` の
+`gpui = { package = "gpui-pre", ... }` を Ravel の gpui フォークへ向ければ、
+`[patch]` の改名問題はそもそも発生しない — **今の gpui-component フォークが
+まさにその仕組みで動いている**。当初この計画は
+「0.6 は gpui-pre を要求する」と読んで gpui 移行を本筋に置いたが、
+**それは撤回した**（下の「ゲートの実測」）。
 
 ### そして gpui-ce が存在した理由が消えた
 
@@ -110,6 +116,46 @@ gpui-pre に移れば消滅する。残るのは「メニューの再フォー�
 
 `ScrubInput` は既に Ravel 自前（`widgets`）で、フォークには無い。
 
+## ゲートの実測（2026-09-04、この計画の結論）
+
+**`gpui-kit` 0.6.0 を clone し、ワークスペースの `gpui` / `gpui_macros` /
+`sum-tree` を `narusenia/gpui-ce-ravel` へ向けて `cargo check` した。**
+
+### `gpui-base` は gpui-ce にほぼそのまま乗る — エラー 4 個
+
+| 不足しているもの | 使用箇所 | 上流での実体 |
+|---|---|---|
+| `gpui::OngoingScroll` | `event.rs` / `scrollable_mask.rs` | **2 フィールドの構造体**（`last_event: Option<Instant>` / `axis: Option<Axis>`）+ `filter`。`gestures.rs` の一部 |
+| `gpui::SpringConfig` / `SpringState` / `SpringTarget`（+ `T::Output`） | `motion.rs` | `spring.rs` **830 行**、依存は `crate::{Hsla, Pixels, Rems, Rgba}` **だけ** |
+
+**API の世界が食い違っているのではなく、上流が gpui-ce の分岐後に足した機能が
+2 つ足りないだけ**である。どちらも**新しく設計するものではなく、上流のコードを
+前に持ってくるだけ**で済む（自己完結していて、プラットフォーム API を触らない）。
+
+クレート単位の欠落も無い: gpui-ce には `gpui_macros` / `gpui_platform` /
+`gpui_sum_tree` / `gpui_web` が揃っている（`sum-tree` は
+`package = "gpui_sum_tree"` で読み替えられる）。
+
+### したがって gpui-pre への移行は本筋ではない
+
+**9 パッチの移植は不要になる見込み。** 代わりに:
+
+1. `OngoingScroll` と spring を `gpui-ce-ravel` へ移植する（10 個目のパッチだが
+   **上流からの前送り**で自作ではない）
+2. `gpui-kit` のフォークを作り、その `gpui` を `gpui-ce-ravel` へ向ける
+   （今の gpui-component フォークと同じ仕組み）
+3. **GPU の 9 パッチは 1 行も触らない**
+
+### この実測が言えないこと
+
+- **コンパイルの測定であって挙動の測定ではない。** spring と慣性スクロールが
+  gpui-ce の上で正しく動くかは別に確かめる必要がある
+- **`gpui-component`（スタイル付き層）の差分はまだ測れていない** —
+  `gpui-base` の失敗の後ろに隠れている。既存 44 ファイルが使うのはこの層なので、
+  ここが大きい可能性は残る。**`KIT-0` の主目的はこの数字を出すこと**
+- `gpui-fps` は `gpui` に `profiler` feature を要求する（Ravel は使わないので
+  無害。ワークスペース全体を解決すると引っかかる）
+
 ## 目標構成
 
 ```text
@@ -131,16 +177,29 @@ gpui-pre 0.3.x ──┼─ gpui-base 0.6 ──→ ravel の独自コンポー�
 `Window` が別の型になる（`MED-GPU-07` の wgpu 二重化と同じ構図）。
 したがって Ravel 内の差し替えは 1 コミットである。
 
-**ただしリスクは段階化できる**: 移植の成否は Ravel の外側（フォーク）で
-先に決着させられる。`KIT-0` がその役目を負う。
+**ただしリスクは段階化できる**: 成否は Ravel の外側（フォーク）で先に
+決着させられる。`KIT-0` がその役目を負う。
 
-### go/no-go は 1 点に絞る
+**なお実測の結果、この制約が効く場面は狭まった** — gpui-ce に留まるなら
+GPUI の型の世界は動かないので、共存の問題そのものが起きない。
+制約が効くのは**フォールバック（gpui-pre 移行）を選んだときだけ**である。
 
-**上流の `SurfaceSource` に Metal RGBA テクスチャと wgpu テクスチャの
-バリアントを足せるか。** ここが通れば残り 8 パッチは機械的な移植である。
-通らなければ移行そのものを見送り、gpui-ce に留まって
-`gpui-component` 0.5.x で凍結する（そのとき `gpui-base` は
-**読むだけ**の参考資料として扱う。Apache-2.0 なので設計を参照する自由はある）。
+### go/no-go は `gpui-component` の残差で決める
+
+**当初は「上流の `SurfaceSource` に Metal / wgpu のバリアントを足せるか」を
+ゲートに置いたが、実測でそこは問われないと分かった**（gpui-ce に留まれるので
+`SurfaceSource` を触る必要が無い）。
+
+新しいゲートは **`gpui-base` を通したうえで `gpui-component` に残るエラーの量**
+である。`OngoingScroll` と spring を移植すれば base は通る見込みなので、
+そこから先に何が出るかで決める:
+
+- **小さい（上流の前送りと局所的な互換パッチで収まる）** → フォーク構成のまま
+  0.6 に乗る。`KIT-1` へ進む
+- **大きい（gpui-ce の分岐が構造的に効いている）** → gpui-pre への移行を
+  フォールバックとして検討する（当初案。9 パッチの移植が必要になる）
+
+**どちらに転んでも Ravel は無傷で判断できる** — `KIT-0` は Ravel を触らない。
 
 ### `ravel-dock` を捨てるかは移行後に決める
 
@@ -151,36 +210,47 @@ gpui-pre 0.3.x ──┼─ gpui-base 0.6 ──→ ravel の独自コンポー�
 
 ## 実装単位
 
-### KIT-0: 移植の実証（Ravel を触らない）
+### KIT-0: 不足 2 機能の移植と `gpui-component` の残差の測定（Ravel を触らない）
 
-**これがゲートで、実装単位ではない。** 成果物はフォーク 1 本と判断である。
+**これがゲートで、実装単位ではない。** 成果物はフォーク 2 本と**数字**である。
 
-- `narusenia/gpui-ce-ravel` の 9 パッチを `gpui-pre` 0.3.x へ移植した
-  フォークを作る（別ブランチ / 別リポジトリ）
-- 移植の順序は依存順: `SurfaceSource` の拡張 → Metal 経路 → wgpu 経路 →
-  完了通知 → Windows → BGRA → window 系（always-on-top / minimize）
-- `gpu_context_full` と device-loss 照会は**上流の公開 API に乗せ直す**
-  （`WgpuContext` の `instance` / `adapter` / `device` / `queue` と
-  `device_lost()` が既に pub なので、`PlatformWindow` トレイトへの
-  アクセサ追加だけで済むはず）
+- **`gpui-ce-ravel` に上流の 2 機能を前送りする**:
+  `OngoingScroll`（`gestures.rs` の一部）と spring
+  （`spring.rs` 830 行、依存は `crate::{Hsla, Pixels, Rems, Rgba}` だけ）。
+  **上流のコードをそのまま持ってくる** — 書き直さない。gpui-pre 0.3.3 が出所
+- **`gpui-kit` 0.6.0 をフォークし、`gpui` / `gpui_macros` / `sum-tree` を
+  `gpui-ce-ravel` へ向ける**（`sum-tree` は `package = "gpui_sum_tree"`）。
+  ワークスペースの members は `base` / `component` / `component-macros` /
+  `assets` に絞る（`fps` が `gpui` の `profiler` feature を要求するので、
+  全体を解決すると無関係な所で止まる）
+- **`cargo check -p gpui-base` を通し、次に `cargo check -p gpui-component` の
+  エラーを分類する** — これがゲートの数字
 
 **完了条件**
 
-- フォーク単体で `cargo build` が macOS / Windows で通る
-- **フォークの examples でゼロコピー surface が実際に描かれる**
-  （テクスチャを渡して画面に出る。「コンパイルできた」は完了条件ではない）
-- `WgpuContext` から device / queue を取り出す経路が
-  `PlatformWindow` 越しに公開されている
-- **移植できなかったパッチがあれば、それを列挙して go/no-go を宣言する**
+- `cargo check -p gpui-base` が macOS で通る
+- **`gpui-component` のエラーを「上流の前送りで済むもの / gpui-ce の分岐が
+  構造的に効いているもの」に分類した表がある**
+- **spring と慣性スクロールが gpui-ce の上で動くことを examples で確認する**
+  （コンパイルは挙動の証明ではない。`gpui-base` の examples か、
+  `gpui-kit` の story を最小構成で動かす）
+- 上の分類にもとづいて **go/no-go を宣言する**（フォーク構成で 0.6 に乗るか、
+  gpui-pre 移行をフォールバックとして起こすか）
+
+**この単位でやらないこと**: Ravel の `Cargo.toml` を触ること。
+9 パッチの移植（フォールバックが選ばれたときだけ必要になる）。
 
 ### KIT-1: Ravel の土台差し替え（1 コミット）
 
-- `Cargo.toml` の `gpui` / `gpui_platform` を `KIT-0` のフォークへ、
-  `gpui-component` を 0.6 へ差し替える
-- `[patch."https://github.com/zed-industries/zed"]` は不要になる
-  （0.6 は crates.io の `gpui-pre` を見るので、`[patch.crates-io]` で
-  `gpui-pre` を差し替える）
+- `Cargo.toml` の `gpui` / `gpui_platform` を **2 機能を前送りした
+  `gpui-ce-ravel`** へ、`gpui-component` を **`KIT-0` の gpui-kit フォーク**の
+  0.6 へ差し替える
+- **`[patch."https://github.com/zed-industries/zed"]` は残る**（gpui-ce の
+  `gpui` を使い続けるので既存の patch がそのまま効く）。フォークが自分の
+  `Cargo.toml` で `gpui` を向け直しているので、`gpui-pre` を patch する
+  必要は無い
 - 44 ファイルの API 追随（`Table` → `DataTable` の 2 箇所ほか）
+- **`gpui-base` を workspace 依存に足す**（新規コンポーネントの土台）
 - `ravel-gpu` の `interop` 境界は**変えない**。`.agents/rules/rust.md` が
   「バックエンド置換はこの署名を変える」と書いているとおり、
   変わるのは `interop::context_from_wgpu` に何を渡すかであって境界の位置ではない

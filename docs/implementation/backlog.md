@@ -39,7 +39,11 @@
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
-| TYPE-1 | フォント解決（依存なし。`TYPE-5` / `TYPE-7` だけが `MOD-5` ✅ 待ちだった） | `typography-plan.md` |
+| KIT-0 | **ゲート**: フォークの 9 パッチを `gpui-pre` へ移植して実証（Ravel を触らない） | `gpui-kit-migration-plan.md` |
+| TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
+| TYPE-4 | パス沿い配置（`TYPE-2` ✅） | `typography-plan.md` |
+| TYPE-5 | `text.to_path` とフィールド被変調（`TYPE-2` / `MOD-5` ✅ で依存が解けた） | `typography-plan.md` |
+| TYPE-6 | 縦書きと禁則処理（`TYPE-2` ✅） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
 | OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
@@ -705,6 +709,22 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | EXPORT-6 | ✅ | 文書更新 | #335 |
 | EXPORT-7 | ✅ | CLI の対話モード | #330 |
 
+### GPUI Kit 移行（gpui-ce → gpui-pre、gpui-base の採用）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| KIT-0 | 🟡 | **ゲート**: フォークの 9 パッチを `gpui-pre` へ移植し、ゼロコピーが実際に描かれることを証明する（Ravel は触らない） | — |
+| KIT-1 | ⬜ | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6、44 ファイルの API 追随）。**1 コミット** | KIT-0 |
+| KIT-2 | ⬜ | gpui-component フォークの棚卸しと上流 PR | KIT-1 |
+| KIT-3 | ⬜ | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | KIT-1 |
+| KIT-4 | ⬜ | `ravel-dock` と `gpui-base` の `dock` の比較（判断の単位） | KIT-1 |
+| KIT-5 | ⬜ | 文書更新（`architecture.md` のフォーク方針、`gpui-ui-guide.md`） | KIT-1 |
+
+**段階移行はできない** — gpui-ce と gpui-pre は 1 バイナリに共存できない
+（`Entity<T>` / `App` / `Window` が別の型になる。`MED-GPU-07` の wgpu
+二重化と同じ構図）。`[patch]` は「同じ名前と同じバージョン」を要求するので
+逃げ道も無い。**リスクの段階化は `KIT-0` が Ravel の外で決着させる形で行う。**
+
 ### CI キャッシュ
 
 | ID | 状態 | 単位 | 依存 |
@@ -1003,15 +1023,22 @@ SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| TYPE-1 | 🟡 | フォント解決 | — |
-| TYPE-2 | ⬜ | シェーピングとレイアウト → インスタンスジオメトリ | TYPE-1 |
-| TYPE-3 | ⬜ | レイヤーテンプレートと Properties | TYPE-2 |
-| TYPE-4 | ⬜ | パス沿い配置 | TYPE-2 |
-| TYPE-5 | ⬜ | `text.to_path` とフィールド被変調 | TYPE-2, MOD-5 |
-| TYPE-6 | ⬜ | 縦書きと禁則処理 | TYPE-2 |
+| TYPE-1 | ✅ | フォント解決（PR #506。`font-kit` は採らず `ttf-parser` で走査 — 計画書の実装メモ参照） | — |
+| TYPE-2 | ✅ | シェーピングとレイアウト → インスタンスジオメトリ（PR #508。**初めてテキストが出た**） | TYPE-1 |
+| TYPE-3 | 🟡 | レイヤーテンプレートと Properties | TYPE-2 |
+| TYPE-4 | 🟡 | パス沿い配置 | TYPE-2 |
+| TYPE-5 | 🟡 | `text.to_path` とフィールド被変調 | TYPE-2, MOD-5 |
+| TYPE-6 | 🟡 | 縦書きと禁則処理 | TYPE-2 |
 | TYPE-7 | ⬜ | ノードプリセットと文書更新 | TYPE-3, TYPE-5, MOD-5 |
 
-TYPE-1 は依存が無いので先行できるが、計画全体は MOD-5 完了が前提。
+`TYPE-1` / `TYPE-2` は済み（#506 / #508）。`MOD-5` も済んだので**残る 5 単位は
+すべて着手可能**。`TYPE-2` の時点で分かった天井が 2 つある — 双方向の並べ替えが
+段落単位（行単位ではない）で、段落は 1 回だけシェイプして行を切り出すこと。
+どちらも `TYPE-6`（縦書き）が行走査を作り直すときに直すのが安い。
+
+**`rasterize` が 1 図形の複数輪郭を 1 回の巻き数で塗らないので、
+文字の穴が塗り潰される**（`TYPE-2` の実機確認で判明）。グリフが穴を持つ
+最初の図形だったので今まで踏まれていなかった。塗りの修正は別の変更で行う。
 
 ### ステートフル評価（REQ-CORE-011）
 

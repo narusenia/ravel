@@ -1466,6 +1466,10 @@ content = "Content"
 metrics = "Metrics"
 paragraph = "Paragraph"
 
+[node."text.to_path"]
+label = "Text To Path"
+description = "Flattens character instances into one geometry of outline paths, baking each character's placement into its outline points and carrying the per-character attributes down onto the Point domain. Applying a field to P then distorts the letter shapes themselves instead of moving whole characters. Any instance geometry converts, not only text; a geometry without instances passes through."
+
 [export]
 title = "Export"
 submit = "Export"

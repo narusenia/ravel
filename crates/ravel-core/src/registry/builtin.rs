@@ -191,6 +191,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(field_apply());
     reg.register(text_font());
     reg.register(text_layout());
+    reg.register(text_to_path());
 }
 
 fn geometry_input(name: &str) -> InputPort {
@@ -2042,6 +2043,27 @@ fn text_layout() -> NodeTemplate {
         .with_param_group("paragraph", ["align", "wrap_width", "anchor"])
 }
 
+/// `text.to_path`: flattens a text layout's character instances into one
+/// geometry of outline paths.
+///
+/// The node the acceptance criterion "the converted geometry is affected by
+/// fields" rests on (REQ-MOGRAPH-004, typography-plan unit 5). Each
+/// character's placement is baked into its outline points and the
+/// per-character attributes descend onto the Point domain, so
+/// `field.noise` -> `field.apply(P)` on the **Point** domain distorts the
+/// letter shapes themselves rather than moving whole characters about.
+///
+/// No parameters: what to convert is the input, and there is nothing to
+/// decide. Not text-specific either — the operation flattens any instance
+/// geometry, and a geometry with no instances passes straight through — but
+/// it lives in the `text.` namespace because converting letters to outlines
+/// is the workflow it exists for.
+fn text_to_path() -> NodeTemplate {
+    NodeTemplate::new("text.to_path", "Text To Path", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2073,7 +2095,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 86);
+        assert_eq!(reg.all_templates().count(), 87);
     }
 
     #[test]

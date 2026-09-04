@@ -5,7 +5,9 @@
 //!
 //! `text.font` resolves a family, weight, and style to one face;
 //! `text.layout` shapes a string in that face into one instance per
-//! character.
+//! character; `text.to_path` flattens those instances into one geometry of
+//! outline paths, which is what puts the letter shapes themselves within
+//! reach of a Point-domain field.
 //!
 //! The selection itself lives in [`ravel_core::text`], which owns the face
 //! index and the caches; this is the node wrapper around it. The only thing
@@ -17,6 +19,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::geometry::{Geometry, ops};
 use ravel_core::graph::Node;
 use ravel_core::text::{self, Align, FontQuery, FontRef, LayoutParams, VerticalAnchor};
 use ravel_core::types::NodeData;
@@ -109,6 +112,58 @@ impl NodeProcessor for LayoutProcessor {
         let geometry = text::layout_text(font, params.str_or("text", ""), &layout)
             .with_context(|| format!("laying text out in {}", font.family))?;
         Ok(Arc::new(geometry))
+    }
+}
+
+/// Flattens the character instances on its input into one geometry of
+/// outline paths (typography-plan unit 5).
+///
+/// The whole node is [`ops::expand_instances`]: each character's `P` / `rot`
+/// / `scale` is baked into its outline points, the per-character attributes
+/// descend onto the Point and Primitive domains, and the bezier tangents are
+/// carried through as the differences they are. What that buys is the
+/// acceptance criterion "the converted geometry is affected by fields" —
+/// `field.apply` on the **Point** domain now reaches the control points of
+/// the letters instead of the character origins.
+///
+/// Stateless, like the other two `text.*` processors: there is nothing to
+/// read off the node.
+pub struct ToPathProcessor;
+
+impl ToPathProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for ToPathProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        // An unconnected input is an empty geometry rather than an error: a
+        // node the user has just dropped in has nothing to convert yet, and
+        // failing the evaluation would blank the whole frame instead of that
+        // one branch.
+        let Some(geometry) = inputs
+            .first()
+            .and_then(Option::as_ref)
+            .map(|input| {
+                input
+                    .downcast_ref::<Geometry>()
+                    .ok_or_else(|| anyhow::anyhow!("text.to_path: input 0 is not Geometry"))
+            })
+            .transpose()?
+        else {
+            return Ok(Arc::new(Geometry::new()));
+        };
+        Ok(Arc::new(
+            ops::expand_instances(geometry).context("converting a text layout to paths")?,
+        ))
     }
 }
 
@@ -340,5 +395,131 @@ mod tests {
             (large / small - 4.0).abs() < 0.01,
             "advance has to scale with size: {small} then {large}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // text.to_path
+    // -----------------------------------------------------------------------
+
+    /// A `text.to_path` node as the registry builds it.
+    fn to_path_node(id: u64) -> Node {
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
+        registry
+            .create_node("text.to_path", NodeId::new(id))
+            .expect("text.to_path is registered")
+    }
+
+    #[test]
+    fn the_to_path_template_declares_a_geometry_input_and_a_geometry_output() {
+        let node = to_path_node(1);
+        assert_eq!(node.inputs.len(), 1);
+        assert_eq!(node.inputs[0].accepted_types, vec![DataTypeId::GEOMETRY]);
+        assert_eq!(node.outputs.len(), 1);
+        assert_eq!(node.outputs[0].data_type, DataTypeId::GEOMETRY);
+        assert!(
+            node.parameters.is_empty(),
+            "there is nothing to decide about a conversion"
+        );
+    }
+
+    /// `text.layout -> text.to_path`: the character instances become one
+    /// geometry of outline paths, with the per-character attributes on the
+    /// Point domain where a field can read them.
+    #[test]
+    fn a_layout_node_feeding_to_path_produces_one_outline_geometry() {
+        let layout = layout_node(1, "Ravel");
+        let to_path = to_path_node(2);
+        let graph = Graph::new()
+            .add_node(layout)
+            .expect("the layout node")
+            .add_node(to_path)
+            .expect("the to_path node")
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .expect("layout connects to to_path");
+        let mut evaluator = Evaluator::new();
+        evaluator.register(NodeId::new(1), Arc::new(LayoutProcessor));
+        evaluator.register(NodeId::new(2), Arc::new(ToPathProcessor));
+
+        let laid_out = evaluator
+            .evaluate(&graph, NodeId::new(1), &ctx())
+            .expect("the layout evaluates");
+        let laid_out = laid_out
+            .downcast_ref::<Geometry>()
+            .expect("text.layout produces geometry");
+        // The point count the conversion has to reproduce: every outline
+        // point of every character, counted from the sources the layout
+        // shares between repeated glyphs.
+        let source_indices = laid_out
+            .instances()
+            .get(names::SOURCE_INDEX)
+            .expect("the layout writes source_index")
+            .as_i32(names::SOURCE_INDEX)
+            .expect("an I32 column")
+            .to_vec();
+        let expected_points: usize = source_indices
+            .iter()
+            .map(|index| {
+                laid_out.sources()[*index as usize]
+                    .geometry()
+                    .expect("a glyph outline")
+                    .point_count()
+            })
+            .sum();
+        assert!(expected_points > 0, "`Ravel` has ink");
+
+        let value = evaluator
+            .evaluate(&graph, NodeId::new(2), &ctx())
+            .expect("the conversion evaluates");
+        let paths = value
+            .downcast_ref::<Geometry>()
+            .expect("text.to_path produces geometry");
+        assert_eq!(paths.point_count(), expected_points);
+        assert_eq!(paths.instance_count(), 0, "the answer is flat geometry");
+        for name in [
+            names::CHAR_INDEX,
+            names::WORD_INDEX,
+            names::LINE_INDEX,
+            names::CHAR_PROGRESS,
+            names::ADVANCE,
+        ] {
+            assert!(
+                paths
+                    .points()
+                    .get(name)
+                    .is_some_and(|column| column.len() == expected_points),
+                "{name} has to reach every outline point"
+            );
+        }
+        // Curves stay curves: the tangents unit 2 wrote are still there.
+        assert!(
+            paths.points().get(names::IN_TAN).is_some(),
+            "the bezier tangents have to survive the conversion"
+        );
+    }
+
+    /// An unconnected input is an empty geometry, not an error: a node just
+    /// dropped into a graph must not blank the frame.
+    #[test]
+    fn an_unconnected_input_converts_to_an_empty_geometry() {
+        let graph = Graph::new()
+            .add_node(to_path_node(1))
+            .expect("a single-node graph");
+        let mut evaluator = Evaluator::new();
+        evaluator.register(NodeId::new(1), Arc::new(ToPathProcessor));
+        let value = evaluator
+            .evaluate(&graph, NodeId::new(1), &ctx())
+            .expect("an unconnected input must not fail the evaluation");
+        let geometry = value
+            .downcast_ref::<Geometry>()
+            .expect("text.to_path produces geometry");
+        assert_eq!(geometry.point_count(), 0);
+        assert_eq!(geometry.instance_count(), 0);
     }
 }

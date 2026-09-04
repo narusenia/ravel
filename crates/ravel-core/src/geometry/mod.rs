@@ -27,7 +27,7 @@ pub use field::{
 pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,
     PathSample, SortMode, TransferMode, attribute_delete, attribute_set, attribute_set_in_group,
-    attribute_transfer, bounds_center, connect, curve_u, element_hash, path_sample,
-    promote_attribute, sort,
+    attribute_transfer, bounds_center, connect, curve_u, element_hash, expand_instances,
+    path_sample, promote_attribute, sort,
 };
 pub use triangulate::Triangulator;

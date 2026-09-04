@@ -2138,6 +2138,59 @@ mod tests {
         assert!(outside[3] < 1e-6, "exterior stays transparent");
     }
 
+    /// Two **overlapping** paths of one run are blended once, not twice.
+    ///
+    /// A run renders one mask, so a translucent shape whose contours overlap
+    /// keeps the alpha it asked for instead of darkening where they cross.
+    /// Before the fill runs existed the two masks blended in sequence and the
+    /// overlap came out at `1 - (1 - a)²`. The value is asserted because it
+    /// is the one place the grouping is visible in the output of a *correct*
+    /// drawing rather than of a broken one: going back to a mask per path
+    /// would leave every hole test passing on opaque fills and only show up
+    /// here.
+    #[test]
+    fn one_run_blends_an_overlap_once() {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(4.0, 4.0),
+            Vec2(20.0, 4.0),
+            Vec2(20.0, 20.0),
+            Vec2(4.0, 20.0),
+            // Same winding, shifted so the two squares share a quadrant.
+            Vec2(12.0, 12.0),
+            Vec2(28.0, 12.0),
+            Vec2(28.0, 28.0),
+            Vec2(12.0, 28.0),
+        ]);
+        for verts in [0..4, 4..8] {
+            geo.push_primitive(Primitive::Path {
+                verts,
+                closed: true,
+            });
+        }
+        geo.primitive_attrs_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(0.0, 0.0, 0.0, 0.5),
+                    Color::new(0.0, 0.0, 0.0, 0.5),
+                ]),
+            )
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 32, 32);
+        let alone = pixel(&fb, 8, 8);
+        let overlap = pixel(&fb, 16, 16);
+        assert!(
+            (alone[3] - 0.5).abs() < 0.05,
+            "a single contour keeps the alpha it asked for: {alone:?}"
+        );
+        assert!(
+            (overlap[3] - 0.5).abs() < 0.05,
+            "the overlap is one blend, not two ({:.3} would be two): {overlap:?}",
+            1.0 - 0.5f32 * 0.5,
+        );
+    }
+
     /// Two closed paths that carry **different** colors are two runs, so the
     /// second one still fills over the first rather than punching a hole in
     /// it. This is what keeps the grouping keyed on the resolved style

@@ -13,7 +13,9 @@
 //! correctness of shaping is pinned by cluster counts, advances and
 //! attributes, not by pixel comparison against a face. What is asserted here
 //! is where the ink is and where it is not — inside the letters' band, with
-//! nothing above the cap height and nothing below the baseline.
+//! nothing above the cap height and nothing below the baseline, and with the
+//! counter of an `o` transparent (the rasterizer's fill runs; see the
+//! `rasterize` module header).
 
 use ravel_core::eval::{EvalContext, Evaluator};
 use ravel_core::graph::{Graph, Node, ParameterValue};
@@ -160,4 +162,63 @@ fn empty_text_rasterizes_to_an_empty_frame() {
     let frame = render("");
     let ink: f32 = (0..HEIGHT).map(|y| row_coverage(&frame, y)).sum();
     assert_eq!(ink, 0.0, "an empty string draws nothing");
+}
+
+/// The runs of covered pixels in one row: `(start, end)` for each stretch of
+/// alpha above a half.
+fn ink_runs(frame: &FrameBuffer, y: u32) -> Vec<(u32, u32)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for x in 0..frame.width {
+        match (pixel(frame, x, y)[3] > 0.5, start) {
+            (true, None) => start = Some(x),
+            (false, Some(from)) => {
+                runs.push((from, x));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = start {
+        runs.push((from, frame.width));
+    }
+    runs
+}
+
+/// A glyph counter is a **hole**, not more ink.
+///
+/// The outline of an `o` is two closed contours wound against each other, and
+/// the rasterizer used to fill each of them on its own — which put the second
+/// one's area back inside the first. A row through the middle of the letter
+/// therefore has to cross ink exactly twice, with fully transparent pixels
+/// between the two crossings.
+#[test]
+fn a_glyph_counter_stays_transparent() {
+    let frame = render("o");
+    // Halfway up the x-height, which for the bundled face is about half an
+    // em: inside both stems of the `o` and clear of its curves.
+    let row = (BASELINE - SIZE * 0.25) as u32;
+    let runs = ink_runs(&frame, row);
+    assert_eq!(
+        runs.len(),
+        2,
+        "row {row} has to cross the two stems of the `o` and nothing else: {runs:?}"
+    );
+
+    // Inset past the antialiased fringe of each stem: those pixels are
+    // partially covered by design. Everything between them has to be
+    // *exactly* transparent — an under-inked counter would still be a filled
+    // one.
+    let (left, right) = (runs[0].1 + 2, runs[1].0 - 2);
+    assert!(
+        right > left,
+        "the counter has to be wider than its own antialiasing: {left}..{right}"
+    );
+    for x in left..right {
+        let hole = pixel(&frame, x, row);
+        assert_eq!(
+            hole[3], 0.0,
+            "the counter is empty, not merely faint, at ({x},{row}): {hole:?}"
+        );
+    }
 }

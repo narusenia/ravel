@@ -2082,6 +2082,87 @@ mod tests {
         assert!(outside[3] < 1e-6, "exterior stays transparent");
     }
 
+    /// A ring: an outer square and an inner square wound the other way, the
+    /// two closed paths of one geometry.
+    ///
+    /// This is the shape of a glyph counter (`o`, `a`, `R`) reduced to
+    /// straight lines, and it carries no primitive attributes, so both paths
+    /// resolve to the same style and land in one run.
+    fn ring_geo() -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            // Outer contour, clockwise in a Y-down space.
+            Vec2(4.0, 4.0),
+            Vec2(28.0, 4.0),
+            Vec2(28.0, 28.0),
+            Vec2(4.0, 28.0),
+            // Inner contour, counter-clockwise: the counter.
+            Vec2(12.0, 20.0),
+            Vec2(20.0, 20.0),
+            Vec2(20.0, 12.0),
+            Vec2(12.0, 12.0),
+        ]);
+        for verts in [0..4, 4..8] {
+            geo.push_primitive(Primitive::Path {
+                verts,
+                closed: true,
+            });
+        }
+        geo
+    }
+
+    /// The counter of a ring stays **empty**, not merely under-inked.
+    ///
+    /// One mask per path can only add area, so before the fill runs existed
+    /// the inner square filled solid and a glyph lost its hole. The
+    /// assertion is on alpha rather than on ink: `α == 0` is the only value
+    /// that says the non-zero rule was evaluated across both contours.
+    #[test]
+    fn a_counter_wound_the_other_way_leaves_a_hole() {
+        let fb = run(true, 0.0, &ring_geo(), 32, 32);
+
+        for (x, y) in [(16, 16), (14, 14), (18, 18)] {
+            let hole = pixel(&fb, x, y);
+            assert_eq!(
+                hole[3], 0.0,
+                "the counter has to stay empty at ({x},{y}): {hole:?}"
+            );
+        }
+        for (x, y) in [(8, 16), (16, 8), (24, 16), (16, 24)] {
+            let band = pixel(&fb, x, y);
+            assert!(
+                band[3] > 0.9,
+                "the band between the contours is filled at ({x},{y}): {band:?}"
+            );
+        }
+        let outside = pixel(&fb, 1, 1);
+        assert!(outside[3] < 1e-6, "exterior stays transparent");
+    }
+
+    /// Two closed paths that carry **different** colors are two runs, so the
+    /// second one still fills over the first rather than punching a hole in
+    /// it. This is what keeps the grouping keyed on the resolved style
+    /// instead of on "closed paths of one geometry".
+    #[test]
+    fn a_differently_coloured_inner_path_still_fills() {
+        let mut geo = ring_geo();
+        geo.primitive_attrs_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(1.0, 0.0, 0.0, 1.0),
+                    Color::new(0.0, 0.0, 1.0, 1.0),
+                ]),
+            )
+            .unwrap();
+
+        let fb = run(true, 0.0, &geo, 32, 32);
+        let middle = pixel(&fb, 16, 16);
+        assert!(
+            middle[3] > 0.9 && middle[2] > 0.9 && middle[0] < 0.1,
+            "the inner path is its own run and fills blue: {middle:?}"
+        );
+    }
+
     /// The CPU path reuses one coverage mask for every primitive, so a
     /// primitive that leaves the mask dirty would stamp its own silhouette,
     /// in the *next* primitive's colour, wherever the next one does not
@@ -3555,6 +3636,54 @@ mod tests {
         let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 2.0, &ctx(40, 40));
         // Same looser per-pixel threshold as the tangent-attribute case.
         assert_equivalent_with(&cpu, &gpu_frame, "flattened polyline", 0.98);
+    }
+
+    /// The hole in a ring has to be the hole on **both** paths.
+    ///
+    /// The shader counts one winding number per draw item and walks the
+    /// contours of that item across the `CONTOUR_BREAK` sentinels; the CPU
+    /// reference accumulates zeno commands. Two independent mechanisms for
+    /// one rule, so nothing but this test says they agree — and a
+    /// disagreement would show as a viewer that draws letters differently
+    /// from the render.
+    #[test]
+    fn gpu_matches_cpu_for_a_counter_wound_the_other_way() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let geo = ring_geo();
+        let cpu = run(true, 0.0, &geo, 32, 32);
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 0.0, &ctx(32, 32));
+        assert_equivalent(&cpu, &gpu_frame, "ring fill");
+        // Not implied by the ratio: both paths could agree on a filled
+        // counter and still match each other.
+        for (x, y) in [(16, 16), (14, 14), (18, 18)] {
+            let hole = pixel(&gpu_frame, x, y);
+            assert_eq!(
+                hole[3], 0.0,
+                "the GPU counter has to stay empty at ({x},{y}): {hole:?}"
+            );
+        }
+    }
+
+    /// A stroked ring: the run carries both contours, so the distance field
+    /// has to outline each of them and never bridge the gap between the two.
+    #[test]
+    fn gpu_matches_cpu_for_a_stroked_ring() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+        let geo = ring_geo();
+        let cpu = run(false, 2.0, &geo, 32, 32);
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, false, 2.0, &ctx(32, 32));
+        assert_equivalent_with(&cpu, &gpu_frame, "stroked ring", 0.98);
+        // The midpoint between the two contours is more than a half-width
+        // from either: a segment joining the contours would put ink here.
+        for frame in [&cpu, &gpu_frame] {
+            let between = pixel(frame, 8, 8);
+            assert!(
+                between[3] < 1e-6,
+                "no segment bridges the contours: {between:?}"
+            );
+        }
     }
 
     /// Square path with no `Cd`/`alpha` attributes.

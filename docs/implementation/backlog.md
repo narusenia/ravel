@@ -39,7 +39,7 @@
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
-| KIT-0 | **ゲート**: 上流の 2 機能を `gpui-ce-ravel` へ前送りし、`gpui-component` の残差を測る（Ravel を触らない） | `gpui-kit-migration-plan.md` |
+| KIT-0b | `simulate_next_frame` と `ArenaClearNeeded::clear(cx)` を前送りして `cargo test -p gpui-base` を緑にする（前送りの正しさの検証と B の実コスト確定） | `gpui-kit-migration-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | TYPE-4 | パス沿い配置（`TYPE-2` ✅） | `typography-plan.md` |
 | TYPE-6 | 縦書きと禁則処理（`TYPE-2` ✅） | `typography-plan.md` |
@@ -712,20 +712,24 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| KIT-0 | 🟡 | **ゲート**: 上流の 2 機能（`OngoingScroll` / spring）を `gpui-ce-ravel` へ前送りし、`gpui-component` の残差を測る（Ravel は触らない） | — |
+| KIT-0 | ✅ | **ゲート**: 上流 API の前送りと残差の測定（Ravel は触らない）。**判断は条件付き GO** — `gpui-component` の残差 38 個のうち **B（構造的な差）が 0** | — |
+| KIT-0b | 🟡 | `simulate_next_frame` と `ArenaClearNeeded::clear(cx)` を前送りして `cargo test -p gpui-base` を緑にする | KIT-0 |
 | KIT-1 | ⬜ | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6、44 ファイルの API 追随）。**1 コミット** | KIT-0 |
 | KIT-2 | ⬜ | gpui-component フォークの棚卸しと上流 PR | KIT-1 |
 | KIT-3 | ⬜ | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | KIT-1 |
 | KIT-4 | ⬜ | `ravel-dock` と `gpui-base` の `dock` の比較（判断の単位） | KIT-1 |
 | KIT-5 | ⬜ | 文書更新（`architecture.md` のフォーク方針、`gpui-ui-guide.md`） | KIT-1 |
 
-**2026-09-04 にゲートを実測して当初の前提を撤回した。** `gpui-base` 0.6 は
-gpui-ce に対してエラー 4 個しか出さず、原因は上流が分岐後に足した 2 機能
-（`OngoingScroll` と spring）だけだった。**gpui-pre への移行は本筋ではなく
-フォールバック**で、gpui-ce に留まったまま `gpui-kit` のフォーク経由で
-0.6 に乗れる見込み（今の gpui-component フォークと同じ仕組み）。
-**残る不確実性は `gpui-component` 側の差分**で、それを測るのが `KIT-0`。
-詳細は計画書の「ゲートの実測」節。
+**`KIT-0` は済み。判断は条件付き GO**（2026-09-05）。上流 API を
+`gpui-ce-ravel` へ前送りしたうえで測ると、`gpui-component` の残差は **38 個で
+B（gpui-ce の分岐が構造的に効いている箇所）が 0**。残りは上流の後付けと
+proc-macro のクレート名ハードコードだけだった。**gpui-pre への移行は
+フォールバック**として生かす。
+
+**2026-09-04 に書いた「エラー 4 個」は誤り**だった — 未解決 import が
+残る間は型検査のエラーが 1 個も出ないため、名前解決段の数字を残差と
+読んでいた。前送り後の実際の残差は `gpui-base` が 13、`gpui-component` が
+38（しかも 38 は下限）。詳細は計画書の「`KIT-0` の実測」節。
 
 ### CI キャッシュ
 

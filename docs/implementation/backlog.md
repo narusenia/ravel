@@ -712,9 +712,9 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| KIT-0 | ✅ | **ゲート**: 上流 API の前送りと残差の測定（Ravel は触らない）。**判断は条件付き GO** — `gpui-component` の残差 38 個のうち **B（構造的な差）が 0** | — |
+| KIT-0 | ✅ | **ゲート**: 上流 API の前送りと残差の測定（Ravel は触らない）。`gpui-component` の残差 38 個のうち **B（構造的な差）が 0** | — |
 | KIT-0b | ✅ | `simulate_next_frame` と `ArenaClearNeeded::clear(cx)` を前送りして `gpui-base` のテストを 761/764 pass に（残り 3 本は上流のバグ） | KIT-0 |
-| KIT-1 | ⬜ | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6、44 ファイルの API 追随）。**1 コミット** | KIT-0 |
+| KIT-1 | ⬜ | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6、44 ファイルの API 追随）。**1 コミット** | KIT-0b ✅ |
 | KIT-2 | ⬜ | gpui-component フォークの棚卸しと上流 PR | KIT-1 |
 | KIT-3 | ⬜ | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | KIT-1 |
 | KIT-4 | ⬜ | `ravel-dock` と `gpui-base` の `dock` の比較（判断の単位） | KIT-1 |

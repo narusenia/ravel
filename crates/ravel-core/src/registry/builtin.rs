@@ -192,6 +192,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(text_font());
     reg.register(text_layout());
     reg.register(text_to_path());
+    reg.register(text_on_path());
 }
 
 fn geometry_input(name: &str) -> InputPort {
@@ -2075,6 +2076,39 @@ fn text_to_path() -> NodeTemplate {
         .with_output(geometry_output())
 }
 
+/// `text.on_path`: re-places a text layout's character instances along a
+/// path (typography-plan unit 4).
+///
+/// Only `P` and `rot` are rewritten, so the glyph outlines in
+/// `instance_sources` and every per-character attribute (`char_index` /
+/// `word_index` / `line_index` / `char_progress` / `advance`) survive — the
+/// field-modulation entry point is the same after the node as before it.
+///
+/// The arc-length coordinate of a character is the running sum of the
+/// `advance` column, not a component of `P`: `advance` is the writing-axis
+/// step in **either** writing mode (`names::ADVANCE`), so vertical text runs
+/// along the path instead of stacking every character at one arc length.
+///
+/// An unconnected `path` input passes the text straight through rather than
+/// failing, for the reason the other `text.*` nodes give: a node the user
+/// has just dropped in must not blank the frame.
+fn text_on_path() -> NodeTemplate {
+    NodeTemplate::new("text.on_path", "Text On Path", NodeCategory::Geometry)
+        .with_input(geometry_input("text"))
+        .with_input(geometry_input("path"))
+        .with_output(geometry_output())
+        .with_param(float_parameter("offset", 0.0))
+        .with_param(float_parameter("spacing", 0.0))
+        .with_param(string_parameter("align", "start"))
+        .with_param_options("align", ["start", "center", "end"])
+        .with_param(Parameter {
+            key: "flip".into(),
+            value: ParameterValue::Bool(false),
+        })
+        .with_param_range("offset", -100000.0..=100000.0, -2000.0..=2000.0)
+        .with_param_range("spacing", -1000.0..=1000.0, -20.0..=100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2106,14 +2140,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 87);
+        assert_eq!(reg.all_templates().count(), 88);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 27);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);

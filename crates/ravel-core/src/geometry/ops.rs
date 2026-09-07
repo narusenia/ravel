@@ -313,7 +313,15 @@ fn first_path<'a>(
     Ok((path, closed))
 }
 
-/// Samples the first path primitive at an absolute, clamped arc length.
+/// The arc-length segment table of a geometry's first path primitive,
+/// built once and sampled many times.
+///
+/// [`path_sample`] is the one-shot form and builds one of these per call,
+/// which is the right shape for a node that reads a single place on a path.
+/// A caller that samples the **same** path once per element — one place per
+/// character in `text.on_path` — must hold the table across its loop
+/// instead: building it walks every vertex, so a rebuild per element is
+/// O(elements x vertices).
 ///
 /// Arc length along a 3D polyline has no agreed definition yet (the frame it
 /// would return is ambiguous), so a geometry with `Vec3` positions is an
@@ -321,34 +329,72 @@ fn first_path<'a>(
 /// length at all, so it is rejected the same way instead of being skipped —
 /// silently sampling the first path of a mixed geometry would answer a
 /// question the caller did not ask.
+#[derive(Clone, Debug)]
+pub struct PathArcTable {
+    /// Non-empty, and cumulative length strictly increasing: `push_segment`
+    /// drops zero-length segments and [`Self::build`] refuses a table whose
+    /// total is degenerate. Both facts are what let [`Self::sample`] be
+    /// infallible and binary-search.
+    segments: Vec<Segment>,
+}
+
+impl PathArcTable {
+    /// Walks the first path primitive of `geometry` into a segment table.
+    ///
+    /// `operation` names the caller in the planar / path-primitive errors.
+    pub fn build(geometry: &Geometry, operation: &'static str) -> Result<Self, GeometryOpError> {
+        let (path, closed) = first_path(geometry, operation)?;
+        let mut segments = Vec::with_capacity(path.len());
+        for index in 1..path.len() {
+            push_segment(&mut segments, path[index - 1], path[index]);
+        }
+        if closed {
+            push_segment(&mut segments, *path.last().unwrap(), path[0]);
+        }
+        if segments.last().map_or(0.0, |segment| segment.2) <= f32::EPSILON {
+            return Err(GeometryOpError::InvalidPath);
+        }
+        Ok(Self { segments })
+    }
+
+    /// Total arc length, always greater than `f32::EPSILON`.
+    pub fn length(&self) -> f32 {
+        self.segments.last().map_or(0.0, |segment| segment.2)
+    }
+
+    /// Samples at an absolute arc length, clamped to `0..=length()`.
+    pub fn sample(&self, distance: f32) -> PathSample {
+        let target = distance.clamp(0.0, self.length());
+        // The first segment whose cumulative length reaches `target`. A
+        // binary search rather than a scan because a per-element caller
+        // would otherwise be back to O(elements x vertices) with the table
+        // shared; the answer is the same one a scan gives, cumulative length
+        // being strictly increasing.
+        let index = self
+            .segments
+            .partition_point(|segment| segment.2 < target)
+            .min(self.segments.len() - 1);
+        let (start, end, cumulative, length) = self.segments[index];
+        let t = ((target - (cumulative - length)) / length).clamp(0.0, 1.0);
+        let tangent = normalize(Vec2(end.0 - start.0, end.1 - start.1));
+        PathSample {
+            position: Vec2(
+                start.0 + (end.0 - start.0) * t,
+                start.1 + (end.1 - start.1) * t,
+            ),
+            tangent,
+            normal: Vec2(-tangent.1, tangent.0),
+        }
+    }
+}
+
+/// Samples the first path primitive at an absolute, clamped arc length.
+///
+/// The one-shot form of [`PathArcTable`]: it builds the table, takes one
+/// sample and drops it. Sampling the same path repeatedly wants the table
+/// held instead.
 pub fn path_sample(geometry: &Geometry, distance: f32) -> Result<PathSample, GeometryOpError> {
-    let (path, closed) = first_path(geometry, "attribute.path_sample")?;
-    let mut segments = Vec::with_capacity(path.len());
-    for index in 1..path.len() {
-        push_segment(&mut segments, path[index - 1], path[index]);
-    }
-    if closed {
-        push_segment(&mut segments, *path.last().unwrap(), path[0]);
-    }
-    let total = segments.last().map_or(0.0, |segment| segment.2);
-    if total <= f32::EPSILON {
-        return Err(GeometryOpError::InvalidPath);
-    }
-    let target = distance.clamp(0.0, total);
-    let &(start, end, cumulative, length) = segments
-        .iter()
-        .find(|segment| target <= segment.2)
-        .unwrap_or_else(|| segments.last().unwrap());
-    let t = ((target - (cumulative - length)) / length).clamp(0.0, 1.0);
-    let tangent = normalize(Vec2(end.0 - start.0, end.1 - start.1));
-    Ok(PathSample {
-        position: Vec2(
-            start.0 + (end.0 - start.0) * t,
-            start.1 + (end.1 - start.1) * t,
-        ),
-        tangent,
-        normal: Vec2(-tangent.1, tangent.0),
-    })
+    Ok(PathArcTable::build(geometry, "attribute.path_sample")?.sample(distance))
 }
 
 /// Which points [`connect`] runs a path through, and in what order.
@@ -2515,6 +2561,43 @@ mod tests {
         assert_eq!(sample.position, Vec2(3.0, 2.0));
         assert_eq!(sample.tangent, Vec2(0.0, 1.0));
         assert_eq!(sample.normal, Vec2(-1.0, 0.0));
+    }
+
+    /// A table held across many samples answers exactly what the one-shot
+    /// [`path_sample`] answers, ends of the range included: the whole point
+    /// of hoisting the walk out of a per-element loop is that the numbers do
+    /// not move.
+    #[test]
+    fn a_held_arc_table_answers_what_path_sample_answers() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(3.0, 0.0), Vec2(3.0, 4.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        let table = PathArcTable::build(&geometry, "test").unwrap();
+        assert_eq!(table.length(), 7.0);
+        // Below zero and past the end are clamped, not extrapolated.
+        for distance in [-4.0, 0.0, 0.5, 3.0, 5.0, 6.999, 7.0, 100.0] {
+            assert_eq!(
+                table.sample(distance),
+                path_sample(&geometry, distance).unwrap(),
+                "the table disagreed with path_sample at {distance}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_path_has_no_arc_table() {
+        let mut geometry = Geometry::from_points(vec![Vec2(2.0, 2.0), Vec2(2.0, 2.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        assert!(matches!(
+            PathArcTable::build(&geometry, "test"),
+            Err(GeometryOpError::InvalidPath)
+        ));
     }
 
     fn point_order(geometry: &Geometry) -> Vec<Vec2> {

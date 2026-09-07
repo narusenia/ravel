@@ -143,6 +143,7 @@ pub fn processor_for_node(
         "text.font" => Some(Arc::new(text::FontProcessor::from_node(node))),
         "text.layout" => Some(Arc::new(text::LayoutProcessor::from_node(node))),
         "text.to_path" => Some(Arc::new(text::ToPathProcessor::from_node(node))),
+        "text.on_path" => Some(Arc::new(text::OnPathProcessor::from_node(node))),
         "style.fill" => Some(Arc::new(style::StyleFillProcessor::from_node(node))),
         "style.stroke" => Some(Arc::new(style::StyleStrokeProcessor::from_node(node))),
         "style.dash" => Some(Arc::new(style::StyleDashProcessor::from_node(node))),

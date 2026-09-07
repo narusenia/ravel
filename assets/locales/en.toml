@@ -1471,6 +1471,15 @@ paragraph = "Paragraph"
 label = "Text To Path"
 description = "Flattens character instances into one geometry of outline paths, baking each character's placement into its outline points and carrying the per-character attributes down onto the Point domain. Applying a field to P then distorts the letter shapes themselves instead of moving whole characters. Any instance geometry converts, not only text; a geometry without instances passes through."
 
+[node."text.on_path"]
+label = "Text On Path"
+description = "Re-places a text layout's characters along a path: each character sits at its own running advance measured as arc length from the start, and turns to the path's tangent there. Only P and rot are rewritten, so the glyph outlines and the per-character attributes carry through to a field. An unconnected path input passes the text through unchanged, and a run longer than the path piles its remaining characters up on the path's last point."
+[node."text.on_path".params]
+offset = "How far along the path the run starts, in composition pixels."
+spacing = "Extra arc length after every character, in composition pixels — tracking measured along the path."
+align = "Where the whole run sits along the path: starting at the offset, centred on the path, or ending where the path does."
+flip = "Turn every character 180 degrees, which puts the run on the other side of the path."
+
 [export]
 title = "Export"
 submit = "Export"

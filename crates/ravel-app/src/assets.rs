@@ -314,6 +314,8 @@ pub enum RavelIcon {
     NodeTextLayout,
     /// Node header/menu: `text.to_path`.
     NodeTextToPath,
+    /// Node header/menu: `text.on_path`.
+    NodeTextOnPath,
     /// Category fallback: `NodeCategory::Geometry`.
     CategoryGeometry,
     /// Category fallback: `NodeCategory::Scene`.
@@ -485,6 +487,7 @@ impl RavelIcon {
             "text.font" => Self::NodeTextFont,
             "text.layout" => Self::NodeTextLayout,
             "text.to_path" => Self::NodeTextToPath,
+            "text.on_path" => Self::NodeTextOnPath,
             _ => category.map(Self::for_category).unwrap_or(Self::NodeGraph),
         }
     }
@@ -641,6 +644,9 @@ impl IconNamed for RavelIcon {
             Self::NodeTextFont => "icons/type.svg",
             Self::NodeTextLayout => "icons/align-left.svg",
             Self::NodeTextToPath => "icons/spline.svg",
+            // The same glyph `attribute.path_sample` uses: both walk arc
+            // length along a path.
+            Self::NodeTextOnPath => "icons/route.svg",
             Self::CategoryGeometry => "icons/shapes.svg",
             Self::CategoryScene => "icons/orbit.svg",
             Self::CategoryField => "icons/activity.svg",

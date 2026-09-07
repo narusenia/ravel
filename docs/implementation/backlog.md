@@ -44,7 +44,6 @@
 | UIX-1 | **Ravel 独自のテーマスキーマ**の定義（色・間隔・字送り・モーション）と gpui-component `ThemeConfig` の導出。まだ配線しない | `ui-component-layer-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | TYPE-4 | パス沿い配置（`TYPE-2` ✅） | `typography-plan.md` |
-| TYPE-6 | 縦書きと禁則処理（`TYPE-2` ✅） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
 | OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
@@ -1064,17 +1063,27 @@ SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触
 | TYPE-3 | 🟡 | レイヤーテンプレートと Properties | TYPE-2 |
 | TYPE-4 | 🟡 | パス沿い配置 | TYPE-2 |
 | TYPE-5 | ✅ | `text.to_path` とフィールド被変調（PR #511。配置の式を `InstanceTransform` としてコアに集約） | TYPE-2, MOD-5 |
-| TYPE-6 | 🟡 | 縦書きと禁則処理 | TYPE-2 |
+| TYPE-6 | ✅ | 縦書きと禁則処理（PR #518。`vert` / `vrt2` + `vhea` / `vmtx` で `vertical-rl`、禁則は追い出しのみ） | TYPE-2 |
 | TYPE-7 | ⬜ | ノードプリセットと文書更新（`TYPE-3` 待ち） | TYPE-3, TYPE-5 ✅, MOD-5 ✅ |
 
-`TYPE-1` / `TYPE-2` は済み（#506 / #508）。`MOD-5` も済んだので**残る 5 単位は
-すべて着手可能**。`TYPE-2` の時点で分かった天井が 2 つある — 双方向の並べ替えが
-段落単位（行単位ではない）で、段落は 1 回だけシェイプして行を切り出すこと。
-どちらも `TYPE-6`（縦書き）が行走査を作り直すときに直すのが安い。
+`TYPE-1` / `TYPE-2` / `TYPE-5` / `TYPE-6` は済み（#506 / #508 / #511 / #518）。
+残るのは `TYPE-3`（**`KIT-1` 待ち** — UI を書いてから土台を移すと二度手間）、
+`TYPE-4`（着手可能）、`TYPE-7`（`TYPE-3` 待ち）。
 
-**`rasterize` が 1 図形の複数輪郭を 1 回の巻き数で塗らないので、
-文字の穴が塗り潰される**（`TYPE-2` の実機確認で判明）。グリフが穴を持つ
-最初の図形だったので今まで踏まれていなかった。塗りの修正は別の変更で行う。
+**`TYPE-2` の天井 2 つはまだ残っている** — 双方向の並べ替えが段落単位
+（行単位ではない）で、段落は 1 回だけシェイプして行を切り出すこと。
+`TYPE-6` が直すと見込んでいたが、**縦書きは行走査を作り直さずに軸を
+入れ替えるだけで済んだ**ので手が入らなかった。直すなら独立した単位になる。
+
+**`TYPE-6` で分かったこと**: 禁則の大半は **UAX #14 が既に実装している**。
+`unicode-linebreak` が `× CL` / `OP ×` / `× NS` を守るので、行分割候補が
+ある限り禁則は自動的に満たされる。`kinsoku_cut` が埋めたのは
+`wrap_paragraph` の**緊急切り出し**（`last_break.unwrap_or(index)`）だけ。
+
+**`rasterize` の穴が塗り潰される問題は解決済み**（PR #510。巻き数を
+run 単位にして、同じスタイルの連続する閉じたパスを 1 領域として塗る。
+CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`TYPE-2` の
+実機確認まで踏まれていなかった。
 
 ### ステートフル評価（REQ-CORE-011）
 

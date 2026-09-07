@@ -1,6 +1,8 @@
 # プロシージャルタイポグラフィ実装計画（REQ-MOGRAPH-004）
 
-> **Status**: Planned — 2026-07-27
+> **Status**: `TYPE-1` / `TYPE-2` / `TYPE-5` / `TYPE-6` 実装済み
+> （#506 / #508 / #511 / #518）— 2026-09-07。`TYPE-3` は `KIT-1` 待ち、
+> `TYPE-4` は着手可能、`TYPE-7` は `TYPE-3` 待ち。
 
 対象要件: REQ-MOGRAPH-004（優先度 Must）。関連: REQ-CORE-001、
 REQ-CORE-007（統一アニメーションチャネル）、REQ-CORE-010（属性）、

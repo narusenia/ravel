@@ -22,6 +22,7 @@ pub mod playback;
 pub mod project_state;
 pub mod settings_dialog;
 pub mod splash;
+pub mod theme_tokens;
 pub mod title_bar;
 pub mod trace;
 pub mod widgets;

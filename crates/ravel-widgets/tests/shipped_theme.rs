@@ -84,6 +84,24 @@ fn the_shipped_file_sets_no_ravel_only_token() {
     // starts failing, the file grew a token section — fine, but then the
     // built-in defaults are no longer the single source and this test should
     // become an equality check against the file's values instead.
+    //
+    // The assertions are on the **unresolved** spec on purpose. `resolve()`
+    // substitutes the built-in for every omitted token, so comparing a
+    // resolved theme against `Spacing::default()` would pass both for a file
+    // that omits the section and for one that writes the defaults out by hand
+    // — which is exactly the difference this test exists to catch.
+    for spec in &shipped().themes {
+        assert_eq!(spec.spacing.xs, None, "{}", spec.name);
+        assert_eq!(spec.spacing.sm, None, "{}", spec.name);
+        assert_eq!(spec.spacing.md, None, "{}", spec.name);
+        assert_eq!(spec.spacing.lg, None, "{}", spec.name);
+        assert_eq!(spec.row.compact, None, "{}", spec.name);
+        assert_eq!(spec.row.default, None, "{}", spec.name);
+        assert_eq!(spec.row.header, None, "{}", spec.name);
+        assert_eq!(spec.motion.feedback_in, None, "{}", spec.name);
+        assert_eq!(spec.motion.feedback_out, None, "{}", spec.name);
+    }
+    // And the resolved side is the built-in, which is what the panels read.
     for theme in resolved() {
         assert_eq!(theme.spacing, Spacing::default());
         assert_eq!(theme.rows, Rows::default());
@@ -93,6 +111,20 @@ fn the_shipped_file_sets_no_ravel_only_token() {
 
 #[test]
 fn the_shipped_file_sets_typography_and_radii() {
+    // Unlike the tokens above, these six *are* written in the file, so the
+    // spec must carry them rather than fall back. Asserting only on the
+    // resolved value would pass for a file that dropped the keys, because
+    // `resolve()` would hand back the same built-in.
+    for spec in &shipped().themes {
+        assert!(spec.font_family.is_some(), "{}", spec.name);
+        assert!(spec.font_size.is_some(), "{}", spec.name);
+        assert!(spec.mono_font_family.is_some(), "{}", spec.name);
+        assert!(spec.mono_font_size.is_some(), "{}", spec.name);
+        assert!(spec.radius.is_some(), "{}", spec.name);
+        assert!(spec.radius_lg.is_some(), "{}", spec.name);
+    }
+    // The values the file writes are the built-ins, so a drift in either
+    // direction shows up here.
     for theme in resolved() {
         assert_eq!(theme.text, Typography::default(), "{}", theme.name);
         assert_eq!(theme.radius, Radii::default(), "{}", theme.name);

@@ -2034,13 +2034,24 @@ fn text_layout() -> NodeTemplate {
         .with_param(float_parameter("wrap_width", 0.0))
         .with_param(string_parameter("anchor", crate::text::TEXT_ANCHORS[0]))
         .with_param_options("anchor", crate::text::TEXT_ANCHORS)
+        // Vertical is `vertical-rl`, and it re-reads `align` / `anchor` /
+        // `wrap_width` against the swapped axes rather than adding
+        // parameters of its own (`ravel_core::text::WritingMode`).
+        .with_param(string_parameter(
+            "writing_mode",
+            crate::text::TEXT_WRITING_MODES[0],
+        ))
+        .with_param_options("writing_mode", crate::text::TEXT_WRITING_MODES)
         .with_param_range("size", 0.0..=10000.0, 8.0..=400.0)
         .with_param_range("tracking", -1000.0..=1000.0, -20.0..=100.0)
         .with_param_range("leading", 0.0..=10000.0, 0.0..=400.0)
         .with_param_range("wrap_width", 0.0..=100000.0, 0.0..=2000.0)
         .with_param_group("content", ["text"])
         .with_param_group("metrics", ["size", "tracking", "leading"])
-        .with_param_group("paragraph", ["align", "wrap_width", "anchor"])
+        .with_param_group(
+            "paragraph",
+            ["writing_mode", "align", "wrap_width", "anchor"],
+        )
 }
 
 /// `text.to_path`: flattens a text layout's character instances into one

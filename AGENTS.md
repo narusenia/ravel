@@ -110,6 +110,8 @@ instruction explicitly.
 
 - `.agents/rules/rust.md`: Rust, Cargo, architecture, and verification rules
 - `.agents/rules/gpui.md`: GPUI and gpui-component UI rules
+- `.agents/rules/ux.md`: the twelve UX invariants (selection ownership, undo
+  granularity, keyboard reach, motion budget, token literals)
 - `.agents/rules/documentation.md`: documentation consistency rules
 
 Repository-specific reusable workflows and framework references live under

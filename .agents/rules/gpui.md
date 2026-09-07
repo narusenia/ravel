@@ -8,6 +8,8 @@ paths:
 # GPUI rules
 
 - Read `docs/gpui-ui-guide.md` before adding a panel or custom component.
+- `.agents/rules/ux.md` carries the twelve UX invariants a panel must not
+  break. It matches the same paths as this file, so it is already in scope.
 - Use the `gpui-ce` skill for GPUI-CE APIs and the `gpui-component` skill when
   selecting or integrating gpui-component widgets.
 - Bootstrap through `gpui_platform::application()` and wrap every window root

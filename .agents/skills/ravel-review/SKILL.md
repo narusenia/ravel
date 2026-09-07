@@ -74,6 +74,24 @@ mise run lint:patterns
 - Document スナップショット undo の原子性を壊していない
 - ブロッキング I/O・重い処理が UI スレッドに乗っていない
 
+### UX 不変条件（panels / widgets / dock を触る diff）
+
+**`.agents/rules/ux.md` の 12 個を辿る。** 各項目に「破ったときにどう見えるか」が
+書いてあるので、**症状に対して diff を当てる**（原則に対して当てない）。
+diff が触りうるものだけを見ればよく、たいてい 2〜3 個。
+
+特に見落としやすい 4 つ:
+
+- **選択の所有権**（1）— 自分が所有しない選択への書き込み。
+  `SelectedPropertiesTarget` / `CanvasSelection` / `LayerSelection` への
+  代入が、そのパネルの所有物か
+- **1 操作 1 undo**（3）— 変化が無いのにコミットしていないか。
+  逆に 1 つのユーザー操作が複数ステップに割れていないか
+- **キーボード到達**（10）— 新しい操作部品に `tab_index` / `tab_stop` があるか。
+  Enter / Space が**クリックと同じ経路**を通るか（別経路は片方が腐る）
+- **トークン**（12）— `lint-patterns.sh` が拾うが、
+  `lint-patterns.allow` への追加は理由が要る
+
 ### テストとドキュメント
 
 - 新挙動に headless テストがある（GPU 必須なら手動確認手順が PR に明記）

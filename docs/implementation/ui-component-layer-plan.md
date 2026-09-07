@@ -1,6 +1,6 @@
 # UI コンポーネント層と UX 不変条件の計画
 
-> **Status**: 未着手 — 2026-09-07。`UIX-0` / `UIX-1` は `KIT-1` と衝突しないので
+> **Status**: `UIX-0` 済み — 2026-09-07。`UIX-1` は `KIT-1` と衝突しないので
 > 先行できる。`UIX-2` 以降は **`KIT-1` 待ち**（`gpui-base` がツリーに入るまで
 > 部品を書けない）。
 
@@ -203,9 +203,9 @@ crates/ravel-widgets/          ← 新規
 
 | ID | 単位 | 依存 |
 |---|---|---|
-| `UIX-0` | 不変条件を `docs/dev/ux-invariants.md` に文書化し、`ravel-review` の検査手順に入れる | — |
-| `UIX-1` | **Ravel 独自のテーマスキーマ**を定義する（色・間隔・字送り・モーション）。gpui-component の `ThemeConfig` を**そこから導出**する。**まだ配線しない** | — |
-| `UIX-2` | `ravel-widgets` クレートを切り、既存 6189 行を移設。`examples/gallery` を作る | `KIT-1` |
+| `UIX-0` | 不変条件を **`.agents/rules/ux.md`** に文書化し、`ravel-review` の検査手順に入れる | — |
+| `UIX-1` | **`ravel-widgets` クレートを作り**（`gpui` + `serde` のみ）、**Ravel 独自のテーマスキーマ**を定義する。gpui-component の `ThemeConfig` の導出は `ravel-app` 側。**まだ配線しない** | — |
+| `UIX-2` | `ravel-widgets` に `gpui-base` を足し、既存 6189 行を移設。`examples/gallery` を作る | `KIT-1` / `UIX-1` |
 | `UIX-3` | `tokens.rs` を配線し、ハードコード 24 箇所を潰す。`lint-patterns.sh` にリテラル禁止を追加 | `UIX-1` / `UIX-2` |
 | `UIX-4` | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で作る。4 状態 + Tab 順 + Enter / Space | `UIX-2` |
 | `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | `UIX-3` |
@@ -225,9 +225,12 @@ crates/ravel-widgets/          ← 新規
 
 ### 作業
 
-- `docs/dev/ux-invariants.md` に 12 個を書く。**各項目に「破ったときに
-  どう見えるか」を 1 行**添える（抽象的な原則だけだと検査に使えない）
-- `ravel-review` スキルの検査手順に「不変条件の照合」を足す
+- **`.agents/rules/ux.md`** に 12 個を書く。**各項目に「破ったときに
+  どう見えるか」**を添える（抽象的な原則だけだと検査に使えない）。
+  `docs/dev/` ではなく `.agents/rules/` に置くのは、`docs/dev/README.md` の
+  分類で不変条件が「規範」に当たるためで、**`paths` frontmatter で
+  パネルを触る diff に自動的に読み込まれる**のが実利
+- `ravel-review` スキルの検査手順に「UX 不変条件」の節を足す
 - **Ravel 独自のテーマスキーマを定義する**（決定: 2026-09-07。理由は下記）
 - 色は既存の 10 種 + `category_color` の族から始め、増やすのは実際に
   要ったときだけ（先回りして 40 色作らない）
@@ -242,7 +245,9 @@ crates/ravel-widgets/          ← 新規
 
 ### 完了条件
 
-- 不変条件 12 個が `docs/dev/` にあり、各項目に違反時の見え方が書かれている
+- 不変条件 12 個が `.agents/rules/ux.md` にあり、各項目に違反時の見え方が
+  書かれている
+- `AGENTS.md` のルール一覧と `.agents/rules/gpui.md` から辿れる
 - `ravel-review` の手順から辿れる
 - トークンの型が `mise run check` を通る（値は入っているが誰も読まない状態）
 - **`mise run docs:check` が通る**
@@ -255,7 +260,8 @@ crates/ravel-widgets/          ← 新規
 
 ### 作業
 
-- `crates/ravel-widgets` を作る。依存は `gpui` / `gpui-base` / `ravel-i18n`
+- `crates/ravel-widgets` に `gpui-base` / `ravel-i18n` を足す
+  （クレート自体は `UIX-1` が `gpui` + `serde` で作っている）
 - `ravel-app/src/widgets/` の 5 ファイル（6189 行）を移す。
   **移設だけで挙動を変えない**（`properties.rs` と `timeline.rs` の
   import が変わるだけのコミットに切る）
@@ -410,6 +416,11 @@ cache を配線し、ロケールもテーマも設定ダイアログから選�
   `Input` の再実装を別単位として起票する
 - **`category_color` の族をトークンにするか。** ノード種別の色は
   「機能色」なので階調トークンとは別の体系になる。`UIX-1` で決める
+- **順序の穴を 1 つ直した**（2026-09-07）。当初 `UIX-1` はトークンを
+  `ravel-widgets` に置く前提だったが、そのクレートを作るのは `UIX-2`
+  （`KIT-1` 待ち）だったので書く場所が無かった。スキーマに要るのは
+  `gpui`（`Hsla`）と `serde` だけで **`gpui-base` は要らない**ので、
+  `UIX-1` がクレートを作る形にした
 - **`ThemeRegistry::watch_dir` が 1 ディレクトリしか受けない。**
   `UIX-8` は 2 ディレクトリ（同梱とユーザー）を監視する必要があるので、
   受けないなら `notify` で自前に張るか、gpui-kit フォークに複数

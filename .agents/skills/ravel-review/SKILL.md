@@ -74,7 +74,7 @@ mise run lint:patterns
 - Document スナップショット undo の原子性を壊していない
 - ブロッキング I/O・重い処理が UI スレッドに乗っていない
 
-### UX 不変条件（panels / widgets / dock を触る diff）
+### UX 不変条件（`ravel-app` / `ravel-ui` / `ravel-dock` / `ravel-widgets` を触る diff）
 
 **`.agents/rules/ux.md` の 12 個を辿る。** 各項目に「破ったときにどう見えるか」が
 書いてあるので、**症状に対して diff を当てる**（原則に対して当てない）。

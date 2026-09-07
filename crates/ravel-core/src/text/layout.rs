@@ -69,6 +69,9 @@ pub(crate) struct ShapedCluster {
     /// The cluster starts with a whitespace character, so a line may end by
     /// dropping it.
     pub(crate) whitespace: bool,
+    /// The cluster's first character, which is what the kinsoku tables are
+    /// keyed by. `\0` only for a cluster whose bytes have gone missing.
+    pub(crate) first: char,
 }
 
 /// Shape one paragraph into clusters, in the order they are drawn.
@@ -175,6 +178,7 @@ fn shape_run(
             index += 1;
         }
         let byte = offset + cluster as usize;
+        let first = text[byte - offset..].chars().next().unwrap_or('\0');
         out.push(ShapedCluster {
             byte,
             glyphs,
@@ -183,10 +187,8 @@ fn shape_run(
             } else {
                 advance
             },
-            whitespace: text[byte - offset..]
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace),
+            whitespace: first.is_whitespace(),
+            first,
         });
     }
 }
@@ -427,6 +429,62 @@ struct Line {
     last_in_paragraph: bool,
 }
 
+/// Characters a line may not **begin** with: the closing half of a bracket
+/// pair, the sentence punctuation, the small kana, and the marks that belong
+/// to whatever stands before them.
+///
+/// Deliberately a subset of JIS X 4051 rather than the standard: the two
+/// classes that matter are "must not start a line" and "must not end one",
+/// and what the standard adds past them — hanging punctuation, adjusting a
+/// line by compressing its spacing — needs a justification model this layout
+/// does not have (typography-plan unit 6 scopes it out).
+///
+/// **ASCII is deliberately absent.** A Latin paragraph therefore wraps
+/// exactly where it did before kinsoku existed, and the rule only speaks up
+/// for the full-width punctuation it was written for.
+const NO_LINE_START: &str = concat!(
+    "。、，．・：；？！‼⁇⁈⁉",
+    "ー゛゜ゝゞ々〻",
+    "）］｝〉》」』】〕〗〙〟’”｠»",
+    "ぁぃぅぇぉっゃゅょゎゕゖ",
+    "ァィゥェォッャュョヮヵヶ",
+);
+
+/// Characters a line may not **end** with: the opening half of a bracket
+/// pair, which would be left dangling away from what it opens.
+const NO_LINE_END: &str = "（［｛〈《「『【〔〖〘〝｟‘“";
+
+/// Move a line break earlier until it satisfies the kinsoku rules.
+///
+/// The only correction is push-out (追い出し), and both classes turn into the
+/// same move. A character that may not begin a line takes the character
+/// before it down onto the next line — the break steps back one. A character
+/// that may not end a line goes down on its own — the break steps back one.
+/// So one loop, one step, both rules.
+///
+/// `start + 1` is the floor, which is what makes this terminate and what
+/// keeps a line from emptying: a break that cannot be fixed without leaving
+/// its line with nothing on it is left exactly where wrapping put it. That is
+/// the answer for a column one character wide, and for a run of nothing but
+/// closing brackets — the text overflows or the rule goes unmet, rather than
+/// the walk looping or emitting a blank line.
+///
+/// A pushed-out character may itself overflow `wrap_width` by one cluster.
+/// Correcting that would mean pulling something else in (追い込み), which
+/// needs the same justification model the table above declines to build.
+fn kinsoku_cut(clusters: &[ShapedCluster], start: usize, cut: usize) -> usize {
+    let mut fixed = cut;
+    while fixed > start + 1 && fixed < clusters.len() {
+        if !NO_LINE_START.contains(clusters[fixed].first)
+            && !NO_LINE_END.contains(clusters[fixed - 1].first)
+        {
+            return fixed;
+        }
+        fixed -= 1;
+    }
+    cut
+}
+
 /// Greedily break one shaped paragraph into lines at `wrap_width`.
 ///
 /// The paragraph is shaped **once** and the lines are cut out of that one
@@ -466,8 +524,10 @@ fn wrap_paragraph(
         {
             // No break opportunity on this line: cut before the character
             // that overflowed, so an unbreakable run still wraps instead of
-            // running off the composition.
-            let cut = last_break.unwrap_or(index);
+            // running off the composition. Kinsoku then gets the last word on
+            // where the cut lands, in both writing modes — a closing bracket
+            // may not open a horizontal line either.
+            let cut = kinsoku_cut(clusters, start, last_break.unwrap_or(index));
             lines.push(cut_line(
                 &clusters[start..cut],
                 &advances[start..cut],
@@ -1073,7 +1133,8 @@ mod tests {
         for (flat, upright) in flat.iter().zip(&upright) {
             assert_ne!(
                 flat.glyphs[0].id, upright.glyphs[0].id,
-                "`vert` / `vrt2` has to substitute a different glyph"
+                "`vert` / `vrt2` has to substitute a different glyph for {:?}",
+                flat.first
             );
         }
         let bbox = |id: u16| {
@@ -1087,6 +1148,110 @@ mod tests {
             "the vertical `。` has to sit clear of the horizontal one: \
              {horizontal:?} then {vertical:?}"
         );
+    }
+
+    /// The first character of each line. Sound only because none of the
+    /// fixtures below carries the trailing whitespace `cut_line` drops.
+    fn line_starts(clusters: &[ShapedCluster], lines: &[Line]) -> Vec<char> {
+        let mut at = 0;
+        lines
+            .iter()
+            .map(|line| {
+                let first = clusters[at].first;
+                at += line.clusters.len();
+                first
+            })
+            .collect()
+    }
+
+    /// The last character of each line, same caveat.
+    fn line_ends(clusters: &[ShapedCluster], lines: &[Line]) -> Vec<char> {
+        let mut at = 0;
+        lines
+            .iter()
+            .map(|line| {
+                at += line.clusters.len();
+                clusters[at - 1].first
+            })
+            .collect()
+    }
+
+    /// Break `text` at `wrap_width` pixels with one em measuring 1000 units
+    /// scaled to ten pixels, so a full-width character is exactly ten wide.
+    fn lines_of(text: &str) -> Vec<ShapedCluster> {
+        shape_paragraph(&face(NOTO_JP), text, WritingMode::Horizontal)
+    }
+
+    /// The completion criterion "no line begins with punctuation".
+    ///
+    /// Two fixtures, because two different things are being claimed. The
+    /// Japanese one is the end-to-end property: `unicode-linebreak` already
+    /// refuses to break before `。` (UAX #14 `× CL`), so a paragraph with
+    /// break opportunities to fall back on needs no help. `ABC。DEF` has
+    /// exactly **one** opportunity in it, so a line too narrow for `ABC。`
+    /// leaves the greedy wrap taking its emergency cut wherever the overflow
+    /// landed — and that cut is the one kinsoku corrects. Deleting
+    /// [`kinsoku_cut`] leaves the first fixture passing and the second
+    /// starting a line with `。`.
+    #[test]
+    fn kinsoku_keeps_forbidden_marks_off_the_line_edges() {
+        let text = "あいうえお。かきくけこ";
+        let clusters = lines_of(text);
+        let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 55.0);
+        assert!(lines.len() > 1, "55 px has to wrap eleven characters");
+        let starts = line_starts(&clusters, &lines);
+        assert!(
+            starts.iter().all(|first| !NO_LINE_START.contains(*first)),
+            "a line begins with a forbidden mark: {starts:?}"
+        );
+
+        let text = "ABC。DEF";
+        let clusters = lines_of(text);
+        let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 25.0);
+        assert_eq!(
+            line_starts(&clusters, &lines),
+            vec!['A', 'C', 'D'],
+            "the cut before `。` has to move back a character"
+        );
+        assert_eq!(line_ends(&clusters, &lines), vec!['B', '。', 'F']);
+    }
+
+    /// A line may not end with an opening bracket either, and the correction
+    /// is the same step back.
+    #[test]
+    fn kinsoku_sends_a_dangling_opening_bracket_down_with_its_quote() {
+        let text = "AB「CD";
+        let clusters = lines_of(text);
+        // Wide enough for `AB「` and not for `AB「C`, so the greedy wrap
+        // would leave the bracket at the end of the first line.
+        let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 25.0);
+        assert_eq!(line_starts(&clusters, &lines), vec!['A', '「']);
+        assert_eq!(line_ends(&clusters, &lines), vec!['B', 'D']);
+    }
+
+    /// The push-out has to stop rather than empty a line or loop.
+    ///
+    /// Every fixture is nothing but forbidden characters at a width narrower
+    /// than one of them, so every cut is the emergency cut and every
+    /// correction hits the floor immediately. The rule then goes unmet — that
+    /// is the documented give-up — but no line is empty, no character is lost,
+    /// and the walk terminates, which is what reaching the assertions proves.
+    #[test]
+    fn kinsoku_gives_up_rather_than_emptying_a_line() {
+        for text in ["。。。。", "「「「「", "あ。。。", "「「「あ", "、。、。"]
+        {
+            let clusters = lines_of(text);
+            let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 5.0);
+            assert!(
+                lines.iter().all(|line| !line.clusters.is_empty()),
+                "{text:?} produced an empty line"
+            );
+            assert_eq!(
+                lines.iter().map(|line| line.clusters.len()).sum::<usize>(),
+                clusters.len(),
+                "{text:?} lost or duplicated a character"
+            );
+        }
     }
 }
 

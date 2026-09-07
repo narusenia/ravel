@@ -41,6 +41,12 @@ model is still current.
   rendering, splitter drag, tab drag-and-drop, `PaneContent` interface). It
   replaces the former `gpui_component::dock` wiring; the bundled
   `examples/gallery` binary exercises it without the application
+- `crates/ravel-widgets`: Ravel's own widget layer, and the design tokens
+  (colors, spacing, row heights, typography, motion, radii) the UI is built
+  from — `tokens.rs` is the single source and the authoritative theme schema.
+  It depends on `gpui` and `serde` only: **never on `gpui-component`**, because
+  gpui-component's `ThemeConfig` is *derived* from Ravel's schema by
+  `ravel-app`, never the reverse
 - `crates/ravel-project`: the `.ravprj` container, format migration, the
   settings layers, UI state, and atomic writes. GUI-free by construction — it
   depends on `ravel-core` and `ravel-ui` only, never on `gpui`, so headless

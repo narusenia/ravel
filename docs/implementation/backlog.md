@@ -42,7 +42,6 @@
 | KIT-1 | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6）。`KIT-0b` でゲートが GO になった | `gpui-kit-migration-plan.md` |
 | UIX-1 | **`ravel-widgets` クレートの作成**（`gpui` + `serde`）と Ravel 独自テーマスキーマの定義。`ThemeConfig` の導出は `ravel-app` 側。まだ配線しない | `ui-component-layer-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
-| TYPE-4 | パス沿い配置（`TYPE-2` ✅） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
 | OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
@@ -1060,14 +1059,15 @@ SHEET-1 と SIM-3 と OVL-2 は同じ型（`EvalRequest` / `EvalUpdate`）を触
 | TYPE-1 | ✅ | フォント解決（PR #506。`font-kit` は採らず `ttf-parser` で走査 — 計画書の実装メモ参照） | — |
 | TYPE-2 | ✅ | シェーピングとレイアウト → インスタンスジオメトリ（PR #508。**初めてテキストが出た**） | TYPE-1 |
 | TYPE-3 | 🟡 | レイヤーテンプレートと Properties | TYPE-2 |
-| TYPE-4 | 🟡 | パス沿い配置 | TYPE-2 |
+| TYPE-4 | ✅ | パス沿い配置（PR #523。弧長は `advance` の累積なので縦組みも流れる。`PathArcTable` を `ops.rs` に公開） | TYPE-2 |
 | TYPE-5 | ✅ | `text.to_path` とフィールド被変調（PR #511。配置の式を `InstanceTransform` としてコアに集約） | TYPE-2, MOD-5 |
 | TYPE-6 | ✅ | 縦書きと禁則処理（PR #518。`vert` / `vrt2` + `vhea` / `vmtx` で `vertical-rl`、禁則は追い出しのみ） | TYPE-2 |
 | TYPE-7 | ⬜ | ノードプリセットと文書更新（`TYPE-3` 待ち） | TYPE-3, TYPE-5 ✅, MOD-5 ✅ |
 
-`TYPE-1` / `TYPE-2` / `TYPE-5` / `TYPE-6` は済み（#506 / #508 / #511 / #518）。
-残るのは `TYPE-3`（**`KIT-1` 待ち** — UI を書いてから土台を移すと二度手間）、
-`TYPE-4`（着手可能）、`TYPE-7`（`TYPE-3` 待ち）。
+`TYPE-1` / `TYPE-2` / `TYPE-4` / `TYPE-5` / `TYPE-6` は済み
+（#506 / #508 / #523 / #511 / #518）。**残るのは `TYPE-3` と `TYPE-7` の 2 つで、
+どちらも `KIT-1` 待ち**（`TYPE-3` は UI を書いてから土台を移すと二度手間、
+`TYPE-7` は `TYPE-3` 待ち）。
 
 **`TYPE-2` の天井 2 つはまだ残っている** — 双方向の並べ替えが段落単位
 （行単位ではない）で、段落は 1 回だけシェイプして行を切り出すこと。

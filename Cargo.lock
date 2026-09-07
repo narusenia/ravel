@@ -6139,6 +6139,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ravel-widgets"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ravif"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

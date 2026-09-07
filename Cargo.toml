@@ -9,6 +9,7 @@ members = [
     "crates/ravel-i18n",
     "crates/ravel-ui",
     "crates/ravel-dock",
+    "crates/ravel-widgets",
     "crates/ravel-project",
     "crates/ravel-app",
     "crates/ravel-cli",
@@ -27,6 +28,7 @@ ravel-media = { path = "crates/ravel-media" }
 ravel-i18n = { path = "crates/ravel-i18n" }
 ravel-ui = { path = "crates/ravel-ui" }
 ravel-dock = { path = "crates/ravel-dock" }
+ravel-widgets = { path = "crates/ravel-widgets" }
 # `playback` (CPAL, and with it CoreAudio / ALSA) is opt-in workspace-wide:
 # only the GUI plays sound, while `ravel-cli` merely mixes one. A member that
 # wants an output device says so with `features = ["playback"]`, and a

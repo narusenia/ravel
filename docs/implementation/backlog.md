@@ -41,7 +41,7 @@
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | KIT-1 | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6）。`KIT-0b` でゲートが GO になった | `gpui-kit-migration-plan.md` |
 | UIX-0 | UX の不変条件 12 個を `docs/dev/` に文書化し、`ravel-review` の検査手順に入れる（パネルを触らないので `KIT-1` と並行可） | `ui-component-layer-plan.md` |
-| UIX-1 | トークンの型定義と値の決定（色・間隔・字送り・モーション）。まだ配線しない | `ui-component-layer-plan.md` |
+| UIX-1 | **Ravel 独自のテーマスキーマ**の定義（色・間隔・字送り・モーション）と gpui-component `ThemeConfig` の導出。まだ配線しない | `ui-component-layer-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | TYPE-4 | パス沿い配置（`TYPE-2` ✅） | `typography-plan.md` |
 | TYPE-6 | 縦書きと禁則処理（`TYPE-2` ✅） | `typography-plan.md` |
@@ -740,14 +740,14 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | UIX-0 | 🟡 | 不変条件 12 個の文書化と `ravel-review` への組み込み | — |
-| UIX-1 | 🟡 | トークンの型定義と値の決定（配線しない） | — |
+| UIX-1 | 🟡 | **Ravel 独自のテーマスキーマ**の定義（色・間隔・字送り・モーション）と `ThemeConfig` の導出。配線しない | — |
 | UIX-2 | ⬜ | `ravel-widgets` クレートを切り、既存 6189 行を移設 + `examples/gallery` | KIT-1 |
 | UIX-3 | ⬜ | トークンの配線、ハードコード 24 箇所の除去、`lint-patterns.sh` にリテラル禁止 | UIX-1 / UIX-2 |
 | UIX-4 | ⬜ | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で（4 状態 + Tab 順 + Enter / Space） | UIX-2 |
 | UIX-5 | ⬜ | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | UIX-3 |
 | UIX-6 | ⬜ | 不変条件 1〜4 の違反を潰す（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | UIX-0 |
 | UIX-7 | ⬜ | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 |
-| UIX-8 | ⬜ | ライトテーマと日本語ロケールを到達可能にする（`MED-APP-10` の設定適用経路） | UIX-3 |
+| UIX-8 | ⬜ | ユーザーテーマディレクトリ（`themes_dir()` を複数候補に、ユーザー側が勝つ、2 ディレクトリ監視、スキーマの文書化） | UIX-1 |
 | UIX-9 | ⬜ | 文書更新（`ui-impl-status.md`、`gpui-ui-guide.md` の「部品を追加する」節） | UIX-4〜UIX-8 |
 
 **`UIX-0` / `UIX-1` は `KIT-1` と並行できる**（文書と型定義だけでパネルを

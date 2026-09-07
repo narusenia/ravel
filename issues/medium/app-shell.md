@@ -128,21 +128,29 @@ ID はファイル名 stem 由来なので、同名アセット（`clip`）を�
 
 ---
 
-## MED-APP-10 | debt | 設定レイヤー全体が永続化されるが一切適用されない — 日本語ロケールが到達不能
+## MED-APP-10 | debt | 解決済み設定のうち autosave / proxy / OCIO に消費側が無い
 
 **該当**: `crates/ravel-project/src/settings.rs`,
-`crates/ravel-project/src/lib.rs:319-333`, `crates/ravel-app/src/main.rs:49`
+`crates/ravel-app/src/app_settings.rs:532-541`
 
-`settings.toml`（ロケール、OCIO カラー設定、プロキシ再生、オートセーブ有効 / 間隔）は
-モデル化・マージ・全プロジェクトへの書き出しまで実装されているが、
-`resolved_settings` に production 呼び出し元が無い。
-オートセーブタスクは存在せず、OCIO / プロキシの消費側も存在せず、
-`ravel_i18n::set_locale` はどこからも呼ばれない。
-アプリは `init(dir, "en")` をハードコードしているため、
-完全にメンテされている `ja.toml`（235キー）をユーザー操作で有効化する手段が無い。
+**2026-09-07 に範囲を狭めた。** 起票時は「設定レイヤー全体が一切適用されない」
+と書いていたが、その後 `app_settings::install` が `apply(Changed::ALL, cx)` を
+呼ぶ形で配線され、**locale / appearance / cache は適用されている**
+（`ravel_i18n::set_locale` も `apply_resolved_appearance` も走り、
+設定ダイアログからロケールとテーマを選べる）。
 
-**修正方針**: 解決済み設定を配線する（ユーザー価値のある locale とオートセーブから着手）。
-または消費側ができるまで dead フィールドを削る。
+残っているのは `apply` が分岐を持たない 3 つ:
+
+- **autosave**（`auto_save_interval_seconds`）— オートセーブタスクが存在しない
+- **proxy 再生**（`proxy_resolution`）— 消費側が存在しない
+- **OCIO カラー設定** — 消費側が存在しない（`color-management-plan.md` の
+  `CM-6` が開くまで動かない）
+
+`app_settings.rs` の外でこれらの名前が出てこないことで確認できる。
+
+**修正方針**: autosave から着手する（ユーザー価値があり、他に依存しない）。
+proxy は `VRES-*`、OCIO は `CM-6` に紐づくので、それぞれの計画で消費側が
+できるまで dead フィールドのまま置く判断でもよい。
 
 ---
 

@@ -283,7 +283,7 @@ impl Render for SearchPalette {
                     .child(Icon::new(icon).size_4().text_color(colors.muted_foreground))
                     .child(
                         div()
-                            .flex_grow()
+                            .flex_grow_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()

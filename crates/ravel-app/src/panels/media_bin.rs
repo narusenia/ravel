@@ -537,7 +537,7 @@ impl MediaBinGpuiPanel {
             .child(self.filter_button(MediaBinFilter::Audio, "media_bin.filter.audio", cx))
             .child(
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .min_w(px(60.0))
                     .child(Input::new(&self.search).xsmall()),
             )
@@ -654,14 +654,14 @@ impl MediaBinGpuiPanel {
                             _ => {}
                         }
                     }))
-                    .child(div().flex_grow().child(Input::new(&input).xsmall()))
+                    .child(div().flex_grow_1().child(Input::new(&input).xsmall()))
             }
             None => content.child(
                 // A file name is one line: `min_w_0` allows the shrink that
                 // `truncate` needs, so the name ellipsizes instead of wrapping
                 // and the trailing duration/offline badges keep their place.
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .min_w_0()
                     .truncate()
                     .child(SharedString::from(row.name.clone())),
@@ -1046,7 +1046,7 @@ impl Render for MediaBinGpuiPanel {
         let mut list = div()
             .id("media-bin-list")
             .debug_selector(|| "media-bin-panel".into())
-            .flex_grow()
+            .flex_grow_1()
             .flex()
             .flex_col()
             .overflow_y_scroll();

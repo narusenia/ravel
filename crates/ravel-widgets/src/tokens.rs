@@ -465,13 +465,13 @@ pub fn parse_hex_color(value: &str) -> Result<Hsla, HexColorError> {
         _ => return Err(HexColorError::Shape),
     }
     let has_alpha = digits.len() == 4 || digits.len() == 8;
-    let rgba = Rgba {
-        r: byte(0)?,
-        g: byte(1)?,
-        b: byte(2)?,
-        a: if has_alpha { byte(3)? } else { 1.0 },
-    };
-    Ok(rgba.into())
+    let rgba = Rgba::new(
+        byte(0)?,
+        byte(1)?,
+        byte(2)?,
+        if has_alpha { byte(3)? } else { 1.0 },
+    );
+    Ok(gpui::rgb_to_hsla(rgba))
 }
 
 /// Write a color back as `#RRGGBB`, or `#RRGGBBAA` when it is translucent.
@@ -481,22 +481,22 @@ pub fn parse_hex_color(value: &str) -> Result<Hsla, HexColorError> {
 /// from a hex string in the first place. Truncating loses a step on most values
 /// and would drift the palette by 1/255 per conversion.
 pub fn hex_color_string(color: Hsla) -> String {
-    let rgba: Rgba = color.into();
+    let rgba = gpui::hsla_to_rgba(color);
     let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    if rgba.a >= 1.0 {
+    if rgba.alpha >= 1.0 {
         format!(
             "#{:02X}{:02X}{:02X}",
-            channel(rgba.r),
-            channel(rgba.g),
-            channel(rgba.b)
+            channel(rgba.color.red),
+            channel(rgba.color.green),
+            channel(rgba.color.blue)
         )
     } else {
         format!(
             "#{:02X}{:02X}{:02X}{:02X}",
-            channel(rgba.r),
-            channel(rgba.g),
-            channel(rgba.b),
-            channel(rgba.a)
+            channel(rgba.color.red),
+            channel(rgba.color.green),
+            channel(rgba.color.blue),
+            channel(rgba.alpha)
         )
     }
 }
@@ -549,11 +549,11 @@ mod tests {
 
         // Same color, different alpha: the last two digits are the alpha, and
         // reading them as a leading channel would move the hue instead.
-        assert_eq!(opaque.h, translucent.h);
-        assert_eq!(opaque.s, translucent.s);
-        assert_eq!(opaque.l, translucent.l);
-        assert_eq!(opaque.a, 1.0);
-        assert_eq!(translucent.a, 21.0 / 255.0);
+        assert_eq!(opaque.color.hue, translucent.color.hue);
+        assert_eq!(opaque.color.saturation, translucent.color.saturation);
+        assert_eq!(opaque.color.lightness, translucent.color.lightness);
+        assert_eq!(opaque.alpha, 1.0);
+        assert_eq!(translucent.alpha, 21.0 / 255.0);
 
         // And the channels are where they should be, not rotated: reading the
         // pairs in another order would put them back out in another order.

@@ -3865,12 +3865,12 @@ impl TimelineGpuiPanel {
                     );
                     let tick_color = if is_major {
                         Hsla {
-                            a: 0.6,
+                            alpha: 0.6,
                             ..colors.foreground
                         }
                     } else {
                         Hsla {
-                            a: 0.2,
+                            alpha: 0.2,
                             ..colors.foreground
                         }
                     };
@@ -3893,6 +3893,7 @@ impl TimelineGpuiPanel {
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
+                                letter_spacing: None,
                             }],
                             None,
                         );
@@ -4229,7 +4230,7 @@ impl TimelineGpuiPanel {
                         window.paint_quad(fill(
                             mute_bounds,
                             Hsla {
-                                a: 0.5,
+                                alpha: 0.5,
                                 ..colors.background
                             },
                         ));
@@ -4247,7 +4248,7 @@ impl TimelineGpuiPanel {
                             window.paint_quad(fill(
                                 prop_border,
                                 Hsla {
-                                    a: 0.3,
+                                    alpha: 0.3,
                                     ..colors.border
                                 },
                             ));
@@ -4268,7 +4269,7 @@ impl TimelineGpuiPanel {
                                     window.paint_quad(fill(
                                         ch_border,
                                         Hsla {
-                                            a: 0.15,
+                                            alpha: 0.15,
                                             ..colors.border
                                         },
                                     ));
@@ -4341,7 +4342,7 @@ impl TimelineGpuiPanel {
                     window.paint_quad(fill(
                         band_bounds,
                         Hsla {
-                            a: 0.18,
+                            alpha: 0.18,
                             ..colors.primary
                         },
                     ));
@@ -4355,7 +4356,7 @@ impl TimelineGpuiPanel {
                 }
             },
         )
-        .flex_grow()
+        .flex_grow_1()
         .h(px(content_height))
         .cursor(cursor)
     }
@@ -4415,7 +4416,7 @@ impl TimelineGpuiPanel {
                 })
                 .collect();
             let transparent = Hsla {
-                a: 0.0,
+                alpha: 0.0,
                 ..colors.background
             };
             curve_editor_canvas_with_x_scale(
@@ -4456,7 +4457,7 @@ impl TimelineGpuiPanel {
         let host = div()
             .id("timeline-curve-editor-host")
             .relative()
-            .flex_grow()
+            .flex_grow_1()
             .h(px(content_height))
             .overflow_hidden()
             .bg(colors.background)
@@ -4499,7 +4500,7 @@ impl TimelineGpuiPanel {
                             window.paint_quad(fill(
                                 band_bounds,
                                 Hsla {
-                                    a: 0.18,
+                                    alpha: 0.18,
                                     ..colors.primary
                                 },
                             ));
@@ -4780,7 +4781,7 @@ impl TimelineGpuiPanel {
                     // S/M/L toggles out of view.
                     .child(
                         div()
-                            .flex_grow()
+                            .flex_grow_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
@@ -4896,7 +4897,7 @@ impl TimelineGpuiPanel {
                         (
                             RavelIcon::Diamond,
                             Hsla {
-                                a: 0.5,
+                                alpha: 0.5,
                                 ..theme.colors.muted_foreground
                             },
                         )
@@ -5032,12 +5033,12 @@ impl TimelineGpuiPanel {
                                     )
                                     .child(
                                         div()
-                                            .flex_grow()
+                                            .flex_grow_1()
                                             .min_w_0()
                                             .truncate()
                                             .text_xs()
                                             .text_color(Hsla {
-                                                a: 0.6,
+                                                alpha: 0.6,
                                                 ..theme.colors.muted_foreground
                                             })
                                             .child(SharedString::from(channel_name_label(ch_name))),
@@ -5287,7 +5288,7 @@ impl Render for TimelineGpuiPanel {
                         // the pointer may leave the ruler mid-scrub.
                         div()
                             .id("ruler-scrub")
-                            .flex_grow()
+                            .flex_grow_1()
                             .h_full()
                             .child(ruler)
                             .on_mouse_down(
@@ -5326,7 +5327,7 @@ impl Render for TimelineGpuiPanel {
             .child(
                 div()
                     .id("layer-scroll-area")
-                    .flex_grow()
+                    .flex_grow_1()
                     .overflow_y_scroll()
                     .track_scroll(&self.layer_scroll)
                     // A MediaBin asset dropped on the stack becomes a layer
@@ -5714,7 +5715,7 @@ impl Render for TimelineGpuiPanel {
                             .child(
                                 div()
                                     .id("layer-area-click")
-                                    .flex_grow()
+                                    .flex_grow_1()
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener({
@@ -5870,7 +5871,7 @@ fn curve_grid_canvas(
                             size(px(1.0), bounds.size.height),
                         ),
                         Hsla {
-                            a: if major { 0.18 } else { 0.07 },
+                            alpha: if major { 0.18 } else { 0.07 },
                             ..colors.foreground
                         },
                     ));
@@ -5884,7 +5885,7 @@ fn curve_grid_canvas(
                 window.paint_quad(fill(
                     Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
                     Hsla {
-                        a: if is_zero { 0.32 } else { 0.12 },
+                        alpha: if is_zero { 0.32 } else { 0.12 },
                         ..colors.foreground
                     },
                 ));
@@ -5900,7 +5901,7 @@ fn curve_grid_canvas(
                         size(label_width, label_height),
                     ),
                     Hsla {
-                        a: 0.82,
+                        alpha: 0.82,
                         ..colors.background
                     },
                 ));
@@ -5916,6 +5917,7 @@ fn curve_grid_canvas(
                         background_color: None,
                         underline: None,
                         strikethrough: None,
+                        letter_spacing: None,
                     }],
                     Some(label_width),
                 );
@@ -6098,7 +6100,7 @@ fn make_toggle(
         colors.primary
     } else {
         Hsla {
-            a: 0.4,
+            alpha: 0.4,
             ..colors.muted_foreground
         }
     };
@@ -6141,14 +6143,14 @@ fn paint_out_of_range(
     window.paint_quad(fill(
         band,
         Hsla {
-            a: OUT_OF_RANGE_ALPHA,
+            alpha: OUT_OF_RANGE_ALPHA,
             ..colors.background
         },
     ));
     window.paint_quad(fill(
         band,
         Hsla {
-            a: OUT_OF_RANGE_TINT_ALPHA,
+            alpha: OUT_OF_RANGE_TINT_ALPHA,
             ..colors.foreground
         },
     ));
@@ -6161,7 +6163,7 @@ fn paint_out_of_range(
                 size(px(1.0), bounds.size.height),
             ),
             Hsla {
-                a: 0.5,
+                alpha: 0.5,
                 ..colors.foreground
             },
         ));
@@ -6190,7 +6192,7 @@ fn paint_loop_range(
     window.paint_quad(fill(
         Bounds::new(origin(x), size(px(width as f32), height)),
         Hsla {
-            a: LOOP_RANGE_ALPHA,
+            alpha: LOOP_RANGE_ALPHA,
             // A chart hue for the same reason the beat lines use one: never
             // mistakable for the playhead (`primary`) or a layer bar.
             ..colors.chart_1
@@ -6265,7 +6267,7 @@ fn paint_beat_lines(
                 size(px(1.0), bounds.size.height),
             ),
             Hsla {
-                a: BEAT_LINE_ALPHA,
+                alpha: BEAT_LINE_ALPHA,
                 // A chart hue, so a beat line never reads as the playhead
                 // (`primary`) or as a layer bar (`accent`).
                 ..colors.chart_2
@@ -6296,6 +6298,7 @@ fn paint_bar_label(
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         }],
         None,
     );
@@ -6356,12 +6359,12 @@ fn layer_color(layer: &Layer, colors: &ThemeColor) -> Hsla {
     // network. Layers without a frame output (null layers) render muted.
     if layer.has_frame_output() {
         Hsla {
-            a: 0.8,
+            alpha: 0.8,
             ..colors.accent
         }
     } else {
         Hsla {
-            a: 0.3,
+            alpha: 0.3,
             ..colors.muted_foreground
         }
     }

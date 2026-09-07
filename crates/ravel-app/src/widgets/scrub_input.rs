@@ -349,7 +349,7 @@ impl RenderOnce for ScrubInput {
             .when(dragging, |this| this.bg(colors.accent))
             .hover(|this| {
                 this.bg(Hsla {
-                    a: 0.15,
+                    alpha: 0.15,
                     ..colors.accent
                 })
             })

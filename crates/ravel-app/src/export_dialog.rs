@@ -385,7 +385,7 @@ impl ExportForm {
                     .text_color(cx.theme().colors.muted_foreground)
                     .child(SharedString::from(label)),
             )
-            .child(div().flex_grow().child(control))
+            .child(div().flex_grow_1().child(control))
     }
 
     /// The format list: one radio per row, unavailable rows disabled with the
@@ -448,7 +448,7 @@ impl Render for ExportForm {
             .gap_1()
             .child(
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .child(NumberInput::new(&self.start).small()),
             )
             .child(
@@ -458,13 +458,21 @@ impl Render for ExportForm {
                     .text_color(muted)
                     .child(SharedString::from("–")),
             )
-            .child(div().flex_grow().child(NumberInput::new(&self.end).small()));
+            .child(
+                div()
+                    .flex_grow_1()
+                    .child(NumberInput::new(&self.end).small()),
+            );
 
         let directory = div()
             .flex()
             .items_center()
             .gap_1()
-            .child(div().flex_grow().child(Input::new(&self.directory).small()))
+            .child(
+                div()
+                    .flex_grow_1()
+                    .child(Input::new(&self.directory).small()),
+            )
             .child(
                 gpui_component::button::Button::new("export-browse")
                     .small()

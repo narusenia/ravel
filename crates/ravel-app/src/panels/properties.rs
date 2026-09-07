@@ -377,11 +377,11 @@ fn custom_port_row(
         )
     };
 
-    let mut fields = div().flex().flex_grow().min_w_0().items_center().gap_1();
+    let mut fields = div().flex().flex_grow_1().min_w_0().items_center().gap_1();
     if let Some((_, input)) = name_input {
         fields = fields.child(
             div()
-                .flex_grow()
+                .flex_grow_1()
                 .min_w_0()
                 .child(Input::new(input).xsmall()),
         );
@@ -456,7 +456,7 @@ fn add_port_row(
         .children(gutter.then(|| div().w(px(PORT_HANDLE_GUTTER))))
         .child(
             div()
-                .flex_grow()
+                .flex_grow_1()
                 .min_w_0()
                 .child(Input::new(name).xsmall().w_full()),
         )
@@ -556,7 +556,7 @@ fn exposed_row(
     if let Some((_, input)) = name_input {
         head = head.child(
             div()
-                .flex_grow()
+                .flex_grow_1()
                 .min_w_0()
                 .child(Input::new(input).xsmall()),
         );
@@ -589,7 +589,7 @@ fn exposed_row(
                 .child(div().w(px(28.0)))
                 .child(
                     div()
-                        .flex_grow()
+                        .flex_grow_1()
                         .min_w_0()
                         .child(Input::new(input).xsmall().w_full()),
                 ),
@@ -611,7 +611,7 @@ fn exposed_row(
                 )
                 .child(
                     div()
-                        .flex_grow()
+                        .flex_grow_1()
                         .min_w_0()
                         .text_xs()
                         .text_color(danger)
@@ -1508,7 +1508,7 @@ fn expression_editor_body(
         body = body.child(
             line.child(
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .min_w_0()
                     // Expression source is code: monospaced so operators and
                     // nesting line up, and so the column a compile error points
@@ -1791,19 +1791,14 @@ const COLOR_COMMIT_QUIET: std::time::Duration = std::time::Duration::from_millis
 /// [`rgba_from_hsla`] is the inverse and the two must stay a pair.
 fn hsla_from_rgba(r: f32, g: f32, b: f32, a: f32) -> Hsla {
     let display = ColorSpace::DISPLAY.from_linear([r, g, b]);
-    Hsla::from(Rgba {
-        r: display[0],
-        g: display[1],
-        b: display[2],
-        a,
-    })
+    gpui::rgb_to_hsla(Rgba::new(display[0], display[1], display[2], a))
 }
 
 /// The picker's display-referred value → a working-space colour.
 fn rgba_from_hsla(hsla: Hsla) -> [f32; 4] {
-    let rgba = Rgba::from(hsla);
-    let linear = ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b]);
-    [linear[0], linear[1], linear[2], rgba.a]
+    let rgba = gpui::hsla_to_rgba(hsla);
+    let linear = ColorSpace::DISPLAY.to_linear([rgba.color.red, rgba.color.green, rgba.color.blue]);
+    [linear[0], linear[1], linear[2], rgba.alpha]
 }
 
 /// What kind of target the current widgets were built for. Same-identity
@@ -5078,7 +5073,7 @@ impl Render for PropertiesGpuiPanel {
                                 wrapper = wrapper.child(button);
                             }
                             container = container
-                                .child(wrapper.child(div().flex_grow().min_w_0().child(row)));
+                                .child(wrapper.child(div().flex_grow_1().min_w_0().child(row)));
                         }
                         if let Some(body) = curve_body {
                             container = container.child(body);
@@ -7977,9 +7972,10 @@ mod tests {
         // the display encoding is undone, so a primary cannot tell a working
         // conversion from a missing one. Half-way in display light is about
         // 0.21 linear, and the stored stop is linear (`CM-2`).
-        let picked: Hsla = gpui::rgb(0x808080).into();
-        let rgba = Rgba::from(picked);
-        let expected = ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b])[0];
+        let picked = gpui::rgb_to_hsla(gpui::rgb(0x808080));
+        let rgba = gpui::hsla_to_rgba(picked);
+        let expected =
+            ColorSpace::DISPLAY.to_linear([rgba.color.red, rgba.color.green, rgba.color.blue])[0];
         for _ in 0..3 {
             picker.update(cx, |_, cx| {
                 cx.emit(ColorPickerEvent::Change(Some(picked)));

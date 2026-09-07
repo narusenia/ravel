@@ -39,12 +39,35 @@ ravel-project = { path = "crates/ravel-project" }
 ravel-app = { path = "crates/ravel-app" }
 ravel-cli = { path = "crates/ravel-cli" }
 
-# UI framework (gpui-ce community edition)
-gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8" }
-gpui_platform = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8", features = ["font-kit"] }
-gpui-component = { git = "https://github.com/narusenia/gpui-component", rev = "94c9eadff5fc5063d74f69bfed8c1c7a6b8d59a4" }
-gpui-component-assets = { git = "https://github.com/narusenia/gpui-component", rev = "94c9eadff5fc5063d74f69bfed8c1c7a6b8d59a4" }
+# UI framework (gpui-ce community edition, and the GPUI Kit 0.6 layers on top)
+#
+# The gpui-ce crates renamed themselves on crates.io (`gpui` → `gpui-ce`,
+# `gpui_platform` → `gpui_ce_platform`), so every entry needs `package =`. The
+# dependency *keys* stay the old names because the library names did not
+# change: `use gpui::…` and `use gpui_platform::…` still resolve.
+gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7", features = ["font-kit"] }
+# `gpui-component` 0.6 lives in the GPUI Kit workspace, whose fork points the
+# whole `gpui` family at the same gpui-ce revision pinned above. Both must move
+# together: two revisions would put two `gpui` crates in the tree and make
+# `Entity<T>` / `App` two different types (the shape `MED-GPU-07` took with
+# wgpu, only harder to read).
+gpui-component = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9" }
+# The behaviour layer under `gpui-component`. Ravel's own widgets are built on
+# this rather than on `gpui-component`'s styled parts
+# (`docs/implementation/ui-component-layer-plan.md`, `UIX-2` onward).
+gpui-base = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9" }
+# Renamed with the kit: `gpui-component-assets` → `gpui-kit-assets`.
+gpui-kit-assets = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9" }
 rust-embed = "8"
+# **No direct `palette` dependency.** `gpui::Hsla` is
+# `palette::Alpha<palette::Hsl, f32>`, but nothing here has to name palette's
+# own traits: `gpui::hsla()` builds a colour, `gpui::rgb_to_hsla` /
+# `gpui::hsla_to_rgba` convert between the two, `gpui::ColorExt` carries
+# `opacity` / `fade_out` / `blend`, and the field types' inherent methods
+# (`RgbHue::into_positive_degrees`) need no import. A crate that ends up
+# spelling `IntoColor` out must pin palette at gpui-ce's exact version
+# (`0.7.6`) — a different major.minor makes `palette::Hsla` a different type.
 
 # GPU
 #
@@ -141,11 +164,14 @@ ctrlc = "3"
 # CLI never asks.
 dialoguer = { version = "0.12", default-features = false }
 
+# Both patch tables have to name the same revision *and* the same package as
+# `[workspace.dependencies]` above. A mismatch is not an error — it silently
+# resolves a second `gpui`.
 [patch.crates-io]
-gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8" }
+gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7" }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/narusenia/gpui-ce-ravel", rev = "27cbf19d9c516d785b2cc07a94e65a40c66cc6a8" }
+gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7" }
 
 # Keep `cargo run` (dev profile) interactive: at opt-level 0 the per-pixel
 # CPU passes (shell compositing in ravel-nodes, the viewer's frame

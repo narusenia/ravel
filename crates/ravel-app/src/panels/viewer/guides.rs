@@ -19,7 +19,7 @@
 //!   the *view* of them — rulers shown, guides shown, guides locked — is panel
 //!   state, the same class as the grid and safe-area toggles.
 
-use gpui::{Bounds, Hsla, Pixels, point, px, size};
+use gpui::{Bounds, Hsla, Pixels, hsla, point, px, size};
 use ravel_core::composition::{Guide, GuideAxis};
 
 use super::overlay::{
@@ -207,12 +207,7 @@ pub fn ruler_primitives(
 /// The guide colour: cyan, distinct from the snap guide's magenta. A snap guide
 /// reports a correction that is happening now; a user guide is a standing mark,
 /// and the two are routinely on screen together.
-const GUIDE_COLOR: Hsla = Hsla {
-    h: 0.5,
-    s: 0.85,
-    l: 0.6,
-    a: 0.85,
-};
+const GUIDE_COLOR: Hsla = hsla(0.5, 0.85, 0.6, 0.85);
 
 /// The composition's user guides, while they are shown.
 ///

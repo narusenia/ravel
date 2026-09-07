@@ -21,7 +21,7 @@
 //!   point is mapped back through the inverse of the layer's compositing
 //!   transform before sampling, so the picture follows the layer.
 
-use gpui::Hsla;
+use gpui::{Hsla, hsla};
 use ravel_core::composition::transform::Affine;
 use ravel_core::eval::EvalContext;
 use ravel_core::geometry::{AttributeArray, AttributeType, FieldSample, FieldValue};
@@ -110,18 +110,8 @@ impl FieldColorMap {
         let value = value.clamp(0.0, 1.0);
         match self {
             // 0.66 (blue) down to 0.0 (red).
-            Self::Heat => Hsla {
-                h: (1.0 - value) * 0.66,
-                s: 0.85,
-                l: 0.5,
-                a: alpha,
-            },
-            Self::Grayscale => Hsla {
-                h: 0.0,
-                s: 0.0,
-                l: value,
-                a: alpha,
-            },
+            Self::Heat => hsla((1.0 - value) * 0.66, 0.85, 0.5, alpha),
+            Self::Grayscale => hsla(0.0, 0.0, value, alpha),
         }
     }
 }
@@ -626,6 +616,13 @@ mod tests {
         }
     }
 
+    /// A colour's hue back in the 0..1 fraction [`FieldColorMap`] is written
+    /// in. `Hsla` stores it as degrees, so an assertion about a map's hue has
+    /// to divide before it compares.
+    fn hue_fraction(color: Hsla) -> f32 {
+        color.color.hue.into_positive_degrees() / 360.0
+    }
+
     fn ctx() -> EvalContext {
         EvalContext::new(0, ravel_core::types::FrameRate::new(30, 1), (100, 100))
     }
@@ -663,8 +660,8 @@ mod tests {
         // end — the property a reader relies on to read the picture.
         let cold = FieldColorMap::Heat.color(normalized[0], 1.0);
         let hot = FieldColorMap::Heat.color(normalized[3], 1.0);
-        assert!((cold.h - 0.66).abs() < 1e-6, "{cold:?}");
-        assert!((hot.h - 0.0).abs() < 1e-6, "{hot:?}");
+        assert!((hue_fraction(cold) - 0.66).abs() < 1e-6, "{cold:?}");
+        assert!((hue_fraction(hot) - 0.0).abs() < 1e-6, "{hot:?}");
 
         // And the drawing agrees: one filled cell per sample, the first in the
         // cold colour and the last in the hot one.
@@ -693,9 +690,9 @@ mod tests {
             })
             .collect();
         assert_eq!(quads.len(), 4);
-        assert!((quads[0].1.h - 0.66).abs() < 1e-6);
-        assert!((quads[3].1.h - 0.0).abs() < 1e-6);
-        assert!((quads[0].1.a - 0.5).abs() < 1e-6, "opacity was ignored");
+        assert!((hue_fraction(quads[0].1) - 0.66).abs() < 1e-6);
+        assert!((hue_fraction(quads[3].1) - 0.0).abs() < 1e-6);
+        assert!((quads[0].1.alpha - 0.5).abs() < 1e-6, "opacity was ignored");
     }
 
     /// A field that samples to `NaN` or `inf` still produces a drawable
@@ -723,7 +720,9 @@ mod tests {
         for value in normalized {
             let color = FieldColorMap::Heat.color(value, 1.0);
             assert!(
-                color.h.is_finite() && color.s.is_finite() && color.l.is_finite(),
+                hue_fraction(color).is_finite()
+                    && color.color.saturation.is_finite()
+                    && color.color.lightness.is_finite(),
                 "undefined colour from {value}"
             );
         }

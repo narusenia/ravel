@@ -29,7 +29,9 @@
 //! [`OverlayLabel`]s that the panel renders as elements, because GPUI shapes
 //! text through elements rather than through the canvas painter.
 
-use gpui::{App, Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
+use gpui::{
+    App, Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, hsla, point, px, size,
+};
 use ravel_core::composition::Document;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::{EvalContext, PathSegment};
@@ -1242,23 +1244,13 @@ pub enum BboxScope {
 }
 
 /// Accent used by both selection bboxes.
-const SELECTION_COLOR: Hsla = Hsla {
-    h: 0.58,
-    s: 0.7,
-    l: 0.6,
-    a: 0.9,
-};
+const SELECTION_COLOR: Hsla = hsla(0.58, 0.7, 0.6, 0.9);
 
 /// Screen-pixel side length of a selection handle (zoom-independent).
 pub const SELECTION_HANDLE_PX: f32 = 7.0;
 
 /// Inner fill of a two-square handle mark.
-const HANDLE_FILL: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 1.0,
-    a: 1.0,
-};
+const HANDLE_FILL: Hsla = hsla(0.0, 0.0, 1.0, 1.0);
 
 /// The eight handle anchor points of a bbox: four corners and the four edge
 /// midpoints. Coordinate-system agnostic.
@@ -1293,21 +1285,11 @@ const GEOMETRY_POINT_PX: f32 = 3.0;
 
 /// Point and path marks: a warmer accent than the bbox, so a dense point cloud
 /// stays distinguishable from the outline around it.
-const GEOMETRY_MARK_COLOR: Hsla = Hsla {
-    h: 0.12,
-    s: 0.85,
-    l: 0.62,
-    a: 0.9,
-};
+const GEOMETRY_MARK_COLOR: Hsla = hsla(0.12, 0.85, 0.62, 0.9);
 
 /// Attribute arrows: cool where the point marks are warm, so an arrow reads as
 /// a separate thing from the element it leaves.
-const ARROW_COLOR: Hsla = Hsla {
-    h: 0.45,
-    s: 0.85,
-    l: 0.62,
-    a: 0.95,
-};
+const ARROW_COLOR: Hsla = hsla(0.45, 0.85, 0.62, 0.95);
 
 /// Longest attribute arrow drawn, as a fraction of the composition's shorter
 /// side. A cap in composition units rather than in the geometry's own bounds:
@@ -1339,14 +1321,14 @@ fn group_color(name: &str) -> Hsla {
     for byte in name.as_bytes() {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211);
     }
-    Hsla {
-        h: (hash % 720) as f32 / 720.0,
+    hsla(
+        (hash % 720) as f32 / 720.0,
         // Kept inside a legible band: every combination has to read as a mark
         // over both the composition and the point cloud around it.
-        s: 0.55 + ((hash >> 32) & 0x7) as f32 * 0.05,
-        l: 0.45 + ((hash >> 40) & 0x7) as f32 * 0.04,
-        a: 0.9,
-    }
+        0.55 + ((hash >> 32) & 0x7) as f32 * 0.05,
+        0.45 + ((hash >> 40) & 0x7) as f32 * 0.04,
+        0.9,
+    )
 }
 
 /// Draws what the evaluator produced for the selection: the bounding box, the
@@ -1820,32 +1802,17 @@ impl ShellHandle {
 
 /// Anchor marker colour: warm, so it never reads as one of the blue scale
 /// handles.
-const ANCHOR_COLOR: Hsla = Hsla {
-    h: 0.09,
-    s: 0.9,
-    l: 0.6,
-    a: 0.95,
-};
+const ANCHOR_COLOR: Hsla = hsla(0.09, 0.9, 0.6, 0.95);
 
 /// The line from a child's anchor to its parent's.
-const PARENT_LINK_COLOR: Hsla = Hsla {
-    h: 0.09,
-    s: 0.5,
-    l: 0.6,
-    a: 0.55,
-};
+const PARENT_LINK_COLOR: Hsla = hsla(0.09, 0.5, 0.6, 0.55);
 
 /// Screen-pixel side length of the anchor marker.
 const ANCHOR_MARKER_PX: f32 = 11.0;
 
 /// The rotation ring: the selection accent held back so the ring reads as a
 /// zone around the corner rather than as another grip.
-const ROTATE_RING_COLOR: Hsla = Hsla {
-    h: 0.58,
-    s: 0.7,
-    l: 0.6,
-    a: 0.4,
-};
+const ROTATE_RING_COLOR: Hsla = hsla(0.58, 0.7, 0.6, 0.4);
 
 /// An angle in radians folded into `(−π, π]`.
 fn wrap_angle(radians: f32) -> f32 {
@@ -3468,7 +3435,13 @@ mod tests {
     /// varies hue alone, and the current one reaches 500.
     #[test]
     fn group_colours_stay_distinct_across_many_names() {
-        let key = |color: Hsla| (color.h.to_bits(), color.s.to_bits(), color.l.to_bits());
+        let key = |color: Hsla| {
+            (
+                color.color.hue.into_positive_degrees().to_bits(),
+                color.color.saturation.to_bits(),
+                color.color.lightness.to_bits(),
+            )
+        };
         assert_ne!(
             key(group_color("g0")),
             key(group_color("g413")),

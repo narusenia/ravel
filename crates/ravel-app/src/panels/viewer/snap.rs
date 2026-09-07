@@ -26,7 +26,7 @@
 //! already means "draw from the centre" for the shape tools and "scale about
 //! the anchor" for the shell grips.
 
-use gpui::Hsla;
+use gpui::{Hsla, hsla};
 use ravel_core::composition::GuideAxis;
 use ravel_core::id::{CompId, LayerId};
 
@@ -262,12 +262,7 @@ fn snap_axis(origin: f32, size: f32, lines: &[f32], threshold: f32) -> Option<(f
 
 /// The guide colour: magenta, so it reads as neither the selection blue, the
 /// geometry warm, nor the safe-area grey it is drawn over.
-const GUIDE_COLOR: Hsla = Hsla {
-    h: 0.85,
-    s: 0.9,
-    l: 0.65,
-    a: 0.9,
-};
+const GUIDE_COLOR: Hsla = hsla(0.85, 0.9, 0.65, 0.9);
 
 /// The lines the drag in flight is snapped to, for as long as it is snapped.
 ///

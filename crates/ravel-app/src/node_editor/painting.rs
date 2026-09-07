@@ -184,7 +184,7 @@ pub fn paint_grid(
     }
 
     let dot_color = Hsla {
-        a: 0.3,
+        alpha: 0.3,
         ..colors.border
     };
     let dot_size = 1.5 * viewport.zoom.min(1.0);
@@ -226,7 +226,7 @@ pub fn paint_edges(
     let ox: f32 = bounds.origin.x.into();
     let oy: f32 = bounds.origin.y.into();
     let normal_color: Hsla = Hsla {
-        a: 0.6,
+        alpha: 0.6,
         ..colors.muted_foreground
     };
 
@@ -258,12 +258,7 @@ pub fn paint_edges(
         let tx = tx + ox;
         let ty = ty + oy;
 
-        let highlight = Hsla {
-            h: 0.55,
-            s: 0.7,
-            l: 0.6,
-            a: 1.0,
-        };
+        let highlight = hsla(0.55, 0.7, 0.6, 1.0);
         let is_selected = selected_edges.contains(&edge.id);
         let color = if is_selected { highlight } else { normal_color };
         let stroke_w = if is_selected { 3.0 } else { 2.0 };
@@ -406,18 +401,8 @@ impl TimingLevel {
 
     fn color(self, colors: &ThemeColor) -> Hsla {
         match self {
-            Self::Critical => Hsla {
-                h: 0.0,
-                s: 0.85,
-                l: 0.60,
-                a: 1.0,
-            },
-            Self::Warn => Hsla {
-                h: 0.13,
-                s: 0.90,
-                l: 0.60,
-                a: 1.0,
-            },
+            Self::Critical => hsla(0.0, 0.85, 0.60, 1.0),
+            Self::Warn => hsla(0.13, 0.90, 0.60, 1.0),
             Self::Normal => colors.muted_foreground,
         }
     }
@@ -590,20 +575,15 @@ fn paint_single_node(
         1.0
     };
     let dim = |color: Hsla| Hsla {
-        a: color.a * opacity,
+        alpha: color.alpha * opacity,
         ..color
     };
 
     let node_bg = dim(Hsla {
-        a: 0.95,
+        alpha: 0.95,
         ..colors.background
     });
-    let highlight = Hsla {
-        h: 0.55,
-        s: 0.7,
-        l: 0.6,
-        a: 1.0,
-    };
+    let highlight = hsla(0.55, 0.7, 0.6, 1.0);
     let node_border = dim(if selected { highlight } else { colors.border });
     let border_w = if selected { 2.0 } else { 1.0 };
 
@@ -624,7 +604,7 @@ fn paint_single_node(
     // past it).
     if let Some(category) = category {
         let tint = Hsla {
-            a: HEADER_TINT_ALPHA,
+            alpha: HEADER_TINT_ALPHA,
             ..category_color(category)
         };
         let header = Bounds::new(
@@ -713,7 +693,7 @@ fn paint_single_node(
     window.paint_quad(fill(
         sep_bounds,
         dim(Hsla {
-            a: 0.2,
+            alpha: 0.2,
             ..colors.border
         }),
     ));
@@ -772,6 +752,7 @@ fn paint_single_node(
                 background_color: None,
                 underline: None,
                 strikethrough: None,
+                letter_spacing: None,
             }],
             None,
         );
@@ -807,7 +788,7 @@ fn paint_single_node(
         window.paint_quad(fill(
             sep2,
             dim(Hsla {
-                a: 0.2,
+                alpha: 0.2,
                 ..colors.border
             }),
         ));
@@ -1170,12 +1151,7 @@ pub fn paint_connection_draft(
     let tx = ox + to.0;
     let ty = oy + to.1;
 
-    let draft_color = Hsla {
-        h: 0.55,
-        s: 0.7,
-        l: 0.6,
-        a: 1.0,
-    };
+    let draft_color = hsla(0.55, 0.7, 0.6, 1.0);
 
     let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
     let mut builder = PathBuilder::stroke(px(2.0));
@@ -1215,14 +1191,9 @@ pub fn paint_selection_box(
         },
     );
 
-    let highlight = Hsla {
-        h: 0.55,
-        s: 0.7,
-        l: 0.6,
-        a: 1.0,
-    };
+    let highlight = hsla(0.55, 0.7, 0.6, 1.0);
     let fill_color = Hsla {
-        a: 0.08,
+        alpha: 0.08,
         ..highlight
     };
     window.paint_quad(fill(rect, fill_color));
@@ -1249,6 +1220,7 @@ fn shape_run(
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         }],
         None,
     )
@@ -1416,6 +1388,7 @@ fn paint_text_in(
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         }],
         None,
     );
@@ -1800,7 +1773,11 @@ mod tests {
         let critical = eval_duration_color(Duration::from_millis(100), &colors);
         assert_ne!(warn, ok);
         assert_ne!(critical, warn);
-        assert_eq!(critical.h, 0.0, "critical is red");
+        assert_eq!(
+            critical.color.hue.into_positive_degrees(),
+            0.0,
+            "critical is red"
+        );
     }
 
     /// Connection-drag snapping must never target a synthetic node.

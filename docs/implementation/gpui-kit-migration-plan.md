@@ -1,6 +1,7 @@
 # GPUI Kit 移行計画（gpui-ce → gpui-pre、gpui-base の採用）
 
-> **Status**: 計画のみ — 2026-09-04（**ゲートを実測して当初の前提を撤回した**。下の「ゲートの実測」節が正）
+> **Status**: `KIT-0` 済み（ゲート通過）— 2026-09-05。**判断は条件付き GO**。
+> 下の「ゲートの実測」節が正で、**2026-09-04 に書いた「エラー 4 個」は誤り**
 
 対象: Ravel が立つ GPUI 実装と、UI コンポーネント層の土台。
 関連要件: REQ-UI-002/003/013（UI の作り込み）、REQ-GPU-001（device 共有）。
@@ -121,7 +122,7 @@ gpui-pre に移れば消滅する。残るのは「メニューの再フォー�
 **`gpui-kit` 0.6.0 を clone し、ワークスペースの `gpui` / `gpui_macros` /
 `sum-tree` を `narusenia/gpui-ce-ravel` へ向けて `cargo check` した。**
 
-### `gpui-base` は gpui-ce にほぼそのまま乗る — エラー 4 個
+### 第 1 報（2026-09-04、**数字は誤り**）
 
 | 不足しているもの | 使用箇所 | 上流での実体 |
 |---|---|---|
@@ -135,6 +136,11 @@ gpui-pre に移れば消滅する。残るのは「メニューの再フォー�
 クレート単位の欠落も無い: gpui-ce には `gpui_macros` / `gpui_platform` /
 `gpui_sum_tree` / `gpui_web` が揃っている（`sum-tree` は
 `package = "gpui_sum_tree"` で読み替えられる）。
+
+> **この「エラー 4 個」は名前解決段の数字で、残差の総量ではなかった。**
+> rustc は未解決 import（E0432）で打ち切るので、その先の型検査段
+> （E0599 / E0061）は 1 個も表示されない。2 機能を前送りして import が
+> 解決した瞬間に **13 個**出てきた。下の「`KIT-0` の実測」が正しい数字である。
 
 ### したがって gpui-pre への移行は本筋ではない
 
@@ -155,6 +161,81 @@ gpui-pre に移れば消滅する。残るのは「メニューの再フォー�
   ここが大きい可能性は残る。**`KIT-0` の主目的はこの数字を出すこと**
 - `gpui-fps` は `gpui` に `profiler` feature を要求する（Ravel は使わないので
   無害。ワークスペース全体を解決すると引っかかる）
+
+## `KIT-0` の実測（2026-09-05、これが正）
+
+上流 gpui-pre 0.3.3 から必要な API を `gpui-ce-ravel` へ前送りし
+（`spring.rs` は**バイト一致で無改変**、`OngoingScroll` は `gestures.rs` から
+必要部分だけ切り出し）、`gpui-kit` 0.6.0 を**その path 参照**に向けて測った。
+
+### 前送りが必要だったのは 2 機能ではなく 7 個
+
+| 前送りしたもの | 分類 |
+|---|---|
+| `spring.rs`（830 行、無改変） | 上流の後付け |
+| `OngoingScroll` + 軸ロック + `TouchPhase::Cancelled` | 上流の後付け |
+| `App::reduce_motion` / `set_reduce_motion` | 上流の後付け |
+| `restrict_scroll_to_axis()` / `aria_numeric_value_step` | 上流の後付け |
+| `ClickEvent::Touch` / `TouchClickEvent` | 上流の後付け |
+| `flex_grow(f32)` / `flex_shrink(f32)` / `flex_grow_1` / `flex_shrink_1` | **署名が違う**（gpui-ce は引数なし版） |
+| `TouchPhase` に `PartialEq` / `Eq` | 上流の後付け |
+
+計 **7 ファイル / +1128 −10 行**。
+
+### `gpui-base --lib` は通る（エラー 0）
+
+**`gpui-base` のテストターゲットは通らない（116 エラー）**:
+`Window::simulate_next_frame`（上流の test-support、13 件）と
+**`ArenaClearNeeded::clear(&mut App)`（103 件）** — 後者は上流が引数を足して
+同一アリーナを assert するようにしたもので、gpui-ce は引数なしのまま。
+
+### `gpui-component --lib` の残差は 38 個で、**B が 0**
+
+| 分類 | 件数 | 代表例 |
+|---|---|---|
+| **A** 上流の前送りで済む | **24** | `BoxShadow::new` + ビルダ 7、システム通知一式 6、`accessibility_id` 2、`aria_placeholder` / `aria_value` / `Window::is_a11y_active` / `TextLayout::line_layouts` / `Animation::repeat_synced` / `container_query`（126 行・自己完結）/ `WindowOptions::app_owns_titlebar_drag` |
+| **B** gpui-ce の分岐が構造的に効く | **0** | — |
+| **C** その他 | **14** | `IntoPlot` proc-macro が `crate_name("gpui-kit")` / `crate_name("gpui-pre")` をハードコード（`component-macros/src/crate_path.rs`）で 7 件 + その波及で chart 7 型が `IntoElement` 未実装 |
+
+エラーコードの内訳も突き合わせた: E0599 が 21（**全部が上流の後付け
+メソッド**）、E0277 が 7（proc-macro の波及）、E0432 が 2、E0560 が 1。
+
+**38 は下限であって総量ではない。** 未解決 import が 2 つ残っている
+（`gpui::container_query`、`gpui::SystemNotification*`）ので、
+それを通すと第 2 波が出る。第 1 報で 4 → 13 に化けたのと同じ理屈である。
+
+### 挙動の確認
+
+- **上流のユニットテスト 17 本が gpui-ce 上で全部 pass**
+  （spring 11 本 = 伝播行列の合成則・減衰全域での整定時間・HSLA の最短色相補間ほか、
+  `OngoingScroll` 6 本 = 優勢軸ロック・方向転換でのアンロック・タイムアウト境界）
+- 上流の `motion` example（spring デモ）が gpui-ce 上で**起動し、23 秒間 panic なし**
+- `components` ショーケースも起動し、**スクロールイベントを 40 発実注入**して
+  `OngoingScroll::filter` を通した。panic なし
+- **ピクセルの目視はできていない**（この環境の `screencapture` が TCC で
+  拒否される）。「正しく見える」は確認していない
+
+## 判断: 条件付き GO（フォーク構成で 0.6 に乗る）
+
+**根拠は「B が 0」の 1 点である。** API の形が構造的に食い違っている箇所が
+`gpui-component` に 1 つも無く、残りは「上流が後から足したもの」と
+「クレート名のハードコード」だけだった。C の 14 件は **1 ファイルの
+proc-macro が原因**で、kit をフォークするなら数行で消える。
+
+**GO の代価として見積もりに入れること**:
+
+- **`flex_grow()` → `flex_grow(f32)` は Ravel 側に波及する。** gpui-ce 内には
+  呼び出しが 0 だったが、Ravel の `.flex_grow()` は全部壊れる
+- **`ArenaClearNeeded::clear(cx)` は gpui-base のテスト 103 箇所**に効く
+- **38 は下限。** 「あと 38 個で終わる」を GO の根拠にしてはいけない。
+  根拠は「B が 0 だった」までである
+
+**次に測るべきもの**: `simulate_next_frame`（A・13 件）と `clear(cx)`
+（B・103 件）を前送りして **`cargo test -p gpui-base` を緑にする**。
+そこで初めて前送りの正しさが検証でき、同時に B の実コストが確定する。
+
+**gpui-pre への移行はフォールバックとして生かしておく** — 第 2 波が
+構造的な差を含んでいたらそちらに切り替える。
 
 ## 目標構成
 

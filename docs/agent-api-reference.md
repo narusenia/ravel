@@ -1359,6 +1359,15 @@ attribute_delete(&geo, Domain, name) -> Result<Geometry>
     // demands it, and it may be the column holding the element count
 bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in 2D
 path_sample(&geo, distance) -> Result<PathSample>   // planar only
+PathArcTable                     // the same walk, held across many samples
+    ::build(&geo, operation) -> Result<Self>   // first path primitive; a
+                 // degenerate total length is InvalidPath, so the rest is
+                 // infallible. `operation` names the caller in the errors
+    .length() -> f32
+    .sample(distance) -> PathSample            // clamped to 0..=length()
+    // `path_sample` is ::build + .sample, and building walks every vertex —
+    // sample the SAME path per element (text.on_path) through a held table,
+    // not through path_sample in the loop
 
 geometry::triangulate
 Triangulator     // `earcut` (MIT OR Apache-2.0) behind a buffer-owning type;
@@ -2174,6 +2183,7 @@ Current keys:
 | `scene.merge` | CPU | union of two scenes, objects and cameras alike; a missing side passes the other through |
 | `scene.camera` | CPU | source node emitting a `Scene` with exactly one `Camera` and no objects, so `scene.merge` combines cameras and objects with one node. `position` / `target` are Channel3, `projection` is a `perspective`/`orthographic` enum, `fov` / `ortho_height` / `near` / `far` are Floats (an unknown `projection` falls back to perspective rather than failing). The aspect ratio is **not** baked in here — it is read from `comp_resolution` when a projection matrix is asked for |
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations, dimension-agnostic (`.transfer` measures distance in three components, so the two sides may differ in dimension). `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
+| `text.on_path` | CPU | re-places a text layout's character instances along the `path` input: a character's arc length is the **running sum of its `advance` column** (the writing-axis step in either writing mode, so a vertical run spreads along the path instead of stacking), its `P` is the sampled position and its `rot` the tangent's angle. `offset` slides the run, `spacing` is tracking measured along the path (added after every character, the last included), `align` puts the run's `start` / `center` / `end` against the path's, and `flip` adds half a turn. **Only `P` and `rot` are rewritten**, so `instance_sources` / `source_index` and the per-character columns survive for a field to read. An unconnected `path` passes the text through unchanged; a run longer than the path clamps its overflow onto the last point; `text.layout`'s own `align` / `anchor` and its line separation drop out, a multi-line layout becoming one continuous run. Instances without an `advance` column are an explicit error, and a `Vec3` instance `P` is refused the way `path_sample` refuses a 3D path |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` or a `Primitive::Mesh` is an explicit error (`GeometryError::RequiresPlanarP` / `RequiresPathPrimitives`) |
 | `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
 | `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |

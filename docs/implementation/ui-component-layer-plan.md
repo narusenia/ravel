@@ -26,10 +26,15 @@ Ravel の UI は「動く」ところまで来ている（`docs/ui-impl-status.m
 - **アクセシビリティは実質ゼロ。** `tab_index` 0 / `tab_stop` 0 /
   `accessibility_id` 0。`focus_handle` は 115 箇所あるがパネル単位の
   コマンド経路用で、**Tab 順という概念が存在しない**
-- **ライトテーマがディスク上にあって到達できない**
-  （`assets/themes/ravel.json` に light / dark 両方、`AppearanceMode` に
-  System もあるが、`MED-APP-10` が「設定レイヤーは永続化されるが一切
-  適用されない」）
+- **テーマは既に JSON で、既にホットリロードされる。**
+  `assets/themes/ravel.json` が gpui-component の `.theme-schema.json`
+  形式で light / dark 2 テーマ × 色 36 キー。`load_ravel_themes()` が
+  themes ディレクトリの `*.json` を全部 `ThemeRegistry` に入れ、
+  `ThemeRegistry::watch_dir` が編集を即反映し、設定ダイアログの
+  `theme_field` が `sorted_themes()` から選ばせる。
+  **足りないのは「ユーザーが置ける場所」だけ** — `themes_dir()` の候補は
+  3 つとも**アプリ側**（`.app` バンドル内 / バイナリ隣 / ワークスペース）で、
+  ユーザーテーマを置くには署名を壊してバンドルに書き込むしかない
 
 `issues/` の open な UI 所見も、見た目の問題ではなく**同じ不変条件を
 別々の場所で破っている**という形をしている（下の表）。だから
@@ -108,6 +113,35 @@ Properties の 1 行が到達すべき状態:
 `row.default` を 24 に寄せるのは、**ヘッダ 24 と合わせて 1 つの階段**に
 するため（22 / 24 / 26 / 28 の 4 段は意味の差ではなく実装の差だった）。
 
+### テーマスキーマは Ravel が持つ（gpui-component から離れる）
+
+**決定: 2026-09-07。** 今の `assets/themes/ravel.json` は
+gpui-component の `.theme-schema.json` に従っているが、`UIX-1` で
+**Ravel 独自のスキーマに移る。**
+
+理由: **間隔とモーションは gpui-component が持つ気の無い概念である。**
+あちらのスキーマは色 36 キーと `font.size` / `radius` までで、
+4px 刻みの間隔や `feedback.in` / `feedback.out` のような時間を
+表す場所が無い。フォークにスキーマを足すと**上流追従のたびに
+衝突する**（`KIT-0b` で 2211 コミット遅れが 9 コミットを無駄にしたのと
+同じ費用の出方）。
+
+**ただし gpui-component の `Theme` は生かし続ける。** 借りている部品
+（`Input`、裾の 8 部品、`Root`）が `cx.theme()` を読むので、
+**Ravel のスキーマを正として `ThemeConfig` を導出する**。方向を
+逆にすると、Ravel 独自のトークンが gpui-component の型に入らない。
+
+```
+ユーザーの theme.json  →  RavelTheme（色・間隔・字送り・モーション）
+                              ├→ ravel-widgets の部品が直接読む
+                              └→ ThemeConfig を導出 → gpui-component の Theme
+                                                        （借りている部品用）
+```
+
+移行の代価: 既存 `ravel.json` を書き換える。**ホットリロードと
+設定ダイアログの選択経路は `ThemeRegistry` のままなので変わらない**
+（`ThemeRegistry` に入れるのは導出後の `ThemeConfig`）。
+
 ## 目標アーキテクチャ
 
 ```
@@ -170,14 +204,14 @@ crates/ravel-widgets/          ← 新規
 | ID | 単位 | 依存 |
 |---|---|---|
 | `UIX-0` | 不変条件を `docs/dev/ux-invariants.md` に文書化し、`ravel-review` の検査手順に入れる | — |
-| `UIX-1` | トークンの型定義と値の決定（色・間隔・字送り・モーション）。**まだ配線しない** | — |
+| `UIX-1` | **Ravel 独自のテーマスキーマ**を定義する（色・間隔・字送り・モーション）。gpui-component の `ThemeConfig` を**そこから導出**する。**まだ配線しない** | — |
 | `UIX-2` | `ravel-widgets` クレートを切り、既存 6189 行を移設。`examples/gallery` を作る | `KIT-1` |
 | `UIX-3` | `tokens.rs` を配線し、ハードコード 24 箇所を潰す。`lint-patterns.sh` にリテラル禁止を追加 | `UIX-1` / `UIX-2` |
 | `UIX-4` | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で作る。4 状態 + Tab 順 + Enter / Space | `UIX-2` |
 | `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | `UIX-3` |
 | `UIX-6` | **不変条件 1〜4 の違反を潰す**（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | `UIX-0` |
 | `UIX-7` | **不変条件 5〜9 の違反を潰す**（狭い幅、死んだ操作、値の意味、設定の適用、派生キャッシュ） | `UIX-0` |
-| `UIX-8` | ライトテーマを到達可能にする（`MED-APP-10` の設定適用経路） | `UIX-3` |
+| `UIX-8` | **ユーザーテーマディレクトリ**を足す（`themes_dir()` を複数候補に、ユーザー側が勝つ、2 ディレクトリ監視、スキーマの文書化） | `UIX-1` |
 | `UIX-9` | 文書更新（`ui-impl-status.md` の密度・部品の記述、`gpui-ui-guide.md` の「部品を追加する」節） | `UIX-4`〜`UIX-8` |
 
 **`UIX-0` と `UIX-1` はパネルを触らないので `KIT-1` と並行できる。**
@@ -194,11 +228,17 @@ crates/ravel-widgets/          ← 新規
 - `docs/dev/ux-invariants.md` に 12 個を書く。**各項目に「破ったときに
   どう見えるか」を 1 行**添える（抽象的な原則だけだと検査に使えない）
 - `ravel-review` スキルの検査手順に「不変条件の照合」を足す
-- トークンの型を決める。**色は既存の 10 種 + `category_color` の族**から
-  始め、増やすのは実際に要ったときだけ（先回りして 40 色作らない）
+- **Ravel 独自のテーマスキーマを定義する**（決定: 2026-09-07。理由は下記）
+- 色は既存の 10 種 + `category_color` の族から始め、増やすのは実際に
+  要ったときだけ（先回りして 40 色作らない）
 - 間隔は 4px 刻み、行高は上の 2 段、字送りは既存の
   `theme().font_family` / `mono_font_family` に段を足す形
 - モーションは `Motion` 2 種だけ（`feedback.in` 120ms / `feedback.out` 180ms）
+- **`ThemeConfig` の導出を書く** — 借りている部品（`Input` と裾の 8 部品、
+  `Root`）は `cx.theme()` を読むので、gpui-component の `Theme` に
+  値を供給し続ける必要がある。**Ravel のスキーマが正で、そこから
+  `ThemeConfig` を作る**（逆ではない）
+- 既存 `assets/themes/ravel.json` の移行を書く
 
 ### 完了条件
 
@@ -315,15 +355,19 @@ crates/ravel-widgets/          ← 新規
 | 7 値の意味 | `MED-APP-19` / `MED-APP-20` / `MED-APP-29` / `MED-APP-30` |
 | 9 派生キャッシュ | `MED-APP-08` |
 
-`UIX-8`（設定の適用）: `MED-APP-10`。**ライトテーマとロケールが
-同時に到達可能になる**（同じ設定適用経路なので 1 単位）。
+`UIX-8` はここには入らない — **設定の適用経路は既に動いている**
+（`app_settings::install` → `apply(Changed::ALL)` が locale / appearance /
+cache を配線し、ロケールもテーマも設定ダイアログから選べる）。
+`MED-APP-10` に残っているのは **autosave / proxy / OCIO** の 3 つで、
+これは UI の不変条件ではないのでこの計画の範囲外。
 
 ### 完了条件
 
 - 各 issue が `issues/closed/` に移り、`**解決済み**` 行を持つ
 - **各修正に「その不変条件を破ると落ちる」テストがある。**
   「直った」を目視で済ませない
-- `UIX-8` の完了後、**日本語ロケールとライトテーマが設定から選べる**
+- `UIX-8` の完了後、**ユーザーが自分のテーマ JSON を置いて選べる**
+  （アプリバンドルに書き込まずに）
 
 ---
 
@@ -366,3 +410,9 @@ crates/ravel-widgets/          ← 新規
   `Input` の再実装を別単位として起票する
 - **`category_color` の族をトークンにするか。** ノード種別の色は
   「機能色」なので階調トークンとは別の体系になる。`UIX-1` で決める
+- **`ThemeRegistry::watch_dir` が 1 ディレクトリしか受けない。**
+  `UIX-8` は 2 ディレクトリ（同梱とユーザー）を監視する必要があるので、
+  受けないなら `notify` で自前に張るか、gpui-kit フォークに複数
+  ディレクトリ対応を入れる。**どちらになるかは `UIX-8` の着手時に測る**
+- **同名衝突はユーザー側が勝つ。** `ThemeRegistry` は先に読んだものを
+  残す仕様なので、ユーザーディレクトリを先に読む

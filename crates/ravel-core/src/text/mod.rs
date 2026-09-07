@@ -25,6 +25,6 @@ pub use font::{
     style_is_italic, weight_from_name,
 };
 pub use layout::{
-    Align, DEFAULT_SIZE, LayoutParams, LayoutTiming, TEXT_ALIGNS, TEXT_ANCHORS, TextError,
-    VerticalAnchor, layout_text, layout_text_timed,
+    Align, DEFAULT_SIZE, LayoutParams, LayoutTiming, TEXT_ALIGNS, TEXT_ANCHORS, TEXT_WRITING_MODES,
+    TextError, VerticalAnchor, WritingMode, layout_text, layout_text_timed,
 };

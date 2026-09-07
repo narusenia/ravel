@@ -1,6 +1,6 @@
 # GPUI Kit 移行計画（gpui-ce → gpui-pre、gpui-base の採用）
 
-> **Status**: `KIT-0` 済み（ゲート通過）— 2026-09-05。**判断は条件付き GO**。
+> **Status**: `KIT-0b` 済み（前送りの検証も完了）— 2026-09-07。**判断は GO**。
 > 下の「ゲートの実測」節が正で、**2026-09-04 に書いた「エラー 4 個」は誤り**
 
 対象: Ravel が立つ GPUI 実装と、UI コンポーネント層の土台。
@@ -234,6 +234,74 @@ proc-macro が原因**で、kit をフォークするなら数行で消える。
 （B・103 件）を前送りして **`cargo test -p gpui-base` を緑にする**。
 そこで初めて前送りの正しさが検証でき、同時に B の実コストが確定する。
 
+## `KIT-0b` の実測（2026-09-07）
+
+上の「次に測るべきもの」を実行した。フォークの revision は
+**`452d028da08d85058ceb95cb262bd9ad14f1f698`**
+（`narusenia/gpui-ce-ravel` の `feat/spring-and-ongoing-scroll`、
+`27cbf19d9c` から 9 コミット）。
+
+### 前送りしたもの（3 コミット）
+
+| 前送りしたもの | 分類 |
+|---|---|
+| `Arena` のスコープ深度 + 遅延 `clear` + `ElementArenaScope::exit` + `ArenaClearNeeded::clear(&mut App)` | **A**（署名の引数追加） |
+| `Window::simulate_next_frame`（test-support） | 上流の後付け |
+| `Arena::allocate` の境界検査をアドレス空間で行う（UB 修正） | 上流のバグ修正 |
+
+### `clear(cx)` は B ではなく A だった
+
+**`KIT-0` の第 1 報はこれを B（gpui-ce の分岐が構造的に効く）に分類していたが、
+誤りだった。** 上流は引数を足して「draw した `App` と同一か」を assert する形に
+変えただけで、gpui-ce 側の対応は**呼び出し 7 箇所**（`app.rs` 2、`window.rs` 2、
+`elements/div.rs` 2、`app/test_app.rs` 1）に `cx` を渡し、`test_context.rs` の
+draw 経路を `exit()` 経由に直すだけで済んだ。**B は 0 のままである。**
+
+副産物として **gpui-ce から `unsafe` の生ポインタ deref が 1 つ消えた**:
+上流の `clear` はポインタを比較するだけで deref しない。
+
+### `gpui-base` のテストは 116 エラー → 0、**761 / 764 pass**
+
+残った 3 本は `motion::tests` の
+`status_transition_reports_delay_running_and_finished` /
+`a_completed_transition_stops_requesting_frames` /
+`presence_enters_exits_and_only_unmounts_after_exit`。
+
+**これは前送りのせいではない。** `kitprobe` の `Cargo.toml` を素の状態に戻して
+**上流構成（gpui-pre 0.3.3）で走らせても同じ 3 本が同じ値で落ちる。**
+
+原因は `Duration::mul_f32` の f32 往復:
+`motion.rs` の `let duration = policy.duration.mul_f32(reversing_factor)` は
+`reversing_factor == 1.0` でも `Duration::from_millis(100)` を
+**`100.000001ms`** にする（`as_secs_f32()` で 0.1 が丸まる）。
+`active_elapsed >= duration` が境界ちょうどで成立せず、
+`Finished` になるべき最終フレームが `Running` のままになる。
+**`gpui-kit` 0.6.0 の既存バグで、`KIT-1` はこれを引き継ぐ。**
+上流に投げる価値がある（1 行で直る: 係数が 1.0 のとき `mul_f32` を通さない）。
+
+### そのほか確認したこと
+
+- **`gpui-component --lib` の残差は 38 個のまま**（内訳も同じ:
+  E0599 21 / E0277 7 / E0432 2 / E0560 1）。この 2 機能は
+  `gpui-component` の穴には含まれていなかった
+- **Ravel はどちらの API も呼んでいない**（`ArenaClearNeeded` /
+  `simulate_next_frame` / `.draw(cx)` の grep が 0 件）。
+  ピン更新で Ravel が壊れることはない
+- `cargo test -p gpui-base`（examples を含む全ターゲット）は
+  **example `components` だけが落ちる**。これはフォークの穴ではなく
+  **probe の配線の問題**で、`kitprobe` が crates.io の
+  `gpui-pre-reqwest-client` を残しているため `HttpClient` が
+  gpui-pre のトレイトになり、gpui-ce の同名トレイトと一致しない。
+  §0 の「gpui-pre と gpui-ce を混ぜるな」と同じ罠。`KIT-1` の配線で消える
+- 追加した 3 本のアリーナテストと `simulate_next_frame` のテストは
+  **変異注入 5 件すべてで落ちることを確認**した
+
+### 判断: 条件付き GO → **GO**
+
+`KIT-0` が GO につけていた条件は「前送りの正しさが未検証」「B の実コストが
+未確定」の 2 つだった。**どちらも解消した** — 前送りは上流のテスト 761 本を
+通し、B は 0 のままだった。
+
 **gpui-pre への移行はフォールバックとして生かしておく** — 第 2 波が
 構造的な差を含んでいたらそちらに切り替える。
 
@@ -323,9 +391,13 @@ GPUI の型の世界は動かないので、共存の問題そのものが起き
 
 ### KIT-1: Ravel の土台差し替え（1 コミット）
 
-- `Cargo.toml` の `gpui` / `gpui_platform` を **2 機能を前送りした
-  `gpui-ce-ravel`** へ、`gpui-component` を **`KIT-0` の gpui-kit フォーク**の
-  0.6 へ差し替える
+- `Cargo.toml` の `gpui` / `gpui_platform` を
+  **`gpui-ce-ravel` の `452d028da08d85058ceb95cb262bd9ad14f1f698`**
+  （`KIT-0` / `KIT-0b` の前送り込み）へ、`gpui-component` を
+  **`KIT-0` の gpui-kit フォーク**の 0.6 へ差し替える。
+  **`[patch."https://github.com/zed-industries/zed"]` の rev も同じものに
+  揃える** — 揃えないと `gpui` が 2 つ木に入り、`MED-GPU-07` で wgpu が
+  二重化したのと同じことが `Entity<T>` / `App` の型で起きる
 - **`[patch."https://github.com/zed-industries/zed"]` は残る**（gpui-ce の
   `gpui` を使い続けるので既存の patch がそのまま効く）。フォークが自分の
   `Cargo.toml` で `gpui` を向け直しているので、`gpui-pre` を patch する

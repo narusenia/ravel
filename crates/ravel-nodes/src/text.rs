@@ -21,7 +21,9 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{Geometry, ops};
 use ravel_core::graph::Node;
-use ravel_core::text::{self, Align, FontQuery, FontRef, LayoutParams, VerticalAnchor};
+use ravel_core::text::{
+    self, Align, FontQuery, FontRef, LayoutParams, VerticalAnchor, WritingMode,
+};
 use ravel_core::types::NodeData;
 use std::sync::Arc;
 
@@ -108,6 +110,9 @@ impl NodeProcessor for LayoutProcessor {
             align: Align::from_name(params.str_or("align", text::TEXT_ALIGNS[0])),
             wrap_width: params.f32_or("wrap_width", 0.0),
             anchor: VerticalAnchor::from_name(params.str_or("anchor", text::TEXT_ANCHORS[0])),
+            writing_mode: WritingMode::from_name(
+                params.str_or("writing_mode", text::TEXT_WRITING_MODES[0]),
+            ),
         };
         let geometry = text::layout_text(font, params.str_or("text", ""), &layout)
             .with_context(|| format!("laying text out in {}", font.family))?;
@@ -394,6 +399,45 @@ mod tests {
         assert!(
             (large / small - 4.0).abs() < 0.01,
             "advance has to scale with size: {small} then {large}"
+        );
+    }
+
+    /// `writing_mode` has to be read off the node, not defaulted: a vertical
+    /// layout steps in Y and a horizontal one in X. Nothing in the layout
+    /// tests would notice an unwired parameter — they build `LayoutParams`
+    /// themselves — so the wiring gets its own assertion here.
+    #[test]
+    fn the_writing_mode_parameter_reaches_the_layout() {
+        let step = |mode: &str| {
+            let mut node = layout_node(1, "ab");
+            set_param(&mut node, "writing_mode", mode);
+            let graph = Graph::new().add_node(node).expect("a single-node graph");
+            let mut evaluator = Evaluator::new();
+            evaluator.register(NodeId::new(1), Arc::new(LayoutProcessor));
+            let value = evaluator
+                .evaluate(&graph, NodeId::new(1), &ctx())
+                .expect("the graph evaluates");
+            let placed = value
+                .downcast_ref::<Geometry>()
+                .expect("geometry")
+                .instances()
+                .get(names::P)
+                .expect("the instance domain carries P")
+                .as_vec2(names::P)
+                .expect("a Vec2 column")
+                .to_vec();
+            (placed[1].0 - placed[0].0, placed[1].1 - placed[0].1)
+        };
+
+        let (dx, dy) = step("horizontal");
+        assert!(
+            dx > 0.0 && dy.abs() < 1e-4,
+            "horizontal text steps in X: {dx}, {dy}"
+        );
+        let (dx, dy) = step("vertical");
+        assert!(
+            dy > 0.0 && dx.abs() < 1e-4,
+            "vertical text steps in Y: {dx}, {dy}"
         );
     }
 

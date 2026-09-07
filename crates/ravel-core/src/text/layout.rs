@@ -62,11 +62,16 @@ pub(crate) struct ShapedCluster {
     pub(crate) byte: usize,
     /// The glyphs this cluster draws, in draw order.
     pub(crate) glyphs: Vec<PlacedGlyph>,
-    /// Pen advance in font units.
+    /// Travel along the writing axis in font units — the pen's X step in
+    /// horizontal mode, its downward Y step in vertical mode. Always
+    /// positive, so the line walk does not care which axis it is on.
     pub(crate) advance: i32,
     /// The cluster starts with a whitespace character, so a line may end by
     /// dropping it.
     pub(crate) whitespace: bool,
+    /// The cluster's first character, which is what the kinsoku tables are
+    /// keyed by. `\0` only for a cluster whose bytes have gone missing.
+    pub(crate) first: char,
 }
 
 /// Shape one paragraph into clusters, in the order they are drawn.
@@ -78,10 +83,15 @@ pub(crate) struct ShapedCluster {
 ///
 /// The reordering is per **paragraph**, not per line: a wrapped line of
 /// mixed-direction text is therefore ordered against its paragraph rather than
-/// against itself. That is exact for single-direction paragraphs, which is all
-/// v1 targets (typography-plan: "v1 は横書き"); per-line reordering belongs
-/// with the vertical-writing unit, which rebuilds the line walk anyway.
-pub(crate) fn shape_paragraph(face: &rustybuzz::Face<'_>, text: &str) -> Vec<ShapedCluster> {
+/// against itself. That is exact for single-direction paragraphs, which is
+/// what the `text.layout` node targets, and it stays a known ceiling —
+/// vertical writing keeps the same paragraph-wide walk, because a column's
+/// order is decided by the column, not by the bidi level inside it.
+pub(crate) fn shape_paragraph(
+    face: &rustybuzz::Face<'_>,
+    text: &str,
+    mode: WritingMode,
+) -> Vec<ShapedCluster> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -91,7 +101,7 @@ pub(crate) fn shape_paragraph(face: &rustybuzz::Face<'_>, text: &str) -> Vec<Sha
     for run in runs {
         let rtl = levels[run.start].is_rtl();
         let start = run.start;
-        shape_run(face, &text[run], rtl, start, &mut clusters);
+        shape_run(face, &text[run], rtl, start, mode, &mut clusters);
     }
     clusters
 }
@@ -105,20 +115,30 @@ fn shape_run(
     text: &str,
     rtl: bool,
     offset: usize,
+    mode: WritingMode,
     out: &mut Vec<ShapedCluster>,
 ) {
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(text);
-    buffer.set_direction(if rtl {
-        rustybuzz::Direction::RightToLeft
-    } else {
-        rustybuzz::Direction::LeftToRight
+    buffer.set_direction(match mode {
+        // A column runs top to bottom whichever way the script's own
+        // horizontal direction points. `vertical-rl` spends the bidi
+        // resolution on the order of the *columns*, not on the order inside
+        // one, so an RTL run in a vertical block still descends.
+        WritingMode::Vertical => rustybuzz::Direction::TopToBottom,
+        WritingMode::Horizontal if rtl => rustybuzz::Direction::RightToLeft,
+        WritingMode::Horizontal => rustybuzz::Direction::LeftToRight,
     });
     // Script and language are guessed from the content: a text node carries no
     // language tag, and guessing is what picks up Arabic joining or Devanagari
     // reordering without the user declaring anything.
     buffer.guess_segment_properties();
-    let shaped = rustybuzz::shape(face, &[], buffer);
+    let features: &[rustybuzz::Feature] = if mode.is_vertical() {
+        &VERTICAL_FEATURES
+    } else {
+        &[]
+    };
+    let shaped = rustybuzz::shape(face, features, buffer);
 
     let infos = shaped.glyph_infos();
     let positions = shaped.glyph_positions();
@@ -133,24 +153,42 @@ fn shape_run(
         // offsets are relative to the pen as it walks through them.
         while index < infos.len() && infos[index].cluster == cluster {
             let position = positions[index];
+            // The pen walks the writing axis and the other axis carries only
+            // the glyph's own offset. In vertical mode harfbuzz has already
+            // moved each glyph onto the column's centreline (it subtracts the
+            // horizontal origin) and down to its own top edge (the vertical
+            // origin), so the offsets place the glyph inside its cell.
+            let (x, y) = match mode {
+                WritingMode::Horizontal => (pen + position.x_offset, position.y_offset),
+                WritingMode::Vertical => (position.x_offset, pen + position.y_offset),
+            };
             glyphs.push(PlacedGlyph {
                 id: infos[index].glyph_id as u16,
-                x: pen + position.x_offset,
-                y: position.y_offset,
+                x,
+                y,
             });
-            pen += position.x_advance;
-            advance += position.x_advance;
+            // `y_advance` is negative for a descending column, because font
+            // space is Y-up.
+            let step = match mode {
+                WritingMode::Horizontal => position.x_advance,
+                WritingMode::Vertical => position.y_advance,
+            };
+            pen += step;
+            advance += step;
             index += 1;
         }
         let byte = offset + cluster as usize;
+        let first = text[byte - offset..].chars().next().unwrap_or('\0');
         out.push(ShapedCluster {
             byte,
             glyphs,
-            advance,
-            whitespace: text[byte - offset..]
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace),
+            advance: if mode.is_vertical() {
+                -advance
+            } else {
+                advance
+            },
+            whitespace: first.is_whitespace(),
+            first,
         });
     }
 }
@@ -171,13 +209,20 @@ pub(crate) fn break_offsets(text: &str) -> Vec<usize> {
 // Parameters
 // ===========================================================================
 
-/// How the lines of a text block sit horizontally against the origin.
+/// Where a line sits against the origin on the axis its characters run along.
 ///
 /// The origin is the anchor, not a margin: `Left` starts every line at `x = 0`,
 /// `Center` centres each line on `x = 0`, `Right` ends each line there. That
 /// makes the alignment and the layer's own anchor point one decision instead
 /// of two, which is what a motion-graphics tool needs — a title that grows
 /// from its centre must not drift because its text got longer.
+///
+/// In [`WritingMode::Vertical`] the axis is Y instead, so the same four
+/// choices read down a column: `Left` starts it at `y = 0`, `Center` centres
+/// it there, `Right` ends it there, and `Justify` stretches it to
+/// `wrap_width`. The names keep their horizontal spelling because the
+/// parameter is one dropdown either way — see the locale strings for how they
+/// are presented.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Align {
     #[default]
@@ -207,18 +252,27 @@ impl Align {
     }
 }
 
-/// Which horizontal line of the text block lands on `y = 0`.
+/// Where the block sits against the origin on the axis its lines stack along.
+///
+/// Horizontally that axis is Y pointing down, so this picks which horizontal
+/// line of the block lands on `y = 0`. In [`WritingMode::Vertical`] it is X
+/// pointing *left*, because the columns march right to left: `Baseline` puts
+/// the first column's centreline on `x = 0`, `Top` the block's right edge,
+/// `Bottom` its left edge, and `Center` straddles the origin. The extents
+/// come from `vhea` rather than `hhea` there — half an em either side of the
+/// centreline for a face that has no `vhea`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VerticalAnchor {
-    /// The first line's baseline. The default, because it is the only anchor
-    /// that does not move when the font's vertical metrics change.
+    /// The first line's baseline, or the first column's centreline. The
+    /// default, because it is the only anchor that does not move when the
+    /// font's metrics change.
     #[default]
     Baseline,
-    /// The top of the first line's ascent.
+    /// The leading edge of the first line's ascent.
     Top,
     /// The middle of the block, ascent to descent.
     Center,
-    /// The bottom of the last line's descent.
+    /// The trailing edge of the last line's descent.
     Bottom,
 }
 
@@ -238,6 +292,67 @@ impl VerticalAnchor {
     }
 }
 
+/// Which axis a line's characters run along.
+///
+/// Vertical means `vertical-rl`: characters descend a column and the columns
+/// themselves march leftwards, which is how Japanese vertical text is set.
+/// `vertical-lr` and the sideways modes are not offered — each would be a
+/// third path through placement for a case none of the target scripts has,
+/// and the two here already differ only by which axis is which.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WritingMode {
+    /// Characters run along X; lines stack downwards along Y.
+    #[default]
+    Horizontal,
+    /// Characters run down a column along Y; columns march leftwards along X.
+    Vertical,
+}
+
+/// The `writing_mode` parameter's dropdown options, in order.
+pub const TEXT_WRITING_MODES: [&str; 2] = ["horizontal", "vertical"];
+
+impl WritingMode {
+    /// The mode a [`TEXT_WRITING_MODES`] name stands for; anything else is
+    /// `Horizontal`, because a foreign value comes from a hand-edited
+    /// document rather than from the dropdown.
+    pub fn from_name(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "vertical" => Self::Vertical,
+            _ => Self::Horizontal,
+        }
+    }
+
+    /// Whether characters run down a column.
+    pub fn is_vertical(self) -> bool {
+        matches!(self, Self::Vertical)
+    }
+}
+
+/// One OpenType feature, switched on over the whole run.
+const fn global_feature(tag: ttf_parser::Tag) -> rustybuzz::Feature {
+    rustybuzz::Feature {
+        tag,
+        value: 1,
+        start: 0,
+        end: u32::MAX,
+    }
+}
+
+/// The GSUB alternates a vertical run is shaped with.
+///
+/// `vert` swaps `。` for the form that sits in the cell's upper right and
+/// turns `「` onto its side; `vrt2` is the same substitution plus the
+/// pre-rotated forms a proportional glyph needs to read down a column.
+/// rustybuzz enables `vert` on its own for a vertical buffer but never
+/// `vrt2` — harfbuzz leaves that rotation to its client — so `vrt2` is the
+/// one that has to be asked for. Both are requested rather than only `vrt2`
+/// because a face may carry either alone, and a feature a face does not have
+/// costs nothing.
+const VERTICAL_FEATURES: [rustybuzz::Feature; 2] = [
+    global_feature(ttf_parser::Tag::from_bytes(b"vert")),
+    global_feature(ttf_parser::Tag::from_bytes(b"vrt2")),
+];
+
 /// Everything `text.layout` decides beyond the face and the string.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutParams {
@@ -252,10 +367,13 @@ pub struct LayoutParams {
     /// takes the face's own `ascender - descender + line_gap`.
     pub leading: f32,
     pub align: Align,
-    /// Wrap lines that would exceed this many composition pixels. Zero or
-    /// negative wraps only at the `\n` in the string.
+    /// Wrap a line that would exceed this many composition pixels — the
+    /// length of a column in vertical mode, since that is the axis the
+    /// characters run along. Zero or negative wraps only at the `\n` in the
+    /// string.
     pub wrap_width: f32,
     pub anchor: VerticalAnchor,
+    pub writing_mode: WritingMode,
 }
 
 impl Default for LayoutParams {
@@ -267,6 +385,7 @@ impl Default for LayoutParams {
             align: Align::Left,
             wrap_width: 0.0,
             anchor: VerticalAnchor::Baseline,
+            writing_mode: WritingMode::Horizontal,
         }
     }
 }
@@ -310,6 +429,62 @@ struct Line {
     last_in_paragraph: bool,
 }
 
+/// Characters a line may not **begin** with: the closing half of a bracket
+/// pair, the sentence punctuation, the small kana, and the marks that belong
+/// to whatever stands before them.
+///
+/// Deliberately a subset of JIS X 4051 rather than the standard: the two
+/// classes that matter are "must not start a line" and "must not end one",
+/// and what the standard adds past them — hanging punctuation, adjusting a
+/// line by compressing its spacing — needs a justification model this layout
+/// does not have (typography-plan unit 6 scopes it out).
+///
+/// **ASCII is deliberately absent.** A Latin paragraph therefore wraps
+/// exactly where it did before kinsoku existed, and the rule only speaks up
+/// for the full-width punctuation it was written for.
+const NO_LINE_START: &str = concat!(
+    "。、，．・：；？！‼⁇⁈⁉",
+    "ー゛゜ゝゞ々〻",
+    "）］｝〉》」』】〕〗〙〟’”｠»",
+    "ぁぃぅぇぉっゃゅょゎゕゖ",
+    "ァィゥェォッャュョヮヵヶ",
+);
+
+/// Characters a line may not **end** with: the opening half of a bracket
+/// pair, which would be left dangling away from what it opens.
+const NO_LINE_END: &str = "（［｛〈《「『【〔〖〘〝｟‘“";
+
+/// Move a line break earlier until it satisfies the kinsoku rules.
+///
+/// The only correction is push-out (追い出し), and both classes turn into the
+/// same move. A character that may not begin a line takes the character
+/// before it down onto the next line — the break steps back one. A character
+/// that may not end a line goes down on its own — the break steps back one.
+/// So one loop, one step, both rules.
+///
+/// `start + 1` is the floor, which is what makes this terminate and what
+/// keeps a line from emptying: a break that cannot be fixed without leaving
+/// its line with nothing on it is left exactly where wrapping put it. That is
+/// the answer for a column one character wide, and for a run of nothing but
+/// closing brackets — the text overflows or the rule goes unmet, rather than
+/// the walk looping or emitting a blank line.
+///
+/// A pushed-out character may itself overflow `wrap_width` by one cluster.
+/// Correcting that would mean pulling something else in (追い込み), which
+/// needs the same justification model the table above declines to build.
+fn kinsoku_cut(clusters: &[ShapedCluster], start: usize, cut: usize) -> usize {
+    let mut fixed = cut;
+    while fixed > start + 1 && fixed < clusters.len() {
+        if !NO_LINE_START.contains(clusters[fixed].first)
+            && !NO_LINE_END.contains(clusters[fixed - 1].first)
+        {
+            return fixed;
+        }
+        fixed -= 1;
+    }
+    cut
+}
+
 /// Greedily break one shaped paragraph into lines at `wrap_width`.
 ///
 /// The paragraph is shaped **once** and the lines are cut out of that one
@@ -349,8 +524,10 @@ fn wrap_paragraph(
         {
             // No break opportunity on this line: cut before the character
             // that overflowed, so an unbreakable run still wraps instead of
-            // running off the composition.
-            let cut = last_break.unwrap_or(index);
+            // running off the composition. Kinsoku then gets the last word on
+            // where the cut lands, in both writing modes — a closing bracket
+            // may not open a horizontal line either.
+            let cut = kinsoku_cut(clusters, start, last_break.unwrap_or(index));
             lines.push(cut_line(
                 &clusters[start..cut],
                 &advances[start..cut],
@@ -666,14 +843,33 @@ pub fn layout_text_timed(
         return Err(TextError::FaceParse);
     }
     let scale = params.size / upem as f32;
-    let ascent = f32::from(face.ascender()) * scale;
-    let descent = -f32::from(face.descender()) * scale;
+    let vertical = params.writing_mode.is_vertical();
+    // The metrics of the axis the lines stack along: `hhea` says how far a
+    // horizontal line reaches above and below its baseline, `vhea` how far a
+    // column reaches either side of its centreline.
+    //
+    // **A face with no `vhea` gets a column one em wide with its centreline
+    // down the middle** — most Latin faces, the bundled Geist among them.
+    // That is the same fallback rustybuzz applies to `glyph_ver_advance` when
+    // a face has no `vmtx` (`ascender - descender`, an em by construction),
+    // so the step down a column and the width of the column stay in
+    // proportion instead of one of them collapsing to zero.
+    let half_em = (upem / 2) as i16;
+    let (ascender, descender, line_gap) = if vertical {
+        (
+            face.vertical_ascender().unwrap_or(half_em),
+            face.vertical_descender().unwrap_or(-half_em),
+            face.vertical_line_gap().unwrap_or(0),
+        )
+    } else {
+        (face.ascender(), face.descender(), face.line_gap())
+    };
+    let ascent = f32::from(ascender) * scale;
+    let descent = -f32::from(descender) * scale;
     let leading = if params.leading > 0.0 {
         params.leading
     } else {
-        (i32::from(face.ascender()) - i32::from(face.descender()) + i32::from(face.line_gap()))
-            as f32
-            * scale
+        (i32::from(ascender) - i32::from(descender) + i32::from(line_gap)) as f32 * scale
     };
 
     let mut lines = Vec::new();
@@ -682,7 +878,7 @@ pub fn layout_text_timed(
         // would shape into a visible cluster.
         let paragraph = paragraph.strip_suffix('\r').unwrap_or(paragraph);
         let shaping = Instant::now();
-        let clusters = shape_paragraph(&face, paragraph);
+        let clusters = shape_paragraph(&face, paragraph, params.writing_mode);
         timing.shaping += shaping.elapsed();
         let breaks = break_offsets(paragraph);
         lines.extend(wrap_paragraph(
@@ -697,11 +893,21 @@ pub fn layout_text_timed(
     // `split` always yields at least one paragraph, so there is at least one
     // line and the subtraction below is safe.
     let last_line = (lines.len() - 1) as f32;
-    let first_baseline = match params.anchor {
+    let first_line = match params.anchor {
         VerticalAnchor::Baseline => 0.0,
         VerticalAnchor::Top => ascent,
         VerticalAnchor::Center => (ascent - descent - last_line * leading) / 2.0,
         VerticalAnchor::Bottom => -descent - last_line * leading,
+    };
+    // The stacking axis is Y pointing down horizontally and X pointing
+    // **left** vertically, because `vertical-rl` puts the second column to
+    // the left of the first. Negating both the offset and the step is the
+    // whole of that difference: `anchor` and `leading` keep their meanings,
+    // and the axis they act on flips.
+    let (first_cross, cross_step) = if vertical {
+        (-first_line, -leading)
+    } else {
+        (first_line, leading)
     };
 
     let mut positions = Vec::new();
@@ -737,7 +943,7 @@ pub fn layout_text_timed(
             Align::Center => -width / 2.0,
             Align::Right => -width,
         };
-        let baseline = first_baseline + line_index as f32 * leading;
+        let cross = first_cross + line_index as f32 * cross_step;
         for (char_index, cluster) in line.clusters.iter().enumerate() {
             if cluster.whitespace {
                 after_gap = true;
@@ -758,7 +964,15 @@ pub fn layout_text_timed(
                 }
             };
             let advance = cluster.advance + if cluster.whitespace { extra } else { 0.0 };
-            positions.push(Vec2(pen, baseline));
+            // `pen` walks the writing axis and `cross` names the line, so the
+            // vertical mode is the horizontal one with its coordinates
+            // swapped. That is also what makes the `advance` attribute a Y
+            // step rather than an X one, with no second column to write.
+            positions.push(if vertical {
+                Vec2(cross, pen)
+            } else {
+                Vec2(pen, cross)
+            });
             advances.push(advance);
             char_indices.push(char_index as i32);
             word_indices.push(word);
@@ -823,13 +1037,13 @@ mod tests {
     pub(super) const NOTO_JP: &[u8] =
         include_bytes!("../../../../assets/fonts/NotoSansJP-Regular.otf");
 
-    fn face(data: &'static [u8]) -> rustybuzz::Face<'static> {
+    pub(super) fn face(data: &'static [u8]) -> rustybuzz::Face<'static> {
         rustybuzz::Face::from_slice(data, 0).expect("a bundled face parses")
     }
 
     #[test]
     fn ascii_shapes_one_cluster_per_character() {
-        let clusters = shape_paragraph(&face(GEIST), "Hello World");
+        let clusters = shape_paragraph(&face(GEIST), "Hello World", WritingMode::Horizontal);
         assert_eq!(clusters.len(), 11);
         assert!(clusters.iter().all(|cluster| cluster.glyphs.len() == 1));
         assert!(clusters[5].whitespace, "the space has to be marked as one");
@@ -852,10 +1066,10 @@ mod tests {
     fn a_latin_ligature_shapes_two_codepoints_into_one_cluster() {
         let text = "fi";
         assert_eq!(text.chars().count(), 2, "the fixture is two codepoints");
-        let clusters = shape_paragraph(&face(GEIST), text);
+        let clusters = shape_paragraph(&face(GEIST), text, WritingMode::Horizontal);
         assert_eq!(clusters.len(), 1, "one ligature, one instance");
         assert_eq!(clusters[0].glyphs.len(), 1);
-        let separate = shape_paragraph(&face(GEIST), "f|i");
+        let separate = shape_paragraph(&face(GEIST), "f|i", WritingMode::Horizontal);
         assert_ne!(
             clusters[0].glyphs[0].id, separate[0].glyphs[0].id,
             "the ligature glyph is not the standalone `f`, so a substitution \
@@ -870,7 +1084,7 @@ mod tests {
     fn a_partial_ligature_leaves_the_unligated_codepoint_its_own_cluster() {
         let text = "ffi";
         assert_eq!(text.chars().count(), 3);
-        let clusters = shape_paragraph(&face(GEIST), text);
+        let clusters = shape_paragraph(&face(GEIST), text, WritingMode::Horizontal);
         assert_eq!(clusters.len(), 2);
         assert_eq!(clusters[0].byte, 0);
         assert_eq!(clusters[1].byte, 2, "the second cluster starts at the `i`");
@@ -883,10 +1097,10 @@ mod tests {
     fn a_combining_voiced_mark_stays_in_its_base_cluster() {
         let text = "\u{304B}\u{3099}";
         assert_eq!(text.chars().count(), 2, "the fixture is two codepoints");
-        let clusters = shape_paragraph(&face(NOTO_JP), text);
+        let clusters = shape_paragraph(&face(NOTO_JP), text, WritingMode::Horizontal);
         assert_eq!(clusters.len(), 1, "one grapheme cluster, not two");
         assert_eq!(clusters[0].glyphs.len(), 1);
-        let precomposed = shape_paragraph(&face(NOTO_JP), "\u{304C}");
+        let precomposed = shape_paragraph(&face(NOTO_JP), "\u{304C}", WritingMode::Horizontal);
         assert_eq!(
             clusters[0].glyphs[0].id, precomposed[0].glyphs[0].id,
             "composition has to land on the precomposed glyph"
@@ -900,11 +1114,150 @@ mod tests {
         assert_eq!(break_offsets("one two three"), vec![4, 8]);
         assert_eq!(break_offsets("unbreakable"), Vec::<usize>::new());
     }
+
+    /// The completion criterion "brackets and punctuation are replaced by
+    /// their vertical forms".
+    ///
+    /// Substituting *a* different glyph is not enough to prove the feature
+    /// fired, so the outlines are compared too: the vertical `。` is the form
+    /// whose ink sits in the cell's upper right, which is a place the
+    /// horizontal one's bounding box does not reach at all.
+    #[test]
+    fn vertical_shaping_substitutes_the_vertical_punctuation_forms() {
+        let face = face(NOTO_JP);
+        let text = "。「";
+        let flat = shape_paragraph(&face, text, WritingMode::Horizontal);
+        let upright = shape_paragraph(&face, text, WritingMode::Vertical);
+        assert_eq!(flat.len(), 2);
+        assert_eq!(upright.len(), 2);
+        for (flat, upright) in flat.iter().zip(&upright) {
+            assert_ne!(
+                flat.glyphs[0].id, upright.glyphs[0].id,
+                "`vert` / `vrt2` has to substitute a different glyph for {:?}",
+                flat.first
+            );
+        }
+        let bbox = |id: u16| {
+            face.glyph_bounding_box(GlyphId(id))
+                .expect("the punctuation glyphs have outlines")
+        };
+        let horizontal = bbox(flat[0].glyphs[0].id);
+        let vertical = bbox(upright[0].glyphs[0].id);
+        assert!(
+            vertical.y_min > horizontal.y_max && vertical.x_min > horizontal.x_max,
+            "the vertical `。` has to sit clear of the horizontal one: \
+             {horizontal:?} then {vertical:?}"
+        );
+    }
+
+    /// The first character of each line. Sound only because none of the
+    /// fixtures below carries the trailing whitespace `cut_line` drops.
+    fn line_starts(clusters: &[ShapedCluster], lines: &[Line]) -> Vec<char> {
+        let mut at = 0;
+        lines
+            .iter()
+            .map(|line| {
+                let first = clusters[at].first;
+                at += line.clusters.len();
+                first
+            })
+            .collect()
+    }
+
+    /// The last character of each line, same caveat.
+    fn line_ends(clusters: &[ShapedCluster], lines: &[Line]) -> Vec<char> {
+        let mut at = 0;
+        lines
+            .iter()
+            .map(|line| {
+                at += line.clusters.len();
+                clusters[at - 1].first
+            })
+            .collect()
+    }
+
+    /// Break `text` at `wrap_width` pixels with one em measuring 1000 units
+    /// scaled to ten pixels, so a full-width character is exactly ten wide.
+    fn lines_of(text: &str) -> Vec<ShapedCluster> {
+        shape_paragraph(&face(NOTO_JP), text, WritingMode::Horizontal)
+    }
+
+    /// The completion criterion "no line begins with punctuation".
+    ///
+    /// Two fixtures, because two different things are being claimed. The
+    /// Japanese one is the end-to-end property: `unicode-linebreak` already
+    /// refuses to break before `。` (UAX #14 `× CL`), so a paragraph with
+    /// break opportunities to fall back on needs no help. `ABC。DEF` has
+    /// exactly **one** opportunity in it, so a line too narrow for `ABC。`
+    /// leaves the greedy wrap taking its emergency cut wherever the overflow
+    /// landed — and that cut is the one kinsoku corrects. Deleting
+    /// [`kinsoku_cut`] leaves the first fixture passing and the second
+    /// starting a line with `。`.
+    #[test]
+    fn kinsoku_keeps_forbidden_marks_off_the_line_edges() {
+        let text = "あいうえお。かきくけこ";
+        let clusters = lines_of(text);
+        let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 55.0);
+        assert!(lines.len() > 1, "55 px has to wrap eleven characters");
+        let starts = line_starts(&clusters, &lines);
+        assert!(
+            starts.iter().all(|first| !NO_LINE_START.contains(*first)),
+            "a line begins with a forbidden mark: {starts:?}"
+        );
+
+        let text = "ABC。DEF";
+        let clusters = lines_of(text);
+        let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 25.0);
+        assert_eq!(
+            line_starts(&clusters, &lines),
+            vec!['A', 'C', 'D'],
+            "the cut before `。` has to move back a character"
+        );
+        assert_eq!(line_ends(&clusters, &lines), vec!['B', '。', 'F']);
+    }
+
+    /// A line may not end with an opening bracket either, and the correction
+    /// is the same step back.
+    #[test]
+    fn kinsoku_sends_a_dangling_opening_bracket_down_with_its_quote() {
+        let text = "AB「CD";
+        let clusters = lines_of(text);
+        // Wide enough for `AB「` and not for `AB「C`, so the greedy wrap
+        // would leave the bracket at the end of the first line.
+        let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 25.0);
+        assert_eq!(line_starts(&clusters, &lines), vec!['A', '「']);
+        assert_eq!(line_ends(&clusters, &lines), vec!['B', 'D']);
+    }
+
+    /// The push-out has to stop rather than empty a line or loop.
+    ///
+    /// Every fixture is nothing but forbidden characters at a width narrower
+    /// than one of them, so every cut is the emergency cut and every
+    /// correction hits the floor immediately. The rule then goes unmet — that
+    /// is the documented give-up — but no line is empty, no character is lost,
+    /// and the walk terminates, which is what reaching the assertions proves.
+    #[test]
+    fn kinsoku_gives_up_rather_than_emptying_a_line() {
+        for text in ["。。。。", "「「「「", "あ。。。", "「「「あ", "、。、。"]
+        {
+            let clusters = lines_of(text);
+            let lines = wrap_paragraph(&clusters, &break_offsets(text), 0.01, 0.0, 5.0);
+            assert!(
+                lines.iter().all(|line| !line.clusters.is_empty()),
+                "{text:?} produced an empty line"
+            );
+            assert_eq!(
+                lines.iter().map(|line| line.clusters.len()).sum::<usize>(),
+                clusters.len(),
+                "{text:?} lost or duplicated a character"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod layout_tests {
-    use super::tests::{GEIST, NOTO_JP};
+    use super::tests::{GEIST, NOTO_JP, face};
     use super::*;
     use crate::geometry::Domain;
 
@@ -933,6 +1286,19 @@ mod layout_tests {
 
     fn geist(text: &str, params: &LayoutParams) -> Geometry {
         layout_text(&font(GEIST), text, params).expect("a bundled face lays out")
+    }
+
+    /// The Japanese face, which is the one that carries `vhea` / `vmtx` and
+    /// the vertical alternates.
+    fn noto(text: &str, params: &LayoutParams) -> Geometry {
+        layout_text(&font(NOTO_JP), text, params).expect("a bundled face lays out")
+    }
+
+    fn vertical() -> LayoutParams {
+        LayoutParams {
+            writing_mode: WritingMode::Vertical,
+            ..params()
+        }
     }
 
     fn positions(geometry: &Geometry) -> Vec<Vec2> {
@@ -1333,6 +1699,173 @@ cd";
                 "the anchor must not restretch the block: {placed:?}"
             );
         }
+    }
+
+    /// The completion criterion "`advance` runs in Y in vertical mode".
+    ///
+    /// Asserted as the identity that makes it true — each character's `P` is
+    /// the previous one's plus its `advance`, on Y and only on Y — with the
+    /// horizontal layout of the same string as the control, so the test is
+    /// about the mode rather than about the string.
+    #[test]
+    fn a_vertical_advance_steps_the_column_in_y() {
+        let text = "あいう";
+        let geometry = noto(text, &vertical());
+        assert_eq!(geometry.instance_count(), 3);
+        let placed = positions(&geometry);
+        let advances = floats(&geometry, names::ADVANCE);
+        assert!(
+            advances.iter().all(|advance| *advance > 0.0),
+            "a column advances by a positive distance: {advances:?}"
+        );
+        assert!(
+            placed
+                .iter()
+                .all(|point| (point.0 - placed[0].0).abs() < 1e-4),
+            "one column does not move in X: {placed:?}"
+        );
+        for index in 0..placed.len() - 1 {
+            assert!(
+                (placed[index + 1].1 - placed[index].1 - advances[index]).abs() < 1e-3,
+                "character {index} has to sit one advance below its predecessor: \
+                 {placed:?} against {advances:?}"
+            );
+        }
+
+        let flat = positions(&noto(text, &params()));
+        let flat_advances = floats(&noto(text, &params()), names::ADVANCE);
+        assert!(
+            flat.iter().all(|point| (point.1 - flat[0].1).abs() < 1e-4),
+            "the same string laid out horizontally does not move in Y: {flat:?}"
+        );
+        assert!(
+            (flat[1].0 - flat[0].0 - flat_advances[0]).abs() < 1e-3,
+            "and its advance is an X step"
+        );
+    }
+
+    /// `vertical-rl`: the second column sits one leading to the **left** of
+    /// the first, and each column restarts at the same point along its own
+    /// axis.
+    #[test]
+    fn vertical_columns_march_leftwards() {
+        let mut params = vertical();
+        params.leading = 61.0;
+        let placed = positions(&noto("あい\nうえ", &params));
+        assert_eq!(placed.len(), 4);
+        assert!(
+            (placed[2].0 - placed[0].0 + params.leading).abs() < 0.01,
+            "the second column is one leading to the left: {placed:?}"
+        );
+        assert!(
+            (placed[2].1 - placed[0].1).abs() < 1e-4,
+            "both columns start at the same height: {placed:?}"
+        );
+        assert_eq!(
+            ints(&noto("あい\nうえ", &params), names::LINE_INDEX),
+            vec![0, 0, 1, 1],
+            "a column is a line"
+        );
+    }
+
+    /// `align` and `anchor` keep their meanings and swap axes: `align` moves
+    /// the characters along their column, `anchor` moves the block across the
+    /// columns — leftwards, because that is the way the columns go.
+    #[test]
+    fn vertical_align_and_anchor_act_on_the_swapped_axes() {
+        let mut params = vertical();
+        params.leading = 61.0;
+        let text = "あい\nうえ";
+
+        // The centreline of the first column, and the two ends of its pen
+        // travel — which is what `align` moves and `anchor` leaves alone.
+        let column = |align, anchor| {
+            let laid = noto(
+                text,
+                &LayoutParams {
+                    align,
+                    anchor,
+                    ..params
+                },
+            );
+            let placed = positions(&laid);
+            let advances = floats(&laid, names::ADVANCE);
+            (placed[0].0, placed[0].1, placed[1].1 + advances[1])
+        };
+
+        let (x, top, bottom) = column(Align::Left, VerticalAnchor::Baseline);
+        assert!(
+            x.abs() < 1e-4,
+            "the first column's centreline is the origin"
+        );
+        assert!(top.abs() < 1e-4, "and `left` starts it at y = 0");
+        let length = bottom - top;
+        assert!(length > 0.0);
+
+        let (_, top, bottom) = column(Align::Center, VerticalAnchor::Baseline);
+        assert!(
+            (top + bottom).abs() < 0.01,
+            "a centred column straddles y = 0: {top} to {bottom}"
+        );
+        assert!(
+            (bottom - top - length).abs() < 0.01,
+            "centring must not resize"
+        );
+
+        let (_, top, bottom) = column(Align::Right, VerticalAnchor::Baseline);
+        assert!(
+            bottom.abs() < 0.01,
+            "`right` ends the column at y = 0: {bottom}"
+        );
+        assert!((bottom - top - length).abs() < 0.01);
+
+        let (leading_edge, _, _) = column(Align::Left, VerticalAnchor::Top);
+        assert!(
+            leading_edge < 0.0,
+            "anchoring at the block's leading edge puts it left of the origin: \
+             {leading_edge}"
+        );
+        let (trailing_edge, _, _) = column(Align::Left, VerticalAnchor::Bottom);
+        assert!(
+            trailing_edge > params.leading,
+            "anchoring at the trailing edge pushes the first column right of \
+             the origin by the whole block: {trailing_edge}"
+        );
+    }
+
+    /// A face with no `vhea` / `vmtx` — most Latin ones — still lays out a
+    /// column instead of collapsing it or panicking. The fallback the unit
+    /// asks for, checked on the face that actually lacks the tables.
+    #[test]
+    fn a_face_without_vertical_metrics_still_lays_out_a_column() {
+        let bare = face(GEIST);
+        assert!(
+            bare.vertical_ascender().is_none() && bare.tables().vmtx.is_none(),
+            "the fixture is only a fixture while Geist has no vertical metrics"
+        );
+
+        let geometry = geist("Ab", &vertical());
+        assert_eq!(geometry.instance_count(), 2);
+        assert!(geometry.validate().is_ok());
+        let advances = floats(&geometry, names::ADVANCE);
+        assert!(
+            advances.iter().all(|advance| *advance > 0.0),
+            "the fallback advance may not be zero, or every character would \
+             pile up on one spot: {advances:?}"
+        );
+        let placed = positions(&geometry);
+        assert!(
+            (placed[1].1 - placed[0].1 - advances[0]).abs() < 1e-3,
+            "the second character sits one advance below the first: {placed:?}"
+        );
+        assert!((placed[1].0 - placed[0].0).abs() < 1e-4);
+
+        let columns = positions(&geist("A\nb", &vertical()));
+        assert!(
+            columns[1].0 < columns[0].0 - 1.0,
+            "and the second column sits a positive width to the left, not on \
+             top of the first: {columns:?}"
+        );
     }
 
     #[test]

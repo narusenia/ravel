@@ -10,8 +10,9 @@
 //! the next frame is painted with.
 //!
 //! The themes are loaded the way a launch loads them (the shipped
-//! `assets/themes/ravel.json`, through `ThemeRegistry`), so a rename in that
-//! asset fails here rather than silently degrading to the fallback.
+//! `assets/themes/ravel.json`, read through Ravel's schema and derived into
+//! `ThemeConfig`s, then handed to `ThemeRegistry`), so a rename in that asset
+//! fails here rather than silently degrading to the fallback.
 
 use std::path::{Path, PathBuf};
 
@@ -41,9 +42,15 @@ const EXTRA_THEMES: &str = r##"{
   ]
 }"##;
 
+/// The shipped theme file, derived the way [`load_ravel_themes`] derives it.
+///
+/// [`load_ravel_themes`]: ../src/main.rs
 fn themes_json() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/ravel.json");
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    ravel_app::theme_tokens::derive_theme_set_json(&content)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
 /// Bring up the appearance path as a launch does: themes in the registry, then

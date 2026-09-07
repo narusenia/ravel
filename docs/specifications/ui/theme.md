@@ -1,23 +1,27 @@
 # テーマ 仕様
 
-> 最終更新: 2026-07-30 ／ 索引: [`../ui-spec.md`](../ui-spec.md)
+> 最終更新: 2026-09-07 ／ 索引: [`../ui-spec.md`](../ui-spec.md)
 
 関連要件: REQ-UI-006。
 
 > **旧仕様との違い**: v1 が書いていた TOML スキーマ
 > （`[colors] background/surface/primary`、`[colors.node_types]`、
-> `[colors.scopes]`、`color_vision`）は**実装されていない**。実装は
-> gpui-component のテーマ JSON スキーマに乗っている。
+> `[colors.scopes]`、`color_vision`）は**実装されていない**。
 
 ## 形式
 
-`assets/themes/*.json`。gpui-component の
-[`.theme-schema.json`](https://github.com/longbridge/gpui-component) に従う。
-1 ファイルに複数テーマを含められる。
+`assets/themes/*.json`。**スキーマは Ravel が持つ**
+（`crates/ravel-widgets/src/tokens.rs`）。1 ファイルに複数テーマを含められる。
+
+ファイルの並びと色キーの名前は gpui-component の `.theme-schema.json` から
+そのまま受け継いでいる（既存のテーマファイルを書き換えずに移れるように）が、
+**正はもう向こうではない**。Ravel のスキーマが正で、借りている部品
+（`Input`、window の `Root`、裾の 8 部品）が読む
+`gpui_component::ThemeConfig` は `ravel_app::theme_tokens` が
+Ravel のテーマから**導出**する。逆方向の変換は無い。
 
 ```json
 {
-  "$schema": "https://github.com/longbridge/gpui-component/raw/refs/heads/main/.theme-schema.json",
   "name": "Ravel",
   "author": "Ravel Contributors",
   "url": "https://github.com/NaruseNia/ravel",
@@ -49,10 +53,24 @@
 
 - 同梱は `assets/themes/ravel.json` の 1 ファイル、**Ravel Light / Ravel Dark の
   2 モード**
-- 色キーはドット区切りのフラットな名前（現在 36 キー）。役割名（`accent` /
+- 色キーはドット区切りのフラットな名前（現在 39 キー）。役割名（`accent` /
   `muted` / `list` / `popover` / `primary` / `secondary` / `scrollbar` / `tab` /
   `danger` / `ring` など）で構成され、**用途名ではなく意味名**
-- 半透明は 8 桁の hex で表す（例 `#5B6EE115`）
+- **Ravel のスキーマが持つのは色 10 種**（`background` / `foreground` /
+  `border` / `muted.foreground` / `accent.background` / `primary.background` /
+  `secondary.background` / `danger.background` / `info.background` /
+  `drop_target.background`）と `font.*` / `mono_font.*` / `radius` /
+  `radius.lg`、加えて Ravel だけが持つ `spacing` / `row` / `motion`。
+  残りの 26 色と `highlight` は**スキーマに入っていない**が、ファイルからは
+  素通しで `ThemeConfig` に渡る（借りている部品だけが読むため）
+- **書かなかったキーは Ravel の組み込み値に落ちる**（`tokens.rs` の
+  `Colors::light()` / `Colors::dark()` と各 `Default`）。落ちるのは
+  **キー単位**で、1 つの誤記が他の色やテーマを壊すことはない。
+  ただし JSON そのものが壊れている場合は**ファイル単位で捨てる**
+- Ravel 側のトークン（`spacing` / `row` / `motion`）は既定値のままなので
+  同梱ファイルには書かれていない。値は `tokens.rs` にある
+- 半透明は 8 桁の hex で表す（例 `#5B6EE115`）。**アルファは末尾の 2 桁**
+  （`#RRGGBBAA`）。`#RGB` / `#RGBA` の短縮形も各桁を 2 回にして読む
 - `font.family` / `mono_font.family` は**同梱フォント**を指す。実体は
   `assets/fonts/` に置き、`crates/ravel-app/src/fonts.rs` が起動時に
   `add_fonts` で登録する（テーマ適用より前）。日本語は Noto Sans JP に
@@ -73,6 +91,11 @@
   以降は `ThemeRegistry::watch_dir` が変更ごとに再読込）。再読込後の再適用は
   設定側が `ThemeRegistry` を観測して行うので、後から置かれたテーマも
   設定が名指ししていれば適用される
+- **再読込は Ravel のスキーマを通らない。** `ThemeRegistry::watch_dir` は
+  ディレクトリを gpui-component 自身のパーサで読み直すので、最初のファイル
+  変更以降、レジストリが持つのは導出後ではなく gpui-component が読んだ形に
+  なる。同梱の `ravel.json` は Ravel が持つ色を全部書いているので両者は
+  一致するが、キーを省いた手書きテーマだけは編集の前後で値が変わる
 
 ## 未実装項目
 
@@ -82,3 +105,5 @@
 | ノード型ごとの色をテーマで指定する（v1 の `[colors.node_types]`） | 未計画。現在は `DataTypeId` ごとの色をコード側が持つ |
 | スコープの色（v1 の `[colors.scopes]`） | スコープ自体が未実装（`MON-1〜7`、`viewer-scopes-plan.md`） |
 | UI スケーリング（`font.size` をユーザーが変える） | `SET-14`。パネルが px 直書きでどれだけ無視するかの調査が前提 |
+| ユーザーのテーマディレクトリ（同梱と別に置く、ユーザー側が勝つ） | `UIX-8`（`ui-component-layer-plan.md`）。スキーマの文書化と 2 ディレクトリ監視、上の再読込の穴もここで閉じる |
+| `spacing` / `row` / `motion` をパネルが読む | `UIX-3` / `UIX-5`。値は定義済みだが配線はまだ無い |

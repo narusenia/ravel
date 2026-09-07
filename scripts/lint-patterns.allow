@@ -200,3 +200,14 @@ observe-global crates/ravel-app/src/app_settings.rs ThemeRegistry
 framebuffer-direct-index crates/ravel-media/src/decoder.rs data-index
 framebuffer-direct-index crates/ravel-media/tests/audio_sample_format.rs data-index
 framebuffer-direct-index crates/ravel-media/tests/integration_ffmpeg.rs data-index
+
+# Theme hex strings, not a display of the composite. `hex_color_string` is the
+# inverse of `parse_hex_color`: both sides move between a theme *file's* own
+# 8-bit-per-channel sRGB text and the `Hsla` the toolkit paints with, so the
+# 255 here is the hex encoding's own radix and nothing to do with `CM-1`'s
+# linear-light exits. `to_display_rgba8` would be the wrong conversion — it
+# encodes a linear composite into the display space first, which would shift
+# every colour in `assets/themes/ravel.json`. It rounds rather than truncates
+# so the pair round-trips exactly; `hex_round_trips_through_the_formatter`
+# fails if it stops doing so.
+raw-pixel-quantisation crates/ravel-widgets/src/tokens.rs quantise

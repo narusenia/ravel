@@ -215,6 +215,17 @@ async fn bootstrap(
 /// runs once, at setup, and says nothing about the reloads that follow every
 /// later file change. The appearance follows the registry itself
 /// (`app_settings::install` observes it), which covers both.
+///
+/// **The asynchronous reload does not go through Ravel's schema.**
+/// `ThemeRegistry::watch_dir` re-reads the directory with gpui-component's own
+/// parser, so after the first file change the registry holds the file as
+/// gpui-component reads it rather than as
+/// [`theme_tokens::derive_theme_set_json`](ravel_app::theme_tokens::derive_theme_set_json)
+/// derives it. For the shipped `ravel.json` the two agree — every colour Ravel
+/// models is written in the file — so this only shows up in a hand-written theme
+/// that omits one: it would wear Ravel's built-in until the first edit and
+/// gpui-component's stock colour after. Closing it means owning the watch
+/// instead of borrowing it, which is the user-theme-directory unit's job.
 fn load_ravel_themes(cx: &mut App) {
     let themes_dir = themes_dir();
     if !themes_dir.exists() {
@@ -225,17 +236,26 @@ fn load_ravel_themes(cx: &mut App) {
     }
 
     for path in theme_files(&themes_dir) {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!("failed to read theme file {}: {e}", path.display());
+                continue;
+            }
+        };
+        // A theme file is written in Ravel's schema, so the registry gets the
+        // *derived* gpui-component themes rather than the file itself
+        // (`theme_tokens`). One malformed theme file must not cost the others,
+        // which is also how the registry's own reload treats them.
+        match ravel_app::theme_tokens::derive_theme_set_json(&content) {
+            Ok(derived) => {
                 if let Err(e) =
-                    gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&content)
+                    gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&derived)
                 {
-                    // One malformed theme file must not cost the others, which
-                    // is also how the registry's own reload treats them.
                     tracing::error!("ignored invalid theme file {}: {e}", path.display());
                 }
             }
-            Err(e) => tracing::warn!("failed to read theme file {}: {e}", path.display()),
+            Err(e) => tracing::error!("ignored invalid theme file {}: {e}", path.display()),
         }
     }
 

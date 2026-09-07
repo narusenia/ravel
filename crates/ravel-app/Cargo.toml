@@ -30,9 +30,11 @@ ravel-media = { workspace = true }
 ravel-nodes = { workspace = true }
 ravel-project = { workspace = true }
 ravel-ui = { workspace = true }
+ravel-widgets = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
+serde_json = { workspace = true }
 dirs = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }

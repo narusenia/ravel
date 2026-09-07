@@ -2596,6 +2596,35 @@ Unknown type keys are skipped silently (plugin space).
   `WorkspaceLayout`, dummy panes, theme toggle. Run with
   `cargo run -p ravel-dock --example gallery`.
 
+## ravel-widgets — design tokens
+
+- `tokens` (tokens.rs): the single source for colours, spacing, row heights,
+  typography, motion and radii. Two forms — the **wire form** a user writes as
+  JSON (`ThemeFile` → `ThemeSpec` → `ColorSpec` / `SpacingSpec` / `RowSpec` /
+  `MotionSpec`, every field optional) and the **resolved form** the widgets read
+  (`RavelTheme` → `Colors` / `Spacing` / `Rows` / `Typography` / `Motion` /
+  `Radii`, no `Option`). `ThemeSpec::resolve()` bridges them, filling each gap
+  from `Colors::for_mode` and the `Default` impls.
+- `Colors`: the ten colours Ravel's own panels read — `background`,
+  `foreground`, `border`, `muted_foreground`, `accent`, `primary`, `secondary`,
+  `danger`, `info`, `drop_target`. `Colors::light()` / `Colors::dark()` are
+  Ravel's built-in palettes and are what a theme file's gaps fall back to, per
+  key.
+- `Rows`: two heights by purpose (`compact` 20px for a row showing one value,
+  `default` 24px for a list row) plus `header` 24px. `Spacing`: `xs` / `sm` /
+  `md` / `lg` on a 4px step. `Motion`: `feedback_in` 120ms / `feedback_out`
+  180ms, state feedback only.
+- `parse_hex_color` / `hex_color_string`: `#RGB`, `#RGBA`, `#RRGGBB`,
+  `#RRGGBBAA` ⇄ `Hsla`. **Alpha is last and two digits.** The formatter rounds
+  rather than truncates, so the pair round-trips exactly.
+- Broken values are handled **per key, not per file**: an unreadable colour
+  string falls back to the built-in for that key, while malformed JSON (or a
+  colour that is not a string) fails the file — which is what the loader wants,
+  since it logs and skips a file it cannot read without harming the others.
+- **Depends on `gpui` and `serde` only.** `ravel_app::theme_tokens` derives
+  `gpui_component::ThemeConfig` from `RavelTheme` for the borrowed components;
+  there is no conversion the other way.
+
 ## ravel-project — the settings rules every front end shares
 
 `crates/ravel-project`, GUI-free. The `.ravprj` container itself is described

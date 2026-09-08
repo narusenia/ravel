@@ -39,8 +39,10 @@
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
-| KIT-1 | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6）。`KIT-0b` でゲートが GO になった | `gpui-kit-migration-plan.md` |
 | UIX-1 | **`ravel-widgets` クレートの作成**（`gpui` + `serde`）と Ravel 独自テーマスキーマの定義。`ThemeConfig` の導出は `ravel-app` 側。まだ配線しない | `ui-component-layer-plan.md` |
+| KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
+| KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
+| KIT-6 | 借りられる primitive の採否（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | `gpui-kit-migration-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
@@ -713,11 +715,12 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 |---|---|---|---|
 | KIT-0 | ✅ | **ゲート**: 上流 API の前送りと残差の測定（Ravel は触らない）。`gpui-component` の残差 38 個のうち **B（構造的な差）が 0** | — |
 | KIT-0b | ✅ | `simulate_next_frame` と `ArenaClearNeeded::clear(cx)` を前送りして `gpui-base` のテストを 761/764 pass に（残り 3 本は上流のバグ） | KIT-0 |
-| KIT-1 | ⬜ | Ravel の土台差し替え（`gpui` / `gpui_platform` / `gpui-component` 0.6、44 ファイルの API 追随）。**1 コミット** | KIT-0b ✅ |
-| KIT-2 | ⬜ | gpui-component フォークの棚卸しと上流 PR | KIT-1 |
-| KIT-3 | ⬜ | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | KIT-1 |
-| KIT-4 | ⬜ | `ravel-dock` と `gpui-base` の `dock` の比較（判断の単位） | KIT-1 |
-| KIT-5 | ⬜ | 文書更新（`architecture.md` のフォーク方針、`gpui-ui-guide.md`） | KIT-1 |
+| KIT-1 | ✅ | Ravel の土台差し替え（PR #525。palette 追随 78 箇所、`.flex_grow_1()` 37 箇所。`Table` → `DataTable` は既に済んでいた） | KIT-0b ✅ |
+| KIT-2 | 🟡 | gpui-component フォークの棚卸し（**上流 PR は範囲外** — 2026-09-08 の決定） | KIT-1 ✅ |
+| KIT-3 | 🟡 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す（`UIX-4` が実質これ） | KIT-1 ✅ |
+| KIT-4 | 🟡 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較（判断の単位） | KIT-1 ✅ |
+| KIT-6 | ⬜ | 借りられる primitive の採否を 1 つずつ決める（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | KIT-1 ✅ |
+| KIT-5 | ⬜ | 文書更新（`architecture.md` のフォーク方針、`gpui-ui-guide.md`） | KIT-1 ✅ |
 
 **`KIT-0` / `KIT-0b` は済み。判断は GO**（2026-09-07）。上流 API を
 `gpui-ce-ravel` へ前送りしたうえで測ると、`gpui-component` の残差は **38 個で
@@ -741,6 +744,7 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | UIX-2 | ⬜ | `ravel-widgets` に `gpui-base` を足し、既存 6189 行を移設 + `examples/gallery` | KIT-1 / UIX-1 |
 | UIX-3 | ⬜ | トークンの配線、ハードコード 24 箇所の除去、`lint-patterns.sh` にリテラル禁止 | UIX-1 / UIX-2 |
 | UIX-4 | ⬜ | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で（4 状態 + Tab 順 + Enter / Space） | UIX-2 |
+| UIX-4b | ⬜ | **`Input`** を `gpui-base` に載せ替え、`scrub_input.rs` を移設（`number_input` と比較） | UIX-4 |
 | UIX-5 | ⬜ | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | UIX-3 |
 | UIX-6 | ⬜ | 不変条件 1〜4 の違反を潰す（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | UIX-0 |
 | UIX-7 | ⬜ | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 |

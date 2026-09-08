@@ -57,10 +57,17 @@ Ravel の UI は「動く」ところまで来ている（`docs/ui-impl-status.m
 - **個別バグの詳述。** `issues/` にある記述が正。この計画は
   「どの不変条件に対応するか」と「潰す順序」だけを持つ
 - **裾の 8 部品**（`TitleBar` / `TabBar` / `Slider` / `Radio` / `Progress` /
-  `Popover` / `DataTable` / `Accordion`。各 1 箇所）。gpui-kit のまま使う
-- **`Input` の再実装。** IME・テキスト選択・undo を自前で持つ費用が
-  見合わない。上流 gpui の `view_example/example_input.rs` に実装例が
-  入ったので不可能ではないが、この計画では借りる
+  `Popover` / `DataTable` / `Accordion`。各 1 箇所）。gpui-kit のまま使う。
+  **ただし `TitleBar` 以外は全部 `gpui-base` にある**
+  （`gpui-kit-migration-plan.md` の「`gpui-base` の棚卸し」）。
+  借り続けるのは**費用の判断**で、不可能だからではない
+- **`Input` を借りるという判断は 2026-09-08 に撤回した。**
+  「IME・テキスト選択・undo を自前で持つ費用が見合わない」を根拠に
+  していたが、**根拠が事実と違った** —
+  `gpui_component::Input`（1077 行）は **`gpui_base::InputBase` のラッパ**で
+  （`use gpui_base::InputBase as BaseInput;`）、IME・選択・undo・masking は
+  全部 `gpui-base` 側にある。component 側はスタイルを着せているだけで、
+  `Button` / `Tooltip` と同じ作業だった。→ **`UIX-4b`** を切った
 - **スクリーンリーダーでの読み上げ検証。** `accessibility_id` を付ける
   ところまで。VoiceOver の通し操作は完了条件にしない
 
@@ -174,7 +181,7 @@ crates/ravel-widgets/          ← 新規
 | `Icon` | 58 | **自前**（`gpui-base` の primitive から。SVG の解決とサイズ量子化は既に `node_editor/painting.rs` が持っている知見を使う） |
 | `Button` | 51 | **自前**（質感が最も宿る。ホバー・フォーカス・押下・無効の 4 状態と、Tab 順・Enter / Space 起動を自分で持つ） |
 | `Tooltip` | 21 | **自前**（登場の遅延と位置決めが UX そのもの） |
-| `Input` | 20 | **借りる**（IME・テキスト選択・undo。gpui-kit のまま） |
+| `Input` | 20 | **`UIX-4b` で `gpui-base` に載せ替える**（`InputBase` が挙動を持っているので、着せるだけ。2026-09-08 に「借りる」から変更） |
 | 裾 8 部品 | 各 1 | **触らない** |
 
 ## UX の不変条件
@@ -208,6 +215,7 @@ crates/ravel-widgets/          ← 新規
 | `UIX-2` | `ravel-widgets` に `gpui-base` を足し、既存 6189 行を移設。`examples/gallery` を作る | `KIT-1` / `UIX-1` |
 | `UIX-3` | `tokens.rs` を配線し、ハードコード 24 箇所を潰す。`lint-patterns.sh` にリテラル禁止を追加 | `UIX-1` / `UIX-2` |
 | `UIX-4` | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で作る。4 状態 + Tab 順 + Enter / Space | `UIX-2` |
+| `UIX-4b` | **`Input`** を `gpui-base` に載せ替え、`scrub_input.rs` を `ravel-widgets` へ移す。`gpui_base::number_input` と比べてどちらを使うか決める | `UIX-4` |
 | `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | `UIX-3` |
 | `UIX-6` | **不変条件 1〜4 の違反を潰す**（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | `UIX-0` |
 | `UIX-7` | **不変条件 5〜9 の違反を潰す**（狭い幅、死んだ操作、値の意味、設定の適用、派生キャッシュ） | `UIX-0` |

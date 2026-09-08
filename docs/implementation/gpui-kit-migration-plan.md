@@ -357,6 +357,77 @@ GPUI の型の世界は動かないので、共存の問題そのものが起き
 **移行と同時に判断しない** — 2 つの大きな変更を 1 つにすると、
 どちらが壊したのか分からなくなる。`KIT-4` で独立に測る。
 
+## `gpui-base` の棚卸し（2026-09-08、`KIT-1` 後）
+
+`KIT-1` で `gpui-base` がツリーに入ったので中身を数えた。**この節が
+この先の単位の材料である。**
+
+### Ravel が gpui-component から借りているものは、ほぼ全部 base にある
+
+| 借りているもの（箇所） | `gpui-base` の対応 | base の行数 |
+|---|---|---|
+| `Input`（20） | **`input`**（`InputBase` / IME / 選択 / masking / LSP） | 14305 |
+| `dialog`（6） | `dialog` + `alert_dialog` | 675 + 314 |
+| `Notification`（5） | `toast` | 1003 |
+| `ActiveTheme`（5） | `theme` + `theme_tokens` | 132 + 303 |
+| `Select`（4） | `select` | 395 |
+| `Checkbox`（4） | `checkbox` | 704 |
+| `IndexPath`（8） | `index_path` | 102 |
+| `TabBar` / `Slider` / `Radio` / `Popover` / `DataTable` / `Accordion` / `Progress`（各 1） | `tabs` / `slider` / `radio_group` / `popover` / `table` / `accordion` / `progress` | 424 / 834 / 67 / 473 / 398 / 491 / 182 |
+
+**`gpui-base` に無いのは 5 つだけ**: `Root`、`menu`、`setting`、
+`TitleBar`、`icon`。
+
+つまり **`gpui-component` への依存をゼロにする道が見えた。**
+`ui-component-layer-plan.md` は「裾の 8 部品は借り続ける」を前提に
+書いてあるが、**その前提は費用の話であって不可能ではない**。
+
+### `Input` を借りる判断は誤りだった
+
+`ui-component-layer-plan.md` は「`Input` の再実装は IME・テキスト選択・
+undo を自前で持つ費用が見合わない」を根拠に借りると決めていた。
+**根拠が事実と違う。**
+
+**`gpui_component::Input`（1077 行）は `gpui_base::InputBase` のラッパである**
+（`use gpui_base::InputBase as BaseInput;`）。IME・選択・undo・masking は
+全部 `gpui-base` 側にあり、component 側はスタイルを着せているだけ。
+`Button` / `Tooltip` と同じ「無スタイル層に着せる」作業である。
+
+→ **`UIX-4b`** を切る（下記）。
+
+### 既存の負債に直接効く primitive
+
+**部品の置き換えより、こちらのほうが効く可能性がある。**
+どれも「採るかどうか」は個別の判断が要るので、**候補として記録する**。
+
+| primitive | base の行数 | Ravel の該当 | 効く issue / 不変条件 |
+|---|---|---|---|
+| **`number_input`** | 489 | `scrub_input.rs` 558 行 | 「**unstyled spinbutton root composed from `InputBase`**」。数値スクラブがまさにこれ。`UIX-4b` で比べる |
+| **`tree`** | 643 | `panels/outliner.rs` **2345 行** | `TreeItem` / `TreeEntry` / `TreeState` を持つ。Outliner はツリーで、今は自前 |
+| **`virtual_list`** | 879 | Timeline / Viewer の毎フレーム再計算 | 「可視範囲だけ描く」。**`LOW-UI-02` / `LOW-UI-03`** の受け皿 |
+| **`undo_history`** | 329 | `ravel-core` の `UndoStack`（5 ファイルが使用） | 「grouped undo transactions」。**不変条件 3（1 操作 1 undo）** |
+| **`focus_trap`** | 228 | 自前なし | 「`focus_trap` を足す拡張 trait」。**不変条件 10**（ダイアログのキーボード完結） |
+| **`macos_accessibility`** | 78 | 自前なし | 不変条件 10 のスクリーンリーダー側（今は範囲外だが土台がある） |
+| **`combobox`** | 246 | ノード検索パレット | 「unstyled controlled combobox root」 |
+| **`color_picker`** | 994 | Properties の色パラメータ | — |
+| **`text_selection`** / `selectable_text` / `measure` | 3554 / 319 / 48 | テキスト選択と計測 | — |
+| **`dock`** | **13251** | **`ravel-dock` 2191 行** | **`KIT-4` の対象**。規模が 6 倍違う |
+| **`resizable`** | — | `ravel-dock` の splitter | 同じく `KIT-4` |
+| **`motion`** / `animation` | 1531 / 399 | `tokens.rs` の `Motion` | 不変条件 11 |
+
+**注意**: 行数の多さは機能の多さで、Ravel に合うかとは別。
+`dock` が 13251 行あるのは N 窓ツリー・タイル・永続化を持つからで、
+**`ravel-dock` の 2191 行が足りないという意味ではない**（`KIT-4` が測る）。
+
+### この棚卸しから出た単位
+
+- **`UIX-4b`**（`ui-component-layer-plan.md`）: `Input` を `gpui-base` に
+  載せ替え、`scrub_input.rs` を `ravel-widgets` へ移す。
+  **`number_input` と比べてどちらを使うかを決める**
+- **`KIT-6`**（下記）: 借りられる primitive の採否を 1 つずつ決める単位。
+  **一括で採らない** — `tree` を採れば Outliner の 2345 行を書き直す
+  ことになり、`undo_history` を採れば不変条件 3 の実装が変わる
+
 ## 実装単位
 
 ### KIT-0: 不足 2 機能の移植と `gpui-component` の残差の測定（Ravel を触らない）
@@ -419,13 +490,23 @@ GPUI の型の世界は動かないので、共存の問題そのものが起き
 
 ### KIT-2: gpui-component フォークの棚卸し
 
-- 残る 2 パッチ（メニュー再フォーカス + キーコンテキスト export、
-  ヘッドレステストのガード）を上流 0.6 に対して作り直す
-- **上流に PR を出す。** マージされればフォークが消える
+- フォークが持っているパッチを棚卸しし、**上流に出す価値のあるものを
+  記録する**
+- **上流 PR は出さない**（2026-09-08 の決定）。記録だけ
+
+`KIT-1` の時点で溜まっているもの:
+
+| 内容 | フォーク側の状態 |
+|---|---|
+| **`gpui-kit` 0.6.0 の `motion` バグ** — `Duration::mul_f32` の f32 往復で `Duration::from_millis(100)` が `100.000001ms` になり最終フレームが `Finished` にならない（テスト 3 本が落ちる。**上流構成でも落ちる**） | 未修正。直しは「係数が 1.0 のとき `mul_f32` を通さない」の 1 行 |
+| **`to_hex` が切り捨てだった** — `Rgba → Hsla → Rgba` の往復で 1 LSB 下がり、パレット JSON の `#22c55e` が `#21C55E` になっていた。**テストがその値を固定していた** | 丸めに修正済み（`5789c1c8`） |
+| **メニューの key context の export** — 0.6 の rebase で落ちていた。無いと host が文字列を複製することになり、ドリフトが静かに `MED-APP-16` を再発させる | `pub const POPUP_MENU_CONTEXT` / `APP_MENU_BAR_CONTEXT` を出した（`7eafdc2a`） |
+| **`Arena::allocate` の境界検査** — `ptr::add` で past-the-end を作る UB | `gpui-ce-ravel` の `56d92d82b4` で修正済み。上流 gpui-ce に同じ穴があるかは未確認 |
 
 **完了条件**
 
-- フォークのパッチが 2 以下で、それぞれに上流 PR かその理由がある
+- フォークのパッチが列挙され、それぞれに「上流に出す価値があるか」の
+  判断が付いている
 
 ### KIT-3: 最初の Ravel コンポーネントを gpui-base で作る
 
@@ -447,12 +528,40 @@ GPUI の型の世界は動かないので、共存の問題そのものが起き
 
 - `gpui-base` の `dock` が `ravel-dock` の要求（分割 / タブ / D&D /
   N 窓ツリー / `PaneContent`）を満たすかを**測る**
+- **規模は `gpui-base` の `dock` が 13251 行、`ravel-dock` が 2191 行**
+  （2026-09-08 実測）。base 側は `dock_area` / `tab_group` / `tiles_*` /
+  `state_convert` / `registry` / `drag` を持ち、`resizable` が隣にある。
+  **6 倍あるのは機能の差で、`ravel-dock` が足りないという意味ではない**
 - 満たすなら移行計画を別に切る。満たさないなら `ravel-dock` を残す理由を
   `free-pane-docking-plan.md` に追記する
 
 **完了条件**
 
 - どちらにするかの判断と根拠がある（コードは書かない単位でもよい）
+
+### KIT-6: 借りられる primitive の採否（1 つ 1 判断）
+
+**棚卸しの節で候補に挙げた primitive を、1 つずつ採否を決める。**
+一括で採らない — どれも Ravel 側の既存実装を置き換える判断だからである。
+
+優先順（Ravel の負債への効き方で）:
+
+1. **`focus_trap`**（228 行、自前なし）— **不変条件 10** の
+   ダイアログ側。既存実装を壊さないので一番安い
+2. **`virtual_list`**（879 行）— **`LOW-UI-02` / `LOW-UI-03`**。
+   Timeline / Viewer の毎フレーム再計算の受け皿
+3. **`undo_history`**（329 行）— **不変条件 3**。ただし `ravel-core` の
+   `UndoStack` は 5 ファイルが使っていて、Document スナップショット undo の
+   原子性（`.agents/rules/rust.md`）に関わるので**慎重に**
+4. **`tree`**（643 行）— Outliner の **2345 行**を書き直すことになる。
+   効果は大きいが risk も大きい
+5. **`combobox`** / **`color_picker`** / **`macos_accessibility`** —
+   要るときに
+
+**完了条件**
+
+- 各候補に「採る / 採らない」と根拠がある（採るものは別単位を切る）
+- **採らないものにも理由が書かれている**（あとから何度も再検討しないため）
 
 ### KIT-5: 文書更新
 

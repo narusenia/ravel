@@ -16,6 +16,7 @@ pub mod geometry;
 pub mod guides;
 pub mod motion_path;
 pub mod overlay;
+mod overlay_colors;
 pub mod snap;
 mod viewport;
 
@@ -3681,7 +3682,7 @@ fn overlay_label_element(
 /// Overlay line color: light gray that stays readable over both the black
 /// frame and bright content.
 fn overlay_line_color() -> Hsla {
-    hsla(0.0, 0.0, 1.0, 0.3)
+    overlay_colors::SAFE_AREA_LINE_COLOR
 }
 
 const CHECKER_CELL_PX: f32 = 12.0;
@@ -3735,7 +3736,7 @@ fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<P
         clip_x + clip_width - frame_x,
         clip_y + clip_height - frame_y,
     );
-    let colors = [rgb(0x4a4a4a), rgb(0x707070)];
+    let colors = overlay_colors::CHECKER_CELLS;
     for (x, y, width, height, light) in checkerboard_tiles(width, height, visible) {
         window.paint_quad(fill(
             Bounds {

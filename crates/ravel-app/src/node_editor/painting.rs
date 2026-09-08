@@ -5,6 +5,8 @@ use gpui::*;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
 use ravel_widgets::tokens::Colors;
+
+use super::load_colors;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -400,8 +402,8 @@ impl TimingLevel {
 
     fn color(self, colors: &Colors) -> Hsla {
         match self {
-            Self::Critical => hsla(0.0, 0.85, 0.60, 1.0),
-            Self::Warn => hsla(0.13, 0.90, 0.60, 1.0),
+            Self::Critical => load_colors::CRITICAL_COLOR,
+            Self::Warn => load_colors::WARN_COLOR,
             Self::Normal => colors.muted_foreground,
         }
     }

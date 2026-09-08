@@ -21,7 +21,7 @@
 //!   point is mapped back through the inverse of the layer's compositing
 //!   transform before sampling, so the picture follows the layer.
 
-use gpui::{Hsla, hsla};
+use gpui::Hsla;
 use ravel_core::composition::transform::Affine;
 use ravel_core::eval::EvalContext;
 use ravel_core::geometry::{AttributeArray, AttributeType, FieldSample, FieldValue};
@@ -33,6 +33,7 @@ use super::CompRect;
 use super::overlay::{
     EvalTarget, OverlayContext, OverlayId, OverlayPainter, ViewerOverlay, priority,
 };
+use super::overlay_colors::{field_grayscale, field_heat};
 
 /// Hard ceiling on grid points sampled per frame, whatever the zoom.
 pub const MAX_FIELD_SAMPLES: usize = 4096;
@@ -109,9 +110,8 @@ impl FieldColorMap {
     pub fn color(self, value: f32, alpha: f32) -> Hsla {
         let value = value.clamp(0.0, 1.0);
         match self {
-            // 0.66 (blue) down to 0.0 (red).
-            Self::Heat => hsla((1.0 - value) * 0.66, 0.85, 0.5, alpha),
-            Self::Grayscale => hsla(0.0, 0.0, value, alpha),
+            Self::Heat => field_heat(value, alpha),
+            Self::Grayscale => field_grayscale(value, alpha),
         }
     }
 }

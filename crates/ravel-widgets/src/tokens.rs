@@ -298,6 +298,11 @@ pub const PRESS_MIX: f32 = 0.08;
 pub const DISABLED_ALPHA: f32 = 0.38;
 /// How far a floating surface moves toward black.
 pub const RAISED_MIX: f32 = 0.03;
+/// The alpha the selected row's tint keeps.
+///
+/// The shipped `list.active.background` was `#5B6EE115`, whose alpha is
+/// `0x15 / 255` = 8.24%; 8% is that value, named.
+pub const SELECTED_ALPHA: f32 = 0.08;
 
 /// Mix `amount` of `toward` into `base`, in sRGB, keeping `base`'s alpha.
 ///
@@ -384,6 +389,30 @@ impl Colors {
         let mut surface = mix(self.background, gpui::black(), RAISED_MIX);
         surface.alpha = 1.0;
         surface
+    }
+
+    /// The surface of a selected row.
+    ///
+    /// A tint of `primary` rather than a step off the background, because a
+    /// selection has to stay readable next to a *hover* on the row beside it —
+    /// and [`hover_surface`] is that step off the background. The two are
+    /// deliberately different vocabularies: hover says "the pointer is here",
+    /// selection says "this is the one you picked".
+    ///
+    /// [`hover_surface`]: Colors::hover_surface
+    pub fn selected_surface(&self) -> Hsla {
+        self.primary.opacity(SELECTED_ALPHA)
+    }
+
+    /// The tab strip, and the inactive tabs sitting in it.
+    ///
+    /// One step off the background, so the *active* tab — which is painted
+    /// [`Colors::background`], the same ground as the panel below it — reads as
+    /// joined to its content while the strip reads as behind it. That is what
+    /// makes a deeply nested dock legible: the shape says which pane a tab
+    /// belongs to, so nothing has to be inferred from position.
+    pub fn tab_bar(&self) -> Hsla {
+        self.accent
     }
 
     /// `base`, moved `amount` of the way toward [`Colors::foreground`].
@@ -1024,6 +1053,40 @@ mod tests {
             "#5B6EE1",
             "the ring is the shipped primary"
         );
+    }
+
+    #[test]
+    fn the_selected_row_is_a_primary_tint_and_not_the_hover_step() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let selected = colors.selected_surface();
+            assert_eq!(selected.alpha, SELECTED_ALPHA);
+            // Same colour as the ring, only faint: a selection that drifted to
+            // `accent` would be the hover surface, and hover and selection have
+            // to stay two vocabularies.
+            assert_eq!(
+                Hsla {
+                    alpha: 1.0,
+                    ..selected
+                },
+                colors.primary
+            );
+            assert_ne!(selected, colors.hover_surface());
+        }
+        // The value the shipped `list.active.background` (`#5B6EE115`) carried.
+        assert_eq!(
+            hex_color_string(Colors::light().selected_surface()),
+            "#5B6EE114"
+        );
+    }
+
+    #[test]
+    fn the_tab_strip_sits_one_step_behind_the_active_tab() {
+        for colors in [Colors::light(), Colors::dark()] {
+            assert_eq!(colors.tab_bar(), colors.accent);
+            // The active tab is painted `background`. A strip on the same
+            // colour would make every tab look active.
+            assert_ne!(colors.tab_bar(), colors.background);
+        }
     }
 
     #[test]

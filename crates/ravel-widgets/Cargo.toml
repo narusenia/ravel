@@ -16,6 +16,9 @@ serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# `#[gpui::test]` for the widgets whose behaviour is focus, keyboard input or
+# the frame clock. Tests only: nothing in `src/` needs it.
+gpui = { workspace = true, features = ["test-support"] }
 # `examples/gallery` only.
 gpui_platform = { workspace = true }
 gpui-kit-assets = { workspace = true }

@@ -20,6 +20,7 @@
 
 pub mod curve_editor;
 pub mod curve_view;
+pub mod theme;
 pub mod tokens;
 
 pub use curve_editor::{
@@ -34,7 +35,9 @@ pub use curve_view::{
     value_grid_values,
 };
 
+pub use theme::{ActiveTokens, set_active_tokens};
+
 pub use tokens::{
-    Colors, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode, ThemeSpec, Typography,
-    hex_color_string, parse_hex_color,
+    Colors, Density, Metrics, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode,
+    ThemeSpec, Typography, hex_color_string, mix, parse_hex_color,
 };

@@ -19,8 +19,11 @@
 //! would repaint every borrowed component, and modelling them would grow
 //! Ravel's schema by twenty-six colours nothing asks for.
 
+use std::collections::HashMap;
+
+use gpui::{App, Global};
 use gpui_component::{ThemeConfig, ThemeMode, ThemeSet};
-use ravel_widgets::tokens::{RavelTheme, ThemeFile, hex_color_string};
+use ravel_widgets::tokens::{self, RavelTheme, ThemeFile, hex_color_string};
 
 /// Derive gpui-component's theme from a Ravel one.
 ///
@@ -91,4 +94,110 @@ pub fn derive_theme_set_json(content: &str) -> anyhow::Result<String> {
         url: unmodelled.url,
         themes,
     })?)
+}
+
+// ---------------------------------------------------------------------------
+// The Ravel side of the same themes
+// ---------------------------------------------------------------------------
+
+/// The Ravel themes read out of the themes directory, by name and mode.
+///
+/// The registry exists because the derivation above is one-way and stays that
+/// way: `ThemeRegistry` holds the *derived* `ThemeConfig`s, which is what the
+/// borrowed components need, and there is deliberately no code that turns one
+/// back into a [`RavelTheme`]. Ravel's own widgets need the Ravel form of
+/// whichever theme is being worn, so the resolved themes are kept here as the
+/// file is read rather than reconstructed later.
+///
+/// Keyed by name **and** mode: a file may name its light and dark themes the
+/// same thing, and the appearance settings pick one per mode.
+#[derive(Default)]
+pub struct RavelThemes(HashMap<(String, tokens::ThemeMode), RavelTheme>);
+
+impl Global for RavelThemes {}
+
+/// Record the Ravel themes a theme file holds.
+///
+/// Called beside [`derive_theme_set_json`] on the same text, so the two
+/// registries hold the same set. A file this fails on is one
+/// `derive_theme_set_json` also fails on, and the caller already logs and
+/// skips it.
+pub fn register_ravel_themes(content: &str, cx: &mut App) -> anyhow::Result<()> {
+    let file: ThemeFile = serde_json::from_str(content)?;
+    let registry = cx.default_global::<RavelThemes>();
+    for spec in &file.themes {
+        registry
+            .0
+            .insert((spec.name.clone(), spec.mode), spec.resolve());
+    }
+    Ok(())
+}
+
+/// Install the tokens Ravel's own widgets paint from.
+///
+/// `name` and `mode` are what gpui-component's `Theme` ended up wearing, so
+/// the two halves of the appearance cannot disagree. A name the registry does
+/// not carry falls back to Ravel's built-in palette for that mode — the same
+/// answer the theme lookup gives when a settings file names a theme that is no
+/// longer installed, and the reason this cannot leave the widgets unpainted.
+pub fn apply_ravel_theme(name: &str, mode: tokens::ThemeMode, cx: &mut App) {
+    let resolved = cx
+        .try_global::<RavelThemes>()
+        .and_then(|registry| registry.0.get(&(name.to_string(), mode)))
+        .cloned()
+        .unwrap_or_else(|| {
+            tokens::ThemeSpec {
+                name: name.to_string(),
+                mode,
+                ..tokens::ThemeSpec::default()
+            }
+            .resolve()
+        });
+    ravel_widgets::set_active_tokens(resolved, cx);
+}
+
+#[cfg(test)]
+mod ravel_theme_tests {
+    use super::*;
+
+    const FILE: &str = r##"{
+        "name": "Set",
+        "themes": [
+            {"name": "T", "mode": "light", "colors": {"primary.background": "#010203"}},
+            {"name": "T", "mode": "dark", "colors": {"primary.background": "#040506"}}
+        ]
+    }"##;
+
+    #[gpui::test]
+    fn the_registry_keeps_one_theme_per_name_and_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register_ravel_themes(FILE, cx).expect("the file parses");
+
+            apply_ravel_theme("T", tokens::ThemeMode::Light, cx);
+            assert_eq!(
+                ravel_widgets::ActiveTokens::tokens(&*cx).colors.primary,
+                tokens::parse_hex_color("#010203").unwrap(),
+            );
+
+            // Same name, other mode: the two must not collide, which keying by
+            // name alone would make them do.
+            apply_ravel_theme("T", tokens::ThemeMode::Dark, cx);
+            assert_eq!(
+                ravel_widgets::ActiveTokens::tokens(&*cx).colors.primary,
+                tokens::parse_hex_color("#040506").unwrap(),
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_unknown_name_falls_back_to_the_built_ins_for_that_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register_ravel_themes(FILE, cx).expect("the file parses");
+            apply_ravel_theme("gone", tokens::ThemeMode::Dark, cx);
+            assert_eq!(
+                ravel_widgets::ActiveTokens::tokens(&*cx).colors,
+                tokens::Colors::dark(),
+            );
+        });
+    }
 }

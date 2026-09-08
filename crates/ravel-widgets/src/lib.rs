@@ -4,10 +4,14 @@
 //! Ravel's own widget layer.
 //!
 //! [`tokens`] is the single source for the colors, spacing, row heights,
-//! typography, motion and radii the UI is built from. [`curve_editor`] and
-//! [`curve_view`] are the first widgets to live here; the remaining ones move
-//! in later units (`docs/implementation/ui-component-layer-plan.md`, `UIX-3`
-//! and `UIX-4`).
+//! typography, motion and radii the UI is built from, and [`theme`] is how a
+//! widget reaches the set in force. [`icon`], [`button`] and [`tooltip`] are
+//! the three parts Ravel owns outright — the ones the application's texture
+//! lives in — and they are built on `gpui-base`'s unstyled primitives, which
+//! own focus, keyboard activation and accessibility. [`curve_editor`] and
+//! [`curve_view`] are the geometry the curve views share. The remaining
+//! borrowed parts move in later units
+//! (`docs/implementation/ui-component-layer-plan.md`).
 //!
 //! `examples/gallery` renders everything this crate exposes without starting
 //! `ravel-app` — it is where the widgets are looked at.
@@ -20,6 +24,7 @@
 
 pub mod curve_editor;
 pub mod curve_view;
+pub mod icon;
 pub mod theme;
 pub mod tokens;
 
@@ -34,6 +39,8 @@ pub use curve_view::{
     CurveValueRange, format_value_label, grid_values, nice_value_step, padded_bounds,
     value_grid_values,
 };
+
+pub use icon::{Icon, IconPath};
 
 pub use theme::{ActiveTokens, set_active_tokens};
 

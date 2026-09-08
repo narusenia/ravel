@@ -13,6 +13,7 @@
 //! no longer where the panels read their colours from.
 
 use gpui::{Hsla, hsla};
+use ravel_widgets::tokens::Colors;
 
 /// The curve ramp's hue and saturation.
 ///
@@ -47,14 +48,26 @@ pub fn ramp(step: usize) -> Hsla {
     )
 }
 
+/// The bright green the theme file shipped for the dark palette (`#30D158`).
+const CACHE_BAND_BRIGHT: Hsla = hsla(0.375, 0.636, 0.504, 1.0);
+/// The dark green it shipped for the light palette (`#319a00`).
+const CACHE_BAND_DARK: Hsla = hsla(0.281, 1.0, 0.302, 1.0);
+
 /// The cache band: green, because "this frame is already rendered" is the one
 /// piece of good news the ruler reports.
 ///
-/// One green rather than one per palette. The band is a solid fill, so it only
-/// has to be *seen*, and this is the brighter of the two greens the theme file
-/// shipped (`#30D158`); the darker one (`#319a00`) all but disappears against
-/// the dark ruler it would sit on.
-pub const CACHE_BAND_COLOR: Hsla = hsla(0.375, 0.636, 0.504, 1.0);
+/// **Two greens, chosen by contrast rather than by mode.** The band is a solid
+/// fill that only has to be *seen*, and a single green cannot do that in both
+/// palettes: the bright one measures about 1.5:1 on a light ruler where the
+/// dark one measures about 2.8:1, and the ratio inverts on a dark one. The
+/// theme file shipped both for exactly this reason.
+///
+/// Picking by [`Colors::more_visible_on`] rather than by `ThemeMode` keeps the
+/// module free of a mode branch, and means a theme whose `background` does not
+/// match its declared mode still gets the visible green.
+pub fn cache_band(colors: &Colors) -> Hsla {
+    Colors::more_visible_on(colors.background, CACHE_BAND_BRIGHT, CACHE_BAND_DARK)
+}
 
 #[cfg(test)]
 mod tests {
@@ -81,9 +94,20 @@ mod tests {
     fn the_cache_band_is_green_and_not_the_ramp() {
         // Green as painted, not as written: a band that drifted blue would read
         // as a ruler mark, and one that drifted yellow as a warning.
-        let rgba = gpui::hsla_to_rgba(CACHE_BAND_COLOR);
-        assert!(rgba.color.green > rgba.color.red);
-        assert!(rgba.color.green > rgba.color.blue);
-        assert!((0..RAMP_STEPS).all(|step| ramp(step) != CACHE_BAND_COLOR));
+        for colors in [Colors::light(), Colors::dark()] {
+            let band = cache_band(&colors);
+            let rgba = gpui::hsla_to_rgba(band);
+            assert!(rgba.color.green > rgba.color.red);
+            assert!(rgba.color.green > rgba.color.blue);
+            assert!((0..RAMP_STEPS).all(|step| ramp(step) != band));
+        }
+
+        // And the two palettes do not get the same green: one green cannot be
+        // seen on both grounds, which is why the theme file shipped a pair.
+        assert_ne!(
+            cache_band(&Colors::light()),
+            cache_band(&Colors::dark()),
+            "a single green would vanish on one of the two rulers"
+        );
     }
 }

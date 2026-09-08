@@ -3835,7 +3835,7 @@ impl TimelineGpuiPanel {
                     if let Some(range) = loop_range {
                         paint_loop_range(&state, range, bounds, window);
                     }
-                    paint_cache_band(&state, &cache_band, bounds, window);
+                    paint_cache_band(&state, &cache_band, bounds, &colors, window);
                     paint_out_of_range(&state, bounds, &colors, window);
                     return;
                 }
@@ -3919,7 +3919,7 @@ impl TimelineGpuiPanel {
                 // Over both bands: the strip is 3 px of fact and the ticks
                 // rise from the same edge, so drawing it earlier would let
                 // them cut it into dashes.
-                paint_cache_band(&state, &cache_band, bounds, window);
+                paint_cache_band(&state, &cache_band, bounds, &colors, window);
                 // Last, so the ticks and labels past the composition end are
                 // knocked back with everything else — the lane paints its
                 // band over its content for the same reason.
@@ -6208,6 +6208,7 @@ fn paint_cache_band(
     state: &TimelinePanel,
     ranges: &[Range<u64>],
     bounds: Bounds<Pixels>,
+    colors: &Colors,
     window: &mut Window,
 ) {
     if ranges.is_empty() {
@@ -6222,7 +6223,7 @@ fn paint_cache_band(
                 point(bounds.origin.x + px(x as f32), top),
                 size(px(width as f32), px(CACHE_BAND_HEIGHT)),
             ),
-            timeline_colors::CACHE_BAND_COLOR,
+            timeline_colors::cache_band(colors),
         ));
     }
 }

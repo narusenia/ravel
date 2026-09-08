@@ -433,6 +433,21 @@ impl Colors {
     /// exactly where it matters: `#0000FF` has lightness 0.5 — nominally
     /// "mid" — and a relative luminance of 0.07, so a lightness rule would
     /// put near-black text on it and produce a 1.4:1 label.
+    /// Whichever of `a` and `b` stands out more against `surface`.
+    ///
+    /// The same measurement [`Colors::readable_on`] makes, exposed for the
+    /// functional palettes: a colour that has to be *seen* on the panel's
+    /// ground — a cache band, a status fill — picks its variant this way
+    /// instead of branching on the mode, so a theme whose `background` does
+    /// not match its declared mode still gets the visible one.
+    pub fn more_visible_on(surface: Hsla, a: Hsla, b: Hsla) -> Hsla {
+        if contrast_ratio(surface, a) >= contrast_ratio(surface, b) {
+            a
+        } else {
+            b
+        }
+    }
+
     pub fn readable_on(&self, surface: Hsla) -> Hsla {
         // Measured against what the eye actually sees. `relative_luminance`
         // reads r/g/b only, so a translucent surface would be judged by its

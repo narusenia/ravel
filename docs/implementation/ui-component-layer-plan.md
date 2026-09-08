@@ -188,7 +188,7 @@ gpui-component の `.theme-schema.json` に従っているが、`UIX-1` で
 **重ね順を自前で決めない。** `gpui-base` が契約として持っている
 （`state_style.rs`）:
 
-```
+```text
 1. instance style（Styled のビルダ連鎖）
 2. checked / pressed / selected / focused
 3. disabled ← 常に最後
@@ -302,7 +302,7 @@ hex 入力状態だけ。
 
 ポップアップの中身:
 
-```
+```text
 ┌──────────────┐┌─┐
 │              ││▓│   彩度×明度の 2D 面 120×120
 │       ●      ││▓│
@@ -327,6 +327,20 @@ hex 入力状態だけ。
 **キーボード** — Tab で 2D 面に入り（内側リング）、`←→` が彩度 ±1%、
 `↑↓` が明度 ±1%、Shift で ±10%。そこから Tab で色相帯 → A → hex。
 **マウスとキーボードが同じ値の道を通ること**（値を書く関数に両方が入る）。
+
+**既存の undo の契約を壊さないこと。** `properties.rs` の
+`color_picker_gesture_commits_one_undo_step` が固定している:
+
+- 1 ジェスチャの複数の `Change` は**即時に適用される**（値の反映を待たせない）
+- `COLOR_COMMIT_QUIET` の静穏期間のあと **undo は 1 段だけ**積む
+- 隣のテストがもう半分を固定している —
+  **保留中の commit は、それを運ぶスロットが消えても落とさない**
+
+**これはマウスとキーボードの両方に掛かる。** 矢印キーの押しっぱなしは
+`Change` を 20 回以上出すので、`UIX-11` がその経路を新しく作ると
+**undo を溢れさせるか commit を落とすかのどちらかを踏みやすい**。
+「同じ値の道を通る」だけでは足りず、**その道が debounce と coalescing を
+持っていること**が要件である。
 
 ### 矢印キーの文脈を 1 つ足す
 
@@ -443,7 +457,7 @@ crates/ravel-widgets/          ← 新規
 | `UIX-8` | **ユーザーテーマディレクトリ**を足す（`themes_dir()` を複数候補に、ユーザー側が勝つ、**watch を自前に持つ**、**`assets/themes/ravel.schema.json` を同梱して `$schema` で指す**、書き方の文書） | `UIX-1` |
 | `UIX-9` | 文書更新（`ui-impl-status.md` の密度・部品の記述、`gpui-ui-guide.md` の「部品を追加する」節） | `UIX-4`〜`UIX-8` |
 | `UIX-10` | **矢印キーを所有する要素のキー文脈**を定義し、グローバルバインドの除外リストに入れる（`←` / `→` が `playback.step_forward` と衝突する。`MED-APP-16` の 3 段目） | — |
-| `UIX-11` | **`color_picker` を自前で作る**（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ） | `UIX-4` / `UIX-10` |
+| `UIX-11` | **`color_picker` を自前で作る**（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ）。**既存の undo の契約を壊さない**（即時適用 + 静穏期間後に 1 段） | `UIX-4b` / `UIX-10` |
 
 **`UIX-0` と `UIX-1` はパネルを触らないので `KIT-1` と並行できる。**
 `UIX-2` 以降は `gpui-base` がツリーに入るまで書けない。

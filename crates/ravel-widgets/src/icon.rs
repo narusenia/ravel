@@ -33,10 +33,16 @@ pub trait IconPath {
 /// The shape-named glyphs: chevrons, a plus, an ellipsis.
 ///
 /// `ravel-app`'s `RavelIcon` names icons after what they *mean* in Ravel —
-/// `ZoomFit`, `NodeSubnet`, `SafeAreas` — because that is what a panel asks
-/// for. These fourteen are the opposite: a widget needs "the chevron that points down"
-/// with no opinion about why, and naming them `PropertiesGroupExpanded` would
-/// invent meaning the drawing does not have.
+/// `NodeSubnet`, `SafeAreas` — because that is what a panel asks for. Most of
+/// these are the opposite: a widget needs "the chevron that points down" with
+/// no opinion about why, and naming them `PropertiesGroupExpanded` would invent
+/// meaning the drawing does not have.
+///
+/// The four exceptions are the ones the parameter editors in this crate draw
+/// themselves — the three interpolation modes and the fit-to-view action. They
+/// carry meaning because the widget that draws them carries the meaning too:
+/// [`crate::param_curve_editor`] *is* where a keyframe's interpolation is
+/// chosen, so there is no host to ask.
 ///
 /// They are the set the borrowed `gpui_component::IconName` was used for, and
 /// **no new SVG rides along**: every path here already resolves through
@@ -58,15 +64,19 @@ pub enum UiIcon {
     ExternalLink,
     FolderClosed,
     Frame,
+    InterpolationBezier,
+    InterpolationLinear,
+    InterpolationStep,
     Network,
     Plus,
     Settings,
     TriangleAlert,
+    ZoomFit,
 }
 
 impl UiIcon {
     /// Every glyph, for the tests and the gallery.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 18] = [
         Self::ChevronDown,
         Self::ChevronLeft,
         Self::ChevronRight,
@@ -77,10 +87,14 @@ impl UiIcon {
         Self::ExternalLink,
         Self::FolderClosed,
         Self::Frame,
+        Self::InterpolationBezier,
+        Self::InterpolationLinear,
+        Self::InterpolationStep,
         Self::Network,
         Self::Plus,
         Self::Settings,
         Self::TriangleAlert,
+        Self::ZoomFit,
     ];
 
     /// The asset path of this glyph.
@@ -96,10 +110,14 @@ impl UiIcon {
             Self::ExternalLink => "icons/external-link.svg",
             Self::FolderClosed => "icons/folder-closed.svg",
             Self::Frame => "icons/frame.svg",
+            Self::InterpolationBezier => "icons/interpolation-bezier.svg",
+            Self::InterpolationLinear => "icons/interpolation-linear.svg",
+            Self::InterpolationStep => "icons/interpolation-step.svg",
             Self::Network => "icons/network.svg",
             Self::Plus => "icons/plus.svg",
             Self::Settings => "icons/settings.svg",
             Self::TriangleAlert => "icons/triangle-alert.svg",
+            Self::ZoomFit => "icons/maximize.svg",
         }
         .into()
     }

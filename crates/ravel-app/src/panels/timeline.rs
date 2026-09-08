@@ -54,17 +54,9 @@ use ravel_widgets::{Escape, Input, InputEvent, InputState};
 use crate::assets::RavelIcon;
 use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
 use crate::project_state::ProjectState;
-use crate::widgets::curve_view::{self, CurveValueRange, format_value_label, value_grid_values};
+use ravel_widgets::curve_view::{self, CurveValueRange, format_value_label, value_grid_values};
 // Exercised only by this module's grid tests, which reach it through
 // `use super::*`.
-#[cfg(test)]
-use crate::widgets::curve_view::nice_value_step;
-use crate::widgets::{
-    CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
-    CurveSource, CurveTransform, HitPart, ScrubEvent, ScrubInput, ScrubInputState, begin_drag,
-    curve_editor_canvas_with_x_scale, dominant_drag_axis, drag_to_constrained,
-    drag_to_with_tangent_snap, hit_test_with_offsets, keyframes_in_rect_with_offsets,
-};
 use crate::workspace::{
     EditDelete, EditDuplicate, FrameStepBackward, FrameStepForward, KeyframeInterpolationBezier,
     KeyframeInterpolationLinear, KeyframeInterpolationStep, PlaybackStop, PlaybackToggle,
@@ -78,6 +70,14 @@ use crate::workspace::{
 };
 use ravel_ui::command::CommandId;
 use ravel_ui::keyframes::RevealFilter;
+#[cfg(test)]
+use ravel_widgets::curve_view::nice_value_step;
+use ravel_widgets::{
+    CurveDrag as WidgetCurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
+    CurveSource, CurveTransform, HitPart, ScrubEvent, ScrubInput, ScrubInputState, begin_drag,
+    curve_editor_canvas_with_x_scale, dominant_drag_axis, drag_to_constrained,
+    drag_to_with_tangent_snap, hit_test_with_offsets, keyframes_in_rect_with_offsets,
+};
 
 /// GPUI key context used by shortcuts local to the timeline.
 pub const KEY_CONTEXT: &str = "Timeline";

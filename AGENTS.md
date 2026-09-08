@@ -57,10 +57,16 @@ model is still current.
   this crate re-exports (with `InputEvent` and the input actions) so a host
   needs no `gpui-base` dependency of its own; **the state is read, never
   written, from `render`**. `scrub_input.rs` (the AE-style drag-a-label
-  numeric field) and the curve-editor geometry (`curve_editor.rs`,
-  `curve_view.rs`) live here too, and the widgets that still borrow from
-  gpui-component stay in `ravel-app`. It depends on `gpui`, `gpui-base`,
-  `ravel-core` and `serde`: **never on `gpui-component`**, because
+  numeric field), the curve-editor geometry (`curve_editor.rs`,
+  `curve_view.rs`) and the two parameter editors built on it
+  (`param_curve_editor.rs`, `param_ramp_editor.rs`) live here too, and the
+  widgets that still borrow from gpui-component stay in `ravel-app`.
+  `fonts.rs` builds the `Font` the canvas painters shape text with out of the
+  typography tokens, with the Japanese fallback attached; the embedded faces
+  and their registration stay in `ravel-app`, which re-exports everything here
+  so a panel keeps one import path. It depends on `gpui`, `gpui-base`,
+  `ravel-core`, `ravel-i18n` (the parameter editors label their own toolbars)
+  and `serde`: **never on `gpui-component`**, because
   gpui-component's `ThemeConfig` is *derived* from Ravel's schema by
   `ravel-app`, never the reverse. The bundled `examples/gallery` binary
   renders every widget and every token in both palettes without the
@@ -69,8 +75,10 @@ model is still current.
   settings layers, UI state, and atomic writes. GUI-free by construction — it
   depends on `ravel-core` and `ravel-ui` only, never on `gpui`, so headless
   callers can load and save projects
-- `crates/ravel-app`: GPUI host, windows and docking, concrete panels, widgets,
-  and the application entry point
+- `crates/ravel-app`: GPUI host, windows and docking, concrete panels, the
+  widgets that still borrow from gpui-component, and the application entry
+  point. There is no `src/widgets/` any more — every widget Ravel owns lives in
+  `ravel-widgets`
 - `crates/ravel-cli`: the `ravel-cli` binary — headless rendering
   (`ravel-cli render`), the machine-readable enumerations
   (`ravel-cli list comps | params | codecs`), and the interactive mode that

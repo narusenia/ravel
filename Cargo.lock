@@ -6173,6 +6173,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui_ce_platform",
  "ravel-core",
+ "ravel-i18n",
  "serde",
  "serde_json",
 ]

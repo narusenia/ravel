@@ -25,7 +25,6 @@ pub mod splash;
 pub mod theme_tokens;
 pub mod title_bar;
 pub mod trace;
-pub mod widgets;
 pub mod window_host;
 pub mod workspace;
 pub mod workspace_layouts;

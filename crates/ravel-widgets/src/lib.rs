@@ -9,8 +9,9 @@
 //! the three parts Ravel owns outright — the ones the application's texture
 //! lives in — and they are built on `gpui-base`'s unstyled primitives, which
 //! own focus, keyboard activation and accessibility. [`curve_editor`] and
-//! [`curve_view`] are the geometry the curve views share. The remaining
-//! borrowed parts move in later units
+//! [`curve_view`] are the geometry the curve views share, and
+//! [`param_curve_editor`] / [`param_ramp_editor`] are the two parameter
+//! editors built on it. The remaining borrowed parts move in later units
 //! (`docs/implementation/ui-component-layer-plan.md`).
 //!
 //! `examples/gallery` renders everything this crate exposes without starting
@@ -25,9 +26,12 @@
 pub mod button;
 pub mod curve_editor;
 pub mod curve_view;
+pub mod fonts;
 pub mod icon;
 pub mod input;
 pub mod number_input;
+pub mod param_curve_editor;
+pub mod param_ramp_editor;
 pub mod scrub_input;
 pub mod theme;
 pub mod tokens;
@@ -52,6 +56,13 @@ pub use icon::{Icon, IconPath, UiIcon};
 pub use input::{Input, InputFace, InputLayers, frame_is_focused, input_layers};
 
 pub use number_input::NumberInput;
+
+pub use param_curve_editor::{
+    ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, curve_thumbnail,
+};
+pub use param_ramp_editor::{
+    ParamRampEditor, ParamRampEditorState, ParamRampEvent, ramp_thumbnail,
+};
 
 pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
 

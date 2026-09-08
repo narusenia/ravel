@@ -38,20 +38,19 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::ActiveTokens as _;
+use crate::{Icon, TooltipExt as _, UiIcon};
 use gpui::*;
 use ravel_core::animation::Interpolation;
 use ravel_core::param_curve::{CurveParam, CurvePoint};
 use ravel_core::types::Vec2;
 use ravel_i18n::t;
-use ravel_widgets::ActiveTokens as _;
-use ravel_widgets::{Icon, TooltipExt as _};
 
 pub use super::curve_editor::CurvePoint as ViewPoint;
 use super::curve_editor::{CurveTransform, HitPart, handle_anchor, snap_to_diagonals};
 use super::curve_view;
 use super::curve_view::CurveValueRange;
 use super::scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
-use crate::assets::RavelIcon;
 
 /// Pointer distance (widget pixels) that still counts as grabbing a point.
 pub const HIT_RADIUS: f64 = 7.0;
@@ -764,7 +763,7 @@ impl ParamCurveEditorState {
     /// End every gesture owned by this editor before its row is rebuilt.
     /// Point fields are document edits; range fields are view-only and are
     /// ended without making them count as an undo step.
-    pub(crate) fn end_gestures(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn end_gestures(&mut self, cx: &mut Context<Self>) -> bool {
         let mut committed = self.end_drag(cx);
         for input in [&self.inputs.point_x, &self.inputs.point_y] {
             if input.read(cx).is_dragging() {
@@ -841,7 +840,7 @@ impl ParamCurveEditorState {
     /// This is the recovery path for a point dragged out of view: the
     /// automatic range is derived from every control point, so fitting always
     /// brings all of them back on screen.
-    pub(crate) fn fit(&mut self, cx: &mut Context<Self>) {
+    pub fn fit(&mut self, cx: &mut Context<Self>) {
         self.input_range.fit();
         self.output_range.fit();
         self.sync_inputs(cx);
@@ -851,13 +850,7 @@ impl ParamCurveEditorState {
     /// Wheel zoom. The output axis is the one that zooms, matching the
     /// Timeline graph editor's vertical zoom; Shift zooms the input axis
     /// instead, so both bounds of the visible box are reachable by wheel.
-    pub(crate) fn zoom(
-        &mut self,
-        delta: f32,
-        horizontal: bool,
-        focus: ViewPoint,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn zoom(&mut self, delta: f32, horizontal: bool, focus: ViewPoint, cx: &mut Context<Self>) {
         if delta == 0.0 {
             return;
         }
@@ -920,7 +913,7 @@ impl ParamCurveEditorState {
     /// and a non-finite output breaks both evaluation and painting — so the
     /// guard belongs here, before the value reaches the curve, and not only
     /// inside it.
-    pub(crate) fn set_selected_component(
+    pub fn set_selected_component(
         &mut self,
         axis: PointAxis,
         value: f32,
@@ -1013,8 +1006,12 @@ impl ParamCurveEditorState {
 
     /// Test hook: paint is what normally records the element's bounds, so
     /// a headless test has to supply them before driving the pointer.
-    #[cfg(test)]
-    pub(crate) fn set_bounds_for_tests(&self, origin: (f32, f32), size: (f32, f32)) {
+    ///
+    /// Not behind `cfg(test)`, for the same reason
+    /// [`crate::Button::debug_selector`] is not: the callers are the
+    /// Properties panel's gesture tests, and this crate is not the one
+    /// compiling them.
+    pub fn set_bounds_for_tests(&self, origin: (f32, f32), size: (f32, f32)) {
         self.bounds.set((origin.0, origin.1, size.0, size.1));
     }
 
@@ -1043,12 +1040,7 @@ impl ParamCurveEditorState {
     /// Left-button press: a second click adds a point (or removes the one
     /// under the pointer), a first click selects and starts dragging whatever
     /// it grabbed — the anchor or one of its Bézier handles.
-    pub(crate) fn pointer_down(
-        &mut self,
-        pointer: ViewPoint,
-        click_count: usize,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn pointer_down(&mut self, pointer: ViewPoint, click_count: usize, cx: &mut Context<Self>) {
         let Some(transform) = self.transform() else {
             return;
         };
@@ -1081,8 +1073,9 @@ impl ParamCurveEditorState {
     }
 
     /// Unmodified drag, used by the headless gesture tests.
-    #[cfg(test)]
-    pub(crate) fn drag_to(&mut self, pointer: ViewPoint, cx: &mut Context<Self>) {
+    ///
+    /// Reachable for the same reason [`Self::set_bounds_for_tests`] is.
+    pub fn drag_to(&mut self, pointer: ViewPoint, cx: &mut Context<Self>) {
         self.drag_to_with_modifiers(pointer, false, cx);
     }
 
@@ -1123,7 +1116,7 @@ impl ParamCurveEditorState {
 
     /// Ends the drag phase and reports whether it emitted a `Commit`, so a
     /// caller that has to take that undo step itself knows there is one.
-    pub(crate) fn end_drag(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(drag) = self.drag.take() else {
             return false;
         };
@@ -1549,15 +1542,9 @@ fn interpolation_button(
     window: &mut Window,
 ) -> Stateful<Div> {
     let (icon, tooltip) = match interpolation {
-        Interpolation::Bezier => (
-            RavelIcon::InterpolationBezier,
-            "timeline.interpolation.bezier",
-        ),
-        Interpolation::Linear => (
-            RavelIcon::InterpolationLinear,
-            "timeline.interpolation.linear",
-        ),
-        Interpolation::Step => (RavelIcon::InterpolationStep, "timeline.interpolation.step"),
+        Interpolation::Bezier => (UiIcon::InterpolationBezier, "timeline.interpolation.bezier"),
+        Interpolation::Linear => (UiIcon::InterpolationLinear, "timeline.interpolation.linear"),
+        Interpolation::Step => (UiIcon::InterpolationStep, "timeline.interpolation.step"),
     };
     let color = if current == Some(interpolation) {
         active
@@ -1746,7 +1733,7 @@ impl RenderOnce for ParamCurveEditor {
             .flex_shrink_0()
             .cursor_pointer()
             .child(
-                Icon::new(RavelIcon::ZoomFit)
+                Icon::new(UiIcon::ZoomFit)
                     .size_3()
                     .text_color(colors.muted_foreground),
             )

@@ -83,7 +83,7 @@ use std::sync::Arc;
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
-use crate::widgets::{
+use ravel_widgets::{
     ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, ParamRampEditor,
     ParamRampEditorState, ParamRampEvent, ScrubEvent, ScrubInput, ScrubInputState, curve_thumbnail,
     ramp_thumbnail,
@@ -7076,10 +7076,10 @@ mod tests {
         x: f32,
         y: f32,
         cx: &mut TestAppContext,
-    ) -> crate::widgets::curve_editor::CurvePoint {
+    ) -> ravel_widgets::curve_editor::CurvePoint {
         state.read_with(cx, |state, _| {
-            crate::widgets::param_curve_editor::transform_for(state.view(), CURVE_TEST_SIZE)
-                .data_to_widget(crate::widgets::curve_editor::CurvePoint::new(
+            ravel_widgets::param_curve_editor::transform_for(state.view(), CURVE_TEST_SIZE)
+                .data_to_widget(ravel_widgets::curve_editor::CurvePoint::new(
                     x as f64, y as f64,
                 ))
         })
@@ -7391,7 +7391,7 @@ mod tests {
     /// one undo step.
     #[gpui::test]
     fn editing_the_selected_point_numerically_reaches_the_document(cx: &mut TestAppContext) {
-        use crate::widgets::param_curve_editor::PointAxis;
+        use ravel_widgets::param_curve_editor::PointAxis;
         let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
         let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
         let state = curve_editor_state(&window, "points", cx);
@@ -7424,7 +7424,7 @@ mod tests {
     /// value and records no undo step.
     #[gpui::test]
     fn changing_the_curve_view_range_never_touches_the_document(cx: &mut TestAppContext) {
-        use crate::widgets::param_curve_editor::ViewPoint;
+        use ravel_widgets::param_curve_editor::ViewPoint;
         let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
         let before = node_curve(&project, &path, node_id, "points", cx).expect("curve");
         let state = curve_editor_state(&window, "points", cx);

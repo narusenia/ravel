@@ -18,7 +18,8 @@ use gpui::{
 };
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::tab::{Tab, TabBar};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size};
+use gpui_component::{Sizable as _, Size};
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Button, Icon, UiIcon};
 
 use crate::menu::MenuButton as _;
@@ -612,7 +613,7 @@ impl DockRoot {
 
         let content_view = self.content.view(&tabs[active], window, cx);
         let highlight = self.drop_highlight_for(path);
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let geometry = self.area_bounds.clone();
         let area_path = path.clone();
         let tab_bar_path = path.clone();
@@ -635,7 +636,7 @@ impl DockRoot {
                     .w_full()
                     .flex_shrink_0()
                     .relative()
-                    .bg(colors.tab_bar)
+                    .bg(colors.tab_bar())
                     .border_b_1()
                     .border_color(colors.border)
                     .child(bounds_watcher(move |bounds| {
@@ -756,7 +757,7 @@ impl DockRoot {
 
         let first_el = self.render_node(first, &path.child(SplitSide::First), window, cx);
         let second_el = self.render_node(second, &path.child(SplitSide::Second), window, cx);
-        let seam = Self::render_seam(horizontal, cx.theme().colors.border);
+        let seam = Self::render_seam(horizontal, cx.tokens().colors.border);
         let grab = self.render_grab(path.clone(), orientation, live_ratio, thickness, cx);
 
         let first_box = div().flex_shrink_0().overflow_hidden().child(first_el);
@@ -814,7 +815,7 @@ impl DockRoot {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let horizontal = matches!(orientation, Orientation::Horizontal);
-        let hover_bg = cx.theme().colors.accent.opacity(0.25);
+        let hover_bg = cx.tokens().colors.accent.opacity(0.25);
         let bounds_cache = self.split_bounds.clone();
         // The overlay's leading edge is half a grab width before the seam.
         let offset = px(-grab / 2.0);
@@ -893,7 +894,7 @@ impl EventEmitter<DockEvent> for DockRoot {}
 impl Render for DockRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = self.root.clone();
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         div()
             .id("dock-root")
             .relative()
@@ -936,7 +937,7 @@ fn bounds_watcher(record: impl Fn(Bounds<Pixels>) + 'static) -> impl IntoElement
 /// The translucent band showing where a dropped tab would land.
 fn render_drop_highlight(zone: DropZone, cx: &App) -> AnyElement {
     let (left, top, width, height) = drop_highlight(zone);
-    let accent = cx.theme().colors.accent;
+    let accent = cx.tokens().colors.accent;
     div()
         .absolute()
         .left(relative(left))
@@ -954,6 +955,6 @@ fn render_drop_highlight(zone: DropZone, cx: &App) -> AnyElement {
 fn default_empty_state(cx: &App) -> AnyElement {
     div()
         .size_full()
-        .bg(cx.theme().muted.opacity(0.2))
+        .bg(cx.tokens().colors.accent.opacity(0.2))
         .into_any_element()
 }

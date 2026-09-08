@@ -13,8 +13,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{ActiveTheme, TitleBar, h_flex};
+use gpui_component::{TitleBar, h_flex};
 use ravel_i18n::t;
+use ravel_widgets::ActiveTokens as _;
 use std::path::Path;
 
 /// Left inset [`TitleBar`] reserves for the platform window controls (the
@@ -118,7 +119,7 @@ impl RenderOnce for RavelTitleBar {
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(cx.theme().colors.muted_foreground)
+                                .text_color(cx.tokens().colors.muted_foreground)
                                 .child(self.center),
                         ),
                 )
@@ -165,7 +166,7 @@ pub fn render_main_title_bar(project_name: &str, cx: &App) -> impl IntoElement {
     let bar = RavelTitleBar::new(project_name.to_owned()).leading(
         div()
             .text_sm()
-            .text_color(cx.theme().colors.foreground)
+            .text_color(cx.tokens().colors.foreground)
             .child(t!("app.title")),
     );
     // macOS keeps the menus where they belong, in the OS menu bar that

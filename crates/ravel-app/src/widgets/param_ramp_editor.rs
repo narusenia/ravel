@@ -35,11 +35,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use ravel_core::color::ColorSpace;
 use ravel_core::param_ramp::{RampInterpolation, RampParam, RampStop};
 use ravel_core::types::Color;
 use ravel_i18n::t;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Icon, TooltipExt as _};
 
 use super::param_curve_editor::clamp_between;
@@ -665,9 +665,9 @@ impl RenderOnce for ParamRampEditor {
         let bounds = state.bounds.clone();
         let position_input = state.position.clone();
         let selected_stop = state.selected_stop();
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let outline = colors.foreground;
-        let accent = colors.accent_foreground;
+        let accent = colors.readable_on(colors.accent);
 
         let band = div()
             .id(("param-ramp-band", entity_id))

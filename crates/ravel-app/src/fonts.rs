@@ -24,7 +24,7 @@ use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use gpui::{App, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, SharedString};
-use gpui_component::ActiveTheme as _;
+use ravel_widgets::ActiveTokens as _;
 
 /// The family Japanese text falls back to, ahead of the platform cascade.
 ///
@@ -87,12 +87,12 @@ pub fn japanese_fallbacks() -> FontFallbacks {
 
 /// The theme's UI family with the Japanese fallback attached.
 pub fn ui_font(cx: &App) -> Font {
-    with_japanese_fallback(cx.theme().font_family.clone())
+    with_japanese_fallback(cx.tokens().text.font_family.clone())
 }
 
 /// The theme's monospace family with the Japanese fallback attached.
 pub fn mono_font(cx: &App) -> Font {
-    with_japanese_fallback(cx.theme().mono_font_family.clone())
+    with_japanese_fallback(cx.tokens().text.mono_font_family.clone())
 }
 
 fn with_japanese_fallback(family: SharedString) -> Font {

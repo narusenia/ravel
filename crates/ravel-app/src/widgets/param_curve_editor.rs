@@ -39,11 +39,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use ravel_core::animation::Interpolation;
 use ravel_core::param_curve::{CurveParam, CurvePoint};
 use ravel_core::types::Vec2;
 use ravel_i18n::t;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Icon, TooltipExt as _};
 
 pub use super::curve_editor::CurvePoint as ViewPoint;
@@ -1587,7 +1587,7 @@ impl RenderOnce for ParamCurveEditor {
         let selected = state.selected;
         let selected_point = state.selected_point();
         let bounds = state.bounds.clone();
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
 
         let graph = div()
             .id(("param-curve-graph", entity_id))
@@ -1621,7 +1621,7 @@ impl RenderOnce for ParamCurveEditor {
                             colors.primary,
                             Some(PointPaint {
                                 color: colors.foreground,
-                                accent: colors.accent_foreground,
+                                accent: colors.readable_on(colors.accent),
                                 selected,
                             }),
                             window,

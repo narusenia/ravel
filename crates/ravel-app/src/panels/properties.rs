@@ -41,7 +41,6 @@
 //! editor through the `NodeEditorHandle` global.
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
@@ -77,6 +76,7 @@ use ravel_ui::properties::media_asset::{
 };
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
 use ravel_widgets::{Input, InputEvent, InputState};
 use std::sync::Arc;
@@ -4659,7 +4659,7 @@ impl Render for PropertiesGpuiPanel {
                     .items_center()
                     .justify_center()
                     .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
+                    .text_color(cx.tokens().colors.muted_foreground)
                     .child(SharedString::from(message)),
             );
         } else {
@@ -4757,15 +4757,15 @@ impl Render for PropertiesGpuiPanel {
                     .collect(),
                 error: self.exposed_error.clone(),
             };
-            let muted = cx.theme().colors.muted_foreground;
-            let fg = cx.theme().colors.foreground;
-            let danger = cx.theme().colors.danger;
-            let mono_family = cx.theme().mono_font_family.clone();
+            let muted = cx.tokens().colors.muted_foreground;
+            let fg = cx.tokens().colors.foreground;
+            let danger = cx.tokens().colors.danger;
+            let mono_family = cx.tokens().text.mono_font_family.clone();
             // Dimmer than `muted`: a control that is present but cannot act.
-            let disabled = cx.theme().colors.border;
+            let disabled = cx.tokens().colors.border;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
             // keyed / exposed states stand out from the muted chrome.
-            let active = cx.theme().colors.primary;
+            let active = cx.tokens().colors.primary;
             let editor = cx.entity().downgrade();
             let node_ids = match &self.target {
                 PropertiesTarget::Nodes { ids, .. } => ids.clone(),

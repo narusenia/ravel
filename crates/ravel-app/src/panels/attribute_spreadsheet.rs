@@ -25,7 +25,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::table::{Column, ColumnFixed, DataTable, TableDelegate, TableState};
-use gpui_component::{ActiveTheme, Sizable as _, Size, v_flex};
+use gpui_component::{Sizable as _, Size, v_flex};
 use ravel_core::geometry::{AttributeType, Domain, Geometry};
 use ravel_core::types::NodeData;
 use ravel_i18n::t;
@@ -40,6 +40,7 @@ use crate::project_state::ProjectState;
 
 use super::viewer::geometry::as_geometry;
 use super::viewer::overlay::EvalResults;
+use ravel_widgets::ActiveTokens as _;
 
 const HEADER_HEIGHT: f32 = 24.0;
 
@@ -361,7 +362,7 @@ impl AttributeSpreadsheetGpuiPanel {
     }
 
     fn render_domain_tab(&self, domain: Domain, cx: &mut Context<Self>) -> Stateful<Div> {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let delegate = self.table.read(cx).delegate();
         let index = DOMAINS.iter().position(|d| *d == domain).unwrap_or(0);
         let count = delegate.counts[index];
@@ -386,10 +387,10 @@ impl AttributeSpreadsheetGpuiPanel {
             } else {
                 colors.muted_foreground
             })
-            .when(active, |tab| tab.bg(colors.list_active))
+            .when(active, |tab| tab.bg(colors.selected_surface()))
             .when(enabled, |tab| {
                 tab.cursor_pointer()
-                    .hover(|style| style.bg(colors.list_hover))
+                    .hover(|style| style.bg(colors.hover_surface()))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.set_domain(domain, cx);
                     }))
@@ -412,7 +413,7 @@ impl Focusable for AttributeSpreadsheetGpuiPanel {
 
 impl Render for AttributeSpreadsheetGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let mut tabs = div()
             .h(px(HEADER_HEIGHT))
             .flex_shrink_0()
@@ -434,7 +435,7 @@ impl Render for AttributeSpreadsheetGpuiPanel {
         let empty = self.table.read(cx).delegate().empty;
         v_flex()
             .size_full()
-            .bg(colors.list)
+            .bg(colors.background)
             .track_focus(&self.focus_handle)
             .child(tabs)
             .child(match empty {

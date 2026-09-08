@@ -17,7 +17,6 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::runtime::InvalidationHint;
@@ -28,6 +27,8 @@ use ravel_ui::document::{
 };
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
+use ravel_widgets::ActiveTokens as _;
+use ravel_widgets::tokens::Colors;
 use ravel_widgets::{Icon, TooltipExt as _, UiIcon};
 use ravel_widgets::{Input, InputEvent, InputState};
 use std::collections::HashSet;
@@ -837,7 +838,7 @@ impl OutlinerGpuiPanel {
     }
 
     fn render_row(&self, index: usize, row: &OutlinerRow, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let selected = self.is_row_selected(row, cx);
         // Rows of a composition that is not active read as browsable but
         // inert; the composition row itself stays fully legible.
@@ -877,7 +878,7 @@ impl OutlinerGpuiPanel {
             .pr_1()
             .text_xs()
             .text_color(text_color)
-            .when(selected, |row| row.bg(colors.list_active))
+            .when(selected, |row| row.bg(colors.selected_surface()))
             .cursor(outliner_row_cursor(self.layer_drag.is_some()))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1197,7 +1198,7 @@ impl OutlinerGpuiPanel {
         icon: impl Into<Icon>,
         tooltip: SharedString,
         action: impl Fn() -> Box<dyn Action> + 'static,
-        colors: &gpui_component::ThemeColor,
+        colors: &Colors,
     ) -> Stateful<Div> {
         div()
             .id(id)
@@ -1208,7 +1209,7 @@ impl OutlinerGpuiPanel {
             .rounded_sm()
             .cursor_pointer()
             .text_color(colors.muted_foreground)
-            .hover(|style| style.bg(colors.list_active))
+            .hover(|style| style.bg(colors.hover_surface()))
             .child(icon.into().size_3())
             .ravel_tooltip(tooltip)
             .on_click(move |_event, window, cx| {
@@ -1219,7 +1220,7 @@ impl OutlinerGpuiPanel {
     /// Panel header: composition management buttons. The trailing three act on
     /// the selected (or active) composition and are hidden without one.
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let has_target = super::command_target_composition(cx).is_some();
         div()
             .flex()
@@ -1266,7 +1267,7 @@ impl OutlinerGpuiPanel {
 
 impl Render for OutlinerGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let mut tree = div()
             .id("outliner-tree")
             .debug_selector(|| "outliner-panel".into())
@@ -1302,7 +1303,7 @@ impl Render for OutlinerGpuiPanel {
             .flex_col()
             .border_t_1()
             .border_color(colors.border)
-            .bg(colors.list)
+            .bg(colors.background)
             .track_focus(&self.focus_handle)
             // A reorder ends wherever the button is released: over the empty
             // area below the rows, or outside the panel entirely — otherwise

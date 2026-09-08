@@ -47,10 +47,11 @@ use gpui_component::setting::{
     AnySettingField, NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
     Settings,
 };
-use gpui_component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
+use gpui_component::{Theme, ThemeMode, ThemeRegistry};
 use ravel_i18n::t;
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
+use ravel_widgets::ActiveTokens as _;
 
 use crate::keybindings::{KeybindingRow, current_row};
 
@@ -1077,9 +1078,9 @@ fn keybinding_group() -> SettingGroup {
 fn keybinding_field(command: CommandId) -> SettingField<SharedString> {
     SettingField::render(move |_options, _window, cx: &mut App| {
         let row = current_row(command, cx);
-        let border = cx.theme().colors.border;
-        let foreground = cx.theme().colors.foreground;
-        let muted = cx.theme().colors.muted_foreground;
+        let border = cx.tokens().colors.border;
+        let foreground = cx.tokens().colors.foreground;
+        let muted = cx.tokens().colors.muted_foreground;
         div()
             .flex()
             .items_center()

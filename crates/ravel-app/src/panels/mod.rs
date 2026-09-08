@@ -9,6 +9,7 @@ pub mod node_editor;
 pub mod outliner;
 mod param_edit;
 pub mod timeline;
+mod timeline_colors;
 pub mod viewer;
 
 pub mod properties;
@@ -16,7 +17,6 @@ pub mod render_queue;
 pub mod sync_probe;
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
@@ -31,6 +31,7 @@ use ravel_nodes::DisplayFrame;
 use ravel_ui::layout::{PanelInstance, PanelInstanceId};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::timeline::BpmGrid;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Icon;
 use smallvec::SmallVec;
 use std::cell::RefCell;
@@ -1345,7 +1346,7 @@ impl Render for PlaceholderPanel {
             .items_center()
             .justify_center()
             .border_t_1()
-            .border_color(cx.theme().colors.border)
+            .border_color(cx.tokens().colors.border)
             .text_color(rgb(0x888888))
             .track_focus(&self.focus_handle)
             .child(SharedString::from(label))
@@ -1509,7 +1510,7 @@ impl PaneContent for PanelViews {
     fn tab_icon(&self, instance: &PanelInstance, _window: &Window, cx: &App) -> Option<Icon> {
         let icon = Icon::new(crate::assets::RavelIcon::for_panel(instance.kind));
         Some(if is_instance_focused(instance.id, cx) {
-            icon.text_color(cx.theme().colors.foreground)
+            icon.text_color(cx.tokens().colors.foreground)
         } else {
             icon
         })

@@ -78,7 +78,7 @@ const INK_MUTED: u32 = 0x737373;
 /// The family the splash names directly.
 ///
 /// Every other surface takes its family from the theme
-/// (`cx.theme().font_family`), but the splash is painted before
+/// (`cx.tokens().text.font_family`), but the splash is painted before
 /// `load_ravel_themes` has run — covering exactly that work is the splash's
 /// job — so there is no Ravel theme to ask yet. The splash is a fixed brand
 /// asset rather than a themed surface, so this states what the artwork was set

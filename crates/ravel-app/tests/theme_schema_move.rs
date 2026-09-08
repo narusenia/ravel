@@ -6,8 +6,9 @@
 //! `assets/themes/ravel.json` is now read through Ravel's own schema
 //! (`ravel_widgets::tokens`) and turned back into a `gpui_component::ThemeConfig`
 //! by `ravel_app::theme_tokens`. What that must not change is what the running
-//! application is painted with: the ten colours Ravel's own panels read out of
-//! `cx.theme()`, the two font families, and the radii.
+//! application is painted with: the ten colours the derived theme carries — read
+//! by the components Ravel still borrows, and by Ravel's own panels through
+//! `cx.tokens()` — the two font families, and the radii.
 //!
 //! The comparison is against [`PRE_MIGRATION`], the theme file as it stood
 //! *before* the move — not against the file next to it. Three of the ten
@@ -136,7 +137,8 @@ const PRE_MIGRATION: &str = r##"
 #[derive(Debug, PartialEq)]
 struct Painted {
     is_dark: bool,
-    // The ten `cx.theme().colors.*` reads in `crates/ravel-app`.
+    // The ten colours Ravel's schema models. The panels read them through
+    // `cx.tokens()`; these are what the *borrowed* components see.
     background: Hsla,
     foreground: Hsla,
     border: Hsla,

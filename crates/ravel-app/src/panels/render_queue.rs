@@ -13,12 +13,12 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::progress::Progress;
 use ravel_core::runtime::RenderJobId;
 use ravel_i18n::t;
 use ravel_ui::layout::PanelInstanceId;
 use ravel_ui::panels::render_queue::RenderQueueRow;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Button;
 
 use crate::export::RenderService;
@@ -67,7 +67,7 @@ impl RenderQueueGpuiPanel {
     }
 
     fn render_header(&self, has_finished: bool, cx: &mut Context<Self>) -> Div {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         div()
             .h(px(HEADER_HEIGHT))
             .flex_shrink_0()
@@ -97,7 +97,7 @@ impl RenderQueueGpuiPanel {
         row: &RenderQueueRow,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let job = row.job();
         let failed = row.failure().is_some();
         let heading = format!(
@@ -186,7 +186,7 @@ impl Focusable for RenderQueueGpuiPanel {
 
 impl Render for RenderQueueGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         // Cloned out of the service so the row loop does not hold a borrow of
         // it across the `cx.listener` calls the buttons need.
         let rows: Vec<RenderQueueRow> = self
@@ -228,7 +228,7 @@ impl Render for RenderQueueGpuiPanel {
             .flex_col()
             .border_t_1()
             .border_color(colors.border)
-            .bg(colors.list)
+            .bg(colors.background)
             .track_focus(&self.focus_handle)
             .child(self.render_header(has_finished, cx))
             .child(list)

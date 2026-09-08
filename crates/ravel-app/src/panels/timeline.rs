@@ -27,7 +27,10 @@ use std::sync::Arc;
 use gpui::*;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
-use gpui_component::{ActiveTheme, ThemeColor};
+use ravel_widgets::ActiveTokens as _;
+use ravel_widgets::tokens::Colors;
+
+use super::timeline_colors;
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
@@ -3382,7 +3385,7 @@ impl TimelineGpuiPanel {
 
     /// The BPM toggle plus, while the grid is on, the tempo and beat-1
     /// readouts. Each readout turns into an input when clicked.
-    fn build_bpm_controls(&self, colors: &ThemeColor, cx: &mut Context<Self>) -> Div {
+    fn build_bpm_controls(&self, colors: &Colors, cx: &mut Context<Self>) -> Div {
         let grid = super::bpm_grid(cx);
         let mut row = div().flex().items_center().gap_1().child(
             make_toggle(
@@ -3433,7 +3436,7 @@ impl TimelineGpuiPanel {
                         .cursor_pointer()
                         .text_xs()
                         .text_color(colors.foreground)
-                        .hover(|this| this.bg(colors.muted))
+                        .hover(|this| this.bg(colors.hover_surface()))
                         .child(SharedString::from(text))
                         .ravel_tooltip(tooltip)
                         .on_click(cx.listener(move |this, _event, window, cx| {
@@ -3461,7 +3464,7 @@ impl TimelineGpuiPanel {
     }
 
     fn build_transport_toolbar(&self, is_playing: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let playhead = self.state.playhead();
         let fps_value = self.state.frame_rate();
         let fps = format_fps(fps_value);
@@ -3561,7 +3564,7 @@ impl TimelineGpuiPanel {
                 .cursor_pointer()
                 .text_xs()
                 .text_color(colors.foreground)
-                .hover(|this| this.bg(colors.muted))
+                .hover(|this| this.bg(colors.hover_surface()))
                 .child(SharedString::from(format_timecode(playhead, fps_value)))
                 .on_click(cx.listener(|this, _event, window, cx| {
                     this.begin_timecode_edit(window, cx);
@@ -3578,7 +3581,7 @@ impl TimelineGpuiPanel {
             .items_center()
             .gap_1()
             .px_1()
-            .bg(colors.tab_bar)
+            .bg(colors.tab_bar())
             .border_b_1()
             .border_color(colors.border)
             .child(timecode)
@@ -3787,7 +3790,7 @@ impl TimelineGpuiPanel {
 
     fn build_ruler(
         &self,
-        theme_colors: &ThemeColor,
+        theme_colors: &Colors,
         bpm: BpmGrid,
         loop_range: Option<LoopRange>,
         cache_band: Vec<Range<u64>>,
@@ -3809,7 +3812,7 @@ impl TimelineGpuiPanel {
                 let fr = state.frame_rate();
                 let area_width: f32 = bounds.size.width.into();
 
-                window.paint_quad(fill(bounds, colors.tab_bar));
+                window.paint_quad(fill(bounds, colors.tab_bar()));
 
                 let border_bounds = Bounds::new(
                     point(
@@ -3823,16 +3826,16 @@ impl TimelineGpuiPanel {
                 // Beat lines sit under the frame ticks: the two grids are
                 // independent and are shown together, so the frame ruler must
                 // stay the one that carries the labels.
-                paint_beat_lines(&state, bpm, bounds, &colors, window);
+                paint_beat_lines(&state, bpm, bounds, window);
 
                 let (minor_interval, major_interval) = tick_intervals(ppf, fr);
                 if minor_interval == 0 || major_interval == 0 {
                     // The end still has to be visible when the tick maths
                     // degenerates (`LOW-APP-05`).
                     if let Some(range) = loop_range {
-                        paint_loop_range(&state, range, bounds, &colors, window);
+                        paint_loop_range(&state, range, bounds, window);
                     }
-                    paint_cache_band(&state, &cache_band, bounds, &colors, window);
+                    paint_cache_band(&state, &cache_band, bounds, window);
                     paint_out_of_range(&state, bounds, &colors, window);
                     return;
                 }
@@ -3911,12 +3914,12 @@ impl TimelineGpuiPanel {
                 // Over the ticks and labels: the band says which span plays,
                 // and a band the ruler draws through reads as a gradient.
                 if let Some(range) = loop_range {
-                    paint_loop_range(&state, range, bounds, &colors, window);
+                    paint_loop_range(&state, range, bounds, window);
                 }
                 // Over both bands: the strip is 3 px of fact and the ticks
                 // rise from the same edge, so drawing it earlier would let
                 // them cut it into dashes.
-                paint_cache_band(&state, &cache_band, bounds, &colors, window);
+                paint_cache_band(&state, &cache_band, bounds, window);
                 // Last, so the ticks and labels past the composition end are
                 // knocked back with everything else — the lane paints its
                 // band over its content for the same reason.
@@ -4090,7 +4093,7 @@ impl TimelineGpuiPanel {
 
     fn build_layer_area(
         &self,
-        theme_colors: &ThemeColor,
+        theme_colors: &Colors,
         bpm: BpmGrid,
         area_origin: Rc<Cell<(f32, f32)>>,
         cx: &App,
@@ -4153,7 +4156,7 @@ impl TimelineGpuiPanel {
                 let area_width: f32 = bounds.size.width.into();
 
                 window.paint_quad(fill(bounds, colors.background));
-                paint_beat_lines(&state, bpm, bounds, &colors, window);
+                paint_beat_lines(&state, bpm, bounds, window);
 
                 // Vertical culling, the counterpart of the horizontal culling
                 // the bars already do. The canvas is as tall as the whole
@@ -4361,14 +4364,14 @@ impl TimelineGpuiPanel {
     /// Timeline adapter around the axis-agnostic curve editor widget.
     fn build_curve_editor_shell(
         &self,
-        theme_colors: &ThemeColor,
+        theme_colors: &Colors,
         area_origin: Rc<Cell<(f32, f32)>>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let state = self.state.clone();
         let colors = *theme_colors;
         let content_height = self.total_layer_height().max(LAYER_ROW_HEIGHT);
-        let resolved = selected_timeline_curves(&self.state, theme_colors);
+        let resolved = selected_timeline_curves(&self.state);
         let has_live_curves = !resolved.is_empty();
         let auto_value_bounds = curve_value_bounds(&resolved)
             .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
@@ -4643,7 +4646,7 @@ impl TimelineGpuiPanel {
     }
 
     fn build_layer_headers(&mut self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let theme = cx.theme().clone();
+        let theme = cx.tokens().clone();
         // Every selected layer is highlighted, not just the primary one
         // (REQ-UI-013 multi-selection).
         let selection = super::layer_selection(cx);
@@ -4658,7 +4661,7 @@ impl TimelineGpuiPanel {
             .flex_col()
             .border_r_1()
             .border_color(theme.colors.border)
-            .bg(theme.colors.list);
+            .bg(theme.colors.background);
 
         // Only the rows on screen are built. A composition's header column is a
         // div/button subtree and a `visible_property_rows` walk per layer, and
@@ -4707,9 +4710,9 @@ impl TimelineGpuiPanel {
         for (i, (layer_id, name, solo, muted, locked)) in layers.iter().enumerate() {
             let is_selected = selection.contains(*layer_id);
             let bg = if is_selected {
-                theme.colors.list_active
+                theme.colors.selected_surface()
             } else {
-                theme.colors.list
+                theme.colors.background
             };
             let lid = *layer_id;
             let is_expanded = expanded_layers[i];
@@ -4908,7 +4911,7 @@ impl TimelineGpuiPanel {
                             .flex()
                             .items_center()
                             .pl(px(20.0))
-                            .bg(theme.colors.list)
+                            .bg(theme.colors.background)
                             .cursor_pointer()
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -5013,9 +5016,9 @@ impl TimelineGpuiPanel {
                                     .pr_1()
                                     .gap_1()
                                     .bg(if is_selected {
-                                        theme.colors.list_active
+                                        theme.colors.selected_surface()
                                     } else {
-                                        theme.colors.list
+                                        theme.colors.background
                                     })
                                     .cursor_pointer()
                                     .on_mouse_down(
@@ -5083,7 +5086,7 @@ impl Focusable for TimelineGpuiPanel {
 
 impl Render for TimelineGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.tokens().clone();
         // Composition 0 (REQ-UI-013): there is no ruler, no stack and no
         // transport range to draw, so the panel says so instead of showing
         // an empty timeline that looks broken.
@@ -5226,7 +5229,7 @@ impl Render for TimelineGpuiPanel {
                             .items_center()
                             .justify_end()
                             .px_1()
-                            .bg(theme.colors.tab_bar)
+                            .bg(theme.colors.tab_bar())
                             .border_r_1()
                             .border_color(theme.colors.border)
                             .child(
@@ -5830,7 +5833,7 @@ fn graph_transform(
 fn curve_grid_canvas(
     state: TimelinePanel,
     value_bounds: (f64, f64),
-    colors: ThemeColor,
+    colors: Colors,
     visible: bool,
 ) -> impl IntoElement {
     canvas(
@@ -5928,7 +5931,7 @@ fn curve_grid_canvas(
     .size_full()
 }
 
-fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<TimelineCurveData> {
+fn selected_timeline_curves(state: &TimelinePanel) -> Vec<TimelineCurveData> {
     let mut series = Vec::new();
     for selected in state.selected_channels() {
         let Some(layer) = state.layer(selected.layer) else {
@@ -5946,13 +5949,7 @@ fn selected_timeline_curves(state: &TimelinePanel, colors: &ThemeColor) -> Vec<T
         if curve.is_empty() {
             continue;
         }
-        let color = match series.len() % 5 {
-            0 => colors.chart_1,
-            1 => colors.chart_2,
-            2 => colors.chart_3,
-            3 => colors.chart_4,
-            _ => colors.chart_5,
-        };
+        let color = timeline_colors::ramp(series.len());
         series.push(TimelineCurveData {
             channel: selected.clone(),
             curve: Arc::new(curve.clone()),
@@ -6087,7 +6084,7 @@ fn make_toggle(
     label: &str,
     active: bool,
     tooltip: SharedString,
-    colors: &ThemeColor,
+    colors: &Colors,
 ) -> Stateful<Div> {
     let text_color = if active {
         colors.primary
@@ -6118,7 +6115,7 @@ fn make_toggle(
 fn paint_out_of_range(
     state: &TimelinePanel,
     bounds: Bounds<Pixels>,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let Some((x, width)) = state.out_of_range_span(f64::from(f32::from(bounds.size.width))) else {
@@ -6173,7 +6170,6 @@ fn paint_loop_range(
     state: &TimelinePanel,
     range: LoopRange,
     bounds: Bounds<Pixels>,
-    colors: &ThemeColor,
     window: &mut Window,
 ) {
     let Some((x, width)) = state.loop_range_span(range, f64::from(f32::from(bounds.size.width)))
@@ -6186,15 +6182,15 @@ fn paint_loop_range(
         Bounds::new(origin(x), size(px(width as f32), height)),
         Hsla {
             alpha: LOOP_RANGE_ALPHA,
-            // A chart hue for the same reason the beat lines use one: never
+            // A ramp hue for the same reason the beat lines use one: never
             // mistakable for the playhead (`primary`) or a layer bar.
-            ..colors.chart_1
+            ..timeline_colors::ramp(0)
         },
     ));
     for edge in [x, x + width - 1.0] {
         window.paint_quad(fill(
             Bounds::new(origin(edge.max(0.0)), size(px(2.0), height)),
-            colors.chart_1,
+            timeline_colors::ramp(0),
         ));
     }
 }
@@ -6212,7 +6208,6 @@ fn paint_cache_band(
     state: &TimelinePanel,
     ranges: &[Range<u64>],
     bounds: Bounds<Pixels>,
-    colors: &ThemeColor,
     window: &mut Window,
 ) {
     if ranges.is_empty() {
@@ -6227,7 +6222,7 @@ fn paint_cache_band(
                 point(bounds.origin.x + px(x as f32), top),
                 size(px(width as f32), px(CACHE_BAND_HEIGHT)),
             ),
-            colors.success,
+            timeline_colors::CACHE_BAND_COLOR,
         ));
     }
 }
@@ -6238,7 +6233,6 @@ fn paint_beat_lines(
     state: &TimelinePanel,
     bpm: BpmGrid,
     bounds: Bounds<Pixels>,
-    colors: &ThemeColor,
     window: &mut Window,
 ) {
     let ppf = state.pixels_per_frame();
@@ -6261,9 +6255,9 @@ fn paint_beat_lines(
             ),
             Hsla {
                 alpha: BEAT_LINE_ALPHA,
-                // A chart hue, so a beat line never reads as the playhead
+                // A ramp hue, so a beat line never reads as the playhead
                 // (`primary`) or as a layer bar (`accent`).
-                ..colors.chart_2
+                ..timeline_colors::ramp(1)
             },
         ));
     }
@@ -6274,7 +6268,7 @@ fn paint_bar_label(
     x: Pixels,
     y: Pixels,
     max_h: Pixels,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -6287,7 +6281,7 @@ fn paint_bar_label(
         &[TextRun {
             len: text_len,
             font,
-            color: colors.accent_foreground,
+            color: colors.readable_on(colors.accent),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -6347,7 +6341,7 @@ pub fn channel_name_label(name: &str) -> String {
     }
 }
 
-fn layer_color(layer: &Layer, colors: &ThemeColor) -> Hsla {
+fn layer_color(layer: &Layer, colors: &Colors) -> Hsla {
     // Layer "kinds" are creation templates; at runtime a layer is its
     // network. Layers without a frame output (null layers) render muted.
     if layer.has_frame_output() {
@@ -6764,12 +6758,11 @@ mod tests {
             true,
         );
 
-        let colors = ThemeColor::default();
-        let resolved = selected_timeline_curves(&state, &colors);
+        let resolved = selected_timeline_curves(&state);
         assert_eq!(resolved.len(), 1, "constant selected channels are skipped");
         assert_eq!(resolved[0].frame_offset, -15);
         assert_eq!(resolved[0].curve.as_ref(), &curve);
-        assert_eq!(resolved[0].color, colors.chart_1);
+        assert_eq!(resolved[0].color, timeline_colors::ramp(0));
     }
 
     /// The graph view plots the int row as a staircase and refuses the step
@@ -6825,8 +6818,7 @@ mod tests {
         state.select_channel(int_channel, false);
         state.select_channel(step_channel, true);
 
-        let colors = ThemeColor::default();
-        let resolved = selected_timeline_curves(&state, &colors);
+        let resolved = selected_timeline_curves(&state);
         assert_eq!(resolved.len(), 1, "the step row contributes no series");
         assert_eq!(resolved[0].curve.as_ref(), &curve);
         assert!(
@@ -6852,7 +6844,6 @@ mod tests {
                     ravel_core::types::Vec2(0.0, 0.0),
                 ),
         );
-        let colors = ThemeColor::default();
         let channel = TimelineChannelRef {
             layer: LayerId::new(1),
             row: PropertyRowId::Shell(PropertyGroup::Opacity),
@@ -6862,7 +6853,7 @@ mod tests {
             channel: channel.clone(),
             curve: Arc::new(bezier),
             frame_offset: 0,
-            color: colors.chart_1,
+            color: timeline_colors::ramp(0),
             integral: false,
         }])
         .unwrap();
@@ -6875,7 +6866,7 @@ mod tests {
             channel,
             curve: Arc::new(flat),
             frame_offset: 0,
-            color: colors.chart_1,
+            color: timeline_colors::ramp(0),
             integral: false,
         }])
         .unwrap();
@@ -6905,7 +6896,7 @@ mod tests {
                 channel,
                 curve: Arc::new(curve),
                 frame_offset: 10,
-                color: ThemeColor::default().chart_1,
+                color: timeline_colors::ramp(0),
                 integral: false,
             }],
             0.0,
@@ -7891,7 +7882,7 @@ mod tests {
                 panel.sync_from_project(cx);
                 panel.state.select_channel(channel, false);
                 panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
-                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let curves = selected_timeline_curves(&panel.state);
                 let transform = CurveTransform::new(
                     CurvePoint::new(0.0, 0.0),
                     CurvePoint::new(20.0, 100.0),
@@ -7950,7 +7941,7 @@ mod tests {
                     },
                     false,
                 );
-                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let curves = selected_timeline_curves(&panel.state);
                 let transform = CurveTransform::new(
                     CurvePoint::new(0.0, 0.0),
                     CurvePoint::new(20.0, 100.0),
@@ -8029,7 +8020,7 @@ mod tests {
                     keyframe_ref(layer_id, &row, 0, 0),
                     keyframe_ref(layer_id, &row, 0, 10),
                 ]);
-                let curves = selected_timeline_curves(&panel.state, &ThemeColor::default());
+                let curves = selected_timeline_curves(&panel.state);
                 let transform = CurveTransform::new(
                     CurvePoint::new(0.0, 0.0),
                     CurvePoint::new(20.0, 100.0),

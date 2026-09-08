@@ -18,7 +18,6 @@
 //! document store, and this panel resyncs through its project observer.
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
@@ -39,6 +38,7 @@ use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_network};
 use ravel_ui::properties::expression;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -2989,7 +2989,7 @@ impl NodeEditorPanel {
     }
 
     fn build_breadcrumb_bar(&self, cx: &mut Context<Self>) -> Div {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let crumbs = self.breadcrumbs(cx);
 
         let mut bar = div()
@@ -3000,7 +3000,7 @@ impl NodeEditorPanel {
             .h(px(24.0))
             .flex_shrink_0()
             .overflow_hidden()
-            .bg(colors.tab_bar)
+            .bg(colors.tab_bar())
             .border_b_1()
             .border_color(colors.border)
             .text_xs();
@@ -3065,7 +3065,7 @@ impl Render for NodeEditorPanel {
         let node_sizes = self.node_sizes.clone();
         let canvas_origin = self.canvas_origin.clone();
         let edge_style = self.edge_style;
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let draft_line = match &self.drag {
             DragMode::Connect {
                 from,
@@ -3156,7 +3156,7 @@ impl Render for NodeEditorPanel {
                 .bottom_2()
                 .px_2()
                 .py_1()
-                .bg(colors.popover)
+                .bg(colors.raised_surface())
                 .border_1()
                 .border_color(colors.border)
                 .rounded_md()
@@ -3926,7 +3926,7 @@ impl Render for NodeEditorPanel {
                         div()
                             .w(px(180.0))
                             .p_1()
-                            .bg(colors.popover)
+                            .bg(colors.raised_surface())
                             .border_1()
                             .border_color(colors.border)
                             .rounded_md()

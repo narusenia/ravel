@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
-use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
+use ravel_widgets::tokens::Colors;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -174,7 +174,7 @@ pub fn paint_background(bounds: &Bounds<Pixels>, bg: Hsla, window: &mut Window) 
 pub fn paint_grid(
     bounds: &Bounds<Pixels>,
     viewport: &Viewport,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let spacing = 20.0 * viewport.zoom;
@@ -219,7 +219,7 @@ pub fn paint_edges(
     bounds: &Bounds<Pixels>,
     selected_edges: &HashSet<EdgeId>,
     edge_style: super::EdgeStyle,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -398,7 +398,7 @@ impl TimingLevel {
         }
     }
 
-    fn color(self, colors: &ThemeColor) -> Hsla {
+    fn color(self, colors: &Colors) -> Hsla {
         match self {
             Self::Critical => hsla(0.0, 0.85, 0.60, 1.0),
             Self::Warn => hsla(0.13, 0.90, 0.60, 1.0),
@@ -409,7 +409,7 @@ impl TimingLevel {
 
 /// Load color of the readout: muted → yellow → red as the node gets more
 /// expensive.
-pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
+pub fn eval_duration_color(duration: Duration, colors: &Colors) -> Hsla {
     TimingLevel::of(duration).color(colors)
 }
 
@@ -475,7 +475,7 @@ pub fn paint_nodes(
     categories: &HashMap<NodeId, NodeCategory>,
     labels: &HashMap<NodeId, String>,
     show_param_values: bool,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -552,7 +552,7 @@ fn paint_single_node(
     category: Option<NodeCategory>,
     z: f32,
     show_param_values: bool,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -1139,7 +1139,7 @@ pub fn paint_connection_draft(
     from: (f32, f32),
     to: (f32, f32),
     bounds: &Bounds<Pixels>,
-    _colors: &ThemeColor,
+    _colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -1169,7 +1169,7 @@ pub fn paint_selection_box(
     start: (f32, f32),
     current: (f32, f32),
     bounds: &Bounds<Pixels>,
-    _colors: &ThemeColor,
+    _colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -1765,7 +1765,7 @@ mod tests {
     /// The readout escalates muted → yellow → red with load.
     #[test]
     fn eval_duration_color_escalates_with_load() {
-        let colors = ThemeColor::default();
+        let colors = Colors::dark();
         let ok = eval_duration_color(Duration::from_millis(2), &colors);
         assert_eq!(ok, colors.muted_foreground);
         let warn = eval_duration_color(Duration::from_millis(15), &colors);

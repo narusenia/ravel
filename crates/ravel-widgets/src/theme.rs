@@ -33,7 +33,62 @@ impl Global for ActiveRavelTheme {}
 /// `cx.refresh_windows()` it already owes for the components that borrow
 /// gpui-component's theme.
 pub fn set_active_tokens(theme: RavelTheme, cx: &mut App) {
+    project_onto_gpui_base(&theme, cx);
     cx.set_global(ActiveRavelTheme(theme));
+}
+
+/// Copy the tokens `gpui-base` paints text with onto its own palette.
+///
+/// **Ravel's schema stays authoritative; this is one more derivation from it**,
+/// the same direction `ravel-app` derives gpui-component's `ThemeConfig`. It
+/// exists because one borrowed part paints *ink* rather than a frame:
+/// `InputState` lays out the glyphs, the caret and the selection itself, and it
+/// resolves their colours from `gpui_base::Theme` on every frame
+/// (`InputEditorStyle::resolved`). Nothing wrote that global, so it fell back
+/// to `gpui-base`'s own light default — which is invisible-to-illegible on
+/// Ravel's dark background.
+///
+/// The alternative was for [`crate::Input`] to project the style itself, which
+/// is what gpui-component does: it calls `set_editor_style` from `render`,
+/// every frame, on the state it was handed. That is a state mutation inside
+/// `render`, and doing it here instead — once, where the palette actually
+/// changes — is both correct and cheaper.
+///
+/// **Only the names that mean the same thing in both schemas are copied.** The
+/// caret and the text selection are deliberately *not* among them: `gpui-base`
+/// derives the caret from `foreground` and the selection from `accent` at 40%
+/// alpha, with its own documented reason ("a selection must not hide the
+/// glyphs it selects"), so feeding it Ravel's `foreground` and `accent` gets
+/// Ravel's selection and caret out of Ravel's tokens without this crate
+/// inventing two colours the theme schema does not model.
+fn project_onto_gpui_base(theme: &RavelTheme, cx: &mut App) {
+    let colors = &theme.colors;
+    let base = gpui_base::Theme::global_mut(cx);
+
+    base.appearance = match theme.mode {
+        crate::tokens::ThemeMode::Dark => gpui_base::ThemeAppearance::Dark,
+        crate::tokens::ThemeMode::Light => gpui_base::ThemeAppearance::Light,
+    };
+
+    let base = &mut base.tokens.colors;
+    base.background = colors.background;
+    base.foreground = colors.foreground;
+    // `surface` is what an input resolves its own background from, and in
+    // Ravel an input sits on the panel's ground — see `input_layers`.
+    base.surface = colors.background;
+    base.surface_foreground = colors.foreground;
+    base.muted_foreground = colors.muted_foreground;
+    base.accent = colors.accent;
+    base.accent_foreground = colors.readable_on(colors.accent);
+    base.primary = colors.primary;
+    base.primary_foreground = colors.readable_on(colors.primary);
+    base.secondary = colors.secondary;
+    base.secondary_foreground = colors.readable_on(colors.secondary);
+    base.destructive = colors.danger;
+    base.destructive_foreground = colors.readable_on(colors.danger);
+    base.border = colors.border;
+    base.input = colors.border;
+    base.ring = colors.focus_ring();
 }
 
 /// Reach the tokens in force.

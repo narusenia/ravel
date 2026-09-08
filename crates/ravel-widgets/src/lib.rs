@@ -26,6 +26,8 @@ pub mod button;
 pub mod curve_editor;
 pub mod curve_view;
 pub mod icon;
+pub mod input;
+pub mod number_input;
 pub mod theme;
 pub mod tokens;
 pub mod tooltip;
@@ -45,6 +47,25 @@ pub use curve_view::{
 pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
 
 pub use icon::{Icon, IconPath, UiIcon};
+
+pub use input::{Input, InputFace, InputLayers, frame_is_focused, input_layers};
+
+pub use number_input::NumberInput;
+
+/// The text-editing engine the two input widgets are built on, re-exported.
+///
+/// These are `gpui-base`'s own types — the same ones gpui-component re-exported
+/// rather than defined, which is why moving the widgets onto `gpui-base`
+/// changes no behaviour. They are surfaced here so a host does not need
+/// `gpui-base` as a direct dependency just to name the state it owns, the way
+/// [`TooltipOverlay`] already is.
+///
+/// [`InputState`] is where everything about the *value* lives — the
+/// placeholder, the default, disabled and read-only, the step size and range,
+/// the validation pattern. [`crate::Input`] and [`crate::NumberInput`] decide
+/// appearance and read that state; they never write to it.
+pub use gpui_base::input::{Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, NumberStep};
+pub use gpui_base::{Decrement, Increment, StepAction};
 
 pub use tooltip::{
     GRACE_PERIOD, SHOW_DELAY, Tooltip, TooltipExt, install_tooltip_overlay, tooltip_overlay,

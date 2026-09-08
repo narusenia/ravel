@@ -7,8 +7,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ravel-core = { workspace = true }
 gpui = { workspace = true }
+# The unstyled interaction/focus/accessibility primitives the widgets are built
+# on. `gpui-component` is deliberately absent — see the crate docs.
+gpui-base = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# `examples/gallery` only.
+gpui_platform = { workspace = true }
+gpui-kit-assets = { workspace = true }

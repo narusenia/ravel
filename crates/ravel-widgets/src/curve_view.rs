@@ -6,11 +6,11 @@
 //!
 //! Both curve editors — the Timeline's keyframe graph
 //! ([`super::curve_editor`]) and the Properties inline editor for curve
-//! parameters ([`super::param_curve_editor`]) — need the same three things:
-//! an automatic range fitted to the data, an optional range the user pinned
-//! instead, and "nice" tick values for whatever range ends up visible. Keeping
-//! one implementation is what makes zooming, fitting, and the grid behave
-//! identically in both places.
+//! parameters (`ravel-app`'s `widgets::param_curve_editor`) — need the same
+//! three things: an automatic range fitted to the data, an optional range the
+//! user pinned instead, and "nice" tick values for whatever range ends up
+//! visible. Keeping one implementation is what makes zooming, fitting, and the
+//! grid behave identically in both places.
 //!
 //! The range is **view state**. It never reaches the Document, so it records
 //! no undo step and undo never changes it.

@@ -742,16 +742,16 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | UIX-0 | ✅ | 不変条件 12 個を `.agents/rules/ux.md` に文書化し `ravel-review` に組み込み | — |
 | UIX-1 | ✅ | **`ravel-widgets` の作成**と Ravel 独自テーマスキーマの定義。`ThemeConfig` の導出は `ravel-app`。配線しない | — |
 | UIX-2 | ✅ | `ravel-widgets` に `gpui-base` を足し、既存 6189 行を移設 + `examples/gallery` | KIT-1 / UIX-1 |
-| UIX-3 | 🟡 | トークンの配線、ハードコード 24 箇所の除去、`lint-patterns.sh` にリテラル禁止 | UIX-1 / UIX-2 |
+| UIX-3 | 🟡 | トークンの配線、**ハードコード色 62 箇所**（`hsla(` 56 + `rgb(0x` 6、2026-09-08 実測。計画書の「24」は古い）の除去、`lint-patterns.sh` にリテラル禁止。**`param_curve_editor` / `param_ramp_editor` の `ravel-widgets` への移設もここ**（`ActiveTheme` が外れれば移せる） | UIX-1 / UIX-2 |
 | UIX-4 | ✅ | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で（4 状態 + Tab 順 + Enter / Space） | UIX-2 |
-| UIX-4b | 🟡 | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を移設。状態型（`InputState` / `InputEvent` / `Escape`）は **base からの再エクスポートなので import のパスだけ**（125 箇所）。`scrub_input`（AE 式の横ドラッグ）と `number_input`（増減ボタン）は**用途が違うので両方持つ** | UIX-4 ✅ |
+| UIX-4b | ✅ | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を移設。状態型（`InputState` / `InputEvent` / `Escape`）は **base からの再エクスポートなので import のパスだけ**（125 箇所）。`scrub_input`（AE 式の横ドラッグ）と `number_input`（増減ボタン）は**用途が違うので両方持つ** | UIX-4 ✅ |
 | UIX-5 | ⬜ | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24）。**compact の `font_size` もここで決める** — `UIX-4b` で `.xsmall()` の `text_xs`(12px) が失われ、両段が `text.font_size`(14px) になった。20px の行に 14px は DCC の慣習より大きい。トークンが 1 つ増えるので `UIX-4b` では発明しなかった | UIX-3 |
 | UIX-6 | ⬜ | 不変条件 1〜4 の違反を潰す（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | UIX-0 |
 | UIX-7 | ⬜ | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 |
 | UIX-8 | ⬜ | ユーザーテーマディレクトリ（`themes_dir()` を複数候補に、ユーザー側が勝つ、**watch を自前に持つ** — 借りた `watch_dir` は導出を挟めない、**`ravel.schema.json` の同梱**、書き方の文書）。**`RavelThemes` の陳腐化もここで閉じる** — `UIX-4` が入れた `register_ravel_themes` は起動時に 1 度しか挿さないので、テーマファイルを編集すると gpui-component 側だけ再読み込みされ、Ravel のトークンが古いまま残る（削除されたテーマの行も残る） | UIX-1 ✅ |
 | UIX-9 | ⬜ | 文書更新（`ui-impl-status.md`、`gpui-ui-guide.md` の「部品を追加する」節） | UIX-4〜UIX-8 |
 | UIX-10 | 🟡 | 矢印キーを所有する要素のキー文脈を定義し、グローバルバインドの除外リストに入れる（`←` / `→` が `playback.step_forward` と衝突。`MED-APP-16` の 3 段目） | — |
-| UIX-11 | ⬜ | `color_picker` を自前で作る（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ）。**既存の undo の契約を壊さない** — 即時適用 + 静穏期間後に 1 段（`color_picker_gesture_commits_one_undo_step` が固定） | UIX-4b / UIX-10 |
+| UIX-11 | 🟡 | `color_picker` を自前で作る（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ）。**既存の undo の契約を壊さない** — 即時適用 + 静穏期間後に 1 段（`color_picker_gesture_commits_one_undo_step` が固定） | UIX-4b / UIX-10 |
 
 **`UIX-0` / `UIX-1` は `KIT-1` と並行できる**（文書と型定義だけでパネルを
 触らない）。`UIX-2` 以降は `gpui-base` がツリーに入るまで書けない。

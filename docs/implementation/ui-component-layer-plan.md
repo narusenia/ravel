@@ -18,7 +18,7 @@ Ravel の UI は「動く」ところまで来ている（`docs/ui-impl-status.m
   だけ**（`muted_foreground` 12 / `border` 7 / `foreground` 4 / `danger` 3 /
   `primary` 2 / `accent` 2 / `secondary` / `info` / `drop_target` /
   `background`）。**間隔・字送り・モーションのトークンは 1 つも無い**
-- **ハードコードされた色が 24 箇所**（`properties.rs` 6 / `param_ramp_editor` 4
+- **ハードコードされた色が 24 箇所**（この節は 2026-09-07 の実測。**2026-09-08 に数え直すと 62 箇所** — `hsla(` 56 + `rgb(0x` 6 で、当初は `rgb(0x` だけを数えていた）（`properties.rs` 6 / `param_ramp_editor` 4
   / `viewer` 系 10 / `composition_form` 3 / `panels/mod.rs` 1）
 - **行高が場所ごとに違う。** `outliner` 22 / `attribute_spreadsheet` 22 /
   `palette` 26 / `media_bin` 28 / `timeline` のレイヤー行 28・プロパティ行 20。
@@ -519,7 +519,7 @@ crates/ravel-widgets/          ← 新規
 | 9 | **文書が変わったら派生キャッシュを捨てる** | `MED-APP-08` |
 | 10 | **キーボードだけで到達・起動・離脱できる** — Tab 順 / Enter・Space / Escape / 見えるリング | 該当 issue なし（`tab_index` が 0 なので起票されていない） |
 | 11 | **状態のフィードバックだけ動く。** 値・レイアウトは即時 | 該当なし（モーションが無いので破れていない） |
-| 12 | **色・間隔・字送りはトークン経由。** リテラルを書かない | ハードコード 24 箇所 |
+| 12 | **色・間隔・字送りはトークン経由。** リテラルを書かない | ハードコード色 62 箇所 |
 
 11 と 12 は**新しく守るもの**、1〜10 は**既に破られているもの**である。
 
@@ -568,7 +568,7 @@ Properties の全パラメータに、後者をダイアログの寸法・フレ
 | `UIX-0` | 不変条件を **`.agents/rules/ux.md`** に文書化し、`ravel-review` の検査手順に入れる | — |
 | `UIX-1` | **`ravel-widgets` クレートを作り**（`gpui` + `serde` のみ）、**Ravel 独自のテーマスキーマ**を定義する。gpui-component の `ThemeConfig` の導出は `ravel-app` 側。**まだ配線しない** | — |
 | `UIX-2` | `ravel-widgets` に `gpui-base` を足し、既存 6189 行を移設。`examples/gallery` を作る | `KIT-1` / `UIX-1` |
-| `UIX-3` | `tokens.rs` を配線し、ハードコード 24 箇所を潰す。`lint-patterns.sh` にリテラル禁止を追加 | `UIX-1` / `UIX-2` |
+| `UIX-3` | `tokens.rs` を配線し、**ハードコード色 62 箇所**を潰す。`lint-patterns.sh` にリテラル禁止を追加。`param_*_editor` の移設もここ | `UIX-1` / `UIX-2` |
 | `UIX-4` | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で作る。4 状態 + Tab 順 + Enter / Space | `UIX-2` |
 | `UIX-4b` | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を `ravel-widgets` へ移す | `UIX-4` |
 | `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24）。**compact の `font_size` もここ**（下記） | `UIX-3` |
@@ -647,7 +647,7 @@ Properties の全パラメータに、後者をダイアログの寸法・フレ
 
 ### 作業
 
-- `tokens.rs` を配線し、**ハードコード 24 箇所を潰す**
+- `tokens.rs` を配線し、**ハードコード色 62 箇所を潰す**（`hsla(` 56 + `rgb(0x` 6。2026-09-08 実測）
 - `scripts/lint-patterns.sh` に追加:
   - `tokens.rs` 以外での `rgb(0x` / `rgba(0x` / `hsla(`
   - `tokens.rs` 以外での生の `px(<数値>)`（レイアウト定数）

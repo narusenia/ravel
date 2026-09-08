@@ -6069,6 +6069,7 @@ dependencies = [
  "gpui_ce_platform",
  "ravel-i18n",
  "ravel-ui",
+ "ravel-widgets",
 ]
 
 [[package]]

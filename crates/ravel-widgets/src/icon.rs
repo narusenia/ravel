@@ -30,6 +30,87 @@ pub trait IconPath {
     fn icon_path(self) -> SharedString;
 }
 
+/// The shape-named glyphs: chevrons, a plus, an ellipsis.
+///
+/// `ravel-app`'s `RavelIcon` names icons after what they *mean* in Ravel —
+/// `ZoomFit`, `NodeSubnet`, `SafeAreas` — because that is what a panel asks
+/// for. These fourteen are the opposite: a widget needs "the chevron that points down"
+/// with no opinion about why, and naming them `PropertiesGroupExpanded` would
+/// invent meaning the drawing does not have.
+///
+/// They are the set the borrowed `gpui_component::IconName` was used for, and
+/// **no new SVG rides along**: every path here already resolves through
+/// `ravel-app`'s `RavelAssets`, from Ravel's own `assets/icons/` where it has
+/// one and from `gpui-kit-assets` (Apache-2.0, compatible with Ravel's
+/// `Apache-2.0 OR MIT`) otherwise. Naming a path is not depending on the
+/// bytes: which files exist stays the host `AssetSource`'s business, and
+/// `ravel-app`'s `every_ui_glyph_resolves_through_the_asset_source` is what
+/// holds the two ends together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiIcon {
+    ChevronDown,
+    ChevronLeft,
+    ChevronRight,
+    ChevronUp,
+    Copy,
+    Delete,
+    Ellipsis,
+    ExternalLink,
+    FolderClosed,
+    Frame,
+    Network,
+    Plus,
+    Settings,
+    TriangleAlert,
+}
+
+impl UiIcon {
+    /// Every glyph, for the tests and the gallery.
+    pub const ALL: [Self; 14] = [
+        Self::ChevronDown,
+        Self::ChevronLeft,
+        Self::ChevronRight,
+        Self::ChevronUp,
+        Self::Copy,
+        Self::Delete,
+        Self::Ellipsis,
+        Self::ExternalLink,
+        Self::FolderClosed,
+        Self::Frame,
+        Self::Network,
+        Self::Plus,
+        Self::Settings,
+        Self::TriangleAlert,
+    ];
+
+    /// The asset path of this glyph.
+    pub fn icon_path(self) -> SharedString {
+        match self {
+            Self::ChevronDown => "icons/chevron-down.svg",
+            Self::ChevronLeft => "icons/chevron-left.svg",
+            Self::ChevronRight => "icons/chevron-right.svg",
+            Self::ChevronUp => "icons/chevron-up.svg",
+            Self::Copy => "icons/copy.svg",
+            Self::Delete => "icons/delete.svg",
+            Self::Ellipsis => "icons/ellipsis.svg",
+            Self::ExternalLink => "icons/external-link.svg",
+            Self::FolderClosed => "icons/folder-closed.svg",
+            Self::Frame => "icons/frame.svg",
+            Self::Network => "icons/network.svg",
+            Self::Plus => "icons/plus.svg",
+            Self::Settings => "icons/settings.svg",
+            Self::TriangleAlert => "icons/triangle-alert.svg",
+        }
+        .into()
+    }
+}
+
+impl IconPath for UiIcon {
+    fn icon_path(self) -> SharedString {
+        UiIcon::icon_path(self)
+    }
+}
+
 /// An SVG icon at a fixed size.
 #[derive(IntoElement)]
 pub struct Icon {

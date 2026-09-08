@@ -44,7 +44,7 @@ pub use curve_view::{
 
 pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
 
-pub use icon::{Icon, IconPath};
+pub use icon::{Icon, IconPath, UiIcon};
 
 pub use tooltip::{SHOW_DELAY, Tooltip, TooltipExt};
 

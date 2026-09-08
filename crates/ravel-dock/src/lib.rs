@@ -19,11 +19,13 @@
 pub mod content;
 pub mod dock;
 pub mod layout_math;
+pub mod menu;
 pub mod path;
 
 pub use content::PaneContent;
 pub use dock::{AreaAction, DockEvent, DockRoot};
 pub use layout_math::DropZone;
+pub use menu::{MenuButton, MenuTrigger};
 pub use path::{
     NodePath, SplitSide, activate_tab, apply_area_action, apply_tab_drop, lead_split_child,
     set_ratio_at, tab_drop_changes_layout,

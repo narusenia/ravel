@@ -181,6 +181,7 @@ pub struct Button {
     tab_index: isize,
     tab_stop: bool,
     on_click: Option<ClickHandler>,
+    debug_selector: Option<String>,
     style: StyleRefinement,
 }
 
@@ -202,6 +203,7 @@ impl Button {
             tab_index: 0,
             tab_stop: true,
             on_click: None,
+            debug_selector: None,
             style: StyleRefinement::default(),
         }
     }
@@ -308,6 +310,29 @@ impl Button {
         self
     }
 
+    /// A key an integration test can look this button's bounds up under.
+    ///
+    /// Forwards to GPUI's `InteractiveElement::debug_selector`, which is a
+    /// no-op in a release build. It is here rather than left to the call site
+    /// because the alternative is wrapping the button in a carrier `div` to
+    /// hold the selector, and a wrapper in a dialog footer is a layout change
+    /// made for a test's benefit — the thing UX invariant 11 exists to stop.
+    /// The closure is called eagerly, exactly as GPUI's own does under
+    /// `test-support`; `cfg` cannot help here, because `test-support` is
+    /// GPUI's feature and this crate is not the one compiling the test.
+    pub fn debug_selector(mut self, selector: impl FnOnce() -> String) -> Self {
+        self.debug_selector = Some(selector());
+        self
+    }
+
+    /// The button's element id.
+    ///
+    /// Exposed for a wrapper that has to name the same element — the menu
+    /// trigger in `ravel-dock` is the one caller.
+    pub fn id(&self) -> &ElementId {
+        &self.id
+    }
+
     /// Whether the button shows nothing but an icon, and is therefore square.
     fn is_icon_only(&self) -> bool {
         self.label.is_none() && self.children.is_empty()
@@ -412,6 +437,9 @@ impl RenderOnce for Button {
             })
             .when_some(self.on_click, |button, on_click| {
                 button.on_click(move |event, window, cx| on_click(event, window, cx))
+            })
+            .when_some(self.debug_selector, |button, selector| {
+                button.debug_selector(|| selector)
             })
             .when_some(self.tooltip, |button, text| {
                 crate::tooltip::TooltipExt::ravel_tooltip(button, text)
@@ -724,6 +752,71 @@ mod tests {
 
     struct TabHarness {
         handles: Vec<FocusHandle>,
+    }
+
+    /// A selected button is still a tab stop, and a disabled one is not.
+    /// Getting the first wrong would make every toggled toolbar button
+    /// unreachable from the keyboard — UX invariant 10 — and nothing else in
+    /// the suite would notice.
+    struct StateTabHarness {
+        handles: Vec<FocusHandle>,
+    }
+
+    impl Render for StateTabHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("state-tabs")
+                .tab_group()
+                .child(
+                    Button::new("plain")
+                        .track_focus(&self.handles[0])
+                        .size(px(20.0)),
+                )
+                .child(
+                    Button::new("selected")
+                        .track_focus(&self.handles[1])
+                        .selected(true)
+                        .size(px(20.0)),
+                )
+                .child(
+                    Button::new("disabled")
+                        .track_focus(&self.handles[2])
+                        .disabled(true)
+                        .size(px(20.0)),
+                )
+                .child(
+                    Button::new("after")
+                        .track_focus(&self.handles[3])
+                        .size(px(20.0)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn selection_keeps_a_tab_stop_and_disabling_removes_one(cx: &mut TestAppContext) {
+        let handles = cx.update(|cx| (0..4).map(|_| cx.focus_handle()).collect::<Vec<_>>());
+        let (_, cx) = cx.add_window_view({
+            let handles = handles.clone();
+            move |_, _| StateTabHarness { handles }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                (0..4)
+                    .find(|i| handles[*i].is_focused(window))
+                    .expect("nothing is focused")
+            })
+        };
+
+        cx.update(|window, cx| window.focus_next(cx));
+        assert_eq!(focused(cx), 0);
+
+        cx.update(|window, cx| window.focus_next(cx));
+        assert_eq!(focused(cx), 1, "a selected button lost its tab stop");
+
+        cx.update(|window, cx| window.focus_next(cx));
+        assert_eq!(focused(cx), 3, "Tab stopped on the disabled button");
     }
 
     impl Render for TabHarness {

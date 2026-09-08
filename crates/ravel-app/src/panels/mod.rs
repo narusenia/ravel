@@ -1347,7 +1347,7 @@ impl Render for PlaceholderPanel {
             .justify_center()
             .border_t_1()
             .border_color(cx.tokens().colors.border)
-            .text_color(rgb(0x888888))
+            .text_color(cx.tokens().colors.muted_foreground)
             .track_focus(&self.focus_handle)
             .child(SharedString::from(label))
     }

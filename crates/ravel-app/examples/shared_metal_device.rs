@@ -15,9 +15,7 @@
 //!
 //! Run with: `cargo run -p ravel-app --example shared_metal_device`
 
-use gpui::{
-    App, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
-};
+use gpui::{App, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px, size};
 
 struct SharedMetalDeviceDemo {
     status: String,
@@ -84,12 +82,12 @@ impl Render for SharedMetalDeviceDemo {
             .flex()
             .flex_col()
             .gap_2()
-            .bg(rgb(0x303030))
+            .bg(ravel_widgets::tokens::Colors::dark().accent)
             .size_full()
             .justify_center()
             .items_center()
             .p_4()
-            .text_color(rgb(0xffffff))
+            .text_color(ravel_widgets::tokens::Colors::dark().foreground)
             .child(self.status.clone())
     }
 }

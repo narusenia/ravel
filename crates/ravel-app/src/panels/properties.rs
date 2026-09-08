@@ -7965,7 +7965,7 @@ mod tests {
         // the display encoding is undone, so a primary cannot tell a working
         // conversion from a missing one. Half-way in display light is about
         // 0.21 linear, and the stored stop is linear (`CM-2`).
-        let picked = gpui::rgb_to_hsla(gpui::rgb(0x808080));
+        let picked = gpui::rgb_to_hsla(gpui::Rgba::new(0.5, 0.5, 0.5, 1.0));
         let rgba = gpui::hsla_to_rgba(picked);
         let expected =
             ColorSpace::DISPLAY.to_linear([rgba.color.red, rgba.color.green, rgba.color.blue])[0];

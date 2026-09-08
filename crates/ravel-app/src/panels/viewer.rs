@@ -3952,7 +3952,7 @@ impl Render for ViewerPanel {
                 color.r, color.g, color.b, color.a,
             )))
         })()
-        .unwrap_or_else(|| gpui::rgb_to_hsla(rgb(0x000000)));
+        .unwrap_or_else(gpui::black);
 
         // The ruler is the one mark that is not an overlay: it is pinned to the
         // panel's edges, which the composition rectangle leaves entirely as
@@ -3993,7 +3993,7 @@ impl Render for ViewerPanel {
                             paint_checkerboard(window, frame_bounds, bounds);
                         }
                         ViewerBackgroundMode::Solid => {
-                            window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                            window.paint_quad(fill(frame_bounds, gpui::black()));
                         }
                     }
                     if let Some(image) = image.clone()

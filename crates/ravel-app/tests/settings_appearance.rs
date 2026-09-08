@@ -183,7 +183,7 @@ fn choosing_a_theme_swaps_the_light_and_dark_slots(cx: &mut TestAppContext) {
     // other theme the mode switch might have reached for.
     assert_eq!(
         background(cx),
-        gpui::rgb_to_hsla(gpui::rgb(0x654321)),
+        ravel_widgets::tokens::parse_hex_color("#654321").expect("the fixture's hex parses"),
         "the dark slot's own palette is what dark mode paints"
     );
 }

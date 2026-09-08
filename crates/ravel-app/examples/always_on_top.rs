@@ -9,9 +9,7 @@
 
 use std::time::Duration;
 
-use gpui::{
-    App, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
-};
+use gpui::{App, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px, size};
 
 struct AlwaysOnTopDemo;
 
@@ -52,11 +50,11 @@ impl Render for AlwaysOnTopDemo {
             .flex()
             .flex_col()
             .gap_2()
-            .bg(rgb(0x303030))
+            .bg(ravel_widgets::tokens::Colors::dark().accent)
             .size(px(400.0))
             .justify_center()
             .items_center()
-            .text_color(rgb(0xffffff))
+            .text_color(ravel_widgets::tokens::Colors::dark().foreground)
             .child("Always-on-top toggles every 3s (see stderr)")
     }
 }

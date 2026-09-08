@@ -192,7 +192,7 @@ impl RenderOnce for Icon {
 mod tests {
     use super::*;
     use crate::tokens::COMPACT_ICON_SIZE;
-    use gpui::{Length, hsla, px, rems};
+    use gpui::{Length, px, rems};
 
     #[derive(Clone, Copy)]
     enum TestIcon {
@@ -212,7 +212,7 @@ mod tests {
     }
 
     fn ambient() -> Hsla {
-        hsla(0.0, 0.0, 0.5, 1.0)
+        crate::tokens::Colors::light().muted_foreground
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn an_explicit_colour_survives_the_fallback() {
-        let named = hsla(0.5, 0.5, 0.5, 1.0);
+        let named = crate::tokens::Colors::light().primary;
         let mut painted = Icon::new(TestIcon::ChevronDown)
             .text_color(named)
             .into_svg(ambient());

@@ -257,7 +257,7 @@ pub fn paint_edges(
         let tx = tx + ox;
         let ty = ty + oy;
 
-        let highlight = hsla(0.55, 0.7, 0.6, 1.0);
+        let highlight = colors.primary;
         let is_selected = selected_edges.contains(&edge.id);
         let color = if is_selected { highlight } else { normal_color };
         let stroke_w = if is_selected { 3.0 } else { 2.0 };
@@ -582,7 +582,7 @@ fn paint_single_node(
         alpha: 0.95,
         ..colors.background
     });
-    let highlight = hsla(0.55, 0.7, 0.6, 1.0);
+    let highlight = colors.primary;
     let node_border = dim(if selected { highlight } else { colors.border });
     let border_w = if selected { 2.0 } else { 1.0 };
 
@@ -1139,7 +1139,7 @@ pub fn paint_connection_draft(
     from: (f32, f32),
     to: (f32, f32),
     bounds: &Bounds<Pixels>,
-    _colors: &Colors,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -1150,7 +1150,7 @@ pub fn paint_connection_draft(
     let tx = ox + to.0;
     let ty = oy + to.1;
 
-    let draft_color = hsla(0.55, 0.7, 0.6, 1.0);
+    let draft_color = colors.primary;
 
     let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
     let mut builder = PathBuilder::stroke(px(2.0));
@@ -1169,7 +1169,7 @@ pub fn paint_selection_box(
     start: (f32, f32),
     current: (f32, f32),
     bounds: &Bounds<Pixels>,
-    _colors: &Colors,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -1190,7 +1190,7 @@ pub fn paint_selection_box(
         },
     );
 
-    let highlight = hsla(0.55, 0.7, 0.6, 1.0);
+    let highlight = colors.primary;
     let fill_color = Hsla {
         alpha: 0.08,
         ..highlight

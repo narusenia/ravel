@@ -1,10 +1,17 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Reusable Ravel-specific widgets (gpui-component independent).
+//! Ravel-specific widgets that still live in the application.
+//!
+//! The gpui-component-independent geometry moved to `ravel-widgets`
+//! ([`curve_editor`], [`curve_view`]) and is re-exported here so the panels and
+//! the widgets still in this module keep one import path. What stays is what
+//! borrows from gpui-component: `scrub_input` wraps its `Input`, and the two
+//! `param_*_editor` widgets read its theme and use its `Icon` / `Tooltip`
+//! until `UIX-3` / `UIX-4` replace those.
 
-pub mod curve_editor;
-pub mod curve_view;
+pub use ravel_widgets::{curve_editor, curve_view};
+
 pub mod param_curve_editor;
 pub mod param_ramp_editor;
 pub mod scrub_input;

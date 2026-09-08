@@ -6167,7 +6167,11 @@ dependencies = [
 name = "ravel-widgets"
 version = "0.1.0"
 dependencies = [
+ "gpui-base",
  "gpui-ce",
+ "gpui-kit-assets",
+ "gpui_ce_platform",
+ "ravel-core",
  "serde",
  "serde_json",
 ]

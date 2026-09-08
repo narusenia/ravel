@@ -377,7 +377,13 @@ impl Colors {
 
     /// The surface of something that floats above the window (a Tooltip).
     pub fn raised_surface(&self) -> Hsla {
-        mix(self.background, gpui::black(), RAISED_MIX)
+        // Forced opaque. `mix` keeps the base's alpha on purpose, and a theme
+        // may write `background` as `#RRGGBBAA`; a translucent floating
+        // surface would show the panel through the tooltip, which is the one
+        // thing a floating surface must not do.
+        let mut surface = mix(self.background, gpui::black(), RAISED_MIX);
+        surface.alpha = 1.0;
+        surface
     }
 
     /// `base`, moved `amount` of the way toward [`Colors::foreground`].
@@ -399,11 +405,29 @@ impl Colors {
     /// "mid" — and a relative luminance of 0.07, so a lightness rule would
     /// put near-black text on it and produce a 1.4:1 label.
     pub fn readable_on(&self, surface: Hsla) -> Hsla {
+        // Measured against what the eye actually sees. `relative_luminance`
+        // reads r/g/b only, so a translucent surface would be judged by its
+        // raw colour rather than by the composite it paints as — and a theme
+        // may write `primary` as `#RRGGBBAA`. Composite it over `background`
+        // first, which is what it sits on.
+        let surface = self.composited(surface);
         if contrast_ratio(surface, self.foreground) >= contrast_ratio(surface, self.background) {
             self.foreground
         } else {
             self.background
         }
+    }
+
+    /// `surface` as it appears once painted on [`Colors::background`].
+    ///
+    /// Opaque input is returned unchanged, so the common path costs nothing.
+    fn composited(&self, surface: Hsla) -> Hsla {
+        if surface.alpha >= 1.0 {
+            return surface;
+        }
+        let mut composited = mix(self.background, surface, surface.alpha);
+        composited.alpha = 1.0;
+        composited
     }
 }
 
@@ -721,6 +745,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::contrast_ratio as contrast_ratio_for_test;
     use super::*;
 
     fn spec(json: &str) -> ThemeSpec {
@@ -1082,6 +1107,56 @@ mod tests {
             colors.readable_on(colors.primary),
             colors.background,
             "pure blue is dark by luminance, so it takes the light label"
+        );
+    }
+
+    /// A theme may write `background` as `#RRGGBBAA`, and `mix` keeps the
+    /// base's alpha on purpose. A floating surface that inherited it would
+    /// show the panel through the tooltip.
+    #[test]
+    fn the_raised_surface_stays_opaque_under_a_translucent_background() {
+        let colors = Colors {
+            background: parse_hex_color("#F9F9F980").unwrap(),
+            ..Colors::light()
+        };
+        assert_eq!(
+            colors.background.alpha,
+            128.0 / 255.0,
+            "the theme is see-through"
+        );
+        assert_eq!(
+            colors.raised_surface().alpha,
+            1.0,
+            "the floating surface is not"
+        );
+    }
+
+    /// `relative_luminance` reads r/g/b only, so a translucent surface has to
+    /// be composited before its contrast is measured — otherwise the label is
+    /// chosen for a colour that is never painted.
+    #[test]
+    fn a_translucent_primary_takes_the_label_for_what_it_composites_to() {
+        // 20% of a near-black blue over a white panel reads as light, so the
+        // label has to be the dark end even though the raw token is dark.
+        let colors = Colors {
+            primary: parse_hex_color("#00003033").unwrap(),
+            ..Colors::light()
+        };
+        let raw_label = if contrast_ratio_for_test(colors.primary, colors.foreground)
+            >= contrast_ratio_for_test(colors.primary, colors.background)
+        {
+            colors.foreground
+        } else {
+            colors.background
+        };
+        assert_eq!(
+            raw_label, colors.background,
+            "judged raw, the near-black token would take the light label"
+        );
+        assert_eq!(
+            colors.readable_on(colors.primary),
+            colors.foreground,
+            "judged as painted, 20% of it over white is light and takes the dark label"
         );
     }
 

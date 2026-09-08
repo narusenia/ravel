@@ -3171,7 +3171,7 @@ impl Render for NodeEditorPanel {
         let canvas_area = div()
             .id("node-editor-canvas")
             .relative()
-            .flex_grow()
+            .flex_grow_1()
             .overflow_hidden()
             .cursor(canvas_cursor)
             .on_mouse_down(

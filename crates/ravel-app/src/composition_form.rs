@@ -152,7 +152,7 @@ impl CompositionForm {
                     .text_color(cx.theme().colors.muted_foreground)
                     .child(SharedString::from(field_label(key))),
             )
-            .child(div().flex_grow().child(control))
+            .child(div().flex_grow_1().child(control))
     }
 }
 
@@ -251,19 +251,18 @@ fn format_fps(fps: f64) -> String {
 /// it and confirms.
 fn hsla_from_rgba(color: ravel_core::types::Color) -> Hsla {
     let display = ravel_core::color::ColorSpace::DISPLAY.from_linear([color.r, color.g, color.b]);
-    Hsla::from(Rgba {
-        r: display[0],
-        g: display[1],
-        b: display[2],
-        a: color.a,
-    })
+    gpui::rgb_to_hsla(Rgba::new(display[0], display[1], display[2], color.a))
 }
 
 /// The inverse. Must stay a pair with [`hsla_from_rgba`].
 fn rgba_from_hsla(hsla: Hsla) -> ravel_core::types::Color {
-    let rgba = Rgba::from(hsla);
-    let linear = ravel_core::color::ColorSpace::DISPLAY.to_linear([rgba.r, rgba.g, rgba.b]);
-    ravel_core::types::Color::new(linear[0], linear[1], linear[2], rgba.a)
+    let rgba = gpui::hsla_to_rgba(hsla);
+    let linear = ravel_core::color::ColorSpace::DISPLAY.to_linear([
+        rgba.color.red,
+        rgba.color.green,
+        rgba.color.blue,
+    ]);
+    ravel_core::types::Color::new(linear[0], linear[1], linear[2], rgba.alpha)
 }
 
 /// Title of the dialog that hosts the form.
@@ -323,9 +322,9 @@ mod tests {
     fn the_background_picker_speaks_the_display_space() {
         // 0.5 linear is sRGB 0.7354; the picker must not show 0.5.
         let linear = Color::new(0.5, 0.5, 0.5, 1.0);
-        let shown = Rgba::from(hsla_from_rgba(linear));
-        assert!((shown.r - 0.735_356_9).abs() < 1e-3, "{shown:?}");
-        assert_eq!(shown.a, 1.0, "alpha carries no transfer function");
+        let shown = gpui::hsla_to_rgba(hsla_from_rgba(linear));
+        assert!((shown.color.red - 0.735_356_9).abs() < 1e-3, "{shown:?}");
+        assert_eq!(shown.alpha, 1.0, "alpha carries no transfer function");
 
         // And a value that came out of a v8 migration survives the trip.
         let migrated = Color::new(0.214_041_1, 0.05, 0.9, 0.5);

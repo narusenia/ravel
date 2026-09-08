@@ -30,7 +30,7 @@
 //! is `[AnimationChannel; 2]`, two independent time curves, and spatial
 //! interpolation would mean changing that representation everywhere.
 
-use gpui::Hsla;
+use gpui::{Hsla, hsla};
 use ravel_core::composition::Layer;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::EvalContext;
@@ -53,20 +53,10 @@ pub const MAX_MOTION_SAMPLES: usize = 256;
 
 /// The trajectory: dimmer than the selection accent, because it is context for
 /// the layer rather than a thing being pointed at.
-const PATH_COLOR: Hsla = Hsla {
-    h: 0.58,
-    s: 0.45,
-    l: 0.75,
-    a: 0.7,
-};
+const PATH_COLOR: Hsla = hsla(0.58, 0.45, 0.75, 0.7);
 
 /// The key marks, in the selection accent: these are grabbable.
-const KEY_COLOR: Hsla = Hsla {
-    h: 0.58,
-    s: 0.7,
-    l: 0.6,
-    a: 0.95,
-};
+const KEY_COLOR: Hsla = hsla(0.58, 0.7, 0.6, 0.95);
 
 /// Screen-pixel side length of a key mark.
 const KEY_MARK_PX: f32 = 7.0;

@@ -124,7 +124,7 @@ impl WorkspaceLayoutsForm {
             .justify_between()
             .gap_2()
             .py(px(2.0))
-            .child(div().flex_grow().truncate().text_sm().child(name))
+            .child(div().flex_grow_1().truncate().text_sm().child(name))
             .child(
                 Button::new(SharedString::from(format!("layout-apply-{apply}")))
                     .xsmall()
@@ -186,7 +186,7 @@ impl Render for WorkspaceLayoutsForm {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_grow().child(Input::new(&self.name).small()))
+                    .child(div().flex_grow_1().child(Input::new(&self.name).small()))
                     .child(
                         Button::new("layout-save-current")
                             .small()

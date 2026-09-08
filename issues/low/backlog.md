@@ -390,7 +390,7 @@ gpui へ渡す側は `chord_to_gpui_string` が `secondary-` へ変換して解�
 `AnySettingField::reset` を実際に呼ぶテストで配線ごと固定できているので、
 非対称はライブラリ側にある。書き込みのロジック自体は `app_settings::update` を
 直接呼ぶテストが覆っている。
-→ fork（`narusenia/gpui-component`）の `AnySettingField` に値の取得 / 設定を
+→ fork（`narusenia/gpui-kit-ravel`）の `AnySettingField` に値の取得 / 設定を
 足して配線をテストする。**pinned git dependency の変更**なので着手前に要確認
 （`.agents/rules/rust.md`）。`SET-12`（キーバインドの割り当て編集）が同じ
 seam を必要とするので、その前が自然なタイミング。

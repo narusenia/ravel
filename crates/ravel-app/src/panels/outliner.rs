@@ -845,7 +845,7 @@ impl OutlinerGpuiPanel {
             && super::active_composition(cx) != Some(row.comp());
         let text_color = if inactive_child {
             Hsla {
-                a: 0.5,
+                alpha: 0.5,
                 ..colors.muted_foreground
             }
         } else if matches!(row.kind, OutlinerRowKind::UnusedGroup { .. }) {
@@ -975,14 +975,14 @@ impl OutlinerGpuiPanel {
                             _ => {}
                         }
                     }))
-                    .child(div().flex_grow().child(Input::new(&input).xsmall()))
+                    .child(div().flex_grow_1().child(Input::new(&input).xsmall()))
             }
             None => content.child(
                 // `min_w_0` lets the label shrink below its text width so
                 // `truncate` can ellipsize it; without it the label keeps its
                 // intrinsic width and pushes the trailing badges out of view.
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .min_w_0()
                     .truncate()
                     .when(index == 0, |label| {
@@ -1274,7 +1274,7 @@ impl Render for OutlinerGpuiPanel {
         let mut tree = div()
             .id("outliner-tree")
             .debug_selector(|| "outliner-panel".into())
-            .flex_grow()
+            .flex_grow_1()
             .flex()
             .flex_col()
             .overflow_y_scroll()

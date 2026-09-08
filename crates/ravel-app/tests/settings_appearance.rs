@@ -183,7 +183,7 @@ fn choosing_a_theme_swaps_the_light_and_dark_slots(cx: &mut TestAppContext) {
     // other theme the mode switch might have reached for.
     assert_eq!(
         background(cx),
-        gpui::rgb(0x654321).into(),
+        gpui::rgb_to_hsla(gpui::rgb(0x654321)),
         "the dark slot's own palette is what dark mode paints"
     );
 }

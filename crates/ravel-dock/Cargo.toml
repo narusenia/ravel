@@ -15,4 +15,4 @@ gpui-component = { workspace = true }
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true }
-gpui-component-assets = { workspace = true }
+gpui-kit-assets = { workspace = true }

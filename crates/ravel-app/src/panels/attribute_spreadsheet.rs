@@ -439,7 +439,7 @@ impl Render for AttributeSpreadsheetGpuiPanel {
             .child(tabs)
             .child(match empty {
                 Some(empty) => div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -448,7 +448,7 @@ impl Render for AttributeSpreadsheetGpuiPanel {
                     .child(SharedString::from(t!(empty.message_key())))
                     .into_any_element(),
                 None => div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .overflow_hidden()
                     // Dense rows: a spreadsheet is read by scanning many
                     // elements at once, so how many fit on screen matters more

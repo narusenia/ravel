@@ -6,7 +6,7 @@
 //! colors are drawn from the port palette (same hues as `port_color`) so
 //! a node's header and its port dots tell one consistent type story.
 
-use gpui::Hsla;
+use gpui::{Hsla, hsla};
 use ravel_core::id::DataTypeId;
 use ravel_core::registry::NodeCategory;
 
@@ -62,74 +62,19 @@ pub fn port_shape(data_type: DataTypeId) -> PortShape {
 
 pub fn port_color(data_type: DataTypeId) -> Hsla {
     match data_type {
-        DataTypeId::FRAME_BUFFER => Hsla {
-            h: 0.08,
-            s: 0.85,
-            l: 0.55,
-            a: 1.0,
-        },
-        DataTypeId::SCALAR => Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.6,
-            a: 1.0,
-        },
-        DataTypeId::VEC2 | DataTypeId::VEC3 | DataTypeId::VEC4 => Hsla {
-            h: 0.75,
-            s: 0.65,
-            l: 0.55,
-            a: 1.0,
-        },
-        DataTypeId::COLOR => Hsla {
-            h: 0.15,
-            s: 0.85,
-            l: 0.55,
-            a: 1.0,
-        },
-        DataTypeId::TIME_CODE => Hsla {
-            h: 0.58,
-            s: 0.70,
-            l: 0.50,
-            a: 1.0,
-        },
-        DataTypeId::AUDIO_BUFFER => Hsla {
-            h: 0.35,
-            s: 0.70,
-            l: 0.45,
-            a: 1.0,
-        },
-        DataTypeId::PLAIN_TEXT => Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.85,
-            a: 1.0,
-        },
-        DataTypeId::GEOMETRY => Hsla {
-            h: 0.48,
-            s: 0.70,
-            l: 0.50,
-            a: 1.0,
-        },
-        DataTypeId::FIELD => Hsla {
-            h: 0.86,
-            s: 0.68,
-            l: 0.56,
-            a: 1.0,
-        },
+        DataTypeId::FRAME_BUFFER => hsla(0.08, 0.85, 0.55, 1.0),
+        DataTypeId::SCALAR => hsla(0.0, 0.0, 0.6, 1.0),
+        DataTypeId::VEC2 | DataTypeId::VEC3 | DataTypeId::VEC4 => hsla(0.75, 0.65, 0.55, 1.0),
+        DataTypeId::COLOR => hsla(0.15, 0.85, 0.55, 1.0),
+        DataTypeId::TIME_CODE => hsla(0.58, 0.70, 0.50, 1.0),
+        DataTypeId::AUDIO_BUFFER => hsla(0.35, 0.70, 0.45, 1.0),
+        DataTypeId::PLAIN_TEXT => hsla(0.0, 0.0, 0.85, 1.0),
+        DataTypeId::GEOMETRY => hsla(0.48, 0.70, 0.50, 1.0),
+        DataTypeId::FIELD => hsla(0.86, 0.68, 0.56, 1.0),
         // Chartreuse: the widest gap left in the palette, a tenth of the hue
         // circle from both the colour (0.15) and the audio (0.35) hues.
-        DataTypeId::SCENE => Hsla {
-            h: 0.25,
-            s: 0.70,
-            l: 0.50,
-            a: 1.0,
-        },
-        _ => Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.5,
-            a: 1.0,
-        },
+        DataTypeId::SCENE => hsla(0.25, 0.70, 0.50, 1.0),
+        _ => hsla(0.0, 0.0, 0.5, 1.0),
     }
 }
 

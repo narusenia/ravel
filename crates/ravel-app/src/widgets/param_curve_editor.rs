@@ -1270,7 +1270,7 @@ fn paint_label(
     window.paint_quad(fill(
         Bounds::new(origin, size(width, height)),
         Hsla {
-            a: 0.82,
+            alpha: 0.82,
             ..background
         },
     ));
@@ -1286,6 +1286,7 @@ fn paint_label(
             background_color: None,
             underline: None,
             strikethrough: None,
+            letter_spacing: None,
         }],
         Some(width),
     );
@@ -1358,7 +1359,7 @@ fn paint_grid(
         window.paint_quad(fill(
             Bounds::new(point(x, bounds.origin.y), size(px(1.0), bounds.size.height)),
             Hsla {
-                a: if zero { GRID_ZERO_ALPHA } else { GRID_ALPHA },
+                alpha: if zero { GRID_ZERO_ALPHA } else { GRID_ALPHA },
                 ..line
             },
         ));
@@ -1387,7 +1388,7 @@ fn paint_grid(
         window.paint_quad(fill(
             Bounds::new(point(bounds.origin.x, y), size(bounds.size.width, px(1.0))),
             Hsla {
-                a: if zero { GRID_ZERO_ALPHA } else { GRID_ALPHA },
+                alpha: if zero { GRID_ZERO_ALPHA } else { GRID_ALPHA },
                 ..line
             },
         ));
@@ -1759,7 +1760,7 @@ impl RenderOnce for ParamCurveEditor {
                     state.fit(cx);
                 }),
             );
-        point_row = point_row.child(div().flex_grow()).child(modes).child(fit);
+        point_row = point_row.child(div().flex_grow_1()).child(modes).child(fit);
 
         // Row 2: the visible range of each axis.
         let range_row = div()

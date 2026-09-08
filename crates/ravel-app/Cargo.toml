@@ -18,7 +18,7 @@ default = []
 ffmpeg = ["ravel-audio/ffmpeg", "ravel-media/ffmpeg", "ravel-nodes/ffmpeg"]
 
 [dependencies]
-gpui-component-assets = { workspace = true }
+gpui-kit-assets = { workspace = true }
 rust-embed = { workspace = true }
 # The GUI is the half of the workspace that opens an output device.
 ravel-audio = { workspace = true, features = ["playback"] }
@@ -69,6 +69,13 @@ wgpu = { workspace = true }
 # later commit.
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_platform = { workspace = true, features = ["wgpu"] }
+# **And the surface API that renderer unlocks.** On Windows the fork gates
+# `SurfaceSource::Texture`, `Window::paint_surface`, `gpu_context_full()` and
+# `gpu_device_lost()` behind `gpui/wgpu-surfaces`; the line above already turns
+# it on through `gpui_windows/wgpu`, but the crate that *calls* those four is
+# this one, so it says so itself rather than inheriting the feature from a
+# sibling's graph.
+gpui = { workspace = true, features = ["wgpu-surfaces"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

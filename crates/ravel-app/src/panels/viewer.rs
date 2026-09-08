@@ -3939,14 +3939,11 @@ impl Render for ViewerPanel {
         let composition_background = (|| {
             let project = cx.try_global::<ProjectStateHandle>()?.0.upgrade()?;
             let color = project.read(cx).active_composition(cx)?.background_color;
-            Some(Hsla::from(gpui::Rgba {
-                r: color.r,
-                g: color.g,
-                b: color.b,
-                a: color.a,
-            }))
+            Some(gpui::rgb_to_hsla(gpui::Rgba::new(
+                color.r, color.g, color.b, color.a,
+            )))
         })()
-        .unwrap_or_else(|| rgb(0x000000).into());
+        .unwrap_or_else(|| gpui::rgb_to_hsla(rgb(0x000000)));
 
         // The ruler is the one mark that is not an overlay: it is pinned to the
         // panel's edges, which the composition rectangle leaves entirely as
@@ -3991,8 +3988,14 @@ impl Render for ViewerPanel {
                         }
                     }
                     if let Some(image) = image.clone()
-                        && let Err(err) =
-                            window.paint_image(frame_bounds, Corners::default(), image, 0, false)
+                        && let Err(err) = window.paint_image(
+                            frame_bounds,
+                            frame_bounds,
+                            Corners::default(),
+                            image,
+                            0,
+                            false,
+                        )
                     {
                         tracing::error!(%err, "failed to paint viewer image");
                     }

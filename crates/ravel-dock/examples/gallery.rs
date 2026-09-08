@@ -284,7 +284,7 @@ fn main() {
         eprintln!("[gallery] locale load failed, menus will show raw keys: {e}");
     }
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(gpui_kit_assets::Assets)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             gpui_component::Theme::sync_system_appearance(None, cx);

@@ -96,12 +96,7 @@ struct RampDrag {
 /// gradient far darker than it renders.
 pub fn display_hsla(color: Color) -> Hsla {
     let display = ColorSpace::DISPLAY.from_linear([color.r, color.g, color.b]);
-    Hsla::from(Rgba {
-        r: display[0],
-        g: display[1],
-        b: display[2],
-        a: color.a,
-    })
+    gpui::rgb_to_hsla(Rgba::new(display[0], display[1], display[2], color.a))
 }
 
 pub struct ParamRampEditorState {
@@ -813,7 +808,7 @@ impl RenderOnce for ParamRampEditor {
                     .flex_shrink_0()
                     .py(px(2.0))
                     .child(toolbar)
-                    .child(div().flex_grow())
+                    .child(div().flex_grow_1())
                     .child(modes),
             )
     }
@@ -1136,11 +1131,11 @@ mod tests {
     #[test]
     fn stops_are_painted_in_the_display_encoding() {
         let mid = display_hsla(Color::new(0.5, 0.5, 0.5, 1.0));
-        let rgba = gpui::Rgba::from(mid);
+        let rgba = gpui::hsla_to_rgba(mid);
         assert!(
-            rgba.r > 0.6,
+            rgba.color.red > 0.6,
             "linear 0.5 is well above 0.5 once encoded: {}",
-            rgba.r
+            rgba.color.red
         );
     }
 }

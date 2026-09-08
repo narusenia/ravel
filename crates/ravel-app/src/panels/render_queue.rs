@@ -136,7 +136,7 @@ impl RenderQueueGpuiPanel {
                     )
                     .child(
                         div()
-                            .flex_grow()
+                            .flex_grow_1()
                             .text_xs()
                             .truncate()
                             .child(SharedString::from(heading)),
@@ -199,7 +199,7 @@ impl Render for RenderQueueGpuiPanel {
         let mut list = div()
             .id("render-queue-list")
             .debug_selector(|| "render-queue-panel".into())
-            .flex_grow()
+            .flex_grow_1()
             .flex()
             .flex_col()
             .overflow_y_scroll();

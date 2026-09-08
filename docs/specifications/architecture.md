@@ -532,8 +532,8 @@ Ravel は UI フレームワークを**フォークして使う**。これは選
 
 | 依存 | フォーク | 固定方法 |
 |---|---|---|
-| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `dd4cc74` |
-| `gpui-component` / `-assets` | `narusenia/gpui-component` | rev `8327eb4` |
+| `gpui` / `gpui_platform` | `narusenia/gpui-ce-ravel` | rev `a93d6cc` |
+| `gpui-component` / `gpui-base` / `gpui-kit-assets` | `narusenia/gpui-kit-ravel` | rev `5789c1c` |
 
 系譜は `zed-industries/zed` の gpui → gpui-ce（コミュニティ版）→
 `gpui-ce-ravel`。`gpui-component` は上流が Zed の gpui を参照するので、
@@ -542,6 +542,13 @@ Ravel は UI フレームワークを**フォークして使う**。これは選
 `gpui-ce-ravel` へ寄せている。これが `cargo tree -i gpui` を 1 本に保つ仕組みで、
 2 節のどちらかを落とすと gpui が 2 本になり型が食い違う。`gpui_macros` は
 patch していない（proc-macro で型を運ばないので 2 本入っても無害）。
+
+**gpui-kit 0.6 以降、`gpui-kit-ravel` は自分の `Cargo.toml` で `gpui` 一族を
+`gpui-ce-ravel` へ向けている**ので、上の 2 節が実際に効く場面は無くなった。
+それでも両方残すのは、上流の依存が Zed の gpui を再び引いたときに黙って
+2 本になるのを防ぐためで、消すなら `cargo tree -d` で gpui が 1 本のままだと
+確かめたうえで消す。両節の rev と `package` は
+`[workspace.dependencies]` と一致していなければならない。
 
 ### フォークに載せるもの / 載せないもの
 

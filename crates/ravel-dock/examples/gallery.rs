@@ -26,7 +26,7 @@ use ravel_dock::{
 use ravel_ui::layout::{PanelInstance, PanelInstanceId, WorkspaceLayout};
 use ravel_ui::preset::BuiltinPreset;
 use ravel_ui::window::WindowId;
-use ravel_widgets::Button;
+use ravel_widgets::{ActiveTokens as _, Button};
 
 /// A colored placeholder pane standing in for a real panel.
 struct DummyPane {
@@ -36,13 +36,15 @@ struct DummyPane {
 
 impl Render for DummyPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
+        // Five tokens that differ, so neighbouring dummy panes are separable.
+        // A real panel paints its own content; these only stand in for one.
         let accents = [
-            colors.chart_1,
-            colors.chart_2,
-            colors.chart_3,
-            colors.chart_4,
-            colors.chart_5,
+            colors.primary,
+            colors.info,
+            colors.danger,
+            colors.secondary,
+            colors.accent,
         ];
         let accent = accents[self.color_ix % accents.len()];
         div()
@@ -109,7 +111,7 @@ impl PaneContent for GalleryContent {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(cx.theme().muted_foreground)
+                        .text_color(cx.tokens().colors.muted_foreground)
                         .child("empty area"),
                 )
                 .into_any_element(),
@@ -220,7 +222,7 @@ impl GalleryApp {
     }
 
     fn toggle_theme(window: &mut Window, cx: &mut App) {
-        let next = if cx.theme().is_dark() {
+        let next = if cx.tokens().mode.is_dark() {
             ThemeMode::Light
         } else {
             ThemeMode::Dark
@@ -237,7 +239,7 @@ impl Render for GalleryApp {
             .gap_2()
             .p_2()
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.tokens().colors.border)
             .children(BuiltinPreset::ALL.map(|preset| {
                 let weak = weak.clone();
                 Button::new(preset.label_key())
@@ -312,6 +314,12 @@ fn main() {
             // Ravel's tokens rather than gpui-component's theme. Nothing here
             // reads a theme file, so both sides wear the built-in palette for
             // whichever mode the system chose.
+            //
+            // The one `cx.theme()` read left in this file, and it is a read
+            // *of* the borrowed side rather than a paint from it:
+            // `sync_system_appearance` above is what detected the system's
+            // choice, and Ravel's schema models no detector of its own. Every
+            // paint below goes through `cx.tokens()`.
             install_ravel_tokens(cx.theme().mode, cx);
             if let Err(e) = cx.open_window(
                 WindowOptions {

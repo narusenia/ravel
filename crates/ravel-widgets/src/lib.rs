@@ -22,6 +22,7 @@
 //! borrowed component (an `Input`, the window `Root`) is wired up in
 //! `ravel-app`, never here.
 
+pub mod button;
 pub mod curve_editor;
 pub mod curve_view;
 pub mod icon;
@@ -40,6 +41,8 @@ pub use curve_view::{
     CurveValueRange, format_value_label, grid_values, nice_value_step, padded_bounds,
     value_grid_values,
 };
+
+pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
 
 pub use icon::{Icon, IconPath};
 

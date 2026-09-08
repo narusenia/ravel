@@ -27,14 +27,14 @@ use std::collections::HashSet;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{self, Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, Sizable as _};
+use gpui_component::ActiveTheme;
 use ravel_core::graph::Graph;
 use ravel_core::id::NodeId;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_i18n::t;
 use ravel_ui::node_search::{SearchCandidate, filter_candidates};
 use ravel_widgets::Icon;
+use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 
 use crate::assets::RavelIcon;
 use crate::node_editor::painting::PortHit;
@@ -328,19 +328,19 @@ impl Render for SearchPalette {
             // The capture phase fires before the focused input's own handlers
             // (see the module docs): arrows move the row selection instead of
             // the text cursor, Enter picks the row, Escape closes.
-            .capture_action(cx.listener(|this, _: &input::MoveUp, _window, cx| {
+            .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
                 this.move_selection(-1, cx);
                 cx.stop_propagation();
             }))
-            .capture_action(cx.listener(|this, _: &input::MoveDown, _window, cx| {
+            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| {
                 this.move_selection(1, cx);
                 cx.stop_propagation();
             }))
-            .capture_action(cx.listener(|this, _: &input::Enter, _window, cx| {
+            .capture_action(cx.listener(|this, _: &Enter, _window, cx| {
                 this.accept_selected(cx);
                 cx.stop_propagation();
             }))
-            .capture_action(cx.listener(|_this, _: &input::Escape, _window, cx| {
+            .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
                 cx.emit(PaletteEvent::Dismiss);
                 cx.stop_propagation();
             }))
@@ -353,7 +353,7 @@ impl Render for SearchPalette {
                     .p_1()
                     .border_b_1()
                     .border_color(colors.border)
-                    .child(Input::new(&self.input).small()),
+                    .child(Input::new(&self.input)),
             )
             .child(chips)
             .child(

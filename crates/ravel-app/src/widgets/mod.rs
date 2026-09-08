@@ -3,18 +3,17 @@
 
 //! Ravel-specific widgets that still live in the application.
 //!
-//! The gpui-component-independent geometry moved to `ravel-widgets`
-//! ([`curve_editor`], [`curve_view`]) and is re-exported here so the panels and
-//! the widgets still in this module keep one import path. What stays is what
-//! borrows from gpui-component: `scrub_input` wraps its `Input`, and the two
-//! `param_*_editor` widgets read its theme. Their icons and tooltips are
-//! Ravel's own ([`ravel_widgets::Icon`], [`ravel_widgets::TooltipExt`]).
+//! The parts that no longer borrow from gpui-component live in
+//! `ravel-widgets` ([`curve_editor`], [`curve_view`], [`scrub_input`]) and are
+//! re-exported here so the panels keep one import path. What stays in this
+//! module is what still reads gpui-component's theme: the two
+//! `param_*_editor` widgets. Their icons and tooltips are already Ravel's own
+//! ([`ravel_widgets::Icon`], [`ravel_widgets::TooltipExt`]).
 
-pub use ravel_widgets::{curve_editor, curve_view};
+pub use ravel_widgets::{curve_editor, curve_view, scrub_input};
 
 pub mod param_curve_editor;
 pub mod param_ramp_editor;
-pub mod scrub_input;
 
 pub use curve_editor::{
     ControlPoint, CurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
@@ -29,4 +28,4 @@ pub use param_curve_editor::{
 pub use param_ramp_editor::{
     ParamRampEditor, ParamRampEditorState, ParamRampEvent, ramp_thumbnail,
 };
-pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
+pub use ravel_widgets::{ScrubEvent, ScrubInput, ScrubInputState};

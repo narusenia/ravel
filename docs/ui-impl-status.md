@@ -155,7 +155,7 @@ Popover・検索パレット・種別アイコン）Done
 | `ravel-ui/src/properties/exposed.rs` | 公開パラメータ宣言のセクション生成（行・既定値の表示形・解決不能理由のロケールキー） |
 | `ravel-ui/src/properties/media_asset.rs` | メディアアセット用セクション生成（probe の読み取り専用行、参照のパス形式と文字列、逆写像 `apply_media_asset_field`） |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
-| `ravel-app/src/widgets/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット） |
+| `ravel-widgets/src/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット）。テキスト編集は `ravel_widgets::Input` |
 | `ravel-app/src/widgets/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換と接線スナップは `widgets/curve_editor.rs` と共有） |
 | `ravel-app/src/widgets/param_ramp_editor.rs` | ParamRampEditor（`RampParam` のインラインエディタ。ドラッグのクランプ規則を `param_curve_editor` と共有。色は `ColorPicker` がパネル側にあるため状態だけ持つ） |
 | `ravel-app/src/widgets/curve_view.rs` | CurveValueRange（表示範囲のビュー状態）と目盛の刻み。Timeline のグラフエディタと Properties が共有 |

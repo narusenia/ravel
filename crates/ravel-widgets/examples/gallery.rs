@@ -52,11 +52,75 @@ use ravel_widgets::curve_view::{
 };
 use ravel_widgets::tokens::{Density, RavelTheme, ThemeMode, ThemeSpec};
 use ravel_widgets::{
-    Button, ButtonVariant, Icon, SHOW_DELAY, TooltipExt as _, TooltipOverlay, UiIcon, button_layers,
+    Button, ButtonVariant, Icon, Input, InputState, NumberInput, SHOW_DELAY, TooltipExt as _,
+    TooltipOverlay, UiIcon, button_layers, hex_color_string, input_layers,
 };
 
 /// One labelled block of the gallery.
-type SectionFn = fn(&RavelTheme) -> AnyElement;
+///
+/// The second argument exists for the two input sections: an `Input` paints an
+/// `Entity<InputState>` that the caller owns, and an entity can only be built
+/// with a window, so the states are made once when the gallery opens rather
+/// than in the section function. The sections that do not paint text ignore it.
+type SectionFn = fn(&RavelTheme, &GalleryInputs) -> AnyElement;
+
+/// One widget's three statically-showable states, at one density step.
+///
+/// The fourth state — focused — is not in here because it cannot be staged:
+/// it is what the *reader* produces by clicking or tabbing into a field, which
+/// is exactly the thing the input sections exist to demonstrate.
+struct StateRow {
+    rest: Entity<InputState>,
+    invalid: Entity<InputState>,
+    disabled: Entity<InputState>,
+}
+
+impl StateRow {
+    /// Three fresh states. One entity cannot serve two rows: each `Input`
+    /// derives its element id from the state's entity id, so the same state
+    /// painted twice in one frame would paint two elements with one id.
+    fn new(value: &str, window: &mut Window, cx: &mut App) -> Self {
+        fn make(
+            value: &str,
+            disabled: bool,
+            window: &mut Window,
+            cx: &mut App,
+        ) -> Entity<InputState> {
+            let value = value.to_string();
+            cx.new(|cx: &mut Context<InputState>| {
+                let mut state = InputState::new(window, cx).default_value(value);
+                if disabled {
+                    state.set_disabled(true, cx);
+                }
+                state
+            })
+        }
+        Self {
+            rest: make(value, false, window, cx),
+            invalid: make(value, false, window, cx),
+            disabled: make(value, true, window, cx),
+        }
+    }
+}
+
+/// Every `InputState` the gallery paints.
+struct GalleryInputs {
+    text: StateRow,
+    text_compact: StateRow,
+    number: StateRow,
+    number_compact: StateRow,
+}
+
+impl GalleryInputs {
+    fn new(window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            text: StateRow::new("Ravel", window, cx),
+            text_compact: StateRow::new("Ravel", window, cx),
+            number: StateRow::new("24", window, cx),
+            number_compact: StateRow::new("24", window, cx),
+        }
+    }
+}
 
 /// Every section the gallery shows, in order.
 ///
@@ -67,6 +131,14 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("Tokens", tokens_section),
     ("icon · UiIcon at both densities", icon_section),
     ("button · every variant against every state", button_section),
+    (
+        "input · the frame, its states, and a ring you can click",
+        input_section,
+    ),
+    (
+        "number_input · the same frame with a step on each side",
+        number_input_section,
+    ),
     ("tooltip · the popup and its delay", tooltip_section),
     ("curve_editor · curve_editor_canvas", curve_canvas_section),
     (
@@ -83,7 +155,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
 /// The tokens themselves: ten colors, four spacing steps, three row heights,
 /// two feedback durations, two radii. The visual baseline `UIX-3` wires the
 /// widgets up against.
-fn tokens_section(theme: &RavelTheme) -> AnyElement {
+fn tokens_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     let colors = [
         ("background", theme.colors.background),
         ("foreground", theme.colors.foreground),
@@ -177,7 +249,7 @@ fn tokens_section(theme: &RavelTheme) -> AnyElement {
 
 /// Three curves over an explicit data range — one per interpolation mode, plus
 /// the integral staircase.
-fn curve_canvas_section(theme: &RavelTheme) -> AnyElement {
+fn curve_canvas_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     let series = vec![
         series(bezier_curve(), theme.colors.primary, false, &[0, 24]),
         series(linear_curve(), theme.colors.info, false, &[]),
@@ -204,7 +276,7 @@ fn curve_canvas_section(theme: &RavelTheme) -> AnyElement {
 
 /// The same curves on the Timeline's axis: x is pixels per frame, so the
 /// visible frame range follows the canvas width instead of being given.
-fn curve_scaled_section(theme: &RavelTheme) -> AnyElement {
+fn curve_scaled_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     let series = vec![
         series(bezier_curve(), theme.colors.primary, false, &[]),
         series(linear_curve(), theme.colors.info, false, &[]),
@@ -233,7 +305,7 @@ fn curve_scaled_section(theme: &RavelTheme) -> AnyElement {
 /// `curve_view` is pure arithmetic (no painting of its own), so its outputs are
 /// shown as the numbers a caller would draw: the fitted range, the tick step,
 /// and the labelled grid values, for an auto range and a pinned one.
-fn curve_view_section(theme: &RavelTheme) -> AnyElement {
+fn curve_view_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     let data = (-0.85_f64, 0.85_f64);
     let auto = padded_bounds(data.0, data.1);
     let ranges = [
@@ -295,7 +367,7 @@ fn curve_view_section(theme: &RavelTheme) -> AnyElement {
 /// The colour is not set on any of them — an icon takes the ambient text
 /// colour, which is what keeps an icon inside a button the same colour as the
 /// label beside it. The last row proves an explicit colour still wins.
-fn icon_section(theme: &RavelTheme) -> AnyElement {
+fn icon_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     let row = |density: Density, label: &str| {
         div()
             .flex()
@@ -347,7 +419,7 @@ fn icon_section(theme: &RavelTheme) -> AnyElement {
 /// navigation (`focus_visible`), so clicking a button focuses it without
 /// painting a ring; Tab paints one. The third button in each row declares
 /// `tab_stop(false)` and Tab skips it.
-fn button_section(theme: &RavelTheme) -> AnyElement {
+fn button_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     let variants = [
         (ButtonVariant::Ghost, "ghost"),
         (ButtonVariant::Solid, "solid"),
@@ -498,7 +570,156 @@ fn button_section(theme: &RavelTheme) -> AnyElement {
 /// it: a bare Escape never reaches GPUI at all (`MED-APP-43`). The dismissal
 /// path is written and unit-tested; the keystroke is swallowed one layer
 /// below.
-fn tooltip_section(theme: &RavelTheme) -> AnyElement {
+/// The input frame in the three states that can be staged, at both density
+/// steps — plus the one that cannot be staged and matters most.
+///
+/// **Read the last field first.** Click into it and a `primary` ring appears;
+/// Tab into it and the same ring appears. That is the deliberate difference
+/// from the button section above, where a *click* paints no ring at all
+/// because a button's ring is `focus_visible`. If a change ever makes the two
+/// behave alike, this is where it shows.
+fn input_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
+    let row = |title: &str, states: &StateRow, density: Density| {
+        let dress = move |input: Input| match density {
+            Density::Compact => input.compact(),
+            Density::Default => input,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.xs)
+            .child(caption(theme, title.to_string()))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme.spacing.sm)
+                    .child(labelled(
+                        theme,
+                        "rest",
+                        dress(Input::new(&states.rest)).w(px(140.0)),
+                    ))
+                    .child(labelled(
+                        theme,
+                        "invalid",
+                        dress(Input::new(&states.invalid))
+                            .invalid(true)
+                            .w(px(140.0)),
+                    ))
+                    .child(labelled(
+                        theme,
+                        "disabled",
+                        dress(Input::new(&states.disabled)).w(px(140.0)),
+                    )),
+            )
+            .into_any_element()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.md)
+        .child(row("default · 24px", &inputs.text, Density::Default))
+        .child(row(
+            "compact · 20px",
+            &inputs.text_compact,
+            Density::Compact,
+        ))
+        .child(caption(
+            theme,
+            "focused · click or Tab into any field above. The ring is `focus`, \
+             not `focus_visible`: unlike a Button, a *click* paints it.",
+        ))
+        .child(caption(
+            theme,
+            format!(
+                "border · rest {} · invalid {} · focused {}",
+                hex_color_string(input_layers(false, false, &theme.colors).rest.border),
+                hex_color_string(input_layers(true, false, &theme.colors).rest.border),
+                hex_color_string(
+                    input_layers(false, false, &theme.colors)
+                        .focused
+                        .expect("an enabled, valid input has a focused layer")
+                        .border
+                ),
+            ),
+        ))
+        .into_any_element()
+}
+
+/// The spin button, in the same three states and the same two steps.
+///
+/// The step buttons are ghost buttons: hover one and it takes a surface, press
+/// it and it takes another. On the disabled row they do neither, which is UX
+/// invariant 6 — a control that cannot act must not react.
+fn number_input_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
+    let row = |title: &str, states: &StateRow, density: Density| {
+        let dress = move |input: NumberInput| match density {
+            Density::Compact => input.compact(),
+            Density::Default => input,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.xs)
+            .child(caption(theme, title.to_string()))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme.spacing.sm)
+                    .child(labelled(
+                        theme,
+                        "rest",
+                        dress(NumberInput::new(&states.rest)).w(px(120.0)),
+                    ))
+                    .child(labelled(
+                        theme,
+                        "invalid",
+                        dress(NumberInput::new(&states.invalid))
+                            .invalid(true)
+                            .w(px(120.0)),
+                    ))
+                    .child(labelled(
+                        theme,
+                        "disabled",
+                        dress(NumberInput::new(&states.disabled)).w(px(120.0)),
+                    )),
+            )
+            .into_any_element()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.md)
+        .child(row("default · 24px", &inputs.number, Density::Default))
+        .child(row(
+            "compact · 20px",
+            &inputs.number_compact,
+            Density::Compact,
+        ))
+        .child(caption(
+            theme,
+            "step · the two arrows and the Up / Down keys reach one handler, so \
+             a value cannot be stepped two different ways.",
+        ))
+        .into_any_element()
+}
+
+/// A widget with its state name under it.
+fn labelled(theme: &RavelTheme, name: &str, widget: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.xs)
+        .child(widget)
+        .child(caption(theme, name.to_string()))
+}
+
+fn tooltip_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -650,6 +871,9 @@ const STARTING_MODE: ThemeMode = ThemeMode::Dark;
 
 struct Gallery {
     mode: ThemeMode,
+    /// The states the two input sections paint. Built once, when the window
+    /// opens: the theme toggle swaps colours, never the text being edited.
+    inputs: GalleryInputs,
     /// The one overlay every tooltip in this window is shown through. The
     /// gallery is a bare GPUI window with no `gpui_component::Root`, so it
     /// installs and renders Ravel's own — without this the tooltip section
@@ -761,7 +985,7 @@ impl Render for Gallery {
                             .text_color(theme.colors.foreground)
                             .child(*title),
                     )
-                    .child(section(&theme))
+                    .child(section(&theme, &self.inputs))
             }));
 
         div()
@@ -821,6 +1045,7 @@ fn main() {
                 |window, cx| {
                     cx.new(|cx| Gallery {
                         mode: STARTING_MODE,
+                        inputs: GalleryInputs::new(window, cx),
                         tooltip_overlay: ravel_widgets::install_tooltip_overlay(window, cx),
                     })
                 },

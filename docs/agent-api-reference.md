@@ -2730,6 +2730,63 @@ control never changes size, and GPUI's `last_input_was_keyboard` gate keeps it
 off a mouse click. State feedback animates over `motion.feedback_in` through
 `InteractiveElement::transitions`; nothing else animates.
 
+### Input / NumberInput / ScrubInput
+
+```rust
+// input.rs — `gpui_base::InputBase` dressed in tokens, around the state.
+input_layers(invalid, disabled, &Colors) -> InputLayers
+    // pure: `rest` (surface / foreground / border) plus the `focused` and
+    // `disabled` layers `gpui_base`'s `InputStyles` resolves. `focused` is
+    // `None` while disabled **or invalid**, which is how those outrank focus
+    // for the one border the frame has
+frame_is_focused(&FocusHandle, disabled, &Window) -> bool
+    // the predicate `render` feeds `InputBase::focused`
+Input::new(&Entity<InputState>).compact() / .density(..)
+    .invalid(..) .accessibility_label(..) .tab_index(..)   // `Styled`
+
+// number_input.rs — `gpui_base::NumberInput` in the same frame.
+NumberInput::new(&Entity<InputState>).compact() / .density(..) / .invalid(..)
+
+// scrub_input.rs — the AE gesture: drag a label sideways to change a value.
+ScrubInputState / ScrubInput / ScrubEvent::{Change, Commit}
+    // `Change` fires live during the drag (apply, no undo); `Commit` fires
+    // once on release or a typed commit (record undo). A drag returned to its
+    // start emits no `Commit` — UX invariant 3
+
+// The borrowed editing engine, re-exported so a host needs no `gpui-base`.
+InputState / InputEvent::{Change, Focus, Blur, PressEnter}
+Enter / Escape / MoveUp / MoveDown / Increment / Decrement / StepAction
+```
+
+**The state is read, never written, from `render`.** Everything about the
+*value* — placeholder, default, `set_disabled`, read-only, step / min / max,
+the validation pattern — lives on `InputState`, and both elements read it
+(`presentation()`). That is why `Input` has no `disabled` builder: only the
+state can actually refuse a keystroke, and a `render` that pushed a flag into
+the state would be the state mutation the GPUI rules forbid. `invalid` *is* an
+element builder, because it is appearance alone — a value mid-typing that will
+not parse.
+
+**The focus ring is `focus`, not `focus_visible` — the one place Ravel's own
+parts disagree.** A Button's ring is keyboard-only because a clicked button is
+already under the pointer; a text field's ring must appear on a click, because
+clicking in is how typing starts and the pointer has moved on by the time you
+type. `the_ring_follows_focus_from_the_pointer_too` and the Button's
+`the_ring_follows_the_keyboard_and_not_the_pointer` are the pair that pins it.
+
+`ravel_widgets::set_active_tokens` also projects the names that mean the same
+thing onto `gpui_base::Theme`, because `InputState` paints its own glyphs,
+caret and selection and resolves their colours from that global. `gpui-base`
+derives the caret from `foreground` and the selection from `accent` at 40%
+alpha, so Ravel's tokens reach the ink without this crate naming two colours
+its schema does not model.
+
+`NumberInput`'s two arrows and the `Increment` / `Decrement` actions all reach
+**one** `on_step` closure inside `gpui-base`, so a value cannot be stepped two
+different ways. The frame is drawn *around* base's three-part element rather
+than on it: base routes `input(..)` into the middle slot, and a border around
+the middle third would claim focus belongs to the text alone.
+
 `ravel_dock::MenuButton::with_menu` wraps a `Button` so gpui-component's
 `DropdownMenu` can be attached — the local type the orphan rule requires.
 

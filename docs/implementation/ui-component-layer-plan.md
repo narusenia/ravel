@@ -120,6 +120,18 @@ Properties の 1 行が到達すべき状態:
 `row.default` を 24 に寄せるのは、**ヘッダ 24 と合わせて 1 つの階段**に
 するため（22 / 24 / 26 / 28 の 4 段は意味の差ではなく実装の差だった）。
 
+**文字の大きさは 1 つしかない。** `Typography` は `font_size`(14px) と
+`mono_font_size`(12px) しか持たず、**段ごとの `font_size` を
+モデル化していない**（この節が言うのは字幅の話ではなく、文字の大きさの話）。
+`UIX-4b` で `Input` を載せ替えたとき、gpui-component の `.xsmall()` が
+持っていた `text_xs`(12px) が失われ、**compact も default も 14px に
+なった**（`UIX-4` の `Button` も同じ扱い）。
+
+20px の行に 14px の文字は DCC の慣習（AE / Blender は 11〜12px）より
+大きい。**直すには段ごとの `font_size` トークンが 1 つ増える**ので、
+`UIX-4b` では発明せず `UIX-5` に送った —— 行高を決める単位が、
+その行に入る文字の大きさも決めるのが筋である。
+
 ### テーマスキーマは Ravel が持つ（gpui-component から離れる）
 
 **決定: 2026-09-07。** 今の `assets/themes/ravel.json` は
@@ -134,7 +146,7 @@ gpui-component の `.theme-schema.json` に従っているが、`UIX-1` で
 同じ費用の出方）。
 
 **ただし gpui-component の `Theme` は生かし続ける。** 借りている部品
-（`Input`、裾の 8 部品、`Root`）が `cx.theme()` を読むので、
+（裾の 8 部品と `Root`）が `cx.theme()` を読むので、
 **Ravel のスキーマを正として `ThemeConfig` を導出する**。方向を
 逆にすると、Ravel 独自のトークンが gpui-component の型に入らない。
 
@@ -473,7 +485,7 @@ crates/ravel-widgets/          ← 新規
 ```
 
 - **依存は `gpui` + `gpui-base` + `ravel-i18n`。`gpui-component` に依存しない**
-  （`Input` を借りるのは `ravel-app` 側で、部品層は借りない）
+  （借りている裾の部品は `ravel-app` 側で、部品層は借りない）
 - `ravel-app` は `ravel-widgets` を使う。パネルは**トークン以外の色・間隔を
   書かない**
 - **`ravel-ui` にトークンは置けない** — あちらは GUI-free（`gpui` に依存
@@ -486,7 +498,7 @@ crates/ravel-widgets/          ← 新規
 | `Icon` | 58 | **自前**（`gpui-base` の primitive から。SVG の解決とサイズ量子化は既に `node_editor/painting.rs` が持っている知見を使う） |
 | `Button` | 51 | **自前**（質感が最も宿る。ホバー・フォーカス・押下・無効の 4 状態と、Tab 順・Enter / Space 起動を自分で持つ） |
 | `Tooltip` | 21 | **自前**（登場の遅延と位置決めが UX そのもの） |
-| `Input` | 20 | **`UIX-4b` で `gpui-base` に載せ替える**（`InputBase` が挙動を持っているので、着せるだけ。2026-09-08 に「借りる」から変更）。**実測した範囲は下の節** |
+| `Input` | 20 | **`UIX-4b` で `gpui-base` に載せ替えた**（`InputBase` が挙動を持っているので着せるだけだった。2026-09-08 に「借りる」から変更）。**実測した範囲は下の節** |
 | 裾 8 部品 | 各 1 | **触らない** |
 
 ## UX の不変条件
@@ -559,7 +571,7 @@ Properties の全パラメータに、後者をダイアログの寸法・フレ
 | `UIX-3` | `tokens.rs` を配線し、ハードコード 24 箇所を潰す。`lint-patterns.sh` にリテラル禁止を追加 | `UIX-1` / `UIX-2` |
 | `UIX-4` | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で作る。4 状態 + Tab 順 + Enter / Space | `UIX-2` |
 | `UIX-4b` | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を `ravel-widgets` へ移す | `UIX-4` |
-| `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | `UIX-3` |
+| `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24）。**compact の `font_size` もここ**（下記） | `UIX-3` |
 | `UIX-6` | **不変条件 1〜4 の違反を潰す**（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | `UIX-0` |
 | `UIX-7` | **不変条件 5〜9 の違反を潰す**（狭い幅、死んだ操作、値の意味、設定の適用、派生キャッシュ） | `UIX-0` |
 | `UIX-8` | **ユーザーテーマディレクトリ**を足す（`themes_dir()` を複数候補に、ユーザー側が勝つ、**watch を自前に持つ**、**`assets/themes/ravel.schema.json` を同梱して `$schema` で指す**、書き方の文書） | `UIX-1` |

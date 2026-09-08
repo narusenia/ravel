@@ -8,7 +8,7 @@
 //! whole span); clamping uses the hard range, so scrubbing can exceed the UI
 //! span up to the true limits. Shift = coarse (10×), Cmd/Ctrl = fine (0.1×).
 //!
-//! Typing goes through `gpui_component::input::Input`, whose `InputState`
+//! Typing goes through [`crate::Input`], whose [`InputState`]
 //! implements `EntityInputHandler` — the proper text path that works where
 //! raw `on_key_down` does not (issue #41). Enter or focus loss commits the
 //! typed value (parsed, clamped); unparsable text reverts.
@@ -19,10 +19,10 @@
 
 use std::ops::RangeInclusive;
 
+use crate::theme::ActiveTokens as _;
+use crate::{Input, InputEvent, InputState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, Sizable as _};
 
 /// Horizontal pixels that sweep the full UI range.
 const PIXELS_PER_UI_SPAN: f32 = 200.0;
@@ -157,14 +157,22 @@ impl ScrubInputState {
         if self.integer { value.round() } else { value }
     }
 
-    pub(crate) fn begin_drag(&mut self, x: f32) {
+    /// Start a scrub at `x`.
+    ///
+    /// `pub` rather than crate-private because the callers that drive a scrub
+    /// they own — the two `param_*_editor` widgets and the panel tests — are
+    /// in `ravel-app`.
+    pub fn begin_drag(&mut self, x: f32) {
         self.dragging = true;
         self.drag_start_x = x;
         self.drag_start_value = self.value;
         self.changed_in_drag = false;
     }
 
-    pub(crate) fn drag_to(&mut self, x: f32, modifiers: &Modifiers, cx: &mut Context<Self>) {
+    /// Continue a scrub to `x`, scaled by `modifiers`.
+    ///
+    /// `pub` for the same reason as [`begin_drag`](Self::begin_drag).
+    pub fn drag_to(&mut self, x: f32, modifiers: &Modifiers, cx: &mut Context<Self>) {
         if !self.dragging {
             return;
         }
@@ -192,7 +200,10 @@ impl ScrubInputState {
     /// pointer scrubbed at all. A drag that returns to its start value emits
     /// no Commit — the live Change events already restored the start value,
     /// so committing would only record a no-op undo snapshot.
-    pub(crate) fn end_drag(&mut self, cx: &mut Context<Self>) -> Option<bool> {
+    ///
+    /// `pub` rather than crate-private because the Timeline and Properties
+    /// panels, which end a scrub they own, are in `ravel-app`.
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) -> Option<bool> {
         if !self.dragging {
             return None;
         }
@@ -210,7 +221,10 @@ impl ScrubInputState {
     /// become a document commit. Unlike [`end_drag`], this distinguishes a
     /// scrub that moved and returned to its start from one that still differs
     /// when a parent editor has to end the field without receiving release.
-    pub(crate) fn end_drag_and_report_commit(&mut self, cx: &mut Context<Self>) -> Option<bool> {
+    ///
+    /// `pub` rather than crate-private because those parent editors — the two
+    /// `param_*_editor` widgets — are still in `ravel-app`.
+    pub fn end_drag_and_report_commit(&mut self, cx: &mut Context<Self>) -> Option<bool> {
         if !self.dragging {
             return None;
         }
@@ -318,7 +332,7 @@ impl RenderOnce for ScrubInput {
         let label = state.label();
         let dragging = state.dragging;
         let editor = state.editor.clone();
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
 
         // Edit mode: show a focused text input in place of the label.
         if let Some(editor) = editor {
@@ -326,7 +340,7 @@ impl RenderOnce for ScrubInput {
                 .id(("scrub-input-edit", entity_id))
                 .h(px(16.0))
                 .min_w(px(48.0))
-                .child(Input::new(&editor).small())
+                .child(Input::new(&editor))
                 .into_any_element();
         }
 
@@ -342,7 +356,7 @@ impl RenderOnce for ScrubInput {
             .cursor(CursorStyle::ResizeLeftRight)
             .text_xs()
             .text_color(if dragging {
-                colors.accent_foreground
+                colors.readable_on(colors.accent)
             } else {
                 colors.foreground
             })
@@ -520,7 +534,7 @@ mod tests {
     /// would quietly truncate the value behind it.
     #[gpui::test]
     fn an_unedited_text_commit_keeps_the_full_precision_value(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_base::init);
         let window = cx.add_window(|window, cx| {
             let state = cx.new(|_| ScrubInputState::new(0.123456));
             state.update(cx, |state, cx| {
@@ -539,7 +553,7 @@ mod tests {
 
     #[gpui::test]
     fn text_edit_starts_with_the_value_selected(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_base::init);
         let window = cx.add_window(|window, cx| {
             let state = cx.new(|_| ScrubInputState::new(12.5));
             state.update(cx, |state, cx| state.begin_edit(window, cx));

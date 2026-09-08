@@ -19,8 +19,6 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::Sizable as _;
-use gpui_component::input::{self, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
@@ -41,6 +39,7 @@ use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_network};
 use ravel_ui::properties::expression;
+use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -3939,18 +3938,16 @@ impl Render for NodeEditorPanel {
                             // has no Escape event of its own, and taking Enter
                             // here keeps one commit path — blur still commits
                             // through the subscription.
-                            .capture_action(cx.listener(
-                                move |this, _: &input::Enter, _window, cx| {
-                                    let name = commit_input.read(cx).value().to_string();
-                                    this.commit_port_rename(name, cx);
-                                    cx.stop_propagation();
-                                },
-                            ))
-                            .capture_action(cx.listener(|this, _: &input::Escape, _window, cx| {
+                            .capture_action(cx.listener(move |this, _: &Enter, _window, cx| {
+                                let name = commit_input.read(cx).value().to_string();
+                                this.commit_port_rename(name, cx);
+                                cx.stop_propagation();
+                            }))
+                            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
                                 this.cancel_port_rename(cx);
                                 cx.stop_propagation();
                             }))
-                            .child(Input::new(&input).xsmall()),
+                            .child(Input::new(&input).compact()),
                     ),
             )
             .with_priority(1)

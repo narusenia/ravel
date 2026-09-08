@@ -17,9 +17,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::ActiveTheme;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
@@ -30,6 +29,7 @@ use ravel_ui::document::{
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
 use ravel_widgets::{Icon, TooltipExt as _, UiIcon};
+use ravel_widgets::{Input, InputEvent, InputState};
 use std::collections::HashSet;
 
 use crate::assets::RavelIcon;
@@ -975,7 +975,7 @@ impl OutlinerGpuiPanel {
                             _ => {}
                         }
                     }))
-                    .child(div().flex_grow_1().child(Input::new(&input).xsmall()))
+                    .child(div().flex_grow_1().child(Input::new(&input).compact()))
             }
             None => content.child(
                 // `min_w_0` lets the label shrink below its text width so

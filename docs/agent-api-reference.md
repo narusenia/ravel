@@ -2702,12 +2702,24 @@ Button::new(id).compact() / .ghost() / .solid() / .primary()
     .label(..) .icon(..) .tooltip(..) .selected(..) .disabled(..)
     .tab_index(..) .tab_stop(..) .on_click(..)
 
-// tooltip.rs
-SHOW_DELAY                       // 500ms, handed to GPUI's own machinery
-TooltipExt::ravel_tooltip(text)  // on any stateful interactive element
+// tooltip.rs — one shared overlay per window, not a timer per trigger
+SHOW_DELAY / GRACE_PERIOD        // 500ms / 300ms, recorded; `gpui-base` owns them
+install_tooltip_overlay(window, cx) -> Entity<TooltipOverlay>
+    // a host calls it once and renders what it returns
+tooltip_overlay(window, cx) -> Option<Entity<TooltipOverlay>>
+    // `None` in a window nobody installed one in: no tooltips, no panic
+TooltipExt::ravel_tooltip(text)  // any stateful interactive element that takes a child
 Tooltip::new(text).build(window, cx) -> AnyView
 Tooltip::on_key(&Keystroke) -> bool  // a bare Escape dismisses the showing
 ```
+
+**One overlay per window is what makes a toolbar usable.** GPUI's own
+`.tooltip()` gives every element its own delay timer, so the pointer pays 500ms
+again at every button; the shared overlay keeps a 300ms grace period after a
+showing folds away, and a move inside it is instant. A trigger asks the overlay
+to hide only while the overlay is still showing *its* tooltip — the two hover
+callbacks of one frame can arrive in either order, and the entered trigger's
+must win.
 
 **Behaviour is borrowed and appearance is Ravel's.** `gpui_base::Button` routes
 the pointer, Enter and Space through one `on_click`, which is how UX invariant

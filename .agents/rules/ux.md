@@ -191,7 +191,7 @@ by meaning. A theme change misses whichever sites were written by hand.
 `scripts/lint-patterns.sh` enforces this one (`colour-literal`). A justified
 exception goes in `scripts/lint-patterns.allow` with its reason — node
 category colours and Viewer guide colours are the expected ones, because they
-are functional colour rather than a palette step.
+are functional colours rather than palette steps.
 
 **Functional colour gets one named palette module per subsystem, and the
 exception is that module** — not the file that paints from it. A mark whose job

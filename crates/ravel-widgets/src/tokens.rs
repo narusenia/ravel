@@ -34,7 +34,7 @@
 
 use std::time::Duration;
 
-use gpui::{Hsla, Pixels, Rgba, SharedString, px};
+use gpui::{ColorExt as _, Hsla, Pixels, Rgba, SharedString, px};
 use serde::{Deserialize, Deserializer};
 
 /// Which of the two palettes a theme is written for.
@@ -288,6 +288,222 @@ impl Colors {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Derived state colors
+// ---------------------------------------------------------------------------
+
+/// How far a pressed surface moves toward [`Colors::foreground`].
+pub const PRESS_MIX: f32 = 0.08;
+/// The alpha a disabled foreground keeps.
+pub const DISABLED_ALPHA: f32 = 0.38;
+/// How far a floating surface moves toward black.
+pub const RAISED_MIX: f32 = 0.03;
+
+/// Mix `amount` of `toward` into `base`, in sRGB, keeping `base`'s alpha.
+///
+/// **Not [`gpui::ColorExt::blend`].** That function's name promises this and
+/// its arithmetic does something else: `Equations::from_parameters` is handed
+/// its factors the other way round, so an opaque `base` is discarded entirely
+/// and the result is the overlay at the overlay's own alpha
+/// (`#F9F9F9.blend(black.opacity(0.03))` is `#00000008`, not a slightly darker
+/// grey). That is usable as a *paint* colour over the very surface it was
+/// derived from — which is how gpui-component uses it — but a state surface
+/// here has to be opaque: a Button sits on panel backgrounds this module has
+/// never seen, and a Tooltip floats over arbitrary content. A 3%-alpha black
+/// tooltip would be transparent.
+pub fn mix(base: Hsla, toward: Hsla, amount: f32) -> Hsla {
+    let amount = amount.clamp(0.0, 1.0);
+    let from = gpui::hsla_to_rgba(base);
+    let to = gpui::hsla_to_rgba(toward);
+    let channel = |a: f32, b: f32| a + (b - a) * amount;
+    let mut mixed = gpui::rgb_to_hsla(Rgba::new(
+        channel(from.color.red, to.color.red),
+        channel(from.color.green, to.color.green),
+        channel(from.color.blue, to.color.blue),
+        1.0,
+    ));
+    mixed.alpha = base.alpha;
+    mixed
+}
+
+/// Relative luminance, per WCAG 2.1.
+fn relative_luminance(color: Hsla) -> f32 {
+    let rgba = gpui::hsla_to_rgba(color);
+    let channel = |value: f32| {
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(rgba.color.red)
+        + 0.7152 * channel(rgba.color.green)
+        + 0.0722 * channel(rgba.color.blue)
+}
+
+/// The WCAG 2.1 contrast ratio between two colors, from 1.0 to 21.0.
+fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    let (a, b) = (relative_luminance(a), relative_luminance(b));
+    let (high, low) = if a >= b { (a, b) } else { (b, a) };
+    (high + 0.05) / (low + 0.05)
+}
+
+impl Colors {
+    /// The surface a hovered control shows.
+    ///
+    /// `accent` is already the "one step off the background" colour in both
+    /// palettes (`#E0E0E0` on `#F9F9F9`, `#282629` on `#131313`), so the
+    /// direction is right in both without asking which mode is in force.
+    pub fn hover_surface(&self) -> Hsla {
+        self.accent
+    }
+
+    /// The surface a pressed control shows: one press step past [`hover_surface`].
+    ///
+    /// [`hover_surface`]: Colors::hover_surface
+    pub fn pressed_surface(&self) -> Hsla {
+        self.toward_foreground(self.hover_surface(), PRESS_MIX)
+    }
+
+    /// The text and icon colour of a disabled control.
+    pub fn disabled_foreground(&self) -> Hsla {
+        self.foreground.opacity(DISABLED_ALPHA)
+    }
+
+    /// The keyboard focus ring.
+    pub fn focus_ring(&self) -> Hsla {
+        self.primary
+    }
+
+    /// The surface of something that floats above the window (a Tooltip).
+    pub fn raised_surface(&self) -> Hsla {
+        // Forced opaque. `mix` keeps the base's alpha on purpose, and a theme
+        // may write `background` as `#RRGGBBAA`; a translucent floating
+        // surface would show the panel through the tooltip, which is the one
+        // thing a floating surface must not do.
+        let mut surface = mix(self.background, gpui::black(), RAISED_MIX);
+        surface.alpha = 1.0;
+        surface
+    }
+
+    /// `base`, moved `amount` of the way toward [`Colors::foreground`].
+    ///
+    /// This is the one operation every state surface is built from, and it is
+    /// why none of them needs to know which palette is in force: `foreground`
+    /// is already the opposite end of the ramp from `background` in both, so
+    /// the same call darkens a light surface and lightens a dark one.
+    pub fn toward_foreground(&self, base: Hsla, amount: f32) -> Hsla {
+        mix(base, self.foreground, amount)
+    }
+
+    /// Whichever of `background` and `foreground` reads better on `surface`.
+    ///
+    /// Used for the label on a filled `primary` button, which is the one place
+    /// a Ravel control paints text on a saturated colour. The choice is by
+    /// **contrast ratio**, not by HSL lightness, because the two disagree
+    /// exactly where it matters: `#0000FF` has lightness 0.5 — nominally
+    /// "mid" — and a relative luminance of 0.07, so a lightness rule would
+    /// put near-black text on it and produce a 1.4:1 label.
+    pub fn readable_on(&self, surface: Hsla) -> Hsla {
+        // Measured against what the eye actually sees. `relative_luminance`
+        // reads r/g/b only, so a translucent surface would be judged by its
+        // raw colour rather than by the composite it paints as — and a theme
+        // may write `primary` as `#RRGGBBAA`. Composite it over `background`
+        // first, which is what it sits on.
+        let surface = self.composited(surface);
+        if contrast_ratio(surface, self.foreground) >= contrast_ratio(surface, self.background) {
+            self.foreground
+        } else {
+            self.background
+        }
+    }
+
+    /// `surface` as it appears once painted on [`Colors::background`].
+    ///
+    /// Opaque input is returned unchanged, so the common path costs nothing.
+    fn composited(&self, surface: Hsla) -> Hsla {
+        if surface.alpha >= 1.0 {
+            return surface;
+        }
+        let mut composited = mix(self.background, surface, surface.alpha);
+        composited.alpha = 1.0;
+        composited
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Density
+// ---------------------------------------------------------------------------
+
+/// The icon of a control on the compact step.
+pub const COMPACT_ICON_SIZE: Pixels = px(12.0);
+/// The icon of a control on the default step.
+pub const DEFAULT_ICON_SIZE: Pixels = px(16.0);
+/// The gap between a compact control's icon and its label.
+pub const COMPACT_GAP: Pixels = px(4.0);
+/// The gap between a default control's icon and its label.
+pub const DEFAULT_GAP: Pixels = px(6.0);
+
+/// Which of the two density steps a control is drawn on.
+///
+/// The two steps are the two row heights: a [`Density::Compact`] control is as
+/// tall as `row.compact` and belongs in a row that shows one value, a
+/// [`Density::Default`] one is as tall as `row.default` and belongs in a list.
+/// There is deliberately no third step — the 32px one gpui-component calls
+/// `medium` was measured across `ravel-app` and used nowhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Density {
+    Compact,
+    #[default]
+    Default,
+}
+
+/// The geometry of one density step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Metrics {
+    /// The control's height, and its width when it holds nothing but an icon.
+    pub height: Pixels,
+    /// Horizontal padding, for a control that carries a label.
+    pub padding_x: Pixels,
+    /// The gap between an icon and a label.
+    pub gap: Pixels,
+    /// The icon size the control gives its icon.
+    pub icon: Pixels,
+}
+
+impl Density {
+    /// The geometry this step takes from `theme`.
+    ///
+    /// Height and padding come from the row-height and spacing tokens, so a
+    /// theme that moves its rows moves the controls with them. The icon size
+    /// and the gap have no token to come from — Ravel's schema models neither,
+    /// and this unit does not grow it — so they are the named constants above.
+    pub fn metrics(self, theme: &RavelTheme) -> Metrics {
+        match self {
+            Self::Compact => Metrics {
+                height: theme.rows.compact,
+                padding_x: theme.spacing.xs,
+                gap: COMPACT_GAP,
+                icon: COMPACT_ICON_SIZE,
+            },
+            Self::Default => Metrics {
+                height: theme.rows.default,
+                padding_x: theme.spacing.sm,
+                gap: DEFAULT_GAP,
+                icon: DEFAULT_ICON_SIZE,
+            },
+        }
+    }
+
+    /// The icon size for this step, for an icon drawn on its own.
+    pub fn icon_size(self) -> Pixels {
+        match self {
+            Self::Compact => COMPACT_ICON_SIZE,
+            Self::Default => DEFAULT_ICON_SIZE,
+        }
+    }
+}
+
 impl Default for Spacing {
     fn default() -> Self {
         Self {
@@ -529,6 +745,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::contrast_ratio as contrast_ratio_for_test;
     use super::*;
 
     fn spec(json: &str) -> ThemeSpec {
@@ -767,6 +984,212 @@ mod tests {
             parse_hex_color("#0A0A0A80").unwrap()
         );
         assert_ne!(theme.colors, Colors::dark(), "nothing fell back");
+    }
+
+    /// The whole point of deriving from `foreground`: the same expression has
+    /// to darken a light surface and lighten a dark one. A derivation that
+    /// branched on the mode would pass one half of this and fail the other.
+    #[test]
+    fn press_moves_toward_the_foreground_in_both_palettes() {
+        let light = Colors::light();
+        let dark = Colors::dark();
+
+        let light_pressed = light.pressed_surface();
+        let dark_pressed = dark.pressed_surface();
+
+        assert!(
+            light_pressed.color.lightness < light.hover_surface().color.lightness,
+            "light press must be darker than hover: {} vs {}",
+            hex_color_string(light_pressed),
+            hex_color_string(light.hover_surface()),
+        );
+        assert!(
+            dark_pressed.color.lightness > dark.hover_surface().color.lightness,
+            "dark press must be lighter than hover: {} vs {}",
+            hex_color_string(dark_pressed),
+            hex_color_string(dark.hover_surface()),
+        );
+    }
+
+    #[test]
+    fn hover_is_the_accent_and_the_ring_is_the_primary() {
+        for colors in [Colors::light(), Colors::dark()] {
+            assert_eq!(colors.hover_surface(), colors.accent);
+            assert_eq!(colors.focus_ring(), colors.primary);
+        }
+        // Both palettes use one ring colour, which is what makes a focus ring
+        // legible against either background without a second token.
+        assert_eq!(
+            hex_color_string(Colors::light().focus_ring()),
+            "#5B6EE1",
+            "the ring is the shipped primary"
+        );
+    }
+
+    #[test]
+    fn disabled_foreground_is_the_foreground_faded_and_nothing_else() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let disabled = colors.disabled_foreground();
+            assert_eq!(disabled.alpha, DISABLED_ALPHA);
+            // Same colour, only fainter: a disabled label must not drift hue,
+            // which is what picking `muted_foreground` instead would do.
+            assert_eq!(
+                Hsla {
+                    alpha: 1.0,
+                    ..disabled
+                },
+                colors.foreground
+            );
+        }
+    }
+
+    #[test]
+    fn the_raised_surface_is_opaque_and_reads_as_lifted_in_both_palettes() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let raised = colors.raised_surface();
+            // A Tooltip floats over arbitrary content: a translucent surface
+            // would show the panel underneath it. `ColorExt::blend` returns
+            // exactly that, which is why `mix` exists.
+            assert_eq!(raised.alpha, 1.0, "the raised surface must be opaque");
+            assert!(
+                raised.color.lightness < colors.background.color.lightness,
+                "the raised surface sits one step off the background: {} vs {}",
+                hex_color_string(raised),
+                hex_color_string(colors.background),
+            );
+        }
+    }
+
+    #[test]
+    fn readable_on_primary_picks_the_higher_contrast_end() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let label = colors.readable_on(colors.primary);
+            assert!(
+                label == colors.foreground || label == colors.background,
+                "the label is one of the two ends of the ramp"
+            );
+            let chosen = contrast_ratio(colors.primary, label);
+            let other = contrast_ratio(
+                colors.primary,
+                if label == colors.foreground {
+                    colors.background
+                } else {
+                    colors.foreground
+                },
+            );
+            assert!(chosen >= other, "{chosen} is not the better of the two");
+            // AA (4.5) is reachable in the light palette — `#000000` on
+            // `#5B6EE1` is 4.75 — but not in the dark one: `#131313` is 4.24
+            // and `#DEDEDE` is 3.32, so 4.24 is the ceiling the ten tokens
+            // allow. The floor records that ceiling instead of hiding it; a
+            // palette change that drops the primary label below it trips here.
+            assert!(
+                chosen >= 4.2,
+                "a primary label must stay legible: {chosen} on {}",
+                hex_color_string(colors.primary),
+            );
+        }
+    }
+
+    /// A lightness rule would answer this one wrongly, which is why
+    /// `readable_on` measures luminance instead.
+    #[test]
+    fn readable_on_a_saturated_blue_does_not_follow_hsl_lightness() {
+        let colors = Colors {
+            primary: parse_hex_color("#0000FF").unwrap(),
+            ..Colors::light()
+        };
+        assert_eq!(
+            colors.primary.color.lightness, 0.5,
+            "HSL calls pure blue a mid tone"
+        );
+        assert_eq!(
+            colors.readable_on(colors.primary),
+            colors.background,
+            "pure blue is dark by luminance, so it takes the light label"
+        );
+    }
+
+    /// A theme may write `background` as `#RRGGBBAA`, and `mix` keeps the
+    /// base's alpha on purpose. A floating surface that inherited it would
+    /// show the panel through the tooltip.
+    #[test]
+    fn the_raised_surface_stays_opaque_under_a_translucent_background() {
+        let colors = Colors {
+            background: parse_hex_color("#F9F9F980").unwrap(),
+            ..Colors::light()
+        };
+        assert_eq!(
+            colors.background.alpha,
+            128.0 / 255.0,
+            "the theme is see-through"
+        );
+        assert_eq!(
+            colors.raised_surface().alpha,
+            1.0,
+            "the floating surface is not"
+        );
+    }
+
+    /// `relative_luminance` reads r/g/b only, so a translucent surface has to
+    /// be composited before its contrast is measured — otherwise the label is
+    /// chosen for a colour that is never painted.
+    #[test]
+    fn a_translucent_primary_takes_the_label_for_what_it_composites_to() {
+        // 20% of a near-black blue over a white panel reads as light, so the
+        // label has to be the dark end even though the raw token is dark.
+        let colors = Colors {
+            primary: parse_hex_color("#00003033").unwrap(),
+            ..Colors::light()
+        };
+        let raw_label = if contrast_ratio_for_test(colors.primary, colors.foreground)
+            >= contrast_ratio_for_test(colors.primary, colors.background)
+        {
+            colors.foreground
+        } else {
+            colors.background
+        };
+        assert_eq!(
+            raw_label, colors.background,
+            "judged raw, the near-black token would take the light label"
+        );
+        assert_eq!(
+            colors.readable_on(colors.primary),
+            colors.foreground,
+            "judged as painted, 20% of it over white is light and takes the dark label"
+        );
+    }
+
+    #[test]
+    fn mix_keeps_the_base_alpha_and_saturates_at_the_ends() {
+        let base = parse_hex_color("#00000080").unwrap();
+        let mixed = mix(base, gpui::white(), 0.5);
+        assert_eq!(mixed.alpha, base.alpha, "mixing does not change opacity");
+
+        let a = parse_hex_color("#123456").unwrap();
+        let b = parse_hex_color("#ABCDEF").unwrap();
+        assert_eq!(hex_color_string(mix(a, b, 0.0)), hex_color_string(a));
+        assert_eq!(hex_color_string(mix(a, b, 1.0)), hex_color_string(b));
+        assert_eq!(hex_color_string(mix(a, b, 2.0)), hex_color_string(b));
+    }
+
+    #[test]
+    fn both_density_steps_read_their_height_from_the_row_tokens() {
+        let theme = spec(r#"{"row": {"compact": 18, "default": 30}}"#).resolve();
+
+        assert_eq!(Density::Compact.metrics(&theme).height, px(18.0));
+        assert_eq!(Density::Default.metrics(&theme).height, px(30.0));
+
+        // And the shipped defaults are the two the design language names.
+        let shipped = spec("{}").resolve();
+        assert_eq!(Density::Compact.metrics(&shipped).height, px(20.0));
+        assert_eq!(Density::Default.metrics(&shipped).height, px(24.0));
+        assert_eq!(Density::Compact.metrics(&shipped).padding_x, px(4.0));
+        assert_eq!(Density::Default.metrics(&shipped).padding_x, px(8.0));
+        assert_eq!(Density::Compact.metrics(&shipped).gap, px(4.0));
+        assert_eq!(Density::Default.metrics(&shipped).gap, px(6.0));
+        assert_eq!(Density::Compact.metrics(&shipped).icon, px(12.0));
+        assert_eq!(Density::Default.metrics(&shipped).icon, px(16.0));
     }
 
     #[test]

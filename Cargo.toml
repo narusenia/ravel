@@ -192,3 +192,9 @@ opt-level = 2
 
 [profile.dev.package.ravel-app]
 opt-level = 1
+
+# The curve editor moved out of ravel-app into this crate, and its paint
+# sampling is 3.4x slower at opt-level 0 (measured: 32.7ms vs 9.6ms for 200
+# polylines). Without this entry the move silently demoted it.
+[profile.dev.package.ravel-widgets]
+opt-level = 2

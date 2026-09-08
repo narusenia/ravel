@@ -493,8 +493,15 @@ impl RavelIcon {
     }
 }
 
-impl IconNamed for RavelIcon {
-    fn path(self) -> SharedString {
+impl RavelIcon {
+    /// The asset path of this icon.
+    ///
+    /// The inherent method is the one Ravel's own code calls. It exists
+    /// because two traits want the same name: `ravel_widgets::IconPath` (for
+    /// [`ravel_widgets::Icon`]) and `gpui_component::IconNamed` (for the
+    /// components still borrowed). Both delegate here, and a call site that
+    /// says `.icon_path()` is unambiguous with either or both in scope.
+    pub fn icon_path(self) -> SharedString {
         match self {
             Self::Outliner => "icons/list-tree.svg",
             Self::NodeGraph => "icons/workflow.svg",
@@ -659,14 +666,27 @@ impl IconNamed for RavelIcon {
     }
 }
 
+impl ravel_widgets::IconPath for RavelIcon {
+    fn icon_path(self) -> SharedString {
+        RavelIcon::icon_path(self)
+    }
+}
+
+impl IconNamed for RavelIcon {
+    fn path(self) -> SharedString {
+        RavelIcon::icon_path(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_widgets::UiIcon;
 
     #[test]
     fn every_panel_icon_is_embedded() {
         for kind in PanelKind::ALL {
-            let path = RavelIcon::for_panel(kind).path();
+            let path = RavelIcon::for_panel(kind).icon_path();
             assert!(
                 RavelEmbed::get(path.as_ref()).is_some(),
                 "missing embedded icon for {kind:?}: {path}"
@@ -737,12 +757,19 @@ mod tests {
         }
     }
 
+    /// Every shape-named glyph resolves, wherever it lives. Nine of the
+    /// fourteen exist only in `gpui-kit-assets`, so this is also the test that
+    /// the fallback chain in [`RavelAssets::load`] still reaches it — drop
+    /// that fallback and nine icons go blank with no other complaint.
     #[test]
-    fn fallback_serves_component_icons() {
-        let loaded = RavelAssets
-            .load(&gpui_component::IconName::ChevronDown.path())
-            .unwrap();
-        assert!(loaded.is_some(), "gpui-component fallback icons must load");
+    fn every_ui_glyph_resolves_through_the_asset_source() {
+        for icon in UiIcon::ALL {
+            let path = icon.icon_path();
+            let loaded = RavelAssets
+                .load(path.as_ref())
+                .unwrap_or_else(|e| panic!("loading {path}: {e}"));
+            assert!(loaded.is_some(), "no asset for {icon:?} at {path}");
+        }
     }
 
     #[test]

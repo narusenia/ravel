@@ -2606,7 +2606,7 @@ Unknown type keys are skipped silently (plugin space).
   `WorkspaceLayout`, dummy panes, theme toggle. Run with
   `cargo run -p ravel-dock --example gallery`.
 
-## ravel-widgets — design tokens
+## ravel-widgets — design tokens and Ravel's own parts
 
 - `tokens` (tokens.rs): the single source for colours, spacing, row heights,
   typography, motion and radii. Two forms — the **wire form** a user writes as
@@ -2631,9 +2631,107 @@ Unknown type keys are skipped silently (plugin space).
   string falls back to the built-in for that key, while malformed JSON (or a
   colour that is not a string) fails the file — which is what the loader wants,
   since it logs and skips a file it cannot read without harming the others.
-- **Depends on `gpui` and `serde` only.** `ravel_app::theme_tokens` derives
-  `gpui_component::ThemeConfig` from `RavelTheme` for the borrowed components;
-  there is no conversion the other way.
+- **Never depends on `gpui-component`** (`gpui`, `gpui-base`, `ravel-core`,
+  `serde`). `ravel_app::theme_tokens` derives `gpui_component::ThemeConfig`
+  from `RavelTheme` for the borrowed components; there is no conversion the
+  other way.
+
+### Reaching the tokens
+
+```rust
+// crates/ravel-widgets/src/theme.rs
+ravel_widgets::set_active_tokens(RavelTheme, &mut App)  // install
+ravel_widgets::ActiveTokens::tokens(&App) -> &RavelTheme  // `cx.tokens()`
+```
+
+`cx.tokens()` is the Ravel counterpart of gpui-component's `cx.theme()`, named
+so both can be imported while the panels still borrow components. An app that
+never installed a set reads the built-in light palette rather than panicking,
+so a test or a headless view can build one widget. `ravel-app` installs it in
+`app_settings::apply_resolved_appearance` from
+`theme_tokens::apply_ravel_theme`, which looks the theme up by name and mode in
+the `RavelThemes` global that `main::load_ravel_themes` fills — the Ravel form
+is kept as the file is read, because the `ThemeConfig` derivation is one-way.
+
+### Derived state colours
+
+`Colors` derives every state colour from the ten tokens; **no state colour is a
+token and none of them branches on the mode**, because `foreground` is already
+the opposite end of the ramp in both palettes.
+
+```rust
+colors.hover_surface()        // `accent`
+colors.pressed_surface()      // one press step past hover
+colors.disabled_foreground()  // `foreground` at 0.38
+colors.focus_ring()           // `primary`
+colors.raised_surface()       // `background` 3% toward black (a Tooltip)
+colors.toward_foreground(base, amount)  // the one mix every surface uses
+colors.readable_on(surface)   // `background` or `foreground`, by WCAG contrast
+tokens::mix(base, toward, amount)       // opaque sRGB mix
+```
+
+`mix` exists because `gpui::ColorExt::blend` is **not** a mix: it discards an
+opaque base and returns the overlay at the overlay's own alpha, which is
+usable as a paint colour over the surface it came from but not as an opaque
+state surface.
+
+### Density
+
+`Density::{Compact, Default}` are the two row heights, and
+`Density::metrics(&RavelTheme) -> Metrics` gives `height` / `padding_x` (from
+the row-height and spacing tokens) plus `gap` / `icon` (module constants —
+Ravel's schema models neither). Compact is 20px / 4 / 4 / 12; default is
+24px / 8 / 6 / 16. There is no 32px step.
+
+### Icon / Button / Tooltip
+
+```rust
+// icon.rs — an SVG at a size. `Styled`; takes the ambient text colour.
+trait IconPath { fn icon_path(self) -> SharedString; }   // `RavelIcon` impls it
+UiIcon::{ChevronDown, .., TriangleAlert}    // the 14 shape-named glyphs
+Icon::new(impl Into<Icon>) / Icon::from_path(..) / .size(Pixels) / .density(..)
+
+// button.rs — `gpui_base::Button` dressed in tokens.
+ButtonVariant::{Ghost, Solid, Primary}
+button_layers(variant, selected, disabled, &Colors) -> ButtonLayers
+    // the whole state machine, pure: `rest` plus `hover` / `pressed` /
+    // `focus_ring` (all `None` while disabled, because GPUI resolves `hover`
+    // after the element style) plus the `selected` / `disabled` layers
+    // `gpui_base`'s `state_style` resolves last
+Button::new(id).compact() / .ghost() / .solid() / .primary()
+    .label(..) .icon(..) .tooltip(..) .selected(..) .disabled(..)
+    .tab_index(..) .tab_stop(..) .on_click(..)
+
+// tooltip.rs — one shared overlay per window, not a timer per trigger
+SHOW_DELAY / GRACE_PERIOD        // 500ms / 300ms, recorded; `gpui-base` owns them
+install_tooltip_overlay(window, cx) -> Entity<TooltipOverlay>
+    // a host calls it once and renders what it returns
+tooltip_overlay(window, cx) -> Option<Entity<TooltipOverlay>>
+    // `None` in a window nobody installed one in: no tooltips, no panic
+TooltipExt::ravel_tooltip(text)  // any stateful interactive element that takes a child
+Tooltip::new(text).build(window, cx) -> AnyView
+Tooltip::on_key(&Keystroke) -> bool  // a bare Escape dismisses the showing
+```
+
+**One overlay per window is what makes a toolbar usable.** GPUI's own
+`.tooltip()` gives every element its own delay timer, so the pointer pays 500ms
+again at every button; the shared overlay keeps a 300ms grace period after a
+showing folds away, and a move inside it is instant. A trigger asks the overlay
+to hide only while the overlay is still showing *its* tooltip — the two hover
+callbacks of one frame can arrive in either order, and the entered trigger's
+must win.
+
+**Behaviour is borrowed and appearance is Ravel's.** `gpui_base::Button` routes
+the pointer, Enter and Space through one `on_click`, which is how UX invariant
+10 is held by construction — never add a parallel `on_key_down`. The focus ring
+is a permanent transparent 1px border coloured under `focus_visible`, so it is
+inside the control's bounds (no ancestor `overflow_hidden` can clip it), the
+control never changes size, and GPUI's `last_input_was_keyboard` gate keeps it
+off a mouse click. State feedback animates over `motion.feedback_in` through
+`InteractiveElement::transitions`; nothing else animates.
+
+`ravel_dock::MenuButton::with_menu` wraps a `Button` so gpui-component's
+`DropdownMenu` can be attached — the local type the orphan rule requires.
 
 ## ravel-project — the settings rules every front end shares
 

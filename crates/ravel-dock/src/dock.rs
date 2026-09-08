@@ -16,10 +16,12 @@ use gpui::{
     MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString, Size as GpuiSize,
     Styled as _, Subscription, Window, canvas, div, px, relative,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::tab::{Tab, TabBar};
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size};
+use ravel_widgets::{Button, Icon, UiIcon};
+
+use crate::menu::MenuButton as _;
 use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, Orientation, PanelInstance, PanelInstanceId};
 
@@ -674,9 +676,9 @@ impl DockRoot {
             "dock-area-menu-{}",
             path.id_string()
         )))
-        .xsmall()
-        .ghost()
-        .icon(Icon::new(IconName::Ellipsis))
+        .compact()
+        .icon(Icon::new(UiIcon::Ellipsis))
+        .with_menu()
         .dropdown_menu(move |mut menu, _window, _cx| {
             for (action, key) in [
                 (AreaAction::SplitRight, "dock.area_menu.split_right"),

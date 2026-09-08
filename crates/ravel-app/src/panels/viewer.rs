@@ -20,10 +20,11 @@ pub mod snap;
 mod viewport;
 
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::ActiveTheme;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Icon, Selectable as _, Sizable as _};
+use ravel_dock::MenuButton as _;
 use ravel_i18n::t;
+use ravel_widgets::{Button, Icon};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -3047,9 +3048,9 @@ impl ViewerPanel {
             let is_active = tool == active;
             let entity = entity.clone();
             let btn = Button::new(SharedString::from(tool.label_key()))
-                .icon(Icon::new(RavelIcon::for_tool(tool)).size_3p5())
+                .icon(Icon::new(RavelIcon::for_tool(tool)))
                 .ghost()
-                .xsmall()
+                .compact()
                 .selected(is_active)
                 .tooltip(t!(tool.label_key()))
                 .on_click(move |_, _window, cx| {
@@ -3180,9 +3181,10 @@ impl ViewerPanel {
             .border_color(cx.theme().colors.border)
             .child(
                 Button::new("viewer-zoom-presets")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .label(zoom_label)
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         for percent in [25.0f32, 50.0, 100.0, 200.0, 400.0] {
                             let entity = entity.clone();
@@ -3203,7 +3205,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-fit")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::ZoomFit))
                     .tooltip(t!("viewer.fit"))
@@ -3214,7 +3216,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-actual-size")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::ZoomActualSize))
                     .tooltip(t!("viewer.actual_size"))
@@ -3231,13 +3233,14 @@ impl ViewerPanel {
                 // places the zoom controls in this toolbar and does not name a
                 // slot for this one.
                 Button::new("viewer-preview-resolution")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .label(SharedString::from(resolution_label(
                         selected_resolution,
                         effective_resolution,
                     )))
                     .tooltip(t!("viewer.resolution"))
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         for factor in ViewerResolution::ALL {
                             let entity = resolution_entity.clone();
@@ -3262,10 +3265,11 @@ impl ViewerPanel {
             .child(div().flex_1())
             .child(
                 Button::new("viewer-background-mode")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .label(SharedString::from(t!(background_mode.label_key())))
                     .tooltip(t!("viewer.background_mode"))
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         for mode in ViewerBackgroundMode::ALL {
                             let entity = background_entity.clone();
@@ -3294,12 +3298,13 @@ impl ViewerPanel {
                 // on screen because "which mode am I in" is the question the
                 // channel views exist to answer.
                 Button::new("viewer-display-channel")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .label(SharedString::from(t!(display_channel_label_key(
                         display_channel
                     ))))
                     .tooltip(t!("viewer.channel"))
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         for channel in DisplayChannel::ALL {
                             let entity = channel_entity.clone();
@@ -3327,7 +3332,7 @@ impl ViewerPanel {
                 // shown", and the readout's own menu carries the only other
                 // decision it has — which scale the numbers are on.
                 Button::new("viewer-pixel-readout")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(pixel_readout)
                     .label(SharedString::from(t!("viewer.pixel_readout")))
@@ -3338,6 +3343,7 @@ impl ViewerPanel {
                             .is_some_and(|project| project.read(cx).pixel_readout());
                         this.set_pixel_readout(!on, cx);
                     }))
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         for format in PixelReadoutFormat::ALL {
                             let entity = readout_entity.clone();
@@ -3355,7 +3361,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-grid")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(self.show_grid)
                     .icon(Icon::new(RavelIcon::GridOverlay))
@@ -3367,7 +3373,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-safe-areas")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(self.show_safe_areas)
                     .icon(Icon::new(RavelIcon::SafeAreas))
@@ -3382,11 +3388,12 @@ impl ViewerPanel {
                 // and "clear" all answer "what do I want the guides to do", and
                 // only the first two are ever visible state.
                 Button::new("viewer-rulers")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(self.show_rulers)
                     .icon(Icon::new(RavelIcon::Rulers))
                     .tooltip(t!("viewer.rulers"))
+                    .with_menu()
                     .dropdown_menu(move |menu, _window, _cx| {
                         let mut menu = menu;
                         for (key, checked, apply) in [
@@ -3431,7 +3438,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-geometry-bounds")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(self.show_geometry_bounds)
                     .icon(Icon::new(RavelIcon::GeometryBounds))
@@ -3443,7 +3450,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-geometry-points")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(self.show_geometry_points)
                     .icon(Icon::new(RavelIcon::GeometryPoints))
@@ -3455,7 +3462,7 @@ impl ViewerPanel {
             )
             .child(
                 Button::new("viewer-geometry-paths")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(self.show_geometry_paths)
                     .icon(Icon::new(RavelIcon::GeometryPaths))
@@ -3472,7 +3479,7 @@ impl ViewerPanel {
                 // whatever the evaluated geometry actually carries rather than
                 // a fixed set of reserved names.
                 Button::new("viewer-geometry-attrs")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(
                         self.geometry_arrow_attr.is_some()
@@ -3481,6 +3488,7 @@ impl ViewerPanel {
                     )
                     .icon(Icon::new(RavelIcon::GeometryAttributes))
                     .tooltip(t!("viewer.geometry_attrs"))
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         let selected = |name: Option<&str>| match (&arrow_attr, name) {
                             (Some(current), Some(name)) => current.as_ref() == name,
@@ -3551,11 +3559,12 @@ impl ViewerPanel {
                 // colour map and the opacity are all "how do I want to look at
                 // this field", and only the first of them is ever off.
                 Button::new("viewer-field")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .selected(field_display != field::FieldDisplay::Off)
                     .icon(Icon::new(RavelIcon::FieldOverlay))
                     .tooltip(t!("viewer.field"))
+                    .with_menu()
                     .dropdown_menu(move |mut menu, _window, _cx| {
                         for mode in field::FieldDisplay::ALL {
                             let entity = field_entity.clone();

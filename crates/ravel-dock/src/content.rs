@@ -4,8 +4,8 @@
 //! The interface through which the host supplies pane contents.
 
 use gpui::{AnyElement, AnyView, App, SharedString, Window};
-use gpui_component::Icon;
 use ravel_ui::layout::PanelInstance;
+use ravel_widgets::Icon;
 
 /// Supplies the contents of docked panes.
 ///

@@ -28,12 +28,13 @@ use std::collections::HashSet;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{self, Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, Icon, Sizable as _};
+use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_core::graph::Graph;
 use ravel_core::id::NodeId;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_i18n::t;
 use ravel_ui::node_search::{SearchCandidate, filter_candidates};
+use ravel_widgets::Icon;
 
 use crate::assets::RavelIcon;
 use crate::node_editor::painting::PortHit;

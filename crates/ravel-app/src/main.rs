@@ -253,6 +253,14 @@ fn load_ravel_themes(cx: &mut App) {
                     gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&derived)
                 {
                     tracing::error!("ignored invalid theme file {}: {e}", path.display());
+                    continue;
+                }
+                // Ravel's own widgets read the Ravel form of the same theme,
+                // and the derivation above is one-way, so the resolved themes
+                // are recorded now rather than reconstructed from the derived
+                // config later (`theme_tokens::RavelThemes`).
+                if let Err(e) = ravel_app::theme_tokens::register_ravel_themes(&content, cx) {
+                    tracing::error!("ignored invalid theme file {}: {e}", path.display());
                 }
             }
             Err(e) => tracing::error!("ignored invalid theme file {}: {e}", path.display()),

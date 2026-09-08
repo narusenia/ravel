@@ -19,7 +19,6 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, WindowBounds,
     WindowOptions, div, px, size,
 };
-use gpui_component::button::Button;
 use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode, h_flex, v_flex};
 use ravel_dock::{
     DockEvent, DockRoot, PaneContent, activate_tab, apply_area_action, apply_tab_drop, set_ratio_at,
@@ -27,6 +26,7 @@ use ravel_dock::{
 use ravel_ui::layout::{PanelInstance, PanelInstanceId, WorkspaceLayout};
 use ravel_ui::preset::BuiltinPreset;
 use ravel_ui::window::WindowId;
+use ravel_widgets::Button;
 
 /// A colored placeholder pane standing in for a real panel.
 struct DummyPane {
@@ -226,6 +226,7 @@ impl GalleryApp {
             ThemeMode::Dark
         };
         Theme::change(next, Some(window), cx);
+        install_ravel_tokens(next, cx);
     }
 }
 
@@ -240,6 +241,7 @@ impl Render for GalleryApp {
             .children(BuiltinPreset::ALL.map(|preset| {
                 let weak = weak.clone();
                 Button::new(preset.label_key())
+                    .solid()
                     .label(format!("{preset:?}"))
                     .on_click(move |_, _window, cx| {
                         weak.update(cx, |this, cx| this.switch_preset(preset, cx))
@@ -248,6 +250,7 @@ impl Render for GalleryApp {
             }))
             .child(
                 Button::new("toggle-theme")
+                    .solid()
                     .label("Toggle theme")
                     .on_click(|_, window, cx| Self::toggle_theme(window, cx)),
             );
@@ -256,6 +259,23 @@ impl Render for GalleryApp {
             .child(toolbar)
             .child(div().flex_1().min_h_0().child(self.dock.clone()))
     }
+}
+
+/// Point Ravel's own parts at the built-in palette for `mode`.
+fn install_ravel_tokens(mode: ThemeMode, cx: &mut App) {
+    let mode = match mode {
+        ThemeMode::Dark => ravel_widgets::ThemeMode::Dark,
+        _ => ravel_widgets::ThemeMode::Light,
+    };
+    ravel_widgets::set_active_tokens(
+        ravel_widgets::ThemeSpec {
+            name: "Ravel".to_string(),
+            mode,
+            ..ravel_widgets::ThemeSpec::default()
+        }
+        .resolve(),
+        cx,
+    );
 }
 
 /// A single-window workspace holding `preset`'s tree.
@@ -288,6 +308,11 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             gpui_component::Theme::sync_system_appearance(None, cx);
+            // The tab bar's own buttons and icons are Ravel's, and they read
+            // Ravel's tokens rather than gpui-component's theme. Nothing here
+            // reads a theme file, so both sides wear the built-in palette for
+            // whichever mode the system chose.
+            install_ravel_tokens(cx.theme().mode, cx);
             if let Err(e) = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

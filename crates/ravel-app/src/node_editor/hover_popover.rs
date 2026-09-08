@@ -27,13 +27,14 @@ use gpui::{
     ParentElement, Pixels, Point, RenderOnce, SharedString, Stateful, Styled, Window, div, px,
 };
 use gpui_component::popover::Popover;
-use gpui_component::{ActiveTheme, Icon, Selectable, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Selectable, h_flex, v_flex};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{DataTypeId, NodeId};
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_i18n::t;
 use ravel_ui::properties::node::channel_display_value;
+use ravel_widgets::Icon;
 use std::time::Duration;
 
 use crate::assets::RavelIcon;

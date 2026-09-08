@@ -17,7 +17,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Icon, Sizable as _, WindowExt as _};
+use gpui_component::{ActiveTheme, Sizable as _, WindowExt as _};
 use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, MediaAssetEntry, MediaAssets};
 use ravel_core::id::AssetId;
@@ -28,6 +28,7 @@ use ravel_ui::panels::media_bin::{
     AssetReference, MediaBinFilter, MediaBinPanel, MediaBinRow, MediaBinRowKind, asset_references,
     format_duration,
 };
+use ravel_widgets::Icon;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::path::PathBuf;

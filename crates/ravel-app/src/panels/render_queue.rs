@@ -13,13 +13,13 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::ActiveTheme;
 use gpui_component::progress::Progress;
-use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_core::runtime::RenderJobId;
 use ravel_i18n::t;
 use ravel_ui::layout::PanelInstanceId;
 use ravel_ui::panels::render_queue::RenderQueueRow;
+use ravel_widgets::Button;
 
 use crate::export::RenderService;
 
@@ -82,7 +82,7 @@ impl RenderQueueGpuiPanel {
                 header.child(
                     Button::new("render-queue-clear")
                         .ghost()
-                        .xsmall()
+                        .compact()
                         .label(SharedString::from(t!("render_queue.clear_finished")))
                         .on_click(cx.listener(|this, _event, _window, cx| {
                             this.clear_finished(cx);
@@ -145,7 +145,7 @@ impl RenderQueueGpuiPanel {
                         header.child(
                             Button::new(("render-queue-cancel", index))
                                 .ghost()
-                                .xsmall()
+                                .compact()
                                 .label(SharedString::from(t!("render_queue.cancel")))
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     this.cancel(job, cx);

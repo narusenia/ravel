@@ -4,10 +4,14 @@
 //! Ravel's own widget layer.
 //!
 //! [`tokens`] is the single source for the colors, spacing, row heights,
-//! typography, motion and radii the UI is built from. [`curve_editor`] and
-//! [`curve_view`] are the first widgets to live here; the remaining ones move
-//! in later units (`docs/implementation/ui-component-layer-plan.md`, `UIX-3`
-//! and `UIX-4`).
+//! typography, motion and radii the UI is built from, and [`theme`] is how a
+//! widget reaches the set in force. [`icon`], [`button`] and [`tooltip`] are
+//! the three parts Ravel owns outright — the ones the application's texture
+//! lives in — and they are built on `gpui-base`'s unstyled primitives, which
+//! own focus, keyboard activation and accessibility. [`curve_editor`] and
+//! [`curve_view`] are the geometry the curve views share. The remaining
+//! borrowed parts move in later units
+//! (`docs/implementation/ui-component-layer-plan.md`).
 //!
 //! `examples/gallery` renders everything this crate exposes without starting
 //! `ravel-app` — it is where the widgets are looked at.
@@ -18,9 +22,13 @@
 //! borrowed component (an `Input`, the window `Root`) is wired up in
 //! `ravel-app`, never here.
 
+pub mod button;
 pub mod curve_editor;
 pub mod curve_view;
+pub mod icon;
+pub mod theme;
 pub mod tokens;
+pub mod tooltip;
 
 pub use curve_editor::{
     ControlPoint, CurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
@@ -34,7 +42,23 @@ pub use curve_view::{
     value_grid_values,
 };
 
+pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
+
+pub use icon::{Icon, IconPath, UiIcon};
+
+pub use tooltip::{
+    GRACE_PERIOD, SHOW_DELAY, Tooltip, TooltipExt, install_tooltip_overlay, tooltip_overlay,
+};
+
+/// The per-window tooltip overlay a host installs and renders.
+///
+/// Re-exported so a host does not need `gpui-base` of its own just to name the
+/// field it keeps [`install_tooltip_overlay`]'s return value in.
+pub use gpui_base::TooltipOverlay;
+
+pub use theme::{ActiveTokens, set_active_tokens};
+
 pub use tokens::{
-    Colors, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode, ThemeSpec, Typography,
-    hex_color_string, parse_hex_color,
+    Colors, Density, Metrics, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode,
+    ThemeSpec, Typography, hex_color_string, mix, parse_hex_color,
 };

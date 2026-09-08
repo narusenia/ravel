@@ -16,7 +16,7 @@ pub mod render_queue;
 pub mod sync_probe;
 
 use gpui::*;
-use gpui_component::{ActiveTheme, Icon};
+use gpui_component::ActiveTheme;
 use image::{Frame as ImageFrame, ImageBuffer, Rgba};
 use ravel_core::composition::{Composition, Document};
 use ravel_core::graph::GraphError;
@@ -31,6 +31,7 @@ use ravel_nodes::DisplayFrame;
 use ravel_ui::layout::{PanelInstance, PanelInstanceId};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::panels::timeline::BpmGrid;
+use ravel_widgets::Icon;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

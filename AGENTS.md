@@ -40,17 +40,26 @@ model is still current.
 - `crates/ravel-dock`: the docking UI for the v2 layout model (split/tab
   rendering, splitter drag, tab drag-and-drop, `PaneContent` interface). It
   replaces the former `gpui_component::dock` wiring; the bundled
-  `examples/gallery` binary exercises it without the application
+  `examples/gallery` binary exercises it without the application. `menu.rs`
+  is a lodger rather than part of the docking model: a `ravel_widgets::Button`
+  that opens a borrowed `gpui_component::PopupMenu` needs a local type to
+  carry gpui-component's `DropdownMenu`, and this is the lowest crate that may
+  name both. It goes when the menu is Ravel's own
 - `crates/ravel-widgets`: Ravel's own widget layer, and the design tokens
   (colors, spacing, row heights, typography, motion, radii) the UI is built
   from — `tokens.rs` is the single source and the authoritative theme schema.
-  The curve-editor geometry (`curve_editor.rs`, `curve_view.rs`) lives here;
-  the widgets that still borrow from gpui-component stay in `ravel-app`. It
-  depends on `gpui`, `gpui-base`, `ravel-core` and `serde`: **never on
-  `gpui-component`**, because gpui-component's `ThemeConfig` is *derived* from
-  Ravel's schema by `ravel-app`, never the reverse. The bundled
-  `examples/gallery` binary renders every widget and every token in both
-  palettes without the application
+  `theme.rs` is the one path from a widget to the set in force (`cx.tokens()`,
+  installed by `ravel-app`). `icon.rs`, `button.rs` and `tooltip.rs` are the
+  three parts Ravel owns outright, built on `gpui-base`'s unstyled primitives
+  so focus, Enter/Space activation and accessibility stay borrowed while the
+  appearance is Ravel's; the curve-editor geometry (`curve_editor.rs`,
+  `curve_view.rs`) lives here too, and the widgets that still borrow from
+  gpui-component stay in `ravel-app`. It depends on `gpui`, `gpui-base`,
+  `ravel-core` and `serde`: **never on `gpui-component`**, because
+  gpui-component's `ThemeConfig` is *derived* from Ravel's schema by
+  `ravel-app`, never the reverse. The bundled `examples/gallery` binary
+  renders every widget and every token in both palettes without the
+  application, and binds Tab itself so the focus ring can be seen
 - `crates/ravel-project`: the `.ravprj` container, format migration, the
   settings layers, UI state, and atomic writes. GUI-free by construction — it
   depends on `ravel-core` and `ravel-ui` only, never on `gpui`, so headless

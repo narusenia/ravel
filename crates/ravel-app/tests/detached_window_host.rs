@@ -10,12 +10,9 @@
 //! switch. Minimize follow and the dialog layers need a real platform window
 //! and are verified on device.
 
-use gpui::{
-    InteractiveElement as _, ParentElement as _, SharedString, TestAppContext, VisualTestContext,
-};
+use gpui::{ParentElement as _, SharedString, TestAppContext, VisualTestContext};
 use gpui_component::Root;
 use gpui_component::WindowExt as _;
-use gpui_component::button::Button;
 use ravel_app::panels;
 use ravel_app::trace;
 use ravel_app::window_host::{self, WindowRegistry};
@@ -23,6 +20,7 @@ use ravel_app::workspace;
 use ravel_ui::command::CommandId;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
+use ravel_widgets::Button;
 use std::time::Duration;
 
 fn init_i18n() {
@@ -338,6 +336,7 @@ fn detached_window_paints_its_dialog_layer(cx: &mut TestAppContext) {
                 .content(|body, _window, _cx| {
                     body.child(
                         Button::new("detached-dialog-probe")
+                            .solid()
                             .label(SharedString::from("probe"))
                             .debug_selector(|| "detached-dialog-probe".into()),
                     )

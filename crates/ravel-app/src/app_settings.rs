@@ -679,6 +679,23 @@ pub fn apply_resolved_appearance(cx: &mut App) {
         AppearanceMode::Light => Theme::change(ThemeMode::Light, None, cx),
         AppearanceMode::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
+    // Ravel's own widgets paint from Ravel's tokens rather than from
+    // gpui-component's `Theme`, so the appearance is only half applied until
+    // they are pointed at the same theme. Reading it back off `Theme` — rather
+    // than resolving the mode a second time here — is what keeps the two
+    // halves from disagreeing after `sync_system_appearance`.
+    let theme = Theme::global(cx);
+    let (mode, name) = match theme.mode {
+        ThemeMode::Light => (
+            ravel_widgets::ThemeMode::Light,
+            theme.light_theme.name.clone(),
+        ),
+        ThemeMode::Dark => (
+            ravel_widgets::ThemeMode::Dark,
+            theme.dark_theme.name.clone(),
+        ),
+    };
+    crate::theme_tokens::apply_ravel_theme(&name, mode, cx);
     // `Theme::change` only refreshes the window it is given one of, and this is
     // an app-level change: every open window is now painting stale colours.
     cx.refresh_windows();

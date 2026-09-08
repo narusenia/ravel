@@ -19,7 +19,6 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::Icon;
 use gpui_component::Sizable as _;
 use gpui_component::input::{self, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -3567,10 +3566,17 @@ impl Render for NodeEditorPanel {
                                                 PopupMenuItem::new(SharedString::from(
                                                     item.label.clone(),
                                                 ))
-                                                .icon(Icon::new(RavelIcon::for_node_type(
+                                                // `PopupMenuItem` is still
+                                                // gpui-component's, so its
+                                                // icon is too: `RavelIcon`
+                                                // converts through
+                                                // `IconNamed`, which is why
+                                                // no `Icon` type is named
+                                                // here.
+                                                .icon(RavelIcon::for_node_type(
                                                     &item.type_key,
                                                     Some(category),
-                                                )))
+                                                ))
                                                 .on_click(move |_, _window, cx| {
                                                     entity
                                                         .update(cx, |this, cx| {

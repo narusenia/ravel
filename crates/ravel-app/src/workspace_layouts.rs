@@ -20,11 +20,11 @@
 //! can drift from the shell.
 
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_i18n::t;
+use ravel_widgets::Button;
 
 use crate::workspace::RavelWorkspace;
 
@@ -127,7 +127,8 @@ impl WorkspaceLayoutsForm {
             .child(div().flex_grow_1().truncate().text_sm().child(name))
             .child(
                 Button::new(SharedString::from(format!("layout-apply-{apply}")))
-                    .xsmall()
+                    .compact()
+                    .solid()
                     .label(SharedString::from(t!("workspace.layouts.apply")))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
                         this.apply(apply.clone(), cx);
@@ -135,7 +136,7 @@ impl WorkspaceLayoutsForm {
             )
             .child(
                 Button::new(SharedString::from(format!("layout-delete-{delete}")))
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .label(SharedString::from(t!("workspace.layouts.delete")))
                     .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -189,7 +190,6 @@ impl Render for WorkspaceLayoutsForm {
                     .child(div().flex_grow_1().child(Input::new(&self.name).small()))
                     .child(
                         Button::new("layout-save-current")
-                            .small()
                             .primary()
                             .label(SharedString::from(t!("workspace.layouts.save")))
                             .on_click(cx.listener(|this, _event, window, cx| {

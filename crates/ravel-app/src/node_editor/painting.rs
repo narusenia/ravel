@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
-use gpui_component::IconNamed as _;
 use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
@@ -652,7 +651,7 @@ fn paint_single_node(
                         height: px(icon_size),
                     },
                 ),
-                icon.path(),
+                icon.icon_path(),
                 None,
                 TransformationMatrix::default(),
                 icon_color,

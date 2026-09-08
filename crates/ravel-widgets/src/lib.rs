@@ -28,6 +28,7 @@ pub mod curve_view;
 pub mod icon;
 pub mod input;
 pub mod number_input;
+pub mod scrub_input;
 pub mod theme;
 pub mod tokens;
 pub mod tooltip;
@@ -51,6 +52,8 @@ pub use icon::{Icon, IconPath, UiIcon};
 pub use input::{Input, InputFace, InputLayers, frame_is_focused, input_layers};
 
 pub use number_input::NumberInput;
+
+pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
 
 /// The text-editing engine the two input widgets are built on, re-exported.
 ///

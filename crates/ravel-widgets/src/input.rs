@@ -124,6 +124,12 @@ pub fn input_layers(invalid: bool, disabled: bool, colors: &Colors) -> InputLaye
         }),
         disabled: disabled.then(|| InputFace {
             foreground: colors.disabled_foreground(),
+            // The border is named rather than inherited from `rest`, which
+            // carries `danger` while `invalid`. Disabled outranks invalid: a
+            // field the user cannot reach is not a warning they can act on,
+            // and shouting at them about a value they are not allowed to fix
+            // is the one thing worse than saying nothing.
+            border: colors.border,
             ..rest
         }),
     }
@@ -347,6 +353,26 @@ mod tests {
             "focus overwrote the danger border"
         );
         assert_eq!(layers(true, false).rest.border, colors.danger);
+    }
+
+    /// The module ranks disabled above invalid, so the danger border has to
+    /// stop at the disabled layer. Inheriting it from `rest` — which carries
+    /// `danger` while invalid — would have let invalid win instead.
+    #[test]
+    fn disabled_outranks_invalid_for_the_border() {
+        let colors = Colors::light();
+
+        let both = layers(true, true);
+        assert_eq!(
+            both.rest.border, colors.danger,
+            "the resting layer still records that the value is invalid"
+        );
+        assert_eq!(
+            both.disabled.expect("the disabled layer").border,
+            colors.border,
+            "but the layer resolved last drops the warning the user cannot act on"
+        );
+        assert_eq!(both.focused, None, "and focus is not in the running either");
     }
 
     /// One rule, both palettes: the derivation never asks which mode is on.

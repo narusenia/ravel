@@ -26,7 +26,6 @@
 //! already means "draw from the centre" for the shape tools and "scale about
 //! the anchor" for the shell grips.
 
-use gpui::{Hsla, hsla};
 use ravel_core::composition::GuideAxis;
 use ravel_core::id::{CompId, LayerId};
 
@@ -35,6 +34,7 @@ use super::overlay::{
     DragModifiers, OverlayContext, OverlayId, OverlayPainter, SAFE_AREA_FRACTIONS, ViewerOverlay,
     priority,
 };
+use super::overlay_colors::SNAP_GUIDE_COLOR;
 
 /// Screen-pixel distance within which a gesture is pulled onto a candidate.
 pub const SNAP_THRESHOLD_PX: f32 = 8.0;
@@ -260,10 +260,6 @@ fn snap_axis(origin: f32, size: f32, lines: &[f32], threshold: f32) -> Option<(f
     best.map(|(_, adjust, line)| (adjust, line))
 }
 
-/// The guide colour: magenta, so it reads as neither the selection blue, the
-/// geometry warm, nor the safe-area grey it is drawn over.
-const GUIDE_COLOR: Hsla = hsla(0.85, 0.9, 0.65, 0.9);
-
 /// The lines the drag in flight is snapped to, for as long as it is snapped.
 ///
 /// It owns no state: the gesture that computed the pull publishes it through
@@ -292,10 +288,10 @@ impl ViewerOverlay for SnapGuideOverlay {
 
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
         if let Some(x) = ctx.snap_guides.x {
-            painter.comp_vrule(x, 1.0, GUIDE_COLOR);
+            painter.comp_vrule(x, 1.0, SNAP_GUIDE_COLOR);
         }
         if let Some(y) = ctx.snap_guides.y {
-            painter.comp_hrule(y, 1.0, GUIDE_COLOR);
+            painter.comp_hrule(y, 1.0, SNAP_GUIDE_COLOR);
         }
     }
 }

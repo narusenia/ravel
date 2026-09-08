@@ -28,7 +28,7 @@ use gpui::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::radio::Radio;
 use gpui_component::select::{Select, SelectState};
-use gpui_component::{ActiveTheme, Disableable as _, Sizable as _};
+use gpui_component::{Disableable as _, Sizable as _};
 use ravel_core::id::CompId;
 use ravel_core::media::encode::{
     Availability, EncodeTarget, EncoderAvailability, PngDepth, UnavailableReason,
@@ -36,6 +36,7 @@ use ravel_core::media::encode::{
 use ravel_core::media::{ImageFormat, VideoCodec};
 use ravel_i18n::t;
 use ravel_ui::export::{DEFAULT_PADDING, ExportSettings};
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Button;
 use ravel_widgets::{Input, InputState, NumberInput};
 use std::path::PathBuf;
@@ -383,7 +384,7 @@ impl ExportForm {
                     .flex_shrink_0()
                     .truncate()
                     .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
+                    .text_color(cx.tokens().colors.muted_foreground)
                     .child(SharedString::from(label)),
             )
             .child(div().flex_grow_1().child(control))
@@ -392,7 +393,7 @@ impl ExportForm {
     /// The format list: one radio per row, unavailable rows disabled with the
     /// reason beside them.
     fn format_list(&self, cx: &mut Context<Self>) -> Div {
-        let muted = cx.theme().colors.muted_foreground;
+        let muted = cx.tokens().colors.muted_foreground;
         let mut list = div().flex().flex_col().gap(px(2.0));
         for (index, choice) in self.choices.iter().enumerate() {
             let selectable = choice.is_selectable();
@@ -429,7 +430,7 @@ impl Focusable for ExportForm {
 
 impl Render for ExportForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().colors.muted_foreground;
+        let muted = cx.tokens().colors.muted_foreground;
         // Re-asked on every draw, and the picker's `cx.notify()` is what makes
         // a draw happen when the composition changes.
         let audio_possible = self.audio_possible(cx);
@@ -551,7 +552,7 @@ impl Render for ExportForm {
                     div()
                         .pt_1()
                         .text_xs()
-                        .text_color(cx.theme().colors.danger)
+                        .text_color(cx.tokens().colors.danger)
                         .child(message),
                 )
             })

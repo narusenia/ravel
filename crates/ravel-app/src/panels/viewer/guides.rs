@@ -19,12 +19,13 @@
 //!   the *view* of them — rulers shown, guides shown, guides locked — is panel
 //!   state, the same class as the grid and safe-area toggles.
 
-use gpui::{Bounds, Hsla, Pixels, hsla, point, px, size};
+use gpui::{Bounds, Hsla, Pixels, point, px, size};
 use ravel_core::composition::{Guide, GuideAxis};
 
 use super::overlay::{
     OverlayContext, OverlayId, OverlayPainter, OverlayPrimitive, ViewerOverlay, priority,
 };
+use super::overlay_colors::USER_GUIDE_COLOR;
 
 /// Thickness of each ruler strip, in screen pixels.
 pub const RULER_PX: f32 = 16.0;
@@ -204,11 +205,6 @@ pub fn ruler_primitives(
     primitives
 }
 
-/// The guide colour: cyan, distinct from the snap guide's magenta. A snap guide
-/// reports a correction that is happening now; a user guide is a standing mark,
-/// and the two are routinely on screen together.
-const GUIDE_COLOR: Hsla = hsla(0.5, 0.85, 0.6, 0.85);
-
 /// The composition's user guides, while they are shown.
 ///
 /// It owns nothing: the positions live in the document, so undo, redo and
@@ -245,8 +241,8 @@ impl ViewerOverlay for GuideOverlay {
     fn paint(&self, ctx: &OverlayContext, painter: &mut OverlayPainter) {
         for guide in Self::guides(ctx) {
             match guide.axis {
-                GuideAxis::Vertical => painter.comp_vrule(guide.position, 1.0, GUIDE_COLOR),
-                GuideAxis::Horizontal => painter.comp_hrule(guide.position, 1.0, GUIDE_COLOR),
+                GuideAxis::Vertical => painter.comp_vrule(guide.position, 1.0, USER_GUIDE_COLOR),
+                GuideAxis::Horizontal => painter.comp_hrule(guide.position, 1.0, USER_GUIDE_COLOR),
             }
         }
     }
@@ -258,6 +254,7 @@ mod tests {
     use ravel_core::composition::{Composition, Document};
     use ravel_core::id::CompId;
     use ravel_core::types::FrameRate;
+    use ravel_widgets::tokens::Colors;
 
     fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds {
@@ -420,8 +417,10 @@ mod tests {
             panel,
             frame,
             (1920, 1080),
-            gpui::hsla(0.0, 0.0, 0.1, 1.0),
-            gpui::hsla(0.0, 0.0, 1.0, 0.5),
+            // Whatever the panel passes: the ruler's own placement is what is
+            // under test, so these are the two tokens the Viewer hands it.
+            Colors::dark().secondary,
+            Colors::dark().muted_foreground,
         );
         let [
             OverlayPrimitive::Quad { bounds: top, .. },
@@ -482,8 +481,10 @@ mod tests {
             bounds(0.0, 0.0, 400.0, 300.0),
             bounds(0.0, 0.0, 0.0, 0.0),
             (1920, 1080),
-            gpui::hsla(0.0, 0.0, 0.1, 1.0),
-            gpui::hsla(0.0, 0.0, 1.0, 0.5),
+            // Whatever the panel passes: the ruler's own placement is what is
+            // under test, so these are the two tokens the Viewer hands it.
+            Colors::dark().secondary,
+            Colors::dark().muted_foreground,
         );
         assert!(primitives.is_empty());
     }

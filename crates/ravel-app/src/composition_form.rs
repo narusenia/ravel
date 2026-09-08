@@ -17,8 +17,8 @@
 //! New Composition leaves no undo step behind.
 
 use gpui::*;
+use gpui_component::Sizable as _;
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
-use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
 use ravel_ui::properties::PropertyField;
@@ -26,6 +26,7 @@ use ravel_ui::properties::composition::{
     self, FIELD_BACKGROUND, FIELD_DURATION, FIELD_FRAME_RATE, FIELD_HEIGHT, FIELD_NAME,
     FIELD_WIDTH, composition_fields,
 };
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{InputState, NumberInput};
 
 /// Localized label for a composition field key (the Properties panel resolves
@@ -149,7 +150,7 @@ impl CompositionForm {
                     .flex_shrink_0()
                     .truncate()
                     .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
+                    .text_color(cx.tokens().colors.muted_foreground)
                     .child(SharedString::from(field_label(key))),
             )
             .child(div().flex_grow_1().child(control))
@@ -187,7 +188,7 @@ impl Render for CompositionForm {
                     .into_any_element(),
                 _ => div()
                     .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
+                    .text_color(cx.tokens().colors.muted_foreground)
                     .child(SharedString::from(placeholder_value(&field)))
                     .into_any_element(),
             };

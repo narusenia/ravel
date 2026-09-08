@@ -41,7 +41,6 @@
 //! editor through the `NodeEditorHandle` global.
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
@@ -77,13 +76,14 @@ use ravel_ui::properties::media_asset::{
 };
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
 use ravel_widgets::{Input, InputEvent, InputState};
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
-use crate::widgets::{
+use ravel_widgets::{
     ParamCurveEditor, ParamCurveEditorState, ParamCurveEvent, ParamRampEditor,
     ParamRampEditorState, ParamRampEvent, ScrubEvent, ScrubInput, ScrubInputState, curve_thumbnail,
     ramp_thumbnail,
@@ -4659,7 +4659,7 @@ impl Render for PropertiesGpuiPanel {
                     .items_center()
                     .justify_center()
                     .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
+                    .text_color(cx.tokens().colors.muted_foreground)
                     .child(SharedString::from(message)),
             );
         } else {
@@ -4757,15 +4757,15 @@ impl Render for PropertiesGpuiPanel {
                     .collect(),
                 error: self.exposed_error.clone(),
             };
-            let muted = cx.theme().colors.muted_foreground;
-            let fg = cx.theme().colors.foreground;
-            let danger = cx.theme().colors.danger;
-            let mono_family = cx.theme().mono_font_family.clone();
+            let muted = cx.tokens().colors.muted_foreground;
+            let fg = cx.tokens().colors.foreground;
+            let danger = cx.tokens().colors.danger;
+            let mono_family = cx.tokens().text.mono_font_family.clone();
             // Dimmer than `muted`: a control that is present but cannot act.
-            let disabled = cx.theme().colors.border;
+            let disabled = cx.tokens().colors.border;
             // Active-state color of the ◆/◎/● toggles: theme primary, so
             // keyed / exposed states stand out from the muted chrome.
-            let active = cx.theme().colors.primary;
+            let active = cx.tokens().colors.primary;
             let editor = cx.entity().downgrade();
             let node_ids = match &self.target {
                 PropertiesTarget::Nodes { ids, .. } => ids.clone(),
@@ -7076,10 +7076,10 @@ mod tests {
         x: f32,
         y: f32,
         cx: &mut TestAppContext,
-    ) -> crate::widgets::curve_editor::CurvePoint {
+    ) -> ravel_widgets::curve_editor::CurvePoint {
         state.read_with(cx, |state, _| {
-            crate::widgets::param_curve_editor::transform_for(state.view(), CURVE_TEST_SIZE)
-                .data_to_widget(crate::widgets::curve_editor::CurvePoint::new(
+            ravel_widgets::param_curve_editor::transform_for(state.view(), CURVE_TEST_SIZE)
+                .data_to_widget(ravel_widgets::curve_editor::CurvePoint::new(
                     x as f64, y as f64,
                 ))
         })
@@ -7391,7 +7391,7 @@ mod tests {
     /// one undo step.
     #[gpui::test]
     fn editing_the_selected_point_numerically_reaches_the_document(cx: &mut TestAppContext) {
-        use crate::widgets::param_curve_editor::PointAxis;
+        use ravel_widgets::param_curve_editor::PointAxis;
         let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
         let original = node_curve(&project, &path, node_id, "points", cx).expect("curve");
         let state = curve_editor_state(&window, "points", cx);
@@ -7424,7 +7424,7 @@ mod tests {
     /// value and records no undo step.
     #[gpui::test]
     fn changing_the_curve_view_range_never_touches_the_document(cx: &mut TestAppContext) {
-        use crate::widgets::param_curve_editor::ViewPoint;
+        use ravel_widgets::param_curve_editor::ViewPoint;
         let (window, _editor, project, path, node_id) = setup_target_for_node(cx, curve_node());
         let before = node_curve(&project, &path, node_id, "points", cx).expect("curve");
         let state = curve_editor_state(&window, "points", cx);
@@ -7965,7 +7965,7 @@ mod tests {
         // the display encoding is undone, so a primary cannot tell a working
         // conversion from a missing one. Half-way in display light is about
         // 0.21 linear, and the stored stop is linear (`CM-2`).
-        let picked = gpui::rgb_to_hsla(gpui::rgb(0x808080));
+        let picked = gpui::rgb_to_hsla(gpui::Rgba::new(0.5, 0.5, 0.5, 1.0));
         let rgba = gpui::hsla_to_rgba(picked);
         let expected =
             ColorSpace::DISPLAY.to_linear([rgba.color.red, rgba.color.green, rgba.color.blue])[0];

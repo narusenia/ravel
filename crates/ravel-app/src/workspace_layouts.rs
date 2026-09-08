@@ -20,9 +20,9 @@
 //! can drift from the shell.
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::checkbox::Checkbox;
 use ravel_i18n::t;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Button;
 use ravel_widgets::{Input, InputState};
 
@@ -156,7 +156,7 @@ impl Render for WorkspaceLayoutsForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let names = self.saved_names(cx);
         let embed = crate::layout_persist::embed_in_projects(cx);
-        let muted = cx.theme().colors.muted_foreground;
+        let muted = cx.tokens().colors.muted_foreground;
 
         let saved: AnyElement = if names.is_empty() {
             div()

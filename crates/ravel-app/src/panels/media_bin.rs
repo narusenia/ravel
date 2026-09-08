@@ -15,8 +15,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::WindowExt as _;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, WindowExt as _};
 use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, MediaAssetEntry, MediaAssets};
 use ravel_core::id::AssetId;
@@ -27,6 +27,7 @@ use ravel_ui::panels::media_bin::{
     AssetReference, MediaBinFilter, MediaBinPanel, MediaBinRow, MediaBinRowKind, asset_references,
     format_duration,
 };
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Icon;
 use ravel_widgets::{Input, InputEvent, InputState};
 use smallvec::SmallVec;
@@ -498,7 +499,7 @@ impl MediaBinGpuiPanel {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let active = self.state.filter() == filter;
         div()
             .id(SharedString::from(format!("media-bin-filter-{label}")))
@@ -514,8 +515,8 @@ impl MediaBinGpuiPanel {
             } else {
                 colors.muted_foreground
             })
-            .when(active, |button| button.bg(colors.list_active))
-            .hover(|style| style.bg(colors.list_hover))
+            .when(active, |button| button.bg(colors.selected_surface()))
+            .hover(|style| style.bg(colors.hover_surface()))
             .child(t!(label))
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.set_filter(filter, cx);
@@ -523,7 +524,7 @@ impl MediaBinGpuiPanel {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         div()
             .flex()
             .items_center()
@@ -553,7 +554,7 @@ impl MediaBinGpuiPanel {
     }
 
     fn render_row(&self, index: usize, row: &MediaBinRow, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let selected = super::media_selection(cx).contains(row.asset_id);
         let can_layer = !row.offline && super::active_composition(cx).is_some();
         let preparing = self
@@ -578,7 +579,7 @@ impl MediaBinGpuiPanel {
             } else {
                 colors.foreground
             })
-            .when(selected, |row| row.bg(colors.list_active))
+            .when(selected, |row| row.bg(colors.selected_surface()))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -615,7 +616,7 @@ impl MediaBinGpuiPanel {
             .rounded_sm()
             .border_1()
             .border_color(colors.border)
-            .bg(colors.muted)
+            .bg(colors.accent)
             .overflow_hidden();
         thumb = match self.thumb_images.get(&row.asset_id) {
             Some((_, image)) => {
@@ -776,16 +777,16 @@ pub struct DraggedAsset {
 
 impl Render for DraggedAsset {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         div()
             .px_1p5()
             .py_0p5()
             .rounded_sm()
             .border_1()
             .border_color(colors.border)
-            .bg(colors.popover)
+            .bg(colors.raised_surface())
             .text_xs()
-            .text_color(colors.popover_foreground)
+            .text_color(colors.foreground)
             .child(SharedString::from(self.name.clone()))
     }
 }
@@ -1043,7 +1044,7 @@ impl Focusable for MediaBinGpuiPanel {
 
 impl Render for MediaBinGpuiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let mut list = div()
             .id("media-bin-list")
             .debug_selector(|| "media-bin-panel".into())
@@ -1078,7 +1079,7 @@ impl Render for MediaBinGpuiPanel {
             .flex_col()
             .border_t_1()
             .border_color(colors.border)
-            .bg(colors.list)
+            .bg(colors.background)
             .track_focus(&self.focus_handle)
             .child(self.render_header(cx))
             .child(list)

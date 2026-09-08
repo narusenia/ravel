@@ -29,9 +29,7 @@
 //! [`OverlayLabel`]s that the panel renders as elements, because GPUI shapes
 //! text through elements rather than through the canvas painter.
 
-use gpui::{
-    App, Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, hsla, point, px, size,
-};
+use gpui::{App, Bounds, Global, Hsla, Pixels, Point, SharedString, Window, fill, point, px, size};
 use ravel_core::composition::Document;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::{EvalContext, PathSegment};
@@ -54,6 +52,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use super::overlay_colors::{
+    ANCHOR_COLOR, ARROW_COLOR, GEOMETRY_MARK_COLOR, HANDLE_FILL, PARENT_LINK_COLOR,
+    ROTATE_RING_COLOR, SELECTION_COLOR, group_color,
+};
 use super::{
     CompRect, PathHandleKind, ViewerPointerHint, edited_path_points, layer_selection_comp_rects,
     overlay_line_color, path_points, selected_path_overlay, selection_comp_rects,
@@ -1243,14 +1245,8 @@ pub enum BboxScope {
     Layer,
 }
 
-/// Accent used by both selection bboxes.
-const SELECTION_COLOR: Hsla = hsla(0.58, 0.7, 0.6, 0.9);
-
 /// Screen-pixel side length of a selection handle (zoom-independent).
 pub const SELECTION_HANDLE_PX: f32 = 7.0;
-
-/// Inner fill of a two-square handle mark.
-const HANDLE_FILL: Hsla = hsla(0.0, 0.0, 1.0, 1.0);
 
 /// The eight handle anchor points of a bbox: four corners and the four edge
 /// midpoints. Coordinate-system agnostic.
@@ -1283,53 +1279,11 @@ pub(super) fn paint_handle_mark(
 /// Screen-pixel side length of a geometry point marker.
 const GEOMETRY_POINT_PX: f32 = 3.0;
 
-/// Point and path marks: a warmer accent than the bbox, so a dense point cloud
-/// stays distinguishable from the outline around it.
-const GEOMETRY_MARK_COLOR: Hsla = hsla(0.12, 0.85, 0.62, 0.9);
-
-/// Attribute arrows: cool where the point marks are warm, so an arrow reads as
-/// a separate thing from the element it leaves.
-const ARROW_COLOR: Hsla = hsla(0.45, 0.85, 0.62, 0.95);
-
 /// Longest attribute arrow drawn, as a fraction of the composition's shorter
 /// side. A cap in composition units rather than in the geometry's own bounds:
 /// a single particle has no extent to measure an arrow against, and its
 /// velocity still has to be visible.
 const ARROW_COMP_FRACTION: f32 = 0.15;
-
-/// The colour of the group named `name`.
-///
-/// Derived from the name, not from the group's position in a list, so a group
-/// keeps its colour when another one appears beside it or when the same group
-/// exists on both drawn domains, and no table has to be maintained.
-///
-/// **Three axes, not one.** Telling groups apart is the whole point of colouring
-/// them, so two names sharing a colour defeats the feature — and hue alone has
-/// only 360 buckets. Distinct colours produced, measured rather than assumed:
-///
-/// | group names | hue only | hue + saturation + lightness |
-/// |---|---|---|
-/// | 26 (single letters) | 26 | 26 |
-/// | 100 (`g0`…`g99`) | 92 | 100 |
-/// | 500 (`g0`…`g499`) | 258 | 500 |
-///
-/// A splitmix finalizer over the hash was measured too and bought nothing at any
-/// plausible group count (it only separates 994 of 1000 names against 984), so it
-/// is not carried.
-fn group_color(name: &str) -> Hsla {
-    let mut hash: u64 = 14_695_981_039_346_656_037;
-    for byte in name.as_bytes() {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(1_099_511_628_211);
-    }
-    hsla(
-        (hash % 720) as f32 / 720.0,
-        // Kept inside a legible band: every combination has to read as a mark
-        // over both the composition and the point cloud around it.
-        0.55 + ((hash >> 32) & 0x7) as f32 * 0.05,
-        0.45 + ((hash >> 40) & 0x7) as f32 * 0.04,
-        0.9,
-    )
-}
 
 /// Draws what the evaluator produced for the selection: the bounding box, the
 /// point and instance positions, and the path primitives — each behind its own
@@ -1800,19 +1754,8 @@ impl ShellHandle {
     }
 }
 
-/// Anchor marker colour: warm, so it never reads as one of the blue scale
-/// handles.
-const ANCHOR_COLOR: Hsla = hsla(0.09, 0.9, 0.6, 0.95);
-
-/// The line from a child's anchor to its parent's.
-const PARENT_LINK_COLOR: Hsla = hsla(0.09, 0.5, 0.6, 0.55);
-
 /// Screen-pixel side length of the anchor marker.
 const ANCHOR_MARKER_PX: f32 = 11.0;
-
-/// The rotation ring: the selection accent held back so the ring reads as a
-/// zone around the corner rather than as another grip.
-const ROTATE_RING_COLOR: Hsla = hsla(0.58, 0.7, 0.6, 0.4);
 
 /// An angle in radians folded into `(−π, π]`.
 fn wrap_angle(radians: f32) -> f32 {
@@ -2800,6 +2743,7 @@ mod tests {
     use ravel_core::graph::{Graph, Node};
     use ravel_core::id::NodeId;
     use ravel_core::types::{FrameRate, Vec2};
+    use ravel_widgets::tokens::Colors;
 
     /// A frame placed away from the panel origin and zoomed to 0.5, so a bug
     /// that forgets either the offset or the scale shows up.
@@ -2815,8 +2759,8 @@ mod tests {
 
     fn colors() -> OverlayColors {
         OverlayColors {
-            path: gpui::hsla(0.5, 0.5, 0.5, 1.0),
-            error: gpui::hsla(0.0, 1.0, 0.5, 1.0),
+            path: Colors::dark().info,
+            error: Colors::dark().danger,
         }
     }
 

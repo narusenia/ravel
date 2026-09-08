@@ -34,17 +34,16 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::ActiveTokens as _;
+use crate::{Icon, TooltipExt as _, UiIcon};
 use gpui::*;
-use gpui_component::ActiveTheme;
 use ravel_core::color::ColorSpace;
 use ravel_core::param_ramp::{RampInterpolation, RampParam, RampStop};
 use ravel_core::types::Color;
 use ravel_i18n::t;
-use ravel_widgets::{Icon, TooltipExt as _};
 
 use super::param_curve_editor::clamp_between;
 use super::scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
-use crate::assets::RavelIcon;
 
 /// Pointer distance (widget pixels, horizontal) that still counts as grabbing
 /// a stop.
@@ -224,8 +223,11 @@ impl ParamRampEditorState {
 
     /// Test hook: paint is what normally records the element's bounds, so a
     /// headless test has to supply them before driving the pointer.
-    #[cfg(test)]
-    pub(crate) fn set_bounds_for_tests(&self, origin: (f32, f32), size: (f32, f32)) {
+    ///
+    /// Not behind `cfg(test)`: the callers are the Properties panel's gesture
+    /// tests, and this crate is not the one compiling them — the same reason
+    /// [`crate::Button::debug_selector`] is unconditional.
+    pub fn set_bounds_for_tests(&self, origin: (f32, f32), size: (f32, f32)) {
         self.bounds.set((origin.0, origin.1, size.0, size.1));
     }
 
@@ -284,7 +286,7 @@ impl ParamRampEditorState {
     /// Left-button press: a second click adds a stop (or removes the one under
     /// the pointer), a first click selects the stop it grabbed and starts
     /// dragging it — the same gesture vocabulary the curve editor uses.
-    pub(crate) fn pointer_down(&mut self, x: f32, click_count: usize, cx: &mut Context<Self>) {
+    pub fn pointer_down(&mut self, x: f32, click_count: usize, cx: &mut Context<Self>) {
         if self.width() <= 0.0 {
             return;
         }
@@ -330,7 +332,7 @@ impl ParamRampEditorState {
     /// between the neighbours it started between. When the neighbours leave no
     /// room at all the stop keeps the position it has: refusing the move is
     /// the one outcome that cannot merge two stops.
-    pub(crate) fn drag_to(&mut self, x: f32, cx: &mut Context<Self>) {
+    pub fn drag_to(&mut self, x: f32, cx: &mut Context<Self>) {
         let Some(drag) = self.drag else {
             return;
         };
@@ -360,7 +362,7 @@ impl ParamRampEditorState {
 
     /// Ends the drag phase and reports whether it emitted a `Commit`, so a
     /// caller that has to take that undo step itself knows there is one.
-    pub(crate) fn end_drag(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(drag) = self.drag.take() else {
             return false;
         };
@@ -398,7 +400,7 @@ impl ParamRampEditorState {
 
     /// End every gesture owned by this editor before its row is rebuilt.
     /// The band drag and the position field both edit the ramp document.
-    pub(crate) fn end_gestures(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn end_gestures(&mut self, cx: &mut Context<Self>) -> bool {
         let mut committed = self.end_drag(cx);
         if self.position.read(cx).is_dragging() {
             committed |= self
@@ -468,11 +470,7 @@ impl ParamRampEditorState {
     }
 
     /// Switch how the spans between stops are filled. One click, one undo step.
-    pub(crate) fn set_interpolation(
-        &mut self,
-        interpolation: RampInterpolation,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_interpolation(&mut self, interpolation: RampInterpolation, cx: &mut Context<Self>) {
         if self.ramp.interpolation() == interpolation {
             return;
         }
@@ -624,15 +622,15 @@ fn interpolation_button(
     // ship rather than adding a near-identical set.
     let (icon, tooltip) = match interpolation {
         RampInterpolation::Linear => (
-            RavelIcon::InterpolationLinear,
+            UiIcon::InterpolationLinear,
             "properties.ramp.interpolation.linear",
         ),
         RampInterpolation::Smooth => (
-            RavelIcon::InterpolationBezier,
+            UiIcon::InterpolationBezier,
             "properties.ramp.interpolation.smooth",
         ),
         RampInterpolation::Constant => (
-            RavelIcon::InterpolationStep,
+            UiIcon::InterpolationStep,
             "properties.ramp.interpolation.constant",
         ),
     };
@@ -665,9 +663,9 @@ impl RenderOnce for ParamRampEditor {
         let bounds = state.bounds.clone();
         let position_input = state.position.clone();
         let selected_stop = state.selected_stop();
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let outline = colors.foreground;
-        let accent = colors.accent_foreground;
+        let accent = colors.readable_on(colors.accent);
 
         let band = div()
             .id(("param-ramp-band", entity_id))

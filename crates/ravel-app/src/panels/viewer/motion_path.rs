@@ -30,7 +30,6 @@
 //! is `[AnimationChannel; 2]`, two independent time curves, and spatial
 //! interpolation would mean changing that representation everywhere.
 
-use gpui::{Hsla, hsla};
 use ravel_core::composition::Layer;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::eval::EvalContext;
@@ -43,6 +42,7 @@ use super::overlay::{
     Axis, DragModifiers, OverlayContext, OverlayEdit, OverlayHandle, OverlayHandleId, OverlayId,
     OverlayPainter, ShellChannel, ViewerOverlay, paint_handle_mark, priority,
 };
+use super::overlay_colors::{MOTION_KEY_COLOR, MOTION_PATH_COLOR};
 
 /// Hard ceiling on trajectory samples, and on key points, per layer.
 ///
@@ -50,13 +50,6 @@ use super::overlay::{
 /// render and every pointer move. Two hundred and fifty-six segments already
 /// draw a smooth curve at any zoom the panel offers.
 pub const MAX_MOTION_SAMPLES: usize = 256;
-
-/// The trajectory: dimmer than the selection accent, because it is context for
-/// the layer rather than a thing being pointed at.
-const PATH_COLOR: Hsla = hsla(0.58, 0.45, 0.75, 0.7);
-
-/// The key marks, in the selection accent: these are grabbable.
-const KEY_COLOR: Hsla = hsla(0.58, 0.7, 0.6, 0.95);
 
 /// Screen-pixel side length of a key mark.
 const KEY_MARK_PX: f32 = 7.0;
@@ -232,9 +225,9 @@ impl ViewerOverlay for MotionPathOverlay {
         let Some(path) = MotionPath::resolve(ctx) else {
             return;
         };
-        painter.stroke_comp_polyline(&path.points, false, 1.0, PATH_COLOR);
+        painter.stroke_comp_polyline(&path.points, false, 1.0, MOTION_PATH_COLOR);
         for (_, position) in &path.keys {
-            paint_handle_mark(painter, *position, KEY_MARK_PX, KEY_COLOR);
+            paint_handle_mark(painter, *position, KEY_MARK_PX, MOTION_KEY_COLOR);
         }
     }
 

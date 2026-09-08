@@ -27,12 +27,12 @@ use std::collections::HashSet;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme;
 use ravel_core::graph::Graph;
 use ravel_core::id::NodeId;
 use ravel_core::registry::{NodeCategory, NodeRegistry};
 use ravel_i18n::t;
 use ravel_ui::node_search::{SearchCandidate, filter_candidates};
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Icon;
 use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 
@@ -226,7 +226,7 @@ impl SearchPalette {
         value: Option<NodeCategory>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let active = self.category_filter == value;
         div()
             .id(SharedString::from(format!(
@@ -240,7 +240,7 @@ impl SearchPalette {
             .rounded_sm()
             .text_xs()
             .cursor_pointer()
-            .when(active, |chip| chip.bg(colors.list_active))
+            .when(active, |chip| chip.bg(colors.selected_surface()))
             .when(!active, |chip| chip.text_color(colors.muted_foreground))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.set_category_filter(value, cx);
@@ -253,7 +253,7 @@ impl EventEmitter<PaletteEvent> for SearchPalette {}
 
 impl Render for SearchPalette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors;
+        let colors = cx.tokens().colors;
         let visible = self.visible.clone();
         let selected = self.selected;
 
@@ -275,8 +275,8 @@ impl Render for SearchPalette {
                     .h(px(ROW_HEIGHT))
                     .flex_shrink_0()
                     .cursor_pointer()
-                    .when(row == selected, |el| el.bg(colors.list_active))
-                    .hover(|el| el.bg(colors.list_hover))
+                    .when(row == selected, |el| el.bg(colors.selected_surface()))
+                    .hover(|el| el.bg(colors.hover_surface()))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.selected = row;
                         cx.emit(PaletteEvent::Accept(type_key.clone()));
@@ -319,7 +319,7 @@ impl Render for SearchPalette {
             .flex()
             .flex_col()
             .w(px(340.0))
-            .bg(colors.popover)
+            .bg(colors.raised_surface())
             .border_1()
             .border_color(colors.border)
             .rounded_md()

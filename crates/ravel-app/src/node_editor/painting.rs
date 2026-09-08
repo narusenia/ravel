@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use gpui::*;
-use gpui_component::theme::ThemeColor;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, NodeId};
+use ravel_widgets::tokens::Colors;
+
+use super::load_colors;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -174,7 +176,7 @@ pub fn paint_background(bounds: &Bounds<Pixels>, bg: Hsla, window: &mut Window) 
 pub fn paint_grid(
     bounds: &Bounds<Pixels>,
     viewport: &Viewport,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let spacing = 20.0 * viewport.zoom;
@@ -219,7 +221,7 @@ pub fn paint_edges(
     bounds: &Bounds<Pixels>,
     selected_edges: &HashSet<EdgeId>,
     edge_style: super::EdgeStyle,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -257,7 +259,7 @@ pub fn paint_edges(
         let tx = tx + ox;
         let ty = ty + oy;
 
-        let highlight = hsla(0.55, 0.7, 0.6, 1.0);
+        let highlight = colors.primary;
         let is_selected = selected_edges.contains(&edge.id);
         let color = if is_selected { highlight } else { normal_color };
         let stroke_w = if is_selected { 3.0 } else { 2.0 };
@@ -398,10 +400,10 @@ impl TimingLevel {
         }
     }
 
-    fn color(self, colors: &ThemeColor) -> Hsla {
+    fn color(self, colors: &Colors) -> Hsla {
         match self {
-            Self::Critical => hsla(0.0, 0.85, 0.60, 1.0),
-            Self::Warn => hsla(0.13, 0.90, 0.60, 1.0),
+            Self::Critical => load_colors::CRITICAL_COLOR,
+            Self::Warn => load_colors::WARN_COLOR,
             Self::Normal => colors.muted_foreground,
         }
     }
@@ -409,7 +411,7 @@ impl TimingLevel {
 
 /// Load color of the readout: muted → yellow → red as the node gets more
 /// expensive.
-pub fn eval_duration_color(duration: Duration, colors: &ThemeColor) -> Hsla {
+pub fn eval_duration_color(duration: Duration, colors: &Colors) -> Hsla {
     TimingLevel::of(duration).color(colors)
 }
 
@@ -475,7 +477,7 @@ pub fn paint_nodes(
     categories: &HashMap<NodeId, NodeCategory>,
     labels: &HashMap<NodeId, String>,
     show_param_values: bool,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -552,7 +554,7 @@ fn paint_single_node(
     category: Option<NodeCategory>,
     z: f32,
     show_param_values: bool,
-    colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -582,7 +584,7 @@ fn paint_single_node(
         alpha: 0.95,
         ..colors.background
     });
-    let highlight = hsla(0.55, 0.7, 0.6, 1.0);
+    let highlight = colors.primary;
     let node_border = dim(if selected { highlight } else { colors.border });
     let border_w = if selected { 2.0 } else { 1.0 };
 
@@ -1139,7 +1141,7 @@ pub fn paint_connection_draft(
     from: (f32, f32),
     to: (f32, f32),
     bounds: &Bounds<Pixels>,
-    _colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -1150,7 +1152,7 @@ pub fn paint_connection_draft(
     let tx = ox + to.0;
     let ty = oy + to.1;
 
-    let draft_color = hsla(0.55, 0.7, 0.6, 1.0);
+    let draft_color = colors.primary;
 
     let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
     let mut builder = PathBuilder::stroke(px(2.0));
@@ -1169,7 +1171,7 @@ pub fn paint_selection_box(
     start: (f32, f32),
     current: (f32, f32),
     bounds: &Bounds<Pixels>,
-    _colors: &ThemeColor,
+    colors: &Colors,
     window: &mut Window,
 ) {
     let ox: f32 = bounds.origin.x.into();
@@ -1190,7 +1192,7 @@ pub fn paint_selection_box(
         },
     );
 
-    let highlight = hsla(0.55, 0.7, 0.6, 1.0);
+    let highlight = colors.primary;
     let fill_color = Hsla {
         alpha: 0.08,
         ..highlight
@@ -1765,7 +1767,7 @@ mod tests {
     /// The readout escalates muted → yellow → red with load.
     #[test]
     fn eval_duration_color_escalates_with_load() {
-        let colors = ThemeColor::default();
+        let colors = Colors::dark();
         let ok = eval_duration_color(Duration::from_millis(2), &colors);
         assert_eq!(ok, colors.muted_foreground);
         let warn = eval_duration_color(Duration::from_millis(15), &colors);

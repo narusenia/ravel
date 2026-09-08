@@ -16,14 +16,15 @@ pub mod geometry;
 pub mod guides;
 pub mod motion_path;
 pub mod overlay;
+mod overlay_colors;
 pub mod snap;
 mod viewport;
 
 use gpui::*;
-use gpui_component::ActiveTheme;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use ravel_dock::MenuButton as _;
 use ravel_i18n::t;
+use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Button, Icon};
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -2150,8 +2151,8 @@ impl ViewerPanel {
             colors: OverlayColors {
                 // A bright semantic info color keeps the editable path legible
                 // over both dark footage and the black composition background.
-                path: cx.theme().colors.info,
-                error: cx.theme().colors.danger,
+                path: cx.tokens().colors.info,
+                error: cx.tokens().colors.danger,
             },
             // Written by `ProjectState` in the same update as `ViewerFrame`,
             // which this panel already observes — so reading it here needs no
@@ -3042,7 +3043,7 @@ impl ViewerPanel {
             .px_1()
             .py_0p5()
             .border_b_1()
-            .border_color(cx.theme().colors.border);
+            .border_color(cx.tokens().colors.border);
 
         for tool in tools {
             let is_active = tool == active;
@@ -3178,7 +3179,7 @@ impl ViewerPanel {
             .px_1()
             .py(px(2.0))
             .border_t_1()
-            .border_color(cx.theme().colors.border)
+            .border_color(cx.tokens().colors.border)
             .child(
                 Button::new("viewer-zoom-presets")
                     .compact()
@@ -3681,7 +3682,7 @@ fn overlay_label_element(
 /// Overlay line color: light gray that stays readable over both the black
 /// frame and bright content.
 fn overlay_line_color() -> Hsla {
-    hsla(0.0, 0.0, 1.0, 0.3)
+    overlay_colors::SAFE_AREA_LINE_COLOR
 }
 
 const CHECKER_CELL_PX: f32 = 12.0;
@@ -3735,7 +3736,7 @@ fn paint_checkerboard(window: &mut Window, frame: Bounds<Pixels>, clip: Bounds<P
         clip_x + clip_width - frame_x,
         clip_y + clip_height - frame_y,
     );
-    let colors = [rgb(0x4a4a4a), rgb(0x707070)];
+    let colors = overlay_colors::CHECKER_CELLS;
     for (x, y, width, height, light) in checkerboard_tiles(width, height, visible) {
         window.paint_quad(fill(
             Bounds {
@@ -3914,8 +3915,8 @@ impl Focusable for ViewerPanel {
 
 impl Render for ViewerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let border_color = cx.theme().colors.border;
-        let bg = cx.theme().colors.background;
+        let border_color = cx.tokens().colors.border;
+        let bg = cx.tokens().colors.background;
 
         let viewport = self.viewport;
         let composition_resolution = self.composition_resolution;
@@ -3928,7 +3929,7 @@ impl Render for ViewerPanel {
         // The rectangle the Zoom drag has swept so far, in panel-local pixels.
         // Without the band the gesture is invisible until the view jumps.
         let zoom_marquee = self.zoom_drag.and_then(|drag| drag.rect());
-        let zoom_marquee_color = cx.theme().colors.primary;
+        let zoom_marquee_color = cx.tokens().colors.primary;
         let active_drag_cursor = viewer_drag_cursor(
             self.pan_drag.is_some(),
             self.move_drag.is_some(),
@@ -3952,15 +3953,15 @@ impl Render for ViewerPanel {
                 color.r, color.g, color.b, color.a,
             )))
         })()
-        .unwrap_or_else(|| gpui::rgb_to_hsla(rgb(0x000000)));
+        .unwrap_or_else(gpui::black);
 
         // The ruler is the one mark that is not an overlay: it is pinned to the
         // panel's edges, which the composition rectangle leaves entirely as
         // soon as the view is zoomed in.
         let rulers = self.show_rulers.then(|| {
             (
-                cx.theme().colors.secondary,
-                cx.theme().colors.muted_foreground,
+                cx.tokens().colors.secondary,
+                cx.tokens().colors.muted_foreground,
             )
         });
         // One snapshot feeds paint, labels and hit-testing, so an overlay can
@@ -3993,7 +3994,7 @@ impl Render for ViewerPanel {
                             paint_checkerboard(window, frame_bounds, bounds);
                         }
                         ViewerBackgroundMode::Solid => {
-                            window.paint_quad(fill(frame_bounds, rgb(0x000000)));
+                            window.paint_quad(fill(frame_bounds, gpui::black()));
                         }
                     }
                     if let Some(image) = image.clone()
@@ -4153,7 +4154,7 @@ impl Render for ViewerPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(cx.theme().colors.muted_foreground)
+                    .text_color(cx.tokens().colors.muted_foreground)
                     .child(SharedString::from(t!("viewer.no_output"))),
             )
         } else {
@@ -4162,7 +4163,7 @@ impl Render for ViewerPanel {
 
         // The interaction surface is the canvas area only, so toolbar
         // clicks and wheel events never zoom or pan the composition.
-        let drop_highlight = cx.theme().colors.drop_target;
+        let drop_highlight = cx.tokens().colors.drop_target;
         let content = div()
             .id("viewer-canvas-area")
             .flex_1()

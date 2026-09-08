@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 ravel-core = { workspace = true }
+# User-visible text: the two parameter editors label their own toolbars, so the
+# widget layer routes strings through `t!` like every other layer does.
+ravel-i18n = { workspace = true }
 gpui = { workspace = true }
 # The unstyled interaction/focus/accessibility primitives the widgets are built
 # on. `gpui-component` is deliberately absent — see the crate docs.

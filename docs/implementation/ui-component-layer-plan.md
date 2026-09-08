@@ -179,9 +179,79 @@ gpui-component の `.theme-schema.json` に従っているが、`UIX-1` で
 | Checkbox / Radio の塗り | `primary` | |
 | 同・マーク | `background` | |
 
-**導出が今の見た目を保つことは裏取り済み。** 浮く面の導出値は出荷
-`ravel.json` の `popover.background` と一致し、行の 2 つは
-`list.active.background`（α 8%）/ `list.active.border` と**完全に一致する**。
+行の 2 つは出荷 `ravel.json` と**完全に一致する** —
+`list.active.background` が `#5B6EE115`（α = 0x15/255 = 8.24%）、
+`list.active.border` が `primary` そのもの。
+
+**浮く面は一致しない。** 出荷 `popover.background` は light が
+`#F9F9F9 → #F5F5F5`（黒へ **1.61%**）、dark が `#131313 → #101010`
+（黒へ **15.79%**）で、**単一の割合では両方を出せない**（手で選ばれた値で、
+規則に従っていない）。3% はその 2 つを**近似する規則**であって再現ではなく、
+実際に出るのは `#F1F1F1` / `#121212` である。**式が正で、出荷値はここで
+置き換わる。**
+
+割合を採り、絶対値のステップ（4/255 なら light は厳密に一致する）を
+採らなかった理由: **絶対値は背景が純黒のユーザーテーマで消える**
+（それ以上暗くできない）。割合なら常に比例したステップが出る。
+
+### `ColorExt::blend` はこの表の式ではない
+
+**`blend` を使わないこと。** ピン rev の実装:
+
+```rust
+Equations::from_parameters(Parameter::OneMinusSourceAlpha, Parameter::SourceAlpha)
+```
+
+source 側の係数が `1 − self.alpha` なので、**`self` が不透明だと係数が 0 に
+なり基色が完全に消える**。`#F9F9F9.blend(black.opacity(0.03))` は
+`#00000008`（黒の α 3%）を返す。
+
+gpui-component があれで正しく見えているのは、**得られた色を「それ自身が
+乗っている面の上」に塗っているから**で、合成を GPU がやっている。
+`ravel-widgets` の部品は**自分が見たことのないパネル背景の上に載る**ので、
+α 3% の面は透明になってしまう。
+
+→ **不透明な sRGB の `mix` を `tokens.rs` に持つ**（`ravel-widgets` 内の
+6 行）。表の `blend(x, f)` は全部その `mix` を指す。
+
+### 面を持つ部品の hover は「自分の面から 1 段」
+
+上の表の `accent` は**透明な部品（ghost）の場合**を書いている。面を持つ
+部品にそのまま当てるのは誤りで、実測すると壊れる:
+
+- **light では `secondary` と `accent` がどちらも `#E0E0E0`（同一）**。
+  だから Solid ボタンの hover を `accent` にすると**hover が一切出ない**
+- Primary ボタンの hover を `accent` にすると、`#5B6EE1` が
+  `#E0E0E0` になる — **指を乗せると灰色になる**
+
+規則を 1 つに一般化する:
+
+> **hover は休止の面を `foreground` へ 1 段（`PRESS_MIX` = 0.08）動かし、
+> press はもう 1 段動かす。**
+
+| variant | 休止の面 | hover | press |
+|---|---|---|---|
+| Ghost | 透明 | `accent`（= 背景から 1 段の名前付き） | `accent` から 1 段 |
+| Solid | `secondary` | `secondary` から 1 段 | もう 1 段 |
+| Primary | `primary` | `primary` から 1 段 | もう 1 段 |
+
+**新しい数値を導入していない** — `PRESS_MIX` は表の press と同じ 0.08。
+Ghost は表のとおりになる（背景から 1 段の名前が `accent` だから）。
+
+### 面の上の文字はコントラストで選ぶ
+
+`Colors` に `primary_foreground` は無いので導出する。**`background` と
+`foreground` のうち、その面に対する WCAG 相対輝度コントラストが高い方**を
+採る。
+
+**HSL の明度で選んではいけない。** 両者は肝心なところで食い違う —
+`#0000FF` は HSL 明度 0.5 だが相対輝度は 0.07 なので、明度規則だと
+**ほぼ黒い文字をコントラスト 1.4:1 で乗せる**ことになる。
+
+**既知の天井**: `primary`（`#5B6EE1`）の上の文字は light では 4.75:1 で
+WCAG AA を満たすが、**dark では 4.24:1 で満たさない**（`#DEDEDE` は
+3.32:1 でさらに悪い）。10 トークンで出せる最良がこれ。直すには 11 個目の
+トークンか別の `primary` が要る。
 
 ### 4 状態は既存機構に載る
 

@@ -486,7 +486,7 @@ crates/ravel-widgets/          ← 新規
 | `Icon` | 58 | **自前**（`gpui-base` の primitive から。SVG の解決とサイズ量子化は既に `node_editor/painting.rs` が持っている知見を使う） |
 | `Button` | 51 | **自前**（質感が最も宿る。ホバー・フォーカス・押下・無効の 4 状態と、Tab 順・Enter / Space 起動を自分で持つ） |
 | `Tooltip` | 21 | **自前**（登場の遅延と位置決めが UX そのもの） |
-| `Input` | 20 | **`UIX-4b` で `gpui-base` に載せ替える**（`InputBase` が挙動を持っているので、着せるだけ。2026-09-08 に「借りる」から変更） |
+| `Input` | 20 | **`UIX-4b` で `gpui-base` に載せ替える**（`InputBase` が挙動を持っているので、着せるだけ。2026-09-08 に「借りる」から変更）。**実測した範囲は下の節** |
 | 裾 8 部品 | 各 1 | **触らない** |
 
 ## UX の不変条件
@@ -511,6 +511,44 @@ crates/ravel-widgets/          ← 新規
 
 11 と 12 は**新しく守るもの**、1〜10 は**既に破られているもの**である。
 
+### `UIX-4b` の実測した範囲（2026-09-08）
+
+**`Input` は 1077 行だが、Ravel が書くのは 2 部品の見た目だけ。**
+
+**状態型は `gpui-base` からの素の再エクスポートである**
+（`gpui_component::input::mod.rs:17-31`）:
+
+```text
+pub use gpui_base::input::{ …, Escape, …, InputEvent, …, InputState, … };
+```
+
+`InputState` / `InputEvent` / `Escape` を gpui-component は持っていない。
+だから Ravel の使用面 —— `InputState::new` 27 / `.value()` 58 /
+`.set_value(..)` 33 / `.placeholder(..)` 6 / `.set_selected_range(..)` 1 の
+**125 箇所は import のパスを変えるだけで移る**。
+
+**Ravel は付属物を 1 つも使っていない。** `Input` に呼んでいるのは
+`.small()` 16 と `.xsmall()` 9 だけで、`prefix` / `suffix` / `cleanable` /
+`mask_toggle` / `context_menu` / `content_type` / `appearance` /
+`bordered` / `readonly` / `disabled` / `tab_index` / `aria_label` は
+**全部 0 箇所**。component の `RenderOnce`（約 420 行）の大半はその付属物の
+ためで、**Ravel が要るのは「枠 + 2 段の高さ + フォーカスリング」だけ**。
+
+**`NumberInput` も base に公開型がある。** `gpui_base::NumberInput` は
+同じ base の `InputState` を取り、`decrement_button` /
+`increment_button` / `input` を差し替えられる。Ravel の使用は
+`.small()` の 6 箇所（`export_dialog` 3、`composition_form` 3）。
+
+**「`number_input` と比べてどちらを使うか」への答え: 両方持つ。**
+`scrub_input`（558 行、AE 式のラベル横ドラッグ）と `number_input`
+（増減ボタンつきスピンボタン）は**用途が違う**。Ravel は前者を
+Properties の全パラメータに、後者をダイアログの寸法・フレームレート・
+パディングに使っている。選ぶ問題ではなかった。
+
+**`Input` のフォーカスリングは `focus_visible` ではなく `focus`。**
+`Button` とは逆にする —— テキスト入力はマウスでクリックして入るのが
+普通で、そこでリングが出ないと「どこに打ち込んでいるか」が分からない。
+
 ## 単位
 
 | ID | 単位 | 依存 |
@@ -520,7 +558,7 @@ crates/ravel-widgets/          ← 新規
 | `UIX-2` | `ravel-widgets` に `gpui-base` を足し、既存 6189 行を移設。`examples/gallery` を作る | `KIT-1` / `UIX-1` |
 | `UIX-3` | `tokens.rs` を配線し、ハードコード 24 箇所を潰す。`lint-patterns.sh` にリテラル禁止を追加 | `UIX-1` / `UIX-2` |
 | `UIX-4` | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で作る。4 状態 + Tab 順 + Enter / Space | `UIX-2` |
-| `UIX-4b` | **`Input`** を `gpui-base` に載せ替え、`scrub_input.rs` を `ravel-widgets` へ移す。`gpui_base::number_input` と比べてどちらを使うか決める | `UIX-4` |
+| `UIX-4b` | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を `ravel-widgets` へ移す | `UIX-4` |
 | `UIX-5` | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24） | `UIX-3` |
 | `UIX-6` | **不変条件 1〜4 の違反を潰す**（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | `UIX-0` |
 | `UIX-7` | **不変条件 5〜9 の違反を潰す**（狭い幅、死んだ操作、値の意味、設定の適用、派生キャッシュ） | `UIX-0` |

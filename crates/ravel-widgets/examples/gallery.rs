@@ -43,6 +43,8 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use ravel_core::animation::{Interpolation, Keyframe, KeyframeCurve};
+use ravel_core::param_curve::CurveParam;
+use ravel_core::param_ramp::RampParam;
 use ravel_core::types::Vec2;
 use ravel_widgets::curve_editor::{
     CurvePoint, CurveSeries, curve_editor_canvas, curve_editor_canvas_with_x_scale,
@@ -52,7 +54,8 @@ use ravel_widgets::curve_view::{
 };
 use ravel_widgets::tokens::{Density, RavelTheme, ThemeMode, ThemeSpec};
 use ravel_widgets::{
-    Button, ButtonVariant, Icon, Input, InputState, NumberInput, SHOW_DELAY, TooltipExt as _,
+    Button, ButtonVariant, Icon, Input, InputState, NumberInput, ParamCurveEditor,
+    ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY, TooltipExt as _,
     TooltipOverlay, UiIcon, button_layers, hex_color_string, input_layers,
 };
 
@@ -109,6 +112,10 @@ struct GalleryInputs {
     text_compact: StateRow,
     number: StateRow,
     number_compact: StateRow,
+    /// The two parameter editors own scrub fields of their own, so they are
+    /// entities for the same reason the rows above are.
+    param_curve: Entity<ParamCurveEditorState>,
+    param_ramp: Entity<ParamRampEditorState>,
 }
 
 impl GalleryInputs {
@@ -118,6 +125,8 @@ impl GalleryInputs {
             text_compact: StateRow::new("Ravel", window, cx),
             number: StateRow::new("24", window, cx),
             number_compact: StateRow::new("24", window, cx),
+            param_curve: cx.new(|cx| ParamCurveEditorState::new(CurveParam::default(), cx)),
+            param_ramp: cx.new(|cx| ParamRampEditorState::new(RampParam::default(), cx)),
         }
     }
 }
@@ -146,11 +155,45 @@ const SECTIONS: &[(&str, SectionFn)] = &[
         curve_scaled_section,
     ),
     ("curve_view · range and grid", curve_view_section),
+    (
+        "param_curve_editor · the keyframe curve and its toolbar",
+        param_curve_section,
+    ),
+    (
+        "param_ramp_editor · the gradient ramp and its stops",
+        param_ramp_section,
+    ),
 ];
 
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
+
+/// The parameter curve editor, at the size the Properties panel gives it.
+///
+/// Both this and [`param_ramp_section`] are the *whole* widget rather than the
+/// canvas underneath: the toolbar, the scrub fields and the value readout are
+/// where the tokens actually show, and they are what a palette change has to
+/// be checked against.
+fn param_curve_section(_theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
+    // Both editors take their canvas height from the parent, exactly as the
+    // Properties panel's resizable row does. A section that forgot to give
+    // them one would show the toolbar and no picture.
+    div()
+        .w(px(360.0))
+        .h(px(220.0))
+        .child(ParamCurveEditor::new(&inputs.param_curve))
+        .into_any_element()
+}
+
+/// The parameter ramp editor: the gradient, its stops, and the mode buttons.
+fn param_ramp_section(_theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
+    div()
+        .w(px(360.0))
+        .h(px(140.0))
+        .child(ParamRampEditor::new(&inputs.param_ramp))
+        .into_any_element()
+}
 
 /// The tokens themselves: ten colors, four spacing steps, three row heights,
 /// two feedback durations, two radii. The visual baseline `UIX-3` wires the
@@ -1024,6 +1067,16 @@ fn main() {
         .with_assets(gpui_kit_assets::Assets)
         .run(|cx: &mut App| {
             gpui_base::init(cx);
+            // The two parameter editors label their own toolbars through `t!`.
+            // Without a locale loaded those labels would come out as their
+            // keys, which is exactly the sort of thing the gallery exists to
+            // catch — so it loads the shipped ones, from the repository rather
+            // than from an embedded asset, since an example has the tree.
+            let locales =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/locales");
+            if let Err(error) = ravel_i18n::init(&locales, "en") {
+                eprintln!("gallery: no locales ({error}); labels show their keys");
+            }
             ravel_widgets::set_active_tokens(
                 ThemeSpec {
                     name: "Ravel".to_string(),

@@ -27,6 +27,7 @@ pub mod curve_view;
 pub mod icon;
 pub mod theme;
 pub mod tokens;
+pub mod tooltip;
 
 pub use curve_editor::{
     ControlPoint, CurveDrag, CurveDragAxis, CurveEdit, CurveHit, CurvePoint, CurveSeries,
@@ -41,6 +42,8 @@ pub use curve_view::{
 };
 
 pub use icon::{Icon, IconPath};
+
+pub use tooltip::{SHOW_DELAY, Tooltip, TooltipExt};
 
 pub use theme::{ActiveTokens, set_active_tokens};
 

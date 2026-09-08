@@ -49,11 +49,16 @@ model is still current.
   (colors, spacing, row heights, typography, motion, radii) the UI is built
   from — `tokens.rs` is the single source and the authoritative theme schema.
   `theme.rs` is the one path from a widget to the set in force (`cx.tokens()`,
-  installed by `ravel-app`). `icon.rs`, `button.rs` and `tooltip.rs` are the
-  three parts Ravel owns outright, built on `gpui-base`'s unstyled primitives
-  so focus, Enter/Space activation and accessibility stay borrowed while the
-  appearance is Ravel's; the curve-editor geometry (`curve_editor.rs`,
-  `curve_view.rs`) lives here too, and the widgets that still borrow from
+  installed by `ravel-app`). `icon.rs`, `button.rs`, `tooltip.rs`, `input.rs`
+  and `number_input.rs` are the parts Ravel owns outright, built on
+  `gpui-base`'s unstyled primitives so focus, Enter/Space activation, text
+  editing and accessibility stay borrowed while the appearance is Ravel's. The
+  two input widgets paint a caller-owned `gpui_base::input::InputState`, which
+  this crate re-exports (with `InputEvent` and the input actions) so a host
+  needs no `gpui-base` dependency of its own; **the state is read, never
+  written, from `render`**. `scrub_input.rs` (the AE-style drag-a-label
+  numeric field) and the curve-editor geometry (`curve_editor.rs`,
+  `curve_view.rs`) live here too, and the widgets that still borrow from
   gpui-component stay in `ravel-app`. It depends on `gpui`, `gpui-base`,
   `ravel-core` and `serde`: **never on `gpui-component`**, because
   gpui-component's `ThemeConfig` is *derived* from Ravel's schema by

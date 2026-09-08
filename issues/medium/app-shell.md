@@ -537,3 +537,65 @@ blank を足すならそのテストの意図（「CPU フレームで描き続�
 既に劣化した状態でしか踏めないので high ではない。low でないのは、GPU
 リソースが返らない経路を残すため。
 
+
+## MED-APP-43 | bug | macOS では素の Escape が GPUI に一切届かない
+
+**該当**: `gpui_macos/src/window.rs` の `handle_key_event`（ピン rev
+`a93d6ccd`、2939-2971 行）
+
+`key_char` を持たないキー（Escape、矢印など）は、修飾キーが無いとまず
+ウィンドウの input context に渡される:
+
+```rust
+if is_composing || is_ime_printable_key
+    || (key_down_event.keystroke.key_char.is_none()
+        && !modifiers.control && !modifiers.function && !modifiers.platform)
+{
+    let handled: BOOL = unsafe {
+        let input_context: id = msg_send![this, inputContext];
+        msg_send![input_context, handleEvent: native_event]
+    };
+    if let Some(handled) = ...do_command_handled.take() { return handled as BOOL; }
+    else if handled == YES { return YES; }          // ← Escape はここで消える
+    let handled = run_callback(PlatformInput::KeyDown(key_down_event));
+    return handled;
+}
+```
+
+`doCommandBySelector:` が呼ばれれば `do_command_by_selector` が KeyDown を
+GPUI へ dispatch するので届く。**Escape ではそれが呼ばれず、
+`handleEvent:` が YES を返して早期 return する。**
+
+**実測**（2026-09-08、`ravel-widgets` の gallery を release で起動し、
+`CGEvent` で送って `observe_keystrokes` にプローブを入れた）:
+
+```
+ESCPROBE tooltip entity alive, observer registered
+ESCPROBE observer saw Keystroke { key: "tab", key_char: Some("\t") }
+ESCPROBE not a dismissal
+```
+
+**Tab は届き、Escape は 1 行も出ない。** テキスト入力にフォーカスは無い状態。
+
+**実害**: 中程度。`Window::dispatch_key_event` より下が全部走らないので、
+**element のキーリスナ・アクション・`observe_keystrokes` のどれでも
+Escape を受け取れない**。`.agents/rules/ux.md` の不変条件 10
+（「Escape で離脱」）を満たすことが macOS では原理的に不可能になる。
+現に効いていないもの: ツールヒントの Escape 消去、ドラッグの中止
+（不変条件 4）。
+
+**テストが通ることに騙されないこと。** `TestAppContext` はプラット
+フォーム層を通らないので、`ravel-widgets` の
+`escape_takes_down_the_showing` / `escape_dismisses_the_showing_and_nothing_else_does`
+は**通るのに実機では動かない**。あの 2 本は「keystroke が配送されたら
+正しく畳む」ことの証明であって、配送されることの証明ではない。
+
+**修正方針**: フォーク側で `handleEvent:` の早期 return を Escape に対して
+やめる（`do_command_handled` も `handled == YES` も見ずに `run_callback` へ
+落とす経路を、`key_char` の無いキーに限って足す）。**上流に投げる価値のある
+変更**だが、ユーザーの指示で上流 PR は保留中なのでフォークに載せる。
+`gpui_macos` は手元で唯一検証できるプラットフォームなので、
+`.agents/rules/` の「検証不能な cfg は判断を外に出す」の対象外。
+
+**severity の根拠**: bug。クラッシュはせず、機能が無いだけ。だが
+不変条件 10 と 4 の両方を macOS で満たせなくするので low ではない。

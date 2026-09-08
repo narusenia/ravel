@@ -51,7 +51,9 @@
 //! `Window::dispatch_key_event` runs — element key listeners included, which
 //! is why the tooltip behaved the same way before it moved to the shared
 //! overlay. The path here is the one that works the moment the keystroke is
-//! delivered.
+//! delivered. Filed as `MED-APP-43`, with the measurement that separates the
+//! two halves: with a tooltip up, `Tab` reaches `observe_keystrokes` and
+//! `Escape` produces nothing at all.
 
 use std::cell::Cell;
 use std::collections::HashMap;

@@ -491,7 +491,13 @@ fn button_section(theme: &RavelTheme) -> AnyElement {
 ///
 /// Both go through the same path — `TooltipExt::ravel_tooltip`, which is what
 /// `Button::tooltip` calls — so there is one delay and one appearance. Hover
-/// and wait 500ms; press Escape while one is up and it goes away.
+/// and wait 500ms; move straight to the next trigger and the next one is
+/// already up, because the overlay stays warm for 300ms.
+///
+/// **Escape does nothing here on macOS**, and not because the tooltip ignores
+/// it: a bare Escape never reaches GPUI at all (`MED-APP-43`). The dismissal
+/// path is written and unit-tested; the keystroke is swallowed one layer
+/// below.
 fn tooltip_section(theme: &RavelTheme) -> AnyElement {
     div()
         .flex()
@@ -533,8 +539,9 @@ fn tooltip_section(theme: &RavelTheme) -> AnyElement {
         .child(caption(
             theme,
             format!(
-                "hover and wait {}ms · Escape dismisses the showing · the surface is \
-                 background mixed {}% toward black, with a 1px border and no shadow",
+                "hover and wait {}ms · move across within 300ms and the next is instant · \
+                 the surface is background mixed {}% toward black, with a 1px border \
+                 and no shadow",
                 SHOW_DELAY.as_millis(),
                 (ravel_widgets::tokens::RAISED_MIX * 100.0).round(),
             ),

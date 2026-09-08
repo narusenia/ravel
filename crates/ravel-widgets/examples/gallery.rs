@@ -12,6 +12,20 @@
 //! others.** Nothing else in this file knows how many sections there are, so
 //! `Icon` / `Button` / `Tooltip` landed as three registrations.
 //!
+//! **Run it with `--release`:**
+//!
+//! ```text
+//! cargo run --release -p ravel-widgets --example gallery
+//! ```
+//!
+//! GPUI lays the whole element tree out on every frame, and this file is one
+//! deep flex tree with `flex_wrap` rows of fourteen icons and six buttons —
+//! taffy's most expensive path. Measured with `sample` over the same three
+//! seconds of scrolling, the main thread is **79% busy in a `cargo run` build
+//! and 27% in `--release`**, with `taffy::compute::flexbox::compute_flexbox_layout`
+//! the single hottest function in both. The debug build scrolls badly enough
+//! to read as a bug in the widgets; it is not.
+//!
 //! Two kinds of widget live here, and they read their colors differently. The
 //! curve views take theirs as arguments; `Icon`, `Button` and `Tooltip` read
 //! the token set in force through `cx.tokens()`. So the theme toggle does two

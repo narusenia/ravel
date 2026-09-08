@@ -37,9 +37,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowBounds, WindowOptions, div, prelude::FluentBuilder as _, px, size,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, WindowBounds, WindowOptions, div, prelude::FluentBuilder as _, px, size,
 };
 use gpui_base::Button as BaseButton;
 use ravel_core::animation::{Interpolation, Keyframe, KeyframeCurve};
@@ -52,7 +52,7 @@ use ravel_widgets::curve_view::{
 };
 use ravel_widgets::tokens::{Density, RavelTheme, ThemeMode, ThemeSpec};
 use ravel_widgets::{
-    Button, ButtonVariant, Icon, SHOW_DELAY, TooltipExt as _, UiIcon, button_layers,
+    Button, ButtonVariant, Icon, SHOW_DELAY, TooltipExt as _, TooltipOverlay, UiIcon, button_layers,
 };
 
 /// One labelled block of the gallery.
@@ -643,6 +643,11 @@ const STARTING_MODE: ThemeMode = ThemeMode::Dark;
 
 struct Gallery {
     mode: ThemeMode,
+    /// The one overlay every tooltip in this window is shown through. The
+    /// gallery is a bare GPUI window with no `gpui_component::Root`, so it
+    /// installs and renders Ravel's own — without this the tooltip section
+    /// would silently show nothing.
+    tooltip_overlay: Entity<TooltipOverlay>,
 }
 
 impl Gallery {
@@ -779,6 +784,7 @@ impl Render for Gallery {
             .text_color(theme.colors.foreground)
             .child(toolbar)
             .child(body)
+            .child(self.tooltip_overlay.clone())
     }
 }
 
@@ -805,9 +811,10 @@ fn main() {
                     ))),
                     ..Default::default()
                 },
-                |_window, cx| {
-                    cx.new(|_cx| Gallery {
+                |window, cx| {
+                    cx.new(|cx| Gallery {
                         mode: STARTING_MODE,
+                        tooltip_overlay: ravel_widgets::install_tooltip_overlay(window, cx),
                     })
                 },
             ) {

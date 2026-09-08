@@ -843,6 +843,13 @@ pub struct WindowHost {
     /// bounds, so the next save writes where the window actually is.
     #[allow(dead_code)]
     bounds_sub: Subscription,
+    /// The one overlay every tooltip in this window is shown through.
+    ///
+    /// It is the host's rather than `Root`'s because `Root::tooltip_overlay`
+    /// is `pub(crate)`, and because the delay and the grace period are then
+    /// the same numbers `ravel-widgets` states for its own gallery. Rendered
+    /// as a child of the frame: the popup is drawn inside it.
+    tooltip_overlay: Entity<ravel_widgets::TooltipOverlay>,
 }
 
 impl WindowHost {
@@ -946,6 +953,7 @@ impl WindowHost {
             session_sub,
             focus_sub,
             bounds_sub,
+            tooltip_overlay: ravel_widgets::install_tooltip_overlay(window, cx),
         };
         // The dock already renders this tree, so only the visible set needs
         // seeding — running the whole of `show_tree` here would rewrite the OS
@@ -1166,9 +1174,10 @@ impl WindowHost {
 
 impl Render for WindowHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // `Root` renders the view, the tooltip, and the native menu overlay,
-        // but the modal layers are the host's to place: without these children
-        // an opened Dialog is live and invisible.
+        // `Root` renders the view and the native menu overlay, but the modal
+        // layers are the host's to place: without these children an opened
+        // Dialog is live and invisible. The tooltip overlay is the host's too
+        // — Ravel's tooltips go through its own, not `Root`'s.
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
         let root = div()
@@ -1194,7 +1203,8 @@ impl Render for WindowHost {
                     .child(self.dock.clone()),
             )
             .children(dialog_layer)
-            .children(notification_layer);
+            .children(notification_layer)
+            .child(self.tooltip_overlay.clone());
         crate::workspace::with_command_handlers(root, cx)
     }
 }

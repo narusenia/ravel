@@ -46,7 +46,15 @@ pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers}
 
 pub use icon::{Icon, IconPath, UiIcon};
 
-pub use tooltip::{SHOW_DELAY, Tooltip, TooltipExt};
+pub use tooltip::{
+    GRACE_PERIOD, SHOW_DELAY, Tooltip, TooltipExt, install_tooltip_overlay, tooltip_overlay,
+};
+
+/// The per-window tooltip overlay a host installs and renders.
+///
+/// Re-exported so a host does not need `gpui-base` of its own just to name the
+/// field it keeps [`install_tooltip_overlay`]'s return value in.
+pub use gpui_base::TooltipOverlay;
 
 pub use theme::{ActiveTokens, set_active_tokens};
 

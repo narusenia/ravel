@@ -44,9 +44,13 @@ model is still current.
 - `crates/ravel-widgets`: Ravel's own widget layer, and the design tokens
   (colors, spacing, row heights, typography, motion, radii) the UI is built
   from — `tokens.rs` is the single source and the authoritative theme schema.
-  It depends on `gpui` and `serde` only: **never on `gpui-component`**, because
-  gpui-component's `ThemeConfig` is *derived* from Ravel's schema by
-  `ravel-app`, never the reverse
+  The curve-editor geometry (`curve_editor.rs`, `curve_view.rs`) lives here;
+  the widgets that still borrow from gpui-component stay in `ravel-app`. It
+  depends on `gpui`, `gpui-base`, `ravel-core` and `serde`: **never on
+  `gpui-component`**, because gpui-component's `ThemeConfig` is *derived* from
+  Ravel's schema by `ravel-app`, never the reverse. The bundled
+  `examples/gallery` binary renders every widget and every token in both
+  palettes without the application
 - `crates/ravel-project`: the `.ravprj` container, format migration, the
   settings layers, UI state, and atomic writes. GUI-free by construction — it
   depends on `ravel-core` and `ravel-ui` only, never on `gpui`, so headless

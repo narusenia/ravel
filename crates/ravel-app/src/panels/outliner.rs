@@ -19,8 +19,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable as _};
+use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_core::id::{CompId, LayerId, NodeId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_i18n::t;
@@ -30,6 +29,7 @@ use ravel_ui::document::{
 };
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
+use ravel_widgets::{Icon, TooltipExt as _, UiIcon};
 use std::collections::HashSet;
 
 use crate::assets::RavelIcon;
@@ -779,12 +779,12 @@ impl OutlinerGpuiPanel {
 
     fn row_icon(&self, row: &OutlinerRow, cx: &App) -> Icon {
         match row.kind {
-            OutlinerRowKind::Comp { .. } => Icon::new(IconName::Frame),
+            OutlinerRowKind::Comp { .. } => Icon::new(UiIcon::Frame),
             OutlinerRowKind::Layer { .. } => Icon::new(RavelIcon::Timeline),
             OutlinerRowKind::Node {
                 comp, layer, node, ..
             } => Icon::new(self.node_row_icon(comp, layer, node, cx)),
-            OutlinerRowKind::UnusedGroup { .. } => Icon::new(IconName::FolderClosed),
+            OutlinerRowKind::UnusedGroup { .. } => Icon::new(UiIcon::FolderClosed),
         }
     }
 
@@ -927,9 +927,9 @@ impl OutlinerGpuiPanel {
                 .justify_center()
                 .child(
                     Icon::new(if row.expanded {
-                        IconName::ChevronDown
+                        UiIcon::ChevronDown
                     } else {
-                        IconName::ChevronRight
+                        UiIcon::ChevronRight
                     })
                     .size_3()
                     .text_color(colors.muted_foreground),
@@ -1006,11 +1006,11 @@ impl OutlinerGpuiPanel {
                     .id(SharedString::from(format!("outliner-offline-{index}")))
                     .flex_shrink_0()
                     .child(
-                        Icon::new(IconName::TriangleAlert)
+                        Icon::new(UiIcon::TriangleAlert)
                             .size_3()
                             .text_color(colors.danger),
                     )
-                    .tooltip(|window, cx| Tooltip::new(t!("media_bin.offline")).build(window, cx)),
+                    .ravel_tooltip(t!("media_bin.offline")),
             );
         }
 
@@ -1024,13 +1024,11 @@ impl OutlinerGpuiPanel {
                     div()
                         .id(SharedString::from(format!("outliner-ref-{index}")))
                         .child(
-                            Icon::new(IconName::ExternalLink)
+                            Icon::new(UiIcon::ExternalLink)
                                 .size_3()
                                 .text_color(colors.muted_foreground),
                         )
-                        .tooltip(|window, cx| {
-                            Tooltip::new(t!("outliner.reference")).build(window, cx)
-                        }),
+                        .ravel_tooltip(t!("outliner.reference")),
                 );
             }
             if subnet {
@@ -1038,13 +1036,11 @@ impl OutlinerGpuiPanel {
                     div()
                         .id(SharedString::from(format!("outliner-subnet-{index}")))
                         .child(
-                            Icon::new(IconName::Network)
+                            Icon::new(UiIcon::Network)
                                 .size_3()
                                 .text_color(colors.muted_foreground),
                         )
-                        .tooltip(|window, cx| {
-                            Tooltip::new(t!("outliner.subnet")).build(window, cx)
-                        }),
+                        .ravel_tooltip(t!("outliner.subnet")),
                 );
             }
         }
@@ -1214,7 +1210,7 @@ impl OutlinerGpuiPanel {
             .text_color(colors.muted_foreground)
             .hover(|style| style.bg(colors.list_active))
             .child(icon.into().size_3())
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .ravel_tooltip(tooltip)
             .on_click(move |_event, window, cx| {
                 window.dispatch_action(action(), cx);
             })
@@ -1236,7 +1232,7 @@ impl OutlinerGpuiPanel {
             .border_color(colors.border)
             .child(Self::command_button(
                 "outliner-comp-new",
-                IconName::Plus,
+                UiIcon::Plus,
                 SharedString::from(t!("menu.composition.new")),
                 || Box::new(crate::workspace::CompositionNew),
                 &colors,
@@ -1245,21 +1241,21 @@ impl OutlinerGpuiPanel {
                 header
                     .child(Self::command_button(
                         "outliner-comp-settings",
-                        IconName::Settings,
+                        UiIcon::Settings,
                         SharedString::from(t!("menu.composition.settings")),
                         || Box::new(crate::workspace::CompositionSettings),
                         &colors,
                     ))
                     .child(Self::command_button(
                         "outliner-comp-duplicate",
-                        IconName::Copy,
+                        UiIcon::Copy,
                         SharedString::from(t!("menu.composition.duplicate")),
                         || Box::new(crate::workspace::CompositionDuplicate),
                         &colors,
                     ))
                     .child(Self::command_button(
                         "outliner-comp-delete",
-                        IconName::Delete,
+                        UiIcon::Delete,
                         SharedString::from(t!("menu.composition.delete")),
                         || Box::new(crate::workspace::CompositionDelete),
                         &colors,

@@ -36,12 +36,11 @@ use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::Icon;
-use gpui_component::tooltip::Tooltip;
 use ravel_core::color::ColorSpace;
 use ravel_core::param_ramp::{RampInterpolation, RampParam, RampStop};
 use ravel_core::types::Color;
 use ravel_i18n::t;
+use ravel_widgets::{Icon, TooltipExt as _};
 
 use super::param_curve_editor::clamp_between;
 use super::scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
@@ -647,7 +646,7 @@ fn interpolation_button(
         .flex_shrink_0()
         .cursor_pointer()
         .child(Icon::new(icon).size_3().text_color(color))
-        .tooltip(move |window, cx| Tooltip::new(ravel_i18n::translate(tooltip)).build(window, cx))
+        .ravel_tooltip(ravel_i18n::translate(tooltip))
         .on_mouse_down(
             MouseButton::Left,
             window.listener_for(state, move |state, _e: &MouseDownEvent, _window, cx| {

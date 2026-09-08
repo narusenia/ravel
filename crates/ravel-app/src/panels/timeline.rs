@@ -25,14 +25,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{
-    ActiveTheme, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, ThemeColor,
-};
+use gpui_component::{ActiveTheme, Sizable as _, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
@@ -50,6 +46,7 @@ use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_cl
 use ravel_ui::panels::timeline::{
     BpmGrid, MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
 };
+use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
 
 use crate::assets::RavelIcon;
 use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
@@ -3438,7 +3435,7 @@ impl TimelineGpuiPanel {
                         .text_color(colors.foreground)
                         .hover(|this| this.bg(colors.muted))
                         .child(SharedString::from(text))
-                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .ravel_tooltip(tooltip)
                         .on_click(cx.listener(move |this, _event, window, cx| {
                             this.begin_bpm_edit(field, window, cx);
                         }))
@@ -3484,7 +3481,7 @@ impl TimelineGpuiPanel {
                 .border_color(colors.border)
                 .child(
                     Button::new("curve-grid")
-                        .xsmall()
+                        .compact()
                         .ghost()
                         .selected(self.show_curve_grid)
                         .icon(Icon::new(RavelIcon::GridOverlay))
@@ -3495,7 +3492,7 @@ impl TimelineGpuiPanel {
                 )
                 .child(
                     Button::new("curve-fit-values")
-                        .xsmall()
+                        .compact()
                         .ghost()
                         .icon(Icon::new(RavelIcon::TimelineFit))
                         .tooltip(t!("timeline.graph.fit_values"))
@@ -3505,7 +3502,7 @@ impl TimelineGpuiPanel {
                 )
                 .child(
                     Button::new("curve-bezier")
-                        .xsmall()
+                        .compact()
                         .ghost()
                         .selected(interpolation == Some(Interpolation::Bezier))
                         .disabled(!can_edit_interpolation)
@@ -3517,7 +3514,7 @@ impl TimelineGpuiPanel {
                 )
                 .child(
                     Button::new("curve-linear")
-                        .xsmall()
+                        .compact()
                         .ghost()
                         .selected(interpolation == Some(Interpolation::Linear))
                         .disabled(!can_edit_interpolation)
@@ -3529,7 +3526,7 @@ impl TimelineGpuiPanel {
                 )
                 .child(
                     Button::new("curve-step")
-                        .xsmall()
+                        .compact()
                         .ghost()
                         .selected(interpolation == Some(Interpolation::Step))
                         .disabled(!can_edit_interpolation)
@@ -3610,7 +3607,7 @@ impl TimelineGpuiPanel {
             .child(div().flex_1())
             .child(
                 Button::new("timeline-to-start")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::SkipBack))
                     .tooltip(t!("timeline.transport.to_start"))
@@ -3620,7 +3617,7 @@ impl TimelineGpuiPanel {
             )
             .child(
                 Button::new("timeline-step-back")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::StepBack))
                     .tooltip(t!("timeline.transport.step_back"))
@@ -3630,7 +3627,7 @@ impl TimelineGpuiPanel {
             )
             .child(
                 Button::new("timeline-play-pause")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(if is_playing {
                         RavelIcon::Pause
@@ -3648,7 +3645,7 @@ impl TimelineGpuiPanel {
             )
             .child(
                 Button::new("timeline-stop")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::Stop))
                     .tooltip(t!("timeline.transport.stop"))
@@ -3658,7 +3655,7 @@ impl TimelineGpuiPanel {
             )
             .child(
                 Button::new("timeline-step-forward")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::StepForward))
                     .tooltip(t!("timeline.transport.step_forward"))
@@ -3668,7 +3665,7 @@ impl TimelineGpuiPanel {
             )
             .child(
                 Button::new("timeline-to-end")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::SkipForward))
                     .tooltip(t!("timeline.transport.to_end"))
@@ -3686,7 +3683,7 @@ impl TimelineGpuiPanel {
             )
             .child(
                 Button::new("timeline-fit")
-                    .xsmall()
+                    .compact()
                     .ghost()
                     .icon(Icon::new(RavelIcon::TimelineFit))
                     .tooltip(t!("timeline.transport.fit"))
@@ -4718,9 +4715,9 @@ impl TimelineGpuiPanel {
             let is_expanded = expanded_layers[i];
 
             let expand_arrow = if is_expanded {
-                IconName::ChevronDown
+                UiIcon::ChevronDown
             } else {
-                IconName::ChevronRight
+                UiIcon::ChevronRight
             };
 
             headers = headers.child(
@@ -4798,13 +4795,11 @@ impl TimelineGpuiPanel {
                             .id(SharedString::from(format!("offline-{lid}")))
                             .flex_shrink_0()
                             .child(
-                                Icon::new(IconName::TriangleAlert)
+                                Icon::new(UiIcon::TriangleAlert)
                                     .size_3()
                                     .text_color(theme.colors.danger),
                             )
-                            .tooltip(|window, cx| {
-                                Tooltip::new(t!("media_bin.offline")).build(window, cx)
-                            })
+                            .ravel_tooltip(t!("media_bin.offline"))
                     }))
                     // S/M/L toggle buttons. The glyphs are untranslated
                     // notation (`docs/specifications/ui/timeline.md`); the
@@ -4876,9 +4871,9 @@ impl TimelineGpuiPanel {
                 for (j, row) in layer_rows[i].iter().enumerate() {
                     let is_prop_expanded = self.state.is_property_expanded(lid, &row.id);
                     let arrow = if is_prop_expanded {
-                        IconName::ChevronDown
+                        UiIcon::ChevronDown
                     } else {
-                        IconName::ChevronRight
+                        UiIcon::ChevronRight
                     };
                     // Shell group labels come from the locale; network rows
                     // carry a data-derived label ("node · key", or the bare
@@ -4937,7 +4932,7 @@ impl TimelineGpuiPanel {
                             .child(
                                 nav_button(
                                     format!("kf-prev-{lid}-{j}"),
-                                    Icon::new(IconName::ChevronLeft)
+                                    Icon::new(UiIcon::ChevronLeft)
                                         .size_3()
                                         .text_color(theme.colors.muted_foreground),
                                     SharedString::from(t!("timeline.navigator.prev")),
@@ -4967,7 +4962,7 @@ impl TimelineGpuiPanel {
                             .child(
                                 nav_button(
                                     format!("kf-next-{lid}-{j}"),
-                                    Icon::new(IconName::ChevronRight)
+                                    Icon::new(UiIcon::ChevronRight)
                                         .size_3()
                                         .text_color(theme.colors.muted_foreground),
                                     SharedString::from(t!("timeline.navigator.next")),
@@ -5238,7 +5233,7 @@ impl Render for TimelineGpuiPanel {
                             .border_color(theme.colors.border)
                             .child(
                                 Button::new("timeline-bar-view")
-                                    .xsmall()
+                                    .compact()
                                     .ghost()
                                     .selected(view_mode == TimelineViewMode::Bars)
                                     .icon(Icon::new(RavelIcon::TimelineBars))
@@ -5251,7 +5246,7 @@ impl Render for TimelineGpuiPanel {
                             )
                             .child(
                                 Button::new("timeline-graph-view")
-                                    .xsmall()
+                                    .compact()
                                     .ghost()
                                     .selected(view_mode == TimelineViewMode::Graph)
                                     .icon(Icon::new(RavelIcon::CurveEditor))
@@ -5793,7 +5788,7 @@ fn nav_button(id: String, icon: Icon, tooltip: SharedString) -> Stateful<Div> {
         .justify_center()
         .cursor_pointer()
         .child(icon)
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .ravel_tooltip(tooltip)
 }
 
 fn graph_hit_at(
@@ -6115,7 +6110,7 @@ fn make_toggle(
         .text_color(text_color)
         .cursor_pointer()
         .child(SharedString::from(label))
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .ravel_tooltip(tooltip)
 }
 
 /// Shades the part of `bounds` that lies past the composition's last frame.

@@ -37,6 +37,7 @@ use ravel_core::media::encode::{
 use ravel_core::media::{ImageFormat, VideoCodec};
 use ravel_i18n::t;
 use ravel_ui::export::{DEFAULT_PADDING, ExportSettings};
+use ravel_widgets::Button;
 use std::path::PathBuf;
 
 /// Width of the label column, matching the composition dialog's.
@@ -474,8 +475,8 @@ impl Render for ExportForm {
                     .child(Input::new(&self.directory).small()),
             )
             .child(
-                gpui_component::button::Button::new("export-browse")
-                    .small()
+                Button::new("export-browse")
+                    .solid()
                     .label(SharedString::from(t!("export.browse")))
                     .on_click(cx.listener(Self::browse)),
             );

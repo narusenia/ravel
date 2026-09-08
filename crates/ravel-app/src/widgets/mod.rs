@@ -7,8 +7,8 @@
 //! ([`curve_editor`], [`curve_view`]) and is re-exported here so the panels and
 //! the widgets still in this module keep one import path. What stays is what
 //! borrows from gpui-component: `scrub_input` wraps its `Input`, and the two
-//! `param_*_editor` widgets read its theme and use its `Icon` / `Tooltip`
-//! until `UIX-3` / `UIX-4` replace those.
+//! `param_*_editor` widgets read its theme. Their icons and tooltips are
+//! Ravel's own ([`ravel_widgets::Icon`], [`ravel_widgets::TooltipExt`]).
 
 pub use ravel_widgets::{curve_editor, curve_view};
 

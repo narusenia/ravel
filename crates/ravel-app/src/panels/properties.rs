@@ -42,14 +42,12 @@
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::Icon;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
-use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetMetadata, Document, Layer, MediaAssetEntry};
@@ -80,6 +78,7 @@ use ravel_ui::properties::media_asset::{
 };
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
+use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
@@ -262,7 +261,7 @@ fn fixed_port_row(row: &ravel_ui::properties::PortRow, gutter: bool, muted: Hsla
             .gap_2()
             .px_1()
             .py(px(1.0))
-            .tooltip(|window, cx| Tooltip::new(t!("properties.ports.builtin")).build(window, cx))
+            .ravel_tooltip(t!("properties.ports.builtin"))
             // Aligned with the editable rows' reorder handles so the list
             // reads as one column of names.
             .child(
@@ -296,7 +295,7 @@ fn port_button(
         .w(px(14.0))
         .cursor_pointer()
         .child(icon.into().size_3().text_color(color))
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .ravel_tooltip(tooltip)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| on_click(window, cx))
 }
 
@@ -330,13 +329,13 @@ fn custom_port_row(
         (
             -1,
             can_move_up,
-            gpui_component::IconName::ChevronUp,
+            UiIcon::ChevronUp,
             "properties.ports.move_up",
         ),
         (
             1,
             can_move_down,
-            gpui_component::IconName::ChevronDown,
+            UiIcon::ChevronDown,
             "properties.ports.move_down",
         ),
     ] {
@@ -365,7 +364,7 @@ fn custom_port_row(
         let name = row.name.clone();
         port_button(
             format!("port-remove-{}", row.name),
-            gpui_component::IconName::Delete,
+            UiIcon::Delete,
             t!("properties.ports.remove"),
             muted,
             move |_window, cx| {
@@ -428,8 +427,9 @@ fn custom_port_row(
 /// command with a shortcut.
 fn relink_row(asset_id: ravel_core::id::AssetId) -> Div {
     div().flex().justify_end().px_1().py(px(2.0)).child(
-        gpui_component::button::Button::new("media-relink")
-            .xsmall()
+        Button::new("media-relink")
+            .compact()
+            .solid()
             .label(SharedString::from(t!("properties.media.relink")))
             .on_click(move |_event, _window, cx| {
                 crate::media::import::prompt_relink(asset_id, cx);
@@ -468,7 +468,7 @@ fn add_port_row(
         )
         .child(port_button(
             "port-add".into(),
-            gpui_component::IconName::Plus,
+            UiIcon::Plus,
             t!("properties.ports.add"),
             muted,
             move |_window, cx| {
@@ -504,13 +504,13 @@ fn exposed_row(
         (
             -1,
             can_move_up,
-            gpui_component::IconName::ChevronUp,
+            UiIcon::ChevronUp,
             "properties.exposed.move_up",
         ),
         (
             1,
             can_move_down,
-            gpui_component::IconName::ChevronDown,
+            UiIcon::ChevronDown,
             "properties.exposed.move_down",
         ),
     ] {
@@ -539,7 +539,7 @@ fn exposed_row(
         let name = row.name.clone();
         port_button(
             format!("exposed-remove-{}", row.name),
-            gpui_component::IconName::Delete,
+            UiIcon::Delete,
             t!("properties.exposed.remove"),
             muted,
             move |_window, cx| {
@@ -604,11 +604,7 @@ fn exposed_row(
                 .px_1()
                 .pb(px(2.0))
                 .child(div().w(px(28.0)))
-                .child(
-                    Icon::new(gpui_component::IconName::TriangleAlert)
-                        .size_3()
-                        .text_color(danger),
-                )
+                .child(Icon::new(UiIcon::TriangleAlert).size_3().text_color(danger))
                 .child(
                     div()
                         .flex_grow_1()
@@ -658,13 +654,10 @@ fn exposed_toggle_button(
         .w(px(14.0))
         .cursor_pointer()
         .child(Icon::new(icon).size_3().text_color(color))
-        .tooltip(move |window, cx| {
-            let text = if declared {
-                t!("properties.toggle.exposed_remove")
-            } else {
-                t!("properties.toggle.exposed")
-            };
-            Tooltip::new(text).build(window, cx)
+        .ravel_tooltip(if declared {
+            t!("properties.toggle.exposed_remove")
+        } else {
+            t!("properties.toggle.exposed")
         })
         .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
             let key = key.clone();
@@ -729,9 +722,9 @@ fn curve_row(
     let editor = editor.clone();
     let field_key = key.to_string();
     let icon = if expanded {
-        gpui_component::IconName::ChevronDown
+        UiIcon::ChevronDown
     } else {
-        gpui_component::IconName::ChevronRight
+        UiIcon::ChevronRight
     };
     div().child(
         div()
@@ -758,7 +751,7 @@ fn curve_row(
                     )
                     .child(Icon::new(icon).size_3().text_color(muted)),
             )
-            .tooltip(|window, cx| Tooltip::new(t!("properties.curve.expand")).build(window, cx))
+            .ravel_tooltip(t!("properties.curve.expand"))
             .on_click(move |_event, _window, cx| {
                 editor
                     .update(cx, |this, cx| {
@@ -783,9 +776,9 @@ fn ramp_row(
     let editor = editor.clone();
     let field_key = key.to_string();
     let icon = if expanded {
-        gpui_component::IconName::ChevronDown
+        UiIcon::ChevronDown
     } else {
-        gpui_component::IconName::ChevronRight
+        UiIcon::ChevronRight
     };
     div().child(
         div()
@@ -814,7 +807,7 @@ fn ramp_row(
                     )
                     .child(Icon::new(icon).size_3().text_color(muted)),
             )
-            .tooltip(|window, cx| Tooltip::new(t!("properties.ramp.expand")).build(window, cx))
+            .ravel_tooltip(t!("properties.ramp.expand"))
             .on_click(move |_event, _window, cx| {
                 editor
                     .update(cx, |this, cx| {
@@ -1302,7 +1295,7 @@ fn key_toggle_button(
         .w(px(14.0))
         .cursor_pointer()
         .child(Icon::new(icon).size_3().text_color(color))
-        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.keyframe")).build(window, cx));
+        .ravel_tooltip(t!("properties.toggle.keyframe"));
     match target {
         KeyTarget::Layer(panel) => {
             let panel = panel.clone();
@@ -1430,13 +1423,13 @@ fn expression_toggle_button(
         .w(px(14.0))
         .child(Icon::new(RavelIcon::Expression).size_3().text_color(color));
     badge = if live {
-        badge.cursor_pointer().tooltip(|window, cx| {
-            Tooltip::new(t!("properties.toggle.expression")).build(window, cx)
-        })
+        badge
+            .cursor_pointer()
+            .ravel_tooltip(t!("properties.toggle.expression"))
     } else {
-        badge.cursor_default().tooltip(|window, cx| {
-            Tooltip::new(t!("properties.toggle.expression_blocked")).build(window, cx)
-        })
+        badge
+            .cursor_default()
+            .ravel_tooltip(t!("properties.toggle.expression_blocked"))
     };
     badge.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
         if !live {
@@ -1670,7 +1663,7 @@ fn port_toggle_button(
         .w(px(14.0))
         .cursor_pointer()
         .child(Icon::new(icon).size_3().text_color(color))
-        .tooltip(|window, cx| Tooltip::new(t!("properties.toggle.port")).build(window, cx))
+        .ravel_tooltip(t!("properties.toggle.port"))
         .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
             let editor = cx
                 .try_global::<super::NodeEditorHandle>()

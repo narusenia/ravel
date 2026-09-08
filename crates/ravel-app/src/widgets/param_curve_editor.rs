@@ -40,12 +40,11 @@ use std::rc::Rc;
 
 use gpui::*;
 use gpui_component::ActiveTheme;
-use gpui_component::Icon;
-use gpui_component::tooltip::Tooltip;
 use ravel_core::animation::Interpolation;
 use ravel_core::param_curve::{CurveParam, CurvePoint};
 use ravel_core::types::Vec2;
 use ravel_i18n::t;
+use ravel_widgets::{Icon, TooltipExt as _};
 
 pub use super::curve_editor::CurvePoint as ViewPoint;
 use super::curve_editor::{CurveTransform, HitPart, handle_anchor, snap_to_diagonals};
@@ -1570,7 +1569,7 @@ fn interpolation_button(
         .flex_shrink_0()
         .cursor_pointer()
         .child(Icon::new(icon).size_3().text_color(color))
-        .tooltip(move |window, cx| Tooltip::new(ravel_i18n::translate(tooltip)).build(window, cx))
+        .ravel_tooltip(ravel_i18n::translate(tooltip))
         .on_mouse_down(
             MouseButton::Left,
             window.listener_for(state, move |state, _e: &MouseDownEvent, _window, cx| {
@@ -1707,9 +1706,7 @@ impl RenderOnce for ParamCurveEditor {
                         .w(px(FIELD_WIDTH))
                         .text_color(colors.muted_foreground)
                         .child(SharedString::from(format!("{:.2}", point.x)))
-                        .tooltip(|window, cx| {
-                            Tooltip::new(t!("properties.curve.pinned_input")).build(window, cx)
-                        })
+                        .ravel_tooltip(t!("properties.curve.pinned_input"))
                         .into_any_element()
                 })
                 .child(field_label(
@@ -1753,7 +1750,7 @@ impl RenderOnce for ParamCurveEditor {
                     .size_3()
                     .text_color(colors.muted_foreground),
             )
-            .tooltip(|window, cx| Tooltip::new(t!("properties.curve.fit")).build(window, cx))
+            .ravel_tooltip(t!("properties.curve.fit"))
             .on_mouse_down(
                 MouseButton::Left,
                 window.listener_for(&self.state, |state, _e: &MouseDownEvent, _window, cx| {

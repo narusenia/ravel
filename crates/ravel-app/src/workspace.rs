@@ -17,7 +17,6 @@
 use std::collections::HashSet;
 
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
 use gpui_component::menu::{APP_MENU_BAR_CONTEXT, AppMenuBar, POPUP_MENU_CONTEXT};
 use gpui_component::notification::{Notification, NotificationType};
@@ -27,6 +26,7 @@ use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::{AppShell, CommandOutcome};
+use ravel_widgets::Button;
 
 use crate::composition_form::CompositionForm;
 use crate::panels;
@@ -2030,6 +2030,27 @@ impl RavelWorkspace {
             let save_workspace = workspace.clone();
             let discard_workspace = workspace.clone();
             let button_workspace = workspace.clone();
+            let discard_button = Button::new("unsaved-discard")
+                .solid()
+                .label(SharedString::from(t!("project.unsaved.discard")))
+                // Discard is the only footer button with no keyboard route
+                // (Enter saves, Escape cancels), so the integration test has
+                // to click it, and the selector lets it read the button's
+                // real bounds instead of a coordinate that only holds for one
+                // platform's font metrics. Compiles to a no-op without
+                // `test-support`.
+                .debug_selector(|| "unsaved-discard".into())
+                .on_click(move |_event, window, cx| {
+                    window.close_dialog(cx);
+                    if discard_workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.perform_project_action(action, window, cx);
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!("workspace dropped before unsaved changes were discarded");
+                    }
+                });
             dialog
                 .title(SharedString::from(t!("project.unsaved.title")))
                 .w(px(448.0))
@@ -2056,35 +2077,11 @@ impl RavelWorkspace {
                     DialogFooter::new()
                         .child(
                             Button::new("unsaved-cancel")
+                                .solid()
                                 .label(SharedString::from(t!("ui.cancel")))
                                 .on_click(|_event, window, cx| window.close_dialog(cx)),
                         )
-                        .child(
-                            Button::new("unsaved-discard")
-                                .label(SharedString::from(t!("project.unsaved.discard")))
-                                // Discard is the only footer button with no
-                                // keyboard route (Enter saves, Escape
-                                // cancels), so the integration test has to
-                                // click it. The selector lets the test read
-                                // the button's real bounds instead of
-                                // hard-coding a coordinate that only holds
-                                // for one platform's font metrics. Compiles
-                                // to a no-op without `test-support`.
-                                .debug_selector(|| "unsaved-discard".into())
-                                .on_click(move |_event, window, cx| {
-                                    window.close_dialog(cx);
-                                    if discard_workspace
-                                        .update(cx, |workspace, cx| {
-                                            workspace.perform_project_action(action, window, cx);
-                                        })
-                                        .is_err()
-                                    {
-                                        tracing::warn!(
-                                            "workspace dropped before unsaved changes were discarded"
-                                        );
-                                    }
-                                }),
-                        )
+                        .child(discard_button)
                         .child(
                             Button::new("unsaved-save")
                                 .primary()
@@ -2283,6 +2280,7 @@ impl RavelWorkspace {
                     DialogFooter::new()
                         .child(
                             Button::new("composition-dialog-cancel")
+                                .solid()
                                 .label(cancel_label)
                                 .on_click(|_event, window, cx| window.close_dialog(cx)),
                         )
@@ -2398,6 +2396,7 @@ impl RavelWorkspace {
                     DialogFooter::new()
                         .child(
                             Button::new("export-dialog-cancel")
+                                .solid()
                                 .label(SharedString::from(t!("ui.cancel")))
                                 .on_click(|_event, window, cx| window.close_dialog(cx)),
                         )

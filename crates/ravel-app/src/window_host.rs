@@ -24,14 +24,14 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Icon, Root, Selectable as _, Sizable as _, TitleBar, WindowExt as _};
+use gpui_component::{Root, TitleBar, WindowExt as _};
 use ravel_dock::{DockEvent, DockRoot};
 use ravel_i18n::t;
 use ravel_ui::layout::{LayoutNode, PanelInstance, PanelInstanceId, WindowLayout};
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 use ravel_ui::window::{WindowId, WindowPlacement};
+use ravel_widgets::{Button, Icon};
 
 use crate::assets::RavelIcon;
 use crate::panels;
@@ -1125,7 +1125,7 @@ impl WindowHost {
             WindowRole::Detached => RavelTitleBar::new(window_title(self.dock.read(cx).layout()))
                 .trailing(
                     Button::new("window-always-on-top")
-                        .xsmall()
+                        .compact()
                         .ghost()
                         .selected(self.always_on_top)
                         .icon(Icon::new(RavelIcon::AlwaysOnTop))

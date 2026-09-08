@@ -18,7 +18,6 @@
 
 use gpui::*;
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
-use gpui_component::input::{InputState, NumberInput};
 use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
@@ -27,6 +26,7 @@ use ravel_ui::properties::composition::{
     self, FIELD_BACKGROUND, FIELD_DURATION, FIELD_FRAME_RATE, FIELD_HEIGHT, FIELD_NAME,
     FIELD_WIDTH, composition_fields,
 };
+use ravel_widgets::{InputState, NumberInput};
 
 /// Localized label for a composition field key (the Properties panel resolves
 /// the same `properties.field.*` keys).
@@ -177,15 +177,11 @@ impl Render for CompositionForm {
         for field in composition_fields(&self.initial) {
             let key = field.key().to_string();
             let control: AnyElement = match key.as_str() {
-                FIELD_NAME => gpui_component::input::Input::new(&self.name)
-                    .small()
-                    .into_any_element(),
-                FIELD_WIDTH => NumberInput::new(&self.width).small().into_any_element(),
-                FIELD_HEIGHT => NumberInput::new(&self.height).small().into_any_element(),
-                FIELD_FRAME_RATE => NumberInput::new(&self.frame_rate)
-                    .small()
-                    .into_any_element(),
-                FIELD_DURATION => NumberInput::new(&self.duration).small().into_any_element(),
+                FIELD_NAME => ravel_widgets::Input::new(&self.name).into_any_element(),
+                FIELD_WIDTH => NumberInput::new(&self.width).into_any_element(),
+                FIELD_HEIGHT => NumberInput::new(&self.height).into_any_element(),
+                FIELD_FRAME_RATE => NumberInput::new(&self.frame_rate).into_any_element(),
+                FIELD_DURATION => NumberInput::new(&self.duration).into_any_element(),
                 FIELD_BACKGROUND => ColorPicker::new(&self.background)
                     .small()
                     .into_any_element(),

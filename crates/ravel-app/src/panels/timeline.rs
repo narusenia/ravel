@@ -25,10 +25,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
-use gpui_component::{ActiveTheme, Sizable as _, ThemeColor};
+use gpui_component::{ActiveTheme, ThemeColor};
 use ravel_core::animation::channel::ChannelSource;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::composition::Layer;
@@ -47,6 +46,7 @@ use ravel_ui::panels::timeline::{
     BpmGrid, MAX_PPF, MIN_PPF, PropertyGroup, TimelineChannelRef, TimelinePanel, TimelineViewMode,
 };
 use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
+use ravel_widgets::{Escape, Input, InputEvent, InputState};
 
 use crate::assets::RavelIcon;
 use crate::panels::media_bin::{DraggedAsset, add_assets_as_layers, dropped_asset_ids};
@@ -3418,7 +3418,7 @@ impl TimelineGpuiPanel {
                 Some((_, input)) => div()
                     .w(px(BPM_FIELD_WIDTH))
                     .h(px(22.0))
-                    .child(Input::new(input).small())
+                    .child(Input::new(input))
                     .into_any_element(),
                 None => {
                     let tooltip = SharedString::from(tooltip);
@@ -3547,7 +3547,7 @@ impl TimelineGpuiPanel {
             div()
                 .w(px(92.0))
                 .h(px(22.0))
-                .child(Input::new(input).small())
+                .child(Input::new(input))
                 .into_any_element()
         } else {
             div()
@@ -5155,17 +5155,15 @@ impl Render for TimelineGpuiPanel {
             .on_action(cx.listener(Self::on_keyframe_bezier))
             .on_action(cx.listener(Self::on_keyframe_linear))
             .on_action(cx.listener(Self::on_keyframe_step))
-            .on_action(
-                cx.listener(|this, _: &gpui_component::input::Escape, _window, cx| {
-                    if this.timecode_input.is_some() {
-                        this.cancel_timecode_edit(cx);
-                    } else if this.bpm_input.is_some() {
-                        this.cancel_bpm_edit(cx);
-                    } else {
-                        cx.propagate();
-                    }
-                }),
-            )
+            .on_action(cx.listener(|this, _: &Escape, _window, cx| {
+                if this.timecode_input.is_some() {
+                    this.cancel_timecode_edit(cx);
+                } else if this.bpm_input.is_some() {
+                    this.cancel_bpm_edit(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if matches!(this.drag, TimelineDrag::None) {
                     if this.state.view_mode() == TimelineViewMode::Bars {

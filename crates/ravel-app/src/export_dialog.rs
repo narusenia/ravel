@@ -26,7 +26,6 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{Input, InputState, NumberInput};
 use gpui_component::radio::Radio;
 use gpui_component::select::{Select, SelectState};
 use gpui_component::{ActiveTheme, Disableable as _, Sizable as _};
@@ -38,6 +37,7 @@ use ravel_core::media::{ImageFormat, VideoCodec};
 use ravel_i18n::t;
 use ravel_ui::export::{DEFAULT_PADDING, ExportSettings};
 use ravel_widgets::Button;
+use ravel_widgets::{Input, InputState, NumberInput};
 use std::path::PathBuf;
 
 /// Width of the label column, matching the composition dialog's.
@@ -447,11 +447,7 @@ impl Render for ExportForm {
             .flex()
             .items_center()
             .gap_1()
-            .child(
-                div()
-                    .flex_grow_1()
-                    .child(NumberInput::new(&self.start).small()),
-            )
+            .child(div().flex_grow_1().child(NumberInput::new(&self.start)))
             .child(
                 div()
                     .flex_shrink_0()
@@ -459,21 +455,13 @@ impl Render for ExportForm {
                     .text_color(muted)
                     .child(SharedString::from("–")),
             )
-            .child(
-                div()
-                    .flex_grow_1()
-                    .child(NumberInput::new(&self.end).small()),
-            );
+            .child(div().flex_grow_1().child(NumberInput::new(&self.end)));
 
         let directory = div()
             .flex()
             .items_center()
             .gap_1()
-            .child(
-                div()
-                    .flex_grow_1()
-                    .child(Input::new(&self.directory).small()),
-            )
+            .child(div().flex_grow_1().child(Input::new(&self.directory)))
             .child(
                 Button::new("export-browse")
                     .solid()
@@ -510,17 +498,17 @@ impl Render for ExportForm {
             ))
             .child(self.row(
                 t!("export.field.prefix"),
-                Input::new(&self.prefix).small().into_any_element(),
+                Input::new(&self.prefix).into_any_element(),
                 cx,
             ))
             .child(self.row(
                 t!("export.field.suffix"),
-                Input::new(&self.suffix).small().into_any_element(),
+                Input::new(&self.suffix).into_any_element(),
                 cx,
             ))
             .child(self.row(
                 t!("export.field.padding"),
-                NumberInput::new(&self.padding).small().into_any_element(),
+                NumberInput::new(&self.padding).into_any_element(),
                 cx,
             ))
             .child(

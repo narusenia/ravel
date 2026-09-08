@@ -46,7 +46,6 @@ use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SelectEvent, SelectState};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::color::ColorSpace;
@@ -79,6 +78,7 @@ use ravel_ui::properties::media_asset::{
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
 use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
+use ravel_widgets::{Input, InputEvent, InputState};
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
@@ -382,7 +382,7 @@ fn custom_port_row(
             div()
                 .flex_grow_1()
                 .min_w_0()
-                .child(Input::new(input).xsmall()),
+                .child(Input::new(input).compact()),
         );
     }
     if let Some((_, select)) = type_select {
@@ -400,7 +400,7 @@ fn custom_port_row(
             div()
                 .flex_shrink_0()
                 .w(px(88.0))
-                .child(Input::new(input).xsmall().w_full()),
+                .child(Input::new(input).compact().w_full()),
         );
     }
 
@@ -458,7 +458,7 @@ fn add_port_row(
             div()
                 .flex_grow_1()
                 .min_w_0()
-                .child(Input::new(name).xsmall().w_full()),
+                .child(Input::new(name).compact().w_full()),
         )
         .child(
             div()
@@ -558,7 +558,7 @@ fn exposed_row(
             div()
                 .flex_grow_1()
                 .min_w_0()
-                .child(Input::new(input).xsmall()),
+                .child(Input::new(input).compact()),
         );
     }
     // The command-line spelling of the type, then the default a caller gets
@@ -591,7 +591,7 @@ fn exposed_row(
                     div()
                         .flex_grow_1()
                         .min_w_0()
-                        .child(Input::new(input).xsmall().w_full()),
+                        .child(Input::new(input).compact().w_full()),
                 ),
         );
     }
@@ -1117,7 +1117,7 @@ fn build_field_row(
                 .py(px(1.0))
                 .child(field_label_cell(field_label(key), muted));
             if let Some(input) = input {
-                row = row.child(Input::new(input).small().w_full());
+                row = row.child(Input::new(input).w_full());
             }
             row
         }
@@ -1510,7 +1510,7 @@ fn expression_editor_body(
                     // `crate::fonts`), which an expression can contain through a
                     // string literal.
                     .font_family(mono.clone())
-                    .child(Input::new(state).small().w_full()),
+                    .child(Input::new(state).w_full()),
             ),
         );
         let error = drafts

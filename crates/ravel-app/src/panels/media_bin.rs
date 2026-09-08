@@ -15,9 +15,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Sizable as _, WindowExt as _};
+use gpui_component::{ActiveTheme, WindowExt as _};
 use ravel_core::color::ColorSpace;
 use ravel_core::composition::{AssetKind, MediaAssetEntry, MediaAssets};
 use ravel_core::id::AssetId;
@@ -29,6 +28,7 @@ use ravel_ui::panels::media_bin::{
     format_duration,
 };
 use ravel_widgets::Icon;
+use ravel_widgets::{Input, InputEvent, InputState};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -540,7 +540,7 @@ impl MediaBinGpuiPanel {
                 div()
                     .flex_grow_1()
                     .min_w(px(60.0))
-                    .child(Input::new(&self.search).xsmall()),
+                    .child(Input::new(&self.search).compact()),
             )
     }
 
@@ -655,7 +655,7 @@ impl MediaBinGpuiPanel {
                             _ => {}
                         }
                     }))
-                    .child(div().flex_grow_1().child(Input::new(&input).xsmall()))
+                    .child(div().flex_grow_1().child(Input::new(&input).compact()))
             }
             None => content.child(
                 // A file name is one line: `min_w_0` allows the shrink that

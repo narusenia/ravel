@@ -20,11 +20,11 @@
 //! can drift from the shell.
 
 use gpui::*;
+use gpui_component::ActiveTheme;
 use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme, Sizable as _};
 use ravel_i18n::t;
 use ravel_widgets::Button;
+use ravel_widgets::{Input, InputState};
 
 use crate::workspace::RavelWorkspace;
 
@@ -187,7 +187,7 @@ impl Render for WorkspaceLayoutsForm {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_grow_1().child(Input::new(&self.name).small()))
+                    .child(div().flex_grow_1().child(Input::new(&self.name)))
                     .child(
                         Button::new("layout-save-current")
                             .primary()

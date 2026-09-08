@@ -211,3 +211,32 @@ framebuffer-direct-index crates/ravel-media/tests/integration_ffmpeg.rs data-ind
 # so the pair round-trips exactly; `hex_round_trips_through_the_formatter`
 # fails if it stops doing so.
 raw-pixel-quantisation crates/ravel-widgets/src/tokens.rs quantise
+
+# Functional colour, and the four modules it is allowed to live in. Each of
+# these answers "which of the things on screen right now is this one?", which
+# no palette step can answer: the palette has no opinion about which two marks
+# must never look alike, and a theme that moved them would destroy exactly the
+# distinction they exist for. One entry per subsystem, so the exception stays
+# countable — a literal written beside its painter does not qualify and the
+# rule will say so.
+#
+# Ports and node headers: the colour *is* the data type. A Geometry output and
+# a Frame Buffer output have to be separable at a glance on a canvas of fifty
+# nodes, and a node's header repeats its domain's port hue so the header and
+# the dots tell one story (`port_color` / `category_color`).
+colour-literal crates/ravel-app/src/node_editor/port_colors.rs palette
+# The per-node load readout's yellow and red: a *rank* (in budget → warn →
+# critical), read by position on a three-step scale. `muted_foreground` is the
+# quiet end; `danger` would be wrong for the loud one, because "this node is
+# slow" is not "this node failed".
+colour-literal crates/ravel-app/src/node_editor/load_colors.rs palette
+# Every Viewer overlay, in one module: the selection blue against the geometry
+# warm, the anchor against the scale handles, a snap guide's magenta against a
+# user guide's cyan, the field ramps that encode a magnitude, and the
+# transparency checkerboard — which must stay neutral greys precisely because
+# it is what the composition's own colours are judged against.
+colour-literal crates/ravel-app/src/panels/viewer/overlay_colors.rs palette
+# The Timeline's curve ramp and cache band: five lightness steps that let
+# several curves be told apart on one graph, and the green that says which
+# frames are already rendered. Both are read as values rather than as chrome.
+colour-literal crates/ravel-app/src/panels/timeline_colors.rs palette

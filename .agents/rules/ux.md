@@ -188,10 +188,24 @@ bug.
 (22 / 24 / 26 / 28 / 20) that differ by implementation accident rather than
 by meaning. A theme change misses whichever sites were written by hand.
 
-`scripts/lint-patterns.sh` enforces this one. A justified exception goes in
-`scripts/lint-patterns.allow` with its reason — node category colours and
-Viewer guide colours are the expected ones, because they are functional
-colour rather than a palette step.
+`scripts/lint-patterns.sh` enforces this one (`colour-literal`). A justified
+exception goes in `scripts/lint-patterns.allow` with its reason — node
+category colours and Viewer guide colours are the expected ones, because they
+are functional colour rather than a palette step.
+
+**Functional colour gets one named palette module per subsystem, and the
+exception is that module** — not the file that paints from it. A mark whose job
+is to be told apart from the marks beside it (a port's data type, a Viewer
+overlay, a curve series, a load band) has no palette step to come from, because
+the palette has no opinion about which two things must never look alike. The
+four that exist are `node_editor/port_colors.rs`,
+`node_editor/load_colors.rs`, `panels/viewer/overlay_colors.rs` and
+`panels/timeline_colors.rs`. Keeping them gathered is what keeps the exception
+countable: a literal written beside its painter earns a violation, not an allow
+entry.
+
+**Dimensions are a reader's job, not the lint's.** `px()` is as often a
+coordinate transform as a spacing step, so the script does not match it.
 
 ## How to use this file
 

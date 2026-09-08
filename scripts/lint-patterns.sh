@@ -323,6 +323,47 @@ done < <(rg -n --no-heading \
     -e '\*[[:space:]]*max[[:space:]]+as[[:space:]]+f32' \
     crates -g '*.rs' 2>/dev/null)
 
+# ---------------------------------------------------------------------------
+# colour-literal: no colour written out where it is painted.
+#
+# UX invariant 12: colour comes from `ravel_widgets::tokens`, so a theme change
+# reaches every surface. Twenty-four hand-written `rgb(0x…)` sites is how the
+# panels drifted apart from the palette in the first place, and it is silent —
+# the theme switches and those surfaces simply do not move.
+#
+# `tokens.rs` defines the palette and is exempt. The other exception the rule
+# file names is **functional colour**: a mark whose job is to be told apart from
+# the marks beside it (a port's data type, a Viewer overlay, a curve series, a
+# load band) cannot be a palette step, because the palette has no opinion about
+# which two things must never look alike. Those live in one named palette module
+# per subsystem with a justified allow entry, so the exception stays countable —
+# a literal beside its painter does not qualify.
+#
+# `hsla(` is matched on a word boundary on purpose: `rgb_to_hsla(`,
+# `hsla_to_rgba(` and `display_hsla(` are colour-space *conversions*, and a rule
+# that flagged them would be answered with an allow entry rather than a fix.
+#
+# **Dimensions are deliberately not matched.** A bare `px(12.0)` is as often a
+# coordinate transform (the curve editor's screen mapping, the overlay
+# painter's) as it is a spacing step, so a `px(` rule would be noise. Spacing
+# and row heights are a reader's job (`.agents/rules/ux.md`), not this script's.
+# ---------------------------------------------------------------------------
+while IFS=: read -r file line content; do
+    [ -z "${file:-}" ] && continue
+    file=$(normalize_path "$file")
+    case "$file" in
+        crates/ravel-widgets/src/tokens.rs) continue ;;
+    esac
+    if ! allowed colour-literal "$file" "palette"; then
+        report colour-literal "$file" "$line" \
+            "colour written out where it is painted (${content#"${content%%[![:space:]]*}"}) — take it from cx.tokens(), or move it into the subsystem's named functional palette (.agents/rules/ux.md rule 12)"
+    fi
+done < <(rg -n --no-heading \
+    -e '\brgb\(0x' \
+    -e '\brgba\(0x' \
+    -e '\bhsla\(' \
+    crates -g '*.rs' 2>/dev/null)
+
 if [ "$violations" -gt 0 ]; then
     echo >&2
     echo "lint-patterns: $violations violation(s). Fix them or add a justified entry to $ALLOW_FILE." >&2

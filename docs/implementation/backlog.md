@@ -745,7 +745,7 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | UIX-3 | ✅ | トークンの配線（`cx.theme()` → `cx.tokens()`）、色リテラルを **4 つの機能色パレット**に閉じ込め `colour-literal` lint で外を禁止（allow 4 行）、`param_curve_editor` / `param_ramp_editor` を `ravel-widgets` へ移設し `ravel-app/src/widgets/` を削除。**箇所数の記録**: 真のリテラルは 44（`hsla(` 38 + `rgb(0x` 6）で、うち階調は 8〜12。計画書の「24」も、私が実測と称した「62」も**色変換関数（`rgb_to_hsla(` 等 18 件）を数え込んだ誤り** | UIX-1 / UIX-2 |
 | UIX-4 | ✅ | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で（4 状態 + Tab 順 + Enter / Space） | UIX-2 |
 | UIX-4b | ✅ | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を移設。状態型（`InputState` / `InputEvent` / `Escape`）は **base からの再エクスポートなので import のパスだけ**（125 箇所）。`scrub_input`（AE 式の横ドラッグ）と `number_input`（増減ボタン）は**用途が違うので両方持つ** | UIX-4 ✅ |
-| UIX-5 | 🟡 | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24）。**compact の `font_size` もここで決める** — `UIX-4b` で `.xsmall()` の `text_xs`(12px) が失われ、両段が `text.font_size`(14px) になった。20px の行に 14px は DCC の慣習より大きい。トークンが 1 つ増えるので `UIX-4b` では発明しなかった | UIX-3 |
+| UIX-5 | ✅ | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24）。**compact の `font_size` もここで決める** — `UIX-4b` で `.xsmall()` の `text_xs`(12px) が失われ、両段が `text.font_size`(14px) になった。20px の行に 14px は DCC の慣習より大きい。トークンが 1 つ増えるので `UIX-4b` では発明しなかった | UIX-3 |
 | UIX-6 | ⬜ | 不変条件 1〜4 の違反を潰す（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | UIX-0 |
 | UIX-7 | ⬜ | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 |
 | UIX-8 | ⬜ | ユーザーテーマディレクトリ（`themes_dir()` を複数候補に、ユーザー側が勝つ、**watch を自前に持つ** — 借りた `watch_dir` は導出を挟めない、**`ravel.schema.json` の同梱**、書き方の文書）。**`RavelThemes` の陳腐化もここで閉じる** — `UIX-4` が入れた `register_ravel_themes` は起動時に 1 度しか挿さないので、テーマファイルを編集すると gpui-component 側だけ再読み込みされ、Ravel のトークンが古いまま残る（削除されたテーマの行も残る） | UIX-1 ✅ |

@@ -47,7 +47,7 @@ const HEADER_HEIGHT: f32 = 24.0;
 /// Row height, matching the Timeline's rows — the application's existing answer
 /// to "a dense row". The table's own size presets stop at 26px, so this is
 /// handed over as an explicit size.
-const ROW_HEIGHT: f32 = 22.0;
+const ROW_HEIGHT: f32 = 24.0;
 
 /// Cell text, a step below the 14px UI font. An explicit size rather than the
 /// inherited one because [`Size::Size`] keeps the default 4px vertical cell

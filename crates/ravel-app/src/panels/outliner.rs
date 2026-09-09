@@ -37,7 +37,7 @@ use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 
 const HEADER_HEIGHT: f32 = 24.0;
-const ROW_HEIGHT: f32 = 22.0;
+const ROW_HEIGHT: f32 = 24.0;
 const INDENT_PER_DEPTH: f32 = 12.0;
 const DISCLOSURE_SIZE: f32 = 14.0;
 

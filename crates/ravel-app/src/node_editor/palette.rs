@@ -45,7 +45,7 @@ use crate::panels::node_editor::{
 
 /// Row height is fixed so [`ScrollHandle::scroll_to_item`] lines the
 /// keyboard selection up with the rendered rows.
-const ROW_HEIGHT: f32 = 26.0;
+const ROW_HEIGHT: f32 = 24.0;
 
 /// Result of the user's interaction with the palette.
 pub enum PaletteEvent {

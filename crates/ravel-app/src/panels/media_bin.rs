@@ -40,7 +40,7 @@ use crate::media::thumbnail::{ThumbnailCache, ThumbnailSource, ThumbnailState};
 use crate::project_state::ProjectState;
 
 const HEADER_HEIGHT: f32 = 24.0;
-const ROW_HEIGHT: f32 = 28.0;
+const ROW_HEIGHT: f32 = 24.0;
 const THUMB_WIDTH: f32 = 40.0;
 const THUMB_HEIGHT: f32 = 24.0;
 

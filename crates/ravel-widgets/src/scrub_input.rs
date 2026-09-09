@@ -333,20 +333,24 @@ impl RenderOnce for ScrubInput {
         let dragging = state.dragging;
         let editor = state.editor.clone();
         let colors = cx.tokens().colors;
+        // A scrub sits in a row that shows one value, so it is as tall as the
+        // compact row step rather than a height of its own.
+        let row_height = cx.tokens().rows.compact;
 
         // Edit mode: show a focused text input in place of the label.
         if let Some(editor) = editor {
             return div()
                 .id(("scrub-input-edit", entity_id))
-                .h(px(16.0))
+                .h(row_height)
                 .min_w(px(48.0))
-                .child(Input::new(&editor))
+                // Compact too, or the editor is a 24px control in a 20px row.
+                .child(Input::new(&editor).compact())
                 .into_any_element();
         }
 
         div()
             .id(("scrub-input", entity_id))
-            .h(px(16.0))
+            .h(row_height)
             .min_w(px(48.0))
             .px_1()
             .flex()

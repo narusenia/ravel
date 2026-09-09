@@ -85,7 +85,7 @@ pub const KEY_CONTEXT: &str = "Timeline";
 const RULER_HEIGHT: f32 = 24.0;
 const TRANSPORT_HEIGHT: f32 = 28.0;
 const HEADER_WIDTH: f32 = 200.0;
-const LAYER_ROW_HEIGHT: f32 = 28.0;
+const LAYER_ROW_HEIGHT: f32 = 24.0;
 const PROPERTY_ROW_HEIGHT: f32 = 20.0;
 const LAYER_BAR_CORNER_RADIUS: f32 = 4.0;
 const LAYER_TEXT_PADDING: f32 = 6.0;
@@ -8189,11 +8189,14 @@ mod tests {
                 panel.state.toggle_layer_expanded(a);
                 panel.state.toggle_property_expanded(a, row.clone());
                 let (origin_x, origin_y) = panel.area_origin.get();
-                // Layer B occupies y 0..28 and layer A's bar y 28..56; the
-                // Anchor Point row (AE's first property) then sits at 56..76
-                // and Position at 76..96, so A's Position-X channel is
-                // centered at area-local y 106. Start at empty frame 15 and
-                // drag left across the keys at frames 0 and 10.
+                // Layer B's bar, then layer A's, then the Anchor Point row
+                // (AE's first property) and Position, and then Position's
+                // channel rows — so A's Position-X channel is half a property
+                // row past two layer bars and two property rows. Derived from
+                // the constants so the row heights can move without moving the
+                // arithmetic. Start at empty frame 15 and drag left across the
+                // keys at frames 0 and 10.
+                let channel_center = 2.0 * LAYER_ROW_HEIGHT + 2.5 * PROPERTY_ROW_HEIGHT;
                 panel.channel_row_mouse_down(
                     a,
                     row.clone(),
@@ -8201,11 +8204,17 @@ mod tests {
                     60.0,
                     1,
                     origin_x + 60.0,
-                    origin_y + 106.0,
+                    origin_y + channel_center,
                     false,
                     cx,
                 );
-                panel.drag_moved(origin_x - 1.0, origin_y + 110.0, false, false, cx);
+                panel.drag_moved(
+                    origin_x - 1.0,
+                    origin_y + channel_center + 4.0,
+                    false,
+                    false,
+                    cx,
+                );
                 assert_eq!(
                     panel.selected_keyframes,
                     HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10),])

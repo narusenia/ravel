@@ -64,16 +64,26 @@ pub fn derive_theme_config(theme: &RavelTheme, unmodelled: &ThemeConfig) -> Them
     config
 }
 
-/// Read a theme file and hand back the same set as gpui-component JSON.
+/// One theme, in both forms.
 ///
-/// The registry only takes themes as text (`load_themes_from_str`), so the
-/// derived configs go back through `serde_json` rather than being inserted
-/// directly. That is the whole reason this returns a `String`.
+/// The derivation is one-way, so a theme that has been through it can no longer
+/// say what it looked like in Ravel's schema. Both forms therefore travel
+/// together from the one parse that produced them.
+struct DerivedTheme {
+    /// What the theme is keyed by: a file may name its light and dark themes
+    /// the same thing.
+    key: (String, tokens::ThemeMode),
+    ravel: RavelTheme,
+    derived: ThemeConfig,
+}
+
+/// Read a theme file under both schemas at once.
 ///
 /// The file is parsed twice, once under each schema, and the two theme lists are
 /// paired by position — they are the same JSON array, so they cannot disagree on
-/// length.
-pub fn derive_theme_set_json(content: &str) -> anyhow::Result<String> {
+/// length. The returned [`ThemeSet`] carries the set's own metadata; its
+/// `themes` are the file's underived ones, which the caller has no use for.
+fn derive_file(content: &str) -> anyhow::Result<(ThemeSet, Vec<DerivedTheme>)> {
     let unmodelled: ThemeSet = serde_json::from_str(content)?;
     let ravel: ThemeFile = serde_json::from_str(content)?;
     anyhow::ensure!(
@@ -81,18 +91,34 @@ pub fn derive_theme_set_json(content: &str) -> anyhow::Result<String> {
         "the two schemas disagree on how many themes the file holds"
     );
 
-    let themes = unmodelled
+    let derived = unmodelled
         .themes
         .iter()
         .zip(ravel.themes.iter())
-        .map(|(unmodelled, spec)| derive_theme_config(&spec.resolve(), unmodelled))
+        .map(|(unmodelled, spec)| {
+            let resolved = spec.resolve();
+            DerivedTheme {
+                key: (spec.name.clone(), spec.mode),
+                derived: derive_theme_config(&resolved, unmodelled),
+                ravel: resolved,
+            }
+        })
         .collect();
+    Ok((unmodelled, derived))
+}
 
+/// Read a theme file and hand back the same set as gpui-component JSON.
+///
+/// The registry only takes themes as text (`load_themes_from_str`), so the
+/// derived configs go back through `serde_json` rather than being inserted
+/// directly. That is the whole reason this returns a `String`.
+pub fn derive_theme_set_json(content: &str) -> anyhow::Result<String> {
+    let (set, derived) = derive_file(content)?;
     Ok(serde_json::to_string(&ThemeSet {
-        name: unmodelled.name,
-        author: unmodelled.author,
-        url: unmodelled.url,
-        themes,
+        name: set.name,
+        author: set.author,
+        url: set.url,
+        themes: derived.into_iter().map(|theme| theme.derived).collect(),
     })?)
 }
 
@@ -100,37 +126,87 @@ pub fn derive_theme_set_json(content: &str) -> anyhow::Result<String> {
 // The Ravel side of the same themes
 // ---------------------------------------------------------------------------
 
-/// The Ravel themes read out of the themes directory, by name and mode.
+/// The themes read out of the themes directories, by name and mode.
 ///
-/// The registry exists because the derivation above is one-way and stays that
-/// way: `ThemeRegistry` holds the *derived* `ThemeConfig`s, which is what the
-/// borrowed components need, and there is deliberately no code that turns one
-/// back into a [`RavelTheme`]. Ravel's own widgets need the Ravel form of
-/// whichever theme is being worn, so the resolved themes are kept here as the
-/// file is read rather than reconstructed later.
+/// Holds **both** forms of every theme: the [`RavelTheme`] Ravel's own widgets
+/// paint from, and the `ThemeConfig` the borrowed components read. Two reasons
+/// they live together rather than one form here and the other in
+/// `ThemeRegistry`:
+///
+/// - the derivation is one-way and stays that way, so a `ThemeConfig` cannot be
+///   turned back into a [`RavelTheme`] when a widget asks for one;
+/// - **this set is rebuilt wholesale on every reload and the registry cannot
+///   be.** `ThemeRegistry` only takes insertions (`load_themes_from_str` keeps
+///   the first theme it sees under a name) and exposes no way to drop one, so
+///   after a file is edited its entry there is the one from startup. This is
+///   what an edited or deleted theme file is resolved against
+///   (`app_settings::theme_named`); the registry is fed a copy for the
+///   components and dialogs that read it directly.
 ///
 /// Keyed by name **and** mode: a file may name its light and dark themes the
 /// same thing, and the appearance settings pick one per mode.
 #[derive(Default)]
-pub struct RavelThemes(HashMap<(String, tokens::ThemeMode), RavelTheme>);
+pub struct RavelThemes(HashMap<(String, tokens::ThemeMode), DerivedTheme>);
 
 impl Global for RavelThemes {}
 
-/// Record the Ravel themes a theme file holds.
-///
-/// Called beside [`derive_theme_set_json`] on the same text, so the two
-/// registries hold the same set. A file this fails on is one
-/// `derive_theme_set_json` also fails on, and the caller already logs and
-/// skips it.
-pub fn register_ravel_themes(content: &str, cx: &mut App) -> anyhow::Result<()> {
-    let file: ThemeFile = serde_json::from_str(content)?;
-    let registry = cx.default_global::<RavelThemes>();
-    for spec in &file.themes {
-        registry
-            .0
-            .insert((spec.name.clone(), spec.mode), spec.resolve());
+impl RavelThemes {
+    /// Add every theme one theme file holds, replacing any theme already here
+    /// under the same name and mode.
+    ///
+    /// Replacing rather than keeping the first is what makes the user's themes
+    /// directory win over the bundled one: the caller reads the directories in
+    /// load order and the last file to claim a name is the one that keeps it
+    /// (`crate::themes::load`).
+    pub fn insert_file(&mut self, content: &str) -> anyhow::Result<()> {
+        for theme in derive_file(content)?.1 {
+            self.0.insert(theme.key.clone(), theme);
+        }
+        Ok(())
     }
-    Ok(())
+
+    /// Publish this set as the one in force, **replacing** what was there.
+    ///
+    /// A reload builds a new set and installs it rather than adding to the
+    /// installed one, which is the only way a theme whose file was deleted
+    /// stops being offered.
+    pub fn install(self, cx: &mut App) {
+        cx.set_global(self);
+    }
+
+    /// gpui-component's form of the theme of that name and mode.
+    pub fn config(&self, name: &str, mode: tokens::ThemeMode) -> Option<&ThemeConfig> {
+        self.0
+            .get(&(name.to_string(), mode))
+            .map(|theme| &theme.derived)
+    }
+
+    /// Every theme as the JSON `gpui_component::ThemeRegistry` takes.
+    ///
+    /// Sorted by name and mode so a file that claims one name for both modes —
+    /// which the registry, keyed by name alone, can only hold one of — resolves
+    /// the same way on every load.
+    pub fn registry_json(&self) -> anyhow::Result<String> {
+        let mut keys: Vec<_> = self.0.keys().collect();
+        keys.sort_by_key(|(name, mode)| (name.clone(), mode.is_dark()));
+        Ok(serde_json::to_string(&ThemeSet {
+            name: "Ravel".into(),
+            author: None,
+            url: None,
+            themes: keys
+                .into_iter()
+                .map(|key| self.0[key].derived.clone())
+                .collect(),
+        })?)
+    }
+}
+
+/// gpui-component's mode in Ravel's vocabulary.
+pub fn ravel_mode(mode: ThemeMode) -> tokens::ThemeMode {
+    match mode {
+        ThemeMode::Light => tokens::ThemeMode::Light,
+        ThemeMode::Dark => tokens::ThemeMode::Dark,
+    }
 }
 
 /// Install the tokens Ravel's own widgets paint from.
@@ -143,8 +219,8 @@ pub fn register_ravel_themes(content: &str, cx: &mut App) -> anyhow::Result<()> 
 pub fn apply_ravel_theme(name: &str, mode: tokens::ThemeMode, cx: &mut App) {
     let resolved = cx
         .try_global::<RavelThemes>()
-        .and_then(|registry| registry.0.get(&(name.to_string(), mode)))
-        .cloned()
+        .and_then(|themes| themes.0.get(&(name.to_string(), mode)))
+        .map(|theme| theme.ravel.clone())
         .unwrap_or_else(|| {
             tokens::ThemeSpec {
                 name: name.to_string(),
@@ -160,6 +236,13 @@ pub fn apply_ravel_theme(name: &str, mode: tokens::ThemeMode, cx: &mut App) {
 mod ravel_theme_tests {
     use super::*;
 
+    /// The set one theme file holds, installed the way the loader installs it.
+    fn install(content: &str, cx: &mut App) {
+        let mut themes = RavelThemes::default();
+        themes.insert_file(content).expect("the file parses");
+        themes.install(cx);
+    }
+
     const FILE: &str = r##"{
         "name": "Set",
         "themes": [
@@ -171,7 +254,7 @@ mod ravel_theme_tests {
     #[gpui::test]
     fn the_registry_keeps_one_theme_per_name_and_mode(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            register_ravel_themes(FILE, cx).expect("the file parses");
+            install(FILE, cx);
 
             apply_ravel_theme("T", tokens::ThemeMode::Light, cx);
             assert_eq!(
@@ -192,7 +275,7 @@ mod ravel_theme_tests {
     #[gpui::test]
     fn an_unknown_name_falls_back_to_the_built_ins_for_that_mode(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            register_ravel_themes(FILE, cx).expect("the file parses");
+            install(FILE, cx);
             apply_ravel_theme("gone", tokens::ThemeMode::Dark, cx);
             assert_eq!(
                 ravel_widgets::ActiveTokens::tokens(&*cx).colors,

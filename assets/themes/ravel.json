@@ -1,4 +1,5 @@
 {
+  "$schema": "./ravel.schema.json",
   "name": "Ravel",
   "author": "Ravel Contributors",
   "url": "https://github.com/NaruseNia/ravel",

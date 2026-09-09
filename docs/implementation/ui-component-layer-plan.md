@@ -807,28 +807,28 @@ cache を配線し、ロケールもテーマも設定ダイアログから選�
   （`KIT-1` 待ち）だったので書く場所が無かった。スキーマに要るのは
   `gpui`（`Hsla`）と `serde` だけで **`gpui-base` は要らない**ので、
   `UIX-1` がクレートを作る形にした
-- **`$schema` は `UIX-1` で外したまま。`UIX-8` が Ravel の schema を同梱して
-  指し直す。** 今指せる先が無い（gpui-component のものは嘘、Ravel の URL は
-  存在しない）ので外した。**ユーザーが手書きテーマを書くときにエディタ補完が
-  効くかどうかは体験そのもの**なので、`UIX-8` は
-  `assets/themes/ravel.schema.json` を**同梱**し（URL ではなく相対パスで
-  指す。オフラインでも効く）、`ThemeSpec` の形と一致することをテストで
-  固定する。**手書きの schema は本体と乖離する**ので、`schemars` で
-  `ThemeSpec` から生成して差分をテストするのが安い
-  （`schemars` は既にツリーにある — gpui が使っている）
-- **ホットリロードが Ravel のスキーマを通らない。`UIX-8` が閉じる。**
-  `ThemeRegistry::watch_dir` の `on_load` コールバックは
-  最初の `reload_themes` の直後に**1 回だけ**呼ばれ、その後の再読み込みは
-  `_watch_themes_dir` が張った監視の中で起きる（`registry.rs:105-115`）。
-  **後続の再読み込みにフックは無い**ので、借りたまま導出を挟むことは
-  できない。**今は到達不能**（ユーザーがテーマを置ける場所が存在せず、
-  同梱 `ravel.json` は Ravel が模型化した 10 色を全部書いているので
-  導出結果と一致する）。**穴を露出させる変更と閉じる変更が同じ
-  `UIX-8`** なので、あの単位は `notify` で watch を自前に持つこと
-  （`notify` は既に依存にある）
-- **`ThemeRegistry::watch_dir` が 1 ディレクトリしか受けない。**
-  `UIX-8` は 2 ディレクトリ（同梱とユーザー）を監視する必要があるので、
-  受けないなら `notify` で自前に張るか、gpui-kit フォークに複数
-  ディレクトリ対応を入れる。**どちらになるかは `UIX-8` の着手時に測る**
-- **同名衝突はユーザー側が勝つ。** `ThemeRegistry` は先に読んだものを
-  残す仕様なので、ユーザーディレクトリを先に読む
+- **`$schema` / ホットリロード / 監視ディレクトリ / 同名衝突の 4 項目は
+  `UIX-8` で閉じた**（2026-09-10）。記録として要点を残す:
+  - **`assets/themes/ravel.schema.json` を同梱し、`ravel.json` が相対パスで
+    指す。** `schemars` は **dev 依存**（`#[cfg_attr(test, derive(JsonSchema))]`）
+    なので本番バイナリに入らない。生成物と同梱ファイルの一致は
+    `tokens::schema_tests::the_shipped_schema_is_the_one_the_wire_form_generates`
+    が縛る（`ThemeSpec` にフィールドを足すと「再生成せよ」で落ちる）
+  - **`gpui::hsla_schemar` は使えなかった。** あれは
+    `hue` / `saturation` / `lightness` / `alpha` の**オブジェクト**スキーマを
+    返すが、Ravel の wire form は `lenient_color` が読む**16 進文字列**。
+    指すとエディタが `ravel.json` の全色を invalid と言う。代わりに
+    cfg(test) の `hex_color_schema`（`type: ["string","null"]` +
+    3/4/6/8 桁の pattern）を書いた
+  - **watch は `notify` で自前に持つ。** `ThemeRegistry::watch_dir` は
+    `on_load` が 1 回しか走らず 1 ディレクトリしか受けないので、借りたまま
+    導出を挟むことはできなかった。**再読み込みは「差分を足す」ではなく
+    「作り直す」** — `ThemeRegistry` は先着優先の挿入だけで削除も置換も
+    できないので、正を Ravel 側の `RavelThemes` に移し、毎回新しい集合に
+    差し替える。registry には表示と借用部品用の写しを渡す
+  - **同名衝突はユーザー側が勝つ。** 読み順を app → user にし、
+    `(name, mode)` で**置換**する（registry の先着優先仕様に依存しない）
+  - **残った穴**: 設定ダイアログの候補は今も `ThemeRegistry` 由来なので、
+    **消したテーマ名は次の起動まで dropdown に残る**（選んでも着られず
+    同梱にフォールバックする）。消すには registry から listing を外すか、
+    フォークに削除 API を入れるかの二択

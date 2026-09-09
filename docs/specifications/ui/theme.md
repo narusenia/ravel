@@ -1,6 +1,6 @@
 # テーマ 仕様
 
-> 最終更新: 2026-09-07 ／ 索引: [`../ui-spec.md`](../ui-spec.md)
+> 最終更新: 2026-09-10 ／ 索引: [`../ui-spec.md`](../ui-spec.md)
 
 関連要件: REQ-UI-006。
 
@@ -12,6 +12,12 @@
 
 `assets/themes/*.json`。**スキーマは Ravel が持つ**
 （`crates/ravel-widgets/src/tokens.rs`）。1 ファイルに複数テーマを含められる。
+
+JSON Schema は `ThemeSpec` から生成して
+[`assets/themes/ravel.schema.json`](../../../assets/themes/ravel.schema.json)
+に同梱し、テーマファイルは `"$schema": "./ravel.schema.json"` と**相対パスで**
+指す（URL ではないのでオフラインでも補完が効く）。生成物と同梱ファイルの一致は
+`ravel-widgets` のテストが縛っている。
 
 ファイルの並びと色キーの名前は gpui-component の `.theme-schema.json` から
 そのまま受け継いでいる（既存のテーマファイルを書き換えずに移れるように）が、
@@ -87,15 +93,23 @@ Ravel のテーマから**導出**する。逆方向の変換は無い。
   ダーク用のテーマ名を別に持つ。既定は OS 追従 + 同梱の 2 テーマで、これは設定
   ファイルが無いときの従来の挙動そのまま。存在しないテーマ名や、枠と `mode` が
   食い違うテーマ名は同梱テーマへフォールバックする（`app_settings.rs`）
-- **テーマファイルは `assets/themes/*.json` を全部読む**（起動時に同期で 1 度、
-  以降は `ThemeRegistry::watch_dir` が変更ごとに再読込）。再読込後の再適用は
-  設定側が `ThemeRegistry` を観測して行うので、後から置かれたテーマも
-  設定が名指ししていれば適用される
-- **再読込は Ravel のスキーマを通らない。** `ThemeRegistry::watch_dir` は
-  ディレクトリを gpui-component 自身のパーサで読み直すので、最初のファイル
-  変更以降、レジストリが持つのは導出後ではなく gpui-component が読んだ形に
-  なる。同梱の `ravel.json` は Ravel が持つ色を全部書いているので両者は
-  一致するが、キーを省いた手書きテーマだけは編集の前後で値が変わる
+- **テーマは 2 つのディレクトリから読む** — 同梱（`assets/themes/`）と
+  ユーザー（`<config>/ravel/themes/`。macOS なら
+  `~/Library/Application Support/ravel/themes/`）。**読む順は同梱 → ユーザー
+  で、後に読んだ方が勝つ**ので、同名同モードのテーマはユーザーのもので
+  置き換わる。どちらも無くてよく、アプリは作らない（書き方は
+  [`../../dev/write-a-theme.md`](../../dev/write-a-theme.md)）
+- **再読込は起動時と同じ経路を通る。** 両ディレクトリを `notify` で自前に監視し
+  （`ravel_app::themes`）、変更のたびに**同じ `load` をやり直す** — Ravel の
+  スキーマから `RavelTheme` と `ThemeConfig` の両方を導出し、テーマ集合を
+  **作り直して**外観を再適用する。差分を足さないので、消したファイルの
+  テーマは Ravel 側の集合から消える。`ThemeRegistry::watch_dir` を使わないのは
+  それが gpui-component 自身のパーサで読み直す（Ravel のスキーマが経路から
+  外れる）・`on_load` が 1 度しか呼ばれない・1 ディレクトリしか受けないため
+- **借りている `ThemeRegistry` は削除 API を持たない。** 導出後のテーマは
+  ダイアログと借用部品のために registry にも入れるが、registry は追加しか
+  できないので、一度読まれたテーマ名は次の起動まで候補に残ることがある。
+  着るテーマの解決は Ravel 側の集合を先に見る（`app_settings::theme_named`）
 
 ## 未実装項目
 
@@ -105,5 +119,4 @@ Ravel のテーマから**導出**する。逆方向の変換は無い。
 | ノード型ごとの色をテーマで指定する（v1 の `[colors.node_types]`） | 未計画。現在は `DataTypeId` ごとの色をコード側が持つ |
 | スコープの色（v1 の `[colors.scopes]`） | スコープ自体が未実装（`MON-1〜7`、`viewer-scopes-plan.md`） |
 | UI スケーリング（`font.size` をユーザーが変える） | `SET-14`。パネルが px 直書きでどれだけ無視するかの調査が前提 |
-| ユーザーのテーマディレクトリ（同梱と別に置く、ユーザー側が勝つ） | `UIX-8`（`ui-component-layer-plan.md`）。スキーマの文書化と 2 ディレクトリ監視、上の再読込の穴もここで閉じる |
 | `spacing` / `row` / `motion` をパネルが読む | `UIX-3` / `UIX-5`。値は定義済みだが配線はまだ無い |

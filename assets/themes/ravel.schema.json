@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ThemeFile",
+  "description": "One theme file: a named set holding one theme per mode.\n\nThe container matches the shape the shipped `assets/themes/ravel.json`\nalready uses (`name` / `author` / `url` / `themes`), so one file carries both\nthe light and the dark theme.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "description": "Name of the set, for the author's benefit; not a theme name.",
+      "type": "string",
+      "default": ""
+    },
+    "author": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "themes": {
+      "description": "The themes in the file, in file order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ThemeSpec"
+      }
+    }
+  },
+  "$defs": {
+    "ThemeSpec": {
+      "description": "One theme as written in JSON. Every field is optional.\n\nThe dotted key names (`font.size`, `radius.lg`, and the color names in\n[`ColorSpec`]) are deliberate: they are the names the existing theme files\nuse, so moving to this schema does not rewrite anyone's file.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The name shown in the appearance settings.",
+          "type": "string",
+          "default": ""
+        },
+        "mode": {
+          "$ref": "#/$defs/ThemeMode"
+        },
+        "colors": {
+          "$ref": "#/$defs/ColorSpec"
+        },
+        "font.family": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "font.size": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "font.size.compact": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "mono_font.family": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mono_font.size": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "radius": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "radius.lg": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "spacing": {
+          "$ref": "#/$defs/SpacingSpec"
+        },
+        "row": {
+          "$ref": "#/$defs/RowSpec"
+        },
+        "motion": {
+          "$ref": "#/$defs/MotionSpec"
+        }
+      }
+    },
+    "ThemeMode": {
+      "description": "Which of the two palettes a theme is written for.\n\nMirrors `gpui_component::ThemeMode` in meaning but not in type: this crate\ndoes not depend on gpui-component.",
+      "type": "string",
+      "enum": [
+        "light",
+        "dark"
+      ]
+    },
+    "ColorSpec": {
+      "description": "The colors a theme may set.\n\nThese ten are the ones Ravel's own panels read; the rest of what\ngpui-component's schema knows about is not modelled here (see\n[`ThemeSpec::resolve`]).",
+      "type": "object",
+      "properties": {
+        "background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "foreground": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "border": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "muted.foreground": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "accent.background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "primary.background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "secondary.background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "danger.background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "info.background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        },
+        "drop_target.background": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+          "default": null
+        }
+      }
+    },
+    "SpacingSpec": {
+      "description": "Spacing steps, in pixels. Multiples of 4.",
+      "type": "object",
+      "properties": {
+        "xs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "sm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "md": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "lg": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        }
+      }
+    },
+    "RowSpec": {
+      "description": "Row heights, in pixels.",
+      "type": "object",
+      "properties": {
+        "compact": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "default": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        },
+        "header": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float",
+          "default": null
+        }
+      }
+    },
+    "MotionSpec": {
+      "description": "Feedback durations, in milliseconds.",
+      "type": "object",
+      "properties": {
+        "feedback.in": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        },
+        "feedback.out": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      }
+    }
+  }
+}

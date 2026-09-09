@@ -20,6 +20,7 @@
 use std::ops::RangeInclusive;
 
 use crate::theme::ActiveTokens as _;
+use crate::tokens::Density;
 use crate::{Input, InputEvent, InputState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -333,9 +334,11 @@ impl RenderOnce for ScrubInput {
         let dragging = state.dragging;
         let editor = state.editor.clone();
         let colors = cx.tokens().colors;
-        // A scrub sits in a row that shows one value, so it is as tall as the
-        // compact row step rather than a height of its own.
-        let row_height = cx.tokens().rows.compact;
+        // A scrub sits in a row that shows one value, so it takes the compact
+        // density step — the same one the editor it swaps to uses, so the two
+        // modes cannot disagree about height or text size.
+        let compact = Density::Compact.metrics(cx.tokens());
+        let row_height = compact.height;
 
         // Edit mode: show a focused text input in place of the label.
         if let Some(editor) = editor {
@@ -350,6 +353,11 @@ impl RenderOnce for ScrubInput {
 
         div()
             .id(("scrub-input", entity_id))
+            // Test hook for `VisualTestContext::debug_bounds` (noop in release
+            // builds). It is what proves the display branch goes through
+            // `Density::Compact` rather than a height and a text size of its
+            // own — the same binding supplies both.
+            .debug_selector(|| "scrub-input-display".into())
             .h(row_height)
             .min_w(px(48.0))
             .px_1()
@@ -358,7 +366,13 @@ impl RenderOnce for ScrubInput {
             .justify_end()
             .rounded(px(2.0))
             .cursor(CursorStyle::ResizeLeftRight)
-            .text_xs()
+            // Through the compact density step, not GPUI's fixed `text_xs` and
+            // not the token directly: the editor this swaps to is a compact
+            // `Input`, which sizes its own text from `Density::metrics`. Both
+            // modes reading the one place is what stops a theme that moves
+            // `font.size.compact` from resizing the number the moment the user
+            // clicks into it.
+            .text_size(compact.font_size)
             .text_color(if dragging {
                 colors.readable_on(colors.accent)
             } else {
@@ -428,6 +442,50 @@ mod tests {
     impl Render for ScrubTestView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             gpui::div()
+        }
+    }
+
+    /// A scrub takes its height *and* its text size from the compact density
+    /// step, so a theme that moves either moves both — and the display mode
+    /// cannot drift away from the editor it swaps to.
+    ///
+    /// This measures the display branch rather than asserting on
+    /// `Density::metrics`, because the bug it guards against is the branch
+    /// reading a fixed size of its own (`text_xs`, `px(16.0)`) while the
+    /// editor reads the token.
+    #[gpui::test]
+    fn the_display_row_is_the_compact_density_step(cx: &mut TestAppContext) {
+        use crate::tokens::ThemeSpec;
+
+        let spec: ThemeSpec =
+            serde_json::from_str(r#"{"row": {"compact": 33}}"#).expect("a one-key theme");
+        cx.update(|cx| crate::set_active_tokens(spec.resolve(), cx));
+
+        let state = cx.new(|_| ScrubInputState::new(5.0));
+        let (_view, visual) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| ScrubProbe { state }
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let row = visual
+            .debug_bounds("scrub-input-display")
+            .expect("the display row is on screen");
+        assert_eq!(
+            row.size.height,
+            gpui::px(33.0),
+            "the row took a height of its own instead of the compact step"
+        );
+    }
+
+    /// Renders one `ScrubInput` so the display branch can be measured.
+    struct ScrubProbe {
+        state: gpui::Entity<ScrubInputState>,
+    }
+
+    impl Render for ScrubProbe {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            super::ScrubInput::new(&self.state)
         }
     }
 

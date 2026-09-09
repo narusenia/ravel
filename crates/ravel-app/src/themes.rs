@@ -413,6 +413,57 @@ mod tests {
     }
 
     #[gpui::test]
+    fn deleting_the_worn_theme_falls_back_on_both_halves(cx: &mut TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        let dirs = dirs(config.path(), config.path());
+        // A bundled theme under the name an unset setting resolves to, so the
+        // fallback has somewhere to land.
+        std::fs::write(
+            config.path().join("ravel.json"),
+            theme_file(ravel_project::settings::DEFAULT_DARK_THEME, "#111213"),
+        )
+        .unwrap();
+        let mine = user_dir(config.path()).join("mine.json");
+        std::fs::write(&mine, theme_file("Mine", "#010203")).unwrap();
+        let settings = config.path().join("settings.toml");
+        std::fs::write(
+            &settings,
+            "[appearance]\ntheme_mode = \"dark\"\ndark_theme = \"Mine\"\n",
+        )
+        .unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            load(&dirs, cx);
+            crate::app_settings::install(
+                crate::app_settings::read_global_settings_at(Some(settings.clone())),
+                cx,
+            );
+        });
+
+        std::fs::remove_file(&mine).unwrap();
+        cx.update(|cx| load(&dirs, cx));
+
+        // `ThemeRegistry` still holds the copy it was handed at startup and has
+        // no way to drop it, so without the Ravel set being the authority the
+        // borrowed components would keep painting `#010203` while Ravel's own
+        // widgets fell back — one window, two palettes.
+        let bundled = tokens::parse_hex_color("#111213").unwrap();
+        assert_eq!(
+            cx.update(|cx| gpui_component::Theme::global(cx).colors.primary),
+            bundled,
+            "the borrowed half falls back to the bundled theme",
+        );
+        // Read as the appearance left it — `apply_resolved_appearance` takes the
+        // name back off `Theme`, so both halves name the same theme.
+        assert_eq!(
+            cx.update(|cx| ravel_widgets::ActiveTokens::tokens(&*cx).colors.primary),
+            bundled,
+            "and so does Ravel's own half",
+        );
+    }
+
+    #[gpui::test]
     fn a_deleted_theme_file_takes_its_themes_with_it(cx: &mut TestAppContext) {
         let bundled = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();

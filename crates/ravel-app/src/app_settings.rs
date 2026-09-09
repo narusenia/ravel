@@ -718,16 +718,32 @@ pub fn apply_resolved_appearance(cx: &mut App) {
 fn theme_named(name: &str, mode: ThemeMode, cx: &App) -> Rc<ThemeConfig> {
     // Ravel's own set first. It is the one a reload rebuilds — `ThemeRegistry`
     // takes insertions only, so its entry for an edited theme is still the one
-    // read at startup (`crate::themes`). A name only the registry carries (one
-    // of gpui-component's built-ins) falls through to it below.
-    if let Some(config) = cx
-        .try_global::<crate::theme_tokens::RavelThemes>()
-        .and_then(|themes| themes.config(name, crate::theme_tokens::ravel_mode(mode)))
+    // read at startup (`crate::themes`).
+    let ravel_themes = cx.try_global::<crate::theme_tokens::RavelThemes>();
+    if let Some(config) =
+        ravel_themes.and_then(|themes| themes.config(name, crate::theme_tokens::ravel_mode(mode)))
     {
         return Rc::new(config.clone());
     }
     let registry = ThemeRegistry::global(cx);
-    if let Some(config) = registry.themes().get(name) {
+    // **A theme that came from a file is only wearable while the file is.** The
+    // registry cannot drop an entry, so the copy it kept of a deleted theme
+    // would stay wearable here while `apply_ravel_theme` — which resolves
+    // against the Ravel set — fell back, leaving the two halves of the
+    // appearance painting different palettes until the next launch. Once the
+    // Ravel set exists it is therefore the authority on file themes, and the
+    // registry answers only for the themes it owns itself: gpui-component's
+    // built-in defaults, which no theme file can be the source of. A host that
+    // has loaded themes straight into the registry and installed no Ravel set
+    // (a test, a tool) keeps the registry as its only source.
+    let registry_owns = |name: &str| {
+        ravel_themes.is_none()
+            || registry
+                .default_themes()
+                .values()
+                .any(|config| config.name == name)
+    };
+    if let Some(config) = registry.themes().get(name).filter(|_| registry_owns(name)) {
         if config.mode == mode {
             return config.clone();
         }
@@ -742,10 +758,27 @@ fn theme_named(name: &str, mode: ThemeMode, cx: &App) -> Rc<ThemeConfig> {
         ThemeMode::Light => ravel_project::settings::DEFAULT_LIGHT_THEME,
         ThemeMode::Dark => ravel_project::settings::DEFAULT_DARK_THEME,
     };
-    // Same check on the fallback: a user theme file loaded before `ravel.json`
-    // can take the bundled theme's name (the registry keeps the first theme it
-    // sees under a name), and a mismatched one there would be just as wrong.
-    if let Some(config) = registry.themes().get(bundled).filter(|c| c.mode == mode) {
+    // The bundled theme is a file theme too, so it is looked up the same way
+    // round: Ravel's set first.
+    if let Some(config) = ravel_themes
+        .and_then(|themes| themes.config(bundled, crate::theme_tokens::ravel_mode(mode)))
+    {
+        tracing::warn!(
+            requested = name,
+            using = bundled,
+            "no usable theme by that name; using the bundled one for this mode"
+        );
+        return Rc::new(config.clone());
+    }
+    // Same check on the registry's copy: a user theme file loaded before
+    // `ravel.json` can take the bundled theme's name (the registry keeps the
+    // first theme it sees under a name), and a mismatched one there would be
+    // just as wrong.
+    if let Some(config) = registry
+        .themes()
+        .get(bundled)
+        .filter(|c| c.mode == mode && registry_owns(bundled))
+    {
         tracing::warn!(
             requested = name,
             using = bundled,

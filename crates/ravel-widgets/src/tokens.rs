@@ -519,15 +519,17 @@ pub struct Metrics {
     pub gap: Pixels,
     /// The icon size the control gives its icon.
     pub icon: Pixels,
+    /// The size the control draws its text at.
+    pub font_size: Pixels,
 }
 
 impl Density {
     /// The geometry this step takes from `theme`.
     ///
-    /// Height and padding come from the row-height and spacing tokens, so a
-    /// theme that moves its rows moves the controls with them. The icon size
-    /// and the gap have no token to come from — Ravel's schema models neither,
-    /// and this unit does not grow it — so they are the named constants above.
+    /// Height, padding and text size come from the row-height, spacing and
+    /// typography tokens, so a theme that moves its rows moves the controls
+    /// with them. The icon size and the gap have no token to come from —
+    /// Ravel's schema models neither — so they are the named constants above.
     pub fn metrics(self, theme: &RavelTheme) -> Metrics {
         match self {
             Self::Compact => Metrics {
@@ -535,12 +537,14 @@ impl Density {
                 padding_x: theme.spacing.xs,
                 gap: COMPACT_GAP,
                 icon: COMPACT_ICON_SIZE,
+                font_size: theme.text.font_size_compact,
             },
             Self::Default => Metrics {
                 height: theme.rows.default,
                 padding_x: theme.spacing.sm,
                 gap: DEFAULT_GAP,
                 icon: DEFAULT_ICON_SIZE,
+                font_size: theme.text.font_size,
             },
         }
     }
@@ -1278,6 +1282,14 @@ mod tests {
         assert_eq!(Density::Default.metrics(&shipped).gap, px(6.0));
         assert_eq!(Density::Compact.metrics(&shipped).icon, px(12.0));
         assert_eq!(Density::Default.metrics(&shipped).icon, px(16.0));
+
+        // The text size is a token too: compact reads `font.size.compact`,
+        // default reads `font.size`.
+        let typed = spec(r#"{"font.size": 17, "font.size.compact": 11}"#).resolve();
+        assert_eq!(Density::Compact.metrics(&typed).font_size, px(11.0));
+        assert_eq!(Density::Default.metrics(&typed).font_size, px(17.0));
+        assert_eq!(Density::Compact.metrics(&shipped).font_size, px(12.0));
+        assert_eq!(Density::Default.metrics(&shipped).font_size, px(14.0));
     }
 
     #[test]

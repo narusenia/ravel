@@ -3277,8 +3277,13 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   itself rather than through that observer.
   It hands `Theme::{light_theme, dark_theme}` the `ThemeConfig`s named by
   `ResolvedSettings::{light_theme, dark_theme}` — from `RavelThemes` first
-  (rebuilt on every reload) and from the registry second (gpui-component's own
-  themes, and anything a caller loaded into it directly) — and then `Theme::change` / `sync_system_appearance` per
+  (rebuilt on every reload) and from the registry second (**only the themes the registry
+  owns itself** — gpui-component's built-in defaults. It takes insertions only,
+  so its copy of a deleted or edited file theme would still be wearable and the
+  two halves of the appearance would paint different palettes; once a Ravel set
+  exists it is the authority on file themes. A host that loaded themes straight
+  into the registry and installed no Ravel set — a test, a tool — keeps the
+  registry as its only source) — and then `Theme::change` / `sync_system_appearance` per
   `theme_mode`. A theme name nothing carries — or one whose `mode` does not match
   the slot — falls back to the bundled theme for that mode, while the resolved
   settings keep the requested name so a theme file arriving later is still worn.

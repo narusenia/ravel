@@ -2650,8 +2650,34 @@ never installed a set reads the built-in light palette rather than panicking,
 so a test or a headless view can build one widget. `ravel-app` installs it in
 `app_settings::apply_resolved_appearance` from
 `theme_tokens::apply_ravel_theme`, which looks the theme up by name and mode in
-the `RavelThemes` global that `main::load_ravel_themes` fills — the Ravel form
-is kept as the file is read, because the `ThemeConfig` derivation is one-way.
+the `RavelThemes` global that `themes::load` fills — the Ravel form is kept as
+the file is read, because the `ThemeConfig` derivation is one-way.
+
+### Where theme files come from
+
+```rust
+// crates/ravel-app/src/themes.rs
+themes::theme_dirs() -> Vec<PathBuf>   // bundled, then `<config>/ravel/themes`
+themes::theme_dirs_from(Option<&Path>, Option<&Path>) -> Vec<PathBuf>
+themes::theme_files(&[PathBuf]) -> Vec<PathBuf>  // `*.json`, in load order
+themes::load(&[PathBuf], &mut App)     // startup *and* reload
+themes::load_and_watch(&mut App)       // once, from `StartupStage::Themes`
+```
+
+Both directories are optional and neither is created. The user's is read
+**last**, and `RavelThemes::insert_file` replaces on a name-and-mode clash, so
+a user theme wins over a bundled one of the same name. A load builds a fresh
+`RavelThemes` and installs it, which is what drops a theme whose file was
+deleted; `ThemeRegistry` is handed a copy (`RavelThemes::registry_json`) for
+the components and dialogs that read it directly, and takes insertions only —
+so `app_settings::theme_named` resolves against `RavelThemes` first and the
+registry second.
+
+`load_and_watch` keeps a `notify` watcher and its drain `Task` in a private
+global: dropping either stops the watch silently. It replaces
+`ThemeRegistry::watch_dir`, which re-reads the directory with gpui-component's
+own parser (dropping Ravel's schema out of the reload path), fires `on_load`
+only once, and takes one directory.
 
 ### Derived state colours
 
@@ -3245,14 +3271,14 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   no store yet. Applying is per-subsystem and only for values that moved:
   `ravel_i18n::set_locale` plus one `cx.refresh_windows()` for the locale, and
   `apply_resolved_appearance(cx)` for the theme — the latter also run whenever
-  `ThemeRegistry` changes (`install` observes it), because the themes directory is
-  read asynchronously and re-read on every file change, so a theme the settings
-  name may not be in the registry yet; `watch_dir`'s `on_load` fires only once and
-  cannot stand in for that.
-  It hands `Theme::{light_theme, dark_theme}` the registry entries named by
-  `ResolvedSettings::{light_theme, dark_theme}` (never copied colours: the
-  registry re-resolves those slots *by name* on reload, which is what makes theme
-  files hot-reload) and then `Theme::change` / `sync_system_appearance` per
+  `ThemeRegistry` changes (`install` observes it), because a theme the settings
+  name may reach the registry after the settings are installed. A theme file
+  edited while the application runs re-applies the appearance from `themes::load`
+  itself rather than through that observer.
+  It hands `Theme::{light_theme, dark_theme}` the `ThemeConfig`s named by
+  `ResolvedSettings::{light_theme, dark_theme}` — from `RavelThemes` first
+  (rebuilt on every reload) and from the registry second (gpui-component's own
+  themes, and anything a caller loaded into it directly) — and then `Theme::change` / `sync_system_appearance` per
   `theme_mode`. A theme name nothing carries — or one whose `mode` does not match
   the slot — falls back to the bundled theme for that mode, while the resolved
   settings keep the requested name so a theme file arriving later is still worn.

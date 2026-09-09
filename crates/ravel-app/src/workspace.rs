@@ -26,7 +26,7 @@ use ravel_ui::command::CommandId;
 use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::{AppShell, CommandOutcome};
-use ravel_widgets::Button;
+use ravel_widgets::{Button, COLOR_PICKER_SURFACE_CONTEXT};
 
 use crate::composition_form::CompositionForm;
 use crate::panels;
@@ -666,7 +666,12 @@ fn dialog_margin_top(window: &Window) -> Pixels {
 /// - a focused text input, whose own `Input`-context actions own the arrows,
 ///   editing, the clipboard chords and Space while typing;
 /// - an open menu, whose `PopupMenu` / `AppMenuBar` actions own the arrows,
-///   Enter and Escape.
+///   Enter and Escape;
+/// - an open colour picker's popup, whose face, hue strip and alpha rail own
+///   the arrows. `Left` / `Right` step the playhead, and gpui stops at the
+///   binding it matched, so without the exclusion the playhead takes the
+///   keystroke and the nudge never happens at all
+///   (`crates/ravel-app/tests/color_picker_arrows.rs` measures it).
 ///
 /// Yielding has to be spelled out here because gpui resolves a tie by
 /// **registration order** (`Keymap::bindings_for_input` sorts by context depth,
@@ -696,13 +701,19 @@ pub fn panel_binding_context(context: &str) -> String {
     yield_to_open_menus(&format!("{context} && !Input"))
 }
 
-/// `context` narrowed so it stops matching while a menu is open.
+/// `context` narrowed so it stops matching while a menu or a colour picker's
+/// popup is open.
 ///
 /// Applies to the panel-scoped bindings too: a popup is a child of the panel
 /// that opened it, so the panel's own key context is still on the stack while
-/// its menu is up, and `L` would lay the graph out behind an open menu.
+/// its menu is up, and `L` would lay the graph out behind an open menu. The
+/// colour picker is the third floor of the same hole (`MED-APP-16` again): its
+/// popup is not a `PopupMenu` and its face is not an `Input`, so nothing in
+/// the first two exclusions covers it.
 fn yield_to_open_menus(context: &str) -> String {
-    format!("{context} && !{POPUP_MENU_CONTEXT} && !{APP_MENU_BAR_CONTEXT}")
+    format!(
+        "{context} && !{POPUP_MENU_CONTEXT} && !{APP_MENU_BAR_CONTEXT}          && !{COLOR_PICKER_SURFACE_CONTEXT}"
+    )
 }
 
 /// Build GPUI keybindings from the headless table and panel-local contexts.
@@ -2837,7 +2848,12 @@ mod tests {
             predicate.eval(&[context("Workspace")]),
             "the workspace still owns the arrow when nothing else does"
         );
-        for owner in ["Input", "PopupMenu", "AppMenuBar"] {
+        for owner in [
+            "Input",
+            "PopupMenu",
+            "AppMenuBar",
+            super::COLOR_PICKER_SURFACE_CONTEXT,
+        ] {
             assert!(
                 !predicate.eval(&[context("Workspace"), context(owner)]),
                 "{owner} owns its own arrows while it is focused"

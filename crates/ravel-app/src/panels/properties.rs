@@ -44,7 +44,7 @@ use gpui::*;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
 use gpui_component::checkbox::Checkbox;
-use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+
 use gpui_component::select::{SelectEvent, SelectState};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::color::ColorSpace;
@@ -77,7 +77,9 @@ use ravel_ui::properties::media_asset::{
 use ravel_ui::properties::node::sections_for_node;
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
 use ravel_widgets::ActiveTokens as _;
-use ravel_widgets::{Button, Icon, TooltipExt as _, UiIcon};
+use ravel_widgets::{
+    Button, ColorPicker, ColorPickerEvent, ColorPickerState, Icon, TooltipExt as _, UiIcon,
+};
 use ravel_widgets::{Input, InputEvent, InputState};
 use std::sync::Arc;
 
@@ -869,7 +871,7 @@ fn ramp_editor_body(
                 .child(SharedString::from(t!("properties.ramp.color"))),
         );
     swatch_row = if has_selection {
-        swatch_row.child(ColorPicker::new(picker).small())
+        swatch_row.child(ColorPicker::new(picker).compact())
     } else {
         // No stop selected: the picker would edit nothing, so the row says so
         // rather than offering a control whose changes are dropped.
@@ -1157,7 +1159,7 @@ fn build_field_row(
                 .py(px(1.0))
                 .child(field_label_cell(field_label(key), muted));
             if let Some(entity) = picker {
-                row = row.child(ColorPicker::new(entity).small());
+                row = row.child(ColorPicker::new(entity).compact());
             } else {
                 // No picker widget for this field: the readout still shows
                 // the display encoding rather than the working-space value
@@ -6424,6 +6426,103 @@ mod tests {
             node_parameter(&project, &path, node_id, "name", cx),
             ParameterValue::String("Renamed".into())
         );
+    }
+
+    /// A held arrow key on the picker's face is one undo step, the same as a
+    /// drag.
+    ///
+    /// The debounce exists because the picker has no gesture-end event, and
+    /// the arrow keys are the input that stresses it hardest: 25 presses are
+    /// 25 `Change`s through the same `update_color` a pointer uses, and each
+    /// one supersedes the last in the pending slot. This drives the widget's
+    /// own value road — `nudged` then `update_color` — rather than calling
+    /// `apply_color_change` directly, so a keyboard path that bypassed the
+    /// event would fail here with no undo step at all.
+    #[gpui::test]
+    fn a_held_arrow_on_a_colour_row_records_one_undo_step(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) = setup_node_target(cx);
+
+        let picker = window
+            .update(cx, |panel, _window, _cx| {
+                panel
+                    .colors
+                    .iter()
+                    .find(|(key, _)| key == "tint")
+                    .expect("the tint row has a picker")
+                    .1
+                    .state
+                    .clone()
+            })
+            .unwrap();
+
+        // The *green* channel, not the red one: the seeded colour is white and
+        // the face's horizontal axis is saturation, so nudging right from the
+        // white edge pulls the colour towards its hue — which for hue 0 leaves
+        // red pinned at 1.0 and drops the other two. Watching red would read
+        // as "nothing happened".
+        let green = |cx: &mut TestAppContext| {
+            let ParameterValue::Channel4(channels) =
+                node_parameter(&project, &path, node_id, "tint", cx)
+            else {
+                panic!("tint remains a colour channel");
+            };
+            let ChannelSource::Constant(value) = channels[1].source else {
+                panic!("tint remains constant");
+            };
+            value
+        };
+        let original = green(cx);
+
+        window
+            .update(cx, |_panel, window, cx| {
+                for _ in 0..25 {
+                    let current = picker
+                        .read(cx)
+                        .displayed_color()
+                        .expect("the row seeded the picker");
+                    let next = ravel_widgets::nudged(
+                        current,
+                        ravel_widgets::PickerSurface::Face,
+                        ravel_widgets::Nudge::Right,
+                        false,
+                    )
+                    .expect("the face has room to the right");
+                    picker.update(cx, |picker, cx| picker.update_color(next, window, cx));
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Every press applied live, with no commit yet.
+        assert!(
+            (green(cx) - original).abs() > 1e-6,
+            "the arrow presses never reached the document"
+        );
+        window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    panel.pending_color_commit.is_some(),
+                    "the presses committed instead of debouncing"
+                );
+            })
+            .unwrap();
+        let live = green(cx);
+
+        cx.executor().advance_clock(COLOR_COMMIT_QUIET * 2);
+        cx.run_until_parked();
+
+        // One step for the whole hold: one undo returns the pre-gesture
+        // colour, and there is nothing behind it to undo twice.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            (green(cx) - original).abs() < 1e-6,
+            "one undo did not restore"
+        );
+        project.update(cx, |project, cx| {
+            assert!(project.redo(cx));
+            assert!(!project.redo(cx), "25 presses recorded a second step");
+        });
+        assert!((green(cx) - live).abs() < 1e-6);
     }
 
     /// Node color edits remain live while the quiet-period commit is pending,

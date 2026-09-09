@@ -17,8 +17,7 @@
 //! New Composition leaves no undo step behind.
 
 use gpui::*;
-use gpui_component::Sizable as _;
-use gpui_component::color_picker::{ColorPicker, ColorPickerState};
+
 use ravel_i18n::t;
 use ravel_ui::document::CompositionSettings;
 use ravel_ui::properties::PropertyField;
@@ -27,7 +26,7 @@ use ravel_ui::properties::composition::{
     FIELD_WIDTH, composition_fields,
 };
 use ravel_widgets::ActiveTokens as _;
-use ravel_widgets::{InputState, NumberInput};
+use ravel_widgets::{ColorPicker, ColorPickerState, InputState, NumberInput};
 
 /// Localized label for a composition field key (the Properties panel resolves
 /// the same `properties.field.*` keys).
@@ -184,7 +183,7 @@ impl Render for CompositionForm {
                 FIELD_FRAME_RATE => NumberInput::new(&self.frame_rate).into_any_element(),
                 FIELD_DURATION => NumberInput::new(&self.duration).into_any_element(),
                 FIELD_BACKGROUND => ColorPicker::new(&self.background)
-                    .small()
+                    .compact()
                     .into_any_element(),
                 _ => div()
                     .text_xs()

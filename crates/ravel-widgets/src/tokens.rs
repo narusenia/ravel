@@ -93,6 +93,8 @@ pub struct ThemeSpec {
     pub font_family: Option<String>,
     #[serde(rename = "font.size")]
     pub font_size: Option<f32>,
+    #[serde(rename = "font.size.compact")]
+    pub font_size_compact: Option<f32>,
     #[serde(rename = "mono_font.family")]
     pub mono_font_family: Option<String>,
     #[serde(rename = "mono_font.size")]
@@ -224,6 +226,10 @@ pub struct Rows {
 pub struct Typography {
     pub font_family: SharedString,
     pub font_size: Pixels,
+    /// The size a control on the [`Density::Compact`] step draws its text at.
+    /// Smaller than `font_size`, because a 20px row with 14px text is taller
+    /// than the DCC convention (After Effects and Blender sit at 11-12px).
+    pub font_size_compact: Pixels,
     pub mono_font_family: SharedString,
     pub mono_font_size: Pixels,
 }
@@ -574,6 +580,7 @@ impl Default for Typography {
         Self {
             font_family: "Geist".into(),
             font_size: px(14.0),
+            font_size_compact: px(12.0),
             mono_font_family: "JetBrains Mono".into(),
             mono_font_size: px(12.0),
         }
@@ -647,6 +654,7 @@ impl ThemeSpec {
                     .clone()
                     .map_or(text.font_family, SharedString::from),
                 font_size: self.font_size.map_or(text.font_size, px),
+                font_size_compact: self.font_size_compact.map_or(text.font_size_compact, px),
                 mono_font_family: self
                     .mono_font_family
                     .clone()
@@ -961,6 +969,7 @@ mod tests {
                  "mode": "dark",
                  "font.family": "F",
                  "font.size": 15,
+                 "font.size.compact": 9,
                  "mono_font.family": "M",
                  "mono_font.size": 11,
                  "radius": 2,
@@ -987,6 +996,7 @@ mod tests {
             Typography {
                 font_family: "F".into(),
                 font_size: px(15.0),
+                font_size_compact: px(9.0),
                 mono_font_family: "M".into(),
                 mono_font_size: px(11.0),
             }
@@ -1268,6 +1278,19 @@ mod tests {
         assert_eq!(Density::Default.metrics(&shipped).gap, px(6.0));
         assert_eq!(Density::Compact.metrics(&shipped).icon, px(12.0));
         assert_eq!(Density::Default.metrics(&shipped).icon, px(16.0));
+    }
+
+    #[test]
+    fn the_compact_text_size_defaults_to_twelve_pixels() {
+        assert_eq!(spec("{}").resolve().text.font_size_compact, px(12.0));
+    }
+
+    #[test]
+    fn a_file_can_move_the_compact_text_size_on_its_own() {
+        let theme = spec(r#"{"font.size.compact": 10}"#).resolve();
+        assert_eq!(theme.text.font_size_compact, px(10.0));
+        // And setting it alone leaves the default size where it was.
+        assert_eq!(theme.text.font_size, Typography::default().font_size);
     }
 
     #[test]

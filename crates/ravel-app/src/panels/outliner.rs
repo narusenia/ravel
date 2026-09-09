@@ -1340,6 +1340,16 @@ mod tests {
     use ravel_core::runtime::InvalidationHint;
     use ravel_core::types::FrameRate;
 
+    /// The only line between this panel's row-height constant and the design
+    /// token it is meant to be. The constant is a local copy so the layout
+    /// arithmetic stays a pure function; moving `row.default` without moving
+    /// the constant has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_row_height_is_the_token() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(px(ROW_HEIGHT), rows.default);
+    }
+
     #[test]
     fn layer_reorder_cursor_changes_only_during_drag() {
         assert_eq!(outliner_row_cursor(false), CursorStyle::PointingHand);

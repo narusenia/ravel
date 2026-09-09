@@ -429,6 +429,16 @@ mod tests {
     /// Japanese search end to end: the shipped `ja.toml` strings feed the
     /// candidates, and a Japanese query finds them — through the label and
     /// through the description.
+    /// The only line between this panel's row-height constant and the design
+    /// token it is meant to be. The constant is a local copy so the layout
+    /// arithmetic stays a pure function; moving `row.default` without moving
+    /// the constant has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_row_height_is_the_token() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(px(ROW_HEIGHT), rows.default);
+    }
+
     #[test]
     fn japanese_locale_strings_are_searchable_with_japanese_queries() {
         let catalog = node_catalog("ja");

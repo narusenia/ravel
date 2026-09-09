@@ -6416,6 +6416,18 @@ mod tests {
     use ravel_core::network as net;
     use ravel_ui::document::NetworkPath;
 
+    /// The only line between this panel's two row-height constants and the
+    /// design tokens they are meant to be: a layer bar is a list row, a
+    /// property row shows one value. They are local copies so the layout
+    /// arithmetic stays a pure function; moving a row token without moving
+    /// them has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_two_row_heights_are_the_tokens() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(px(LAYER_ROW_HEIGHT), rows.default);
+        assert_eq!(px(PROPERTY_ROW_HEIGHT), rows.compact);
+    }
+
     #[test]
     fn pointer_hint_changes_only_at_boundaries_and_never_during_drag() {
         assert_eq!(

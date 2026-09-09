@@ -528,6 +528,16 @@ mod tests {
 
     /// The delegate answers `columns_count` / `rows_count` / `column` without a
     /// window, which is the interface `DataTable` drives.
+    /// The only line between this panel's row-height constant and the design
+    /// token it is meant to be. The constant is a local copy so the layout
+    /// arithmetic stays a pure function; moving `row.default` without moving
+    /// the constant has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_row_height_is_the_token() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(gpui::px(super::ROW_HEIGHT), rows.default);
+    }
+
     #[gpui::test]
     fn the_delegate_describes_the_selected_domain(cx: &mut gpui::TestAppContext) {
         let mut delegate = delegate_with(scatter_like());

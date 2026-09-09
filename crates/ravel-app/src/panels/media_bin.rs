@@ -1151,6 +1151,16 @@ mod tests {
     /// Renaming a row commits the trimmed name as **one** undo step, and a
     /// blank name is not an edit at all. The name is a label: the asset keeps
     /// its id, so the layer that references it is untouched (`AID-3`).
+    /// The only line between this panel's row-height constant and the design
+    /// token it is meant to be. The constant is a local copy so the layout
+    /// arithmetic stays a pure function; moving `row.default` without moving
+    /// the constant has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_row_height_is_the_token() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(px(super::ROW_HEIGHT), rows.default);
+    }
+
     #[gpui::test]
     fn renaming_an_asset_commits_once_and_ignores_a_blank_name(cx: &mut gpui::TestAppContext) {
         let project = init(cx);

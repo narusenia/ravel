@@ -54,8 +54,8 @@ pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers}
 
 pub use color_picker::{
     COLOR_PICKER_SURFACE_CONTEXT, ColorPicker, FacePoint, HUE_BANDS, Nudge, PickerSurface,
-    face_color, face_point, face_point_at, horizontal_fraction, hue_band, nudge_step, nudged,
-    pointer_color, swatch, vertical_fraction, with_face_point,
+    SwatchLayers, face_color, face_point, face_point_at, horizontal_fraction, hue_band, nudge_step,
+    nudged, pointer_color, swatch, swatch_layers, vertical_fraction, with_face_point,
 };
 
 pub use icon::{Icon, IconPath, UiIcon};

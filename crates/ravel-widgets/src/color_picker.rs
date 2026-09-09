@@ -67,11 +67,12 @@
 //! opening.
 
 use gpui::{
-    App, AppContext as _, Bounds, ColorSpace, Div, Empty, Entity, EntityId, FocusHandle,
-    Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Point, Render, RenderOnce, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, black, div, linear_color_stop,
-    linear_gradient, prelude::FluentBuilder as _, px, relative, white,
+    App, AppContext as _, Background, Bounds, ColorSpace, Div, Empty, Entity, EntityId,
+    FocusHandle, Focusable as _, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, RenderOnce,
+    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, black, div,
+    linear_color_stop, linear_gradient, pattern_slash, prelude::FluentBuilder as _, px, relative,
+    white,
 };
 use gpui_base::{
     ColorPicker as BaseColorPicker, ColorPickerState, Popover, Slider, StyledExt as _,
@@ -109,6 +110,11 @@ pub const SWATCH_RADIUS: Pixels = px(2.0);
 pub const MARKER_SIZE: Pixels = px(10.0);
 /// The height of the hue strip's marker.
 pub const HUE_MARKER_HEIGHT: Pixels = px(2.0);
+
+/// The stripe width of the slash underlay a translucent swatch shows through.
+const SLASH_WIDTH: f32 = 2.0;
+/// The gap between the underlay's stripes.
+const SLASH_INTERVAL: f32 = 2.0;
 
 /// How many two-stop bands the hue strip is built from.
 ///
@@ -298,8 +304,38 @@ pub fn pointer_color(
 // The swatch
 // ---------------------------------------------------------------------------
 
-/// A swatch: the colour in a 16px rounded square.
+/// The layers a swatch paints, bottom first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwatchLayers {
+    /// The opaque ground the underlay's stripes are drawn on, so a swatch
+    /// reads the same over any panel.
+    pub ground: Hsla,
+    /// The slash pattern a translucent colour shows through.
+    pub underlay: Background,
+    /// The colour itself, at its own alpha. `None` when the picker has no
+    /// value yet.
+    pub color: Option<Hsla>,
+}
+
+/// What a swatch of `color` paints.
+///
+/// The colour keeps its alpha, which is the whole point of the underlay: in a
+/// compositor "this colour is black" and "this colour is transparent" are two
+/// different things and a flattened swatch cannot tell them apart.
+pub fn swatch_layers(color: Option<Hsla>, colors: &Colors) -> SwatchLayers {
+    SwatchLayers {
+        ground: colors.background,
+        // `border` rather than a grey of its own: the stripes are chrome, and
+        // a neutral that already reads against `background` is what the token
+        // set has for that.
+        underlay: pattern_slash(colors.border, SLASH_WIDTH, SLASH_INTERVAL),
+        color,
+    }
+}
+
+/// A swatch: the colour over a slash underlay, in a 16px rounded square.
 pub fn swatch(color: Option<Hsla>, colors: &Colors) -> Div {
+    let layers = swatch_layers(color, colors);
     div()
         .relative()
         .flex_shrink_0()
@@ -308,8 +344,9 @@ pub fn swatch(color: Option<Hsla>, colors: &Colors) -> Div {
         .overflow_hidden()
         .border_1()
         .border_color(colors.border)
-        .bg(colors.background)
-        .when_some(color, |this, color| {
+        .bg(layers.ground)
+        .child(div().absolute().inset_0().bg(layers.underlay))
+        .when_some(layers.color, |this, color| {
             this.child(div().absolute().inset_0().bg(color))
         })
 }
@@ -1074,6 +1111,241 @@ mod tests {
                 (hue_band(band).0 - hue_band(band - 1).1).abs() < 1e-6,
                 "band {band} does not start where {} ended",
                 band - 1
+            );
+        }
+    }
+
+    /// A translucent colour has to be *seen* to be translucent: the slash
+    /// underlay is under it and the colour keeps its own alpha. Flattening the
+    /// swatch onto its ground is the bug — "black" and "transparent" then look
+    /// alike, which in a compositor is the one confusion that matters.
+    #[test]
+    fn a_translucent_swatch_keeps_its_alpha_over_the_slash_underlay() {
+        let colors = Colors::light();
+        let translucent = hsla_from_hsv(0.6, 0.7, 0.8, 0.4);
+        let layers = swatch_layers(Some(translucent), &colors);
+
+        assert_eq!(
+            layers.underlay,
+            pattern_slash(colors.border, SLASH_WIDTH, SLASH_INTERVAL),
+            "the swatch lost the underlay a translucent colour shows through"
+        );
+        assert_eq!(
+            layers.color.expect("a colour").alpha,
+            0.4,
+            "the swatch flattened the alpha away"
+        );
+        assert_eq!(layers.ground, colors.background);
+
+        // No value yet: the underlay still paints, so an empty swatch reads as
+        // empty rather than as black.
+        let empty = swatch_layers(None, &colors);
+        assert_eq!(empty.color, None);
+        assert_eq!(empty.underlay, layers.underlay);
+    }
+
+    // -----------------------------------------------------------------------
+    // What only a window can answer: that Tab reaches the face, and that an
+    // arrow press there travels the same road a drag does — out through
+    // `ColorPickerEvent::Change`, which is where the consumer's debounce is.
+    // -----------------------------------------------------------------------
+
+    use gpui::{
+        Context, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext,
+        VisualTestContext,
+    };
+    use gpui_base::{ColorPickerEvent, ColorPickerState};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A seed whose face point is `(0.5, 0.8)`, so 25 arrow presses fit along
+    /// the horizontal axis without the clamp taking part.
+    fn seed() -> Hsla {
+        hsla_from_hsv(0.5, 0.5, 0.8, 1.0)
+    }
+
+    struct PickerHarness {
+        state: Entity<ColorPickerState>,
+    }
+
+    impl Render for PickerHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("harness")
+                .tab_group()
+                .size(px(400.0))
+                .child(ColorPicker::new(&self.state))
+        }
+    }
+
+    /// An open picker with the face focused, and every `Change` it emits.
+    fn open_picker(
+        cx: &mut TestAppContext,
+    ) -> (
+        &mut VisualTestContext,
+        Entity<ColorPickerState>,
+        Rc<RefCell<Vec<Hsla>>>,
+    ) {
+        cx.update(gpui_base::init);
+        let (view, cx) = cx.add_window_view(|window, cx| PickerHarness {
+            state: cx.new(|cx| ColorPickerState::new(window, cx).default_value(seed())),
+        });
+        let state = view.read_with(cx, |harness, _| harness.state.clone());
+
+        let changes: Rc<RefCell<Vec<Hsla>>> = Rc::default();
+        cx.update(|_, cx| {
+            let seen = changes.clone();
+            cx.subscribe(&state, move |_, event: &ColorPickerEvent, _| {
+                let ColorPickerEvent::Change(color) = event;
+                if let Some(color) = color {
+                    seen.borrow_mut().push(*color);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| state.set_open(true, cx));
+            window.draw(cx).clear(cx);
+        });
+        // The popover takes focus when it opens; the first Tab stop inside it
+        // is the face, which is the plan's "Tab into the face" in one step.
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        changes.borrow_mut().clear();
+
+        (cx, state, changes)
+    }
+
+    fn press(cx: &mut VisualTestContext, key: &str) {
+        let keystroke = Keystroke::parse(key).expect("the test keystroke parses");
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+    }
+
+    /// **The keyboard half of the one value road.** A face that wrote its
+    /// slider states directly — the obvious shortcut, since the state hands
+    /// them over — would move the colour on screen and emit nothing, so the
+    /// consumer's debounce would never see the gesture and the edit would fold
+    /// into whatever undo step came next. The assertion is the event.
+    #[gpui::test]
+    fn an_arrow_on_the_face_emits_the_change_a_drag_would(cx: &mut TestAppContext) {
+        let (cx, state, changes) = open_picker(cx);
+
+        press(cx, "right");
+
+        let emitted = changes.borrow().clone();
+        assert_eq!(
+            emitted.len(),
+            1,
+            "one arrow press must emit exactly one Change: {emitted:?}"
+        );
+        let value = state
+            .read_with(cx, |state, _| state.value())
+            .expect("a value");
+        assert_eq!(emitted[0], value, "the event carried the committed colour");
+
+        let moved = face_point(value);
+        let before = face_point(seed());
+        assert!(
+            (moved.saturation - (before.saturation + NUDGE_STEP)).abs() < 1e-4,
+            "saturation went from {} to {}",
+            before.saturation,
+            moved.saturation
+        );
+        assert!(
+            (moved.value - before.value).abs() < 1e-4,
+            "the vertical axis moved too"
+        );
+        assert!(
+            (hue_fraction(value) - hue_fraction(seed())).abs() < 1e-4,
+            "the face changed the hue"
+        );
+    }
+
+    /// Shift on the same key, through the same handler: ten steps, one event.
+    #[gpui::test]
+    fn shift_and_an_arrow_move_ten_steps_in_one_event(cx: &mut TestAppContext) {
+        let (cx, state, changes) = open_picker(cx);
+
+        press(cx, "shift-right");
+
+        assert_eq!(changes.borrow().len(), 1, "one press, one Change");
+        let value = state
+            .read_with(cx, |state, _| state.value())
+            .expect("a value");
+        assert!(
+            (face_point(value).saturation - (face_point(seed()).saturation + NUDGE_STEP_COARSE))
+                .abs()
+                < 1e-4
+        );
+    }
+
+    /// A held arrow is what the consumer's debounce has to survive: 25 presses
+    /// are 25 `Change`s, every one carrying the value already applied, which
+    /// is exactly the shape a slider drag has. Coalescing them into one undo
+    /// step is the consumer's job and this pins the input to it.
+    #[gpui::test]
+    fn a_held_arrow_emits_one_change_per_press_and_stops_at_the_edge(cx: &mut TestAppContext) {
+        let (cx, state, changes) = open_picker(cx);
+
+        for _ in 0..25 {
+            press(cx, "right");
+        }
+
+        assert_eq!(
+            changes.borrow().len(),
+            25,
+            "a held arrow must keep writing while the axis has room"
+        );
+        let value = state
+            .read_with(cx, |state, _| state.value())
+            .expect("a value");
+        assert!(
+            (face_point(value).saturation - 0.75).abs() < 1e-3,
+            "25 presses of 1% from 0.5 landed on {}",
+            face_point(value).saturation
+        );
+
+        // Drive it into the edge, then keep pressing: against the end of its
+        // axis a surface goes quiet rather than re-emitting the value it
+        // already has (UX invariant 3), so the consumer's quiet period can
+        // actually end while the key is still down.
+        for _ in 0..5 {
+            press(cx, "shift-right");
+        }
+        let value = state
+            .read_with(cx, |state, _| state.value())
+            .expect("a value");
+        assert!(
+            (face_point(value).saturation - 1.0).abs() < 1e-4,
+            "the axis did not reach its end"
+        );
+
+        changes.borrow_mut().clear();
+        for _ in 0..5 {
+            press(cx, "right");
+        }
+        assert!(
+            changes.borrow().is_empty(),
+            "the edge kept emitting: {:?}",
+            changes.borrow()
+        );
+    }
+
+    /// One rule, both palettes: nothing here asks which mode is in force.
+    #[test]
+    fn both_palettes_take_their_colours_from_their_own_tokens() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let layers = swatch_layers(Some(gpui::red()), &colors);
+            assert_eq!(layers.ground, colors.background);
+            assert_eq!(
+                layers.underlay,
+                pattern_slash(colors.border, SLASH_WIDTH, SLASH_INTERVAL)
             );
         }
     }

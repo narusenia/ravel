@@ -750,8 +750,7 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | UIX-7 | ⬜ | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 |
 | UIX-8 | ⬜ | ユーザーテーマディレクトリ（`themes_dir()` を複数候補に、ユーザー側が勝つ、**watch を自前に持つ** — 借りた `watch_dir` は導出を挟めない、**`ravel.schema.json` の同梱**、書き方の文書）。**`RavelThemes` の陳腐化もここで閉じる** — `UIX-4` が入れた `register_ravel_themes` は起動時に 1 度しか挿さないので、テーマファイルを編集すると gpui-component 側だけ再読み込みされ、Ravel のトークンが古いまま残る（削除されたテーマの行も残る） | UIX-1 ✅ |
 | UIX-9 | ⬜ | 文書更新（`ui-impl-status.md`、`gpui-ui-guide.md` の「部品を追加する」節） | UIX-4〜UIX-8 |
-| UIX-10 | 🟡 | 矢印キーを所有する要素のキー文脈を定義し、グローバルバインドの除外リストに入れる（`←` / `→` が `playback.step_forward` と衝突。`MED-APP-16` の 3 段目） | — |
-| UIX-11 | 🟡 | `color_picker` を自前で作る（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ）。**既存の undo の契約を壊さない** — 即時適用 + 静穏期間後に 1 段（`color_picker_gesture_commits_one_undo_step` が固定） | UIX-4b / UIX-10 |
+| UIX-11 | 🟡 | `color_picker` を自前で作る（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ）。**既存の undo の契約を壊さない** — 即時適用 + 静穏期間後に 1 段（`color_picker_gesture_commits_one_undo_step` が固定）。**矢印キーを所有するキー文脈もここ**（旧 `UIX-10`。`←`/`→` を取る要素が今 1 つも無く、文脈だけ作ると消費者の無い場になるので 2026-09-09 に畳んだ） | UIX-4b ✅ |
 
 **`UIX-0` / `UIX-1` は `KIT-1` と並行できる**（文書と型定義だけでパネルを
 触らない）。`UIX-2` 以降は `gpui-base` がツリーに入るまで書けない。

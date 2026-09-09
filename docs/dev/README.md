@@ -11,6 +11,7 @@
 | パネルを追加する | [add-panel.md](add-panel.md) |
 | コマンド・ショートカット・メニュー項目を追加する | [add-command.md](add-command.md) |
 | ユーザーに見える文字列を追加する | [add-locale.md](add-locale.md) |
+| テーマを書く / テーマスキーマを変える | [write-a-theme.md](write-a-theme.md) |
 | 式を書く / 式言語に名前を足す | [write-expression.md](write-expression.md) |
 | 永続化（`.ravprj`）を変更する | [persistence.md](persistence.md) |
 | CLI から書き出す（`ravel-cli`） | [render-cli.md](render-cli.md) |

@@ -24,23 +24,6 @@ fn locale_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("assets/locales"))
 }
 
-fn themes_dir() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let exe_dir = exe.parent().unwrap_or(exe.as_path());
-    let candidates = [
-        // macOS .app bundle: Contents/MacOS/../Resources/themes
-        exe_dir.join("../Resources/themes"),
-        // Next to binary
-        exe_dir.join("assets/themes"),
-        // Workspace root (cargo run)
-        PathBuf::from("assets/themes"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.is_dir())
-        .unwrap_or_else(|| PathBuf::from("assets/themes"))
-}
-
 fn main() {
     let _ = ravel_core::logging::init_logging("RAVEL_LOG", None);
 
@@ -117,7 +100,13 @@ async fn bootstrap(
         }
 
         cx.update(|cx| match stage {
-            StartupStage::Themes => load_ravel_themes(cx),
+            StartupStage::Themes => {
+                let themes = ravel_app::themes::theme_dirs();
+                if themes.is_empty() {
+                    tracing::warn!("no themes directory found");
+                }
+                ravel_app::themes::load(&themes, cx);
+            }
             StartupStage::Settings => {
                 workspace::register_action_handlers(cx);
                 ravel_app::trace::init(cx);
@@ -196,109 +185,4 @@ async fn bootstrap(
         ravel_app::window_host::open_restored(&restored_windows, cx);
         cx.activate(true);
     });
-}
-
-/// Fills the theme registry from the themes directory, and watches it for
-/// hot-reloading during development.
-///
-/// **Which theme is worn is not decided here** — that is the resolved
-/// appearance (`app_settings::apply_resolved_appearance`), which runs once the
-/// settings are installed. This function only makes the themes available to
-/// choose from, so no theme name is hardcoded on this path.
-///
-/// The directory is read **synchronously** even though `watch_dir` reloads it
-/// again a moment later, for two reasons: the first frame must already wear the
-/// user's theme rather than flash a default one, and the theme the settings name
-/// has to exist by the time the appearance is applied. The asynchronous reload
-/// is not a substitute — it lands after the window is up. Re-applying the
-/// appearance after a reload is not wired here either: `watch_dir`'s `on_load`
-/// runs once, at setup, and says nothing about the reloads that follow every
-/// later file change. The appearance follows the registry itself
-/// (`app_settings::install` observes it), which covers both.
-///
-/// **The asynchronous reload does not go through Ravel's schema.**
-/// `ThemeRegistry::watch_dir` re-reads the directory with gpui-component's own
-/// parser, so after the first file change the registry holds the file as
-/// gpui-component reads it rather than as
-/// [`theme_tokens::derive_theme_set_json`](ravel_app::theme_tokens::derive_theme_set_json)
-/// derives it. For the shipped `ravel.json` the two agree — every colour Ravel
-/// models is written in the file — so this only shows up in a hand-written theme
-/// that omits one: it would wear Ravel's built-in until the first edit and
-/// gpui-component's stock colour after. Closing it means owning the watch
-/// instead of borrowing it, which is the user-theme-directory unit's job.
-fn load_ravel_themes(cx: &mut App) {
-    let themes_dir = themes_dir();
-    if !themes_dir.exists() {
-        // Not fatal: the registry keeps gpui-component's built-in themes, and
-        // the appearance settings fall back to them by name.
-        tracing::warn!("themes directory not found: {}", themes_dir.display());
-        return;
-    }
-
-    for path in theme_files(&themes_dir) {
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::warn!("failed to read theme file {}: {e}", path.display());
-                continue;
-            }
-        };
-        // A theme file is written in Ravel's schema, so the registry gets the
-        // *derived* gpui-component themes rather than the file itself
-        // (`theme_tokens`). One malformed theme file must not cost the others,
-        // which is also how the registry's own reload treats them.
-        match ravel_app::theme_tokens::derive_theme_set_json(&content) {
-            Ok(derived) => {
-                if let Err(e) =
-                    gpui_component::ThemeRegistry::global_mut(cx).load_themes_from_str(&derived)
-                {
-                    tracing::error!("ignored invalid theme file {}: {e}", path.display());
-                    continue;
-                }
-                // Ravel's own widgets read the Ravel form of the same theme,
-                // and the derivation above is one-way, so the resolved themes
-                // are recorded now rather than reconstructed from the derived
-                // config later (`theme_tokens::RavelThemes`).
-                if let Err(e) = ravel_app::theme_tokens::register_ravel_themes(&content, cx) {
-                    tracing::error!("ignored invalid theme file {}: {e}", path.display());
-                }
-            }
-            Err(e) => tracing::error!("ignored invalid theme file {}: {e}", path.display()),
-        }
-    }
-
-    // Watch the themes directory for hot-reloading during development. Every
-    // reload replaces the registry's entries, and re-applying the appearance is
-    // the job of the observer in `app_settings` — this callback fires only for
-    // the first reload, so using it here would leave every later edit unapplied.
-    if let Err(e) = gpui_component::ThemeRegistry::watch_dir(themes_dir, cx, |_cx| {}) {
-        tracing::error!("failed to watch themes directory: {e}");
-    }
-}
-
-/// The `*.json` files in `dir`, in a stable order.
-///
-/// Sorted because the registry keeps the *first* theme it sees under a given
-/// name: which file wins a name collision must not depend on directory order.
-/// Only this synchronous pass is ordered — the registry's own asynchronous
-/// reload reads the directory itself and takes no order from here, so two files
-/// claiming one theme name are the user's to sort out, not something the app
-/// promises to resolve the same way twice.
-fn theme_files(dir: &std::path::Path) -> Vec<PathBuf> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::warn!("failed to read themes directory {}: {e}", dir.display());
-            return Vec::new();
-        }
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("json")
-        })
-        .collect();
-    files.sort();
-    files
 }

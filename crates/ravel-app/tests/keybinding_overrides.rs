@@ -47,29 +47,31 @@ use ravel_ui::keybindings::KeyChord;
 use ravel_ui::panel::PanelKind;
 use ravel_ui::shell::AppShell;
 
-/// The contexts an open menu owns, spelled out rather than read from
-/// `gpui_component`.
+/// The contexts something other than the workspace owns the keyboard in,
+/// spelled out rather than read from `gpui_component` or `ravel_widgets`.
 ///
 /// Deliberate duplication: this file exists to catch the predicate narrowing
 /// **going away**, so deriving the expected value from the code under test
 /// would make every assertion here true by construction. Widening the set of
 /// keyboard owners is supposed to fail this test until someone confirms the
-/// widening was intended.
-const MENU_CONTEXTS: [&str; 2] = ["PopupMenu", "AppMenuBar"];
+/// widening was intended — which is how `ColorPickerSurface` got here: the
+/// colour picker's popup owns the arrows while it is open, and `Left` /
+/// `Right` are the playhead's.
+const KEYBOARD_OWNERS: [&str; 3] = ["PopupMenu", "AppMenuBar", "ColorPickerSurface"];
 
 /// The predicate every binding derived from the binding set must carry.
 fn workspace_context() -> String {
     yielding("!Input")
 }
 
-/// `context` with the menu owners excluded — the shape `build_keybindings`
-/// gives a workspace binding. A panel binding also carries `!Input`
+/// `context` with the other keyboard owners excluded — the shape
+/// `build_keybindings` gives a workspace binding. A panel binding also carries `!Input`
 /// ([`panel_yielding`]).
 fn yielding(context: &str) -> String {
     let mut out = context.to_string();
-    for menu in MENU_CONTEXTS {
+    for owner in KEYBOARD_OWNERS {
         out.push_str(" && !");
-        out.push_str(menu);
+        out.push_str(owner);
     }
     out
 }

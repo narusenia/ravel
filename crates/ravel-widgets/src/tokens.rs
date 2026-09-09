@@ -34,7 +34,7 @@
 
 use std::time::Duration;
 
-use gpui::{ColorExt as _, Hsla, Pixels, Rgba, SharedString, px};
+use gpui::{ColorExt as _, Hsla, Pixels, Rgba, SharedString, hsla, px};
 use serde::{Deserialize, Deserializer};
 
 /// Which of the two palettes a theme is written for.
@@ -304,6 +304,8 @@ pub const PRESS_MIX: f32 = 0.08;
 pub const DISABLED_ALPHA: f32 = 0.38;
 /// How far a floating surface moves toward black.
 pub const RAISED_MIX: f32 = 0.03;
+/// The alpha a Slider's or a Progress bar's fill keeps.
+pub const SLIDER_FILL_ALPHA: f32 = 0.25;
 /// The alpha the selected row's tint keeps.
 ///
 /// The shipped `list.active.background` was `#5B6EE115`, whose alpha is
@@ -335,6 +337,77 @@ pub fn mix(base: Hsla, toward: Hsla, amount: f32) -> Hsla {
     ));
     mixed.alpha = base.alpha;
     mixed
+}
+
+// ---------------------------------------------------------------------------
+// Colour-space arithmetic
+// ---------------------------------------------------------------------------
+//
+// These live in the token module rather than beside the widget that paints
+// with them, for the same reason [`parse_hex_color`] does: they convert one
+// description of a colour into another and hold no palette opinion at all.
+// UX invariant 12 forbids a widget *naming* a colour, which is why the colour
+// picker cannot write its own `hsla(…)`; a widget that converts the colour it
+// was handed is not naming one, and this is the crate's one colour module.
+
+/// The hue of `color` as the `0..1` fraction of the circle, rather than the
+/// degrees [`Hsla`] stores.
+pub fn hue_fraction(color: Hsla) -> f32 {
+    color.hue.into_positive_degrees() / 360.0
+}
+
+/// The hue itself: fully saturated, mid lightness, with nothing taken out.
+pub fn hue_color(hue: f32) -> Hsla {
+    hsla(hue, 1.0, 0.5, 1.0)
+}
+
+/// `color` at `hue`, keeping saturation, lightness and alpha.
+pub fn with_hue(color: Hsla, hue: f32) -> Hsla {
+    hsla(hue, color.saturation, color.lightness, color.alpha)
+}
+
+/// `color` at `alpha`, keeping the rest. Unlike [`gpui::ColorExt::opacity`]
+/// this *sets* the alpha rather than scaling it, which is what an alpha
+/// control writes.
+pub fn with_alpha(color: Hsla, alpha: f32) -> Hsla {
+    hsla(
+        hue_fraction(color),
+        color.saturation,
+        color.lightness,
+        alpha,
+    )
+}
+
+/// `color`'s HSV saturation and brightness.
+///
+/// The pair round-trips exactly through [`hsla_from_hsv`], including at black:
+/// HSV describes every black as brightness 0 and has no saturation left to
+/// report, so HSL's own saturation field carries that value across. Without
+/// the carry, a control that walked a colour down to black and back would come
+/// back on the grey axis instead of where it left.
+pub fn hsv_of(color: Hsla) -> (f32, f32) {
+    let value = color.lightness + color.saturation * color.lightness.min(1.0 - color.lightness);
+    let saturation = if value <= 0.0 {
+        color.saturation
+    } else {
+        2.0 * (1.0 - color.lightness / value)
+    };
+    (saturation.clamp(0.0, 1.0), value.clamp(0.0, 1.0))
+}
+
+/// The colour at an HSV coordinate, with `alpha`.
+///
+/// The inverse of [`hsv_of`], carry included.
+pub fn hsla_from_hsv(hue: f32, saturation: f32, value: f32, alpha: f32) -> Hsla {
+    let saturation = saturation.clamp(0.0, 1.0);
+    let value = value.clamp(0.0, 1.0);
+    let lightness = value * (1.0 - saturation / 2.0);
+    let hsl_saturation = if lightness <= 0.0 || lightness >= 1.0 {
+        saturation
+    } else {
+        (value - lightness) / lightness.min(1.0 - lightness)
+    };
+    hsla(hue, hsl_saturation.clamp(0.0, 1.0), lightness, alpha)
 }
 
 /// Relative luminance, per WCAG 2.1.
@@ -395,6 +468,18 @@ impl Colors {
         let mut surface = mix(self.background, gpui::black(), RAISED_MIX);
         surface.alpha = 1.0;
         surface
+    }
+
+    /// The fill of a Slider or a Progress bar.
+    ///
+    /// A tint of `primary` rather than a step off the background, for the same
+    /// reason [`selected_surface`] is one: the fill says "this much", which is
+    /// a *value* rather than a state, and it has to stay legible next to a
+    /// hovered control — and `hover_surface` is that step off the background.
+    ///
+    /// [`selected_surface`]: Colors::selected_surface
+    pub fn slider_fill(&self) -> Hsla {
+        self.primary.opacity(SLIDER_FILL_ALPHA)
     }
 
     /// The surface of a selected row.
@@ -806,6 +891,62 @@ mod tests {
 
     fn spec(json: &str) -> ThemeSpec {
         serde_json::from_str(json).expect("the test JSON parses")
+    }
+
+    /// The plan's Slider fill: a `primary` tint, not a step off the
+    /// background. A fill says "this much", which is a value rather than a
+    /// state, and it has to stay legible beside a hovered control.
+    #[test]
+    fn the_slider_fill_is_a_primary_tint_in_both_palettes() {
+        for colors in [Colors::light(), Colors::dark()] {
+            assert_eq!(colors.slider_fill(), colors.primary.opacity(0.25));
+            assert_ne!(colors.slider_fill(), colors.hover_surface());
+        }
+    }
+
+    /// The colour-space pair, at the two coordinates that lose information in
+    /// one direction: white, where HSL saturation is undefined, and black,
+    /// where every HSV saturation is the same colour.
+    #[test]
+    fn hsv_round_trips_through_hsl_including_the_degenerate_ends() {
+        for (saturation, value) in [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (0.5, 0.5),
+            (0.25, 0.9),
+        ] {
+            let color = hsla_from_hsv(0.35, saturation, value, 1.0);
+            let (back_saturation, back_value) = hsv_of(color);
+            assert!(
+                (back_saturation - saturation).abs() < 1e-4 && (back_value - value).abs() < 1e-4,
+                "({saturation}, {value}) came back as ({back_saturation}, {back_value})"
+            );
+        }
+    }
+
+    /// `hue_color` is the hue with nothing taken out: HSL saturation 1 at
+    /// lightness 0.5, which is HSV brightness 1 and saturation 1.
+    #[test]
+    fn the_hue_colour_is_the_fully_saturated_one() {
+        let hue = hue_color(0.25);
+        assert_eq!(hsv_of(hue), (1.0, 1.0));
+        assert!((hue_fraction(hue) - 0.25).abs() < 1e-5);
+    }
+
+    /// `with_alpha` sets rather than scales, which is the difference from
+    /// `ColorExt::opacity` and the whole reason it exists.
+    #[test]
+    fn with_alpha_sets_the_alpha_and_with_hue_keeps_the_rest() {
+        let start = hsla_from_hsv(0.1, 0.6, 0.7, 0.5);
+        assert_eq!(with_alpha(start, 1.0).alpha, 1.0);
+        assert_eq!(with_alpha(with_alpha(start, 0.5), 0.5).alpha, 0.5);
+
+        let moved = with_hue(start, 0.8);
+        assert!((hue_fraction(moved) - 0.8).abs() < 1e-5);
+        assert_eq!(hsv_of(moved), hsv_of(start));
+        assert_eq!(moved.alpha, start.alpha);
     }
 
     #[test]

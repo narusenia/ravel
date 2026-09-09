@@ -719,6 +719,11 @@ ok = "OK"
 cancel = "キャンセル"
 close = "閉じる"
 
+[color_picker]
+# The alpha rail's label, beside the fill. One letter because the
+# popup is 144px wide and the rail needs every pixel of it.
+alpha = "A"
+
 [workspace.preset]
 edit = "エディット"
 node = "ノード"

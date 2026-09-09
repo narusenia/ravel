@@ -269,7 +269,7 @@ fn the_synthetic_application_menu_only_duplicates_headless_entries() {
 #[test]
 fn viewer_tool_keybindings_are_free_of_the_global_chords() {
     let viewer_scope = format!(
-        "{} && !Input && !PopupMenu && !AppMenuBar",
+        "{} && !Input && !PopupMenu && !AppMenuBar && !ColorPickerSurface",
         ravel_app::panels::viewer::KEY_CONTEXT
     );
     let global_scope = ravel_app::workspace::workspace_binding_context();
@@ -336,10 +336,12 @@ fn viewer_tool_keybindings_are_free_of_the_global_chords() {
 
 #[test]
 fn node_editor_keybindings_are_context_scoped() {
-    // The panel's own context, narrowed out of an open menu the same way every
+    // The panel's own context, narrowed out of an open menu — and out of an
+    // open colour picker, whose popup owns the arrows — the same way every
     // other binding is (`MED-APP-31`). Spelled out rather than read from
     // `build_keybindings`, so a narrowing that silently goes away fails here.
-    let scope = format!("{KEY_CONTEXT} && !Input && !PopupMenu && !AppMenuBar");
+    let scope =
+        format!("{KEY_CONTEXT} && !Input && !PopupMenu && !AppMenuBar && !ColorPickerSurface");
     let bindings = build_keybindings(&AppShell::default());
     let scoped: Vec<_> = bindings
         .iter()

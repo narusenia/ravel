@@ -24,6 +24,7 @@
 //! `ravel-app`, never here.
 
 pub mod button;
+pub mod color_picker;
 pub mod curve_editor;
 pub mod curve_view;
 pub mod fonts;
@@ -50,6 +51,12 @@ pub use curve_view::{
 };
 
 pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
+
+pub use color_picker::{
+    COLOR_PICKER_SURFACE_CONTEXT, ColorPicker, FacePoint, HUE_BANDS, Nudge, PickerSurface,
+    SwatchLayers, face_color, face_point, face_point_at, horizontal_fraction, hue_band, nudge_step,
+    nudged, pointer_color, swatch, swatch_layers, vertical_fraction, with_face_point,
+};
 
 pub use icon::{Icon, IconPath, UiIcon};
 
@@ -81,6 +88,21 @@ pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
 pub use gpui_base::input::{Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, NumberStep};
 pub use gpui_base::{Decrement, Increment, StepAction};
 
+/// The colour picker's state and its change event, re-exported.
+///
+/// The same arrangement [`InputState`] has, and for the same reason: these are
+/// `gpui-base`'s own types — the ones gpui-component re-exported rather than
+/// defined — so a host that owns a picker's state needs no `gpui-base`
+/// dependency of its own to name it. [`crate::ColorPicker`] paints the state
+/// and never writes to it from `render`.
+///
+/// Everything about the *value* lives here: the committed colour, the
+/// transient preview, the open state, the hex field and the four HSLA slider
+/// states the popup's surfaces move. `ColorPickerEvent::Change` is emitted
+/// once per pointer tick and once per arrow press, with no gesture-end event,
+/// which is why every consumer debounces it into one undo step.
+pub use gpui_base::{ColorPickerEvent, ColorPickerState};
+
 pub use tooltip::{
     GRACE_PERIOD, SHOW_DELAY, Tooltip, TooltipExt, install_tooltip_overlay, tooltip_overlay,
 };
@@ -95,5 +117,6 @@ pub use theme::{ActiveTokens, set_active_tokens};
 
 pub use tokens::{
     Colors, Density, Metrics, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode,
-    ThemeSpec, Typography, hex_color_string, mix, parse_hex_color,
+    ThemeSpec, Typography, hex_color_string, hsla_from_hsv, hsv_of, hue_color, hue_fraction, mix,
+    parse_hex_color, with_alpha, with_hue,
 };

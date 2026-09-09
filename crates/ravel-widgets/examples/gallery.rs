@@ -54,9 +54,10 @@ use ravel_widgets::curve_view::{
 };
 use ravel_widgets::tokens::{Density, RavelTheme, ThemeMode, ThemeSpec};
 use ravel_widgets::{
-    Button, ButtonVariant, Icon, Input, InputState, NumberInput, ParamCurveEditor,
-    ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY, TooltipExt as _,
-    TooltipOverlay, UiIcon, button_layers, hex_color_string, input_layers,
+    Button, ButtonVariant, ColorPicker, ColorPickerState, Icon, Input, InputState, NumberInput,
+    ParamCurveEditor, ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY,
+    TooltipExt as _, TooltipOverlay, UiIcon, button_layers, hex_color_string, hsla_from_hsv,
+    input_layers, swatch, with_alpha,
 };
 
 /// One labelled block of the gallery.
@@ -116,6 +117,13 @@ struct GalleryInputs {
     /// entities for the same reason the rows above are.
     param_curve: Entity<ParamCurveEditorState>,
     param_ramp: Entity<ParamRampEditorState>,
+    /// The colour picker, opened on load: its face, hue strip, alpha rail and
+    /// hex field only exist inside the popup, so a shut picker would show the
+    /// gallery nothing but a 16px square.
+    color: Entity<ColorPickerState>,
+    /// A second picker at 40% alpha, left shut, so the swatch's slash underlay
+    /// can be compared against the opaque one beside it.
+    color_translucent: Entity<ColorPickerState>,
 }
 
 impl GalleryInputs {
@@ -127,6 +135,13 @@ impl GalleryInputs {
             number_compact: StateRow::new("24", window, cx),
             param_curve: cx.new(|cx| ParamCurveEditorState::new(CurveParam::default(), cx)),
             param_ramp: cx.new(|cx| ParamRampEditorState::new(RampParam::default(), cx)),
+            color: cx.new(|cx| {
+                let mut state = ColorPickerState::new(window, cx).default_value(gallery_color(1.0));
+                state.set_open(true, cx);
+                state
+            }),
+            color_translucent: cx
+                .new(|cx| ColorPickerState::new(window, cx).default_value(gallery_color(0.4))),
         }
     }
 }
@@ -149,6 +164,10 @@ const SECTIONS: &[(&str, SectionFn)] = &[
         number_input_section,
     ),
     ("tooltip · the popup and its delay", tooltip_section),
+    (
+        "color_picker · the face, the hue strip, alpha and hex",
+        color_picker_section,
+    ),
     ("curve_editor · curve_editor_canvas", curve_canvas_section),
     (
         "curve_editor · curve_editor_canvas_with_x_scale",
@@ -760,6 +779,77 @@ fn labelled(theme: &RavelTheme, name: &str, widget: impl IntoElement) -> impl In
         .gap(theme.spacing.xs)
         .child(widget)
         .child(caption(theme, name.to_string()))
+}
+
+/// The colour the gallery's pickers start on, at `alpha`.
+fn gallery_color(alpha: f32) -> gpui::Hsla {
+    hsla_from_hsv(0.62, 0.65, 0.9, alpha)
+}
+
+/// The colour picker: the popup's four surfaces, and the swatch at two alphas.
+///
+/// The first picker is **open when the gallery loads**, because everything the
+/// widget decides — the face's two gradients, the hue strip's six bands, the
+/// alpha rail's fill, the hex field — lives inside the popup. It floats over
+/// the sections below it; that is what a popup does.
+///
+/// The two bare swatches beside it are the alpha requirement: at 40% the slash
+/// underlay shows through, which is what tells "this colour is transparent"
+/// apart from "this colour is dark" — a distinction a compositor cannot afford
+/// to lose.
+fn color_picker_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
+    let colors = &theme.colors;
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.md)
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(theme.spacing.lg)
+                .child(labelled(
+                    theme,
+                    "open · Tab into the face, then ←→ / ↑↓, Shift for 10%",
+                    ColorPicker::new(&inputs.color),
+                ))
+                .child(labelled(
+                    theme,
+                    "compact · click to open",
+                    ColorPicker::new(&inputs.color_translucent).compact(),
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.spacing.lg)
+                .child(labelled(
+                    theme,
+                    "swatch · opaque",
+                    swatch(Some(gallery_color(1.0)), colors),
+                ))
+                .child(labelled(
+                    theme,
+                    "swatch · alpha 40%",
+                    swatch(Some(gallery_color(0.4)), colors),
+                ))
+                .child(labelled(
+                    theme,
+                    "swatch · alpha 0%",
+                    swatch(Some(with_alpha(gallery_color(1.0), 0.0)), colors),
+                ))
+                .child(labelled(theme, "swatch · no value", swatch(None, colors))),
+        )
+        .child(caption(
+            theme,
+            format!(
+                "fill {} · underlay {} · the face is HSV; the state is HSL",
+                hex_color_string(colors.slider_fill()),
+                hex_color_string(colors.border)
+            ),
+        ))
+        .into_any_element()
 }
 
 fn tooltip_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {

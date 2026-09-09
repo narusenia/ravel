@@ -37,7 +37,7 @@ use crate::assets::RavelIcon;
 use crate::project_state::ProjectState;
 
 const HEADER_HEIGHT: f32 = 24.0;
-const ROW_HEIGHT: f32 = 22.0;
+const ROW_HEIGHT: f32 = 24.0;
 const INDENT_PER_DEPTH: f32 = 12.0;
 const DISCLOSURE_SIZE: f32 = 14.0;
 
@@ -1340,6 +1340,16 @@ mod tests {
     use ravel_core::runtime::InvalidationHint;
     use ravel_core::types::FrameRate;
 
+    /// The only line between this panel's row-height constant and the design
+    /// token it is meant to be. The constant is a local copy so the layout
+    /// arithmetic stays a pure function; moving `row.default` without moving
+    /// the constant has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_row_height_is_the_token() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(px(ROW_HEIGHT), rows.default);
+    }
+
     #[test]
     fn layer_reorder_cursor_changes_only_during_drag() {
         assert_eq!(outliner_row_cursor(false), CursorStyle::PointingHand);
@@ -2300,6 +2310,19 @@ mod tests {
         assert!(
             label.size.height <= px(ROW_HEIGHT),
             "label {:?} must stay on one line within the {ROW_HEIGHT}px row",
+            label.size,
+        );
+
+        // The row bound above only says the label *fits*, which a taller row
+        // satisfies by accident — it went from 22px to 24px without this test
+        // noticing. The regression was a *second line*, so the bound that
+        // actually catches it is one line rather than one row: one line of the
+        // shipped face measures 19.5px, a wrapped label 58.5px, and 1.5em sits
+        // between them whatever the theme sets `font.size` to.
+        let one_line = px(f32::from(ravel_widgets::tokens::Typography::default().font_size) * 1.5);
+        assert!(
+            label.size.height <= one_line,
+            "label {:?} wrapped: it is taller than the one line {one_line:?} allows",
             label.size,
         );
     }

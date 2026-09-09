@@ -393,7 +393,7 @@ impl RenderOnce for Button {
             // and the button never changes size.
             .border_1()
             .border_color(transparent_black())
-            .text_size(theme.text.font_size)
+            .text_size(metrics.font_size)
             .bg(layers.rest.surface)
             .text_color(layers.rest.foreground)
             // Only the surface and the text animate, and only over the

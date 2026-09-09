@@ -40,9 +40,13 @@ use crate::media::thumbnail::{ThumbnailCache, ThumbnailSource, ThumbnailState};
 use crate::project_state::ProjectState;
 
 const HEADER_HEIGHT: f32 = 24.0;
-const ROW_HEIGHT: f32 = 28.0;
-const THUMB_WIDTH: f32 = 40.0;
-const THUMB_HEIGHT: f32 = 24.0;
+const ROW_HEIGHT: f32 = 24.0;
+const THUMB_WIDTH: f32 = 34.0;
+/// The thumbnail is shorter than `ROW_HEIGHT` so its border does not sit on
+/// the row's edges. At the same height as the row it measured a point taller
+/// than the row it lived in — the 1px border falls outside the 24px box — and
+/// bled into the row above.
+const THUMB_HEIGHT: f32 = 20.0;
 
 /// Inline rename of a MediaBin row. The subscription commits the edited name
 /// on Enter or blur and is dropped with the rename (the Outliner's layer
@@ -1151,6 +1155,30 @@ mod tests {
     /// Renaming a row commits the trimmed name as **one** undo step, and a
     /// blank name is not an edit at all. The name is a label: the asset keeps
     /// its id, so the layer that references it is untouched (`AID-3`).
+    /// The only line between this panel's row-height constant and the design
+    /// token it is meant to be. The constant is a local copy so the layout
+    /// arithmetic stays a pure function; moving `row.default` without moving
+    /// the constant has to fail somewhere, and this is that somewhere.
+    #[test]
+    fn the_row_height_is_the_token() {
+        let rows = ravel_widgets::tokens::Rows::default();
+        assert_eq!(px(super::ROW_HEIGHT), rows.default);
+    }
+
+    /// The thumbnail plus its 1px border has to fit inside the row, or it
+    /// paints over the row above (which is what a 24px thumbnail in a 24px
+    /// row did).
+    #[test]
+    fn the_thumbnail_and_its_border_fit_the_row() {
+        let border = 1.0;
+        assert!(
+            super::THUMB_HEIGHT + 2.0 * border <= super::ROW_HEIGHT,
+            "a {}px thumbnail with a {border}px border does not fit a {}px row",
+            super::THUMB_HEIGHT,
+            super::ROW_HEIGHT,
+        );
+    }
+
     #[gpui::test]
     fn renaming_an_asset_commits_once_and_ignores_a_blank_name(cx: &mut gpui::TestAppContext) {
         let project = init(cx);

@@ -266,7 +266,7 @@ impl RenderOnce for Input {
             // clipped by an `overflow_hidden` ancestor and the field never
             // changes size when it takes focus.
             .border_1()
-            .text_size(theme.text.font_size)
+            .text_size(metrics.font_size)
             .bg(layers.rest.surface)
             .text_color(layers.rest.foreground)
             .border_color(layers.rest.border)

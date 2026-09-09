@@ -163,7 +163,7 @@ impl RenderOnce for NumberInput {
             .h(metrics.height)
             .rounded(theme.radius.radius)
             .border_1()
-            .text_size(theme.text.font_size)
+            .text_size(metrics.font_size)
             .bg(layers.rest.surface)
             .text_color(layers.rest.foreground)
             // `focus`, not `focus_visible`, for the reason `crate::input`

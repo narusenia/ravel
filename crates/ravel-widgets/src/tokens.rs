@@ -963,8 +963,13 @@ mod schema_tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             return;
         }
+        // Normalised, because this compares serializer output against a file
+        // read from disk and Windows checks text files out with CRLF
+        // (`.agents/rules/rust.md`). Without it the test fails on CI only, and
+        // the message says "stale" when the bytes are the same document.
         let shipped = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+            .replace("\r\n", "\n");
         assert_eq!(
             shipped, generated,
             "assets/themes/ravel.schema.json is stale; regenerate it with \

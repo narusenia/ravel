@@ -24,6 +24,7 @@
 //! `ravel-app`, never here.
 
 pub mod button;
+pub mod color_picker;
 pub mod curve_editor;
 pub mod curve_view;
 pub mod fonts;
@@ -50,6 +51,12 @@ pub use curve_view::{
 };
 
 pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
+
+pub use color_picker::{
+    COLOR_PICKER_SURFACE_CONTEXT, ColorPicker, FacePoint, HUE_BANDS, Nudge, PickerSurface,
+    face_color, face_point, face_point_at, horizontal_fraction, hue_band, nudge_step, nudged,
+    pointer_color, swatch, vertical_fraction, with_face_point,
+};
 
 pub use icon::{Icon, IconPath, UiIcon};
 
@@ -95,5 +102,6 @@ pub use theme::{ActiveTokens, set_active_tokens};
 
 pub use tokens::{
     Colors, Density, Metrics, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode,
-    ThemeSpec, Typography, hex_color_string, mix, parse_hex_color,
+    ThemeSpec, Typography, hex_color_string, hsla_from_hsv, hsv_of, hue_color, hue_fraction, mix,
+    parse_hex_color, with_alpha, with_hue,
 };

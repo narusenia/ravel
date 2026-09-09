@@ -113,16 +113,26 @@ Properties の 1 行が到達すべき状態:
 
 | トークン | 値 | 用途 | 今の値 |
 |---|---|---|---|
-| `row.compact` | 20px | 値の行（Properties のパラメータ、Timeline のプロパティ行） | 20（timeline）だけ正しい |
-| `row.default` | 24px | 一覧の行（Outliner / MediaBin / Palette / Spreadsheet） | 22 / 28 / 26 / 22 |
-| `header` | 24px | パネルヘッダ | 24（既に揃っている） |
+| `row.compact` | 20px | 値の行（Properties のパラメータ、Timeline のプロパティ行、スクラブ） | **20**（`UIX-5` で揃えた。スクラブは 16→20） |
+| `row.default` | 24px | 一覧の行（Outliner / MediaBin / Palette / Spreadsheet / Timeline のレイヤー行） | **24**（`UIX-5` で揃えた） |
+| `header` | 24px | パネルヘッダ | 24（元から揃っている） |
 
 `row.default` を 24 に寄せるのは、**ヘッダ 24 と合わせて 1 つの階段**に
 するため（22 / 24 / 26 / 28 の 4 段は意味の差ではなく実装の差だった）。
 
-**文字の大きさは 1 つしかない。** `Typography` は `font_size`(14px) と
-`mono_font_size`(12px) しか持たず、**段ごとの `font_size` を
-モデル化していない**（この節が言うのは字幅の話ではなく、文字の大きさの話）。
+**`UIX-5` は `timeline` のレイヤー行 28 も 24 に含めた。** Phase 2 の作業
+リストは 4 パネルしか挙げていなかったが、そのままだと Outliner の 24 と
+横に並ぶレイヤー行が 28 で残り、2 段にならない。定数は各パネルのローカル
+コピーのまま（`y += LAYER_ROW_HEIGHT` は `cx` を持たない純関数の中にある）で、
+**トークンとの一致は各パネル 1 本のテストが縛る**（`the_row_height_is_the_token`）。
+
+**文字の大きさは 2 つになった（`UIX-5`）。** `Typography` は
+`font_size`(14px) / `font_size_compact`(12px) / `mono_font_size`(12px) を
+持ち、**段ごとの文字の大きさは `Density::metrics` が返す**ので
+`Button` / `Input` / `NumberInput` は段から字を決める。以下はそれ以前の記録:
+`Typography` は `font_size`(14px) と `mono_font_size`(12px) しか持たず、
+**段ごとの `font_size` をモデル化していなかった**（この節が言うのは
+字幅の話ではなく、文字の大きさの話）。
 `UIX-4b` で `Input` を載せ替えたとき、gpui-component の `.xsmall()` が
 持っていた `text_xs`(12px) が失われ、**compact も default も 14px に
 なった**（`UIX-4` の `Button` も同じ扱い）。
@@ -654,7 +664,8 @@ Properties の全パラメータに、後者をダイアログの寸法・フレ
 - **例外は `scripts/lint-patterns.allow` に理由付きで書く。**
   想定される正当な例外はノードのカテゴリ色と Viewer のガイド色
 - 行高を 2 段に統一（`outliner` 22→24 / `media_bin` 28→24 /
-  `palette` 26→24 / `attribute_spreadsheet` 22→24。
+  `palette` 26→24 / `attribute_spreadsheet` 22→24 /
+  `timeline` のレイヤー行 28→24 / `scrub_input` 16→20。
   `timeline` のプロパティ行 20 は `row.compact` として正しいので触らない）
 
 ### 完了条件
@@ -664,9 +675,11 @@ Properties の全パラメータに、後者をダイアログの寸法・フレ
 - `lint-patterns.sh` が新しい規則で clean
 - 行高の定数が 5 種から 2 種に減っている
 - **`outliner` の「ラベルが 1 行に収まる」テストが 24px でも通る**
-  （`outliner.rs:2304` が `ROW_HEIGHT` を assert しているので、
-  22→24 で緩む側。**緩んだことを見落とさないよう、逆に
-  「23px では溢れる」ことを要求するテストを足す**）
+  （`outliner.rs` が `ROW_HEIGHT` を assert しているので、22→24 で緩む側）。
+  **「23px では溢れる」は測ったら成り立たなかった**: ラベルは 1 行 19.5px
+  で、22px の行にも元から余裕があった。代わりに**行ではなく 1 行で縛る**
+  （`font.size` の 1.5em = 21px。折り返すと 58.5px なので落ちる）ので、
+  行高をいくら広げてもこの assert は緩まない
 
 ---
 

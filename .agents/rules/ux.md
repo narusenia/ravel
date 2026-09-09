@@ -188,6 +188,12 @@ bug.
 (22 / 24 / 26 / 28 / 20) that differ by implementation accident rather than
 by meaning. A theme change misses whichever sites were written by hand.
 
+The row heights are now two — 20 for a row that shows one value, 24 for a row
+in a list — and each panel's constant is held to its token by a test
+(`the_row_height_is_the_token`). A panel that needs a third height is
+describing a meaning the two steps do not carry; say which, rather than
+writing a number.
+
 `scripts/lint-patterns.sh` enforces this one (`colour-literal`). A justified
 exception goes in `scripts/lint-patterns.allow` with its reason — node
 category colours and Viewer guide colours are the expected ones, because they

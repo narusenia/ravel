@@ -88,6 +88,21 @@ pub use scrub_input::{ScrubEvent, ScrubInput, ScrubInputState};
 pub use gpui_base::input::{Enter, Escape, InputEvent, InputState, MoveDown, MoveUp, NumberStep};
 pub use gpui_base::{Decrement, Increment, StepAction};
 
+/// The colour picker's state and its change event, re-exported.
+///
+/// The same arrangement [`InputState`] has, and for the same reason: these are
+/// `gpui-base`'s own types — the ones gpui-component re-exported rather than
+/// defined — so a host that owns a picker's state needs no `gpui-base`
+/// dependency of its own to name it. [`crate::ColorPicker`] paints the state
+/// and never writes to it from `render`.
+///
+/// Everything about the *value* lives here: the committed colour, the
+/// transient preview, the open state, the hex field and the four HSLA slider
+/// states the popup's surfaces move. `ColorPickerEvent::Change` is emitted
+/// once per pointer tick and once per arrow press, with no gesture-end event,
+/// which is why every consumer debounces it into one undo step.
+pub use gpui_base::{ColorPickerEvent, ColorPickerState};
+
 pub use tooltip::{
     GRACE_PERIOD, SHOW_DELAY, Tooltip, TooltipExt, install_tooltip_overlay, tooltip_overlay,
 };

@@ -42,6 +42,7 @@ use serde::{Deserialize, Deserializer};
 /// Mirrors `gpui_component::ThemeMode` in meaning but not in type: this crate
 /// does not depend on gpui-component.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
     #[default]
@@ -66,6 +67,7 @@ impl ThemeMode {
 /// already uses (`name` / `author` / `url` / `themes`), so one file carries both
 /// the light and the dark theme.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ThemeFile {
     /// Name of the set, for the author's benefit; not a theme name.
@@ -82,6 +84,7 @@ pub struct ThemeFile {
 /// [`ColorSpec`]) are deliberate: they are the names the existing theme files
 /// use, so moving to this schema does not rewrite anyone's file.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ThemeSpec {
     /// The name shown in the appearance settings.
@@ -116,32 +119,44 @@ pub struct ThemeSpec {
 /// gpui-component's schema knows about is not modelled here (see
 /// [`ThemeSpec::resolve`]).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct ColorSpec {
     #[serde(rename = "background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub background: Option<Hsla>,
     #[serde(rename = "foreground", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub foreground: Option<Hsla>,
     #[serde(rename = "border", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub border: Option<Hsla>,
     #[serde(rename = "muted.foreground", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub muted_foreground: Option<Hsla>,
     #[serde(rename = "accent.background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub accent: Option<Hsla>,
     #[serde(rename = "primary.background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub primary: Option<Hsla>,
     #[serde(rename = "secondary.background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub secondary: Option<Hsla>,
     #[serde(rename = "danger.background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub danger: Option<Hsla>,
     #[serde(rename = "info.background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub info: Option<Hsla>,
     #[serde(rename = "drop_target.background", deserialize_with = "lenient_color")]
+    #[cfg_attr(test, schemars(schema_with = "hex_color_schema"))]
     pub drop_target: Option<Hsla>,
 }
 
 /// Spacing steps, in pixels. Multiples of 4.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct SpacingSpec {
     pub xs: Option<f32>,
@@ -152,6 +167,7 @@ pub struct SpacingSpec {
 
 /// Row heights, in pixels.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct RowSpec {
     pub compact: Option<f32>,
@@ -161,6 +177,7 @@ pub struct RowSpec {
 
 /// Feedback durations, in milliseconds.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct MotionSpec {
     #[serde(rename = "feedback.in")]
@@ -882,6 +899,78 @@ where
         return Ok(None);
     };
     Ok(parse_hex_color(&text).ok())
+}
+
+/// The JSON Schema of a colour as a theme file writes it.
+///
+/// `Hsla` is palette's type and has no `JsonSchema`, so the wire form of a
+/// colour has to be described by hand. `gpui::hsla_schemar` is the obvious
+/// candidate and is the wrong one: it describes the *struct*
+/// (`hue` / `saturation` / `lightness` / `alpha`), while [`lenient_color`] reads
+/// a hex **string**. Pointing an editor at that schema would mark every colour
+/// in `assets/themes/ravel.json` invalid.
+///
+/// The pattern matches what [`parse_hex_color`] accepts — `#rgb`, `#rgba`,
+/// `#rrggbb`, `#rrggbbaa` — so completion flags a typo that would otherwise
+/// cost one colour silently.
+#[cfg(test)]
+fn hex_color_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"],
+        "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+    })
+}
+
+/// The shipped schema, as generated from the wire form.
+///
+/// One newline-terminated pretty-printed document, which is what
+/// `assets/themes/ravel.schema.json` holds. Both the comparison and the
+/// regeneration go through here so they cannot disagree on formatting.
+#[cfg(test)]
+fn generated_theme_schema() -> String {
+    let schema = schemars::schema_for!(ThemeFile);
+    let mut json = serde_json::to_string_pretty(&schema).expect("a schema serializes");
+    json.push('\n');
+    json
+}
+
+/// Where the generated schema is shipped.
+#[cfg(test)]
+fn shipped_theme_schema_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/ravel.schema.json")
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// Environment variable that turns the comparison below into a rewrite.
+    const UPDATE: &str = "UPDATE_THEME_SCHEMA";
+
+    /// The one line against a hand-edited schema drifting from the wire form.
+    ///
+    /// A field added to [`ThemeSpec`] — or a renamed key, or a colour that
+    /// stops being a hex string — changes what
+    /// [`generated_theme_schema`] produces and fails here, because the shipped
+    /// file is what a user's editor reads and a stale one lies about what the
+    /// application accepts.
+    #[test]
+    fn the_shipped_schema_is_the_one_the_wire_form_generates() {
+        let path = shipped_theme_schema_path();
+        let generated = generated_theme_schema();
+        if std::env::var_os(UPDATE).is_some() {
+            std::fs::write(&path, &generated)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            return;
+        }
+        let shipped = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert_eq!(
+            shipped, generated,
+            "assets/themes/ravel.schema.json is stale; regenerate it with \
+             `{UPDATE}=1 cargo test -p ravel-widgets the_shipped_schema`",
+        );
+    }
 }
 
 #[cfg(test)]

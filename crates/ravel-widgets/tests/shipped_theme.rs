@@ -130,3 +130,19 @@ fn the_shipped_file_sets_typography_and_radii() {
         assert_eq!(theme.radius, Radii::default(), "{}", theme.name);
     }
 }
+
+#[test]
+fn the_shipped_file_points_at_the_schema_shipped_beside_it() {
+    // A relative path rather than a URL: an editor resolves it from the file
+    // it is editing, so completion works offline and for a theme the user
+    // copied next to `ravel.schema.json`. The key is not part of Ravel's wire
+    // form, so this also pins that the loader tolerates it.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes/ravel.json");
+    let json = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        value.get("$schema").and_then(serde_json::Value::as_str),
+        Some("./ravel.schema.json"),
+    );
+}

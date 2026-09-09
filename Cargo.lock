@@ -6174,6 +6174,7 @@ dependencies = [
  "gpui_ce_platform",
  "ravel-core",
  "ravel-i18n",
+ "schemars",
  "serde",
  "serde_json",
 ]

@@ -19,6 +19,14 @@ serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# **Tests only.** `assets/themes/ravel.schema.json` is generated from the wire
+# form here (`the_shipped_schema_is_the_one_the_wire_form_generates`) rather
+# than hand-written, so the shipped schema cannot drift from `ThemeSpec`. The
+# derives it needs are `#[cfg_attr(test, derive(JsonSchema))]`, so nothing in
+# `src/` depends on it and no shipped binary links it. Pinned to the version
+# `gpui` already resolves (1.2.1) — `gpui::hsla_schemar` and this crate would
+# otherwise speak two incompatible `schemars`.
+schemars = "1.2"
 # `#[gpui::test]` for the widgets whose behaviour is focus, keyboard input or
 # the frame clock. Tests only: nothing in `src/` needs it.
 gpui = { workspace = true, features = ["test-support"] }

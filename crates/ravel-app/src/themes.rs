@@ -184,9 +184,51 @@ pub fn load_and_watch(cx: &mut App) {
         tracing::warn!("no themes directory found");
     }
     load(&dirs, cx);
+    place_schema_beside_user_themes(&dirs);
     match watch(dirs, cx) {
         Ok(watch) => cx.set_global(watch),
         Err(e) => tracing::error!("failed to watch the themes directories: {e}"),
+    }
+}
+
+/// The schema file a user theme's `"$schema": "./ravel.schema.json"` resolves to.
+const SCHEMA_FILE: &str = "ravel.schema.json";
+
+/// Put a copy of the shipped schema beside the user's own theme files.
+///
+/// `docs/dev/write-a-theme.md` tells a theme author to write
+/// `"$schema": "./ravel.schema.json"`, and that path resolves **next to the
+/// theme file** — so a theme in the user's directory needs the schema there
+/// rather than in the bundle. Without the copy the reference dangles, which is
+/// worse than no `$schema` at all: an editor reports the missing schema as an
+/// error instead of quietly offering no completion.
+///
+/// Only writes into a directory the user already has, never creates one, and
+/// only when the content differs — so it is a no-op on every launch after the
+/// first, and on the bundle (the first entry, which already holds the file).
+/// A failure is logged and nothing else: a theme still loads without its
+/// schema, and refusing to start over an editor convenience would be absurd.
+fn place_schema_beside_user_themes(dirs: &[PathBuf]) {
+    let Some(shipped) = dirs.first().map(|bundled| bundled.join(SCHEMA_FILE)) else {
+        return;
+    };
+    let Ok(content) = std::fs::read(&shipped) else {
+        // Not shipped beside the themes (a partial install, or a layout this
+        // function does not know); nothing to copy.
+        return;
+    };
+    for dir in dirs.iter().skip(1) {
+        let target = dir.join(SCHEMA_FILE);
+        if std::fs::read(&target).is_ok_and(|existing| existing == content) {
+            continue;
+        }
+        if let Err(e) = std::fs::write(&target, &content) {
+            tracing::warn!(
+                "could not put {} beside {}: {e}",
+                SCHEMA_FILE,
+                dir.display()
+            );
+        }
     }
 }
 
@@ -251,6 +293,38 @@ mod tests {
     use ravel_widgets::tokens::{self, Colors, hex_color_string};
 
     use super::*;
+
+    /// The `$schema` the doc tells a theme author to write is relative to the
+    /// theme file, so a user theme needs the schema in *its* directory.
+    #[test]
+    fn the_schema_lands_beside_a_user_theme() {
+        let bundled = tempfile::tempdir().expect("a bundled directory");
+        let user = tempfile::tempdir().expect("a user directory");
+        std::fs::write(bundled.path().join(SCHEMA_FILE), b"{\"schema\": 1}").expect("shipped");
+
+        let dirs = vec![bundled.path().to_path_buf(), user.path().to_path_buf()];
+        place_schema_beside_user_themes(&dirs);
+
+        assert_eq!(
+            std::fs::read(user.path().join(SCHEMA_FILE)).expect("the copy"),
+            b"{\"schema\": 1}",
+            "a user theme's ./ravel.schema.json would dangle"
+        );
+    }
+
+    /// It writes into a directory that is already there and never makes one:
+    /// `theme_dirs` only returns existing directories, and a schema is not a
+    /// reason to start creating them.
+    #[test]
+    fn a_missing_user_directory_is_not_created_for_the_schema() {
+        let bundled = tempfile::tempdir().expect("a bundled directory");
+        std::fs::write(bundled.path().join(SCHEMA_FILE), b"{}").expect("shipped");
+        let absent = bundled.path().join("not-there");
+
+        place_schema_beside_user_themes(&[bundled.path().to_path_buf(), absent.clone()]);
+
+        assert!(!absent.exists(), "the directory was created");
+    }
 
     /// A theme file naming one theme and setting one colour.
     fn theme_file(name: &str, primary: &str) -> String {

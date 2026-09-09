@@ -716,6 +716,16 @@ pub fn apply_resolved_appearance(cx: &mut App) {
 /// kind of wrong, a dark palette in the light slot flipping the UI to unreadable
 /// every time the user switches to light.
 fn theme_named(name: &str, mode: ThemeMode, cx: &App) -> Rc<ThemeConfig> {
+    // Ravel's own set first. It is the one a reload rebuilds — `ThemeRegistry`
+    // takes insertions only, so its entry for an edited theme is still the one
+    // read at startup (`crate::themes`). A name only the registry carries (one
+    // of gpui-component's built-ins) falls through to it below.
+    if let Some(config) = cx
+        .try_global::<crate::theme_tokens::RavelThemes>()
+        .and_then(|themes| themes.config(name, crate::theme_tokens::ravel_mode(mode)))
+    {
+        return Rc::new(config.clone());
+    }
     let registry = ThemeRegistry::global(cx);
     if let Some(config) = registry.themes().get(name) {
         if config.mode == mode {

@@ -5964,6 +5964,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui_ce_platform",
  "image",
+ "notify 8.2.0",
  "pollster 0.4.0",
  "ravel-audio",
  "ravel-cli",

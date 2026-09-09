@@ -40,6 +40,11 @@ gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
 futures = { workspace = true }
+# The watch on the themes directories (`themes.rs`). `ThemeRegistry::watch_dir`
+# would be less code and re-reads the directory with gpui-component's parser,
+# which drops Ravel's schema out of the reload path and only takes one
+# directory — see the module docs.
+notify = { workspace = true }
 image = { workspace = true }
 rayon = { workspace = true }
 sha2 = { workspace = true }

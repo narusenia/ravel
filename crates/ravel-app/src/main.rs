@@ -100,13 +100,7 @@ async fn bootstrap(
         }
 
         cx.update(|cx| match stage {
-            StartupStage::Themes => {
-                let themes = ravel_app::themes::theme_dirs();
-                if themes.is_empty() {
-                    tracing::warn!("no themes directory found");
-                }
-                ravel_app::themes::load(&themes, cx);
-            }
+            StartupStage::Themes => ravel_app::themes::load_and_watch(cx),
             StartupStage::Settings => {
                 workspace::register_action_handlers(cx);
                 ravel_app::trace::init(cx);

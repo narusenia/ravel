@@ -11,18 +11,43 @@
 //! putting a file called `ravel.json` in your own directory is how you edit the
 //! shipped theme without writing inside the application bundle.
 //!
-//! A load **replaces** the theme set rather than adding to it, so re-running it
-//! is all a reload is: same directories, same order, same derivation.
+//! # Why the watch is ours
+//!
+//! `gpui_component::ThemeRegistry::watch_dir` would be less code and is the
+//! wrong shape for three reasons, all of them the same root: it re-reads the
+//! directory itself, with gpui-component's parser.
+//!
+//! - **Ravel's schema drops out of the path.** After the first file change the
+//!   registry holds the file as gpui-component reads it, not as
+//!   [`crate::theme_tokens`] derives it, so every colour Ravel models but the
+//!   file omits reverts from Ravel's built-in to gpui-component's stock palette.
+//! - **`RavelThemes` never updates.** Its `on_load` callback fires once, at
+//!   setup, and says nothing about the reloads that follow every later change,
+//!   so Ravel's own widgets keep painting the values read at startup.
+//! - **It takes one directory**, and there are two.
+//!
+//! So the watch lives here, and a reload runs exactly the load startup ran —
+//! same directories, same order, same derivation — and **replaces** the theme
+//! set rather than adding to it. Replacing is what makes a deleted theme file
+//! stop being worn; adding would leave it installed until the next launch.
 
 use std::path::{Path, PathBuf};
 
-use gpui::App;
+use gpui::{App, Global, Task};
 use gpui_component::ThemeRegistry;
 
 use crate::theme_tokens::RavelThemes;
 
 /// The user's themes directory, under the global config directory.
 pub const USER_THEMES_DIR: &str = "themes";
+
+/// How long a change is left to settle before the directories are re-read.
+///
+/// An editor saving a file emits several events, and the first of them can
+/// arrive while the file is still half-written — reading it then would parse a
+/// truncated theme, fall back for a frame, and repaint twice. The delay is
+/// below the threshold where a hand-edited colour stops feeling immediate.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// The themes directory that ships with the installation.
 ///
@@ -147,6 +172,79 @@ pub fn load(dirs: &[PathBuf], cx: &mut App) {
     crate::app_settings::apply_resolved_appearance(cx);
 }
 
+/// Read the themes directories and keep reading them as they change.
+///
+/// Called once, at startup. The directories are read **synchronously** first:
+/// the first frame must already wear the user's theme rather than flash a
+/// default one, and the theme the settings name has to exist by the time the
+/// appearance is applied.
+pub fn load_and_watch(cx: &mut App) {
+    let dirs = theme_dirs();
+    if dirs.is_empty() {
+        tracing::warn!("no themes directory found");
+    }
+    load(&dirs, cx);
+    match watch(dirs, cx) {
+        Ok(watch) => cx.set_global(watch),
+        Err(e) => tracing::error!("failed to watch the themes directories: {e}"),
+    }
+}
+
+/// The live watch on the themes directories.
+///
+/// A `Global` because both halves die when they are dropped — a dropped
+/// `RecommendedWatcher` stops delivering events and a dropped [`Task`] cancels
+/// the loop that drains them, both silently — and the watch has to last as long
+/// as the application does.
+struct ThemeWatch {
+    _watcher: notify::RecommendedWatcher,
+    _drain: Task<()>,
+}
+
+impl Global for ThemeWatch {}
+
+/// Watch `dirs` and reload them on every change.
+fn watch(dirs: Vec<PathBuf>, cx: &mut App) -> anyhow::Result<ThemeWatch> {
+    use notify::Watcher as _;
+
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let Ok(event) = event else { return };
+        if matches!(
+            event.kind,
+            notify::EventKind::Create(_)
+                | notify::EventKind::Modify(_)
+                | notify::EventKind::Remove(_)
+        ) {
+            // The receiver is gone once the watch is dropped, and then there is
+            // nothing to report to.
+            let _ = tx.unbounded_send(());
+        }
+    })?;
+    for dir in &dirs {
+        // Not recursive: theme files sit directly in the directory, and a
+        // recursive watch would wake on anything a user parked in a subfolder.
+        watcher.watch(dir, notify::RecursiveMode::NonRecursive)?;
+    }
+
+    let drain = cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+
+        while rx.next().await.is_some() {
+            cx.background_executor().timer(SETTLE).await;
+            // Everything that arrived while the change settled is the same
+            // reload, so it is dropped rather than queued behind this one.
+            while rx.try_recv().is_ok() {}
+            cx.update(|cx| load(&dirs, cx));
+        }
+    });
+
+    Ok(ThemeWatch {
+        _watcher: watcher,
+        _drain: drain,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::TestAppContext;
@@ -269,6 +367,49 @@ mod tests {
                 "an omitted colour is Ravel's built-in after a reload",
             );
         });
+    }
+
+    #[gpui::test]
+    fn an_edited_theme_is_worn_without_a_relaunch(cx: &mut TestAppContext) {
+        let config = tempfile::tempdir().unwrap();
+        let dirs = dirs(config.path(), config.path());
+        let path = user_dir(config.path()).join("mine.json");
+        std::fs::write(&path, theme_file("Mine", "#010203")).unwrap();
+        let settings = config.path().join("settings.toml");
+        std::fs::write(
+            &settings,
+            "[appearance]\ntheme_mode = \"dark\"\ndark_theme = \"Mine\"\n",
+        )
+        .unwrap();
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            load(&dirs, cx);
+            crate::app_settings::install(
+                crate::app_settings::read_global_settings_at(Some(settings.clone())),
+                cx,
+            );
+        });
+        assert_eq!(
+            cx.update(|cx| gpui_component::Theme::global(cx).colors.primary),
+            tokens::parse_hex_color("#010203").unwrap(),
+        );
+
+        // The whole point of owning the watch: the reload re-applies the
+        // appearance, so the colour the next frame is painted with is the one
+        // in the file rather than the one read at startup.
+        std::fs::write(&path, theme_file("Mine", "#0A0B0C")).unwrap();
+        cx.update(|cx| load(&dirs, cx));
+
+        assert_eq!(
+            cx.update(|cx| gpui_component::Theme::global(cx).colors.primary),
+            tokens::parse_hex_color("#0A0B0C").unwrap(),
+            "the borrowed components repaint from the edited file too",
+        );
+        assert_eq!(
+            primary("Mine", cx),
+            Some(tokens::parse_hex_color("#0A0B0C").unwrap()),
+        );
     }
 
     #[gpui::test]

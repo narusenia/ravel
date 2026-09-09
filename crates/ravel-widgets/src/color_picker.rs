@@ -652,10 +652,15 @@ where
                 bounds.update(cx, |bounds, _| bounds.set(surface, prepaint.bounds));
             }
         })
+        // **No `stop_propagation` here.** gpui's own click-to-focus for a
+        // `track_focus`ed element is a mouse-down listener registered *before*
+        // this one, and paint-time listeners run innermost-first — so stopping
+        // propagation here silences it and the surface can only be reached by
+        // Tab. Measured in the running application: the click picked a colour
+        // and then the arrow keys did nothing, because nothing had focus.
         .on_mouse_down(MouseButton::Left, {
             let write = write.clone();
             move |event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
                 write(event.position, window, cx);
             }
         })
@@ -1150,13 +1155,16 @@ mod tests {
     // `ColorPickerEvent::Change`, which is where the consumer's debounce is.
     // -----------------------------------------------------------------------
 
-    use gpui::{
-        Context, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Render, TestAppContext,
-        VisualTestContext,
-    };
+    use gpui::{Context, Entity, Modifiers, Point, Render, TestAppContext, VisualTestContext};
     use gpui_base::{ColorPickerEvent, ColorPickerState};
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    /// The middle of the face, as the harness below lays the popup out.
+    const FACE_CENTRE: Point<Pixels> = Point {
+        x: px(70.0),
+        y: px(94.0),
+    };
 
     /// A seed whose face point is `(0.5, 0.8)`, so 25 arrow presses fit along
     /// the horizontal axis without the clamp taking part.
@@ -1217,14 +1225,14 @@ mod tests {
         (cx, state, changes)
     }
 
+    /// Press a key **through the keymap**, the way a real keystroke arrives.
+    ///
+    /// Not `simulate_event(KeyDownEvent)`: that hands the event straight to
+    /// the listeners and skips binding resolution, so it cannot see a binding
+    /// swallowing the key — which is exactly the failure the running
+    /// application showed.
     fn press(cx: &mut VisualTestContext, key: &str) {
-        let keystroke = Keystroke::parse(key).expect("the test keystroke parses");
-        cx.simulate_event(KeyDownEvent {
-            keystroke: keystroke.clone(),
-            is_held: false,
-            prefer_character_input: false,
-        });
-        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.simulate_keystrokes(key);
     }
 
     /// **The keyboard half of the one value road.** A face that wrote its
@@ -1282,6 +1290,54 @@ mod tests {
             (face_point(value).saturation - (face_point(seed()).saturation + NUDGE_STEP_COARSE))
                 .abs()
                 < 1e-4
+        );
+    }
+
+    /// **The pointer half of the road, and the click-to-focus that goes with
+    /// it.** Clicking a surface must both write a colour *and* leave that
+    /// surface holding the keyboard, so the obvious gesture — click roughly,
+    /// then nudge — works. It was broken once already: the surface's own
+    /// mouse-down handler called `stop_propagation`, which silences gpui's
+    /// focus-on-mouse-down (registered first, dispatched last), so a clicked
+    /// face picked a colour and then ignored every arrow.
+    ///
+    /// The coordinate is the face's centre as this harness lays it out: the
+    /// picker sits at the window's top-left corner and the popover anchors
+    /// under its trigger, so it is stable, and a layout change that moved the
+    /// face would fail here rather than silently stop testing anything —
+    /// which is what the first assertion is for.
+    #[gpui::test]
+    fn clicking_a_surface_writes_a_colour_and_takes_the_keyboard(cx: &mut TestAppContext) {
+        let (cx, state, changes) = open_picker(cx);
+
+        cx.simulate_click(FACE_CENTRE, Modifiers::default());
+
+        assert_eq!(
+            changes.borrow().len(),
+            1,
+            "the click missed the face: no Change was emitted"
+        );
+        let clicked = state
+            .read_with(cx, |state, _| state.value())
+            .expect("a value");
+        let point = face_point(clicked);
+        assert!(
+            (point.saturation - 0.5).abs() < 0.2 && (point.value - 0.5).abs() < 0.2,
+            "the click landed off the middle of the face: {point:?}"
+        );
+
+        // And the arrows now work without a Tab, which is the half that the
+        // `stop_propagation` regression broke.
+        press(cx, "right");
+        assert_eq!(changes.borrow().len(), 2, "the clicked face has no focus");
+        assert!(
+            face_point(
+                state
+                    .read_with(cx, |state, _| state.value())
+                    .expect("a value")
+            )
+            .saturation
+                > point.saturation
         );
     }
 

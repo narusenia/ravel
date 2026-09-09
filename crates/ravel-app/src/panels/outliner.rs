@@ -2312,6 +2312,19 @@ mod tests {
             "label {:?} must stay on one line within the {ROW_HEIGHT}px row",
             label.size,
         );
+
+        // The row bound above only says the label *fits*, which a taller row
+        // satisfies by accident — it went from 22px to 24px without this test
+        // noticing. The regression was a *second line*, so the bound that
+        // actually catches it is one line rather than one row: one line of the
+        // shipped face measures 19.5px, a wrapped label 58.5px, and 1.5em sits
+        // between them whatever the theme sets `font.size` to.
+        let one_line = px(f32::from(ravel_widgets::tokens::Typography::default().font_size) * 1.5);
+        assert!(
+            label.size.height <= one_line,
+            "label {:?} wrapped: it is taller than the one line {one_line:?} allows",
+            label.size,
+        );
     }
 
     /// A tree taller than the panel scrolls (regression: shrinkable rows let

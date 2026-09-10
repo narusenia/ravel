@@ -746,10 +746,10 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | UIX-4 | ✅ | `Icon` / `Button` / `Tooltip` を `gpui-base` から自前で（4 状態 + Tab 順 + Enter / Space） | UIX-2 |
 | UIX-4b | ✅ | **`Input`** と **`NumberInput`** を `gpui-base` に載せ替え、`scrub_input.rs` を移設。状態型（`InputState` / `InputEvent` / `Escape`）は **base からの再エクスポートなので import のパスだけ**（125 箇所）。`scrub_input`（AE 式の横ドラッグ）と `number_input`（増減ボタン）は**用途が違うので両方持つ** | UIX-4 ✅ |
 | UIX-5 | ✅ | 行高を 2 段に統一（`row.compact` 20 / `row.default` 24）。**compact の `font_size` もここで決める** — `UIX-4b` で `.xsmall()` の `text_xs`(12px) が失われ、両段が `text.font_size`(14px) になった。20px の行に 14px は DCC の慣習より大きい。トークンが 1 つ増えるので `UIX-4b` では発明しなかった | UIX-3 |
-| UIX-6 | ⬜ | 不変条件 1〜4 の違反を潰す（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | UIX-0 |
-| UIX-7 | ⬜ | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 |
+| UIX-6 | 🟡 | 不変条件 1〜4 の違反を潰す（選択の所有権・寿命、undo の粒度、ドラッグの取り消し） | UIX-0 ✅ |
+| UIX-7 | 🟡 | 不変条件 5〜9 の違反を潰す（狭い幅、死んだ操作、値の意味、派生キャッシュ） | UIX-0 ✅ |
 | UIX-8 | ✅ | ユーザーテーマディレクトリ（`themes_dir()` を複数候補に、ユーザー側が勝つ、**watch を自前に持つ** — 借りた `watch_dir` は導出を挟めない、**`ravel.schema.json` の同梱**、書き方の文書）。**`RavelThemes` の陳腐化もここで閉じる** — `UIX-4` が入れた `register_ravel_themes` は起動時に 1 度しか挿さないので、テーマファイルを編集すると gpui-component 側だけ再読み込みされ、Ravel のトークンが古いまま残る（削除されたテーマの行も残る） | UIX-1 ✅ |
-| UIX-9 | 🟡 | 文書更新（`ui-impl-status.md`、`gpui-ui-guide.md` の「部品を追加する」節） | UIX-4〜UIX-8 |
+| UIX-9 | ✅ | 文書更新（`ui-impl-status.md` の古い 4 箇所、`gpui-ui-guide.md` の「部品を追加する」節 7 手順、**`docs/dev/add-widget.md` 新設**）と、**その手順で `Checkbox` を実際に足して確かめる**（完了条件が「手順書は使わないと腐る」なので実証が単位の半分）。`gpui_component::Checkbox` の借用 4 箇所を返却。**手順書の穴が 6 件出て直した** — うち 1 件は設計上の罠で、マークの色は計画書が「`background` で抜く」と名指ししているのに `readable_on(primary)` はライトパレットで `foreground` を選ぶ（黒 4.8:1 対 白 4.4:1）ため、導出に任せるとライトだけ黒いチェックになる | UIX-4〜UIX-8 ✅ |
 | UIX-11 | ✅ | `color_picker` を自前で作る（2D 彩度面 + 色相帯 + A + hex、`pattern_slash` のスウォッチ）。**既存の undo の契約を壊さない** — 即時適用 + 静穏期間後に 1 段（`color_picker_gesture_commits_one_undo_step` が固定）。**矢印キーを所有するキー文脈もここ**（旧 `UIX-10`。`←`/`→` を取る要素が今 1 つも無く、文脈だけ作ると消費者の無い場になるので 2026-09-09 に畳んだ） | UIX-4b ✅ |
 
 **`UIX-0` / `UIX-1` は `KIT-1` と並行できる**（文書と型定義だけでパネルを

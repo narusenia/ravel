@@ -6,8 +6,9 @@
 //! [`tokens`] is the single source for the colors, spacing, row heights,
 //! typography, motion and radii the UI is built from, and [`theme`] is how a
 //! widget reaches the set in force. [`icon`], [`button`], [`tooltip`] and
-//! [`checkbox`] are among the parts Ravel owns outright — the ones the application's texture
-//! lives in — and they are built on `gpui-base`'s unstyled primitives, which
+//! [`checkbox`] are among the parts Ravel owns outright — the ones the
+//! application's texture lives in — and they are built on `gpui-base`'s
+//! unstyled primitives, which
 //! own focus, keyboard activation and accessibility. [`curve_editor`] and
 //! [`curve_view`] are the geometry the curve views share, and
 //! [`param_curve_editor`] / [`param_ramp_editor`] are the two parameter

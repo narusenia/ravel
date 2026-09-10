@@ -533,14 +533,6 @@ impl Colors {
         mix(base, self.foreground, amount)
     }
 
-    /// Whichever of `background` and `foreground` reads better on `surface`.
-    ///
-    /// Used for the label on a filled `primary` button, which is the one place
-    /// a Ravel control paints text on a saturated colour. The choice is by
-    /// **contrast ratio**, not by HSL lightness, because the two disagree
-    /// exactly where it matters: `#0000FF` has lightness 0.5 — nominally
-    /// "mid" — and a relative luminance of 0.07, so a lightness rule would
-    /// put near-black text on it and produce a 1.4:1 label.
     /// Whichever of `a` and `b` stands out more against `surface`.
     ///
     /// The same measurement [`Colors::readable_on`] makes, exposed for the
@@ -556,6 +548,20 @@ impl Colors {
         }
     }
 
+    /// Whichever of `background` and `foreground` reads better on `surface`.
+    ///
+    /// Used for the label on a filled `primary` button, and for a mark on a
+    /// fill that has been faded — the two places a Ravel control paints on a
+    /// saturated colour. The choice is by **contrast ratio**, not by HSL
+    /// lightness, because the two disagree exactly where it matters:
+    /// `#0000FF` has lightness 0.5 — nominally "mid" — and a relative
+    /// luminance of 0.07, so a lightness rule would put near-black text on it
+    /// and produce a 1.4:1 label.
+    ///
+    /// It answers "which of my two ends is readable", which is not the same
+    /// question as "which colour did the spec name": see `checkbox.rs`, where
+    /// the mark is `background` by decision and this function only fills in
+    /// the state the decision does not cover.
     pub fn readable_on(&self, surface: Hsla) -> Hsla {
         // Measured against what the eye actually sees. `relative_luminance`
         // reads r/g/b only, so a translucent surface would be judged by its

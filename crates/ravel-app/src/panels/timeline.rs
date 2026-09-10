@@ -2247,7 +2247,14 @@ impl TimelineGpuiPanel {
                         self.drag = TimelineDrag::MoveBar {
                             baselines,
                             pressed,
-                            collapse_on_click,
+                            // The gesture is a no-op for undo, but it is not
+                            // a *click*: the pointer travelled and came back,
+                            // which is how a user takes a move back. Letting
+                            // `collapse_on_click` survive would spend the
+                            // mouse-up narrowing a multi-selection the press
+                            // deliberately kept, so a change of mind would
+                            // cost the selection.
+                            collapse_on_click: false,
                             grab_x,
                             changed: false,
                         };
@@ -2425,7 +2432,8 @@ impl TimelineGpuiPanel {
                         baselines,
                         origin_selection,
                         pressed,
-                        collapse_on_click,
+                        // Not a click any more — see the bar arm above.
+                        collapse_on_click: false,
                         current_delta: 0,
                         grab_x,
                         changed: false,
@@ -7636,6 +7644,89 @@ mod tests {
                 );
                 panel.drag_ended(cx);
                 assert_eq!(super::super::layer_selection(cx).layers(), [a]);
+            })
+            .unwrap();
+    }
+
+    /// The other half of "a press that never moved is a click": a press that
+    /// *did* move and came home is **not** one. Taking a move back is how a
+    /// user changes their mind, and the press kept the multi-selection
+    /// precisely so the gesture could carry it — so narrowing it on the
+    /// mouse-up would charge the change of mind a selection.
+    ///
+    /// **What this test drops**: `collapse_on_click: false` in the
+    /// `delta == 0` arm of `MoveBar` inside
+    /// [`TimelineGpuiPanel::drag_moved`]. Carry the flag through instead and
+    /// the returned drag collapses to the pressed layer, because the arm also
+    /// resets `changed` (invariant 3) and that is what `drag_ended` reads.
+    #[gpui::test]
+    fn a_bar_drag_that_returned_home_keeps_the_selection_it_carried(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: panel.bar_baselines(a, cx),
+                    pressed: a,
+                    collapse_on_click: true,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                // Ten frames out, then home again.
+                panel.drag_moved(40.0, 0.0, false, false, cx);
+                panel.drag_moved(0.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+                assert_eq!(
+                    super::super::layer_selection(cx).layers(),
+                    [a, b],
+                    "the returned drag was read as a click and narrowed the selection"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The keyframe half of the same rule.
+    ///
+    /// **What this test drops**: `collapse_on_click: false` in the
+    /// `delta == 0` arm of `MoveKeyframe`.
+    #[gpui::test]
+    fn a_keyframe_drag_that_returned_home_keeps_the_selection_it_carried(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Both keys picked, then a press on one of them: the press
+                // keeps the pair so the gesture can move both.
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10)]);
+                let (origin_x, origin_y) = panel.area_origin.get();
+                panel.channel_row_mouse_down(
+                    a,
+                    row.clone(),
+                    0,
+                    40.0,
+                    1,
+                    origin_x + 40.0,
+                    origin_y,
+                    false,
+                    cx,
+                );
+                assert_eq!(
+                    panel.selected_keyframes.len(),
+                    2,
+                    "the press keeps the pair it may have to move"
+                );
+                panel.drag_moved(origin_x + 80.0, origin_y, false, false, cx);
+                panel.drag_moved(origin_x + 40.0, origin_y, false, false, cx);
+                panel.drag_ended(cx);
+                assert_eq!(
+                    panel.selected_keyframes.len(),
+                    2,
+                    "the returned drag was read as a click and dropped one of the pair"
+                );
             })
             .unwrap();
     }

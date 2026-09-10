@@ -2413,6 +2413,25 @@ impl TimelineGpuiPanel {
                 if delta == current_delta {
                     return;
                 }
+                if delta == 0 {
+                    // Back on the baseline: drop the preview rather than
+                    // re-applying one, so the gesture is a no-op again and the
+                    // mouse-up has nothing to commit. The bar arms above got
+                    // this from `MED-APP-07`; the rule is invariant 3 and it
+                    // applies to every arm that previews from a baseline.
+                    self.revert_drag_preview(cx);
+                    self.selected_keyframes = origin_selection.clone();
+                    self.drag = TimelineDrag::MoveKeyframe {
+                        baselines,
+                        origin_selection,
+                        pressed,
+                        collapse_on_click,
+                        current_delta: 0,
+                        grab_x,
+                        changed: false,
+                    };
+                    return;
+                }
                 self.apply_keyframe_move_preview(&baselines, delta, cx);
                 self.selected_keyframes =
                     Self::selection_after_move(&origin_selection, &baselines, delta);
@@ -2466,6 +2485,24 @@ impl TimelineGpuiPanel {
                 if frame_delta == current_frame_delta
                     && value_delta.to_bits() == current_value_delta.to_bits()
                 {
+                    return;
+                }
+                if frame_delta == 0 && value_delta == 0.0 {
+                    // Same rule as `MoveKeyframe` above: a curve edit dragged
+                    // back onto the key it started on changed nothing.
+                    self.revert_drag_preview(cx);
+                    self.selected_keyframes = origin_selection.clone();
+                    self.drag = TimelineDrag::GraphKeyframes {
+                        baselines,
+                        origin_selection,
+                        drag,
+                        transform,
+                        graph_origin,
+                        pressed_value,
+                        current_frame_delta: 0,
+                        current_value_delta: 0.0,
+                        changed: false,
+                    };
                     return;
                 }
                 self.apply_graph_keyframe_preview(&baselines, frame_delta, value_delta, cx);
@@ -8184,6 +8221,145 @@ mod tests {
         };
         assert_eq!(curve.keyframes()[0].frame, 0);
         assert_eq!(curve.keyframes()[0].value, 0.0);
+    }
+
+    /// Invariant 3, the keyframe arms: a keyframe dragged out and dropped back
+    /// on its own frame changed nothing, so it records nothing. `MED-APP-07`
+    /// named the bar arms, but `MoveKeyframe` guarded only "the pointer has
+    /// not moved since the last event" — a drag that wandered and came back
+    /// re-applied a delta-0 preview and kept `changed: true`, so `drag_ended`
+    /// committed a no-op step.
+    ///
+    /// **What this test drops**: the `delta == 0` arm in `MoveKeyframe` inside
+    /// [`TimelineGpuiPanel::drag_moved`]. Without it the undo below is spent
+    /// on the gesture — on its garbage step, or (with only the step removed)
+    /// on discarding a preview identical to the committed document — instead
+    /// of reaching the solo toggle.
+    #[gpui::test]
+    fn a_keyframe_drag_that_ends_where_it_started_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        // The last real edit — what one Ctrl+Z has to reach.
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layer(&project, comp_id, a, cx).solo);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.selected_keyframes = HashSet::from([keyframe_ref(a, &row, 0, 10)]);
+                let (origin_x, origin_y) = panel.area_origin.get();
+                // Press the key at frame 10 (content x 40 at 4 px/frame).
+                panel.channel_row_mouse_down(
+                    a,
+                    row.clone(),
+                    0,
+                    40.0,
+                    1,
+                    origin_x + 40.0,
+                    origin_y,
+                    false,
+                    cx,
+                );
+                assert!(matches!(panel.drag, TimelineDrag::MoveKeyframe { .. }));
+                // Ten frames out, then home again.
+                panel.drag_moved(origin_x + 80.0, origin_y, false, false, cx);
+                panel.drag_moved(origin_x + 40.0, origin_y, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let placed = layer(&project, comp_id, a, cx);
+        assert!(
+            keyframes::has_keyframe_at(&placed, &row, 0, 0)
+                && keyframes::has_keyframe_at(&placed, &row, 0, 10),
+            "the gesture left both keys on their own frames"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, a, cx).solo,
+            "one undo reached the last real edit, so the gesture recorded none"
+        );
+    }
+
+    /// The curve-editor half of the same rule: `GraphKeyframes` kept a sticky
+    /// `changed` (`changed || frame_delta != 0 || value_delta != 0.0`), so a
+    /// key dragged in frame/value space and dropped back on itself committed
+    /// a step that changed nothing.
+    ///
+    /// **What this test drops**: the `frame_delta == 0 && value_delta == 0.0`
+    /// arm in `GraphKeyframes` inside [`TimelineGpuiPanel::drag_moved`].
+    #[gpui::test]
+    fn a_graph_keyframe_drag_that_ends_where_it_started_records_no_undo_step(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: layer_id,
+            row: row.clone(),
+            component: 0,
+        };
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(layer_id, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layer(&project, comp_id, layer_id, cx).solo);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(channel, false);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
+                let curves = selected_timeline_curves(&panel.state);
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                let press = CurvePoint::new(0.0, 100.0);
+                panel.begin_graph_drag(
+                    &curves,
+                    CurveHit {
+                        curve: 0,
+                        frame: 0,
+                        part: HitPart::Keyframe,
+                    },
+                    press,
+                    transform,
+                    (0.0, 0.0),
+                );
+                // Five frames and fifty units away, then back onto the press.
+                panel.drag_moved(50.0, 50.0, false, false, cx);
+                panel.drag_moved(press.x as f32, press.y as f32, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let placed = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&placed, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(
+            (curve.keyframes()[0].frame, curve.keyframes()[0].value),
+            (0, 0.0),
+            "the gesture left the key on its own frame and value"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, layer_id, cx).solo,
+            "one undo reached the last real edit, so the gesture recorded none"
+        );
     }
 
     #[gpui::test]

@@ -392,8 +392,17 @@ impl SurfaceBounds {
 }
 
 /// The drag in flight on one of the popup's surfaces.
+///
+/// It names the **surface** as well as the picker, and both halves are load
+/// bearing. `Interactivity::on_drag_move` fires in the capture phase for
+/// every painted listener of the payload's type *without consulting its
+/// hitbox*, so a drag anywhere in the window reaches all three surfaces of
+/// every picker in it. The picker alone cannot tell them apart, because all
+/// three read the same `ColorPickerState`: dragging the alpha rail wrote the
+/// face as well, with a pointer below the face, which clamps brightness to
+/// zero and pinned the marker to the bottom edge.
 #[derive(Clone)]
-struct SurfaceDrag(EntityId);
+struct SurfaceDrag(EntityId, PickerSurface);
 
 impl Render for SurfaceDrag {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
@@ -592,6 +601,16 @@ fn surface_border(handle: &FocusHandle, colors: &Colors, window: &Window) -> Hsl
     }
 }
 
+/// The name one surface goes by: the key its focus handle is kept under, and
+/// the debug selector a test finds its rectangle by.
+fn surface_name(surface: PickerSurface) -> &'static str {
+    match surface {
+        PickerSurface::Face => "ravel-color-picker-face",
+        PickerSurface::Hue => "ravel-color-picker-hue",
+        PickerSurface::Alpha => "ravel-color-picker-alpha",
+    }
+}
+
 /// One popup surface's focus handle, stable while the popup is open.
 fn surface_focus(
     surface: PickerSurface,
@@ -599,11 +618,7 @@ fn surface_focus(
     window: &mut Window,
     cx: &mut App,
 ) -> FocusHandle {
-    let key = match surface {
-        PickerSurface::Face => "ravel-color-picker-face",
-        PickerSurface::Hue => "ravel-color-picker-hue",
-        PickerSurface::Alpha => "ravel-color-picker-alpha",
-    };
+    let key = surface_name(surface);
     window
         .use_keyed_state((key, state.entity_id()), cx, |_, cx| {
             cx.focus_handle().tab_stop(true)
@@ -643,6 +658,10 @@ where
     element
         .track_focus(handle)
         .tab_index(tab_index)
+        // Where a surface ended up is otherwise invisible to a test: the
+        // popup is placed by the popover, so a test that wants to drag on one
+        // surface has no other way to find its rectangle.
+        .debug_selector(move || surface_name(surface).to_owned())
         // The surface's geometry, recorded where the pointer handling that
         // needs it lives: a mouse event carries a window position and nothing
         // else can turn that into a fraction of an axis.
@@ -664,14 +683,15 @@ where
                 write(event.position, window, cx);
             }
         })
-        .on_drag(SurfaceDrag(entity_id), |drag, _, _, cx| {
+        .on_drag(SurfaceDrag(entity_id, surface), |drag, _, _, cx| {
             cx.stop_propagation();
             cx.new(|_| drag.clone())
         })
         .on_drag_move(
             move |event: &gpui::DragMoveEvent<SurfaceDrag>, window, cx| {
-                let SurfaceDrag(dragged) = event.drag(cx);
-                if *dragged != entity_id {
+                let SurfaceDrag(dragged, dragged_surface) = event.drag(cx);
+                // Both halves, for the reason `SurfaceDrag` documents.
+                if *dragged != entity_id || *dragged_surface != surface {
                     return;
                 }
                 write(event.event.position, window, cx);
@@ -1390,6 +1410,70 @@ mod tests {
             changes.borrow().is_empty(),
             "the edge kept emitting: {:?}",
             changes.borrow()
+        );
+    }
+
+    /// **The regression this closes.** `Interactivity::on_drag_move` fires in
+    /// the capture phase for every painted listener of the payload's type
+    /// *without consulting its hitbox*, so a drag on one surface reached the
+    /// other two as well. All three read the same `ColorPickerState`, so
+    /// naming only the picker in the payload told them apart from another
+    /// picker's drag and not from each other — and each one then mapped a
+    /// pointer that was never on it onto its own axes. Dragging the alpha rail
+    /// was what the user saw: below the face, brightness clamps to zero, so
+    /// the marker pinned itself to the bottom edge while they changed opacity.
+    ///
+    /// The drag under test is the **hue strip's**, because the alpha rail's
+    /// rectangle is not usable from a test: no locale is loaded, so its label
+    /// is the raw `color_picker.alpha` key, which is wide enough to push the
+    /// `flex_1` rail down to 2px and out past the popup's clip. The strip is
+    /// the same mechanism from the other side — its own axis must move, and
+    /// the face's two and the alpha must not.
+    #[gpui::test]
+    fn a_drag_on_one_surface_moves_nothing_but_its_own_axis(cx: &mut TestAppContext) {
+        let (cx, state, _changes) = open_picker(cx);
+        let value = |cx: &mut VisualTestContext| {
+            state
+                .read_with(cx, |state, _| state.value())
+                .expect("a value")
+        };
+        let before = value(cx);
+
+        let strip = cx
+            .debug_bounds(surface_name(PickerSurface::Hue))
+            .expect("the hue strip is drawn");
+        let start = strip.center();
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        // The first move is the one that starts the drag: the capture-phase
+        // handler runs before `active_drag` is set, so it writes nothing. The
+        // second is the move a user would notice.
+        let mut at = start;
+        for offset in [4.0, 30.0] {
+            at = Point {
+                x: start.x,
+                y: start.y - px(offset),
+            };
+            cx.simulate_mouse_move(at, Some(MouseButton::Left), Modifiers::none());
+        }
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        let after = value(cx);
+        assert!(
+            (hue_fraction(after) - hue_fraction(before)).abs() > 1e-3,
+            "the drag never reached the hue strip: {} to {}",
+            hue_fraction(before),
+            hue_fraction(after)
+        );
+        let (moved, held) = (face_point(after), face_point(before));
+        assert!(
+            (moved.saturation - held.saturation).abs() < 1e-4
+                && (moved.value - held.value).abs() < 1e-4,
+            "the hue drag moved the face: {held:?} to {moved:?}"
+        );
+        assert_eq!(
+            after.alpha, before.alpha,
+            "the hue drag moved the alpha rail"
         );
     }
 

@@ -10,21 +10,20 @@
 //!
 //! **Adding a widget adds one row to [`SECTIONS`] and one `fn` beside the
 //! others.** Nothing else in this file knows how many sections there are, so
-//! `Icon` / `Button` / `Tooltip` landed as three registrations.
-//!
-//! **Run it with `--release`:**
+//! each widget landed as one registration.
 //!
 //! ```text
-//! cargo run --release -p ravel-widgets --example gallery
+//! cargo run -p ravel-widgets --example gallery
 //! ```
 //!
 //! GPUI lays the whole element tree out on every frame, and this file is one
-//! deep flex tree with `flex_wrap` rows of fourteen icons and six buttons —
-//! taffy's most expensive path. Measured with `sample` over the same three
-//! seconds of scrolling, the main thread is **79% busy in a `cargo run` build
-//! and 27% in `--release`**, with `taffy::compute::flexbox::compute_flexbox_layout`
-//! the single hottest function in both. The debug build scrolls badly enough
-//! to read as a bug in the widgets; it is not.
+//! deep flex tree with `flex_wrap` rows of icons and buttons — taffy's most
+//! expensive path, and the single hottest function in a `sample` of scrolling
+//! it in either profile. That used to make the debug build scroll badly enough
+//! to read as a bug in the widgets. **It no longer does**: the workspace
+//! `Cargo.toml` raises `gpui-ce` and `taffy` for `dev` (measured there: 54.0ms
+//! per frame with both at the default, 4.3ms with both raised), so `cargo run`
+//! is usable and `--release` is merely faster.
 //!
 //! Two kinds of widget live here, and they read their colors differently. The
 //! curve views take theirs as arguments; `Icon`, `Button` and `Tooltip` read
@@ -54,9 +53,10 @@ use ravel_widgets::curve_view::{
 };
 use ravel_widgets::tokens::{Density, RavelTheme, ThemeMode, ThemeSpec};
 use ravel_widgets::{
-    Button, ButtonVariant, ColorPicker, ColorPickerState, Icon, Input, InputState, NumberInput,
-    ParamCurveEditor, ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY,
-    TooltipExt as _, TooltipOverlay, UiIcon, button_layers, hex_color_string, hsla_from_hsv,
+    Button, ButtonVariant, CHECKBOX_MARK_SIZE, CHECKBOX_SIZE, Checkbox, CheckboxState, ColorPicker,
+    ColorPickerState, Icon, Input, InputState, NumberInput, ParamCurveEditor,
+    ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY, TooltipExt as _,
+    TooltipOverlay, UiIcon, button_layers, checkbox_layers, hex_color_string, hsla_from_hsv,
     input_layers, swatch, with_alpha,
 };
 
@@ -155,6 +155,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("Tokens", tokens_section),
     ("icon · UiIcon at both densities", icon_section),
     ("button · every variant against every state", button_section),
+    ("checkbox · three states and four looks", checkbox_section),
     (
         "input · the frame, its states, and a ring you can click",
         input_section,
@@ -617,6 +618,140 @@ fn button_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
              the 1px ring (a click focuses without one) · Tab walks these left \
              to right and skips the third button in each row, which declares \
              tab_stop(false)",
+        ))
+        .into_any_element()
+}
+
+/// `Checkbox`: the three values it can hold, and the four looks each one has.
+///
+/// **The row to read is `disabled`.** A disabled *checked* box keeps its fill
+/// at 38% instead of losing it, so it still reads as checked — the one place
+/// this widget's disabled rule deliberately differs from the button's. A
+/// mechanical "remove the surface" would draw it exactly like the disabled
+/// unchecked box beside it.
+fn checkbox_section(theme: &RavelTheme, _inputs: &GalleryInputs) -> AnyElement {
+    let states = [
+        (CheckboxState::Unchecked, "unchecked"),
+        (CheckboxState::Checked, "checked"),
+        (CheckboxState::Indeterminate, "indeterminate"),
+    ];
+
+    // Live checkboxes: both density steps and the states a caller sets. They
+    // are controlled, so clicking one paints no new value — the section shows
+    // the looks; the unit tests hold the transitions.
+    let live = div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.sm)
+        .children(states.map(|(state, name)| {
+            let checkbox = move |id: &str, density: Density| {
+                Checkbox::new(SharedString::from(format!("gallery-{name}-{id}")))
+                    .density(density)
+                    .state(state)
+            };
+            div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(theme.spacing.md)
+                .child(div().w(px(96.0)).child(caption(theme, name.to_string())))
+                .child(checkbox("compact", Density::Compact).label("compact"))
+                .child(checkbox("default", Density::Default).label("default"))
+                .child(checkbox("bare", Density::Default))
+                .child(
+                    checkbox("no-tab-stop", Density::Default)
+                        .label("no tab stop")
+                        .tab_stop(false),
+                )
+                .child(
+                    checkbox("disabled", Density::Default)
+                        .label("disabled")
+                        .disabled(true),
+                )
+        }));
+
+    // The same boxes, flat, from the pure function: the four looks side by
+    // side without having to perform hover and press.
+    let swatches = div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.xs)
+        .children(states.map(|(state, name)| {
+            let enabled = checkbox_layers(state, false, &theme.colors);
+            let disabled = checkbox_layers(state, true, &theme.colors);
+            let looks = [
+                ("rest", enabled, None),
+                ("hover", enabled, enabled.hover),
+                ("press", enabled, enabled.pressed),
+                ("disabled", disabled, None),
+            ];
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.spacing.sm)
+                .child(div().w(px(96.0)).child(caption(theme, name.to_string())))
+                .children(looks.map(|(look, layers, ground)| {
+                    div()
+                        .h(theme.rows.default)
+                        .w(px(112.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(theme.spacing.xs)
+                        .rounded(theme.radius.radius)
+                        .when_some(ground, |cell, surface| cell.bg(surface))
+                        .text_size(theme.text.mono_font_size)
+                        .text_color(layers.label)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .size(CHECKBOX_SIZE)
+                                .rounded(theme.radius.radius)
+                                .border_1()
+                                .border_color(layers.indicator.border)
+                                .bg(layers.indicator.surface)
+                                .when_some(layers.indicator.mark.icon(), |box_, icon| {
+                                    box_.child(
+                                        Icon::new(icon)
+                                            .size(CHECKBOX_MARK_SIZE)
+                                            .text_color(layers.indicator.mark_color),
+                                    )
+                                }),
+                        )
+                        .child(look)
+                }))
+                .child(
+                    // The ring on its own, as in the button section: it is a
+                    // different layer from the hover surface and both can be on.
+                    div()
+                        .h(theme.rows.default)
+                        .w(px(80.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radius.radius)
+                        .border_1()
+                        .border_color(enabled.focus_ring.unwrap_or(theme.colors.border))
+                        .text_size(theme.text.mono_font_size)
+                        .text_color(theme.colors.foreground)
+                        .child("ring"),
+                )
+        }));
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.md)
+        .child(live)
+        .child(swatches)
+        .child(caption(
+            theme,
+            "the box is 14px at both densities · the row it sits in is not · \
+             Tab reaches every box but the fourth in each row · Enter and \
+             Space toggle through the same handler a click does",
         ))
         .into_any_element()
 }

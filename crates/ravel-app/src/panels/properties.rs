@@ -43,7 +43,6 @@
 use gpui::*;
 use gpui_component::Sizable;
 use gpui_component::accordion::Accordion;
-use gpui_component::checkbox::Checkbox;
 
 use gpui_component::select::{SelectEvent, SelectState};
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
@@ -80,6 +79,7 @@ use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{
     Button, ColorPicker, ColorPickerEvent, ColorPickerState, Icon, TooltipExt as _, UiIcon,
 };
+use ravel_widgets::{Checkbox, CheckboxState};
 use ravel_widgets::{Input, InputEvent, InputState};
 use std::sync::Arc;
 
@@ -1096,8 +1096,8 @@ fn build_field_row(
                 .child(
                     Checkbox::new(SharedString::from(format!("bool-{key}")))
                         .checked(*value)
-                        .on_click(move |checked: &bool, _window, cx| {
-                            let value = PropertyValue::Bool(*checked);
+                        .on_change(move |state: &CheckboxState, _window, cx| {
+                            let value = PropertyValue::Bool(*state == CheckboxState::Checked);
                             let key = field_key.clone();
                             let node_ids = node_ids.clone();
                             editor

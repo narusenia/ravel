@@ -9,6 +9,7 @@
 |---|---|
 | ノード型を追加する（CPU / GPU） | [add-node.md](add-node.md) |
 | パネルを追加する | [add-panel.md](add-panel.md) |
+| 部品（ウィジェット）を追加する | [add-widget.md](add-widget.md) |
 | コマンド・ショートカット・メニュー項目を追加する | [add-command.md](add-command.md) |
 | ユーザーに見える文字列を追加する | [add-locale.md](add-locale.md) |
 | テーマを書く / テーマスキーマを変える | [write-a-theme.md](write-a-theme.md) |

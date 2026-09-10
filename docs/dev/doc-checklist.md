@@ -13,6 +13,7 @@
 | 変えたもの | 直すもの |
 |---|---|
 | ノードを追加 / 削除 / `type_key` 変更 | [add-node.md](add-node.md) の手順（登録経路が変わった場合のみ）、[`../agent-api-reference.md`](../agent-api-reference.md) の `ravel-nodes` 節 |
+| 部品（`ravel-widgets`）を追加 / 借用部品を自前に差し替え | [add-widget.md](add-widget.md) の手順、[`../gpui-ui-guide.md`](../gpui-ui-guide.md#部品を追加する)（手順が足りなかった場合）、[`../ui-impl-status.md`](../ui-impl-status.md)（部品名とファイルパス）、`examples/gallery.rs` の `SECTIONS` |
 | パネルを追加 / 挙動変更 | `../specifications/ui/<view>.md`（設計意図）、[`../ui-impl-status.md`](../ui-impl-status.md)（実装状況）、[`../specifications/ui-spec.md`](../specifications/ui-spec.md) のパネル一覧（追加時） |
 | コマンド / キーバインドを追加・変更 | [`../specifications/ui/keybindings.md`](../specifications/ui/keybindings.md)、ロケール、[add-command.md](add-command.md)（経路が変わった場合） |
 | 公開 API（trait / 型 / シグネチャ） | [`../agent-api-reference.md`](../agent-api-reference.md)、該当する `docs/dev/` の手順 |

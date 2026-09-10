@@ -49,10 +49,17 @@ model is still current.
   (colors, spacing, row heights, typography, motion, radii) the UI is built
   from — `tokens.rs` is the single source and the authoritative theme schema.
   `theme.rs` is the one path from a widget to the set in force (`cx.tokens()`,
-  installed by `ravel-app`). `icon.rs`, `button.rs`, `tooltip.rs`, `input.rs`
-  and `number_input.rs` are the parts Ravel owns outright, built on
-  `gpui-base`'s unstyled primitives so focus, Enter/Space activation, text
-  editing and accessibility stay borrowed while the appearance is Ravel's. The
+  installed by `ravel-app`). `icon.rs`, `button.rs`, `tooltip.rs`, `input.rs`,
+  `number_input.rs`, `checkbox.rs` and `color_picker.rs` are the parts Ravel
+  owns outright, built on `gpui-base`'s unstyled primitives so focus,
+  Enter/Space activation, toggling, text editing and accessibility stay
+  borrowed while the appearance is Ravel's. The three that carry states decide
+  them in one pure function — `button_layers`, `input_layers`,
+  `checkbox_layers` — which a test and `examples/gallery` call without a
+  window; the colour picker's pure functions are a different shape, because
+  what it has to decide is a value rather than a state (`swatch_layers` for
+  the trigger, `pointer_color` / `nudged` for the surfaces).
+  `docs/dev/add-widget.md` is the checklist for adding the next one. The
   two input widgets paint a caller-owned `gpui_base::input::InputState`, which
   this crate re-exports (with `InputEvent` and the input actions) so a host
   needs no `gpui-base` dependency of its own; **the state is read, never
@@ -117,7 +124,8 @@ Important references:
 
 - `docs/README.md` (**documentation index** — which document plays which role)
 - `docs/dev/` (how-to pages with checklists: add a node, add a panel, add a
-  command, add locale strings, change persistence, testing, workflow)
+  widget, add a command, add locale strings, change persistence, testing,
+  workflow)
 - `docs/agent-api-reference.md` (compact public-API map for coding agents)
 - `docs/specifications/architecture.md`
 - `docs/specifications/data-model.md`

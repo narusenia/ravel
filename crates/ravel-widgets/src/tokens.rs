@@ -533,14 +533,6 @@ impl Colors {
         mix(base, self.foreground, amount)
     }
 
-    /// Whichever of `background` and `foreground` reads better on `surface`.
-    ///
-    /// Used for the label on a filled `primary` button, which is the one place
-    /// a Ravel control paints text on a saturated colour. The choice is by
-    /// **contrast ratio**, not by HSL lightness, because the two disagree
-    /// exactly where it matters: `#0000FF` has lightness 0.5 — nominally
-    /// "mid" — and a relative luminance of 0.07, so a lightness rule would
-    /// put near-black text on it and produce a 1.4:1 label.
     /// Whichever of `a` and `b` stands out more against `surface`.
     ///
     /// The same measurement [`Colors::readable_on`] makes, exposed for the
@@ -556,6 +548,20 @@ impl Colors {
         }
     }
 
+    /// Whichever of `background` and `foreground` reads better on `surface`.
+    ///
+    /// Used for the label on a filled `primary` button, and for a mark on a
+    /// fill that has been faded — the two places a Ravel control paints on a
+    /// saturated colour. The choice is by **contrast ratio**, not by HSL
+    /// lightness, because the two disagree exactly where it matters:
+    /// `#0000FF` has lightness 0.5 — nominally "mid" — and a relative
+    /// luminance of 0.07, so a lightness rule would put near-black text on it
+    /// and produce a 1.4:1 label.
+    ///
+    /// It answers "which of my two ends is readable", which is not the same
+    /// question as "which colour did the spec name": see `checkbox.rs`, where
+    /// the mark is `background` by decision and this function only fills in
+    /// the state the decision does not cover.
     pub fn readable_on(&self, surface: Hsla) -> Hsla {
         // Measured against what the eye actually sees. `relative_luminance`
         // reads r/g/b only, so a translucent surface would be judged by its
@@ -591,6 +597,19 @@ impl Colors {
 pub const COMPACT_ICON_SIZE: Pixels = px(12.0);
 /// The icon of a control on the default step.
 pub const DEFAULT_ICON_SIZE: Pixels = px(16.0);
+/// The side of the square a Checkbox or a Radio draws.
+///
+/// One size at both density steps, unlike an icon: the box is a *mark* rather
+/// than a glyph sized to its row, and 14px is what the visual spec fixed
+/// (`docs/implementation/ui-component-layer-plan.md`, "部品ごと"). A theme
+/// has no token for it because the schema models no control geometry.
+pub const CHECKBOX_SIZE: Pixels = px(14.0);
+/// The check or dash drawn inside a [`CHECKBOX_SIZE`] box.
+///
+/// Two pixels of ground on each side of the 14px box, so the mark reads as
+/// sitting in the fill rather than touching its border.
+pub const CHECKBOX_MARK_SIZE: Pixels = px(10.0);
+
 /// The gap between a compact control's icon and its label.
 pub const COMPACT_GAP: Pixels = px(4.0);
 /// The gap between a default control's icon and its label.

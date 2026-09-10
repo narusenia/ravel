@@ -1,0 +1,87 @@
+name: Bug report
+description: Something in Ravel behaves incorrectly, crashes, or renders wrongly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        日本語で書きたい場合は「Bug report（日本語）」のテンプレートを使ってください。
+
+        Please check the [open issues](https://github.com/narusenia/ravel/issues)
+        first. Note that the `issues/` **directory** in this repository is an
+        internal audit ledger, not this tracker — you do not need to look there.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected to see instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >
+        The shortest sequence that shows it. If a project file is involved,
+        attaching a minimal `.ravprj` helps more than anything else here.
+      placeholder: |
+        1. New project
+        2. Add a Shape node and connect it to …
+        3. Scrub the playhead past frame 10
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happens
+      description: A guess is fine — it only routes the report.
+      options:
+        - Viewer / rendering
+        - Timeline
+        - Node editor
+        - Properties
+        - Media import / decode
+        - Audio
+        - Export / render output
+        - Project load / save
+        - ravel-cli (headless)
+        - Somewhere else, or not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ravel version or commit
+      description: >
+        The release you installed, or the commit you built (`git rev-parse --short HEAD`).
+      placeholder: "6fff1966"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and GPU
+      description: >
+        Ravel runs its compositing on the GPU, so the adapter matters for
+        anything visual.
+      placeholder: "macOS 15.3 (Apple M2 Pro) / Windows 11 (RTX 4070)"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output or backtrace
+      description: >
+        Optional. Run with `RUST_LOG=debug` for more, and
+        `RUST_BACKTRACE=1` if it crashed.
+      render: text
+  - type: checkboxes
+    id: gpu-note
+    attributes:
+      label: Before you post
+      options:
+        - label: >
+            If this is a visual bug, I have said whether it also happens with a
+            different preview resolution (the Viewer toolbar) — that separates a
+            rendering bug from a scaling one.
+          required: false

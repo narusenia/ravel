@@ -1,0 +1,3 @@
+# A free-form issue is still allowed: a report that does not fit either form
+# is better filed badly than not filed.
+blank_issues_enabled: true

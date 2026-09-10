@@ -53,10 +53,13 @@ model is still current.
   `number_input.rs`, `checkbox.rs` and `color_picker.rs` are the parts Ravel
   owns outright, built on `gpui-base`'s unstyled primitives so focus,
   Enter/Space activation, toggling, text editing and accessibility stay
-  borrowed while the appearance is Ravel's. Each of them decides its states in
-  one pure function (`button_layers`, `input_layers`, `checkbox_layers`) that a
-  test and `examples/gallery` can call without a window; `docs/dev/add-widget.md`
-  is the checklist for adding the next one. The
+  borrowed while the appearance is Ravel's. The three that carry states decide
+  them in one pure function — `button_layers`, `input_layers`,
+  `checkbox_layers` — which a test and `examples/gallery` call without a
+  window; the colour picker's pure functions are a different shape, because
+  what it has to decide is a value rather than a state (`swatch_layers` for
+  the trigger, `pointer_color` / `nudged` for the surfaces).
+  `docs/dev/add-widget.md` is the checklist for adding the next one. The
   two input widgets paint a caller-owned `gpui_base::input::InputState`, which
   this crate re-exports (with `InputEvent` and the input actions) so a host
   needs no `gpui-base` dependency of its own; **the state is read, never

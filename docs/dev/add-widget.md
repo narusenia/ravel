@@ -66,6 +66,11 @@ GPUI のパターンは [`../gpui-ui-guide.md`](../gpui-ui-guide.md#部品を追
 `render` はそれを当てるだけにする。実物は `button_layers` /
 `input_layers` / `checkbox_layers` / `frame_is_focused`。
 
+**値を決める部品はこの形にならない。** `color_picker` が返すのは状態ごとの
+層ではなく、ポインタと鍵盤が書く色（`pointer_color` / `nudged`）と、
+トリガのスウォッチ（`swatch_layers`）。純関数に出す理由は同じでも、
+何を受けて何を返すかは部品が決めることの形に従う。
+
 ```rust
 pub fn checkbox_layers(
     state: CheckboxState,
@@ -116,13 +121,15 @@ pressed: (!disabled).then(|| …),
 focus_ring: (!disabled).then(|| …),
 ```
 
-**disabled のとき hover / press を「上から消す」のではなく、
+**disabled のとき hover / press / リングを「上から消す」のではなく、
 最初からインストールしない。** GPUI は `hover` を要素スタイルの*後*に
 解決するので、インストールしたままだと disabled でもポインタで光る。
+**リングも同じ扱い** — disabled な部品は Tab で到達しないので、出る道が
+無いはずのリングを定義に残さない（`focus_ring: (!disabled).then(…)`）。
 
 disabled で消すものと残すものは分かれる（計画書の「disabled が何に掛かるか」）:
 
-- **消す**: hover / press の面、Button の実体の面
+- **消す**: hover / press の面、フォーカスリング、Button の実体の面
 - **38% で残す**: Checkbox のチェックの塗り、Radio の点、Slider の塗り面、
   Tab のアクティブの面 — これらは「押せる」ではなく**状態**を語る塗りなので、
   機械的に消すと disabled かつチェック済みが未チェックと同じ絵になる

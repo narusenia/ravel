@@ -149,7 +149,10 @@ use gpui_base::{Checkbox as BaseCheckbox, CheckboxState};
 BaseCheckbox::new(self.id)
     .state(self.state)
     .disabled(self.disabled)
-    .on_change(move |state, event, window, cx| …)   // pointer と鍵盤の両方
+    // primitive 側のハンドラ。pointer と鍵盤の両方がここへ来る。
+    // 4 引数なのは primitive の形で、Ravel が公開するのは下記の 3 引数版:
+    // この閉包はその間の詰め物にすぎない
+    .on_change(move |state, _event, window, cx| on_change(&state, window, cx))
 ```
 
 **`on_click` / `on_change` が pointer と鍵盤の単一の経路であること。**

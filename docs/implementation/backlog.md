@@ -632,8 +632,8 @@ OVL-7 は選択 bbox の 8 ハンドルを**初めて機能させる**単位（�
 （旧 `"0:0,1:1"` 文字列は `.ravprj` v5 → v6 で変換）、`PARAM-2` で
 Properties のインラインカーブエディタ
 （`crates/ravel-widgets/src/param_curve_editor.rs`）から編集できる。
-Timeline の `ravel-widgets/src/curve_editor.rs` とは座標変換と評価関数を共有する
-（実装が分かれた理由は計画書 単位 2）。
+Timeline の `crates/ravel-widgets/src/curve_editor.rs` とは座標変換と
+評価関数を共有する（実装が分かれた理由は計画書 単位 2）。
 
 **2 型に 6 つの消費者がいる**。カーブとランプがそれぞれ 3 ドメインに現れる。
 

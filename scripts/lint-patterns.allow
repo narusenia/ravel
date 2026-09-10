@@ -110,6 +110,12 @@ observe-global crates/ravel-app/src/panels/mod.rs VisiblePanels
 # pattern for transient drag modes per .agents/rules/gpui.md.
 panel-on-key-down crates/ravel-app/src/panels/viewer.rs on_key_down
 
+# Escape abandons a live node editor gesture (`MED-APP-03`, UX invariant 4):
+# the same transient-drag-mode case as the Viewer above, wired the same way.
+# It consumes the key only while a drag is standing, so it takes nothing an
+# Action would otherwise receive.
+panel-on-key-down crates/ravel-app/src/panels/node_editor.rs on_key_down
+
 # Inline layer rename (REQ-UI-013 unit 5): text entry is the other approved
 # raw-key case. `InputState` emits no event for Escape, and its Enter action
 # does not reach a subscriber from a row (the pre-existing Properties name

@@ -923,6 +923,12 @@ impl TimelineGpuiPanel {
         mode: LayerClickMode,
         cx: &mut Context<Self>,
     ) {
+        // A keyframe selection is scoped to the row it was made in, so
+        // picking layers ends it (invariant 2, `MED-APP-04`). The bar row
+        // clears for the same reason; without it here, Delete after a header
+        // click removes a keyframe — possibly one in a collapsed row nobody
+        // can see — instead of the layer the click just selected.
+        self.selected_keyframes.clear();
         let order: Vec<LayerId> = self.state.layers().map(|layer| layer.id).collect();
         let selection = super::layer_selection(cx);
         let layers = layer_selection_after_click(selection.layers(), &order, lid, mode);
@@ -9311,6 +9317,48 @@ mod tests {
             Some(0.0),
             "the same-numbered layer of the other composition is untouched"
         );
+    }
+
+    /// Invariant 2 (selection lifetime): a keyframe selection belongs to the
+    /// row it was made in, so clicking a layer header ends it. The bar row
+    /// already cleared it; the header row did not, and Delete then removed a
+    /// keyframe of the *previous* layer — one that may sit in a collapsed row
+    /// nobody can see — instead of the layer the click just selected.
+    ///
+    /// **What this test drops**: the `selected_keyframes.clear()` in
+    /// [`TimelineGpuiPanel::select_layer_with_mode`], the header click's
+    /// selection path. Without it Delete deletes layer A's key at frame 10 and
+    /// leaves layer B in the composition.
+    #[gpui::test]
+    fn a_layer_header_click_ends_the_keyframe_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.select_layer(a, cx);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(a, &row, 0, 10)]);
+                // What a click on layer B's header runs.
+                panel.select_layer_with_mode(b, LayerClickMode::Replace, cx);
+                assert!(
+                    panel.selected_keyframes.is_empty(),
+                    "the keyframe selection outlived the row it belonged to"
+                );
+                panel.on_delete(&EditDelete, window, cx);
+            })
+            .unwrap();
+
+        let l = layer(&project, comp_id, a, cx);
+        assert!(
+            keyframes::has_keyframe_at(&l, &row, 0, 10),
+            "Delete was aimed at the clicked layer, not at a stale keyframe"
+        );
+        project.read_with(cx, |project, _| {
+            let comp = project.document().get_composition(comp_id).unwrap();
+            assert!(comp.get_layer(b).is_none(), "the clicked layer is deleted");
+            assert!(comp.get_layer(a).is_some(), "and the other one stands");
+        });
     }
 
     /// Batch Delete removes every selected keyframe while preserving the

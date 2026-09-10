@@ -341,6 +341,26 @@ gpui へ渡す側は `chord_to_gpui_string` が `secondary-` へ変換して解�
 応じて `Cmd+` / `Ctrl+` を出す。**`Display` を触ると資産の書式が変わる**ので、
 そちらは動かさないこと。
 
+**LOW-APP-30 | bug | ノードを動かして元の位置へ戻したドラッグが、z だけを変える undo ステップを残す**
+`crates/ravel-app/src/panels/node_editor.rs`（`canvas_mouse_moved` の
+`DragMode::MoveNodes` 腕と、マウスアップの `moved: true` ゲート）
+`LOW-APP-02` / `UIX-6` で raise は「ドラッグが実際に動いたら」に遅延したが、
+`moved` は**そのイベントで位置が変わったか**を `self.graph`（＝直前の
+プレビュー）と比べて決めるので、押下点へ戻ってきたフレームでも
+`moved: true` になり、しかも `DragMode` の `moved` は sticky。
+結果、**外へ出して元へ戻したドラッグはマウスアップで `commit_graph` に入り、
+位置は起点と同一で z だけが上がった undo ステップ**が残る
+（`cancel_drag` は `NodeMoveOrigin` の位置と z を戻すので、Escape や
+ボタン喪失の経路では起きない）。
+`LOW-APP-29` と同じ「デルタでは検出できない no-op」で、症状も同じ
+（見た目に何も起きない Ctrl+Z が増える）。
+
+**修正方針**: `moved` を「このイベントで変わったか」ではなく
+**`NodeMoveOrigin::position` に対する純移動量**で判定し、純移動が 0 の
+ときはマウスアップで `commit_graph` せず `NodeMoveOrigin`（位置 + z）へ
+戻す（`cancel_drag` と同じ復元）。`LOW-APP-29` の文書比較を入れるなら
+そちらでまとめて閉じてもよい。往復のドラッグの回帰テストを併せて追加する。
+
 **LOW-APP-29 | bug | フレームデルタでは検出できない no-op ジェスチャが undo ステップを積む（クランプで飽和したトリム）**
 `crates/ravel-app/src/panels/timeline.rs`（`drag_moved` の `TrimIn` / `TrimOut`
 の腕、および `GraphTangent` の腕）

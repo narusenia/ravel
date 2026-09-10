@@ -146,8 +146,10 @@ disabled で消すものと残すものは分かれる（計画書の「disabled
 - 両パレットで見ること。テーマトグルは
   `ravel_widgets::set_active_tokens` も呼ぶので、節が自分のトークンと
   食い違うことはない
-- `cargo run --release -p ravel-widgets --example gallery` で開く。
-  **`--release` を付ける**（理由は gallery の module doc）
+- `cargo run -p ravel-widgets --example gallery` で開く。
+  `--release` は速いが、**debug でも実用になる**（`Cargo.toml` の
+  `[profile.dev.package]` が `gpui-ce` と `taffy` を上げている。
+  理由と実測は gallery の module doc）
 
 ## 6. テスト
 

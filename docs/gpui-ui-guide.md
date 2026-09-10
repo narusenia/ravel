@@ -239,8 +239,8 @@ const SECTIONS: &[(&str, SectionFn)] = &[
 それは窓が必要な部品だけの話）。
 
 **4 状態と両パレットが 1 画面で見えること。** 生きた部品と、純関数から
-作った swatch 列の両方を出す（`--release` で開く。理由は gallery の
-module doc）。
+作った swatch 列の両方を出す（`cargo run -p ravel-widgets --example
+gallery`。`--release` は要らない — 理由は下の「dev プロファイルのこと」）。
 
 ### 6b. マークをアイコンで描くなら `UiIcon` に足す
 

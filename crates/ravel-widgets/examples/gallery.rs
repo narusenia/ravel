@@ -10,21 +10,20 @@
 //!
 //! **Adding a widget adds one row to [`SECTIONS`] and one `fn` beside the
 //! others.** Nothing else in this file knows how many sections there are, so
-//! `Icon` / `Button` / `Tooltip` landed as three registrations.
-//!
-//! **Run it with `--release`:**
+//! each widget landed as one registration.
 //!
 //! ```text
-//! cargo run --release -p ravel-widgets --example gallery
+//! cargo run -p ravel-widgets --example gallery
 //! ```
 //!
 //! GPUI lays the whole element tree out on every frame, and this file is one
-//! deep flex tree with `flex_wrap` rows of fourteen icons and six buttons —
-//! taffy's most expensive path. Measured with `sample` over the same three
-//! seconds of scrolling, the main thread is **79% busy in a `cargo run` build
-//! and 27% in `--release`**, with `taffy::compute::flexbox::compute_flexbox_layout`
-//! the single hottest function in both. The debug build scrolls badly enough
-//! to read as a bug in the widgets; it is not.
+//! deep flex tree with `flex_wrap` rows of icons and buttons — taffy's most
+//! expensive path, and the single hottest function in a `sample` of scrolling
+//! it in either profile. That used to make the debug build scroll badly enough
+//! to read as a bug in the widgets. **It no longer does**: the workspace
+//! `Cargo.toml` raises `gpui-ce` and `taffy` for `dev` (measured there: 54.0ms
+//! per frame with both at the default, 4.3ms with both raised), so `cargo run`
+//! is usable and `--release` is merely faster.
 //!
 //! Two kinds of widget live here, and they read their colors differently. The
 //! curve views take theirs as arguments; `Icon`, `Button` and `Tooltip` read

@@ -455,6 +455,11 @@ enum TimelineDrag {
     /// Reorder the layer in the stack (header vertical drag).
     Reorder {
         layer: LayerId,
+        /// Where the layer sat when the press landed. A drag that wanders and
+        /// comes back leaves the stack as it found it, so `changed` is the
+        /// *current* index against this one rather than "a reorder ran"
+        /// (invariant 3, `MED-APP-07`).
+        from_index: usize,
         changed: bool,
     },
     /// Move selected keyframes along the timeline (layer-local frames).
@@ -2228,9 +2233,27 @@ impl TimelineGpuiPanel {
                 pressed,
                 collapse_on_click,
                 grab_x,
-                ..
+                changed,
             } => {
                 let delta = self.frames_delta(grab_x, x);
+                // A gesture that changed nothing records nothing (invariant 3,
+                // `MED-APP-07`). The frame delta decides, not the fact that a
+                // move arrived: a click with a 1px wobble never leaves
+                // `delta == 0`, and a bar dragged out and dropped back on its
+                // start is a no-op again rather than staying `changed`.
+                if delta == 0 {
+                    if changed {
+                        self.revert_drag_preview(cx);
+                        self.drag = TimelineDrag::MoveBar {
+                            baselines,
+                            pressed,
+                            collapse_on_click,
+                            grab_x,
+                            changed: false,
+                        };
+                    }
+                    return;
+                }
                 self.edit_bar_targets(
                     &baselines,
                     |baseline, layer| layer.start_frame = baseline.start + delta,
@@ -2249,9 +2272,23 @@ impl TimelineGpuiPanel {
                 pressed,
                 collapse_on_click,
                 grab_x,
-                ..
+                changed,
             } => {
                 let delta = self.frames_delta(grab_x, x);
+                // Same rule as `MoveBar` above.
+                if delta == 0 {
+                    if changed {
+                        self.revert_drag_preview(cx);
+                        self.drag = TimelineDrag::TrimIn {
+                            baselines,
+                            pressed,
+                            collapse_on_click,
+                            grab_x,
+                            changed: false,
+                        };
+                    }
+                    return;
+                }
                 self.edit_bar_targets(
                     &baselines,
                     |baseline, layer| {
@@ -2280,9 +2317,23 @@ impl TimelineGpuiPanel {
                 pressed,
                 collapse_on_click,
                 grab_x,
-                ..
+                changed,
             } => {
                 let delta = self.frames_delta(grab_x, x);
+                // Same rule as `MoveBar` above.
+                if delta == 0 {
+                    if changed {
+                        self.revert_drag_preview(cx);
+                        self.drag = TimelineDrag::TrimOut {
+                            baselines,
+                            pressed,
+                            collapse_on_click,
+                            grab_x,
+                            changed: false,
+                        };
+                    }
+                    return;
+                }
                 self.edit_bar_targets(
                     &baselines,
                     |baseline, layer| {
@@ -2300,7 +2351,9 @@ impl TimelineGpuiPanel {
                     changed: true,
                 };
             }
-            TimelineDrag::Reorder { layer, changed } => {
+            TimelineDrag::Reorder {
+                layer, from_index, ..
+            } => {
                 let origin_y = self.area_origin.get().1;
                 let Some(target) = self.layer_at_content_y(y - origin_y) else {
                     return;
@@ -2317,14 +2370,27 @@ impl TimelineGpuiPanel {
                 let Some(to_index) = self.state.layers().position(|l| l.id == target) else {
                     return;
                 };
+                if to_index == from_index {
+                    // The layer is back in the slot the press found it in:
+                    // drop the preview instead of reordering into the same
+                    // place, so the gesture has nothing to commit (invariant
+                    // 3, `MED-APP-07`).
+                    self.revert_drag_preview(cx);
+                    self.drag = TimelineDrag::Reorder {
+                        layer,
+                        from_index,
+                        changed: false,
+                    };
+                    return;
+                }
                 project.update(cx, |project, cx| {
                     if let Some(doc) = reorder_layer(project.document(), comp_id, layer, to_index) {
                         project.apply_document(doc, InvalidationHint::Structural, cx);
                     }
                 });
-                let _ = changed;
                 self.drag = TimelineDrag::Reorder {
                     layer,
+                    from_index,
                     changed: true,
                 };
             }
@@ -2526,6 +2592,23 @@ impl TimelineGpuiPanel {
         }
     }
 
+    /// Drop the uncommitted preview a gesture has applied, putting the last
+    /// committed document back.
+    ///
+    /// Both ways out of an edit that turned out to be nothing use it: a
+    /// cancelled drag, and a live gesture that came back to where it started.
+    /// The second one matters because a preview left standing is *also* an
+    /// invariant-3 break — [`ravel_ui::document::DocumentStore::undo`] spends
+    /// the first Ctrl+Z discarding it, so the press does nothing visible even
+    /// though no undo step was pushed (`MED-APP-07`).
+    fn revert_drag_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(project) = self.project.clone() {
+            project.update(cx, |project, cx| {
+                project.revert_document(cx);
+            });
+        }
+    }
+
     /// Abort the active drag (button state lost mid-gesture): its live
     /// document updates are uncommitted and must not leak into an unrelated
     /// undo step.
@@ -2555,11 +2638,7 @@ impl TimelineGpuiPanel {
         if !changed {
             return;
         }
-        if let Some(project) = self.project.clone() {
-            project.update(cx, |project, cx| {
-                project.revert_document(cx);
-            });
-        }
+        self.revert_drag_preview(cx);
     }
 
     fn drag_ended(&mut self, cx: &mut Context<Self>) {
@@ -4749,9 +4828,13 @@ impl TimelineGpuiPanel {
                             // Header drag reorders the stack; committed on
                             // mouse-up. A modified click is building a
                             // selection, not moving a layer.
-                            if !mode.is_additive() {
+                            if !mode.is_additive()
+                                && let Some(from_index) =
+                                    this.state.layers().position(|l| l.id == lid)
+                            {
                                 this.drag = TimelineDrag::Reorder {
                                     layer: lid,
+                                    from_index,
                                     changed: false,
                                 };
                             }
@@ -7682,6 +7765,167 @@ mod tests {
         assert!(layer(&project, comp_id, a, cx).locked);
     }
 
+    /// Invariant 3 (one action, one undo step): a bar gesture that leaves the
+    /// bar where it found it is not an edit. `UndoStack::push` does not
+    /// deduplicate, so a click with a 1px wobble — and a drag that wandered
+    /// and came back — used to push a step that Ctrl+Z spends without showing
+    /// anything, pushing the real history out of the 200-step window.
+    ///
+    /// **What this test drops**: the `delta == 0` arm in `MoveBar`, `TrimIn`
+    /// or `TrimOut` inside [`TimelineGpuiPanel::drag_moved`]. Apply
+    /// unconditionally and mark `changed: true` the way they used to, and the
+    /// undo below spends itself on a no-op — either on the garbage step, or
+    /// (with the step gone but the preview left standing) on discarding a
+    /// preview identical to the committed document — instead of reaching the
+    /// solo toggle.
+    #[gpui::test]
+    fn a_bar_drag_that_ends_where_it_started_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        // The last real edit — what one Ctrl+Z has to reach.
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layer(&project, comp_id, a, cx).solo);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let baselines = panel.bar_baselines(a, cx);
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: baselines.clone(),
+                    pressed: a,
+                    collapse_on_click: false,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                // A click with a wobble: 1px is less than a frame.
+                panel.drag_moved(1.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+
+                // And a real drag dropped back on its own start: 40px is ten
+                // frames out, 0px is home again.
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines,
+                    pressed: a,
+                    collapse_on_click: false,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(40.0, 0.0, false, false, cx);
+                panel.drag_moved(0.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+
+                // Both trim edges follow the same rule.
+                for edge in ["in", "out"] {
+                    let baselines = panel.bar_baselines(a, cx);
+                    panel.drag = if edge == "in" {
+                        TimelineDrag::TrimIn {
+                            baselines,
+                            pressed: a,
+                            collapse_on_click: false,
+                            grab_x: 0.0,
+                            changed: false,
+                        }
+                    } else {
+                        TimelineDrag::TrimOut {
+                            baselines,
+                            pressed: a,
+                            collapse_on_click: false,
+                            grab_x: 0.0,
+                            changed: false,
+                        }
+                    };
+                    panel.drag_moved(40.0, 0.0, false, false, cx);
+                    panel.drag_moved(0.0, 0.0, false, false, cx);
+                    panel.drag_ended(cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let placed = layer(&project, comp_id, a, cx);
+        assert_eq!(
+            (placed.start_frame, placed.in_frame, placed.out_frame),
+            (0, 0, 100),
+            "every gesture left the bar and both trim edges where they started"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, a, cx).solo,
+            "one undo reached the last real edit, so the gestures recorded none"
+        );
+    }
+
+    /// The reorder half of invariant 3: a header drag is judged by where the
+    /// layer ends up, not by whether a reorder ran on the way.
+    ///
+    /// **What this test drops**: `changed: to_index != from_index` in the
+    /// `Reorder` arm of [`TimelineGpuiPanel::drag_moved`]. Set it to `true`
+    /// and the undo below spends itself on a stack that never changed.
+    #[gpui::test]
+    fn a_header_drag_that_returns_to_its_own_slot_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let order = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .iter()
+                    .map(|l| l.id)
+                    .collect::<Vec<LayerId>>()
+            })
+        };
+        let start = order(cx);
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        // Press on A's header, then drag onto the other row.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::Reorder {
+                    layer: a,
+                    from_index: panel.state.layers().position(|l| l.id == a).unwrap(),
+                    changed: false,
+                };
+                let origin_y = panel.area_origin.get().1;
+                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, false, false, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_ne!(order(cx), start, "the drag did move the layer");
+
+        // And back onto its own slot: the row B now occupies.
+        window
+            .update(cx, |panel, _window, cx| {
+                let origin_y = panel.area_origin.get().1;
+                let rows: Vec<LayerId> = panel.state.layers().rev().map(|l| l.id).collect();
+                let row = rows.iter().position(|id| *id == b).unwrap() as f32;
+                panel.drag_moved(
+                    0.0,
+                    origin_y + LAYER_ROW_HEIGHT * row + LAYER_ROW_HEIGHT / 2.0,
+                    false,
+                    false,
+                    cx,
+                );
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(order(cx), start, "the stack is back as the press found it");
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, a, cx).solo,
+            "one undo reached the last real edit, so the gesture recorded none"
+        );
+    }
+
     /// Reordering via header drag persists to the document.
     #[gpui::test]
     fn header_drag_reorders_the_stack(cx: &mut TestAppContext) {
@@ -7691,6 +7935,7 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.drag = TimelineDrag::Reorder {
                     layer: a,
+                    from_index: panel.state.layers().position(|l| l.id == a).unwrap(),
                     changed: false,
                 };
                 // Row 0 (top) is layer B: dragging A onto it moves A to B's

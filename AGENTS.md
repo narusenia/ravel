@@ -117,7 +117,8 @@ Important references:
 
 - `docs/README.md` (**documentation index** — which document plays which role)
 - `docs/dev/` (how-to pages with checklists: add a node, add a panel, add a
-  command, add locale strings, change persistence, testing, workflow)
+  widget, add a command, add locale strings, change persistence, testing,
+  workflow)
 - `docs/agent-api-reference.md` (compact public-API map for coding agents)
 - `docs/specifications/architecture.md`
 - `docs/specifications/data-model.md`

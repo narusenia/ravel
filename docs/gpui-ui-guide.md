@@ -130,55 +130,172 @@ window bounds の読み取りと `open_window` は `cx.defer` で 1 サイクル
 - レイアウトツリーをホストからパネルへ渡す（パネルは自分の `PanelInstanceId` と
   durable Global だけを知っていればよい）
 
-## Theme カラーの使い方
+## 部品を追加する
+
+`crates/ravel-widgets` に Ravel 自前の部品（Button / Input / Checkbox …）を
+足すときの手順。**順番に意味がある。** チェックリスト形式は
+[`dev/add-widget.md`](dev/add-widget.md)、見た目の決定は
+[`implementation/ui-component-layer-plan.md`](implementation/ui-component-layer-plan.md)
+の「見た目の仕様」。
+
+### 1. `gpui-base` の無スタイル primitive に着せる
+
+挙動（フォーカス、Tab stop、Enter / Space、トグル、アクセシビリティ
+ロール）は借りる。Ravel が書くのは見た目だけ。
+
+```rust
+use gpui_base::{Checkbox as BaseCheckbox, CheckboxState};
+
+BaseCheckbox::new(self.id)
+    .state(self.state)
+    .disabled(self.disabled)
+    .on_change(move |state, event, window, cx| …)   // pointer と鍵盤の両方
+```
+
+**`on_click` / `on_change` が pointer と鍵盤の単一の経路であること。**
+primitive の側で Enter / Space が click として届くので、`on_key_down` を
+並べて足すと 2 経路になり、片方が腐る（不変条件 10）。
+
+### 2. 寸法は `Density::metrics` から
+
+```rust
+let theme = cx.tokens().clone();
+let metrics = self.density.metrics(&theme);   // height / padding_x / gap / icon / font_size
+```
+
+行高は 2 段だけ（`row.compact` 20 / `row.default` 24）。**3 段目を発明
+しない。** トークンに無い部品固有の寸法（14px の Checkbox）は `tokens.rs`
+の名前付き定数にする（不変条件 12）。
+
+### 3. 色は `Colors` の導出から
+
+`hover_surface()` / `pressed_surface()` / `disabled_foreground()` /
+`focus_ring()` / `raised_surface()` / `selected_surface()` /
+`toward_foreground()` / `readable_on()`。**`is_dark` の分岐を書かない** —
+`foreground` が既にモードで逆向きなので、そこへ混色すれば向きは自動で
+正しくなる。
+
+### 4. 判定を純関数に出す
+
+`render` が呼ぶものをテストが呼べるようにする。実物は `button_layers` /
+`input_layers` / `checkbox_layers` / `frame_is_focused`。
+
+```rust
+let layers = checkbox_layers(self.state, self.disabled, &theme.colors);
+```
+
+`render` は返ってきた層を当てるだけ。**disabled のとき hover / press は
+インストールしない**（GPUI は `hover` を要素スタイルの後に解決するので、
+残したままだと disabled でもポインタで光る）。
+
+### 5. リングは内側の 1px
+
+`Button` は **`focus_visible`**（鍵盤で移動したときだけ。GPUI が
+`last_input_was_keyboard` と AND する）、`Input` と `ColorPicker` の面は
+**`focus`**。理由は `input.rs` の module doc — クリックして入る面は、
+ポインタが離れても鍵盤を持ち続けるので、リングが出ないと「どこに打ち込んで
+いるか」が分からない。外側のリングは使わない（`overflow_hidden` の祖先に
+切られる）。
+
+### 6. `examples/gallery` の `SECTIONS` に 1 行足す
+
+```rust
+const SECTIONS: &[(&str, SectionFn)] = &[
+    …
+    ("checkbox · 三状態と 4 状態", checkbox_section),
+];
+```
+
+**4 状態と両パレットが 1 画面で見えること。** 生きた部品と、純関数から
+作った swatch 列の両方を出す（`--release` で開く。理由は gallery の
+module doc）。
+
+### 7. `ravel-widgets` に `gpui-component` を足さない
+
+テーマスキーマは Ravel 側が正で、gpui-component の `ThemeConfig` は
+`ravel-app` が*導出*する。**逆向きは禁止。** 借りている裾の部品
+（`menu` / `select` / `table` …）の配線は `ravel-app` 側に置く。
+
+### dev プロファイルのこと
+
+描画の重い部品を `ravel-widgets` に足すときは、`Cargo.toml` の
+`[profile.dev.package.*]` を思い出す。**このクレートは `opt-level = 2`**
+（カーブエディタの paint サンプリングが opt-level 0 で 3.4 倍遅い:
+32.7ms vs 9.6ms）で、`gpui-ce` = 2 / `taffy` = 3 は debug build の
+1 フレームのため（600 個の flex 子で 54.0ms → 4.3ms）。debug build の
+体感が「部品のバグ」に見えることがあるが、それはこれ。
+
+## Theme トークンの使い方
 
 ### 取得方法
 
+**Ravel 自前のトークンが正**（`ravel_widgets::tokens`）。パネルも自前部品も
+`cx.tokens()` の 1 経路だけで手に入れる。
+
 ```rust
-use gpui_component::ActiveTheme;  // トレイト import 必須
+use ravel_widgets::ActiveTokens as _;   // トレイト import 必須
 
 // Render::render() 内で
-let theme = cx.theme();  // &Theme
-let colors = theme.colors;  // ThemeColor (Copy)
+let theme = cx.tokens();          // &RavelTheme
+let colors = &theme.colors;       // Colors (Copy)
 ```
 
-### 主要カラーフィールド (ThemeColor)
+`gpui-component` の `cx.theme()` は**借りている部品の中身が読むもの**で、
+その `ThemeConfig` は `ravel-app` が Ravel のトークンから*導出*している
+（`theme_tokens.rs`）。パネルから `cx.theme()` を読まない。
 
-全て `Hsla` 型。
+### カラートークン (Colors)
+
+全て `Hsla` 型。**10 個しかない。**
 
 | フィールド | 用途 |
 |-----------|------|
 | `background` | パネル背景 |
 | `foreground` | テキスト |
-| `border` | ボーダー |
-| `accent` | アクセント色（クリップ等） |
-| `accent_foreground` | アクセント上のテキスト |
-| `muted` | 控えめな背景 |
+| `border` | ボーダー、パネル境界 |
 | `muted_foreground` | 控えめなテキスト（ラベル、サブ情報） |
-| `list` | リスト/ヘッダー背景 |
-| `list_hover` | リストホバー |
-| `list_active` | リスト選択 |
-| `tab_bar` | タブバー/ルーラー背景 |
+| `accent` | 背景から 1 段（hover の面、タブ帯） |
+| `primary` | 選択・フォーカスリング・強調 |
+| `secondary` | 実体のあるボタンの面 |
 | `danger` | 危険操作 |
+| `info` | 情報 |
+| `drop_target` | ドロップ先の表示 |
 
-その他: `primary`, `secondary`, `warning`, `info`, `success`, `chart_1`〜`chart_5`, `scrollbar`, `sidebar` 等多数。
+### 状態の色は導出メソッドで作る
+
+**10 個を増やさない。** 状態は純関数で導く。
+
+| 欲しいもの | 導出 |
+|---|---|
+| hover の面 | `colors.hover_surface()` |
+| press の面 | `colors.pressed_surface()` |
+| 自分の面から 1 段 | `colors.toward_foreground(surface, PRESS_MIX)` |
+| disabled の前景 | `colors.disabled_foreground()` |
+| フォーカスリング | `colors.focus_ring()` |
+| 浮く面（Tooltip / Popover） | `colors.raised_surface()` |
+| 選択された行の面 | `colors.selected_surface()` |
+| タブ帯 | `colors.tab_bar()` |
+| Slider / Progress の塗り | `colors.slider_fill()` |
+| 面の上で読める文字色 | `colors.readable_on(surface)` |
+
+`is_dark` で分岐しない。ハードコードした色は
+`scripts/lint-patterns.sh` の `colour-literal` が落とす
+（[`.agents/rules/ux.md`](../.agents/rules/ux.md) 不変条件 12）。
 
 ### 透明度の調整
 
-`Hsla` 構造体の `a` フィールドを直接変更:
-
 ```rust
-// 良い（Copyなのでspread可能）
-Hsla { a: 0.5, ..colors.background }
-
-// gpui_component::Colorize トレイトも使える
-use gpui_component::Colorize;
-colors.foreground.opacity(0.6)
+colors.foreground.opacity(0.6)          // gpui の Hsla::opacity
+Hsla { a: 0.5, ..colors.background }    // Copy なので spread も可
+ravel_widgets::with_alpha(color, 0.38)  // アルファだけ差し替える
 ```
+
+**混色は `tokens::mix` を使う。** `gpui::ColorExt::blend` は名前が約束する
+ものと違う計算をする（不透明な基色が消える。理由は `mix` の doc）。
 
 ### RGBA → HSLA 変換
 
-`clip.color` 等が `[f32; 4]` (RGBA) の場合:
+`[f32; 4]` (RGBA) から:
 
 ```rust
 use gpui::{Rgba, Hsla};

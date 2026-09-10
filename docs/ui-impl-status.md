@@ -129,7 +129,7 @@ Popover・検索パレット・種別アイコン）Done
 | ノード選択連動 | ✅ | SelectedPropertiesTarget Global で自動切替 |
 | レイヤー選択連動 | ✅ | Timeline / Outliner のレイヤー選択で Layer セクション表示・編集（殻属性: 時間配置/Transform/opacity/blend/adjustment、音声を持つレイヤーでは Audio セクションの gain/fade/audio mute、およびアセットが持つ音声ストリーム一覧からの選択（コンテナのストリーム番号 + codec/rate/ch。一覧は `AssetMetadata` 由来で probe しない）、ProjectState 経由で Document 更新）。複数選択時は読み取り専用の Layers ターゲット（選択数 + 共通値、相違は「—」。一括編集は後半） |
 | In カスタムパラメータ | ✅ | `custom.<name>` フィールドとして表示・編集（REQ-LAYER-002）。編集は In ノードのパラメータへ書き戻し |
-| Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
+| Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Ravel 自前の `Checkbox`（`ravel-widgets/src/checkbox.rs`、`UIX-9`）で編集。14px の四角、未チェックは枠だけ、チェック済みは `primary` の面に `background` でマークを抜く。disabled でもチェックの塗りは 38% で残す（消すと未チェックと同じ絵になるため）。Tab で到達し Enter / Space がクリックと同じ経路で届く |
 | Parent（親レイヤー）の設定 | ✅ | Transform セクション先頭の Parent ドロップダウン（layer-shell-wiring 計画 単位 5、REQ-LAYER-001）。候補は同一コンプの他レイヤー + `(none)`。**自身と自身の子孫は列挙しない**ので UI から親子循環を作れない（評価側の停止保証は残っている）。選択肢は `{layer_id}: {名前}` なので同名レイヤーでも別の親を指す。付け替え・解除はどちらも `InvalidationHint::Structural` で **1 操作 1 undo**（`compile.rs` が親の Transform ノードから辺を張るため構造変化）。親レイヤーを削除すると子の `parent` は `None` に戻る（`Composition::remove_layer` が解決不能な `LayerId` を残さない）。Timeline の Parent 列・Outliner の D&D・Viewer の親子リンク線はこの単位の対象外 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新。**式で駆動された成分はスクラブしても変わらない**（値の出どころは式なので、ドラッグ中に動いた表示は離すと戻る）。編集は行の下の式エディタで行う |
 | クリックでテキスト入力 | ✅ | Ravel の `Input`（`ravel-widgets`。テキスト編集の状態は `gpui_base::InputState` で、`ravel_widgets` が再エクスポートしている）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |

@@ -591,6 +591,19 @@ impl Colors {
 pub const COMPACT_ICON_SIZE: Pixels = px(12.0);
 /// The icon of a control on the default step.
 pub const DEFAULT_ICON_SIZE: Pixels = px(16.0);
+/// The side of the square a Checkbox or a Radio draws.
+///
+/// One size at both density steps, unlike an icon: the box is a *mark* rather
+/// than a glyph sized to its row, and 14px is what the visual spec fixed
+/// (`docs/implementation/ui-component-layer-plan.md`, "部品ごと"). A theme
+/// has no token for it because the schema models no control geometry.
+pub const CHECKBOX_SIZE: Pixels = px(14.0);
+/// The check or dash drawn inside a [`CHECKBOX_SIZE`] box.
+///
+/// Two pixels of ground on each side of the 14px box, so the mark reads as
+/// sitting in the fill rather than touching its border.
+pub const CHECKBOX_MARK_SIZE: Pixels = px(10.0);
+
 /// The gap between a compact control's icon and its label.
 pub const COMPACT_GAP: Pixels = px(4.0);
 /// The gap between a default control's icon and its label.

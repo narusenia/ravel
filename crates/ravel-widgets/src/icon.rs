@@ -54,6 +54,7 @@ pub trait IconPath {
 /// holds the two ends together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiIcon {
+    Check,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
@@ -67,6 +68,7 @@ pub enum UiIcon {
     InterpolationBezier,
     InterpolationLinear,
     InterpolationStep,
+    Minus,
     Network,
     Plus,
     Settings,
@@ -76,7 +78,8 @@ pub enum UiIcon {
 
 impl UiIcon {
     /// Every glyph, for the tests and the gallery.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 20] = [
+        Self::Check,
         Self::ChevronDown,
         Self::ChevronLeft,
         Self::ChevronRight,
@@ -90,6 +93,7 @@ impl UiIcon {
         Self::InterpolationBezier,
         Self::InterpolationLinear,
         Self::InterpolationStep,
+        Self::Minus,
         Self::Network,
         Self::Plus,
         Self::Settings,
@@ -100,6 +104,7 @@ impl UiIcon {
     /// The asset path of this glyph.
     pub fn icon_path(self) -> SharedString {
         match self {
+            Self::Check => "icons/check.svg",
             Self::ChevronDown => "icons/chevron-down.svg",
             Self::ChevronLeft => "icons/chevron-left.svg",
             Self::ChevronRight => "icons/chevron-right.svg",
@@ -113,6 +118,7 @@ impl UiIcon {
             Self::InterpolationBezier => "icons/interpolation-bezier.svg",
             Self::InterpolationLinear => "icons/interpolation-linear.svg",
             Self::InterpolationStep => "icons/interpolation-step.svg",
+            Self::Minus => "icons/minus.svg",
             Self::Network => "icons/network.svg",
             Self::Plus => "icons/plus.svg",
             Self::Settings => "icons/settings.svg",

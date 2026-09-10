@@ -20,10 +20,10 @@
 //! can drift from the shell.
 
 use gpui::*;
-use gpui_component::checkbox::Checkbox;
 use ravel_i18n::t;
 use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Button;
+use ravel_widgets::{Checkbox, CheckboxState};
 use ravel_widgets::{Input, InputState};
 
 use crate::workspace::RavelWorkspace;
@@ -213,8 +213,9 @@ impl Render for WorkspaceLayoutsForm {
                         Checkbox::new("layout-embed-in-projects")
                             .label(SharedString::from(t!("workspace.layouts.embed")))
                             .checked(embed)
-                            .on_click(|checked, _window, cx| {
-                                crate::layout_persist::set_embed_in_projects(*checked, cx);
+                            .on_change(|state, _window, cx| {
+                                let embed = *state == CheckboxState::Checked;
+                                crate::layout_persist::set_embed_in_projects(embed, cx);
                             }),
                     )
                     .child(

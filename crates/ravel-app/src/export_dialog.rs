@@ -25,10 +25,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::checkbox::Checkbox;
+use gpui_component::Sizable as _;
 use gpui_component::radio::Radio;
 use gpui_component::select::{Select, SelectState};
-use gpui_component::{Disableable as _, Sizable as _};
 use ravel_core::id::CompId;
 use ravel_core::media::encode::{
     Availability, EncodeTarget, EncoderAvailability, PngDepth, UnavailableReason,
@@ -38,6 +37,7 @@ use ravel_i18n::t;
 use ravel_ui::export::{DEFAULT_PADDING, ExportSettings};
 use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::Button;
+use ravel_widgets::{Checkbox, CheckboxState};
 use ravel_widgets::{Input, InputState, NumberInput};
 use std::path::PathBuf;
 
@@ -522,8 +522,8 @@ impl Render for ExportForm {
                         Checkbox::new("export-overwrite")
                             .label(SharedString::from(t!("export.field.overwrite")))
                             .checked(self.overwrite)
-                            .on_click(cx.listener(|this, checked: &bool, _window, cx| {
-                                this.overwrite = *checked;
+                            .on_change(cx.listener(|this, state: &CheckboxState, _window, cx| {
+                                this.overwrite = *state == CheckboxState::Checked;
                                 this.error = None;
                                 cx.notify();
                             })),
@@ -533,8 +533,8 @@ impl Render for ExportForm {
                             .label(SharedString::from(t!("export.field.audio")))
                             .checked(self.audio && audio_possible)
                             .disabled(!audio_possible)
-                            .on_click(cx.listener(|this, checked: &bool, _window, cx| {
-                                this.audio = *checked;
+                            .on_change(cx.listener(|this, state: &CheckboxState, _window, cx| {
+                                this.audio = *state == CheckboxState::Checked;
                                 cx.notify();
                             })),
                     )

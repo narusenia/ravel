@@ -5,8 +5,8 @@
 //!
 //! [`tokens`] is the single source for the colors, spacing, row heights,
 //! typography, motion and radii the UI is built from, and [`theme`] is how a
-//! widget reaches the set in force. [`icon`], [`button`] and [`tooltip`] are
-//! the three parts Ravel owns outright — the ones the application's texture
+//! widget reaches the set in force. [`icon`], [`button`], [`tooltip`] and
+//! [`checkbox`] are among the parts Ravel owns outright — the ones the application's texture
 //! lives in — and they are built on `gpui-base`'s unstyled primitives, which
 //! own focus, keyboard activation and accessibility. [`curve_editor`] and
 //! [`curve_view`] are the geometry the curve views share, and
@@ -24,6 +24,7 @@
 //! `ravel-app`, never here.
 
 pub mod button;
+pub mod checkbox;
 pub mod color_picker;
 pub mod curve_editor;
 pub mod curve_view;
@@ -51,6 +52,17 @@ pub use curve_view::{
 };
 
 pub use button::{Button, ButtonFace, ButtonLayers, ButtonVariant, button_layers};
+
+pub use checkbox::{Checkbox, CheckboxBox, CheckboxLayers, CheckboxMark, checkbox_layers};
+
+/// The checkbox's three-valued state, re-exported.
+///
+/// `gpui-base`'s own type, surfaced for the same reason [`InputState`] is: a
+/// host that reads which state an activation landed on needs no `gpui-base`
+/// dependency of its own to name it. The transition rule — unchecked and
+/// indeterminate both activate to checked — lives with the primitive, so
+/// [`crate::Checkbox`] forwards the next state rather than computing one.
+pub use gpui_base::CheckboxState;
 
 pub use color_picker::{
     COLOR_PICKER_SURFACE_CONTEXT, ColorPicker, FacePoint, HUE_BANDS, Nudge, PickerSurface,
@@ -116,7 +128,7 @@ pub use gpui_base::TooltipOverlay;
 pub use theme::{ActiveTokens, set_active_tokens};
 
 pub use tokens::{
-    Colors, Density, Metrics, Motion, Radii, RavelTheme, Rows, Spacing, ThemeFile, ThemeMode,
-    ThemeSpec, Typography, hex_color_string, hsla_from_hsv, hsv_of, hue_color, hue_fraction, mix,
-    parse_hex_color, with_alpha, with_hue,
+    CHECKBOX_MARK_SIZE, CHECKBOX_SIZE, Colors, Density, Metrics, Motion, Radii, RavelTheme, Rows,
+    Spacing, ThemeFile, ThemeMode, ThemeSpec, Typography, hex_color_string, hsla_from_hsv, hsv_of,
+    hue_color, hue_fraction, mix, parse_hex_color, with_alpha, with_hue,
 };

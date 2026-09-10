@@ -198,3 +198,19 @@ opt-level = 1
 # polylines). Without this entry the move silently demoted it.
 [profile.dev.package.ravel-widgets]
 opt-level = 2
+
+# **The two crates a debug frame is spent in, neither of them Ravel's.**
+# Measured with 600 small flex children redrawn 100 times: 54.0ms per frame
+# with both at the profile default, 6.6ms with `gpui-ce` alone raised, and
+# 4.3ms with `taffy` raised too — twelve times faster, which is the difference
+# between a debug build that scrolls and one that does not. Adding the text
+# stack (`cosmic-text`, `rustybuzz`, `ttf-parser`, `swash`) on top changed
+# nothing measurable, so it is not here.
+#
+# The cost is one longer build whenever the pinned revision moves; stepping
+# into gpui's own layout code is the thing given up.
+[profile.dev.package.gpui-ce]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 3

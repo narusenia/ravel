@@ -369,6 +369,17 @@ pub trait TooltipExt: StatefulInteractiveElement + ParentElement + Sized {
             .on_mouse_down(MouseButton::Left, |_event, window, cx| {
                 hide_tooltip(window, cx);
             })
+            // A scroll moves the trigger out from under the pointer without
+            // moving the pointer, and GPUI recomputes hover from mouse
+            // movement only — so `on_hover(false)` never runs and the showing
+            // has no other way to end. Worse, the trigger's bounds are the
+            // identity `WindowTooltip::showing` holds, and a scroll changes
+            // them: the eventual mouse move then finds a mismatch and returns
+            // early, so the popup stays up for good. GPUI's own `.tooltip()`
+            // clears on a scroll wheel event for the same reason.
+            .on_scroll_wheel(|_event, window, cx| {
+                hide_tooltip(window, cx);
+            })
     }
 }
 
@@ -377,7 +388,10 @@ impl<E: StatefulInteractiveElement + ParentElement> TooltipExt for E {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, point};
+    use gpui::{
+        Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
+        point,
+    };
 
     fn key(name: &str) -> Keystroke {
         Keystroke::parse(name).expect("the test keystroke parses")
@@ -642,6 +656,37 @@ mod tests {
         cx.simulate_mouse_down(center(FIRST_LEFT), MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
         assert!(!showing(FIRST_POPUP, cx), "the press left the tooltip up");
+    }
+
+    /// **The regression this closes.** A scroll moves the trigger out from
+    /// under a pointer that has not moved, so nothing recomputes hover and the
+    /// trigger's `on_hover(false)` never runs. Before the scroll listener the
+    /// popup stayed up indefinitely — and stayed up even after the pointer
+    /// finally moved away, because the scroll had changed the bounds the
+    /// showing is identified by. Both halves are asserted.
+    #[gpui::test]
+    fn scrolling_over_the_trigger_hides_the_tooltip(cx: &mut TestAppContext) {
+        let cx = toolbar(true, cx);
+        hover(center(FIRST_LEFT), cx);
+        wait(SHOW_DELAY, cx);
+        assert!(showing(FIRST_POPUP, cx));
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: center(FIRST_LEFT),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        assert!(!showing(FIRST_POPUP, cx), "the scroll left the tooltip up");
+
+        // And the window is cold afterwards: the next hover explains itself
+        // only after a deliberate pause, the way a press leaves it.
+        hover(center(SECOND_LEFT), cx);
+        assert!(
+            !showing(SECOND_POPUP, cx),
+            "the scroll left the window inside its grace period"
+        );
     }
 
     /// Escape takes down the showing rather than only the content view: with

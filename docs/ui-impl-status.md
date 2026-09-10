@@ -132,7 +132,7 @@ Popover・検索パレット・種別アイコン）Done
 | Bool 編集（レイヤー） | ✅ | solo/muted/locked/adjustment を Checkbox で編集 |
 | Parent（親レイヤー）の設定 | ✅ | Transform セクション先頭の Parent ドロップダウン（layer-shell-wiring 計画 単位 5、REQ-LAYER-001）。候補は同一コンプの他レイヤー + `(none)`。**自身と自身の子孫は列挙しない**ので UI から親子循環を作れない（評価側の停止保証は残っている）。選択肢は `{layer_id}: {名前}` なので同名レイヤーでも別の親を指す。付け替え・解除はどちらも `InvalidationHint::Structural` で **1 操作 1 undo**（`compile.rs` が親の Transform ノードから辺を張るため構造変化）。親レイヤーを削除すると子の `parent` は `None` に戻る（`Composition::remove_layer` が解決不能な `LayerId` を残さない）。Timeline の Parent 列・Outliner の D&D・Viewer の親子リンク線はこの単位の対象外 |
 | スクラブでパラメータ変更 | ✅ | 感度=UI レンジ由来、clamp=hard レンジ。Shift=10x / Cmd=0.1x。NodeEditorHandle 経由の deferred direct call で Graph 更新。**式で駆動された成分はスクラブしても変わらない**（値の出どころは式なので、ドラッグ中に動いた表示は離すと戻る）。編集は行の下の式エディタで行う |
-| クリックでテキスト入力 | ✅ | gpui-component Input（EntityInputHandler 経由）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
+| クリックでテキスト入力 | ✅ | Ravel の `Input`（`ravel-widgets`。テキスト編集の状態は `gpui_base::InputState` で、`ravel_widgets` が再エクスポートしている）。全選択で開始、Enter/blur で確定・clamp、パース不能は復元。IME 実機確認は未 (#41) |
 | Select でパラメータ変更 | ✅ | Enum パラメータ (merge operation、`attribute.set` の `type` 等)。`type` の変更は `value` のアリティも変え、露出済みパラメータポートの型を追随させる（合わなくなったエッジは破棄。値・ポート・エッジで 1 undo） |
 | カスタムポートの編集 | ✅ | Ports セクションからの追加・改名・型変更・並び替え・削除。いずれも `NodeEditorHandle` 経由の deferred direct call → `commit_graph` で **1 操作 1 undo**（ポート・同名パラメータ・巻き添えのエッジが 1 スナップショット）。型変更はポートの index を保つ（新しい型を運べないエッジのみ破棄、パラメータは新しい型の既定値に置き換わる）。並び替えは固定ポートを跨がない。改名と削除はノードエディタのポート右クリックからも同じ経路で行える（単位 4、NodeEditor の表を参照） |
 | undo/redo | ✅ | Document 単位 undo（ProjectState）。**undo 単位=ジェスチャ**（スクラブ中の Change は undo を積まず、ドラッグ終了の Commit で 1 スナップショット） |
@@ -156,9 +156,9 @@ Popover・検索パレット・種別アイコン）Done
 | `ravel-ui/src/properties/media_asset.rs` | メディアアセット用セクション生成（probe の読み取り専用行、参照のパス形式と文字列、逆写像 `apply_media_asset_field`） |
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-widgets/src/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット）。テキスト編集は `ravel_widgets::Input` |
-| `ravel-app/src/widgets/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換と接線スナップは `widgets/curve_editor.rs` と共有） |
-| `ravel-app/src/widgets/param_ramp_editor.rs` | ParamRampEditor（`RampParam` のインラインエディタ。ドラッグのクランプ規則を `param_curve_editor` と共有。色は `ColorPicker` がパネル側にあるため状態だけ持つ） |
-| `ravel-app/src/widgets/curve_view.rs` | CurveValueRange（表示範囲のビュー状態）と目盛の刻み。Timeline のグラフエディタと Properties が共有 |
+| `ravel-widgets/src/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換と接線スナップは `ravel-widgets/src/curve_editor.rs` と共有） |
+| `ravel-widgets/src/param_ramp_editor.rs` | ParamRampEditor（`RampParam` のインラインエディタ。ドラッグのクランプ規則を `param_curve_editor` と共有。色は Ravel 自前の `ColorPicker`（`ravel-widgets/src/color_picker.rs`、`UIX-11`）で選ぶ） |
+| `ravel-widgets/src/curve_view.rs` | CurveValueRange（表示範囲のビュー状態）と目盛の刻み。Timeline のグラフエディタと Properties が共有 |
 | `ravel-app/src/panels/mod.rs` | PropertiesTarget, NodeEditorHandle |
 
 ---

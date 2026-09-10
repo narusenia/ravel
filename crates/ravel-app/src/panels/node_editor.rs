@@ -2418,43 +2418,15 @@ impl NodeEditorPanel {
     /// untouched: it always shows the root composition output
     /// (REQ-LAYER-007).
     ///
-    /// With nothing selected the panel only withdraws its *own* target: a
-    /// `Layer` target belongs to the layer-selection writers (see
-    /// `panels::set_layer_selection`), and opening a network as a consequence
-    /// of a layer being selected must not blank the Properties panel that same
-    /// selection just filled.
-    ///
-    /// The ids are published in ascending id order, the order the Viewer's own
-    /// selection publisher already uses. The canvas selection is a
-    /// [`HashSet`], so its iteration order is an artifact of the hasher: the
-    /// consumers that follow `ids.first()` — Properties for the keyframe
-    /// target, the scoped evaluation target an inspection panel declares —
-    /// would otherwise name a different node from run to run, and a different
-    /// one again depending on which panel published the selection.
+    /// The ownership rule and the id order both live in
+    /// [`super::publish_node_properties_target`], shared with the Viewer's
+    /// selection publisher. What matters here: with nothing selected the panel
+    /// withdraws only its *own* target, because opening a network as a
+    /// consequence of a layer being selected must not blank the Properties
+    /// panel that same selection just filled.
     fn notify_properties_selection(&self, cx: &mut App) {
         let sel = Self::selected_nodes(cx);
-        let target = match &self.context {
-            Some(network) if !sel.is_empty() => {
-                let mut ids: Vec<_> = sel.into_iter().collect();
-                ids.sort_by_key(|id| id.raw());
-                super::PropertiesTarget::Nodes {
-                    network: network.clone(),
-                    ids,
-                }
-            }
-            _ => {
-                let owned = matches!(
-                    cx.try_global::<super::SelectedPropertiesTarget>()
-                        .map(|t| &t.0),
-                    None | Some(super::PropertiesTarget::Nodes { .. })
-                );
-                if !owned {
-                    return;
-                }
-                super::PropertiesTarget::Empty
-            }
-        };
-        cx.set_global(super::SelectedPropertiesTarget(target));
+        super::publish_node_properties_target(self.context.as_ref(), &sel, cx);
     }
 
     /// Adopt `style` and remember it.

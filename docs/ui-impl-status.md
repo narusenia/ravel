@@ -157,7 +157,7 @@ Popover・検索パレット・種別アイコン）Done
 | `ravel-app/src/panels/properties.rs` | PropertiesGpuiPanel (GPUI描画、ウィジェット管理) |
 | `ravel-widgets/src/scrub_input.rs` | ScrubInput（スクラブ + テキスト編集の数値ウィジェット）。テキスト編集は `ravel_widgets::Input` |
 | `ravel-widgets/src/param_curve_editor.rs` | ParamCurveEditor（`CurveParam` のインラインエディタ。座標変換と接線スナップは `ravel-widgets/src/curve_editor.rs` と共有） |
-| `ravel-widgets/src/param_ramp_editor.rs` | ParamRampEditor（`RampParam` のインラインエディタ。ドラッグのクランプ規則を `param_curve_editor` と共有。色は Ravel 自前の `ColorPicker`（`ravel-widgets/src/color_picker.rs`、`UIX-11`）で選ぶ） |
+| `ravel-widgets/src/param_ramp_editor.rs` | ParamRampEditor（`RampParam` のインラインエディタ。ドラッグのクランプ規則を `param_curve_editor` と共有。色は Ravel 自前の `ColorPicker`（`ravel-widgets/src/color_picker.rs`、`UIX-11`）で選ぶが、**その `ColorPicker` はこのエディタではなくパネル側にある**（`ColorPickerState` の生成に `Window` が要るため。このモジュールは選択ストップの状態だけ持つ）） |
 | `ravel-widgets/src/curve_view.rs` | CurveValueRange（表示範囲のビュー状態）と目盛の刻み。Timeline のグラフエディタと Properties が共有 |
 | `ravel-app/src/panels/mod.rs` | PropertiesTarget, NodeEditorHandle |
 

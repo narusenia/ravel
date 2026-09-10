@@ -5,6 +5,13 @@ name: CI
 # checks, so a docs-only PR stays mergeable with zero checks reported.
 # Locale/asset changes still run CI — they affect runtime behavior.
 #
+# The issue forms are ignored for the same reason as Markdown, and they need
+# naming separately because they are YAML: GitHub reads
+# `.github/ISSUE_TEMPLATE/**` itself and nothing in the workspace parses it,
+# so a template edit cannot change what `cargo test` does. **Only that
+# directory** — `.github/**` as a whole would take the workflows with it, and
+# a change to how CI runs is the last thing that should skip CI.
+#
 # `paths-ignore` compares against **the whole pull request**, not the latest
 # push, so a docs-only commit added to a branch that already changed Rust
 # re-runs the full matrix. Fold such follow-ups into a docs commit on `main`
@@ -15,11 +22,13 @@ on:
     paths-ignore:
       - "docs/**"
       - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
   pull_request:
     branches: [main]
     paths-ignore:
       - "docs/**"
       - "**.md"
+      - ".github/ISSUE_TEMPLATE/**"
 
 # Newer pushes to the same branch/PR supersede running checks.
 concurrency:

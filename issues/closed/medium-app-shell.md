@@ -869,3 +869,150 @@ Hand の左ドラッグパンも Zoom のクリックズームもハンドラが
 （実装する方を採る）。`docs/implementation/done/pointer-feedback-plan.md` は
 この 2 ツールのカーソルを意図的に見送っており、`TOOLX-1` がカーソルも同時に付ける
 （機能が無いものに UI の約束をしないため）。
+
+## MED-APP-03 | bug | ノードエディタのドラッグが `pressed_button` を確認せず、Escape / ボタン喪失の復帰もない
+
+**該当**: `crates/ravel-app/src/panels/node_editor.rs:1868-1954`
+
+> **解決済み**: `UIX-6`。マウス移動の入口
+> （`NodeEditorPanel::canvas_mouse_moved`、旧クロージャを Viewer の
+> `left_dragged` と同じ形でメソッドへ出した）が `pressed_button` を見て、
+> 左でも中でもなければ `cancel_drag` する。`cancel_drag` は移動中のノードを
+> 押下時の位置と z（`NodeMoveOrigin`）へ戻すので、半端な状態も
+> 未コミットの raise も残らない（invariant 3 も同時に満たす）。
+> Escape は `on_key_down`（`scripts/lint-patterns.allow` に
+> 「transient drag mode」として登録、Viewer と同じ扱い）で同じ経路へ入る。
+> 回帰 pin は `a_node_move_ends_when_the_button_is_no_longer_down` と
+> `escape_abandons_a_node_move`（`crates/ravel-app/src/panels/node_editor.rs`）。
+> **注意**: macOS では素の Escape が GPUI に届かない（`MED-APP-43`）ので、
+> Escape 経路が実機で効くのはそちらが直ってから。
+
+`DragMode::Pan/MoveNodes/Connect/SelectBox` がボタン状態に関係なく全マウス移動で適用される。
+キャンバス外でマウスアップするとドラッグが armed のまま残り、
+ボタンを押していない状態で再入するとパン / 移動 / ラバーバンドが続く。
+Viewer と Timeline は同じ問題に対する防御を持つ
+（`viewer.rs:1741-1747`, `timeline.rs:3464-3467`）。
+ノードエディタにはどのドラッグにも Escape キャンセルが無い。
+
+**修正方針**: `event.pressed_button != Some(Left)` のとき `drag = DragMode::None` にリセット。
+`node_origins` を復元する Escape キャンセルを追加。
+
+---
+
+---
+
+
+## MED-APP-04 | bug | Timeline のレイヤーヘッダクリックが stale なキーフレーム選択を残し、Delete を横取りする
+
+**該当**: `crates/ravel-app/src/panels/timeline.rs:3084-3101`（対比 `:3977-3983`, `:958-967`）
+
+> **解決済み**: `UIX-6`。`selected_keyframes.clear()` を
+> `TimelineGpuiPanel::select_layer_with_mode` へ置いたので、ヘッダクリック・
+> バークリック・右クリック・プログラム的な選択のすべてが同じ規則を通る。
+> 回帰 pin は `a_layer_header_click_ends_the_keyframe_selection`
+> （`crates/ravel-app/src/panels/timeline.rs`）。
+
+バークリックは「Delete がレイヤーを対象にし続けるように」`selected_keyframes` をクリアするが、
+ヘッダクリックはしない。
+レイヤー A のキーフレームを選択 → レイヤー B のヘッダをクリック → Delete で、
+レイヤー B ではなく A のキーフレーム（折りたたまれた行にあり不可視の可能性）が削除される。
+
+**修正方針**: ヘッダ選択経路でも `selected_keyframes` をクリアする。
+
+---
+
+---
+
+
+## MED-APP-05 | bug | Viewer が `SelectedPropertiesTarget` を無条件に上書きし、自分の所有でない Layer ターゲットを消す
+
+**該当**: `crates/ravel-app/src/panels/viewer.rs:371-387`, `:673-687`
+
+> **解決済み**: `UIX-6`。ノード選択を Properties の主題として publish する規則を
+> `panels::publish_node_properties_target`（`crates/ravel-app/src/panels/mod.rs`）
+> 1 か所に集約し、Viewer の `publish_selection` / `restore_selection` と
+> NodeEditor の `notify_properties_selection` がそこを通る。選択が空のときに
+> 取り下げるのは `Nodes` ターゲット（と未設定）だけで、`Layer` / `Layers` /
+> `Composition` / `MediaAsset` は他パネルの所有物として残る。回帰 pin は
+> `an_empty_canvas_selection_leaves_a_foreign_properties_target` と
+> `an_empty_canvas_selection_withdraws_its_own_properties_target`
+> （`crates/ravel-app/src/panels/viewer.rs`）。
+
+`NodeEditorPanel::notify_properties_selection` はターゲット所有権を尊重する
+（ノード選択が空のとき自分の `Nodes` ターゲットのみ取り下げる）が、
+Viewer の `publish_selection` は無条件に `Empty` を設定する。
+Timeline でレイヤーを選択 → Select ツールで空キャンバスをクリックすると、
+レイヤーはまだ選択されているのに Layer プロパティが空になる。
+
+**修正方針**: ノードエディタと同じガードを適用。
+2パネルが分岐したコピーを持っているので、共有の publish ヘルパーに抽出する。
+
+---
+
+---
+
+
+## MED-APP-06 | bug | `prune_media_selection` が無関係な対象から Properties ターゲットを奪う
+
+**該当**: `crates/ravel-app/src/panels/mod.rs:182-210`
+
+> **解決済み**: `UIX-6`。`prune_media_selection` は `set_media_selection` を
+> 経由せず `MediaSelection` を直接刈り、Properties の再 publish は
+> `properties_shows_media_selection`（レイヤー側の
+> `properties_shows_layer_selection` と同じ形）が真のときだけ行う。
+> 回帰 pin は `pruning_the_media_selection_leaves_a_foreign_properties_target`
+> （`crates/ravel-app/tests/media_bin.rs`）。
+
+`set_media_selection` が `SelectedPropertiesTarget` を無条件に上書きし、
+`prune_media_selection` はドキュメント変更ごとに走る。
+レイヤーを検査中に、以前選択したメディアアセットを削除する undo が入ると、
+Properties パネルが強制的に `Empty` / `MediaAsset` にリセットされる。
+レイヤー側の prune 経路には明示的な所有権ガードがある
+（`properties_shows_layer_selection`, `mod.rs:416-453`）が、メディア側に相当物が無い。
+
+**修正方針**: 選択グローバルを直接 prune し、
+現在のターゲットが既に `MediaAsset` の場合のみターゲットを再 publish する。
+
+---
+
+---
+
+
+## MED-APP-07 | bug | Timeline のバードラッグが no-op の undo ステップを記録する
+
+**該当**: `crates/ravel-app/src/panels/timeline.rs:1323-1428`, `:1655-1698`
+
+> **解決済み**: `UIX-6`。MoveBar / TrimIn / TrimOut は
+> フレームデルタ 0 のあいだ apply せず、いちど動いて戻ってきた場合は
+> 新設の `revert_drag_preview`（= `ProjectState::revert_document`）で
+> プレビューを捨てる。Reorder は最終インデックスを押下時の
+> `from_index` と比べ、同じ枠に戻ったらプレビューを捨てる。
+> **ゴミステップだけでなく「dirty なプレビュー」も同じ症状を出す**のが
+> 追加で分かった点で（`DocumentStore::undo` は最初の Ctrl+Z を
+> 未コミットのプレビュー破棄に使う）、no-op ジェスチャーはそこも掃除する。
+> 回帰 pin は `a_bar_drag_that_ends_where_it_started_records_no_undo_step`
+> と `a_header_drag_that_returns_to_its_own_slot_records_no_undo_step`
+> （`crates/ravel-app/src/panels/timeline.rs`）。
+> キーフレーム側の兄弟の腕（`MoveKeyframe` / `GraphKeyframes`）にも同じ穴が
+> あったので同時に塞いだ（`.agents/rules/ux.md` 末尾の「チケットが名指しした
+> 呼び出し側だけ直すと兄弟は壊れたまま」に従う）。回帰 pin は
+> `a_keyframe_drag_that_ends_where_it_started_records_no_undo_step` と
+> `a_graph_keyframe_drag_that_ends_where_it_started_records_no_undo_step`。
+> **残っている隙間**: クランプに当たってフレームデルタだけ 0 でない
+> トリムと、`GraphTangent` の coupling だけが変わる場合は依然 changed 扱い。
+> デルタ比較では検出できないので `LOW-APP-29`（押下時スナップショットと
+> `drag_ended` 時点の文書比較）へ切り出した。
+
+`MoveKeyframe` / `GraphKeyframes` はデルタ 0 で早期 return するが、
+MoveBar / TrimIn / TrimOut / Reorder はしない。
+バー上のクリック + 1px のぶれで `changed: true` になり `drag_ended` が無条件にコミットする
+（`UndoStack::push` は重複排除しない）。
+Ctrl+Z が見た目上何も起こさなくなり、ゴミステップが 200 件上限から実履歴を追い出す。
+
+**修正方針**: キーフレーム側のガードを踏襲する
+（フレームデルタ 0 の間は apply をスキップ。Reorder は最終インデックスを起点と比較）。
+
+---
+
+---
+

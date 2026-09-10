@@ -480,6 +480,19 @@ struct ClipboardContent {
     edges: Vec<Edge>,
 }
 
+/// One node's placement when a move gesture began: what every move
+/// recomputes from, and what the abandon path puts back.
+///
+/// The stacking slot is part of it because a move raises the dragged nodes to
+/// the front, and a drag that is abandoned must leave neither a drifted node
+/// nor an uncommitted z change behind (invariant 4, `MED-APP-03`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NodeMoveOrigin {
+    id: NodeId,
+    position: (f32, f32),
+    z: u64,
+}
+
 #[derive(Clone)]
 enum DragMode {
     None,
@@ -489,7 +502,7 @@ enum DragMode {
     },
     MoveNodes {
         origin_mouse: (f32, f32),
-        node_origins: Vec<(NodeId, f32, f32)>,
+        node_origins: Vec<NodeMoveOrigin>,
         /// Whether any position actually changed; a plain click-release on a
         /// node must not record an undo step.
         moved: bool,
@@ -2418,43 +2431,15 @@ impl NodeEditorPanel {
     /// untouched: it always shows the root composition output
     /// (REQ-LAYER-007).
     ///
-    /// With nothing selected the panel only withdraws its *own* target: a
-    /// `Layer` target belongs to the layer-selection writers (see
-    /// `panels::set_layer_selection`), and opening a network as a consequence
-    /// of a layer being selected must not blank the Properties panel that same
-    /// selection just filled.
-    ///
-    /// The ids are published in ascending id order, the order the Viewer's own
-    /// selection publisher already uses. The canvas selection is a
-    /// [`HashSet`], so its iteration order is an artifact of the hasher: the
-    /// consumers that follow `ids.first()` — Properties for the keyframe
-    /// target, the scoped evaluation target an inspection panel declares —
-    /// would otherwise name a different node from run to run, and a different
-    /// one again depending on which panel published the selection.
+    /// The ownership rule and the id order both live in
+    /// [`super::publish_node_properties_target`], shared with the Viewer's
+    /// selection publisher. What matters here: with nothing selected the panel
+    /// withdraws only its *own* target, because opening a network as a
+    /// consequence of a layer being selected must not blank the Properties
+    /// panel that same selection just filled.
     fn notify_properties_selection(&self, cx: &mut App) {
         let sel = Self::selected_nodes(cx);
-        let target = match &self.context {
-            Some(network) if !sel.is_empty() => {
-                let mut ids: Vec<_> = sel.into_iter().collect();
-                ids.sort_by_key(|id| id.raw());
-                super::PropertiesTarget::Nodes {
-                    network: network.clone(),
-                    ids,
-                }
-            }
-            _ => {
-                let owned = matches!(
-                    cx.try_global::<super::SelectedPropertiesTarget>()
-                        .map(|t| &t.0),
-                    None | Some(super::PropertiesTarget::Nodes { .. })
-                );
-                if !owned {
-                    return;
-                }
-                super::PropertiesTarget::Empty
-            }
-        };
-        cx.set_global(super::SelectedPropertiesTarget(target));
+        super::publish_node_properties_target(self.context.as_ref(), &sel, cx);
     }
 
     /// Adopt `style` and remember it.
@@ -2695,6 +2680,318 @@ impl NodeEditorPanel {
             .map(|n| n.metadata.z)
             .max()
             .map_or(0, |z| z + 1)
+    }
+
+    /// The canvas left press: dive into a subnet, open the palette, start a
+    /// pan / wire / move / band, or select what is under the pointer.
+    ///
+    /// A method rather than the closure body it used to be, for the same
+    /// reason as [`Self::canvas_mouse_moved`]: the press decides what a click
+    /// costs, and that has to be checkable without a window.
+    fn canvas_left_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (lx, ly) = self.local_from_event(event.position);
+        self.hover_popover.cancel();
+
+        // Double-click on a subnet node dives into it
+        // (REQ-LAYER-003/011).
+        if event.click_count == 2
+            && let Some(node_id) = self.node_at_local_pos(lx, ly)
+            && self.graph.node(node_id).is_some_and(|n| n.subnet.is_some())
+        {
+            self.drag = DragMode::None;
+            self.enter_subnet(node_id, cx);
+            return;
+        }
+
+        // Double-click on empty canvas opens the node search
+        // palette (DISC-3); the first click of the pair may have
+        // started a pan, which is abandoned here.
+        if event.click_count == 2
+            && self.port_at_local_pos(lx, ly).is_none()
+            && self.node_at_local_pos(lx, ly).is_none()
+            && painting::edge_at_local_pos(
+                &self.graph,
+                &self.viewport,
+                lx,
+                ly,
+                5.0,
+                self.edge_style,
+            )
+            .is_none()
+        {
+            self.drag = DragMode::None;
+            self.open_search_palette(None, (lx, ly), event.position, window, cx);
+            return;
+        }
+
+        if event.modifiers.alt {
+            self.drag = DragMode::Pan {
+                start_mouse: (lx, ly),
+                start_viewport: (self.viewport.x, self.viewport.y),
+            };
+            cx.notify();
+            return;
+        }
+
+        if let Some(port_hit) = self.port_at_local_pos(lx, ly) {
+            self.drag = DragMode::Connect {
+                from: port_hit.clone(),
+                to_point: (lx, ly),
+                snap: None,
+            };
+            cx.notify();
+            return;
+        }
+
+        if let Some(node_id) = self.node_at_local_pos(lx, ly) {
+            let mut sel = Self::selected_nodes(cx);
+            if !event.modifiers.shift && !sel.contains(&node_id) {
+                sel.clear();
+            }
+            self.selected_edges.clear();
+            sel.insert(node_id);
+            self.set_selected_nodes(sel.clone(), cx);
+            self.notify_properties_selection(cx);
+
+            // The raise the press used to apply here now rides with the first
+            // real move (`LOW-APP-02`): a plain click committed nothing, so
+            // the z change either vanished on the next refresh or was baked
+            // into the next unrelated `commit_graph` — undoing *that* step
+            // then silently restacked the graph (invariant 3).
+            let origins: Vec<_> = sel
+                .iter()
+                .filter_map(|id| {
+                    self.graph.node(*id).map(|n| NodeMoveOrigin {
+                        id: *id,
+                        position: n.metadata.position,
+                        z: n.metadata.z,
+                    })
+                })
+                .collect();
+
+            self.drag = DragMode::MoveNodes {
+                origin_mouse: (lx, ly),
+                node_origins: origins,
+                moved: false,
+            };
+        } else if let Some(edge_id) =
+            painting::edge_at_local_pos(&self.graph, &self.viewport, lx, ly, 5.0, self.edge_style)
+        {
+            if !event.modifiers.shift {
+                self.selected_edges.clear();
+                self.clear_selected_nodes(cx);
+            }
+            self.selected_edges.insert(edge_id);
+            self.notify_properties_selection(cx);
+        } else if event.modifiers.shift {
+            self.drag = DragMode::SelectBox {
+                start: (lx, ly),
+                current: (lx, ly),
+            };
+        } else {
+            self.clear_selected_nodes(cx);
+            self.selected_edges.clear();
+            self.notify_properties_selection(cx);
+            self.drag = DragMode::Pan {
+                start_mouse: (lx, ly),
+                start_viewport: (self.viewport.x, self.viewport.y),
+            };
+        }
+        cx.notify();
+    }
+
+    /// End the live gesture without leaving half of it applied (invariant 4):
+    /// a lost button, or Escape.
+    ///
+    /// A move puts every node back where the press found it — position and
+    /// stacking slot, so the raise the gesture applied goes too. The panel
+    /// graph then matches the document again, which is also what keeps an
+    /// abandoned drag out of the undo history (invariant 3): nothing is
+    /// committed here, and the next unrelated `commit_graph` has no leftover
+    /// of this gesture to bake in.
+    ///
+    /// A pan leaves the viewport where the drag reached it (the Viewer's
+    /// abandon path does the same — the view is not document state), and a
+    /// wire drag writes nothing outside [`DragMode`]. A rubber band has
+    /// already published its selection, so only the Properties subject needs
+    /// to catch up.
+    ///
+    /// Returns whether a drag was ended.
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_select_box = matches!(self.drag, DragMode::SelectBox { .. });
+        match std::mem::replace(&mut self.drag, DragMode::None) {
+            DragMode::None => return false,
+            DragMode::MoveNodes { node_origins, .. } => {
+                let mut graph = self.graph.clone();
+                for origin in &node_origins {
+                    let Some(node) = graph.node(origin.id) else {
+                        continue;
+                    };
+                    let mut updated = (**node).clone();
+                    updated.metadata.position = origin.position;
+                    updated.metadata.z = origin.z;
+                    graph = graph.replace_node(Arc::new(updated));
+                }
+                self.graph = graph;
+            }
+            DragMode::Pan { .. } | DragMode::Connect { .. } | DragMode::SelectBox { .. } => {}
+        }
+        if was_select_box {
+            self.notify_properties_selection(cx);
+        }
+        cx.notify();
+        true
+    }
+
+    /// The canvas pointer path: drive the live gesture, or track hover when
+    /// there is none.
+    ///
+    /// A method rather than the closure body it used to be, so the abandon
+    /// rule below can be exercised without a window (the Viewer's
+    /// `left_dragged` is the same shape).
+    ///
+    /// **Invariant 4**: a drag ends when the button that holds it is no longer
+    /// down. Without this the gesture stays armed after a release the window
+    /// never saw — a mouse-up outside the canvas, an alt-tab, a system dialog
+    /// — and re-entering the canvas pans, moves nodes or draws a rubber band
+    /// with nothing held (`MED-APP-03`). Viewer and Timeline guard the same
+    /// way; the middle button is allowed because it holds a pan of its own.
+    fn canvas_mouse_moved(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !matches!(self.drag, DragMode::None)
+            && !matches!(
+                event.pressed_button,
+                Some(MouseButton::Left | MouseButton::Middle)
+            )
+        {
+            self.cancel_drag(cx);
+            return;
+        }
+        let (lx, ly) = self.local_from_event(event.position);
+        self.last_pointer = Some((lx, ly));
+
+        // Gestures suppress the hover popover (DISC-2); the drag
+        // branches below repaint anyway.
+        if !matches!(self.drag, DragMode::None) {
+            self.hover_popover.cancel();
+        }
+
+        match &self.drag {
+            DragMode::Pan {
+                start_mouse,
+                start_viewport,
+            } => {
+                self.viewport.x = start_viewport.0 + (lx - start_mouse.0);
+                self.viewport.y = start_viewport.1 + (ly - start_mouse.1);
+                cx.notify();
+            }
+            DragMode::MoveNodes {
+                origin_mouse,
+                node_origins,
+                moved: was_moved,
+            } => {
+                let origin_mouse = *origin_mouse;
+                let was_moved = *was_moved;
+                let node_origins = node_origins.clone();
+                let dx = (lx - origin_mouse.0) / self.viewport.zoom;
+                let dy = (ly - origin_mouse.1) / self.viewport.zoom;
+
+                let snap_grid = 10.0;
+                let mut graph = self.graph.clone();
+                let mut moved = false;
+                for &NodeMoveOrigin {
+                    id,
+                    position: (ox, oy),
+                    ..
+                } in &node_origins
+                {
+                    if let Some(node) = graph.node(id) {
+                        let mut updated = node.as_ref().clone();
+                        let new_x = ((ox + dx) / snap_grid).round() * snap_grid;
+                        let new_y = ((oy + dy) / snap_grid).round() * snap_grid;
+                        moved |= updated.metadata.position != (new_x, new_y);
+                        updated.metadata.position = (new_x, new_y);
+                        graph = graph.replace_node(Arc::new(updated));
+                    }
+                }
+                if moved && !was_moved {
+                    // The gesture has become a move: raise the dragged nodes
+                    // above the rest, so the raise lands in the same undo step
+                    // as the positions it belongs to (`LOW-APP-02`). The
+                    // abandon path takes it back with them.
+                    let ids = node_origins.iter().map(|origin| origin.id).collect();
+                    graph = Self::raised_to_front(&graph, &ids);
+                }
+                self.graph = graph;
+                if moved {
+                    self.drag = DragMode::MoveNodes {
+                        origin_mouse,
+                        node_origins,
+                        moved: true,
+                    };
+                }
+                cx.notify();
+            }
+            DragMode::Connect { from, .. } => {
+                let snap = painting::find_snap_target(&self.graph, &self.viewport, from, lx, ly);
+                self.drag = DragMode::Connect {
+                    from: from.clone(),
+                    to_point: (lx, ly),
+                    snap,
+                };
+                cx.notify();
+            }
+            DragMode::SelectBox { start, .. } => {
+                let start = *start;
+                self.drag = DragMode::SelectBox {
+                    start,
+                    current: (lx, ly),
+                };
+                let (sx, ex) = (start.0.min(lx), start.0.max(lx));
+                let (sy, ey) = (start.1.min(ly), start.1.max(ly));
+                let mut sel = HashSet::new();
+                for node in self.graph.nodes() {
+                    if node.metadata.synthetic {
+                        continue;
+                    }
+                    let (nx, ny) = self
+                        .viewport
+                        .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                    let (nw, nh) = self
+                        .node_sizes
+                        .get(&node.id)
+                        .copied()
+                        .unwrap_or((node_width(self.viewport.zoom), 60.0));
+                    if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
+                        sel.insert(node.id);
+                    }
+                }
+                self.publish_band_selection(sel, cx);
+                // The rectangle itself moved even when its contents
+                // did not.
+                cx.notify();
+            }
+            DragMode::None => {
+                let hint = self.pointer_hint_at(lx, ly);
+                self.update_pointer_hint(hint, cx);
+
+                // Idle hover tracking: re-arm the dwell when the
+                // hovered node changes; repaint when an open popover
+                // just closed.
+                let hovered = self.node_at_local_pos(lx, ly);
+                let (repaint, arm) = self.hover_popover.pointer_moved(hovered);
+                if arm {
+                    self.arm_hover_dwell(cx);
+                }
+                if repaint {
+                    cx.notify();
+                }
+            }
+        }
     }
 
     /// Reassign `ids` the top z slots — above every other node — keeping
@@ -3174,116 +3471,8 @@ impl Render for NodeEditorPanel {
             .cursor(canvas_cursor)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    let (lx, ly) = this.local_from_event(event.position);
-                    this.hover_popover.cancel();
-
-                    // Double-click on a subnet node dives into it
-                    // (REQ-LAYER-003/011).
-                    if event.click_count == 2
-                        && let Some(node_id) = this.node_at_local_pos(lx, ly)
-                        && this.graph.node(node_id).is_some_and(|n| n.subnet.is_some())
-                    {
-                        this.drag = DragMode::None;
-                        this.enter_subnet(node_id, cx);
-                        return;
-                    }
-
-                    // Double-click on empty canvas opens the node search
-                    // palette (DISC-3); the first click of the pair may have
-                    // started a pan, which is abandoned here.
-                    if event.click_count == 2
-                        && this.port_at_local_pos(lx, ly).is_none()
-                        && this.node_at_local_pos(lx, ly).is_none()
-                        && painting::edge_at_local_pos(
-                            &this.graph,
-                            &this.viewport,
-                            lx,
-                            ly,
-                            5.0,
-                            this.edge_style,
-                        )
-                        .is_none()
-                    {
-                        this.drag = DragMode::None;
-                        this.open_search_palette(None, (lx, ly), event.position, window, cx);
-                        return;
-                    }
-
-                    if event.modifiers.alt {
-                        this.drag = DragMode::Pan {
-                            start_mouse: (lx, ly),
-                            start_viewport: (this.viewport.x, this.viewport.y),
-                        };
-                        cx.notify();
-                        return;
-                    }
-
-                    if let Some(port_hit) = this.port_at_local_pos(lx, ly) {
-                        this.drag = DragMode::Connect {
-                            from: port_hit.clone(),
-                            to_point: (lx, ly),
-                            snap: None,
-                        };
-                        cx.notify();
-                        return;
-                    }
-
-                    if let Some(node_id) = this.node_at_local_pos(lx, ly) {
-                        let mut sel = Self::selected_nodes(cx);
-                        if !event.modifiers.shift && !sel.contains(&node_id) {
-                            sel.clear();
-                        }
-                        this.selected_edges.clear();
-                        sel.insert(node_id);
-                        this.set_selected_nodes(sel.clone(), cx);
-                        this.notify_properties_selection(cx);
-
-                        this.graph = Self::raised_to_front(&this.graph, &sel);
-
-                        let origins: Vec<_> = sel
-                            .iter()
-                            .filter_map(|id| {
-                                this.graph
-                                    .node(*id)
-                                    .map(|n| (*id, n.metadata.position.0, n.metadata.position.1))
-                            })
-                            .collect();
-
-                        this.drag = DragMode::MoveNodes {
-                            origin_mouse: (lx, ly),
-                            node_origins: origins,
-                            moved: false,
-                        };
-                    } else if let Some(edge_id) = painting::edge_at_local_pos(
-                        &this.graph,
-                        &this.viewport,
-                        lx,
-                        ly,
-                        5.0,
-                        this.edge_style,
-                    ) {
-                        if !event.modifiers.shift {
-                            this.selected_edges.clear();
-                            this.clear_selected_nodes(cx);
-                        }
-                        this.selected_edges.insert(edge_id);
-                        this.notify_properties_selection(cx);
-                    } else if event.modifiers.shift {
-                        this.drag = DragMode::SelectBox {
-                            start: (lx, ly),
-                            current: (lx, ly),
-                        };
-                    } else {
-                        this.clear_selected_nodes(cx);
-                        this.selected_edges.clear();
-                        this.notify_properties_selection(cx);
-                        this.drag = DragMode::Pan {
-                            start_mouse: (lx, ly),
-                            start_viewport: (this.viewport.x, this.viewport.y),
-                        };
-                    }
-                    cx.notify();
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.canvas_left_mouse_down(event, window, cx);
                 }),
             )
             .on_mouse_down(
@@ -3390,114 +3579,7 @@ impl Render for NodeEditorPanel {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                let (lx, ly) = this.local_from_event(event.position);
-                this.last_pointer = Some((lx, ly));
-
-                // Gestures suppress the hover popover (DISC-2); the drag
-                // branches below repaint anyway.
-                if !matches!(this.drag, DragMode::None) {
-                    this.hover_popover.cancel();
-                }
-
-                match &this.drag {
-                    DragMode::Pan {
-                        start_mouse,
-                        start_viewport,
-                    } => {
-                        this.viewport.x = start_viewport.0 + (lx - start_mouse.0);
-                        this.viewport.y = start_viewport.1 + (ly - start_mouse.1);
-                        cx.notify();
-                    }
-                    DragMode::MoveNodes {
-                        origin_mouse,
-                        node_origins,
-                        ..
-                    } => {
-                        let origin_mouse = *origin_mouse;
-                        let node_origins = node_origins.clone();
-                        let dx = (lx - origin_mouse.0) / this.viewport.zoom;
-                        let dy = (ly - origin_mouse.1) / this.viewport.zoom;
-
-                        let snap_grid = 10.0;
-                        let mut graph = this.graph.clone();
-                        let mut moved = false;
-                        for &(id, ox, oy) in &node_origins {
-                            if let Some(node) = graph.node(id) {
-                                let mut updated = node.as_ref().clone();
-                                let new_x = ((ox + dx) / snap_grid).round() * snap_grid;
-                                let new_y = ((oy + dy) / snap_grid).round() * snap_grid;
-                                moved |= updated.metadata.position != (new_x, new_y);
-                                updated.metadata.position = (new_x, new_y);
-                                graph = graph.replace_node(Arc::new(updated));
-                            }
-                        }
-                        this.graph = graph;
-                        if moved {
-                            this.drag = DragMode::MoveNodes {
-                                origin_mouse,
-                                node_origins,
-                                moved: true,
-                            };
-                        }
-                        cx.notify();
-                    }
-                    DragMode::Connect { from, .. } => {
-                        let snap =
-                            painting::find_snap_target(&this.graph, &this.viewport, from, lx, ly);
-                        this.drag = DragMode::Connect {
-                            from: from.clone(),
-                            to_point: (lx, ly),
-                            snap,
-                        };
-                        cx.notify();
-                    }
-                    DragMode::SelectBox { start, .. } => {
-                        let start = *start;
-                        this.drag = DragMode::SelectBox {
-                            start,
-                            current: (lx, ly),
-                        };
-                        let (sx, ex) = (start.0.min(lx), start.0.max(lx));
-                        let (sy, ey) = (start.1.min(ly), start.1.max(ly));
-                        let mut sel = HashSet::new();
-                        for node in this.graph.nodes() {
-                            if node.metadata.synthetic {
-                                continue;
-                            }
-                            let (nx, ny) = this
-                                .viewport
-                                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                            let (nw, nh) = this
-                                .node_sizes
-                                .get(&node.id)
-                                .copied()
-                                .unwrap_or((node_width(this.viewport.zoom), 60.0));
-                            if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
-                                sel.insert(node.id);
-                            }
-                        }
-                        this.publish_band_selection(sel, cx);
-                        // The rectangle itself moved even when its contents
-                        // did not.
-                        cx.notify();
-                    }
-                    DragMode::None => {
-                        let hint = this.pointer_hint_at(lx, ly);
-                        this.update_pointer_hint(hint, cx);
-
-                        // Idle hover tracking: re-arm the dwell when the
-                        // hovered node changes; repaint when an open popover
-                        // just closed.
-                        let hovered = this.node_at_local_pos(lx, ly);
-                        let (repaint, arm) = this.hover_popover.pointer_moved(hovered);
-                        if arm {
-                            this.arm_hover_dwell(cx);
-                        }
-                        if repaint {
-                            cx.notify();
-                        }
-                    }
-                }
+                this.canvas_mouse_moved(event, cx);
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(20.0));
@@ -3961,6 +4043,15 @@ impl Render for NodeEditorPanel {
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .key_context(KEY_CONTEXT)
+            // Escape abandons the live gesture (invariant 4). Raw key handling
+            // rather than an Action, the way the Viewer's own drag cancel is
+            // wired: this is a transient drag mode, not a command, and it only
+            // consumes the key while a drag is actually standing.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key.as_str() == "escape" && this.cancel_drag(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(Self::on_duplicate))
@@ -7290,6 +7381,217 @@ mod tests {
                     "a document change reindexed the ports under the drag"
                 );
                 assert_edge_indices_in_range(panel);
+            })
+            .unwrap();
+    }
+
+    /// A move gesture in the state a canvas press leaves behind.
+    fn begin_node_move(panel: &mut NodeEditorPanel, node: NodeId) -> ((f32, f32), u64) {
+        let placed = panel.graph.node(node).expect("the dragged node");
+        let position = placed.metadata.position;
+        let z = placed.metadata.z;
+        panel.drag = DragMode::MoveNodes {
+            origin_mouse: (0.0, 0.0),
+            node_origins: vec![NodeMoveOrigin {
+                id: node,
+                position,
+                z,
+            }],
+            moved: false,
+        };
+        (position, z)
+    }
+
+    fn pointer_move(at: (f32, f32), pressed: Option<MouseButton>) -> MouseMoveEvent {
+        MouseMoveEvent {
+            position: point(px(at.0), px(at.1)),
+            pressed_button: pressed,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    /// Place the two fixture nodes apart so a press can name one of them, and
+    /// return a left press over `node`'s body.
+    fn press_on_node(panel: &NodeEditorPanel, node: NodeId) -> MouseDownEvent {
+        let placed = panel.graph.node(node).expect("the pressed node");
+        let (sx, sy) = panel
+            .viewport
+            .flow_to_screen(placed.metadata.position.0, placed.metadata.position.1);
+        let (ox, oy) = panel.canvas_origin.get();
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(ox + sx + 5.0), px(oy + sy + 5.0)),
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    /// Invariant 3 (one action, one undo step): clicking a node to select it
+    /// is not an edit. The press used to raise the clicked node in the panel's
+    /// own graph without committing anything, so the z change either vanished
+    /// on the next refresh or rode along inside the next unrelated
+    /// `commit_graph` — and undoing *that* step then restacked the graph
+    /// behind the user's back (`LOW-APP-02`).
+    ///
+    /// **What this test drops**: the `moved && !was_moved` gate on the raise
+    /// in [`NodeEditorPanel::canvas_mouse_moved`], or putting the raise back
+    /// into [`NodeEditorPanel::canvas_left_mouse_down`]. Either way the press
+    /// below changes the stacking order with nothing to commit it, and the
+    /// second half of the test — the raise a real move *does* apply — is what
+    /// keeps the fix from being "never raise at all".
+    #[gpui::test]
+    fn a_node_click_raises_nothing_until_the_drag_moves(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        let other = add_node_of(&window, &project, &path, "blur", cx);
+
+        // Two nodes at the same spot cannot be told apart by a press.
+        project.update(cx, |project, cx| {
+            let mut graph = resolve_network(project.document(), &path)
+                .expect("network")
+                .clone();
+            for (id, position) in [(blur, (0.0, 0.0)), (other, (400.0, 0.0))] {
+                let node = graph.node(id).expect("fixture node");
+                let mut updated = (**node).clone();
+                updated.metadata.position = position;
+                graph = graph.replace_node(Arc::new(updated));
+            }
+            let doc = replace_network(project.document(), &path, graph).unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx)
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, window, cx| {
+                let before = panel.graph.node(blur).unwrap().metadata.z;
+                let press = press_on_node(panel, blur);
+                panel.canvas_left_mouse_down(&press, window, cx);
+                assert!(
+                    matches!(panel.drag, DragMode::MoveNodes { .. }),
+                    "the press arms a move on the node under it"
+                );
+                assert_eq!(
+                    panel.graph.node(blur).unwrap().metadata.z,
+                    before,
+                    "the press restacked the graph with nothing to commit the change"
+                );
+
+                // A gesture that actually moves does raise, and its mouse-up
+                // commits the raise together with the positions.
+                let at: (f32, f32) = (press.position.x.into(), press.position.y.into());
+                panel.canvas_mouse_moved(
+                    &pointer_move((at.0 + 100.0, at.1 + 100.0), Some(MouseButton::Left)),
+                    cx,
+                );
+                assert!(
+                    panel.graph.node(blur).unwrap().metadata.z > before,
+                    "a move raises the nodes it drags"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Invariant 4: a drag ends when the button holding it is no longer down.
+    /// A mouse-up outside the canvas (an alt-tab, a system dialog, a trackpad
+    /// hiccup) left the gesture armed, and re-entering the canvas kept moving
+    /// the node with nothing held.
+    ///
+    /// **What this test drops**: the `pressed_button` guard at the top of
+    /// [`NodeEditorPanel::canvas_mouse_moved`]. Without it the buttonless move
+    /// below drags the node further instead of abandoning the gesture. Dropping
+    /// the restore in [`NodeEditorPanel::cancel_drag`] instead fails the last
+    /// two assertions: the abandoned drag leaves the node drifted and raised,
+    /// which is what the next unrelated commit would bake in.
+    #[gpui::test]
+    fn a_node_move_ends_when_the_button_is_no_longer_down(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        // A second node, so the raise the gesture applies has something to
+        // raise above.
+        add_node_of(&window, &project, &path, "blur", cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let (start, z) = begin_node_move(panel, blur);
+
+                panel
+                    .canvas_mouse_moved(&pointer_move((100.0, 100.0), Some(MouseButton::Left)), cx);
+                assert_ne!(
+                    panel.graph.node(blur).unwrap().metadata.position,
+                    start,
+                    "the node followed the pointer while the button was down"
+                );
+
+                // The release this window never received.
+                panel.canvas_mouse_moved(&pointer_move((150.0, 150.0), None), cx);
+                assert!(
+                    matches!(panel.drag, DragMode::None),
+                    "the gesture stayed armed with no button held"
+                );
+                let node = panel.graph.node(blur).unwrap();
+                assert_eq!(
+                    node.metadata.position, start,
+                    "the abandoned drag left the node where it dropped it"
+                );
+                assert_eq!(
+                    node.metadata.z, z,
+                    "the abandoned drag left its raise standing"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The other half of invariant 4: Escape abandons the drag. The node
+    /// editor had no cancel at all — the key reached nothing.
+    ///
+    /// **What this test drops**: the `on_key_down` handler on the panel root.
+    /// Without it Escape leaves the gesture armed and the node drifted.
+    ///
+    /// (macOS does not deliver a bare Escape to GPUI at all — `MED-APP-43`,
+    /// a platform-fork bug — so this path is only reachable there once that
+    /// is fixed. The wiring itself is what this test pins.)
+    #[gpui::test]
+    fn escape_abandons_a_node_move(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        add_node_of(&window, &project, &path, "blur", cx);
+
+        let start = window
+            .update(cx, |panel, window, cx| {
+                let (start, _z) = begin_node_move(panel, blur);
+                panel
+                    .canvas_mouse_moved(&pointer_move((100.0, 100.0), Some(MouseButton::Left)), cx);
+                panel.focus_handle.focus(window, cx);
+                start
+            })
+            .unwrap();
+
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+        visual.simulate_event(KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers::default(),
+                key: "escape".to_string(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        });
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert!(
+                    matches!(panel.drag, DragMode::None),
+                    "Escape left the gesture armed"
+                );
+                assert_eq!(
+                    panel.graph.node(blur).unwrap().metadata.position,
+                    start,
+                    "Escape left the node where the drag had dragged it"
+                );
             })
             .unwrap();
     }

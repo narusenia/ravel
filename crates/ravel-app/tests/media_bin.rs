@@ -353,3 +353,56 @@ fn deleting_an_in_use_asset_confirms_with_the_reference_count(cx: &mut TestAppCo
     });
     assert_eq!(properties_target(cx), PropertiesTarget::Empty);
 }
+
+/// Invariant 1 (selection ownership): pruning the media selection after a
+/// document change must not take a Properties subject the MediaBin does not
+/// own. The prune runs after *every* document change, so an undo that drops a
+/// previously selected asset used to blank a layer the user was inspecting.
+///
+/// **What this test drops**: the `properties_shows_media_selection` guard in
+/// `panels::prune_media_selection`. Prune through `set_media_selection` again
+/// — which publishes the media subject unconditionally — and the Layer target
+/// below is overwritten with `Empty`.
+#[gpui::test]
+fn pruning_the_media_selection_leaves_a_foreign_properties_target(cx: &mut TestAppContext) {
+    let harness = open_panel(cx);
+    let clip = import_clip(&harness, cx);
+    cx.update(|cx| add_asset_as_layer(clip, cx));
+    cx.run_until_parked();
+
+    // The asset is selected in the MediaBin, but the user has moved on to a
+    // layer: the Properties panel shows the layer, not the asset.
+    let (comp_id, layer_id) = harness.project.read_with(cx, |project, cx| {
+        let comp = project.active_composition(cx).expect("active composition");
+        (comp.id, comp.layers.front().expect("the placed layer").id)
+    });
+    cx.update(|cx| {
+        panels::set_media_selection(vec![clip], cx);
+        panels::set_layer_selection(vec![layer_id], cx);
+        cx.set_global(panels::SelectedPropertiesTarget(PropertiesTarget::Layer {
+            comp_id,
+            layer_id,
+        }));
+    });
+
+    // The asset leaves the document (a delete elsewhere, an undo of the
+    // import): the stale selection goes with it.
+    harness.project.update(cx, |project, cx| {
+        let mut doc = project.document().clone();
+        doc.media_assets.remove(&clip);
+        project.commit_document(doc, ravel_core::runtime::InvalidationHint::Structural, cx);
+    });
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        assert!(
+            panels::media_selection(cx).is_empty(),
+            "the gone asset leaves the selection it was in"
+        );
+    });
+    assert_eq!(
+        properties_target(cx),
+        PropertiesTarget::Layer { comp_id, layer_id },
+        "the layer subject belongs to the layer selection and stands"
+    );
+}

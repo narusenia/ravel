@@ -275,6 +275,51 @@ pub struct CanvasSelection {
 
 impl Global for CanvasSelection {}
 
+/// Publish a node selection as the Properties subject — the one rule both
+/// panels that own a node selection follow (the node editor's canvas and the
+/// Viewer's tools).
+///
+/// A non-empty selection is this selection's `Nodes` target, in ascending id
+/// order: the canvas selection is a [`HashSet`], so its iteration order is an
+/// artifact of the hasher, and the consumers that follow `ids.first()` —
+/// Properties for the keyframe target, the scoped evaluation target an
+/// inspection panel declares — would otherwise name a different node from run
+/// to run, and a different one again depending on which panel published.
+///
+/// An empty one withdraws **only a target the node selection owns**: a
+/// `Layer`, `Layers`, `Composition` or `MediaAsset` subject belongs to another
+/// panel, and clicking empty canvas is not a reason to empty the Properties
+/// panel behind the Timeline's back (invariant 1, `MED-APP-05`). The two
+/// panels had divergent copies of this — one guarded, one not — so it lives
+/// here, where a change reaches both.
+pub(crate) fn publish_node_properties_target(
+    network: Option<&ravel_ui::document::NetworkPath>,
+    nodes: &HashSet<NodeId>,
+    cx: &mut App,
+) {
+    let target = match network {
+        Some(network) if !nodes.is_empty() => {
+            let mut ids: Vec<_> = nodes.iter().copied().collect();
+            ids.sort_by_key(|id| id.raw());
+            PropertiesTarget::Nodes {
+                network: network.clone(),
+                ids,
+            }
+        }
+        _ => {
+            let owned = matches!(
+                cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+                None | Some(PropertiesTarget::Nodes { .. })
+            );
+            if !owned {
+                return;
+            }
+            PropertiesTarget::Empty
+        }
+    };
+    cx.set_global(SelectedPropertiesTarget(target));
+}
+
 // ---------------------------------------------------------------------------
 // Media asset selection (REQ-UI-008, media-import plan unit 4)
 // ---------------------------------------------------------------------------
@@ -324,12 +369,29 @@ pub fn media_selection(cx: &App) -> MediaSelection {
 /// territory). This is the selection's only writer, so the two globals can
 /// never disagree.
 pub fn set_media_selection(assets: Vec<AssetId>, cx: &mut App) {
-    let target = match assets.as_slice() {
+    cx.set_global(MediaSelection { assets });
+    publish_media_properties_target(cx);
+}
+
+/// Publish the current media selection as the Properties subject, the way
+/// [`publish_layer_properties_target`] does for layers. A click in the
+/// MediaBin means "inspect this", so this writes unconditionally; the callers
+/// that must not steal a foreign subject (the prune below) ask first.
+fn publish_media_properties_target(cx: &mut App) {
+    let target = match media_selection(cx).assets() {
         [id] => PropertiesTarget::MediaAsset { id: *id },
         _ => PropertiesTarget::Empty,
     };
-    cx.set_global(MediaSelection { assets });
     cx.set_global(SelectedPropertiesTarget(target));
+}
+
+/// Whether the Properties panel is currently showing a media asset — the
+/// media-side counterpart of [`properties_shows_layer_selection`].
+fn properties_shows_media_selection(cx: &App) -> bool {
+    matches!(
+        cx.try_global::<SelectedPropertiesTarget>().map(|t| &t.0),
+        Some(PropertiesTarget::MediaAsset { .. })
+    )
 }
 
 /// Drop selected assets `document` no longer holds (a delete, an undo, a
@@ -349,7 +411,17 @@ pub(crate) fn prune_media_selection(document: &Document, cx: &mut App) -> bool {
         .copied()
         .collect();
     if surviving.len() != selection.assets().len() {
-        set_media_selection(surviving, cx);
+        // Not through `set_media_selection`: that publisher speaks for a
+        // MediaBin click and writes the Properties subject unconditionally,
+        // and a document change is not a reason to take a subject this
+        // selection does not own (invariant 1, `MED-APP-06`). Republish only
+        // what was already showing an asset, the way
+        // [`prune_layer_selection`] does for layers.
+        let showing_media = properties_shows_media_selection(cx);
+        cx.set_global(MediaSelection { assets: surviving });
+        if showing_media {
+            publish_media_properties_target(cx);
+        }
         changed = true;
     }
     // The Properties target can name a gone asset without the selection

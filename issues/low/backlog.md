@@ -212,13 +212,6 @@ gpui-ce フォーク `gpui_wgpu/src/wgpu_renderer.rs`（Ravel 側にコードは
 
 ## ravel-app / ravel-ui（軽微なバグ）
 
-**LOW-APP-02 | bug | クリックによる前面移動（z 変更）がコミットされず、無関係な undo ステップに混入する**
-`crates/ravel-app/src/panels/node_editor.rs:1744`
-`raised_to_front` がマウスダウン時に表示グラフを変更する。
-単なるクリックではコミットされないので refresh で元に戻る、
-または次の無関係な `commit_graph` に相乗りする。
-→ ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。
-
 **LOW-APP-03 | bug | Shift + ドラッグのボックス選択が既存選択を拡張せず置換する**
 `crates/ravel-app/src/panels/node_editor.rs:1760-1764`, `:1923-1949`
 バンド開始に Shift を要求するのに、publish するのはボックス内容のみで、
@@ -347,6 +340,35 @@ gpui へ渡す側は `chord_to_gpui_string` が `secondary-` へ変換して解�
 → 保存形（`Display`）と表示形を分ける。表示側で `cfg!(target_os = "macos")` に
 応じて `Cmd+` / `Ctrl+` を出す。**`Display` を触ると資産の書式が変わる**ので、
 そちらは動かさないこと。
+
+**LOW-APP-29 | bug | フレームデルタでは検出できない no-op ジェスチャが undo ステップを積む（クランプで飽和したトリム）**
+`crates/ravel-app/src/panels/timeline.rs`（`drag_moved` の `TrimIn` / `TrimOut`
+の腕、および `GraphTangent` の腕）
+`MED-APP-07` / `UIX-6` で、バー・キーフレーム・カーブの各ジェスチャは
+**フレームデルタが 0 に戻ったらプレビューを捨てて `changed: false` に戻す**
+ようになった。残るのは「**デルタは 0 でないのに文書が変わらない**」形:
+- `TrimIn` は `new_in` を `[0, out-1)` にクランプするので、in が既に 0 の
+  レイヤーで in 端をさらに左へ引くとデルタは負のまま `new_in == 0` で、
+  文書は変わらないのに `changed: true` になる。`TrimOut` の
+  `max(in+1)` 側も同じ。
+- `GraphTangent` は `delta == Vec2(0,0)` でも `coupling`（Alt の有無で
+  Symmetric / Separated）だけが変わりうるので、**デルタ 0 を no-op と
+  みなせない**（非対称なキーに Symmetric をデルタ 0 で当てると反対側の
+  ハンドルが実際に動く）。逆に「デルタ 0 かつ押下時と同じ coupling」は
+  no-op だが、押下時の coupling は記録されていない。
+症状は `MED-APP-07` と同じで、`UndoStack::push` は重複排除しないので
+見た目に何も起きない Ctrl+Z が増え、200 件上限から実履歴を追い出す。
+
+**修正方針**: デルタ比較を腕ごとに増やすのではなく、**押下時に捕まえた文書と
+`drag_ended` 時点の文書を比較する**。`ProjectState::restore_document_snapshot`
+が既に「ジェスチャ開始時のスナップショット」の仕組みを持っている
+（`CRIT-04` で入った）ので、そのスナップショットを `drag_ended` で
+現在の文書と比べ、等しければコミットせずプレビューを捨てるだけでよい。
+文書比較 1 箇所でこの種の穴が全部閉じる（クランプ飽和・coupling・
+将来の腕）。`Document` の比較は `HIGH-02` の ptr_eq 高速路があるので
+ジェスチャ終了時 1 回なら安い。
+**注意**: これは `MED-APP-07` の方針（デルタ比較）を越える設計変更なので、
+`UIX-6` では実施していない。
 
 ## 参考: 監査で問題なしと確認された箇所
 

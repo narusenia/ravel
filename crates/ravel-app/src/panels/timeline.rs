@@ -455,6 +455,11 @@ enum TimelineDrag {
     /// Reorder the layer in the stack (header vertical drag).
     Reorder {
         layer: LayerId,
+        /// Where the layer sat when the press landed. A drag that wanders and
+        /// comes back leaves the stack as it found it, so `changed` is the
+        /// *current* index against this one rather than "a reorder ran"
+        /// (invariant 3, `MED-APP-07`).
+        from_index: usize,
         changed: bool,
     },
     /// Move selected keyframes along the timeline (layer-local frames).
@@ -923,6 +928,12 @@ impl TimelineGpuiPanel {
         mode: LayerClickMode,
         cx: &mut Context<Self>,
     ) {
+        // A keyframe selection is scoped to the row it was made in, so
+        // picking layers ends it (invariant 2, `MED-APP-04`). The bar row
+        // clears for the same reason; without it here, Delete after a header
+        // click removes a keyframe — possibly one in a collapsed row nobody
+        // can see — instead of the layer the click just selected.
+        self.selected_keyframes.clear();
         let order: Vec<LayerId> = self.state.layers().map(|layer| layer.id).collect();
         let selection = super::layer_selection(cx);
         let layers = layer_selection_after_click(selection.layers(), &order, lid, mode);
@@ -2222,9 +2233,34 @@ impl TimelineGpuiPanel {
                 pressed,
                 collapse_on_click,
                 grab_x,
-                ..
+                changed,
             } => {
                 let delta = self.frames_delta(grab_x, x);
+                // A gesture that changed nothing records nothing (invariant 3,
+                // `MED-APP-07`). The frame delta decides, not the fact that a
+                // move arrived: a click with a 1px wobble never leaves
+                // `delta == 0`, and a bar dragged out and dropped back on its
+                // start is a no-op again rather than staying `changed`.
+                if delta == 0 {
+                    if changed {
+                        self.revert_drag_preview(cx);
+                        self.drag = TimelineDrag::MoveBar {
+                            baselines,
+                            pressed,
+                            // The gesture is a no-op for undo, but it is not
+                            // a *click*: the pointer travelled and came back,
+                            // which is how a user takes a move back. Letting
+                            // `collapse_on_click` survive would spend the
+                            // mouse-up narrowing a multi-selection the press
+                            // deliberately kept, so a change of mind would
+                            // cost the selection.
+                            collapse_on_click: false,
+                            grab_x,
+                            changed: false,
+                        };
+                    }
+                    return;
+                }
                 self.edit_bar_targets(
                     &baselines,
                     |baseline, layer| layer.start_frame = baseline.start + delta,
@@ -2243,9 +2279,23 @@ impl TimelineGpuiPanel {
                 pressed,
                 collapse_on_click,
                 grab_x,
-                ..
+                changed,
             } => {
                 let delta = self.frames_delta(grab_x, x);
+                // Same rule as `MoveBar` above.
+                if delta == 0 {
+                    if changed {
+                        self.revert_drag_preview(cx);
+                        self.drag = TimelineDrag::TrimIn {
+                            baselines,
+                            pressed,
+                            collapse_on_click,
+                            grab_x,
+                            changed: false,
+                        };
+                    }
+                    return;
+                }
                 self.edit_bar_targets(
                     &baselines,
                     |baseline, layer| {
@@ -2274,9 +2324,23 @@ impl TimelineGpuiPanel {
                 pressed,
                 collapse_on_click,
                 grab_x,
-                ..
+                changed,
             } => {
                 let delta = self.frames_delta(grab_x, x);
+                // Same rule as `MoveBar` above.
+                if delta == 0 {
+                    if changed {
+                        self.revert_drag_preview(cx);
+                        self.drag = TimelineDrag::TrimOut {
+                            baselines,
+                            pressed,
+                            collapse_on_click,
+                            grab_x,
+                            changed: false,
+                        };
+                    }
+                    return;
+                }
                 self.edit_bar_targets(
                     &baselines,
                     |baseline, layer| {
@@ -2294,7 +2358,9 @@ impl TimelineGpuiPanel {
                     changed: true,
                 };
             }
-            TimelineDrag::Reorder { layer, changed } => {
+            TimelineDrag::Reorder {
+                layer, from_index, ..
+            } => {
                 let origin_y = self.area_origin.get().1;
                 let Some(target) = self.layer_at_content_y(y - origin_y) else {
                     return;
@@ -2311,14 +2377,27 @@ impl TimelineGpuiPanel {
                 let Some(to_index) = self.state.layers().position(|l| l.id == target) else {
                     return;
                 };
+                if to_index == from_index {
+                    // The layer is back in the slot the press found it in:
+                    // drop the preview instead of reordering into the same
+                    // place, so the gesture has nothing to commit (invariant
+                    // 3, `MED-APP-07`).
+                    self.revert_drag_preview(cx);
+                    self.drag = TimelineDrag::Reorder {
+                        layer,
+                        from_index,
+                        changed: false,
+                    };
+                    return;
+                }
                 project.update(cx, |project, cx| {
                     if let Some(doc) = reorder_layer(project.document(), comp_id, layer, to_index) {
                         project.apply_document(doc, InvalidationHint::Structural, cx);
                     }
                 });
-                let _ = changed;
                 self.drag = TimelineDrag::Reorder {
                     layer,
+                    from_index,
                     changed: true,
                 };
             }
@@ -2339,6 +2418,26 @@ impl TimelineGpuiPanel {
                     .unwrap_or(0);
                 let delta = self.frames_delta(grab_x, x).max(-(min_origin as i64));
                 if delta == current_delta {
+                    return;
+                }
+                if delta == 0 {
+                    // Back on the baseline: drop the preview rather than
+                    // re-applying one, so the gesture is a no-op again and the
+                    // mouse-up has nothing to commit. The bar arms above got
+                    // this from `MED-APP-07`; the rule is invariant 3 and it
+                    // applies to every arm that previews from a baseline.
+                    self.revert_drag_preview(cx);
+                    self.selected_keyframes = origin_selection.clone();
+                    self.drag = TimelineDrag::MoveKeyframe {
+                        baselines,
+                        origin_selection,
+                        pressed,
+                        // Not a click any more — see the bar arm above.
+                        collapse_on_click: false,
+                        current_delta: 0,
+                        grab_x,
+                        changed: false,
+                    };
                     return;
                 }
                 self.apply_keyframe_move_preview(&baselines, delta, cx);
@@ -2394,6 +2493,24 @@ impl TimelineGpuiPanel {
                 if frame_delta == current_frame_delta
                     && value_delta.to_bits() == current_value_delta.to_bits()
                 {
+                    return;
+                }
+                if frame_delta == 0 && value_delta == 0.0 {
+                    // Same rule as `MoveKeyframe` above: a curve edit dragged
+                    // back onto the key it started on changed nothing.
+                    self.revert_drag_preview(cx);
+                    self.selected_keyframes = origin_selection.clone();
+                    self.drag = TimelineDrag::GraphKeyframes {
+                        baselines,
+                        origin_selection,
+                        drag,
+                        transform,
+                        graph_origin,
+                        pressed_value,
+                        current_frame_delta: 0,
+                        current_value_delta: 0.0,
+                        changed: false,
+                    };
                     return;
                 }
                 self.apply_graph_keyframe_preview(&baselines, frame_delta, value_delta, cx);
@@ -2520,6 +2637,23 @@ impl TimelineGpuiPanel {
         }
     }
 
+    /// Drop the uncommitted preview a gesture has applied, putting the last
+    /// committed document back.
+    ///
+    /// Both ways out of an edit that turned out to be nothing use it: a
+    /// cancelled drag, and a live gesture that came back to where it started.
+    /// The second one matters because a preview left standing is *also* an
+    /// invariant-3 break — [`ravel_ui::document::DocumentStore::undo`] spends
+    /// the first Ctrl+Z discarding it, so the press does nothing visible even
+    /// though no undo step was pushed (`MED-APP-07`).
+    fn revert_drag_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(project) = self.project.clone() {
+            project.update(cx, |project, cx| {
+                project.revert_document(cx);
+            });
+        }
+    }
+
     /// Abort the active drag (button state lost mid-gesture): its live
     /// document updates are uncommitted and must not leak into an unrelated
     /// undo step.
@@ -2549,11 +2683,7 @@ impl TimelineGpuiPanel {
         if !changed {
             return;
         }
-        if let Some(project) = self.project.clone() {
-            project.update(cx, |project, cx| {
-                project.revert_document(cx);
-            });
-        }
+        self.revert_drag_preview(cx);
     }
 
     fn drag_ended(&mut self, cx: &mut Context<Self>) {
@@ -4743,9 +4873,13 @@ impl TimelineGpuiPanel {
                             // Header drag reorders the stack; committed on
                             // mouse-up. A modified click is building a
                             // selection, not moving a layer.
-                            if !mode.is_additive() {
+                            if !mode.is_additive()
+                                && let Some(from_index) =
+                                    this.state.layers().position(|l| l.id == lid)
+                            {
                                 this.drag = TimelineDrag::Reorder {
                                     layer: lid,
+                                    from_index,
                                     changed: false,
                                 };
                             }
@@ -7514,6 +7648,89 @@ mod tests {
             .unwrap();
     }
 
+    /// The other half of "a press that never moved is a click": a press that
+    /// *did* move and came home is **not** one. Taking a move back is how a
+    /// user changes their mind, and the press kept the multi-selection
+    /// precisely so the gesture could carry it — so narrowing it on the
+    /// mouse-up would charge the change of mind a selection.
+    ///
+    /// **What this test drops**: `collapse_on_click: false` in the
+    /// `delta == 0` arm of `MoveBar` inside
+    /// [`TimelineGpuiPanel::drag_moved`]. Carry the flag through instead and
+    /// the returned drag collapses to the pressed layer, because the arm also
+    /// resets `changed` (invariant 3) and that is what `drag_ended` reads.
+    #[gpui::test]
+    fn a_bar_drag_that_returned_home_keeps_the_selection_it_carried(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, a, b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                super::super::set_layer_selection(vec![a, b], cx);
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: panel.bar_baselines(a, cx),
+                    pressed: a,
+                    collapse_on_click: true,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                // Ten frames out, then home again.
+                panel.drag_moved(40.0, 0.0, false, false, cx);
+                panel.drag_moved(0.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+                assert_eq!(
+                    super::super::layer_selection(cx).layers(),
+                    [a, b],
+                    "the returned drag was read as a click and narrowed the selection"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The keyframe half of the same rule.
+    ///
+    /// **What this test drops**: `collapse_on_click: false` in the
+    /// `delta == 0` arm of `MoveKeyframe`.
+    #[gpui::test]
+    fn a_keyframe_drag_that_returned_home_keeps_the_selection_it_carried(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Both keys picked, then a press on one of them: the press
+                // keeps the pair so the gesture can move both.
+                panel.selected_keyframes =
+                    HashSet::from([keyframe_ref(a, &row, 0, 0), keyframe_ref(a, &row, 0, 10)]);
+                let (origin_x, origin_y) = panel.area_origin.get();
+                panel.channel_row_mouse_down(
+                    a,
+                    row.clone(),
+                    0,
+                    40.0,
+                    1,
+                    origin_x + 40.0,
+                    origin_y,
+                    false,
+                    cx,
+                );
+                assert_eq!(
+                    panel.selected_keyframes.len(),
+                    2,
+                    "the press keeps the pair it may have to move"
+                );
+                panel.drag_moved(origin_x + 80.0, origin_y, false, false, cx);
+                panel.drag_moved(origin_x + 40.0, origin_y, false, false, cx);
+                panel.drag_ended(cx);
+                assert_eq!(
+                    panel.selected_keyframes.len(),
+                    2,
+                    "the returned drag was read as a click and dropped one of the pair"
+                );
+            })
+            .unwrap();
+    }
+
     /// Deleting the selected layer removes it (and its network) from the
     /// document; undo restores it (REQ-LAYER-009).
     #[gpui::test]
@@ -7676,6 +7893,167 @@ mod tests {
         assert!(layer(&project, comp_id, a, cx).locked);
     }
 
+    /// Invariant 3 (one action, one undo step): a bar gesture that leaves the
+    /// bar where it found it is not an edit. `UndoStack::push` does not
+    /// deduplicate, so a click with a 1px wobble — and a drag that wandered
+    /// and came back — used to push a step that Ctrl+Z spends without showing
+    /// anything, pushing the real history out of the 200-step window.
+    ///
+    /// **What this test drops**: the `delta == 0` arm in `MoveBar`, `TrimIn`
+    /// or `TrimOut` inside [`TimelineGpuiPanel::drag_moved`]. Apply
+    /// unconditionally and mark `changed: true` the way they used to, and the
+    /// undo below spends itself on a no-op — either on the garbage step, or
+    /// (with the step gone but the preview left standing) on discarding a
+    /// preview identical to the committed document — instead of reaching the
+    /// solo toggle.
+    #[gpui::test]
+    fn a_bar_drag_that_ends_where_it_started_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        // The last real edit — what one Ctrl+Z has to reach.
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layer(&project, comp_id, a, cx).solo);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let baselines = panel.bar_baselines(a, cx);
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: baselines.clone(),
+                    pressed: a,
+                    collapse_on_click: false,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                // A click with a wobble: 1px is less than a frame.
+                panel.drag_moved(1.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+
+                // And a real drag dropped back on its own start: 40px is ten
+                // frames out, 0px is home again.
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines,
+                    pressed: a,
+                    collapse_on_click: false,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(40.0, 0.0, false, false, cx);
+                panel.drag_moved(0.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+
+                // Both trim edges follow the same rule.
+                for edge in ["in", "out"] {
+                    let baselines = panel.bar_baselines(a, cx);
+                    panel.drag = if edge == "in" {
+                        TimelineDrag::TrimIn {
+                            baselines,
+                            pressed: a,
+                            collapse_on_click: false,
+                            grab_x: 0.0,
+                            changed: false,
+                        }
+                    } else {
+                        TimelineDrag::TrimOut {
+                            baselines,
+                            pressed: a,
+                            collapse_on_click: false,
+                            grab_x: 0.0,
+                            changed: false,
+                        }
+                    };
+                    panel.drag_moved(40.0, 0.0, false, false, cx);
+                    panel.drag_moved(0.0, 0.0, false, false, cx);
+                    panel.drag_ended(cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let placed = layer(&project, comp_id, a, cx);
+        assert_eq!(
+            (placed.start_frame, placed.in_frame, placed.out_frame),
+            (0, 0, 100),
+            "every gesture left the bar and both trim edges where they started"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, a, cx).solo,
+            "one undo reached the last real edit, so the gestures recorded none"
+        );
+    }
+
+    /// The reorder half of invariant 3: a header drag is judged by where the
+    /// layer ends up, not by whether a reorder ran on the way.
+    ///
+    /// **What this test drops**: `changed: to_index != from_index` in the
+    /// `Reorder` arm of [`TimelineGpuiPanel::drag_moved`]. Set it to `true`
+    /// and the undo below spends itself on a stack that never changed.
+    #[gpui::test]
+    fn a_header_drag_that_returns_to_its_own_slot_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        let order = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                project
+                    .document()
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .layers
+                    .iter()
+                    .map(|l| l.id)
+                    .collect::<Vec<LayerId>>()
+            })
+        };
+        let start = order(cx);
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        // Press on A's header, then drag onto the other row.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::Reorder {
+                    layer: a,
+                    from_index: panel.state.layers().position(|l| l.id == a).unwrap(),
+                    changed: false,
+                };
+                let origin_y = panel.area_origin.get().1;
+                panel.drag_moved(0.0, origin_y + LAYER_ROW_HEIGHT / 2.0, false, false, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_ne!(order(cx), start, "the drag did move the layer");
+
+        // And back onto its own slot: the row B now occupies.
+        window
+            .update(cx, |panel, _window, cx| {
+                let origin_y = panel.area_origin.get().1;
+                let rows: Vec<LayerId> = panel.state.layers().rev().map(|l| l.id).collect();
+                let row = rows.iter().position(|id| *id == b).unwrap() as f32;
+                panel.drag_moved(
+                    0.0,
+                    origin_y + LAYER_ROW_HEIGHT * row + LAYER_ROW_HEIGHT / 2.0,
+                    false,
+                    false,
+                    cx,
+                );
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(order(cx), start, "the stack is back as the press found it");
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, a, cx).solo,
+            "one undo reached the last real edit, so the gesture recorded none"
+        );
+    }
+
     /// Reordering via header drag persists to the document.
     #[gpui::test]
     fn header_drag_reorders_the_stack(cx: &mut TestAppContext) {
@@ -7685,6 +8063,7 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.drag = TimelineDrag::Reorder {
                     layer: a,
+                    from_index: panel.state.layers().position(|l| l.id == a).unwrap(),
                     changed: false,
                 };
                 // Row 0 (top) is layer B: dragging A onto it moves A to B's
@@ -7933,6 +8312,145 @@ mod tests {
         };
         assert_eq!(curve.keyframes()[0].frame, 0);
         assert_eq!(curve.keyframes()[0].value, 0.0);
+    }
+
+    /// Invariant 3, the keyframe arms: a keyframe dragged out and dropped back
+    /// on its own frame changed nothing, so it records nothing. `MED-APP-07`
+    /// named the bar arms, but `MoveKeyframe` guarded only "the pointer has
+    /// not moved since the last event" — a drag that wandered and came back
+    /// re-applied a delta-0 preview and kept `changed: true`, so `drag_ended`
+    /// committed a no-op step.
+    ///
+    /// **What this test drops**: the `delta == 0` arm in `MoveKeyframe` inside
+    /// [`TimelineGpuiPanel::drag_moved`]. Without it the undo below is spent
+    /// on the gesture — on its garbage step, or (with only the step removed)
+    /// on discarding a preview identical to the committed document — instead
+    /// of reaching the solo toggle.
+    #[gpui::test]
+    fn a_keyframe_drag_that_ends_where_it_started_records_no_undo_step(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        // The last real edit — what one Ctrl+Z has to reach.
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(a, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layer(&project, comp_id, a, cx).solo);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.selected_keyframes = HashSet::from([keyframe_ref(a, &row, 0, 10)]);
+                let (origin_x, origin_y) = panel.area_origin.get();
+                // Press the key at frame 10 (content x 40 at 4 px/frame).
+                panel.channel_row_mouse_down(
+                    a,
+                    row.clone(),
+                    0,
+                    40.0,
+                    1,
+                    origin_x + 40.0,
+                    origin_y,
+                    false,
+                    cx,
+                );
+                assert!(matches!(panel.drag, TimelineDrag::MoveKeyframe { .. }));
+                // Ten frames out, then home again.
+                panel.drag_moved(origin_x + 80.0, origin_y, false, false, cx);
+                panel.drag_moved(origin_x + 40.0, origin_y, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let placed = layer(&project, comp_id, a, cx);
+        assert!(
+            keyframes::has_keyframe_at(&placed, &row, 0, 0)
+                && keyframes::has_keyframe_at(&placed, &row, 0, 10),
+            "the gesture left both keys on their own frames"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, a, cx).solo,
+            "one undo reached the last real edit, so the gesture recorded none"
+        );
+    }
+
+    /// The curve-editor half of the same rule: `GraphKeyframes` kept a sticky
+    /// `changed` (`changed || frame_delta != 0 || value_delta != 0.0`), so a
+    /// key dragged in frame/value space and dropped back on itself committed
+    /// a step that changed nothing.
+    ///
+    /// **What this test drops**: the `frame_delta == 0 && value_delta == 0.0`
+    /// arm in `GraphKeyframes` inside [`TimelineGpuiPanel::drag_moved`].
+    #[gpui::test]
+    fn a_graph_keyframe_drag_that_ends_where_it_started_records_no_undo_step(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, project, comp_id, layer_id, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, layer_id, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: layer_id,
+            row: row.clone(),
+            component: 0,
+        };
+
+        window
+            .update(cx, |panel, _window, cx| panel.toggle_solo(layer_id, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(layer(&project, comp_id, layer_id, cx).solo);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.sync_from_project(cx);
+                panel.state.select_channel(channel, false);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(layer_id, &row, 0, 0)]);
+                let curves = selected_timeline_curves(&panel.state);
+                let transform = CurveTransform::new(
+                    CurvePoint::new(0.0, 0.0),
+                    CurvePoint::new(20.0, 100.0),
+                    CurvePoint::new(200.0, 100.0),
+                );
+                let press = CurvePoint::new(0.0, 100.0);
+                panel.begin_graph_drag(
+                    &curves,
+                    CurveHit {
+                        curve: 0,
+                        frame: 0,
+                        part: HitPart::Keyframe,
+                    },
+                    press,
+                    transform,
+                    (0.0, 0.0),
+                );
+                // Five frames and fifty units away, then back onto the press.
+                panel.drag_moved(50.0, 50.0, false, false, cx);
+                panel.drag_moved(press.x as f32, press.y as f32, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let placed = layer(&project, comp_id, layer_id, cx);
+        let channels = keyframes::row_channels(&placed, &row).unwrap();
+        let ChannelSource::Keyframes(curve) = &channels[0].source else {
+            panic!("expected keyframes");
+        };
+        assert_eq!(
+            (curve.keyframes()[0].frame, curve.keyframes()[0].value),
+            (0, 0.0),
+            "the gesture left the key on its own frame and value"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(
+            !layer(&project, comp_id, layer_id, cx).solo,
+            "one undo reached the last real edit, so the gesture recorded none"
+        );
     }
 
     #[gpui::test]
@@ -9311,6 +9829,48 @@ mod tests {
             Some(0.0),
             "the same-numbered layer of the other composition is untouched"
         );
+    }
+
+    /// Invariant 2 (selection lifetime): a keyframe selection belongs to the
+    /// row it was made in, so clicking a layer header ends it. The bar row
+    /// already cleared it; the header row did not, and Delete then removed a
+    /// keyframe of the *previous* layer — one that may sit in a collapsed row
+    /// nobody can see — instead of the layer the click just selected.
+    ///
+    /// **What this test drops**: the `selected_keyframes.clear()` in
+    /// [`TimelineGpuiPanel::select_layer_with_mode`], the header click's
+    /// selection path. Without it Delete deletes layer A's key at frame 10 and
+    /// leaves layer B in the composition.
+    #[gpui::test]
+    fn a_layer_header_click_ends_the_keyframe_selection(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+
+        window
+            .update(cx, |panel, window, cx| {
+                panel.select_layer(a, cx);
+                panel.selected_keyframes = HashSet::from([keyframe_ref(a, &row, 0, 10)]);
+                // What a click on layer B's header runs.
+                panel.select_layer_with_mode(b, LayerClickMode::Replace, cx);
+                assert!(
+                    panel.selected_keyframes.is_empty(),
+                    "the keyframe selection outlived the row it belonged to"
+                );
+                panel.on_delete(&EditDelete, window, cx);
+            })
+            .unwrap();
+
+        let l = layer(&project, comp_id, a, cx);
+        assert!(
+            keyframes::has_keyframe_at(&l, &row, 0, 10),
+            "Delete was aimed at the clicked layer, not at a stale keyframe"
+        );
+        project.read_with(cx, |project, _| {
+            let comp = project.document().get_composition(comp_id).unwrap();
+            assert!(comp.get_layer(b).is_none(), "the clicked layer is deleted");
+            assert!(comp.get_layer(a).is_some(), "and the other one stands");
+        });
     }
 
     /// Batch Delete removes every selected keyframe while preserving the

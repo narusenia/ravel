@@ -973,21 +973,14 @@ impl ViewerPanel {
     }
 
     fn publish_selection(network: NetworkPath, nodes: HashSet<NodeId>, cx: &mut App) {
-        let target = if nodes.is_empty() {
-            super::PropertiesTarget::Empty
-        } else {
-            let mut ids: Vec<_> = nodes.iter().copied().collect();
-            ids.sort_by_key(|id| id.raw());
-            super::PropertiesTarget::Nodes {
-                network: network.clone(),
-                ids,
-            }
-        };
+        // The Properties subject goes through the shared publisher: a click on
+        // empty canvas empties the panel only when what it shows is this
+        // selection's own (invariant 1, `MED-APP-05`).
+        super::publish_node_properties_target(Some(&network), &nodes, cx);
         cx.set_global(CanvasSelection {
             path: Some(network),
             nodes,
         });
-        cx.set_global(super::SelectedPropertiesTarget(target));
     }
 
     /// What the left button means, decided in one place from the active tool.
@@ -1705,19 +1698,8 @@ impl ViewerPanel {
     /// including the "no network open" state that [`Self::publish_selection`]
     /// cannot express.
     fn restore_selection(selection: CanvasSelection, cx: &mut App) {
-        let target = match &selection.path {
-            Some(network) if !selection.nodes.is_empty() => {
-                let mut ids: Vec<_> = selection.nodes.iter().copied().collect();
-                ids.sort_by_key(|id| id.raw());
-                super::PropertiesTarget::Nodes {
-                    network: network.clone(),
-                    ids,
-                }
-            }
-            _ => super::PropertiesTarget::Empty,
-        };
+        super::publish_node_properties_target(selection.path.as_ref(), &selection.nodes, cx);
         cx.set_global(selection);
-        cx.set_global(super::SelectedPropertiesTarget(target));
     }
 
     /// Shape-tool mouse-down: record the pending drag. Nothing is created yet
@@ -11965,5 +11947,84 @@ mod tests {
             original,
             "one undo takes the whole removal back"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Selection ownership (invariant 1, `MED-APP-05`)
+    // -----------------------------------------------------------------------
+
+    /// Invariant 1: the Viewer owns the canvas selection, not the Properties
+    /// subject.
+    ///
+    /// **What this test drops**: the ownership guard in
+    /// [`crate::panels::publish_node_properties_target`]. Publish `Empty`
+    /// unconditionally — the way this panel used to — and a Select-tool click
+    /// on empty canvas blanks the Properties panel while the Timeline's layer
+    /// is still selected.
+    #[gpui::test]
+    fn an_empty_canvas_selection_leaves_a_foreign_properties_target(cx: &mut TestAppContext) {
+        let (_window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+
+        // The Timeline's own publisher puts the layer on screen.
+        cx.update(crate::panels::publish_layer_properties_target);
+        cx.update(|cx| {
+            assert!(
+                matches!(
+                    &cx.global::<crate::panels::SelectedPropertiesTarget>().0,
+                    crate::panels::PropertiesTarget::Layer { layer_id, .. } if *layer_id == layer
+                ),
+                "the fixture starts with the layer as the Properties subject"
+            );
+        });
+
+        // A click on empty canvas: the Viewer's selection empties.
+        cx.update(|cx| ViewerPanel::publish_selection(network.clone(), HashSet::new(), cx));
+        cx.update(|cx| {
+            assert!(
+                cx.global::<CanvasSelection>().nodes.is_empty(),
+                "the canvas selection — which this panel does own — is empty"
+            );
+            assert!(
+                matches!(
+                    &cx.global::<crate::panels::SelectedPropertiesTarget>().0,
+                    crate::panels::PropertiesTarget::Layer { layer_id, .. } if *layer_id == layer
+                ),
+                "the layer target belongs to the layer selection and stands"
+            );
+        });
+    }
+
+    /// The other half of invariant 1: the guard withdraws what the node
+    /// selection *does* own, so emptying the selection after a node click
+    /// clears the panel instead of leaving a stale node on screen.
+    ///
+    /// **What this test drops**: the `Empty` write in
+    /// [`crate::panels::publish_node_properties_target`]. Return early for
+    /// every empty selection and the withdrawn node stays the subject.
+    #[gpui::test]
+    fn an_empty_canvas_selection_withdraws_its_own_properties_target(cx: &mut TestAppContext) {
+        let (_window, _project, comp_id, layer) = shell_setup(cx);
+        let network = NetworkPath::layer(comp_id, layer);
+        let node = ravel_core::id::NodeId::next();
+
+        cx.update(|cx| {
+            ViewerPanel::publish_selection(network.clone(), HashSet::from([node]), cx);
+            assert!(
+                matches!(
+                    &cx.global::<crate::panels::SelectedPropertiesTarget>().0,
+                    crate::panels::PropertiesTarget::Nodes { ids, .. } if ids == &[node]
+                ),
+                "a node click publishes this panel's own subject"
+            );
+            ViewerPanel::publish_selection(network.clone(), HashSet::new(), cx);
+            assert!(
+                matches!(
+                    &cx.global::<crate::panels::SelectedPropertiesTarget>().0,
+                    crate::panels::PropertiesTarget::Empty
+                ),
+                "and emptying the selection withdraws it"
+            );
+        });
     }
 }

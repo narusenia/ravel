@@ -156,6 +156,17 @@ BaseCheckbox::new(self.id)
 primitive の側で Enter / Space が click として届くので、`on_key_down` を
 並べて足すと 2 経路になり、片方が腐る（不変条件 10）。
 
+**primitive が決めた遷移規則を Ravel 側に写さない。** 活性化がどの状態に
+着地するか（`Checkbox` なら未チェックと不定はどちらもチェックへ）は
+primitive が持っている。`gpui_base` 側の判定関数は private なので、写すと
+規則の出どころが 2 つになる — **転送するだけにする**。
+
+**ハンドラの形は `Fn(&T, &mut Window, &mut App)` の 3 引数にする。**
+`Context::listener` はこの形しか作らないので、primitive の
+`Fn(T, &ClickEvent, …)` をそのまま公開すると**呼び出し側が
+`cx.listener` を使えなくなる**。イベント（修飾キー）を要求する呼び出し側が
+現れるまでは落として通す。
+
 ### 2. 寸法は `Density::metrics` から
 
 ```rust
@@ -175,6 +186,14 @@ let metrics = self.density.metrics(&theme);   // height / padding_x / gap / icon
 `foreground` が既にモードで逆向きなので、そこへ混色すれば向きは自動で
 正しくなる。
 
+**ただし計画書が色を名指ししている箇所は計画書が正。** 導出メソッドは
+「決まっていないところ」を埋めるもので、決まっているものを上書きしない。
+実例: Checkbox のマークは「`background` で抜く」と決まっているが、
+`readable_on(primary)` は**ライトパレットでは `foreground` を選ぶ**
+（`#5B6EE1` は黒に対して 4.8:1、白に対して 4.4:1）。導出に任せると
+ライトだけ黒いチェックになる。名指しの色を採り、**導出はその色が働かなく
+なる派生状態**（38% に落ちた面の上など）にだけ使う。
+
 ### 4. 判定を純関数に出す
 
 `render` が呼ぶものをテストが呼べるようにする。実物は `button_layers` /
@@ -187,6 +206,14 @@ let layers = checkbox_layers(self.state, self.disabled, &theme.colors);
 `render` は返ってきた層を当てるだけ。**disabled のとき hover / press は
 インストールしない**（GPUI は `hover` を要素スタイルの後に解決するので、
 残したままだと disabled でもポインタで光る）。
+
+**部品が入れ子（面 + ラベル）のときは、hover / press をフォーカスを持つ
+根に置く。** GPUI の `hover` はそれを書いた要素にしか掛からないので、
+子（Checkbox の 14px の四角など）を親のホバーで動かすには
+`group_hover` / `group_active` が要り、`gpui_base::CheckboxIndicator` は
+そもそも `InteractiveElement` を実装していない。**根に 1 枚の面**を敷けば、
+状態を語る子の塗り（チェックの `primary`）と、操作を語る親の面
+（`accent`）が混ざらずに済む。
 
 ### 5. リングは内側の 1px
 
@@ -202,13 +229,31 @@ let layers = checkbox_layers(self.state, self.disabled, &theme.colors);
 ```rust
 const SECTIONS: &[(&str, SectionFn)] = &[
     …
-    ("checkbox · 三状態と 4 状態", checkbox_section),
+    ("checkbox · three states and four looks", checkbox_section),
 ];
 ```
+
+節の `fn` は `fn(&RavelTheme, &GalleryInputs) -> AnyElement` で、**`cx` を
+受け取らない**。状態を持てないので、生きた部品は*制御された*状態を並べる
+（トグルは単体テストが固定する。`GalleryInputs` に足せば状態は持てるが、
+それは窓が必要な部品だけの話）。
 
 **4 状態と両パレットが 1 画面で見えること。** 生きた部品と、純関数から
 作った swatch 列の両方を出す（`--release` で開く。理由は gallery の
 module doc）。
+
+### 6b. マークをアイコンで描くなら `UiIcon` に足す
+
+部品が中にグリフを描く（チェック、ダッシュ、矢印）なら、`icon.rs` の
+`UiIcon` に名前を足す。**`ALL` は固定長配列なので要素数も直す**
+（直さないとコンパイルエラー。これは good failure）。
+
+パスは**2 つの `AssetSource` の両方で解決する必要がある** — アプリの
+`RavelAssets`（`assets/icons/` → `gpui-kit-assets` フォールバック）と、
+gallery の `gpui_kit_assets::Assets`。`gpui-kit-assets` が持っているグリフ
+（`icons/check.svg` / `icons/minus.svg` 等）なら SVG を vendoring しなくて
+よい。`ravel-app` の
+`every_ui_glyph_resolves_through_the_asset_source` が両端を繋ぎ止める。
 
 ### 7. `ravel-widgets` に `gpui-component` を足さない
 

@@ -22,6 +22,9 @@ GPUI のパターンは [`../gpui-ui-guide.md`](../gpui-ui-guide.md#部品を追
       取る（`is_dark` で分岐しない。不変条件 12）
 - [ ] **Tab 順**（`tab_index` / `tab_stop`）と **Enter / Space** を通す。
       pointer と鍵盤は**同一の経路**（不変条件 10）
+- [ ] 公開するハンドラは `Fn(&T, &mut Window, &mut App)` の 3 引数
+      （`cx.listener` が作れる形。primitive の 4 引数をそのまま出さない）
+- [ ] マークをアイコンで描くなら `UiIcon` に足す（`ALL` の要素数も更新）
 - [ ] フォーカスリングは要素の**内側**の 1px（`Button` は `focus_visible`、
       クリックして入る面は `focus`）
 - [ ] `examples/gallery.rs` の `SECTIONS` に 1 行足す
@@ -45,6 +48,13 @@ GPUI のパターンは [`../gpui-ui-guide.md`](../gpui-ui-guide.md#部品を追
 
 - 状態型（`CheckboxState` / `InputState` …）は `gpui-base` のものを
   そのまま再エクスポートする。Ravel 側で似た enum を作らない
+- **遷移規則も primitive のもの。** 活性化がどの状態に着地するかは
+  primitive が決めているので、転送するだけにする（判定関数は private で、
+  写せば規則の出どころが 2 つになる）。Ravel 側のテストはその規則を
+  **窓越しに読む**（`every_state_activates_to_the_one_the_primitive_names`）
+- 公開するハンドラは `Fn(&T, &mut Window, &mut App)`。primitive の
+  `Fn(T, &ClickEvent, …)` を素通しすると、**呼び出し側が `cx.listener` を
+  使えなくなる**。`ClickEvent` は要求する呼び出し側が出るまで落とす
 - 活性化のハンドラは 1 つだけ受ける（`on_click` / `on_change`）。
   **`on_key_down` を足さない** — 2 経路作ると片方が腐る（不変条件 10）
 - primitive が持つ状態は、今の呼び出し側が使っていなくても**描けるように
@@ -84,6 +94,15 @@ pub fn checkbox_layers(
   発明しない。段で表せない意味なら、その意味を先に言う（不変条件 12）
 - **`is_dark` で分岐しない。** `foreground` が既にモードで逆向きなので、
   `toward_foreground` に混ぜれば向きは自動で正しくなる
+- **計画書が名指しした色は計画書が正。** 導出は決まっていないところを
+  埋めるもの。Checkbox のマークは「`background` で抜く」と決まっており、
+  `readable_on(primary)` はライトパレットでは `foreground` を選ぶので
+  （4.8:1 対 4.4:1）、そこを導出に任せるとライトだけ黒いチェックになる。
+  導出はその色が働かなくなる派生状態（38% の面の上）に使う
+- **入れ子の部品の hover / press は、フォーカスを持つ根に置く。** GPUI の
+  `hover` は書いた要素にしか掛からず、`gpui_base::CheckboxIndicator` は
+  `InteractiveElement` を実装していないので子を親のホバーで動かせない。
+  状態を語る子の塗りと、操作を語る根の面を分ける
 - 部品固有で**トークンに無い寸法**（14px の Checkbox、12px のアイコン）は
   `tokens.rs` の名前付き定数にする。painter の中に数字を置かない
 - `gpui::ColorExt::blend` は使わない。`tokens::mix` を使う
@@ -120,6 +139,10 @@ disabled で消すものと残すものは分かれる（計画書の「disabled
 
 - **生きた部品**（実際に押せるもの）と、**純関数から作った swatch 列**の
   両方を出す。後者が「4 状態が読み分けられる」の確認になる
+- 節の `fn` は `cx` を受け取らないので状態を持てない。生きた部品は
+  *制御された*状態を並べる（トグルの正しさは単体テストの担当）
+- アイコンのパスは gallery の `gpui_kit_assets::Assets` と、アプリの
+  `RavelAssets` の**両方で解決する**必要がある
 - 両パレットで見ること。テーマトグルは
   `ravel_widgets::set_active_tokens` も呼ぶので、節が自分のトークンと
   食い違うことはない

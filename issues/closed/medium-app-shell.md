@@ -993,8 +993,15 @@ Properties パネルが強制的に `Empty` / `MediaAsset` にリセットされ
 > 回帰 pin は `a_bar_drag_that_ends_where_it_started_records_no_undo_step`
 > と `a_header_drag_that_returns_to_its_own_slot_records_no_undo_step`
 > （`crates/ravel-app/src/panels/timeline.rs`）。
+> キーフレーム側の兄弟の腕（`MoveKeyframe` / `GraphKeyframes`）にも同じ穴が
+> あったので同時に塞いだ（`.agents/rules/ux.md` 末尾の「チケットが名指しした
+> 呼び出し側だけ直すと兄弟は壊れたまま」に従う）。回帰 pin は
+> `a_keyframe_drag_that_ends_where_it_started_records_no_undo_step` と
+> `a_graph_keyframe_drag_that_ends_where_it_started_records_no_undo_step`。
 > **残っている隙間**: クランプに当たってフレームデルタだけ 0 でない
-> トリム（in を 0 より左へ、など）は依然 changed 扱いになる。
+> トリムと、`GraphTangent` の coupling だけが変わる場合は依然 changed 扱い。
+> デルタ比較では検出できないので `LOW-APP-29`（押下時スナップショットと
+> `drag_ended` 時点の文書比較）へ切り出した。
 
 `MoveKeyframe` / `GraphKeyframes` はデルタ 0 で早期 return するが、
 MoveBar / TrimIn / TrimOut / Reorder はしない。

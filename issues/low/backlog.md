@@ -212,13 +212,6 @@ gpui-ce フォーク `gpui_wgpu/src/wgpu_renderer.rs`（Ravel 側にコードは
 
 ## ravel-app / ravel-ui（軽微なバグ）
 
-**LOW-APP-02 | bug | クリックによる前面移動（z 変更）がコミットされず、無関係な undo ステップに混入する**
-`crates/ravel-app/src/panels/node_editor.rs:1744`
-`raised_to_front` がマウスダウン時に表示グラフを変更する。
-単なるクリックではコミットされないので refresh で元に戻る、
-または次の無関係な `commit_graph` に相乗りする。
-→ ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。
-
 **LOW-APP-03 | bug | Shift + ドラッグのボックス選択が既存選択を拡張せず置換する**
 `crates/ravel-app/src/panels/node_editor.rs:1760-1764`, `:1923-1949`
 バンド開始に Shift を要求するのに、publish するのはボックス内容のみで、

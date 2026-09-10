@@ -143,3 +143,16 @@ inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
 → キーに解決済みパスを含める / `resolved` の変更時に失敗エントリを消す。
 コメントを直す。**`ravel-audio` 側の `CacheKey` に手が入るので、
 `ravel-app` の 3 箇所と合わせて 1 単位**。
+
+**LOW-APP-02 | bug | クリックによる前面移動（z 変更）がコミットされず、無関係な undo ステップに混入する**
+（**解決済み**: `UIX-6`。`raised_to_front` は押下時ではなく「ドラッグが実際に
+動いた最初の移動」で適用されるので、単クリックは z を触らない。ドラッグの
+マウスアップは移動と raise を 1 ステップでコミットし、取り消し
+（`cancel_drag`）は `NodeMoveOrigin` の位置と z を戻す。回帰 pin は
+`a_node_click_raises_nothing_until_the_drag_moves`
+（`crates/ravel-app/src/panels/node_editor.rs`））
+`crates/ravel-app/src/panels/node_editor.rs:1744`
+`raised_to_front` がマウスダウン時に表示グラフを変更する。
+単なるクリックではコミットされないので refresh で元に戻る、
+または次の無関係な `commit_graph` に相乗りする。
+→ ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。

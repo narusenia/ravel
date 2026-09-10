@@ -1,0 +1,86 @@
+name: Bug report（日本語）
+description: Ravel の挙動がおかしい・クラッシュする・描画が正しくない。
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you would rather write in English, use the "Bug report" template.
+
+        先に [open issues](https://github.com/narusenia/ravel/issues) を
+        確認してください。なお、このリポジトリの `issues/` **ディレクトリ**は
+        内部の監査台帳で、このトラッカーとは別物です（見に行く必要はありません）。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 何が起きたか
+      description: 見えたことと、代わりに何が起きると思っていたか。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 再現手順
+      description: >
+        それが起きる最短の手順。プロジェクトファイルが絡むなら、
+        **最小の `.ravprj` を添付**してもらえるのが一番助かります。
+      placeholder: |
+        1. 新規プロジェクト
+        2. Shape ノードを足して … に繋ぐ
+        3. プレイヘッドを 10 フレームより後ろへスクラブ
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: どこで起きるか
+      description: 見当で構いません（報告の振り分けにしか使いません）。
+      options:
+        - Viewer / 描画
+        - Timeline
+        - ノードエディタ
+        - Properties
+        - メディアの読み込み / デコード
+        - 音声
+        - 書き出し / レンダー出力
+        - プロジェクトのロード / 保存
+        - ravel-cli（ヘッドレス）
+        - それ以外、または分からない
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ravel のバージョンまたはコミット
+      description: >
+        入れたリリース、またはビルドしたコミット（`git rev-parse --short HEAD`）。
+      placeholder: "6fff1966"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS と GPU
+      description: >
+        Ravel は合成を GPU でやるので、見た目の不具合ではアダプタが効きます。
+      placeholder: "macOS 15.3 (Apple M2 Pro) / Windows 11 (RTX 4070)"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ / バックトレース
+      description: >
+        任意。詳しく見るには `RUST_LOG=debug`、クラッシュしたなら
+        `RUST_BACKTRACE=1` を付けて実行してください。
+      render: text
+  - type: checkboxes
+    id: gpu-note
+    attributes:
+      label: 投稿の前に
+      options:
+        - label: >
+            見た目の不具合なら、**プレビュー解像度**（Viewer のツールバー）を
+            変えても起きるかどうかを書きました — 描画のバグとスケーリングの
+            バグを切り分けられます。
+          required: false

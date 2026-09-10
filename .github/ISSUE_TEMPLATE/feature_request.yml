@@ -1,0 +1,46 @@
+name: Feature request
+description: Ask for something Ravel cannot do yet.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        日本語で書きたい場合は「Feature request（日本語）」のテンプレートを使ってください。
+
+        Ravel's planned work is public: the roadmap lives in
+        [`docs/implementation/roadmap.md`](https://github.com/narusenia/ravel/blob/main/docs/implementation/roadmap.md)
+        and every unit in
+        [`docs/implementation/backlog.md`](https://github.com/narusenia/ravel/blob/main/docs/implementation/backlog.md).
+        Worth a look — what you want may already be scheduled.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The task, not the feature. "I need the same motion on 40 layers with a
+        stagger" tells us more than "add a stagger option", because it leaves
+        room for an answer the node graph already reaches.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today instead
+      description: The workaround, if there is one, and where it breaks down.
+  - type: textarea
+    id: shape
+    attributes:
+      label: How you imagine it working
+      description: >
+        Optional. If you know the tool that does it well (After Effects,
+        Cavalry, Houdini, Blender …), naming it is useful shorthand.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Kind of request
+      options:
+        - label: A new node or node parameter
+        - label: An editing or UI affordance
+        - label: Import / export format support
+        - label: Performance
+        - label: Scripting or automation

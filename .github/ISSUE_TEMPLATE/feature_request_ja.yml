@@ -1,0 +1,46 @@
+name: Feature request（日本語）
+description: Ravel にまだできないことの要望。
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you would rather write in English, use the "Feature request" template.
+
+        予定している作業は公開されています。順序は
+        [`docs/implementation/roadmap.md`](https://github.com/narusenia/ravel/blob/main/docs/implementation/roadmap.md)、
+        単位の一覧は
+        [`docs/implementation/backlog.md`](https://github.com/narusenia/ravel/blob/main/docs/implementation/backlog.md)。
+        欲しいものが既に予定に入っているかもしれません。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 何をしようとしているか
+      description: >
+        **機能ではなく作業を**書いてください。「40 レイヤーに同じモーションを
+        ずらして当てたい」は「stagger オプションを付けて」より情報量が多く、
+        ノードグラフで既に届く答えの余地が残ります。
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: 今はどうしているか
+      description: 回避策があるなら、それとどこで破綻するか。
+  - type: textarea
+    id: shape
+    attributes:
+      label: どう動くと思うか
+      description: >
+        任意。うまくやっている既存ツール（After Effects / Cavalry /
+        Houdini / Blender …）があれば、名前を挙げてもらえると早いです。
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 要望の種類
+      options:
+        - label: 新しいノード、またはノードのパラメータ
+        - label: 編集操作 / UI
+        - label: 読み込み・書き出しのフォーマット対応
+        - label: パフォーマンス
+        - label: スクリプト / 自動化

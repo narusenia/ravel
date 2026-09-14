@@ -293,35 +293,45 @@ impl MediaBinGpuiPanel {
     /// Decode whatever the cache has ready into renderable images. Runs on
     /// cache notifications and rebuilds — never in `render()`.
     fn refresh_thumbnails(&mut self, cx: &mut Context<Self>) -> bool {
+        let document = self
+            .project
+            .as_ref()
+            .map(|project| project.read(cx).document().clone());
+        // Rule 9: a stored image is derived state, so it lives exactly as long
+        // as the identity it was derived from. Dropping the mismatched ones
+        // *here* — before anything is requested — is what keeps `render` from
+        // painting them: requesting a replacement is not enough, because a
+        // replacement that never arrives (an offline or unreadable file, whose
+        // state is `Unavailable`) would leave the previous project's frame on
+        // screen for good (`MED-APP-08`). It subsumes dropping the images of
+        // assets that left the document, which is the same rule with no
+        // current identity at all.
+        let before = self.thumb_images.len();
+        self.thumb_images.retain(|id, (stored, _)| {
+            document
+                .as_ref()
+                .and_then(|document| document.media_assets.get(id))
+                .and_then(thumbnail_identity)
+                .is_some_and(|current| current == *stored)
+        });
+        let mut changed = before != self.thumb_images.len();
+
         let entries: Vec<(AssetId, ThumbnailIdentity)> = self
             .rows
             .iter()
             .filter_map(|row| {
-                let entry = self
-                    .project
-                    .as_ref()?
-                    .read(cx)
-                    .document()
-                    .media_assets
-                    .get(&row.asset_id)?
-                    .clone();
-                let identity = thumbnail_identity(&entry)?;
-                // A stored image is fresh only if it was generated from this
-                // exact identity. An input-colour-space change keeps the same
-                // id and path, so keying on the id alone would show the old
-                // space's thumbnail forever.
-                if self
-                    .thumb_images
-                    .get(&row.asset_id)
-                    .is_some_and(|(stored, _)| *stored == identity)
-                {
+                let entry = document.as_ref()?.media_assets.get(&row.asset_id)?;
+                let identity = thumbnail_identity(entry)?;
+                // Everything still stored matches its identity after the
+                // retain above, so having an image at all means it is fresh.
+                if self.thumb_images.contains_key(&row.asset_id) {
                     return None;
                 }
                 Some((row.asset_id, identity))
             })
             .collect();
         if entries.is_empty() {
-            return false;
+            return changed;
         }
         let ready: Vec<(AssetId, ThumbnailIdentity, Arc<[u8]>)> =
             self.thumbnails.update(cx, |cache, cx| {
@@ -340,23 +350,11 @@ impl MediaBinGpuiPanel {
                     })
                     .collect()
             });
-        let mut changed = false;
         for (id, identity, bytes) in ready {
             if let Some(image) = decode_thumbnail(&bytes) {
                 self.thumb_images.insert(id, (identity, image));
                 changed = true;
             }
-        }
-        // Assets can leave the document (delete, undo): drop their images so
-        // the map does not grow without bound. Since `.ravprj` v9 a
-        // re-imported file takes a fresh `AssetId`, so it could not inherit a
-        // stale frame even if the entry stayed.
-        if let Some(project) = &self.project {
-            let document = project.read(cx).document();
-            let before = self.thumb_images.len();
-            self.thumb_images
-                .retain(|id, _| document.media_assets.contains_key(id));
-            changed |= before != self.thumb_images.len();
         }
         changed
     }
@@ -1285,17 +1283,17 @@ mod tests {
             .unwrap();
     }
 
-    /// A stored thumbnail must not survive a change of the asset's resolved
-    /// input colour space: the id and the path are unchanged, so keying the
-    /// decoded image on the id alone would show the old space's thumbnail
-    /// forever (CodeRabbit review on the MED-APP-32 fix).
-    #[gpui::test]
-    fn a_colour_space_change_regenerates_the_thumbnail(cx: &mut gpui::TestAppContext) {
+    /// A Media Bin panel in a real window with `generator` behind its
+    /// thumbnail cache, plus the project it mirrors.
+    fn thumbnail_panel(
+        cx: &mut gpui::TestAppContext,
+        generator: ThumbnailGenerator,
+    ) -> (gpui::Entity<ProjectState>, gpui::Entity<MediaBinGpuiPanel>) {
         // No `ravel_i18n::init` here: i18n is process-global, and the lib
         // tests share one process — initializing it flips label lookups for
         // concurrently running tests (node_editor's driven-params test reads
         // the type id "constant", not the English display name). Uninitialised
-        // `t!` returns the raw key, which this test never asserts on.
+        // `t!` returns the raw key, which these tests never assert on.
         crate::project_state::disable_background_eval_for_tests();
         let project = cx.update(|cx| {
             gpui_component::init(cx);
@@ -1333,7 +1331,100 @@ mod tests {
             .borrow_mut()
             .take()
             .expect("panel entity should be created");
+        panel.update(cx, |panel, cx| {
+            panel.thumbnails = cx.new(|_| ThumbnailCache::with_generator(None, generator));
+        });
+        (project, panel)
+    }
 
+    /// Rule 9: a decoded thumbnail is derived from the asset's identity (its
+    /// resolved path, decode source and input colour space), so it must not
+    /// outlive that identity — the id alone repeats across documents and
+    /// across a relink (`MED-APP-08`).
+    ///
+    /// The case that made it permanent is the one asserted here: the
+    /// replacement never becomes ready (an offline or unreadable file, whose
+    /// state is `Unavailable`), so "request a new image" is not enough. The
+    /// stale one has to be dropped whether or not a new one arrives, which is
+    /// what leaves `render` with nothing but the kind icon to draw.
+    ///
+    /// Breaks on: removing the identity `retain` from `refresh_thumbnails`, or
+    /// weakening it back to "is this asset still in the document".
+    #[gpui::test]
+    fn a_relinked_asset_never_shows_the_previous_file(cx: &mut gpui::TestAppContext) {
+        // Only the fixture decodes; anything else fails, so the relinked path
+        // stays `Unavailable` for good.
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let clip = temp.path().join("clip.mov");
+        std::fs::write(&clip, b"media fixture").expect("write media fixture");
+        let decodable = clip.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |path, _source, _space| {
+            if path == decodable {
+                Ok(FrameBuffer::from_f32(8, 8, vec![0.5; 8 * 8 * 4]))
+            } else {
+                Err(crate::media::thumbnail::ThumbnailError::DecodeUnavailable(
+                    "offline".into(),
+                ))
+            }
+        });
+        let (project, panel) = thumbnail_panel(cx, generator);
+
+        project.update(cx, |project, cx| {
+            project.import_media(vec![probed_clip(clip.to_str().unwrap())], vec![], cx);
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+
+        let asset_id = panel.read_with(cx, |panel, _| panel.rows[0].asset_id);
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.thumb_images.contains_key(&asset_id),
+                "the fixture's thumbnail is what goes stale later",
+            );
+        });
+
+        // The asset is relinked to a file that cannot be decoded: same id,
+        // same row, new path — exactly what re-opening a different project
+        // with a same-named asset produces.
+        let relinked = temp.path().join("other.mov");
+        std::fs::write(&relinked, b"other fixture").expect("write other fixture");
+        project.update(cx, |project, cx| {
+            let mut doc = project.document().clone();
+            let entry = doc
+                .media_assets
+                .get_mut(&asset_id)
+                .expect("asset in document");
+            entry.resolved = Some(relinked.clone());
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.rows.iter().any(|row| row.asset_id == asset_id),
+                "the row is still there — only its image must be gone",
+            );
+            assert!(
+                !panel.thumb_images.contains_key(&asset_id),
+                "the previous file's frame is still stored, so the row keeps \
+                 drawing it: {:?}",
+                panel
+                    .thumb_images
+                    .get(&asset_id)
+                    .map(|(identity, _)| identity.clone()),
+            );
+        });
+    }
+
+    /// A stored thumbnail must not survive a change of the asset's resolved
+    /// input colour space: the id and the path are unchanged, so keying the
+    /// decoded image on the id alone would show the old space's thumbnail
+    /// forever (CodeRabbit review on the MED-APP-32 fix).
+    #[gpui::test]
+    fn a_colour_space_change_regenerates_the_thumbnail(cx: &mut gpui::TestAppContext) {
         // A generator that records the colour space each request carried.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorder = calls.clone();
@@ -1341,9 +1432,7 @@ mod tests {
             recorder.lock().unwrap().push(space);
             Ok(FrameBuffer::from_f32(8, 8, vec![0.5; 8 * 8 * 4]))
         });
-        panel.update(cx, |panel, cx| {
-            panel.thumbnails = cx.new(|_| ThumbnailCache::with_generator(None, generator));
-        });
+        let (project, panel) = thumbnail_panel(cx, generator);
 
         // The thumbnail cache keys by statting the source, so the clip needs
         // a real file behind it.

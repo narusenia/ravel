@@ -18,22 +18,6 @@
 
 ---
 
-## MED-APP-08 | bug | MediaBin のサムネイルがアセット ID キーのため File ▸ Open を越えて stale になる
-
-**該当**: `crates/ravel-app/src/panels/media_bin.rs:176-178`, `:214-218`
-
-`thumb_images` はアセット ID キーでプロジェクト差し替えを越えて生存する。
-ID はファイル名 stem 由来なので、同名アセット（`clip`）を含む別プロジェクトを開くと
-前プロジェクトのサムネイルが永久に表示される。
-`AudioService` はこの ID 再利用ケースを generation カウンタで防いでいるが、
-サムネイルマップには無い。`ThumbnailCache::invalidate` は production 呼び出し元がゼロ。
-
-**修正方針**: ドキュメント差し替え時に `thumb_images` をクリアする
-（`AudioService::on_document_replaced` と同じフックを使う）。
-または解決済みパスでキーにする。
-
----
-
 ## MED-APP-09 | bug | 音声トラック構築がライブ編集ごとに UI スレッドで無制限の作業を行う
 
 **該当**: `crates/ravel-app/src/audio/mixdown.rs:213-219`, `:255-272`,

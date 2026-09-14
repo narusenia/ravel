@@ -1014,5 +1014,44 @@ Ctrl+Z が見た目上何も起こさなくなり、ゴミステップが 200 �
 
 ---
 
----
+## MED-APP-08 | bug | MediaBin のサムネイルがアセット ID キーのため File ▸ Open を越えて stale になる
 
+> **解決済み**: `UIX-7`。`refresh_thumbnails` が、保存済み画像の identity と
+> ドキュメント上の現在の identity（解決済みパス + デコード元 + 入力色空間）を
+> 突き合わせ、**一致しないものをその場で捨てる**ようにした。要求を投げるだけでは
+> 閉じない — 新しい方が `Unavailable`（オフライン / 読めないファイル）だと
+> 差し替えが永久に来ないので、前の絵が残り続ける。ドキュメントから消えた
+> アセットの `retain` はこの規則の特殊ケース（現在の identity が無い）なので
+> 吸収した。`a_relinked_asset_never_shows_the_previous_file` が固定する。
+>
+> **起票時の前提との差分**:
+> - 「アセット ID キーなのでプロジェクト差し替えを越えて生存する」は**もう古い**。
+>   `ThumbnailIdentity`（`MED-APP-32` の CodeRabbit 指摘で入った）が既にあり、
+>   `refresh_thumbnails` は identity 不一致を検出して**再取得は投げていた**。
+>   残っていた穴は「再取得が成功するまで（成功しなければ永久に）古い画像を
+>   保持し、`render`（`:625`）がそれを identity を見ずに描く」こと
+> - したがって修正方針の「ドキュメント差し替え時に `thumb_images` をクリア」では
+>   足りない。同一ドキュメント内の relink や入力色空間の変更が閉じないため、
+>   ドキュメント遷移ではなく identity 不一致で捨てる形にした
+> - `render` 側は id キーのままにした。`refresh_thumbnails` の後にマップへ
+>   不一致が残らず、identity を変える変更は必ずドキュメントの commit を伴って
+>   `mirror_epoch` を進める（= 描画前に observer → `rebuild_rows` →
+>   `refresh_thumbnails` が走る）ので、描画側の照合は二重になる
+> - `ThumbnailCache::invalidate` に production 呼び出し元がゼロなのは**今も事実**
+>   （呼ぶのはテストだけ）。ただし不変条件 9 の違反ではないので、この単位では
+>   触っていない
+
+**該当**: `crates/ravel-app/src/panels/media_bin.rs:176-178`, `:214-218`
+
+`thumb_images` はアセット ID キーでプロジェクト差し替えを越えて生存する。
+ID はファイル名 stem 由来なので、同名アセット（`clip`）を含む別プロジェクトを開くと
+前プロジェクトのサムネイルが永久に表示される。
+`AudioService` はこの ID 再利用ケースを generation カウンタで防いでいるが、
+サムネイルマップには無い。`ThumbnailCache::invalidate` は production 呼び出し元がゼロ。
+
+**修正方針**: ドキュメント差し替え時に `thumb_images` をクリアする
+（`AudioService::on_document_replaced` と同じフックを使う）。
+または解決済みパスでキーにする。
+
+
+---

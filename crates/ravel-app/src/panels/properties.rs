@@ -1236,8 +1236,16 @@ fn build_field_row(
                             .gap_1()
                             .child(
                                 div()
+                                    // The letter is *in* the selector, the
+                                    // shape `crate::tooltip`'s own selector
+                                    // uses: geometry is all `debug_bounds`
+                                    // returns, so a label whose text the test
+                                    // cannot read is a label the test cannot
+                                    // hold to anything (rule 7 is about the
+                                    // name being on screen, not about a box
+                                    // being on screen).
                                     .debug_selector(move || {
-                                        format!("vector-label-{label_selector}")
+                                        format!("vector-label-{label_selector}:{label}")
                                     })
                                     .flex_shrink_0()
                                     .w(px(VECTOR_LABEL_WIDTH))
@@ -6810,25 +6818,30 @@ mod tests {
         visual.simulate_resize(size(px(400.0), px(600.0)));
         cx.run_until_parked();
 
+        // The letter each selector ends in is the assertion: a label drawn
+        // blank, or drawn with the wrong axis, has no selector to find.
         for (component, label_selector, cell_selector) in [
             (
                 "x",
-                "vector-label-custom.offset#x",
+                "vector-label-custom.offset#x:X",
                 "vector-cell-custom.offset#x",
             ),
             (
                 "y",
-                "vector-label-custom.offset#y",
+                "vector-label-custom.offset#y:Y",
                 "vector-cell-custom.offset#y",
             ),
             (
                 "z",
-                "vector-label-custom.offset#z",
+                "vector-label-custom.offset#z:Z",
                 "vector-cell-custom.offset#z",
             ),
         ] {
             let label = visual.debug_bounds(label_selector).unwrap_or_else(|| {
-                panic!("component {component} is unlabelled: only its position names it")
+                panic!(
+                    "component {component} carries no `{label_selector}` label: \
+                     it is unnamed, or named something else"
+                )
             });
             let cell = visual
                 .debug_bounds(cell_selector)
@@ -6840,7 +6853,7 @@ mod tests {
         }
         assert!(
             visual
-                .debug_bounds("vector-label-custom.offset#w")
+                .debug_bounds("vector-label-custom.offset#w:W")
                 .is_none(),
             "a three-component vector grew a fourth label"
         );

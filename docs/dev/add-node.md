@@ -17,6 +17,8 @@
       **必須**: `every_node_template_icon_is_embedded` が全テンプレートに
       固有のアイコンを要求するので、カテゴリ既定へのフォールバックは
       テスト失敗になる
+- [ ] **色のパラメータがあるなら `with_color_param` で宣言**（下記
+      「色を宣言する」。忘れると色が 4 成分スクラブで描かれる）
 - [ ] `crates/ravel-nodes/src/<領域>/` に `NodeProcessor` の実装を追加
 - [ ] `crates/ravel-nodes/src/lib.rs` の `processor_for_node` の `match` に
       `type_key` を追加
@@ -221,6 +223,47 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   色を扱うパラメータは `Channel4` で宣言し、`VEC4` のベクタと区別できるように
   する（`.ravprj` の移行がポート宣言型で色を見分ける）
 
+## 色を宣言する
+
+`Channel4` は**色にもベクタにもなる**ので、`Channel4` で宣言しただけでは
+編集器はどちらか分からない。**色ならテンプレートで明示する**:
+
+```rust
+.with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+.with_color_param("color")
+```
+
+これで決まるのは**画面での描き方だけ**（`MED-APP-19` / `MED-APP-30`、
+UX 不変条件 7）:
+
+| 宣言 | Properties | Timeline のキー行 |
+|---|---|---|
+| 色（`with_color_param`） | ColorPicker | `R` / `G` / `B` / `A` |
+| 無し | 4 成分の Vector 行 | `X` / `Y` / `Z` / `W` |
+
+**宣言を忘れると色が 4 成分のスクラブになる。** 組み込みの全 `Channel4` は
+`registry::builtin::tests::every_builtin_four_component_parameter_is_classified`
+が列挙して分類を固定しているので、新しい `Channel4` を足すとこのテストが
+落ちて気づける — 落ちたら宣言するか、**色でないなら**期待表に
+`(type_key, key, false)` を足す。
+
+色かどうかが**同じパラメータで `type` によって変わる**場合（`attribute.set` の
+`value` が `type = "color"` と `type = "vec4"` で同じ `Channel4`）は
+条件付きで宣言する:
+
+```rust
+.with_color_param_when("value", "type", "color")
+```
+
+解決は `ravel_core::registry::is_color_parameter(registry, node, key)` の
+1 箇所。**UI 側に種別判定を書き足さないこと** — ネットワークインタフェースの
+In ノードと subnet ノードは、テンプレートを持たないかわりに
+`CustomPortType` に `Vec4` が無いことを根拠にこの関数が色として扱う。
+
+`ParamRole`（`Position` / `Size`）とは**別の宣言**である。あちらは Viewer の
+マニピュレータがハンドルを置く幾何的な意味で、「色である」はハンドルを
+持たない。
+
 ## パラメータが外部契約に出られるか (REQ-PROJ-006)
 
 Properties のパラメータ行には**公開トグル（□ / ■）**があり、押すとその
@@ -239,7 +282,10 @@ Properties のパラメータ行には**公開トグル（□ / ■）**があ�
 
 対応は `ravel-core::exposed::apply::seed_value` の 1 箇所だけが持つ。
 **UI 側で種別判定を書き足さないこと** — 2 つ目の対応表ができた瞬間、
-`apply` が書き戻せない宣言を作れるようになる。`PathPoints` / `Curve` /
+`apply` が書き戻せない宣言を作れるようになる。上の
+[色を宣言する](#色を宣言する)は**この表を触らない**ので、色として宣言して
+いない `Channel4` も公開宣言では `color` 型になる（既知の食い違い、
+`LOW-APP-32`）。`PathPoints` / `Curve` /
 `Ramp` が外れているのは内部表現を外部契約に露出させないため
 （[`../specifications/data-model.md`](../specifications/data-model.md) の
 公開パラメータ宣言モデル）。

@@ -597,6 +597,10 @@ pub struct TimelineGpuiPanel {
     /// Origin of the layer bar area, captured during prepaint for
     /// bar hit-testing in panel coordinates.
     area_origin: Rc<Cell<(f32, f32)>>,
+    /// Size of the graph editor area, captured during prepaint beside
+    /// [`Self::area_origin`]. The wheel handler sits on the panel root, so
+    /// this is how a value zoom knows where the pointer is inside the graph.
+    graph_area_size: Rc<Cell<(f32, f32)>>,
     /// Vertical scroll of the layer stack. Read during render to build and
     /// paint only the rows on screen ([`TimelineGpuiPanel::visible_content_y`]);
     /// gpui wakes this view whenever the offset moves, so the value is never a
@@ -808,6 +812,7 @@ impl TimelineGpuiPanel {
             ruler_width: Rc::new(Cell::new(0.0)),
             ruler_origin_x: Rc::new(Cell::new(0.0)),
             area_origin: Rc::new(Cell::new((0.0, 0.0))),
+            graph_area_size: Rc::new(Cell::new((0.0, 0.0))),
             layer_scroll: ScrollHandle::new(),
             last_right_click: Rc::new(Cell::new((0.0, 0.0))),
             timecode_input: None,
@@ -1702,6 +1707,33 @@ impl TimelineGpuiPanel {
         }
         self.selected_keyframes = selected;
         cx.notify();
+    }
+
+    /// Zoom the value axis about `pointer_y` (a window coordinate), scaling
+    /// the visible span by `factor`.
+    ///
+    /// Only the graph editor has a value axis, so in bar view the gesture does
+    /// nothing rather than pinning a range nobody can see. Pinning is what
+    /// gives [`Self::fit_curve_values`] something to undo: before this
+    /// existed, Fit assigned the automatic range to the automatic range and
+    /// the button was inert (`MED-APP-17`).
+    fn zoom_curve_values(&mut self, factor: f64, pointer_y: f32, cx: &mut Context<Self>) {
+        if self.state.view_mode() != TimelineViewMode::Graph {
+            return;
+        }
+        let auto = curve_value_bounds(&selected_timeline_curves(&self.state))
+            .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN));
+        // 0 at the top edge (the `max` end), the convention
+        // `CurveValueRange::zoom` and the Properties curve editor share.
+        let height = self.graph_area_size.get().1;
+        let focus = if height > 0.0 {
+            ((pointer_y - self.area_origin.get().1) / height).clamp(0.0, 1.0) as f64
+        } else {
+            0.5
+        };
+        if self.curve_value_range.zoom(auto, factor, focus) {
+            cx.notify();
+        }
     }
 
     /// Fit the value axis back onto the data. Unpinning the shared range is
@@ -3627,6 +3659,11 @@ impl TimelineGpuiPanel {
                     Button::new("curve-fit-values")
                         .compact()
                         .ghost()
+                        // Rule 6: with the axis already following the data
+                        // there is nothing to fit, and a button that looks
+                        // live but changes nothing costs the user a guess
+                        // every time.
+                        .disabled(self.curve_value_range.is_auto())
                         .icon(Icon::new(RavelIcon::TimelineFit))
                         .tooltip(t!("timeline.graph.fit_values"))
                         .on_click(cx.listener(|this, _event, _window, cx| {
@@ -4515,7 +4552,7 @@ impl TimelineGpuiPanel {
         };
         let value_bounds =
             drag_value_bounds.unwrap_or_else(|| self.curve_value_range.resolved(auto_value_bounds));
-        let graph_size = Rc::new(Cell::new((0.0_f32, 0.0_f32)));
+        let graph_size = self.graph_area_size.clone();
         let grid = curve_grid_canvas(
             self.state.clone(),
             value_bounds,
@@ -5335,10 +5372,19 @@ impl Render for TimelineGpuiPanel {
                 if event.modifiers.platform || event.modifiers.control {
                     let dy: f32 = delta.y.into();
                     let factor = if dy > 0.0 { 1.2 } else { 1.0 / 1.2 };
-                    let cursor_x: f32 = event.position.x.into();
-                    this.state
-                        .zoom_at(cursor_x as f64 - HEADER_WIDTH as f64, factor);
-                    this.sync_zoom_slider(window, cx);
+                    if event.modifiers.shift {
+                        // Cmd/Ctrl + Shift + wheel zooms the value axis. It
+                        // lives inside the time-zoom branch so the plain wheel
+                        // (horizontal scroll) keeps every event it had, and a
+                        // graph zoom shrinks the span where a time zoom grows
+                        // pixels-per-frame — hence the reciprocal.
+                        this.zoom_curve_values(1.0 / factor, event.position.y.into(), cx);
+                    } else {
+                        let cursor_x: f32 = event.position.x.into();
+                        this.state
+                            .zoom_at(cursor_x as f64 - HEADER_WIDTH as f64, factor);
+                        this.sync_zoom_slider(window, cx);
+                    }
                 } else {
                     let dx: f32 = delta.x.into();
                     let frame_delta = dx as f64 / this.state.pixels_per_frame();
@@ -10549,6 +10595,156 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// Rule 6, "a visible control does something": the graph editor's Fit
+    /// button can only put the value axis back on the data if something can
+    /// take it off. `Cmd`/`Ctrl` + `Shift` + wheel is that something
+    /// (`MED-APP-17`), and it is deliberately the *only* wheel chord that
+    /// changed — the plain wheel still scrolls and `Cmd`/`Ctrl` + wheel still
+    /// zooms time, both asserted here so the value zoom cannot be added by
+    /// stealing one of them.
+    ///
+    /// Breaks on: dropping the `shift` branch from the wheel handler (Fit goes
+    /// inert again), routing the chord to `zoom_at` instead (time zoom moves),
+    /// dropping the graph-view guard in `zoom_curve_values` (the bar view pins
+    /// a range nobody can see), or inverting the reciprocal (the range widens
+    /// where the time axis zooms in).
+    #[gpui::test]
+    fn a_platform_shift_wheel_zooms_the_value_axis_and_fit_undoes_it(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.select_layer(a, cx);
+                panel.state.set_view_mode(TimelineViewMode::Graph);
+                cx.notify();
+            })
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let (graph_origin, graph_size) = window
+            .read_with(cx, |panel, _| {
+                (panel.area_origin.get(), panel.graph_area_size.get())
+            })
+            .unwrap();
+        assert!(
+            graph_size.1 > 0.0,
+            "the graph area must be laid out for the pointer to sit inside it",
+        );
+        // A quarter down the graph: off-centre, so a zoom that ignored the
+        // focus would land somewhere else.
+        let pointer = point(
+            px(graph_origin.0 + graph_size.0 / 2.0),
+            px(graph_origin.1 + graph_size.1 / 4.0),
+        );
+        let wheel = |modifiers: Modifiers| gpui::ScrollWheelEvent {
+            position: pointer,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(40.0))),
+            modifiers,
+            ..Default::default()
+        };
+        let platform = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        let platform_shift = Modifiers {
+            platform: true,
+            shift: true,
+            ..Default::default()
+        };
+
+        // What the axis follows while it is auto, which is where the zoom
+        // starts from.
+        let auto = window
+            .read_with(cx, |panel, _| {
+                curve_value_bounds(&selected_timeline_curves(&panel.state))
+                    .unwrap_or((-CURVE_DEGENERATE_MARGIN, CURVE_DEGENERATE_MARGIN))
+            })
+            .unwrap();
+        let range = |cx: &mut TestAppContext| {
+            window
+                .read_with(cx, |panel, _| panel.curve_value_range)
+                .unwrap()
+        };
+        let pixels_per_frame = |cx: &mut TestAppContext| {
+            window
+                .read_with(cx, |panel, _| panel.state.pixels_per_frame())
+                .unwrap()
+        };
+        assert!(range(cx).is_auto(), "the axis starts on the data");
+        let time_zoom_before = pixels_per_frame(cx);
+
+        visual.simulate_event(wheel(platform_shift));
+        cx.run_until_parked();
+
+        let zoomed = range(cx);
+        assert!(
+            !zoomed.is_auto(),
+            "Cmd+Shift+wheel must pin the value range, or Fit has nothing to \
+             put back",
+        );
+        let (min, max) = zoomed.bounds().expect("pinned bounds");
+        assert!(
+            max - min < auto.1 - auto.0,
+            "scrolling up must zoom in: {min}..{max} is not narrower than \
+             {auto:?}",
+        );
+        assert_eq!(
+            pixels_per_frame(cx),
+            time_zoom_before,
+            "the value zoom must leave the time axis alone",
+        );
+        // The pointer sat a quarter down the area, so the value that was
+        // under it has to still be under it — that is what makes the gesture
+        // feel anchored, and it is the only thing that proves the focus came
+        // from the pointer rather than from the middle of the graph.
+        let focus = 0.25;
+        let anchored = auto.1 - (auto.1 - auto.0) * focus;
+        let after = max - (max - min) * focus;
+        assert!(
+            (anchored - after).abs() < 1.0e-6,
+            "the value under the pointer moved from {anchored} to {after}",
+        );
+
+        window
+            .update(cx, |panel, _window, cx| panel.fit_curve_values(cx))
+            .unwrap();
+        assert!(
+            range(cx).is_auto(),
+            "Fit must drop the pinned range — that is the whole button",
+        );
+
+        // The chord it was added beside is unchanged.
+        visual.simulate_event(wheel(platform));
+        cx.run_until_parked();
+        assert!(
+            pixels_per_frame(cx) > time_zoom_before,
+            "Cmd+wheel must still zoom time",
+        );
+        assert!(range(cx).is_auto(), "and must not touch the value axis",);
+
+        // Bar view has no value axis, so the chord does nothing at all there.
+        let time_zoom_in_bars = pixels_per_frame(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.state.set_view_mode(TimelineViewMode::Bars);
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        visual.simulate_event(wheel(platform_shift));
+        cx.run_until_parked();
+        assert!(
+            range(cx).is_auto(),
+            "bar view must not pin a range the user cannot see",
+        );
+        assert_eq!(
+            pixels_per_frame(cx),
+            time_zoom_in_bars,
+            "and must not fall through to the time zoom either",
+        );
     }
 
     /// The graph editor's value range is the shared `widgets::curve_view`

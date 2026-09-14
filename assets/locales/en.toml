@@ -632,7 +632,7 @@ no_composition = "No composition — create one to start editing"
 empty = "Select an animated property to show its curve"
 grid = "Show graph grid"
 select_all = "Select all displayed keyframes"
-fit_values = "Fit value range"
+fit_values = "Fit value range (Cmd/Ctrl + Shift + wheel zooms)"
 
 # Playhead-relative layer timing (After Effects' Cmd+Shift+D, [, ], I and O).
 [timeline.layer]

@@ -98,7 +98,7 @@ canvas 上のカーソルは既存の click / drag と同じヒットテスト�
 開くとプレースホルダが出る。Shader Editor / Lua Console / アトリビュートスプレッドシートは
 どのプリセットにも無いが、**17 種すべてに View メニューの表示トグルがある**ので
 プリセットに依らず出せる。担当計画:
-Dopesheet とカーブエディタの縦ズームは `PARAM-5`、スコープ 4 種は
+Dopesheet は `PARAM-5`、スコープ 4 種は
 `viewer-scopes-plan.md` の `MON-1〜7`、Text Editor は
 `typography-plan.md`、Shader Editor と Lua Console は REQ-CODE-001。
 

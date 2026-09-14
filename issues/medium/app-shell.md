@@ -108,46 +108,6 @@ authoritative なレジストリは `ProjectState` が所有している（Viewe
 
 ---
 
-## MED-APP-17 | bug | カーブエディタの縦ズームが未実装で、Fit ボタンが何もしない
-
-**該当**: `crates/ravel-app/src/panels/timeline.rs:241`, `:345`, `:948-951`, `:2800-2802`
-
-縦方向の手動レンジを持つフィールドがあるが、**`Some(..)` を代入するコードが
-1 行も存在しない**。
-
-| 行 | 内容 |
-| --- | --- |
-| `:241` | `curve_value_range: Option<(f64, f64)>` の宣言 |
-| `:345` | `None` で初期化 |
-| `:949` | `fit_curve_values` が `None` を代入 |
-| `:2801` | 読み出し（`.or(self.curve_value_range)`） |
-
-帰結が 2 つ:
-
-1. **縦ズーム・縦パンが存在しない**。縦の表示範囲は常に
-   `curve_value_bounds(&resolved)` の自動 bounds に固定される
-2. **Fit ボタンが何もしない**。`fit_curve_values` は `None` に `None` を
-   代入して `cx.notify()` するだけ。既に auto なので見た目が変わらない
-
-ツールバーとコンテキストメニューの両方から到達できる（`:2162`, `:3917`）が、
-どちらも無反応。
-
-**修正方針**: 縦ズーム（ホイール / ピンチ / ドラッグ）を実装して
-`curve_value_range` を書く経路を作る。その時点で `fit_curve_values` が
-「手動レンジを捨てて自動に戻す」という意味を持つ。
-
-**現状（`PARAM-5` 実施後）**: 置き場所は済んでいる。`curve_value_range` は
-`crates/ravel-app/src/widgets/curve_view.rs` の `CurveValueRange` になり、
-`fit_curve_values` はその `fit()`（= データ追従に戻す）を呼ぶ。Properties の
-カーブエディタは同じ型をホイールと数値入力から書いている。**残っているのは
-Timeline に書き込み操作を足すこと**（ホイールを縦ズームに割り当てると既存の
-スクロール挙動が変わるため、`PARAM-5` では足していない）。それまで Timeline
-の Fit は自動範囲に自動範囲を代入するので見た目が変わらない。
-
-**検証**: ホイール / ピンチで縦方向にズームでき、Fit で自動範囲へ戻るテスト。
-
----
-
 ## MED-APP-19 | bug | `Channel4` パラメータが常に Color として描画される
 
 **該当**: `crates/ravel-ui/src/properties/node.rs:141`

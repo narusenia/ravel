@@ -623,7 +623,7 @@ no_composition = "コンポジションがありません — 作成すると編
 empty = "アニメーションプロパティを選択するとカーブが表示されます"
 grid = "グラフのグリッドを表示"
 select_all = "表示中のキーフレームをすべて選択"
-fit_values = "値範囲をフィット"
+fit_values = "値範囲をフィット（Cmd/Ctrl + Shift + ホイールでズーム）"
 
 # プレイヘッド基準のレイヤー時間操作（AE の Cmd+Shift+D / [ / ] / I / O）。
 [timeline.layer]

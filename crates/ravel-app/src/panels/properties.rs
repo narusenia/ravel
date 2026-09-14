@@ -674,6 +674,15 @@ fn exposed_toggle_button(
 
 /// Synthetic scrub keys for the components of a `Vector` field
 /// (`center#x`, `center#y`, ...).
+/// Width reserved for a Vector component's letter (`X` / `Y` / `Z` / `W`).
+/// It is *added* to the scrub's own minimum rather than taken out of it:
+/// rule 5 cuts labels, never values, and a letter drawn over the number
+/// would cut the value (`MED-APP-20`).
+const VECTOR_LABEL_WIDTH: f32 = 12.0;
+/// Space between a component's letter and its scrub, matching the `gap_1`
+/// the cell lays them out with.
+const VECTOR_LABEL_GAP: f32 = 4.0;
+
 fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
     const SUFFIXES: [&str; 4] = ["x", "y", "z", "w"];
     (0..count.min(SUFFIXES.len()))
@@ -1200,19 +1209,56 @@ fn build_field_row(
                 .child(field_label_cell(field_label(key), muted));
             if entities.len() == components.len() {
                 let mut cell = div().flex().flex_wrap().w_full().gap_1();
-                for (component_key, entity) in keys.iter().zip(entities) {
+                for (index, (component_key, entity)) in keys.iter().zip(entities).enumerate() {
                     let selector = component_key.clone();
+                    let label_selector = component_key.clone();
+                    // Rule 7 (a value's meaning is visible in its editor):
+                    // without the letter the components are told apart by
+                    // position alone (`MED-APP-20`). A Vector row is by
+                    // construction not a colour — a declared colour is a
+                    // `PropertyField::Color` — so the axis letters are the
+                    // only naming this row can need.
+                    let label = ravel_ui::keyframes::AXIS_LETTERS[index];
                     cell = cell.child(
                         div()
                             // Test hook for `VisualTestContext::debug_bounds`
                             // (noop in release builds).
                             .debug_selector(move || format!("vector-cell-{selector}"))
                             .flex_1()
-                            // The scrub's own minimum, so a line that cannot
-                            // hold every component wraps instead of squeezing
-                            // the numbers into nothing.
-                            .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH))
-                            .child(ScrubInput::new(entity)),
+                            // The scrub's own minimum plus the letter, so a
+                            // line that cannot hold every component wraps
+                            // instead of squeezing the numbers into nothing.
+                            .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH
+                                + VECTOR_LABEL_WIDTH
+                                + VECTOR_LABEL_GAP))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    // The letter is *in* the selector, the
+                                    // shape `crate::tooltip`'s own selector
+                                    // uses: geometry is all `debug_bounds`
+                                    // returns, so a label whose text the test
+                                    // cannot read is a label the test cannot
+                                    // hold to anything (rule 7 is about the
+                                    // name being on screen, not about a box
+                                    // being on screen).
+                                    .debug_selector(move || {
+                                        format!("vector-label-{label_selector}:{label}")
+                                    })
+                                    .flex_shrink_0()
+                                    .w(px(VECTOR_LABEL_WIDTH))
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(SharedString::from(label)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH))
+                                    .child(ScrubInput::new(entity)),
+                            ),
                     );
                 }
                 row = row.child(cell);
@@ -5237,9 +5283,10 @@ mod tests {
             .unwrap()
     }
 
-    /// A layer network whose custom parameter is a three-component vector —
-    /// the widest `PropertyField::Vector` the panel can be handed today, since
-    /// `Channel4` still routes to the colour picker (`MED-APP-19`).
+    /// A layer network whose custom parameter is a three-component vector.
+    /// A layer-root In node offers no four-component type but `Color`
+    /// (`CustomPortType::allowed_for_in`), so three is the widest Vector row
+    /// this path can produce.
     fn network_with_vector_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
         let in_node = Node::new(NodeId::next(), net::NET_IN_TYPE_KEY)
@@ -6511,15 +6558,27 @@ mod tests {
     /// event would fail here with no undo step at all.
     #[gpui::test]
     fn a_held_arrow_on_a_colour_row_records_one_undo_step(cx: &mut TestAppContext) {
-        let (window, _editor, project, path, node_id) = setup_node_target(cx);
+        // A registered type whose `color` the registry declares a colour:
+        // the picker exists because of that declaration, not because the
+        // value has four components (`MED-APP-19`).
+        let node = Node::new(NodeId::next(), "style.fill").with_param(
+            "color",
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        );
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
 
         let picker = window
             .update(cx, |panel, _window, _cx| {
                 panel
                     .colors
                     .iter()
-                    .find(|(key, _)| key == "tint")
-                    .expect("the tint row has a picker")
+                    .find(|(key, _)| key == "color")
+                    .expect("the color row has a picker")
                     .1
                     .state
                     .clone()
@@ -6533,9 +6592,9 @@ mod tests {
         // as "nothing happened".
         let green = |cx: &mut TestAppContext| {
             let ParameterValue::Channel4(channels) =
-                node_parameter(&project, &path, node_id, "tint", cx)
+                node_parameter(&project, &path, node_id, "color", cx)
             else {
-                panic!("tint remains a colour channel");
+                panic!("color remains a colour channel");
             };
             let ChannelSource::Constant(value) = channels[1].source else {
                 panic!("tint remains constant");
@@ -6742,6 +6801,61 @@ mod tests {
             "content {:?} must overflow the panel {:?}",
             content.size,
             root.size,
+        );
+    }
+
+    /// Rule 7: each Vector component carries its axis letter, so X is told
+    /// from Y by name and not by position (`MED-APP-20`). The letters follow
+    /// the value's arity — a 3-vector has no `W` row to label.
+    #[gpui::test]
+    fn vector_components_carry_their_axis_letters(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _lid) = setup_vector_layer(cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(size(px(400.0), px(600.0)));
+        cx.run_until_parked();
+
+        // The letter each selector ends in is the assertion: a label drawn
+        // blank, or drawn with the wrong axis, has no selector to find.
+        for (component, label_selector, cell_selector) in [
+            (
+                "x",
+                "vector-label-custom.offset#x:X",
+                "vector-cell-custom.offset#x",
+            ),
+            (
+                "y",
+                "vector-label-custom.offset#y:Y",
+                "vector-cell-custom.offset#y",
+            ),
+            (
+                "z",
+                "vector-label-custom.offset#z:Z",
+                "vector-cell-custom.offset#z",
+            ),
+        ] {
+            let label = visual.debug_bounds(label_selector).unwrap_or_else(|| {
+                panic!(
+                    "component {component} carries no `{label_selector}` label: \
+                     it is unnamed, or named something else"
+                )
+            });
+            let cell = visual
+                .debug_bounds(cell_selector)
+                .expect("vector component cell");
+            assert!(
+                label.left() >= cell.left() && label.right() <= cell.right(),
+                "the {component} letter sits outside its own component cell"
+            );
+        }
+        assert!(
+            visual
+                .debug_bounds("vector-label-custom.offset#w:W")
+                .is_none(),
+            "a three-component vector grew a fourth label"
         );
     }
 

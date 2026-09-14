@@ -374,7 +374,13 @@ AE 相当の 4 つ。キーバインドは Timeline のキーコンテキスト�
   ベジェハンドルを編集（既定は対称連動、**Alt で分離**）
 - 空白のドラッグでラバーバンド選択
 - ダブルクリックでキーフレームを追加
-- `Channel4` が常に Color として描かれる不具合がある（`MED-APP-19`）
+- **成分名はパラメータの宣言で決まる**（`MED-APP-44`）。レジストリが色として
+  宣言したパラメータだけが `R` / `G` / `B` / `A`、それ以外の多成分値は
+  `X` / `Y` / `Z` / `W`。成分数から色かどうかを推測しない
+  （宣言は `NodeTemplate::color_params`、解決は
+  `ravel_core::registry::is_color_parameter`）。**例外**: 宣言を持てない
+  ネットワーク In ノードと subnet ノードの `Channel4` は無条件に色
+  （カスタムポート型に `Vec4` が無いため）
 
 ## 翻訳しない表記
 
@@ -389,7 +395,7 @@ Timeline の一部の文字は**言語に依存しない記法**として、ロ�
 | `S` / `M` / `L` | solo / mute / lock のトグル | `timeline.toggle.solo` / `.mute` / `.lock` のツールチップ |
 | `F` | フォロー再生のトグル | `timeline.toggle.follow_playhead` のツールチップ |
 | `BPM` | 拍グリッドのトグル | `timeline.bpm.toggle` のツールチップ |
-| `X` / `Y` | 成分チャネルの軸 | 親のプロパティ行（`timeline.property.position` など） |
+| `X` / `Y` / `Z` / `W` | 成分チャネルの軸 | 親のプロパティ行（`timeline.property.position` など） |
 | `R` / `G` / `B` / `A` | カラーチャネルの成分 | 親のプロパティ行（ノード名 · パラメータ名） |
 
 語で名づけられる成分（回転、不透明度、ゲイン、単一チャネルの「値」）は
@@ -403,8 +409,6 @@ Timeline の一部の文字は**言語に依存しない記法**として、ロ�
 
 | 項目 | 担当 |
 |---|---|
-| `Channel4` の型に応じた描画 | `MED-APP-19` |
-| Vector の成分ラベルとリンクトグル | `MED-APP-20` / `VEC-5` |
 | 音声波形の表示 | `AUDIO-5` |
 | マーカー、トランジション | 未計画（v1 仕様に図があったが Composition モデルでの設計が無い） |
 | Dopesheet の独立パネル | 🔲 `PlaceholderPanel`。現状は Timeline 内のモード切替で代替 |

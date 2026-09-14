@@ -1122,3 +1122,174 @@ Timeline に書き込み操作を足すこと**（ホイールを縦ズームに
 
 
 ---
+
+---
+
+## MED-APP-19 | bug | `Channel4` パラメータが常に Color として描画される
+
+> **解決済み**: `UIX-7` B。`ParamRole` とは別の宣言
+> `NodeTemplate::color_params`（`ColorParam::Always` / `When`）をレジストリに
+> 足し、`registry::is_color_parameter` が解決する。色として宣言された
+> `Channel4` だけが `PropertyField::Color`、宣言の無いものは 4 成分の
+> `PropertyField::Vector`。
+>
+> **個票との差分**:
+> - 該当行は `crates/ravel-ui/src/properties/node.rs:286`（個票の `:141` は古い）
+> - `crates/ravel-ui/src/properties/layer.rs:687`（レイヤーのカスタム
+>   パラメータ）は**直していない**。レイヤールートの In ノードが選べる
+>   4 成分の型は `CustomPortType::Color` だけ（`allowed_for_in` に `Vec4` は
+>   無い）なので、あの `Channel4` は構造上必ず色。同じ理由で
+>   `is_color_parameter` は In ノードと subnet ノードを無条件に色として扱う
+> - `attribute.set` は `type = "color"` と `type = "vec4"` が**同じ**
+>   `value` パラメータなので、テンプレート静的な宣言では区別できない。
+>   宣言側に条件（`ColorParam::When { key: "type", value: "color" }`）を
+>   持たせて解いた。個票が「テンプレート側の宣言で区別する」と書いていた
+>   ところが、実際には `type` を読む必要があった点が差分
+> - **公開パラメータ宣言の型は触っていない**（`docs/dev/add-node.md` の
+>   「対応表を 2 つにしない」）。残る食い違いは `LOW-APP-32` に分離した
+>
+> **テスト**: `registry::builtin::tests::every_builtin_four_component_parameter_is_classified`
+> （組み込みの `Channel4` 全件の分類を固定。宣言を 1 つ落とすと落ちる）、
+> `attribute_set_is_a_colour_only_while_its_type_says_so`、
+> `custom_port_nodes_read_four_components_as_a_colour`、
+> `properties::node::tests::only_a_declared_colour_draws_a_swatch`、
+> `attribute_set_follows_its_type_between_colour_and_vector`。
+
+**該当**: `crates/ravel-ui/src/properties/node.rs:141`
+
+ノードパラメータ → Properties フィールドの写像で、`Channel4` が
+`PropertyField::Color` に決め打ちされている。`Channel2` / `Channel3` は
+`PropertyField::Vector` になる（`:121`, `:131`）のに、4 成分だけ色扱い。
+
+色ではない Vec4 パラメータが色スウォッチと `(r, g, b)` テキストで表示され、
+成分を個別に編集できない。**実例**: `attribute.set` の `type = "vec4"`
+（`vector-field-plan.md` 単位 5 で `value` が型駆動の 1 パラメータになった）。
+同じノードの `type = "color"` は色なので現状の描画が正しく、両者を
+テンプレート側の宣言で区別する必要がある。
+
+**wire 型の側は解決済み**（単位 5）。4 成分パラメータポートは `COLOR` と
+`VEC4` の両方を受けるので（`ParameterValue::port_accepted_types`）、
+`vector.construct.vec4` から駆動できる。残るのは Properties の描画だけ。
+
+**修正方針**: 色かどうかをレジストリのテンプレート側で宣言する
+（`done/viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に
+`Color` の区別を置くのが素直）。宣言が無い `Channel4` は `Vector` として
+4 成分表示にする。
+
+**検証**: 色として宣言されていない `Channel4` が 4 成分の Vector 行になるテスト。
+`constant.color` の `color` が従来どおり ColorPicker になるテスト。
+
+---
+
+## MED-APP-20 | debt | Vector フィールドに成分ラベルとリンクトグルが無い
+
+> **解決済み**: `UIX-7` B。各成分の `ScrubInput` の前に軸の文字
+> （`X` / `Y` / `Z` / `W`、`ravel_ui::keyframes::AXIS_LETTERS`）を描く。
+> 文字幅はスクラブ自身の最小幅に**足す**ので、不変条件 5 の「ラベルは
+> 省略、値は省略しない」を崩さない（`UIX-7` A の
+> `a_narrow_panel_keeps_every_vector_component_inside_it` は無改変で通る）。
+>
+> **個票との差分**:
+> - 該当行は `crates/ravel-app/src/panels/properties.rs` の
+>   `PropertyField::Vector` の腕（`UIX-7` A が縦積み + `flex_wrap` に
+>   組み替えたので個票の `:274-309` は古い）
+> - **リンクトグル（均一スケール）はこの単位でやらない**（ユーザーの決定）。
+>   `LOW-APP-31` に分離した
+> - Vector 行は構造上色ではない（色として宣言された `Channel4` は
+>   `PropertyField::Color` に行く）ので、行ごとに `R`/`G`/`B`/`A` を選ぶ
+>   必要は無く、軸の文字だけでよい
+>
+> **テスト**: `panels::properties::tests::vector_components_carry_their_axis_letters`
+> （3 成分のベクタ行に `x` / `y` / `z` のラベルが出て `w` は出ないことを
+> `debug_bounds` で確かめる。ラベルの `child` を外すと落ちる）。
+
+**該当**: `crates/ravel-app/src/panels/properties.rs:274-309`
+
+`PropertyField::Vector` は成分ごとの `ScrubInput` を横並びで描画する
+（`:294-299` の `div().flex().gap_1()`、各 `min_w(56px)`）。C4D / Houdini と
+同じ行レイアウトだが、
+
+- 各フィールドに**成分ラベル（X / Y / Z）が無い**。成分の区別が位置だけ
+- **リンクトグル（均一スケール）が無い**
+- キーフレームダイヤはフィールド単位（押すと全成分に打つ）。AE と同じ挙動なので
+  仕様として妥当だが、成分別に打つ手段が無い
+
+**修正方針**: 成分ラベルを `ScrubInput` の接頭辞として描く。リンクトグルは
+`ParamRole::Size` を宣言したパラメータにのみ出す。
+
+なお**この問題が表面化するのは組み込みノードが Vec を `Channel2` /
+`Channel3` で宣言してから**。現状は `center_x` / `center_y` のように
+Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs:566-582`
+他）、Vector 行にほとんど到達しない。統合は
+`docs/implementation/vector-field-plan.md` 単位 5 が担当する。
+
+**検証**: 成分ラベルが型のアリティに応じて X / Y / Z / W になるテスト。
+
+---
+
+## MED-APP-44 | bug | Timeline のキーフレーム行の成分名が arity だけで決まる
+
+> **解決済み**: `UIX-7` B。成分名は arity ではなく
+> `registry::is_color_parameter` で決める。色なら `R`/`G`/`B`/`A`、
+> そうでなければ `X`/`Y`/`Z`/`W`（`AXIS_LETTERS`）。1 成分の
+> `CHANNEL_VALUE` は現状維持。
+>
+> **採番のやり直し**: この票は起票時 `MED-APP-30` で、同じファイルにある
+> 「ノードエディタのラバーバンド選択中に Properties が作り直され続ける」
+> （perf、PR #344 で解決）と番号が衝突していた。台帳は ID で引くもので、
+> `scripts/docs.sh id MED-APP-30` が 2 票を返すのは索引の不具合なので、
+> **`UIX-7` B で `MED-APP-44` に振り直した**。動かしたのはこちら（新しい方）で、
+> perf 側は PR #344 / `HIGH-28` / `hands-on-findings-handoff.md` が
+> **当時の記録として**参照しているため触っていない。
+>
+> **個票との差分**:
+> - 該当行は `crates/ravel-ui/src/keyframes.rs:1085-1090`（個票の
+>   `:869-874` は古い）
+> - `keyframes.rs` はレジストリを一切参照していなかったので、経路を作った:
+>   `property_rows(layer, registry)` に引数を足し、`TimelinePanel` が
+>   `Arc<NodeRegistry>` を持って `set_registry` で受ける
+>   （`sync_offline_layers` と同じ「描画時に借りられないプロジェクトの
+>   情報をパネルへ写す」形）。ホストは `ravel-app` の Timeline パネルが
+>   `set_composition` の直前に呼ぶ
+>
+> **テスト**: `keyframes::tests::an_undeclared_vector_is_named_by_its_axes`
+> （`constant.vec3` / `constant.vec4` が `X`/`Y`/`Z`/`W` になる。arity で
+> 3 成分を色扱いに戻すと落ちる）、既存の
+> `multi_component_params_report_component_names`（`constant.color` が
+> `R`/`G`/`B`/`A` のまま。`constant.color` の色宣言を外すと落ちる）。
+
+**該当**: `crates/ravel-ui/src/keyframes.rs:869-874`
+
+```rust
+let names = match components.len() {
+    1 => vec![CHANNEL_VALUE],
+    2 => vec!["X", "Y"],
+    3 => vec!["R", "G", "B"],      // ← Vec3 でも RGB
+    _ => vec!["R", "G", "B", "A"], // ← Vec4 でも RGBA
+};
+```
+
+2 成分だけ X / Y で、**3 成分以上は無条件に色扱い**。Vec3 パラメータに
+キーフレームを打つと、Timeline の子行が `R` / `G` / `B` と表示される。
+
+**再現**: `constant.vec3`（`vector-field-plan.md` 単位 6、#402）の値に
+キーフレームを打つ。
+
+**既存の票は覆っていない**:
+
+| 票 | 覆っている範囲 |
+| --- | --- |
+| `MED-APP-19` | Properties の描画。`Channel4` が `PropertyField::Color` 決め打ち（**4 成分の話で 3 成分に触れていない**） |
+| `MED-APP-20` | Properties の Vector 行に成分ラベルが**無い**（**間違っている**話ではない） |
+| 本票 | Timeline のキーフレーム行の成分名 |
+
+**修正方針**: 根は 3 票とも同じで、「このパラメータは色か、ベクタか」が
+テンプレート側で宣言されていないこと。`MED-APP-19` が挙げている方針
+（`done/viewer-overlay-manipulator-plan.md` の `ParamRole` と同じ層に `Color` の
+区別を置く）に相乗りさせ、宣言が無い 3 / 4 成分は `X` / `Y` / `Z` / `W` に
+する。**3 票まとめて片付ける**のが素直。
+
+**検証**: 色として宣言されていない `Channel3` のキーフレーム行が
+`X` / `Y` / `Z` になるテスト。`constant.color` が従来どおり `R` / `G` / `B` /
+`A` のままであるテスト。
+

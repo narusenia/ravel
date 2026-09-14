@@ -15,11 +15,13 @@ use crate::panel::PanelKind;
 use crate::panels::media_bin;
 use ravel_core::composition::{Composition, Document, Layer};
 use ravel_core::id::{CompId, LayerId};
+use ravel_core::registry::NodeRegistry;
 use ravel_core::runtime::playback::LoopRange;
 use ravel_core::types::FrameRate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 const DEFAULT_PPF: f64 = 4.0;
 pub const MIN_PPF: f64 = 0.1;
@@ -232,6 +234,16 @@ pub struct TimelinePanel {
     /// and a walk of the layer network, and the host paints rows in
     /// `render()`.
     offline_layers: HashSet<LayerId>,
+    /// Node templates, which is where a parameter declares whether it is a
+    /// colour ([`ravel_core::registry::is_color_parameter`], `MED-APP-30`).
+    ///
+    /// Mirrored onto the panel for the reason [`Self::offline_layers`] is:
+    /// the answer is needed while the rows are enumerated, and the host
+    /// paints rows in `render()` where the project is not borrowable. Empty
+    /// until [`TimelinePanel::set_registry`], which the host calls beside
+    /// [`TimelinePanel::sync_offline_layers`]; with no templates every
+    /// four-component parameter reads as a vector, never as a wrong colour.
+    registry: Arc<NodeRegistry>,
 }
 
 impl TimelinePanel {
@@ -254,7 +266,15 @@ impl TimelinePanel {
             selected_channels: Vec::new(),
             reveal: HashSet::new(),
             offline_layers: HashSet::new(),
+            registry: Arc::new(NodeRegistry::new()),
         }
+    }
+
+    /// Adopt the project's node templates. Call it beside
+    /// [`TimelinePanel::sync_offline_layers`]; both mirror project data the
+    /// row enumeration needs.
+    pub fn set_registry(&mut self, registry: Arc<NodeRegistry>) {
+        self.registry = registry;
     }
 
     pub fn with_composition(composition: Composition) -> Self {
@@ -304,7 +324,10 @@ impl TimelinePanel {
     }
 
     pub fn set_composition(&mut self, comp: Option<Composition>) {
-        let valid_channels = comp.as_ref().map(channel_refs).unwrap_or_default();
+        let valid_channels = comp
+            .as_ref()
+            .map(|comp| channel_refs(comp, &self.registry))
+            .unwrap_or_default();
         self.composition = comp;
         self.selected_channels
             .retain(|channel| valid_channels.contains(channel));
@@ -532,7 +555,7 @@ impl TimelinePanel {
     /// deriving the row list anywhere else makes them disagree below the first
     /// hidden row (`MED-APP-13`).
     pub fn visible_property_rows(&self, layer: &Layer) -> Vec<crate::keyframes::PropertyRow> {
-        let rows = crate::keyframes::property_rows(layer);
+        let rows = crate::keyframes::property_rows(layer, &self.registry);
         if self.reveal.is_empty() {
             return rows;
         }
@@ -685,12 +708,12 @@ impl TimelinePanel {
     }
 }
 
-fn channel_refs(composition: &Composition) -> HashSet<TimelineChannelRef> {
+fn channel_refs(composition: &Composition, registry: &NodeRegistry) -> HashSet<TimelineChannelRef> {
     composition
         .layers
         .iter()
         .flat_map(|layer| {
-            crate::keyframes::property_rows(layer)
+            crate::keyframes::property_rows(layer, registry)
                 .into_iter()
                 .flat_map(move |row| {
                     (0..row.channel_names.len()).map(move |component| TimelineChannelRef {
@@ -974,7 +997,7 @@ mod tests {
         let layer = reveal_layer();
         assert_eq!(
             p.visible_property_rows(&layer).len(),
-            crate::keyframes::property_rows(&layer).len()
+            crate::keyframes::property_rows(&layer, &NodeRegistry::new()).len()
         );
     }
 

@@ -390,6 +390,47 @@ gpui へ渡す側は `chord_to_gpui_string` が `secondary-` へ変換して解�
 **注意**: これは `MED-APP-07` の方針（デルタ比較）を越える設計変更なので、
 `UIX-6` では実施していない。
 
+**LOW-APP-31 | debt | Vector 行に均一スケールのリンクトグルが無い**
+`crates/ravel-app/src/panels/properties.rs`（`PropertyField::Vector` の腕）
+`MED-APP-20` の後半。`UIX-7` B は成分ラベル（`X` / `Y` / `Z` / `W`）だけを
+入れて 3 票を閉じ、**リンクトグルは分離した**（ユーザーの決定）。
+今は 3 成分のベクタを等倍で拡大するのに 3 つのスクラブを順に動かす。
+C4D / Houdini / AE はいずれも行にリンクの鎖アイコンを持つ。
+
+**修正方針**: `MED-APP-20` の記述を引き継ぐ — **`ParamRole::Size` を宣言した
+パラメータにのみ出す**（位置や角度をリンクしても意味が無い。宣言は
+`crates/ravel-core/src/registry/mod.rs` の `param_roles`、`shape.ellipse` の
+`radius` が唯一の `Size`）。
+
+**未決**: 状態の置き場。ビュー状態（パネルが持つ `HashSet<key>`。
+プロジェクトに残らないので別マシンで開くと外れる）か、文書
+（`.ravprj` に残るが、絵に影響しない値を文書に入れることになり、
+undo の単位にもなる）か。`BpmGrid` は前者、`param_groups` は後者で、
+先例が両方あるので決めるところから。
+
+**LOW-APP-32 | debt | 色として宣言されていない `Channel4` が、公開パラメータ宣言では `color` 型になる**
+`crates/ravel-core/src/exposed/apply.rs:462`（`seed_value` の
+`ParameterValue::Channel4` の腕）
+`UIX-7` B（`MED-APP-19`）で、Properties と Timeline は
+`registry::is_color_parameter` を見て「色か、4 成分のベクタか」を描き分ける
+ようになった。一方**公開パラメータ宣言の型は `ParameterValue` だけで決まる**:
+`seed_value` は `Channel4` を無条件に `ExposedValue::Color` にする。
+結果、`constant.vec4` の `value` や `attribute.set` の `type = "vec4"` は
+画面では 4 成分のベクタなのに、公開トグルを押すと `color` 型の宣言になる
+（CLI の `--param` も色として解釈する）。
+
+`UIX-7` B では**意図して直していない**。`docs/dev/add-node.md` が
+「`ParameterValue` → 公開契約型の対応は `seed_value` の 1 箇所だけが持つ。
+UI 側で種別判定を書き足すな」と書いており、`is_color_parameter` を
+`seed_value` から読ませると 2 つ目の対応表になる（`apply` が書き戻せない
+宣言を作れるようになる）。
+
+**修正方針**: `ExposedValue` に `Vec4` を足し、`seed_value` が
+`is_color_parameter` ではなく**同じ宣言を単一の入口で**読むようにする
+（`seed_value` にレジストリを渡し、対応表は 1 つのまま `Channel4` の行だけを
+2 分岐にする）。`ExposedValue` は `.ravprj` と CLI の外部契約なので
+フォーマット移行を伴う — Design gate に当たる。
+
 ## 参考: 監査で問題なしと確認された箇所
 
 - 永続化のマイグレーション連鎖 v1→v4 は防御的でテスト十分

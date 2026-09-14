@@ -108,60 +108,6 @@ authoritative なレジストリは `ProjectState` が所有している（Viewe
 
 ---
 
-## MED-APP-19 | bug | `Channel4` パラメータが常に Color として描画される
-
-**該当**: `crates/ravel-ui/src/properties/node.rs:141`
-
-ノードパラメータ → Properties フィールドの写像で、`Channel4` が
-`PropertyField::Color` に決め打ちされている。`Channel2` / `Channel3` は
-`PropertyField::Vector` になる（`:121`, `:131`）のに、4 成分だけ色扱い。
-
-色ではない Vec4 パラメータが色スウォッチと `(r, g, b)` テキストで表示され、
-成分を個別に編集できない。**実例**: `attribute.set` の `type = "vec4"`
-（`vector-field-plan.md` 単位 5 で `value` が型駆動の 1 パラメータになった）。
-同じノードの `type = "color"` は色なので現状の描画が正しく、両者を
-テンプレート側の宣言で区別する必要がある。
-
-**wire 型の側は解決済み**（単位 5）。4 成分パラメータポートは `COLOR` と
-`VEC4` の両方を受けるので（`ParameterValue::port_accepted_types`）、
-`vector.construct.vec4` から駆動できる。残るのは Properties の描画だけ。
-
-**修正方針**: 色かどうかをレジストリのテンプレート側で宣言する
-（`done/viewer-overlay-manipulator-plan.md` が導入する `ParamRole` と同じ層に
-`Color` の区別を置くのが素直）。宣言が無い `Channel4` は `Vector` として
-4 成分表示にする。
-
-**検証**: 色として宣言されていない `Channel4` が 4 成分の Vector 行になるテスト。
-`constant.color` の `color` が従来どおり ColorPicker になるテスト。
-
----
-
-## MED-APP-20 | debt | Vector フィールドに成分ラベルとリンクトグルが無い
-
-**該当**: `crates/ravel-app/src/panels/properties.rs:274-309`
-
-`PropertyField::Vector` は成分ごとの `ScrubInput` を横並びで描画する
-（`:294-299` の `div().flex().gap_1()`、各 `min_w(56px)`）。C4D / Houdini と
-同じ行レイアウトだが、
-
-- 各フィールドに**成分ラベル（X / Y / Z）が無い**。成分の区別が位置だけ
-- **リンクトグル（均一スケール）が無い**
-- キーフレームダイヤはフィールド単位（押すと全成分に打つ）。AE と同じ挙動なので
-  仕様として妥当だが、成分別に打つ手段が無い
-
-**修正方針**: 成分ラベルを `ScrubInput` の接頭辞として描く。リンクトグルは
-`ParamRole::Size` を宣言したパラメータにのみ出す。
-
-なお**この問題が表面化するのは組み込みノードが Vec を `Channel2` /
-`Channel3` で宣言してから**。現状は `center_x` / `center_y` のように
-Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs:566-582`
-他）、Vector 行にほとんど到達しない。統合は
-`docs/implementation/vector-field-plan.md` 単位 5 が担当する。
-
-**検証**: 成分ラベルが型のアリティに応じて X / Y / Z / W になるテスト。
-
----
-
 ## MED-APP-29 | bug / debt | `layer.ref` のレイヤー指定が数値スクラブで、参照ポートを変えても出力型が変わらない
 
 **該当**: `crates/ravel-core/src/registry/builtin.rs:529-540`（`layer_ref`）
@@ -191,43 +137,6 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
 
 ---
-
-## MED-APP-30 | bug | Timeline のキーフレーム行の成分名が arity だけで決まる
-
-**該当**: `crates/ravel-ui/src/keyframes.rs:869-874`
-
-```rust
-let names = match components.len() {
-    1 => vec![CHANNEL_VALUE],
-    2 => vec!["X", "Y"],
-    3 => vec!["R", "G", "B"],      // ← Vec3 でも RGB
-    _ => vec!["R", "G", "B", "A"], // ← Vec4 でも RGBA
-};
-```
-
-2 成分だけ X / Y で、**3 成分以上は無条件に色扱い**。Vec3 パラメータに
-キーフレームを打つと、Timeline の子行が `R` / `G` / `B` と表示される。
-
-**再現**: `constant.vec3`（`vector-field-plan.md` 単位 6、#402）の値に
-キーフレームを打つ。
-
-**既存の票は覆っていない**:
-
-| 票 | 覆っている範囲 |
-| --- | --- |
-| `MED-APP-19` | Properties の描画。`Channel4` が `PropertyField::Color` 決め打ち（**4 成分の話で 3 成分に触れていない**） |
-| `MED-APP-20` | Properties の Vector 行に成分ラベルが**無い**（**間違っている**話ではない） |
-| 本票 | Timeline のキーフレーム行の成分名 |
-
-**修正方針**: 根は 3 票とも同じで、「このパラメータは色か、ベクタか」が
-テンプレート側で宣言されていないこと。`MED-APP-19` が挙げている方針
-（`done/viewer-overlay-manipulator-plan.md` の `ParamRole` と同じ層に `Color` の
-区別を置く）に相乗りさせ、宣言が無い 3 / 4 成分は `X` / `Y` / `Z` / `W` に
-する。**3 票まとめて片付ける**のが素直。
-
-**検証**: 色として宣言されていない `Channel3` のキーフレーム行が
-`X` / `Y` / `Z` になるテスト。`constant.color` が従来どおり `R` / `G` / `B` /
-`A` のままであるテスト。
 
 ## MED-APP-37 | bug | 評価結果が「届いた時点のコンポジション」と対で扱われ、切替中の結果が別コンプの寸法で解釈される
 

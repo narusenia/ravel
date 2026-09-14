@@ -443,6 +443,9 @@ fn attribute_set() -> NodeTemplate {
             value: ParameterValue::Bool(false),
         })
         .with_param(string_parameter("string_value", ""))
+        // `value` is the same `Channel4` for `color` and for `vec4`; only the
+        // first is a colour, so the declaration reads `type`.
+        .with_color_param_when("value", "type", "color")
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
         .with_param_range("int_value", -1e9..=1e9, -100.0..=100.0)
         // `type` decides which of the four value rows is read, so the choice
@@ -469,6 +472,7 @@ fn style_fill() -> NodeTemplate {
             value: ParameterValue::Bool(true),
         })
         .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color")
         .with_param(string_parameter("domain", "primitive"))
         .with_param_options("domain", STYLE_DOMAINS)
         .with_param(string_parameter("group", ""))
@@ -482,6 +486,7 @@ fn style_stroke() -> NodeTemplate {
         .with_output(geometry_output())
         .with_param(float_parameter("width", 1.0))
         .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color")
         .with_param(string_parameter("domain", "primitive"))
         .with_param_options("domain", STYLE_DOMAINS)
         .with_param(string_parameter("group", ""))
@@ -891,6 +896,7 @@ fn rasterize() -> NodeTemplate {
                 AnimationChannel::constant(1.0),
             ]),
         })
+        .with_color_param("color")
         .with_param_range("stroke_width", 0.0..=1000.0, 0.0..=20.0)
 }
 
@@ -1195,6 +1201,7 @@ fn constant_color() -> NodeTemplate {
                 AnimationChannel::constant(1.0),
             ]),
         })
+        .with_color_param("color")
 }
 
 fn merge() -> NodeTemplate {
@@ -2113,6 +2120,8 @@ fn text_on_path() -> NodeTemplate {
 mod tests {
     use super::*;
     use crate::animation::channel::ChannelSource;
+    use crate::graph::Node;
+    use crate::id::NodeId;
 
     /// The constant value of a template-declared channel. Template defaults
     /// are always constants, so anything else is a declaration bug.
@@ -2699,6 +2708,139 @@ mod tests {
                 .map(|p| &p.value),
             Some(ParameterValue::Int(5))
         ));
+    }
+
+    /// Every built-in four-component parameter is classified, and the ones
+    /// that are colours say so.
+    ///
+    /// A `Channel4` with no declaration renders as four numbered scrubs and
+    /// its Timeline rows read `X`/`Y`/`Z`/`W` (`MED-APP-19`, `MED-APP-30`),
+    /// so a new colour that forgets [`NodeTemplate::with_color_param`] is a
+    /// silent regression — a swatch turning into four numbers. The list below
+    /// is the whole set; anything else has to be added here on purpose.
+    #[test]
+    fn every_builtin_four_component_parameter_is_classified() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+
+        // (`type_key`, `key`, is a colour). `attribute.set`'s `value` is not
+        // here: it defaults to a 1-component channel and only widens to four
+        // when `type` says so, which the next test covers.
+        let expected: &[(&str, &str, bool)] = &[
+            ("constant.vec4", "value", false),
+            ("constant.color", "color", true),
+            ("rasterize", "color", true),
+            ("style.fill", "color", true),
+            ("style.stroke", "color", true),
+        ];
+
+        let mut found: Vec<(String, String, bool)> = Vec::new();
+        for tmpl in reg.all_templates() {
+            for param in &tmpl.default_params {
+                if !matches!(param.value, ParameterValue::Channel4(_)) {
+                    continue;
+                }
+                found.push((
+                    tmpl.type_key.clone(),
+                    param.key.clone(),
+                    tmpl.color_param(&param.key).is_some(),
+                ));
+            }
+        }
+        found.sort();
+        let mut want: Vec<(String, String, bool)> = expected
+            .iter()
+            .map(|(t, k, c)| (t.to_string(), k.to_string(), *c))
+            .collect();
+        want.sort();
+        assert_eq!(
+            found, want,
+            "a four-component parameter appeared, moved or lost its colour \
+             declaration: an undeclared colour renders as four scrubs"
+        );
+
+        // A declaration on a key the template does not have is dead: it would
+        // never be consulted and the colour it names would stay undrawn.
+        for tmpl in reg.all_templates() {
+            for key in tmpl.color_params.keys() {
+                assert!(
+                    tmpl.default_params.iter().any(|p| &p.key == key),
+                    "{}.{key} is declared a colour but is not a parameter",
+                    tmpl.type_key
+                );
+            }
+        }
+    }
+
+    /// `attribute.set` writes a colour and a plain `vec4` through the *same*
+    /// `Channel4` parameter, so its declaration reads `type` rather than
+    /// holding unconditionally (`MED-APP-19`'s own example).
+    #[test]
+    fn attribute_set_is_a_colour_only_while_its_type_says_so() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+
+        let node = reg.create_node("attribute.set", NodeId::new(1)).unwrap();
+        let typed = |type_name: &str| {
+            let mut node = node.clone();
+            for param in &mut node.parameters {
+                if param.key == "type" {
+                    param.value = ParameterValue::String(type_name.into());
+                }
+                if param.key == "value" {
+                    param.value = attribute_set_value_for_type(type_name, &param.value).unwrap();
+                }
+            }
+            node
+        };
+
+        assert!(crate::registry::is_color_parameter(
+            &reg,
+            &typed("color"),
+            "value"
+        ));
+        assert!(!crate::registry::is_color_parameter(
+            &reg,
+            &typed("vec4"),
+            "value"
+        ));
+        // Fewer than four components is never a colour, whatever is declared.
+        assert!(!crate::registry::is_color_parameter(
+            &reg,
+            &typed("vec3"),
+            "value"
+        ));
+    }
+
+    /// A network-interface In node and the subnet node that promotes it have
+    /// no template to declare anything, and `CustomPortType` offers `Color`
+    /// and no `Vec4`: every four-component custom parameter is a colour.
+    #[test]
+    fn custom_port_nodes_read_four_components_as_a_colour() {
+        let reg = NodeRegistry::new();
+        let in_node = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY).with_param(
+            "tint",
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        );
+        assert!(crate::registry::is_color_parameter(&reg, &in_node, "tint"));
+
+        // An unregistered ordinary type declares nothing, so the same value
+        // is a vector.
+        let plain = Node::new(NodeId::new(2), "some.node").with_param(
+            "tint",
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        );
+        assert!(!crate::registry::is_color_parameter(&reg, &plain, "tint"));
     }
 
     /// The shape sources declare what their vector parameters mean, so the

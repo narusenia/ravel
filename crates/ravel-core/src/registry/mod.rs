@@ -91,6 +91,86 @@ pub enum ParamRole {
     Size,
 }
 
+/// Declares that a four-component parameter is a **colour**, so the editors
+/// draw it as one.
+///
+/// Deliberately **not** a [`ParamRole`] arm. `ParamRole` is the set of
+/// geometric meanings the Viewer's manipulator draws a handle for, and its
+/// own doc comment refuses roles that draw nothing; "this is a colour" draws
+/// no handle and is not a position in the node's space. The two answer
+/// different questions — where is it, versus how is it read — so they are
+/// two declarations.
+///
+/// **What this decides is how the value is drawn, and nothing else**: the
+/// Properties field kind (a colour swatch instead of four scrubs) and the
+/// Timeline's component names (`R`/`G`/`B`/`A` instead of `X`/`Y`/`Z`/`W`).
+/// The *exposed* parameter declaration type still comes from
+/// `exposed::apply::seed_value` alone, which is the single owner of the
+/// `ParameterValue` → external-contract mapping
+/// (`docs/dev/add-node.md`). Adding a second table there would let the panel
+/// declare something `apply` cannot write back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColorParam {
+    /// The parameter is always a colour.
+    Always,
+    /// The parameter is a colour only while the node's `key` parameter reads
+    /// `value`.
+    ///
+    /// `attribute.set` needs this: its `value` is the same `Channel4` for
+    /// `type = "color"` and for `type = "vec4"`, and only the first is a
+    /// colour (`Graph::port_accepted_types` states the same split).
+    When { key: String, value: String },
+}
+
+impl ColorParam {
+    /// Whether this declaration holds for `node` right now.
+    fn holds_for(&self, node: &Node) -> bool {
+        match self {
+            Self::Always => true,
+            Self::When { key, value } => node
+                .parameters
+                .iter()
+                .find(|p| &p.key == key)
+                .and_then(|p| p.value.as_str())
+                .is_some_and(|current| current == value),
+        }
+    }
+}
+
+/// Whether `key` on `node` is drawn as a colour rather than as a plain
+/// 4-component vector.
+///
+/// Only a four-component parameter can be one: `Channel2` / `Channel3` are
+/// vectors whatever the template says, and the registry has no three-channel
+/// colour. Everything else is `false`, so a caller may ask about any key.
+///
+/// Three sources, in order:
+///
+/// 1. **A custom-port node** — a network-interface In node, or a subnet node
+///    carrying the promoted parameters of one. Their parameters have no
+///    template to declare them; the custom port the user picked is the
+///    declaration, and [`crate::network::CustomPortType`] offers `Color` and
+///    no `Vec4`, so every four-component custom parameter is a colour.
+/// 2. **The template's** [`NodeTemplate::color_param`] declaration.
+/// 3. Nothing: an undeclared `Channel4` is a vector (`MED-APP-19`). A new
+///    node type whose colour is undeclared therefore renders as four scrubs
+///    — `builtin::tests` enumerates every built-in `Channel4` to catch that.
+pub fn is_color_parameter(registry: &NodeRegistry, node: &Node, key: &str) -> bool {
+    let Some(param) = node.parameters.iter().find(|p| p.key == key) else {
+        return false;
+    };
+    if !matches!(param.value, crate::graph::ParameterValue::Channel4(_)) {
+        return false;
+    }
+    if node.type_key == crate::network::NET_IN_TYPE_KEY || node.subnet.is_some() {
+        return true;
+    }
+    registry
+        .get(&node.type_key)
+        .and_then(|template| template.color_param(key))
+        .is_some_and(|declaration| declaration.holds_for(node))
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeTemplate {
     pub type_key: String,
@@ -108,6 +188,10 @@ pub struct NodeTemplate {
     pub param_options: HashMap<String, Vec<String>>,
     /// Geometric meanings the Viewer's manipulator reads.
     pub param_roles: HashMap<String, ParamRole>,
+    /// Four-component parameters that are colours, which is what decides
+    /// whether an editor draws a swatch or four numbered components
+    /// ([`is_color_parameter`]).
+    pub color_params: HashMap<String, ColorParam>,
     /// Display groups for this type's parameters: a group name (whose locale
     /// key is `node.<type_key>.group.<name>`) and the parameter keys it
     /// holds, in the order the Properties sections should appear.
@@ -138,6 +222,7 @@ impl NodeTemplate {
             param_ranges: HashMap::new(),
             param_options: HashMap::new(),
             param_roles: HashMap::new(),
+            color_params: HashMap::new(),
             param_groups: Vec::new(),
         }
     }
@@ -203,6 +288,34 @@ impl NodeTemplate {
 
     pub fn param_role(&self, key: &str) -> Option<ParamRole> {
         self.param_roles.get(key).copied()
+    }
+
+    /// Declares a four-component parameter to be a colour.
+    pub fn with_color_param(mut self, key: impl Into<String>) -> Self {
+        self.color_params.insert(key.into(), ColorParam::Always);
+        self
+    }
+
+    /// Declares a four-component parameter to be a colour only while the
+    /// node's `on` parameter reads `equals` ([`ColorParam::When`]).
+    pub fn with_color_param_when(
+        mut self,
+        key: impl Into<String>,
+        on: impl Into<String>,
+        equals: impl Into<String>,
+    ) -> Self {
+        self.color_params.insert(
+            key.into(),
+            ColorParam::When {
+                key: on.into(),
+                value: equals.into(),
+            },
+        );
+        self
+    }
+
+    pub fn color_param(&self, key: &str) -> Option<&ColorParam> {
+        self.color_params.get(key)
     }
 
     /// Declares one display group: `name` (the group's locale key is

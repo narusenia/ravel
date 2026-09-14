@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
 | high | 2 | 33 | [high/](high/) — 1件1ファイル |
-| medium | 32 | 53 | [medium/](medium/) — 領域別5ファイル |
+| medium | 31 | 54 | [medium/](medium/) — 領域別5ファイル |
 | low | 39 | 11 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
@@ -153,8 +153,8 @@
 `MED-UI-06`（2 経路の重複 sync）。`MED-UI-05`（Outliner / MediaBin の全行再構築）は
 Outliner 側が #397、MediaBin 側が #400 で解決した。`MED-UI-02` は二段で閉じた —
 `RESP3-7` がプレイヘッドの空振りを、`VIS-2`〜`VIS-4` が「裏のタブでは
-更新を遅らせ、表に戻ったときに追いつく」を入れた。**この節の未解決は
-`MED-UI-07`（狭い Properties の Vector 行）だけ**である。
+更新を遅らせ、表に戻ったときに追いつく」を入れた。`MED-UI-07`（狭い Properties の
+Vector 行）は `UIX-7` で閉じ、**この節に未解決は残っていない**。
 第1段を直すと呼ばれる回数は減るが、レイヤー数が増えるとこれらが再び効いてくる。
 
 ---

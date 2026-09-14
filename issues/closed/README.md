@@ -14,7 +14,7 @@
 |---|---|---|
 | critical | 4 | 1件1ファイル |
 | high | 33 | 1件1ファイル |
-| medium | 53 | 領域別5ファイル（`medium-*.md`） |
+| medium | 54 | 領域別5ファイル（`medium-*.md`） |
 | low | 11 | [low.md](low.md) 1ファイル |
 
 ## critical（4件 — 起票分すべて解決）
@@ -64,7 +64,7 @@
 | [HIGH-34](HIGH-34-offline-media-renders-silently-transparent.md) | オフラインの素材がレンダー結果を黙って透明にする（機械可読な警告が無い） | `WARN-2`（`media-offline` / `media-unreadable`） |
 | [HIGH-35](HIGH-35-identifier-parameters-can-be-driven-by-a-wire.md) | 参照 ID のパラメータをフレームごとに動かせ、ID の予約が外れる | `WARN-1`（読み口を `ParameterValue::identifier` へ集約） |
 
-## medium（53件）
+## medium（54件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `03` `04` `05` `06` `07` `12` `15` `16` `18` `21` `22` `23` `24` `25` `26` `27` `28` `30` `31` `32` `33` `34` `35` `36`
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09` `10`
@@ -72,9 +72,9 @@
   `HIGH-26` で閉じたが、評価側の再帰が残るので未解決のまま。
   [`../medium/core-evaluator.md`](../medium/core-evaluator.md)）
 - [medium-gpu-nodes.md](medium-gpu-nodes.md) — `MED-GPU-01` `02` `03` `04` `05` `07` `10`
-- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `02` `03` `04` `05` `06`
-  （未解決分は `MED-UI-07` のみ。
-  [`../medium/ui-rendering.md`](../medium/ui-rendering.md)）
+- [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `02` `03` `04` `05` `06` `07`
+  （起票分すべて解決。[`../medium/ui-rendering.md`](../medium/ui-rendering.md) は
+  「問題なしと確認した箇所」だけが残る）
 - [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `07` / `MED-AUD-01` `02` `03`
 
 ## low（11件）

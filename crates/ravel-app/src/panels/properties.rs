@@ -5237,9 +5237,10 @@ mod tests {
             .unwrap()
     }
 
-    /// A layer network whose custom parameter is a three-component vector —
-    /// the widest `PropertyField::Vector` the panel can be handed today, since
-    /// `Channel4` still routes to the colour picker (`MED-APP-19`).
+    /// A layer network whose custom parameter is a three-component vector.
+    /// A layer-root In node offers no four-component type but `Color`
+    /// (`CustomPortType::allowed_for_in`), so three is the widest Vector row
+    /// this path can produce.
     fn network_with_vector_param() -> Graph {
         use ravel_core::animation::channel::AnimationChannel;
         let in_node = Node::new(NodeId::next(), net::NET_IN_TYPE_KEY)
@@ -6511,15 +6512,27 @@ mod tests {
     /// event would fail here with no undo step at all.
     #[gpui::test]
     fn a_held_arrow_on_a_colour_row_records_one_undo_step(cx: &mut TestAppContext) {
-        let (window, _editor, project, path, node_id) = setup_node_target(cx);
+        // A registered type whose `color` the registry declares a colour:
+        // the picker exists because of that declaration, not because the
+        // value has four components (`MED-APP-19`).
+        let node = Node::new(NodeId::next(), "style.fill").with_param(
+            "color",
+            ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        );
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
 
         let picker = window
             .update(cx, |panel, _window, _cx| {
                 panel
                     .colors
                     .iter()
-                    .find(|(key, _)| key == "tint")
-                    .expect("the tint row has a picker")
+                    .find(|(key, _)| key == "color")
+                    .expect("the color row has a picker")
                     .1
                     .state
                     .clone()
@@ -6533,9 +6546,9 @@ mod tests {
         // as "nothing happened".
         let green = |cx: &mut TestAppContext| {
             let ParameterValue::Channel4(channels) =
-                node_parameter(&project, &path, node_id, "tint", cx)
+                node_parameter(&project, &path, node_id, "color", cx)
             else {
-                panic!("tint remains a colour channel");
+                panic!("color remains a colour channel");
             };
             let ChannelSource::Constant(value) = channels[1].source else {
                 panic!("tint remains constant");

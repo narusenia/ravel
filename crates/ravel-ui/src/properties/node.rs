@@ -283,12 +283,30 @@ fn param_field(
             ui_range: ranges.map(|r| r.ui.clone()),
             step: Some(0.01),
         },
-        ParameterValue::Channel4(chs) => PropertyField::Color {
+        // A colour draws a swatch; an undeclared four-component value is a
+        // vector and gets one scrub per component (`MED-APP-19`). The
+        // registry owns that distinction — the panel must not re-derive it
+        // from the key's spelling or its arity.
+        ParameterValue::Channel4(chs)
+            if ravel_core::registry::is_color_parameter(registry, node, &p.key) =>
+        {
+            PropertyField::Color {
+                key: p.key.clone(),
+                r: channel_display_value(&chs[0], frame, eval),
+                g: channel_display_value(&chs[1], frame, eval),
+                b: channel_display_value(&chs[2], frame, eval),
+                a: channel_display_value(&chs[3], frame, eval),
+            }
+        }
+        ParameterValue::Channel4(chs) => PropertyField::Vector {
             key: p.key.clone(),
-            r: channel_display_value(&chs[0], frame, eval),
-            g: channel_display_value(&chs[1], frame, eval),
-            b: channel_display_value(&chs[2], frame, eval),
-            a: channel_display_value(&chs[3], frame, eval),
+            components: chs
+                .iter()
+                .map(|ch| channel_display_value(ch, frame, eval))
+                .collect(),
+            range: ranges.map(|r| r.hard.clone()),
+            ui_range: ranges.map(|r| r.ui.clone()),
+            step: Some(0.01),
         },
         // Path control points are edited on the canvas (pen tool);
         // Properties shows a read-only summary (REQ-UI-011).
@@ -488,6 +506,77 @@ mod tests {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         reg
+    }
+
+    /// A four-component parameter is drawn from what it *means*, not from
+    /// its arity (`MED-APP-19`, UX invariant 7): `constant.color` keeps the
+    /// swatch, `constant.vec4` — which carries the identical `Channel4` —
+    /// gets four editable components.
+    #[test]
+    fn only_a_declared_colour_draws_a_swatch() {
+        let reg = registry();
+        let colour = reg.create_node("constant.color", NodeId::new(1)).unwrap();
+        let vector = reg.create_node("constant.vec4", NodeId::new(2)).unwrap();
+
+        let fields = node_params_fields(&colour, &reg, 0, &eval(), &[]);
+        assert!(
+            matches!(
+                fields.iter().find(|f| f.key() == "color"),
+                Some(PropertyField::Color { .. })
+            ),
+            "constant.color must stay a colour picker, got {fields:?}"
+        );
+
+        let fields = node_params_fields(&vector, &reg, 0, &eval(), &[]);
+        match fields.iter().find(|f| f.key() == "value") {
+            Some(PropertyField::Vector { components, .. }) => {
+                assert_eq!(
+                    components.len(),
+                    4,
+                    "every component of an undeclared Vec4 must be editable"
+                );
+            }
+            other => panic!("constant.vec4 must be a Vector row, got {other:?}"),
+        }
+    }
+
+    /// `attribute.set` writes a colour and a plain `vec4` through the same
+    /// `Channel4`, so the row follows its `type` — the example `MED-APP-19`
+    /// was filed against.
+    #[test]
+    fn attribute_set_follows_its_type_between_colour_and_vector() {
+        let reg = registry();
+        let base = reg.create_node("attribute.set", NodeId::new(1)).unwrap();
+        let typed = |type_name: &str| {
+            let mut node = base.clone();
+            for param in &mut node.parameters {
+                if param.key == "type" {
+                    param.value = ParameterValue::String(type_name.into());
+                } else if param.key == "value" {
+                    param.value = ravel_core::registry::builtin::attribute_set_value_for_type(
+                        type_name,
+                        &param.value,
+                    )
+                    .unwrap();
+                }
+            }
+            node
+        };
+
+        let field = |node: &Node| {
+            node_params_fields(node, &reg, 0, &eval(), &[])
+                .into_iter()
+                .find(|f| f.key() == "value")
+                .expect("value row")
+        };
+        assert!(matches!(
+            field(&typed("color")),
+            PropertyField::Color { .. }
+        ));
+        assert!(matches!(
+            field(&typed("vec4")),
+            PropertyField::Vector { components, .. } if components.len() == 4
+        ));
     }
 
     #[test]

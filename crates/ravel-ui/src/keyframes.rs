@@ -40,6 +40,7 @@ use ravel_core::composition::Layer;
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::NodeId;
 use ravel_core::network as net;
+use ravel_core::registry::NodeRegistry;
 use ravel_core::types::Vec2;
 
 use crate::panels::timeline::PropertyGroup;
@@ -81,6 +82,16 @@ pub struct PropertyRow {
 /// to (rotation, opacity, gain), so they reuse the shell group's own key; a
 /// network parameter has no such word and is simply "the value".
 pub const CHANNEL_VALUE: &str = "timeline.channel.value";
+
+/// Component names of a multi-component value, by meaning rather than by
+/// arity (`MED-APP-30`, UX invariant 7). Both are language-independent
+/// notation the Timeline spec keeps untranslated, so they travel through
+/// [`PropertyRow::channel_names`] verbatim; the Properties panel labels its
+/// Vector components from the same letters.
+pub const AXIS_LETTERS: [&str; 4] = ["X", "Y", "Z", "W"];
+/// Component names of a parameter declared a colour
+/// ([`ravel_core::registry::is_color_parameter`]).
+pub const COLOR_CHANNELS: [&str; 4] = ["R", "G", "B", "A"];
 
 /// The tangent handle being edited on a keyframe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,7 +238,7 @@ fn shell_default_channels(group: PropertyGroup) -> Vec<AnimationChannel> {
 /// parameter with at least one keyframed component (REQ-LAYER-004), ordered
 /// deterministically by node id then parameter position — subnets included,
 /// each subnet's rows following the node that owns them ([`network_rows`]).
-pub fn property_rows(layer: &Layer) -> Vec<PropertyRow> {
+pub fn property_rows(layer: &Layer, registry: &NodeRegistry) -> Vec<PropertyRow> {
     let mut rows: Vec<PropertyRow> = SHELL_GROUPS
         .iter()
         .map(|group| PropertyRow {
@@ -251,7 +262,7 @@ pub fn property_rows(layer: &Layer) -> Vec<PropertyRow> {
         });
     }
 
-    network_rows(&layer.network, "", None, &mut rows);
+    network_rows(&layer.network, "", None, registry, &mut rows);
     rows
 }
 
@@ -277,6 +288,7 @@ fn network_rows(
     graph: &ravel_core::graph::Graph,
     prefix: &str,
     owner: Option<&ravel_core::graph::Node>,
+    registry: &NodeRegistry,
     rows: &mut Vec<PropertyRow>,
 ) {
     let mut nodes: Vec<_> = graph.nodes().collect();
@@ -301,7 +313,10 @@ fn network_rows(
             ) {
                 continue;
             }
-            let Some(names) = keyframed_channel_names(&param.value) else {
+            let Some(names) = keyframed_channel_names(
+                &param.value,
+                ravel_core::registry::is_color_parameter(registry, node, &param.key),
+            ) else {
                 continue;
             };
             let label = if node.type_key == net::NET_IN_TYPE_KEY {
@@ -321,7 +336,13 @@ fn network_rows(
         }
         if let Some(inner) = node.subnet.as_deref() {
             let node_label = node.metadata.label.as_deref().unwrap_or(&node.type_key);
-            network_rows(inner, &format!("{prefix}{node_label} / "), Some(node), rows);
+            network_rows(
+                inner,
+                &format!("{prefix}{node_label} / "),
+                Some(node),
+                registry,
+                rows,
+            );
         }
     }
 }
@@ -1068,7 +1089,7 @@ fn channel_components(value: &ParameterValue) -> Option<Vec<&AnimationChannel>> 
 /// Component names when the parameter carries keys — a `Channel*` value with
 /// at least one keyframed component, or a non-empty step curve (`None` = not
 /// part of the property tree).
-fn keyframed_channel_names(value: &ParameterValue) -> Option<Vec<String>> {
+fn keyframed_channel_names(value: &ParameterValue, is_color: bool) -> Option<Vec<String>> {
     // A step curve has no float components at all, so it never reaches
     // `channel_components`; one row with one lane of held keys is its whole
     // shape ([`RowValueKind::Steps`]).
@@ -1082,11 +1103,14 @@ fn keyframed_channel_names(value: &ParameterValue) -> Option<Vec<String>> {
     {
         return None;
     }
-    let names = match components.len() {
+    // Arity alone cannot tell a position from an RGB, so it decides nothing
+    // beyond the single-component case: the registry declaration does
+    // (`MED-APP-30`). A colour is four components by construction, so the
+    // truncation only ever bites the axis letters.
+    let names: Vec<&str> = match components.len() {
         1 => vec![CHANNEL_VALUE],
-        2 => vec!["X", "Y"],
-        3 => vec!["R", "G", "B"],
-        _ => vec!["R", "G", "B", "A"],
+        arity if is_color => COLOR_CHANNELS[..arity.min(4)].to_vec(),
+        arity => AXIS_LETTERS[..arity.min(4)].to_vec(),
     };
     Some(names.into_iter().map(str::to_string).collect())
 }
@@ -1216,6 +1240,14 @@ mod tests {
     use ravel_core::id::{DataTypeId, LayerId};
     use ravel_core::types::FrameRate;
 
+    /// The built-in templates, which is where a parameter declares whether
+    /// it is a colour.
+    fn registry() -> NodeRegistry {
+        let mut reg = NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut reg);
+        reg
+    }
+
     fn curve_0_to_10() -> KeyframeCurve {
         let mut curve = KeyframeCurve::new();
         curve.insert(0, 0.0, Interpolation::Linear);
@@ -1259,7 +1291,7 @@ mod tests {
 
     #[test]
     fn rows_list_shell_groups_then_keyframed_network_params() {
-        let rows = property_rows(&test_layer());
+        let rows = property_rows(&test_layer(), &registry());
         assert_eq!(rows.len(), 6);
         // After Effects' order: Anchor Point, Position, Scale, Rotation,
         // Opacity, then the keyframed network parameters.
@@ -1287,7 +1319,7 @@ mod tests {
     fn anchor_point_is_a_keyable_shell_row() {
         let mut layer = test_layer();
         let row = PropertyRowId::Shell(PropertyGroup::AnchorPoint);
-        let listed = property_rows(&layer);
+        let listed = property_rows(&layer, &registry());
         assert_eq!(listed[0].id, row);
         assert_eq!(listed[0].channel_names, vec!["X", "Y"]);
 
@@ -1304,7 +1336,7 @@ mod tests {
     fn audio_gain_is_a_shell_keyframe_row_only_on_audio_layers() {
         let mut layer = test_layer();
         assert!(
-            !property_rows(&layer)
+            !property_rows(&layer, &registry())
                 .iter()
                 .any(|row| { row.id == PropertyRowId::Shell(PropertyGroup::AudioGain) })
         );
@@ -1315,7 +1347,7 @@ mod tests {
         ));
         let row = PropertyRowId::Shell(PropertyGroup::AudioGain);
         assert!(
-            property_rows(&layer)
+            property_rows(&layer, &registry())
                 .iter()
                 .any(|candidate| candidate.id == row)
         );
@@ -1406,7 +1438,7 @@ mod tests {
         assert_eq!(curve.len(), 1);
         assert!((curve.sample(7.0) - 2.0).abs() < f32::EPSILON);
         // …and the param now shows up in the tree with the In bare-key label.
-        let row = property_rows(&layer)
+        let row = property_rows(&layer, &registry())
             .into_iter()
             .find(|r| r.id == in_id)
             .expect("keyframed custom param listed");
@@ -1444,7 +1476,11 @@ mod tests {
         assert!(!remove_keyframe(&mut layer, &row, 0, 10), "already gone");
         let channels = row_channels(&layer, &row).unwrap();
         assert_eq!(channels[0].source, ChannelSource::Constant(1.0));
-        assert!(!property_rows(&layer).iter().any(|r| r.id == row));
+        assert!(
+            !property_rows(&layer, &registry())
+                .iter()
+                .any(|r| r.id == row)
+        );
     }
 
     #[test]
@@ -1508,6 +1544,39 @@ mod tests {
         assert!(!insert_keyframe(&mut layer, &float_key, 0, 0));
     }
 
+    /// Component names come from what the parameter *means*, not from how
+    /// many floats it has (`MED-APP-30`, UX invariant 7): an undeclared
+    /// 3- or 4-vector reads `X`/`Y`/`Z`/`W`, never `R`/`G`/`B`.
+    #[test]
+    fn an_undeclared_vector_is_named_by_its_axes() {
+        let reg = registry();
+        for (type_key, key, expected) in [
+            ("constant.vec3", "value", vec!["X", "Y", "Z"]),
+            ("constant.vec4", "value", vec!["X", "Y", "Z", "W"]),
+        ] {
+            let mut node = reg.create_node(type_key, NodeId::new(31)).unwrap();
+            for param in &mut node.parameters {
+                if param.key == key {
+                    let Some(channels) = param.value.channels() else {
+                        panic!("{type_key}.{key} carries no channels");
+                    };
+                    let mut channels = channels.to_vec();
+                    channels[0] = AnimationChannel::keyframes(curve_0_to_10());
+                    param.value =
+                        ParameterValue::from_channels(Some(&param.value), channels).unwrap();
+                }
+            }
+            let network = Graph::new().add_node(node).unwrap();
+            let layer = Layer::new(LayerId::new(3), "V", network).with_time(0, 0, 100);
+            let rows = property_rows(&layer, &reg);
+            let row = rows.last().expect("the keyframed parameter has a row");
+            assert_eq!(
+                row.channel_names, expected,
+                "{type_key}.{key} is not a colour and must not be named like one"
+            );
+        }
+    }
+
     #[test]
     fn multi_component_params_report_component_names() {
         let color = Node::new(NodeId::new(30), "constant.color").with_param(
@@ -1521,7 +1590,7 @@ mod tests {
         );
         let network = Graph::new().add_node(color).unwrap();
         let layer = Layer::new(LayerId::new(2), "C", network).with_time(0, 0, 100);
-        let rows = property_rows(&layer);
+        let rows = property_rows(&layer, &registry());
         assert_eq!(rows.len(), 6);
         assert_eq!(rows[5].channel_names, vec!["R", "G", "B", "A"]);
         // Per-component editing targets the keyframed component only.
@@ -1919,7 +1988,7 @@ mod tests {
     /// level still has a row, at any depth, named by the subnets it sits in.
     #[test]
     fn rows_reach_keyframes_inside_nested_subnets() {
-        let rows = property_rows(&layer_with_nested_subnets());
+        let rows = property_rows(&layer_with_nested_subnets(), &registry());
         let network: Vec<(&PropertyRowId, Option<&str>)> = rows
             .iter()
             .filter(|row| matches!(row.id, PropertyRowId::Network { .. }))
@@ -2035,7 +2104,7 @@ mod tests {
     /// "the value" — the same shape a single-component float parameter has.
     #[test]
     fn int_and_string_parameters_get_property_rows() {
-        let rows = property_rows(&discrete_layer());
+        let rows = property_rows(&discrete_layer(), &registry());
         let int = rows
             .iter()
             .find(|row| row.id == int_row())
@@ -2061,7 +2130,7 @@ mod tests {
         let mut layer = test_layer();
         layer.network = layer.network.clone().add_node(node).unwrap();
         assert!(
-            !property_rows(&layer)
+            !property_rows(&layer, &registry())
                 .iter()
                 .any(|row| row.id == string_row())
         );
@@ -2153,7 +2222,11 @@ mod tests {
             row_parameter_value(&layer, &row),
             Some(&ParameterValue::String("fallback".to_string()))
         );
-        assert!(!property_rows(&layer).iter().any(|r| r.id == row));
+        assert!(
+            !property_rows(&layer, &registry())
+                .iter()
+                .any(|r| r.id == row)
+        );
     }
 
     /// The drag preview rebuilds from the pre-gesture snapshot, so a
@@ -2213,7 +2286,7 @@ mod tests {
     #[test]
     fn the_animated_reveal_keeps_int_and_step_rows() {
         let layer = discrete_layer();
-        for row in property_rows(&layer) {
+        for row in property_rows(&layer, &registry()) {
             if matches!(row.id, PropertyRowId::Network { .. }) {
                 assert!(
                     RevealFilter::Animated.matches(&layer, &row),
@@ -2223,8 +2296,8 @@ mod tests {
             }
         }
         // Unfiltered and `U`-filtered network rows are the same set.
-        let unfiltered = property_rows(&layer).len();
-        let animated = property_rows(&layer)
+        let unfiltered = property_rows(&layer, &registry()).len();
+        let animated = property_rows(&layer, &registry())
             .into_iter()
             .filter(|row| RevealFilter::Animated.matches(&layer, row))
             .count();
@@ -2264,7 +2337,7 @@ mod tests {
             .add_node(media)
             .unwrap();
 
-        let rows = property_rows(&layer);
+        let rows = property_rows(&layer, &registry());
         assert!(
             !rows.iter().any(|row| matches!(
                 &row.id,

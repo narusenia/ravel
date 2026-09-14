@@ -147,6 +147,12 @@ fn property_rows_display_translated_text_with_their_count() {
     );
 }
 
+fn registry() -> ravel_core::registry::NodeRegistry {
+    let mut reg = ravel_core::registry::NodeRegistry::new();
+    ravel_core::registry::builtin::register_builtins(&mut reg);
+    reg
+}
+
 /// Channel rows: a word is a key and translates, an axis letter is notation
 /// and passes through unchanged in every locale
 /// (`docs/specifications/ui/timeline.md`).
@@ -154,7 +160,7 @@ fn property_rows_display_translated_text_with_their_count() {
 fn channel_names_translate_words_and_keep_axis_letters() {
     let _lock = TEST_LOCK.lock().unwrap();
     init_i18n();
-    let rows = property_rows(&network_layer());
+    let rows = property_rows(&network_layer(), &registry());
     let position = rows
         .iter()
         .find(|row| row.channel_names.len() == 2)

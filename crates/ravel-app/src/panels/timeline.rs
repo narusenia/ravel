@@ -699,6 +699,10 @@ impl TimelineGpuiPanel {
         let mut state = TimelinePanel::new(FrameRate::new(30, 1));
         if let Some(project) = &project {
             let comp = super::active_composition_in(project.read(cx).document(), cx).cloned();
+            // Before the composition: `set_composition` enumerates the rows to
+            // drop a stale channel selection, and that enumeration reads the
+            // templates (`TimelinePanel::set_registry`).
+            state.set_registry(project.read(cx).shared_registry());
             state.set_composition(comp);
             state.sync_offline_layers(project.read(cx).document());
         }
@@ -859,6 +863,7 @@ impl TimelineGpuiPanel {
         // definition a change.
         let old_comp_id = self.state.comp_id();
         let new_comp_id = comp.as_ref().map(|comp| comp.id);
+        self.state.set_registry(project.read(cx).shared_registry());
         self.state.set_composition(comp);
         // Which layers reference an offline asset is a document question (the
         // asset table plus a walk of each layer network), so it is answered

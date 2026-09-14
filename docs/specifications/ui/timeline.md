@@ -378,7 +378,9 @@ AE 相当の 4 つ。キーバインドは Timeline のキーコンテキスト�
   宣言したパラメータだけが `R` / `G` / `B` / `A`、それ以外の多成分値は
   `X` / `Y` / `Z` / `W`。成分数から色かどうかを推測しない
   （宣言は `NodeTemplate::color_params`、解決は
-  `ravel_core::registry::is_color_parameter`）
+  `ravel_core::registry::is_color_parameter`）。**例外**: 宣言を持てない
+  ネットワーク In ノードと subnet ノードの `Channel4` は無条件に色
+  （カスタムポート型に `Vec4` が無いため）
 
 ## 翻訳しない表記
 

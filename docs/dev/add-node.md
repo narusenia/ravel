@@ -17,8 +17,10 @@
       **必須**: `every_node_template_icon_is_embedded` が全テンプレートに
       固有のアイコンを要求するので、カテゴリ既定へのフォールバックは
       テスト失敗になる
-- [ ] **色のパラメータがあるなら `with_color_param` で宣言**（下記
-      「色を宣言する」。忘れると色が 4 成分スクラブで描かれる）
+- [ ] **色のパラメータがあるなら宣言する**（下記「色を宣言する」。忘れると
+      色が 4 成分スクラブで描かれる）。常に色なら `with_color_param`、
+      **同じノードの別パラメータで色かベクタが変わるなら
+      `with_color_param_when`**（`attribute.set` の `type` がその形）
 - [ ] `crates/ravel-nodes/src/<領域>/` に `NodeProcessor` の実装を追加
 - [ ] `crates/ravel-nodes/src/lib.rs` の `processor_for_node` の `match` に
       `type_key` を追加
@@ -257,8 +259,12 @@ UX 不変条件 7）:
 
 解決は `ravel_core::registry::is_color_parameter(registry, node, key)` の
 1 箇所。**UI 側に種別判定を書き足さないこと** — ネットワークインタフェースの
-In ノードと subnet ノードは、テンプレートを持たないかわりに
-`CustomPortType` に `Vec4` が無いことを根拠にこの関数が色として扱う。
+In ノードと subnet ノードは宣言を持てない（テンプレートが無い）ので、
+**この関数がそれらの `Channel4` を無条件に色として扱う**。無条件で正しいのは
+`CustomPortType` に `Vec4` が無いからで、**その制約は上流側の不変条件**
+（`allowed_for_in` / `ALL_PORT_TYPES`）であってこの関数が確かめている
+ものではない。`Vec4` をカスタムポート型に足す日が来たら、ここが
+最初に嘘になる。
 
 `ParamRole`（`Position` / `Size`）とは**別の宣言**である。あちらは Viewer の
 マニピュレータがハンドルを置く幾何的な意味で、「色である」はハンドルを

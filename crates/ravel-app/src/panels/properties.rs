@@ -674,6 +674,15 @@ fn exposed_toggle_button(
 
 /// Synthetic scrub keys for the components of a `Vector` field
 /// (`center#x`, `center#y`, ...).
+/// Width reserved for a Vector component's letter (`X` / `Y` / `Z` / `W`).
+/// It is *added* to the scrub's own minimum rather than taken out of it:
+/// rule 5 cuts labels, never values, and a letter drawn over the number
+/// would cut the value (`MED-APP-20`).
+const VECTOR_LABEL_WIDTH: f32 = 12.0;
+/// Space between a component's letter and its scrub, matching the `gap_1`
+/// the cell lays them out with.
+const VECTOR_LABEL_GAP: f32 = 4.0;
+
 fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
     const SUFFIXES: [&str; 4] = ["x", "y", "z", "w"];
     (0..count.min(SUFFIXES.len()))
@@ -1200,19 +1209,48 @@ fn build_field_row(
                 .child(field_label_cell(field_label(key), muted));
             if entities.len() == components.len() {
                 let mut cell = div().flex().flex_wrap().w_full().gap_1();
-                for (component_key, entity) in keys.iter().zip(entities) {
+                for (index, (component_key, entity)) in keys.iter().zip(entities).enumerate() {
                     let selector = component_key.clone();
+                    let label_selector = component_key.clone();
+                    // Rule 7 (a value's meaning is visible in its editor):
+                    // without the letter the components are told apart by
+                    // position alone (`MED-APP-20`). A Vector row is by
+                    // construction not a colour — a declared colour is a
+                    // `PropertyField::Color` — so the axis letters are the
+                    // only naming this row can need.
+                    let label = ravel_ui::keyframes::AXIS_LETTERS[index];
                     cell = cell.child(
                         div()
                             // Test hook for `VisualTestContext::debug_bounds`
                             // (noop in release builds).
                             .debug_selector(move || format!("vector-cell-{selector}"))
                             .flex_1()
-                            // The scrub's own minimum, so a line that cannot
-                            // hold every component wraps instead of squeezing
-                            // the numbers into nothing.
-                            .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH))
-                            .child(ScrubInput::new(entity)),
+                            // The scrub's own minimum plus the letter, so a
+                            // line that cannot hold every component wraps
+                            // instead of squeezing the numbers into nothing.
+                            .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH
+                                + VECTOR_LABEL_WIDTH
+                                + VECTOR_LABEL_GAP))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("vector-label-{label_selector}")
+                                    })
+                                    .flex_shrink_0()
+                                    .w(px(VECTOR_LABEL_WIDTH))
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(SharedString::from(label)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH))
+                                    .child(ScrubInput::new(entity)),
+                            ),
                     );
                 }
                 row = row.child(cell);
@@ -6755,6 +6793,56 @@ mod tests {
             "content {:?} must overflow the panel {:?}",
             content.size,
             root.size,
+        );
+    }
+
+    /// Rule 7: each Vector component carries its axis letter, so X is told
+    /// from Y by name and not by position (`MED-APP-20`). The letters follow
+    /// the value's arity — a 3-vector has no `W` row to label.
+    #[gpui::test]
+    fn vector_components_carry_their_axis_letters(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _lid) = setup_vector_layer(cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(size(px(400.0), px(600.0)));
+        cx.run_until_parked();
+
+        for (component, label_selector, cell_selector) in [
+            (
+                "x",
+                "vector-label-custom.offset#x",
+                "vector-cell-custom.offset#x",
+            ),
+            (
+                "y",
+                "vector-label-custom.offset#y",
+                "vector-cell-custom.offset#y",
+            ),
+            (
+                "z",
+                "vector-label-custom.offset#z",
+                "vector-cell-custom.offset#z",
+            ),
+        ] {
+            let label = visual.debug_bounds(label_selector).unwrap_or_else(|| {
+                panic!("component {component} is unlabelled: only its position names it")
+            });
+            let cell = visual
+                .debug_bounds(cell_selector)
+                .expect("vector component cell");
+            assert!(
+                label.left() >= cell.left() && label.right() <= cell.right(),
+                "the {component} letter sits outside its own component cell"
+            );
+        }
+        assert!(
+            visual
+                .debug_bounds("vector-label-custom.offset#w")
+                .is_none(),
+            "a three-component vector grew a fourth label"
         );
     }
 

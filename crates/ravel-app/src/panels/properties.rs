@@ -1183,25 +1183,45 @@ fn build_field_row(
                 .iter()
                 .filter_map(|ck| scrubs.iter().find(|(k, _)| k == ck).map(|(_, e)| e))
                 .collect();
+            // Rule 5 (operable at any width): the label elides, the value does
+            // not. One `justify_between` line cannot honour both — the
+            // components carry their own minimum width, so a narrow panel
+            // pushed the last one out past the right edge with nothing to
+            // scroll it back into view (`MED-UI-07`). The row therefore stacks
+            // the label above the components, the shape `String` and `Enum`
+            // already use, and lets the component line wrap: unconditional, so
+            // there is no width threshold to tune and no layout flip at it.
             let mut row = div()
                 .flex()
-                .justify_between()
-                .items_center()
-                .gap_2()
+                .flex_col()
+                .gap_1()
                 .px_1()
                 .py(px(1.0))
                 .child(field_label_cell(field_label(key), muted));
             if entities.len() == components.len() {
-                let mut cell = div().flex().flex_shrink_0().gap_1();
-                for entity in entities {
-                    cell = cell.child(div().min_w(px(56.0)).child(ScrubInput::new(entity)));
+                let mut cell = div().flex().flex_wrap().w_full().gap_1();
+                for (component_key, entity) in keys.iter().zip(entities) {
+                    let selector = component_key.clone();
+                    cell = cell.child(
+                        div()
+                            // Test hook for `VisualTestContext::debug_bounds`
+                            // (noop in release builds).
+                            .debug_selector(move || format!("vector-cell-{selector}"))
+                            .flex_1()
+                            // The scrub's own minimum, so a line that cannot
+                            // hold every component wraps instead of squeezing
+                            // the numbers into nothing.
+                            .min_w(px(ravel_widgets::scrub_input::MIN_WIDTH))
+                            .child(ScrubInput::new(entity)),
+                    );
                 }
                 row = row.child(cell);
             } else {
                 let parts: Vec<String> = components.iter().map(|v| format!("{v:.3}")).collect();
                 row = row.child(
                     div()
-                        .flex_shrink_0()
+                        .w_full()
+                        .min_w_0()
                         .text_xs()
                         .text_color(fg)
                         .child(SharedString::from(format!("[{}]", parts.join(", ")))),
@@ -5217,8 +5237,59 @@ mod tests {
             .unwrap()
     }
 
+    /// A layer network whose custom parameter is a three-component vector —
+    /// the widest `PropertyField::Vector` the panel can be handed today, since
+    /// `Channel4` still routes to the colour picker (`MED-APP-19`).
+    fn network_with_vector_param() -> Graph {
+        use ravel_core::animation::channel::AnimationChannel;
+        let in_node = Node::new(NodeId::next(), net::NET_IN_TYPE_KEY)
+            .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+            .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+            .with_output("offset", DataTypeId::VEC3)
+            .with_param(
+                "offset",
+                ParameterValue::Channel3([
+                    AnimationChannel::constant(-123.456),
+                    AnimationChannel::constant(-123.456),
+                    AnimationChannel::constant(-123.456),
+                ]),
+            );
+        let out = Node::new(NodeId::next(), net::NET_OUT_TYPE_KEY)
+            .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
+        Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out)
+            .unwrap()
+    }
+
+    /// [`setup`] against a layer whose custom parameter renders as a Vector
+    /// row.
+    fn setup_vector_layer(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<PropertiesGpuiPanel>,
+        Entity<ProjectState>,
+        CompId,
+        LayerId,
+    ) {
+        setup_with_network(cx, network_with_vector_param())
+    }
+
     fn setup(
         cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<PropertiesGpuiPanel>,
+        Entity<ProjectState>,
+        CompId,
+        LayerId,
+    ) {
+        setup_with_network(cx, network_with_custom_param())
+    }
+
+    fn setup_with_network(
+        cx: &mut TestAppContext,
+        network: Graph,
     ) -> (
         gpui::WindowHandle<PropertiesGpuiPanel>,
         Entity<ProjectState>,
@@ -5239,7 +5310,7 @@ mod tests {
         let (comp_id, lid) = project.update(cx, |project, cx| {
             let comp_id = project.document().root_comp.unwrap();
             let lid = LayerId::next();
-            let layer = Layer::new(lid, "L", network_with_custom_param()).with_time(0, 0, 300);
+            let layer = Layer::new(lid, "L", network).with_time(0, 0, 300);
             let doc = ravel_ui::document::add_layer(project.document(), comp_id, layer).unwrap();
             project.commit_document(doc, InvalidationHint::Structural, cx);
             (comp_id, lid)
@@ -6672,6 +6743,63 @@ mod tests {
             content.size,
             root.size,
         );
+    }
+
+    /// Rule 5, "operable at any width": every component of a Vector row stays
+    /// inside the panel however narrow it gets. It fails if the row goes back
+    /// to one `justify_between` line — the component cells carry a minimum
+    /// width of their own, so on that line the last one hangs past the right
+    /// edge of a panel that has no horizontal scroll to bring it back
+    /// (`MED-UI-07`: 160px panel, cells ending at 211px).
+    ///
+    /// Verified to fail on three mutations: putting the one-line
+    /// `justify_between` row back (z lands at 161..220px), dropping
+    /// `flex_wrap` (z lands at 131..179px), and letting the cells shrink past
+    /// the scrub's own minimum with `min_w_0` (37.5px cells, the number
+    /// clipped instead of the label).
+    #[gpui::test]
+    fn a_narrow_panel_keeps_every_vector_component_inside_it(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _lid) = setup_vector_layer(cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        // 160px is the width the issue measured at; 120px is narrower than
+        // three components can sit side by side, so the line has to wrap.
+        for width in [160.0, 120.0] {
+            visual.simulate_resize(size(px(width), px(600.0)));
+            cx.run_until_parked();
+
+            let root = visual
+                .debug_bounds("properties-panel")
+                .expect("panel root bounds");
+            for component in [
+                "vector-cell-custom.offset#x",
+                "vector-cell-custom.offset#y",
+                "vector-cell-custom.offset#z",
+            ] {
+                let cell = visual
+                    .debug_bounds(component)
+                    .expect("vector component cell");
+                assert!(
+                    cell.right() <= root.right() && cell.left() >= root.left(),
+                    "at {width}px component {component} sits at {:?}..{:?}, \
+                     outside the panel {:?}..{:?}: it is unreachable",
+                    cell.left(),
+                    cell.right(),
+                    root.left(),
+                    root.right(),
+                );
+                assert!(
+                    cell.size.width >= px(ravel_widgets::scrub_input::MIN_WIDTH),
+                    "at {width}px component {component} is {:?} wide, under the \
+                     scrub's own minimum: the value is clipped instead of the \
+                     label",
+                    cell.size.width,
+                );
+            }
+        }
     }
 
     /// Current value shown for a `Float` field, as displayed by the panel.

@@ -25,6 +25,11 @@ use crate::{Input, InputEvent, InputState};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
+/// Narrowest a scrub may be drawn: below it the number it exists to show is
+/// clipped. A caller laying scrubs out side by side (a Vector row) has to
+/// wrap or scroll rather than squeeze past this.
+pub const MIN_WIDTH: f32 = 48.0;
+
 /// Horizontal pixels that sweep the full UI range.
 const PIXELS_PER_UI_SPAN: f32 = 200.0;
 /// Fallback UI span when a field declares no range.
@@ -345,7 +350,7 @@ impl RenderOnce for ScrubInput {
             return div()
                 .id(("scrub-input-edit", entity_id))
                 .h(row_height)
-                .min_w(px(48.0))
+                .min_w(px(MIN_WIDTH))
                 // Compact too, or the editor is a 24px control in a 20px row.
                 .child(Input::new(&editor).compact())
                 .into_any_element();
@@ -359,7 +364,7 @@ impl RenderOnce for ScrubInput {
             // own — the same binding supplies both.
             .debug_selector(|| "scrub-input-display".into())
             .h(row_height)
-            .min_w(px(48.0))
+            .min_w(px(MIN_WIDTH))
             .px_1()
             .flex()
             .items_center()

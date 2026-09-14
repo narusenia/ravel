@@ -1014,5 +1014,111 @@ Ctrl+Z が見た目上何も起こさなくなり、ゴミステップが 200 �
 
 ---
 
+## MED-APP-08 | bug | MediaBin のサムネイルがアセット ID キーのため File ▸ Open を越えて stale になる
+
+> **解決済み**: `UIX-7`。`refresh_thumbnails` が、保存済み画像の identity と
+> ドキュメント上の現在の identity（解決済みパス + デコード元 + 入力色空間）を
+> 突き合わせ、**一致しないものをその場で捨てる**ようにした。要求を投げるだけでは
+> 閉じない — 新しい方が `Unavailable`（オフライン / 読めないファイル）だと
+> 差し替えが永久に来ないので、前の絵が残り続ける。ドキュメントから消えた
+> アセットの `retain` はこの規則の特殊ケース（現在の identity が無い）なので
+> 吸収した。`a_relinked_asset_never_shows_the_previous_file` が固定する。
+>
+> **起票時の前提との差分**:
+> - 「アセット ID キーなのでプロジェクト差し替えを越えて生存する」は**もう古い**。
+>   `ThumbnailIdentity`（`MED-APP-32` の CodeRabbit 指摘で入った）が既にあり、
+>   `refresh_thumbnails` は identity 不一致を検出して**再取得は投げていた**。
+>   残っていた穴は「再取得が成功するまで（成功しなければ永久に）古い画像を
+>   保持し、`render`（`:625`）がそれを identity を見ずに描く」こと
+> - したがって修正方針の「ドキュメント差し替え時に `thumb_images` をクリア」では
+>   足りない。同一ドキュメント内の relink や入力色空間の変更が閉じないため、
+>   ドキュメント遷移ではなく identity 不一致で捨てる形にした
+> - `render` 側は id キーのままにした。`refresh_thumbnails` の後にマップへ
+>   不一致が残らず、identity を変える変更は必ずドキュメントの commit を伴って
+>   `mirror_epoch` を進める（= 描画前に observer → `rebuild_rows` →
+>   `refresh_thumbnails` が走る）ので、描画側の照合は二重になる
+> - `ThumbnailCache::invalidate` に production 呼び出し元がゼロなのは**今も事実**
+>   （呼ぶのはテストだけ）。ただし不変条件 9 の違反ではないので、この単位では
+>   触っていない
+
+**該当**: `crates/ravel-app/src/panels/media_bin.rs:176-178`, `:214-218`
+
+`thumb_images` はアセット ID キーでプロジェクト差し替えを越えて生存する。
+ID はファイル名 stem 由来なので、同名アセット（`clip`）を含む別プロジェクトを開くと
+前プロジェクトのサムネイルが永久に表示される。
+`AudioService` はこの ID 再利用ケースを generation カウンタで防いでいるが、
+サムネイルマップには無い。`ThumbnailCache::invalidate` は production 呼び出し元がゼロ。
+
+**修正方針**: ドキュメント差し替え時に `thumb_images` をクリアする
+（`AudioService::on_document_replaced` と同じフックを使う）。
+または解決済みパスでキーにする。
+
+
 ---
 
+## MED-APP-17 | bug | カーブエディタの縦ズームが未実装で、Fit ボタンが何もしない
+
+> **解決済み**: `UIX-7`。Timeline のグラフエディタに値（縦）ズームを足し、
+> `curve_value_range` に `Some(..)` を書く経路を作った。割り当ては
+> **`Cmd`（macOS）/ `Ctrl` + `Shift` + ホイール**で、既存の時間軸ズーム
+> （`Cmd`/`Ctrl` + ホイール）の枝の中で `shift` を見て分けている — 素のホイール
+> （横スクロール）の枝とは取り合いにならない。焦点はポインタの縦位置
+> （グラフ領域の上端を 0 とする 0..1 の比率。Properties のカーブエディタと同じ
+> 規約）。**グラフエディタ非表示のときは何もしない**（値軸が無い）。
+> これで Fit が「手動レンジを捨てて自動に戻す」という意味を持つ。併せて
+> **自動追従中の Fit ボタンは無効表示**にした（不変条件 6 の「できないなら
+> 無効化して見せる」）。ツールチップに操作も書いた。
+> `a_platform_shift_wheel_zooms_the_value_axis_and_fit_undoes_it` が、
+> ホイールイベントの実配線・ポインタ追従・Fit・**`Cmd`+ホイールが時間軸ズームの
+> まま**であること・バー表示で無反応であることを固定する。
+>
+> **起票時の前提との差分**:
+> - 行番号はすべて古い。`PARAM-5` 後の実際は `:590`（`CurveValueRange` の宣言）、
+>   `:807`（`auto()` 初期化）、`:1742`（`fit_curve_values` → `fit()`）、
+>   `:4517`（`resolved(auto_value_bounds)` の読み出し）
+> - 個票の「`Some(..)` を代入するコードが 1 行も存在しない」は**書き込み経路が
+>   無い**という意味で正しかった（`Option` 自体は `CurveValueRange` の中に移った）
+> - ピンチは足していない。ホイールの和音だけで足り、macOS のピンチは
+>   同じ `ScrollWheelEvent` に乗らないので別経路になる
+> - 実装で足りなかったのはもう 1 つ、**グラフ領域の大きさ**。ホイールハンドラは
+>   パネルのルートに居るので、焦点を出すのに `area_origin` と対の
+>   `graph_area_size`（prepaint で採る）を新設した
+
+**該当**: `crates/ravel-app/src/panels/timeline.rs:241`, `:345`, `:948-951`, `:2800-2802`
+
+縦方向の手動レンジを持つフィールドがあるが、**`Some(..)` を代入するコードが
+1 行も存在しない**。
+
+| 行 | 内容 |
+| --- | --- |
+| `:241` | `curve_value_range: Option<(f64, f64)>` の宣言 |
+| `:345` | `None` で初期化 |
+| `:949` | `fit_curve_values` が `None` を代入 |
+| `:2801` | 読み出し（`.or(self.curve_value_range)`） |
+
+帰結が 2 つ:
+
+1. **縦ズーム・縦パンが存在しない**。縦の表示範囲は常に
+   `curve_value_bounds(&resolved)` の自動 bounds に固定される
+2. **Fit ボタンが何もしない**。`fit_curve_values` は `None` に `None` を
+   代入して `cx.notify()` するだけ。既に auto なので見た目が変わらない
+
+ツールバーとコンテキストメニューの両方から到達できる（`:2162`, `:3917`）が、
+どちらも無反応。
+
+**修正方針**: 縦ズーム（ホイール / ピンチ / ドラッグ）を実装して
+`curve_value_range` を書く経路を作る。その時点で `fit_curve_values` が
+「手動レンジを捨てて自動に戻す」という意味を持つ。
+
+**現状（`PARAM-5` 実施後）**: 置き場所は済んでいる。`curve_value_range` は
+`crates/ravel-app/src/widgets/curve_view.rs` の `CurveValueRange` になり、
+`fit_curve_values` はその `fit()`（= データ追従に戻す）を呼ぶ。Properties の
+カーブエディタは同じ型をホイールと数値入力から書いている。**残っているのは
+Timeline に書き込み操作を足すこと**（ホイールを縦ズームに割り当てると既存の
+スクロール挙動が変わるため、`PARAM-5` では足していない）。それまで Timeline
+の Fit は自動範囲に自動範囲を代入するので見た目が変わらない。
+
+**検証**: ホイール / ピンチで縦方向にズームでき、Fit で自動範囲へ戻るテスト。
+
+
+---

@@ -1227,16 +1227,20 @@ Float 2 本に分解されており（`crates/ravel-core/src/registry/builtin.rs
 
 ---
 
-## MED-APP-30 | bug | Timeline のキーフレーム行の成分名が arity だけで決まる
+## MED-APP-44 | bug | Timeline のキーフレーム行の成分名が arity だけで決まる
 
 > **解決済み**: `UIX-7` B。成分名は arity ではなく
 > `registry::is_color_parameter` で決める。色なら `R`/`G`/`B`/`A`、
 > そうでなければ `X`/`Y`/`Z`/`W`（`AXIS_LETTERS`）。1 成分の
 > `CHANNEL_VALUE` は現状維持。
 >
-> **ID の重複**: この `MED-APP-30` は、同じファイルにある
+> **採番のやり直し**: この票は起票時 `MED-APP-30` で、同じファイルにある
 > 「ノードエディタのラバーバンド選択中に Properties が作り直され続ける」
-> （perf、PR #344 で解決）とは**別の票**で、採番が衝突していた。
+> （perf、PR #344 で解決）と番号が衝突していた。台帳は ID で引くもので、
+> `scripts/docs.sh id MED-APP-30` が 2 票を返すのは索引の不具合なので、
+> **`UIX-7` B で `MED-APP-44` に振り直した**。動かしたのはこちら（新しい方）で、
+> perf 側は PR #344 / `HIGH-28` / `hands-on-findings-handoff.md` が
+> **当時の記録として**参照しているため触っていない。
 >
 > **個票との差分**:
 > - 該当行は `crates/ravel-ui/src/keyframes.rs:1085-1090`（個票の

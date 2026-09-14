@@ -106,7 +106,7 @@ reason.
 (`MED-APP-19`). A Vector field shows two unlabelled numbers with no way to
 tell X from Y and no link toggle (`MED-APP-20`). A keyframe row names its
 components from arity alone, so a 3-vector's rows read `0 / 1 / 2` whether
-it is a position or an RGB (`MED-APP-30`). A layer reference is a number
+it is a position or an RGB (`MED-APP-44`). A layer reference is a number
 scrubber, so pointing it at a different layer cannot change the output type
 (`MED-APP-29`).
 

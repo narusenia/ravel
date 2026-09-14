@@ -233,7 +233,7 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
 .with_color_param("color")
 ```
 
-これで決まるのは**画面での描き方だけ**（`MED-APP-19` / `MED-APP-30`、
+これで決まるのは**画面での描き方だけ**（`MED-APP-19` / `MED-APP-44`、
 UX 不変条件 7）:
 
 | 宣言 | Properties | Timeline のキー行 |

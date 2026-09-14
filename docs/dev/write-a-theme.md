@@ -125,4 +125,4 @@
   再生成せずにフィールドを足すとこのテストが落ちる。
 - **色を増やしたくなったら導出を先に疑う。** 10 色から導けるものはトークンに
   しない（`.agents/rules/ux.md` の不変条件 12、
-  `docs/implementation/ui-component-layer-plan.md`）。
+  `docs/implementation/done/ui-component-layer-plan.md`）。

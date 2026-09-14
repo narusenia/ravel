@@ -39,7 +39,7 @@
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
-| UIX-1 | **`ravel-widgets` クレートの作成**（`gpui` + `serde`）と Ravel 独自テーマスキーマの定義。`ThemeConfig` の導出は `ravel-app` 側。まだ配線しない | `ui-component-layer-plan.md` |
+| UIX-1 | **`ravel-widgets` クレートの作成**（`gpui` + `serde`）と Ravel 独自テーマスキーマの定義。`ThemeConfig` の導出は `ravel-app` 側。まだ配線しない | `done/ui-component-layer-plan.md` |
 | KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
 | KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
 | KIT-6 | 借りられる primitive の採否（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | `gpui-kit-migration-plan.md` |

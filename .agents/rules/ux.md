@@ -10,7 +10,7 @@ paths:
 
 Twelve rules the UI must not break. They exist because the open panel bugs
 are not twelve unrelated defects — they are the **same few rules broken in
-different places** (`docs/implementation/ui-component-layer-plan.md`).
+different places** (`docs/implementation/done/ui-component-layer-plan.md`).
 
 Each rule below carries **what it looks like when broken**, because an
 abstract principle cannot be checked. If a diff cannot be argued against the

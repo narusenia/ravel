@@ -3,7 +3,7 @@
 > 索引: [`README.md`](README.md)
 
 `crates/ravel-widgets` に Ravel 自前の部品を 1 つ足す手順。設計の意図は
-[`../implementation/ui-component-layer-plan.md`](../implementation/ui-component-layer-plan.md)
+[`../implementation/ui-component-layer-plan.md`](../implementation/done/ui-component-layer-plan.md)
 の「見た目の仕様」、守るべきことは
 [`.agents/rules/ux.md`](../../.agents/rules/ux.md) の 12 個の不変条件、
 GPUI のパターンは [`../gpui-ui-guide.md`](../gpui-ui-guide.md#部品を追加する)。

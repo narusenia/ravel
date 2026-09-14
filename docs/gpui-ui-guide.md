@@ -135,7 +135,7 @@ window bounds の読み取りと `open_window` は `cx.defer` で 1 サイクル
 `crates/ravel-widgets` に Ravel 自前の部品（Button / Input / Checkbox …）を
 足すときの手順。**順番に意味がある。** チェックリスト形式は
 [`dev/add-widget.md`](dev/add-widget.md)、見た目の決定は
-[`implementation/ui-component-layer-plan.md`](implementation/ui-component-layer-plan.md)
+[`implementation/ui-component-layer-plan.md`](implementation/done/ui-component-layer-plan.md)
 の「見た目の仕様」。
 
 ### 1. `gpui-base` の無スタイル primitive に着せる

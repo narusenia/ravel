@@ -2525,10 +2525,20 @@ Unknown type keys are skipped silently (plugin space).
   unchanged. `param_group_titles(node, &registry) -> Vec<(group, title)>` is
   the same split without the fields — the host keys the fold state on
   `(type_key, group)` in `ui_state.json` and shows `title`. Builders: `sections_for_node(node,
-  &registry, frame, driven, NetworkContext)` (samples animated channels at the
-  layer-local frame; the context reaches only `node_ports_section`, which
-  returns `None` for anything but `net.in` / `net.out`. Collapse a
-  `NetworkPath` with `NetworkPath::context()`),
+  &registry, frame, driven, NodeContext)` (samples animated channels at the
+  layer-local frame). `properties::node::NodeContext { network: NetworkContext,
+  comp: Option<&Composition>, owner: Option<LayerId> }` says where the node
+  sits: `network` reaches only `node_ports_section`, which returns `None` for
+  anything but `net.in` / `net.out` (collapse a `NetworkPath` with
+  `NetworkPath::context()`), while `comp` + `owner` resolve a
+  `ParamOptions::Contextual` parameter's candidates. Feed them
+  `document.get_composition(path.comp)` and `Some(path.layer)` — `path.layer`
+  is the owner for a node inside a subnet too. `NodeContext::detached(network)`
+  is the no-document form. Such a row with NO candidates becomes a read-only
+  `properties::node::NO_SIBLING_LAYERS` rather than an empty dropdown, and a
+  stored value the candidates do not offer is APPENDED to them so it stays
+  selected (`enum_row_label` only fixes the display; the Select's index comes
+  from the option list),
   `sections_for_layer(layer, comp, &ctx, audio_asset: Option<&AssetMetadata>)`
   (evaluates transform channels in layer-local time; includes the In node's
   custom parameters as `custom.<name>` fields, REQ-LAYER-002; `audio_asset`

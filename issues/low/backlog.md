@@ -555,8 +555,13 @@ close 経路（`window_host::close`）も同じ形なので、**元からある�
 
 **該当**: `crates/ravel-app/src/panels/viewer/geometry.rs` の `geometry_bounds`
 
-bbox は頂点位置の AABB で、線がそこからどれだけ外へ届くかを見ていない。
-`stroke_width` が大きいシェイプは**描かれるピクセルが枠の外に出る**。
+`geometry_bounds` が測るのは `Domain::Point` と `Domain::Instance` の**位置**の
+AABB で、線がその位置からどれだけ外へ届くかは見ていない。`stroke_width` が
+大きいシェイプは**描かれるピクセルが枠の外に出る**。
+
+`MED-APP-45` とは別件。あちらは**インスタンスの画像矩形**が位置以外の
+情報として落ちている話で、こちらは**位置は正しく測れているが線の張り出しが
+足りない**話。両方とも同じ走査の中にあるだけ。
 
 答えは既にラスタライザ側にある。`crates/ravel-nodes/src/rasterize/mod.rs` の
 `stroke_margin(width, join)` が「パスから線がどこまで届くか」を、マイター

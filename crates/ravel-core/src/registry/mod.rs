@@ -592,6 +592,8 @@ mod tests {
 
     // ----- contextual option sets (CPO-1) -----------------------------------
 
+    /// A composition whose layer ids are deliberately **not** their row
+    /// numbers, so a label built from the wrong one is visible.
     fn comp_with(names: &[&str]) -> Composition {
         let mut comp = Composition::new(
             crate::id::CompId::new(1),
@@ -603,7 +605,7 @@ mod tests {
         for (index, name) in names.iter().enumerate() {
             comp = comp.add_layer(
                 Layer::new(
-                    LayerId::new(index as u64 + 1),
+                    LayerId::new(index as u64 * 10 + 7),
                     *name,
                     crate::graph::Graph::new(),
                 )
@@ -655,12 +657,12 @@ mod tests {
     fn sibling_layer_options_exclude_the_owner_and_number_by_stack_position() {
         let comp = comp_with(&["Background", "Middle", "Foreground"]);
         let options =
-            contextual_options(ContextualKind::SiblingLayer, &comp, Some(LayerId::new(2)));
+            contextual_options(ContextualKind::SiblingLayer, &comp, Some(LayerId::new(17)));
         assert_eq!(
             options,
             vec![
-                ParamOption::new("1", "1. Background"),
-                ParamOption::new("3", "3. Foreground"),
+                ParamOption::new("7", "1. Background"),
+                ParamOption::new("27", "3. Foreground"),
             ],
             "the middle layer is not its own sibling, and Foreground stays row 3"
         );
@@ -676,7 +678,7 @@ mod tests {
             contextual_options(
                 ContextualKind::SiblingLayer,
                 &comp_with(&[]),
-                Some(LayerId::new(1))
+                Some(LayerId::new(7))
             )
             .is_empty(),
             "an empty composition offers nothing either"

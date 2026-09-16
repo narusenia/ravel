@@ -3379,10 +3379,11 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
 ///
 /// The unset spellings, for the values that do not stand still, are ones the
 /// processors already handle, so nothing downstream learns a new case:
-/// [`AssetId::UNSET`](crate::id::AssetId::UNSET) is the id no asset has and no
-/// allocation can reach, so `media` resolves it to **offline** exactly as it
-/// resolves a deleted asset, and `layer.ref` reads a negative target as "no
-/// target set". Every parameter in
+/// [`AssetId::UNSET`](crate::id::AssetId::UNSET) is zero, the id no asset and
+/// no layer has and no allocation can reach, so `media` resolves it to
+/// **offline** exactly as it resolves a deleted asset and `layer.ref` reads it
+/// as "no target set" exactly as it reads its empty default. Every parameter
+/// in
 /// [`is_identifier_parameter`](crate::composition::validate::is_identifier_parameter)
 /// is one of the two types, so the `Int` arm is the fallthrough rather than a
 /// guess.
@@ -5505,10 +5506,14 @@ mod tests {
             Composition, Document, Layer, MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS,
         };
 
-        let mut curve = KeyframeCurve::new();
-        curve.insert(0, 900.0, Interpolation::Linear);
-        curve.insert(10, 901.0, Interpolation::Linear);
-        let keyed_layer = ParameterValue::IntChannel(AnimationChannel::keyframes(curve));
+        // The layer target is text (`.ravprj` v13), so both halves have to read
+        // it through the text mouth: `identifier_overlay` for what evaluation
+        // sees, `static_text_identifier` for what the watermark reserves. One
+        // of them reading the numeric spelling instead is exactly the
+        // disagreement this test exists to catch.
+        let mut moving_layer = StepCurve::new("900".to_string());
+        moving_layer.insert(0, "900".to_string());
+        moving_layer.insert(10, "901".to_string());
         let mut moving_asset = StepCurve::new("700".to_string());
         moving_asset.insert(0, "700".to_string());
         moving_asset.insert(5, "701".to_string());
@@ -5516,13 +5521,13 @@ mod tests {
         let network = Graph::new()
             .add_node(
                 Node::new(NodeId::new(10), LAYER_REF_TYPE_KEY)
-                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(3)),
+                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::String("3".into())),
             )
             .unwrap()
-            .add_node(
-                Node::new(NodeId::new(11), LAYER_REF_TYPE_KEY)
-                    .with_param(LAYER_REF_LAYER_PARAM, keyed_layer),
-            )
+            .add_node(Node::new(NodeId::new(11), LAYER_REF_TYPE_KEY).with_param(
+                LAYER_REF_LAYER_PARAM,
+                ParameterValue::StringSteps(moving_layer),
+            ))
             .unwrap()
             .add_node(
                 Node::new(NodeId::new(12), MEDIA_TYPE_KEYS[0])

@@ -851,7 +851,7 @@ asset_id = "読み込み済みアセットの中から対象を選ぶ。"
 label = "レイヤー参照"
 description = "同じコンポジション内の別レイヤーの出力を参照する。"
 [node."layer.ref".params]
-layer = "対象レイヤーの ID（-1 で未指定）。"
+layer = "参照する同じコンポジション内のレイヤー。"
 port = "読み取る対象レイヤーの出力ポート名。"
 
 [node."subnet"]

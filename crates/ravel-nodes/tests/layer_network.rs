@@ -1084,10 +1084,13 @@ fn subnet_inside_layer_network_sees_layer_local_time() {
 // ===========================================================================
 
 /// Network `layer.ref(target, port) → net.out(frame)`.
+///
+/// The target is the decimal `LayerId` in a `String`, as `.ravprj` v13 stores
+/// it and as the processor reads it.
 fn layer_ref_network(ref_id: u64, out_id: u64, target: u64, port: &str) -> Graph {
     let ref_node = Node::new(NodeId::new(ref_id), "layer.ref")
         .with_output("output", DataTypeId::FRAME_BUFFER)
-        .with_param("layer", ParameterValue::Int(target as i32))
+        .with_param("layer", ParameterValue::String(target.to_string()))
         .with_param("port", ParameterValue::String(port.into()));
     Graph::new()
         .add_node(ref_node)
@@ -1166,7 +1169,7 @@ fn layer_ref_applies_target_time_placement() {
     // The ref output is retyped SCALAR to match the referenced port.
     let ref_node = Node::new(NodeId::new(832), "layer.ref")
         .with_output("output", DataTypeId::SCALAR)
-        .with_param("layer", ParameterValue::Int(1))
+        .with_param("layer", ParameterValue::String("1".into()))
         .with_param("port", ParameterValue::String("value".into()));
     let ref_network = Graph::new()
         .add_node(ref_node)
@@ -1233,6 +1236,12 @@ fn layer_ref_tracks_target_timing_edit_at_same_frame() {
     // The referenced layer's shell timing is a document-side dependency of
     // layer.ref: editing it must invalidate the referencing scope even at
     // the same comp frame.
+    //
+    // The invalidation runs off `validate::layer_ref_targets`, so this is one
+    // of the three consumers that go quiet — with no error and no warning — if
+    // that scan reads the target through the numeric mouth instead of the text
+    // one: the referring scope would simply never be invalidated and the stale
+    // frame would stand.
     let t_out = Node::new(NodeId::new(891), net::NET_OUT_TYPE_KEY)
         .with_input("value", &[DataTypeId::SCALAR]);
     let target_network = Graph::new()
@@ -1250,7 +1259,7 @@ fn layer_ref_tracks_target_timing_edit_at_same_frame() {
         .unwrap();
     let ref_node = Node::new(NodeId::new(892), "layer.ref")
         .with_output("output", DataTypeId::SCALAR)
-        .with_param("layer", ParameterValue::Int(1))
+        .with_param("layer", ParameterValue::String("1".into()))
         .with_param("port", ParameterValue::String("value".into()));
     let ref_network = Graph::new()
         .add_node(ref_node)

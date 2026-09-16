@@ -117,7 +117,9 @@ fn node_info_section_carries_the_description_when_the_locale_defines_one() {
         0,
         &eval(),
         &[],
-        ravel_core::network::NetworkContext::LayerRoot,
+        ravel_ui::properties::node::NodeContext::detached(
+            ravel_core::network::NetworkContext::LayerRoot,
+        ),
     );
     append_node_description(&mut sections, &node.type_key);
 

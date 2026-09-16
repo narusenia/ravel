@@ -193,6 +193,28 @@ fn enum_options_translate_state_words_and_never_a_declared_label() {
     ravel_i18n::set_locale("en").expect("en catalog is shipped");
 }
 
+/// CPO-2: the reason a contextual row shows instead of an empty dropdown is a
+/// locale key from `ravel-ui`, so it has to come out of the display boundary
+/// as a sentence in both catalogs — never as `properties.value.*`.
+#[test]
+fn the_no_sibling_layers_reason_is_translated_not_shown_as_a_key() {
+    use ravel_ui::properties::node::NO_SIBLING_LAYERS;
+
+    let _lock = TEST_LOCK.lock().unwrap();
+    init_i18n();
+
+    for locale in ["en", "ja"] {
+        ravel_i18n::set_locale(locale).expect("the catalog is shipped");
+        let shown = read_only_value(NO_SIBLING_LAYERS);
+        assert_ne!(shown, NO_SIBLING_LAYERS, "{locale} shows the raw key");
+        assert!(
+            !shown.starts_with("properties."),
+            "{locale} shows a key: {shown}"
+        );
+    }
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
 /// The row's current value reads as the label of the option carrying it, and
 /// a value no option carries reads as itself — never as nothing. A document
 /// that travelled (a layer reference copied into another project, a file that

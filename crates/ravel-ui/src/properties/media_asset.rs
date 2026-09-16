@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ravel_core::composition::{AssetKind, AssetPath, MediaAssetEntry};
+use ravel_core::registry::ParamOption;
 
 use super::{PropertyField, PropertySection, PropertyValue, counted_value};
 use crate::panels::media_bin::{asset_name, format_duration};
@@ -149,11 +150,9 @@ fn reference_fields(entry: &MediaAssetEntry) -> Vec<PropertyField> {
         PropertyField::Enum {
             key: FIELD_PATH_KIND.into(),
             value: path_kind_option(&entry.path).to_string(),
-            options: vec![
-                PATH_ABSOLUTE.to_string(),
-                PATH_RELATIVE.to_string(),
-                PATH_VARIABLE.to_string(),
-            ],
+            options: [PATH_ABSOLUTE, PATH_RELATIVE, PATH_VARIABLE]
+                .map(ParamOption::fixed)
+                .to_vec(),
         },
         PropertyField::String {
             key: FIELD_PATH.into(),

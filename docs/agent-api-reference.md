@@ -2486,8 +2486,15 @@ Unknown type keys are skipped silently (plugin space).
   globally unique across the document).
 - `properties/`: `PropertySection { title, fields }` where `title` is a
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color, Vector,
-  Curve, ReadOnly, PortList}` keyed by stable identifiers (`Curve` carries a
-  whole `CurveParam`; the panel renders it as a thumbnail row that expands
+  Curve, ReadOnly, PortList}` keyed by stable identifiers (`Enum` holds
+  `value: String` plus `options: Vec<ParamOption>` — each option carries the
+  value it writes AND its display text, so nothing derives one from the other
+  or packs both into one string; a stored value no option carries stays the
+  value and the row shows it verbatim. `panels::properties::enum_option_label`
+  is the display boundary: a FIXED option, one whose label equals its value,
+  goes through `read_only_value` so a state word such as `PARENT_NONE` is
+  translated, while a DECLARED label — a layer name — is never translated.
+  `Curve` carries a whole `CurveParam`; the panel renders it as a thumbnail row that expands
   `widgets::param_curve_editor` inline, and which rows are open is panel view
   state that never enters the Document). `PortList { key, side, rows:
   Vec<PortRow { name, port_type, fixed, group }>, options }` is the odd one out: it
@@ -2515,9 +2522,12 @@ Unknown type keys are skipped silently (plugin space).
   is the metadata of the asset the layer's `AudioSource` points at, resolved
   by the caller — it only feeds the Audio section's stream picker options,
   and `comp` is what the Transform section's Parent picker enumerates its
-  candidates from, minus the layer itself and its descendants,
-  `layer::parse_stream_index` reads the container index back out of the
-  selected option, and nothing here ever probes a file),
+  candidates from, minus the layer itself and its descendants
+  (`layer::parent_candidates`, labelled `"{row}. {name}"` by
+  `registry::layer_param_option` — the row is the position in `comp.layers`,
+  which is the Timeline's number, not the position in the candidate list).
+  The stream picker's option value is the bare container index and its label
+  the probe's description, and nothing here ever probes a file),
   `sections_for_layers(&[&Layer], comp, &ctx)` for a multi-layer selection (count plus
   the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`, a
   merged boolean as the locale key `VALUE_ON` / `VALUE_OFF` which the panel

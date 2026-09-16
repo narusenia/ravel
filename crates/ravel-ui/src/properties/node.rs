@@ -9,7 +9,7 @@ use ravel_core::graph::{Node, Parameter, ParameterValue, PortSide};
 use ravel_core::network::{
     CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
 };
-use ravel_core::registry::{NodeRegistry, ParamRange};
+use ravel_core::registry::{NodeRegistry, ParamOption, ParamRange};
 
 use std::collections::HashSet;
 
@@ -89,7 +89,7 @@ fn string_field(
         Some(options) => PropertyField::Enum {
             key,
             value,
-            options: options.to_vec(),
+            options: options.iter().map(ParamOption::fixed).collect(),
         },
         None => PropertyField::String { key, value },
     }

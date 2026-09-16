@@ -867,6 +867,23 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 `CPO-1` / `CPO-6` が入った時点で機構は 1 本になっていて、どの builtin も
 `Contextual` を宣言していないので Properties の挙動は #542 では変わっていない。
 
+### レイヤーの内容サイズと `auto`（`layer-content-size-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| EXT-1 | ⬜ | `shape.rect` の `size_mode` と `auto` の解決（コアと nodes） | — |
+| EXT-2 | ⬜ | 宣言で駆動された行を read-only にする（`ColorParam::When` の一般化） | EXT-1 |
+| EXT-3 | ⬜ | `solid.ron` を `shape.rect` へ差し替え | EXT-1 |
+| EXT-4 | ⬜ | bbox の取りこぼし 3 件（画像インスタンスの矩形 / コアの Instance ドメイン / ストローク幅） | — |
+| EXT-5 | ⬜ | ロケール / 文書 | EXT-1〜4 |
+
+Solid の bbox がコンプ解像度分あるのは bbox の計算のせいではなく、**内容が
+`base_quad(ctx.comp_resolution)`**（`crates/ravel-nodes/src/net.rs:137`）だから。
+`shape.rect` が既に `center` + `width` / `height` を持っているので新ノードは作らず、
+`auto` / `fixed` のモードを足して `solid.ron` を差し替える。
+**フォーマット版は上げない。** ラスタの範囲（RoD）は別の計画書
+（`FrameBuffer` に原点が無く、全ピクセルノードが `ctx.resolution` で確保している）。
+
 ### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |

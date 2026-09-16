@@ -1553,9 +1553,13 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     .with_param_range(key, hard, ui)     // ParamRange: hard = clamp bound,
     // ui = default editing span (slider/scrub); ui must be within hard.
     // Every numeric default param MUST declare one (builtin test enforces).
-    .with_param_options(key, options)    // closed option set for a String
-    // param → Properties renders an enum dropdown (merge `operation`,
+    .with_param_options(key, options)    // FIXED closed option set for a
+    // String param → Properties renders an enum dropdown (merge `operation`,
     // math.scalar `op`)
+    .with_contextual_param_options(key, ContextualKind)   // the candidates
+    // come from WHERE THE NODE SITS, not from the template. Closed enum
+    // (SiblingLayer), never a closure: NodeTemplate is data that is cloned and
+    // compared, and the resolution must stay in ravel-core.
     .with_param_role(key, ParamRole)     // Position | Size: what a vector
     // param means on the canvas. The Viewer's ParamManipulator puts a handle
     // on it; Size is measured from the node's first Position param.
@@ -1571,6 +1575,20 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // keys, no repeats, and all-or-nothing coverage per template.
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
+    // the FIXED values only; a contextual declaration answers None here
+registry.param_option_source(type_key, param_key) -> Option<&ParamOptions>
+    // ParamOptions::{Fixed(Vec<String>), Contextual(ContextualKind)} — the
+    // declaration itself, for a reader that can supply a context
+registry::contextual_options(ContextualKind, &Composition, Option<LayerId>)
+    -> Vec<ParamOption>
+    // ParamOption { value, label }: the value an edit writes and the text the
+    // user reads, SEPARATE — a layer is addressed by LayerId and read by name.
+    // `owner` is the layer owning the node's network; None means the node
+    // belongs to no layer, and SiblingLayer then answers EMPTY (a node whose
+    // own place in the stack is unknown must not be offered a self-reference).
+    // SiblingLayer keeps `comp.layers` order, drops the owner, and labels
+    // `"{index}. {name}"` where index is the position in the COMPOSITION + 1
+    // (the Timeline row number), never the position in the candidate list.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
 template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node

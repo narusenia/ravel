@@ -165,6 +165,26 @@ pub fn enum_option_label(option: &ParamOption) -> String {
     }
 }
 
+/// Display text of an [`PropertyField::Enum`] row's **current** value: the
+/// label of the option carrying it, or the value itself when no option does.
+///
+/// A stored value the candidates do not offer is the normal state of a
+/// document that travelled — a layer reference copied into another project, a
+/// media file that lost the stream it named. The row shows it verbatim
+/// because a blank row would read as "this parameter has no value" for one
+/// that has a value the panel cannot name.
+///
+/// Pure, and separate from the row that paints it, for the reason the widget
+/// layer keeps `button_layers` and `checkbox_layers` separate from their
+/// elements: a decision inside `render` is a decision no test can reach.
+pub fn enum_row_label(options: &[ParamOption], value: &str) -> String {
+    options
+        .iter()
+        .find(|option| option.value == value)
+        .map(enum_option_label)
+        .unwrap_or_else(|| value.to_string())
+}
+
 /// Append the node type's description to the Node Info section when the
 /// locale defines one. This is the keyboard-reachable counterpart of the
 /// node editor's hover popover (DISC-2): the popover is pointer-only, so
@@ -1152,14 +1172,7 @@ fn build_field_row(
             options,
         } => {
             let select = selects.iter().find(|(k, _)| k == key);
-            // The option carries the display text; a stored value no option
-            // carries is shown verbatim rather than blank, so the row reads
-            // as what the document holds.
-            let label = options
-                .iter()
-                .find(|option| &option.value == value)
-                .map(enum_option_label)
-                .unwrap_or_else(|| value.clone());
+            let label = enum_row_label(options, value);
             let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
                 div()
                     .flex()

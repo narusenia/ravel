@@ -74,6 +74,15 @@ pub struct NodeContext<'a> {
     pub owner: Option<LayerId>,
 }
 
+/// Which of a string parameter's two spellings a row is being built from:
+/// the constant `String` or the animatable `StringSteps`. Only the contextual
+/// option set cares, and only to refuse a picker on the animatable one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StringSpelling {
+    Constant,
+    Animated,
+}
+
 impl NodeContext<'_> {
     /// A context that resolves no contextual candidates: for a caller holding
     /// a node but not the document it came out of.
@@ -167,6 +176,7 @@ fn string_field(
     registry: &NodeRegistry,
     type_key: &str,
     ctx: NodeContext<'_>,
+    spelling: StringSpelling,
 ) -> PropertyField {
     match registry.param_option_source(type_key, &key) {
         Some(ParamOptions::Fixed(options)) => PropertyField::Enum {
@@ -174,6 +184,19 @@ fn string_field(
             value,
             options: options.iter().map(ParamOption::fixed).collect(),
         },
+        // A contextual candidate addresses something the document holds, so
+        // the parameter is an identifier — and an identifier that can change
+        // over time names **nothing**
+        // (`ParameterValue::identifier` answers `Dynamic`, and the evaluator
+        // substitutes the unset id). A picker on the animatable spelling
+        // would write a key into the curve, report success, and leave the
+        // reference resolving to no target at all, so the row says what it
+        // holds instead of offering an edit that cannot land. Only a
+        // hand-edited document reaches here: the keyframe toggle refuses an
+        // identifier parameter (`DISK-2`).
+        Some(ParamOptions::Contextual(_)) if spelling == StringSpelling::Animated => {
+            PropertyField::ReadOnly { key, value }
+        }
         Some(ParamOptions::Contextual(kind)) => {
             let mut options = ctx
                 .comp
@@ -359,9 +382,14 @@ fn param_field(
             key: p.key.clone(),
             value: *v,
         },
-        ParameterValue::String(v) => {
-            string_field(p.key.clone(), v.clone(), registry, &node.type_key, ctx)
-        }
+        ParameterValue::String(v) => string_field(
+            p.key.clone(),
+            v.clone(),
+            registry,
+            &node.type_key,
+            ctx,
+            StringSpelling::Constant,
+        ),
         ParameterValue::Channel(ch) => PropertyField::Float {
             key: p.key.clone(),
             value: channel_display_value(ch, frame, eval),
@@ -451,6 +479,7 @@ fn param_field(
             registry,
             &node.type_key,
             ctx,
+            StringSpelling::Animated,
         ),
     }
 }
@@ -1699,6 +1728,45 @@ mod tests {
             .into_iter()
             .flat_map(|section| section.fields)
             .collect()
+    }
+
+    /// An identifier stored in the **animatable** spelling gets no picker.
+    ///
+    /// A reference that can change over time names nothing — `identifier()`
+    /// answers `Dynamic(StringSteps)` and the evaluator substitutes the unset
+    /// id — so a dropdown here would write a key into the curve, look like it
+    /// worked, and leave the reference pointing at no layer. The row shows
+    /// what the document holds instead.
+    #[test]
+    fn an_animatable_identifier_shows_its_value_instead_of_a_picker() {
+        use ravel_core::animation::step::StepCurve;
+
+        let comp = comp_of(&["Backdrop", "Middle", "Hero"]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&comp),
+            owner: Some(LayerId::new(2)),
+        };
+        let node = set_param(
+            layer_ref_node("3"),
+            "layer",
+            ParameterValue::StringSteps(StepCurve::keyed(0, "3".to_string())),
+        );
+
+        match field_of(&rows(&node, ctx), "layer") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, "3"),
+            other => panic!("expected the value, not an editor: {other:?}"),
+        }
+
+        // The constant spelling of the very same target still gets the picker,
+        // so this is about the spelling and not about the value.
+        assert!(
+            matches!(
+                field_of(&rows(&layer_ref_node("3"), ctx), "layer"),
+                PropertyField::Enum { .. }
+            ),
+            "the constant spelling is still a picker"
+        );
     }
 
     /// CPO-2: `layer.ref`'s target is a dropdown of the composition's *other*

@@ -203,9 +203,21 @@ fn string_field(
                 .map(|comp| contextual_options(*kind, comp, ctx.owner))
                 .unwrap_or_default();
             if options.is_empty() {
+                // Nothing to offer. What the row says then depends on whether
+                // the document holds a target: the reason only when there is
+                // no value to show, because "there are no other layers" over
+                // a reference that *is* set would hide what the document
+                // holds — the copy-between-projects case this row is supposed
+                // to survive. A value with no candidates cannot be a
+                // dropdown either (one option, and it is the current one), so
+                // it reads as itself.
                 return PropertyField::ReadOnly {
                     key,
-                    value: no_candidates_reason(*kind).to_string(),
+                    value: if value.is_empty() {
+                        no_candidates_reason(*kind).to_string()
+                    } else {
+                        value
+                    },
                 };
             }
             // The unset default is not a candidate — nothing to keep selected
@@ -1728,6 +1740,37 @@ mod tests {
             .into_iter()
             .flat_map(|section| section.fields)
             .collect()
+    }
+
+    /// With no candidates at all, the row still shows a target the document
+    /// holds — the reason replaces it only when there is nothing to show.
+    ///
+    /// A reference copied out of another project lands in exactly this state:
+    /// a value whose layer is not here, in a composition with no siblings to
+    /// offer. Saying "there are no other layers" over it would hide the one
+    /// thing the row exists to display.
+    #[test]
+    fn no_candidates_still_shows_a_target_the_document_holds() {
+        let alone = comp_of(&["Only"]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&alone),
+            owner: Some(LayerId::new(1)),
+        };
+
+        match field_of(&rows(&layer_ref_node("909"), ctx), "layer") {
+            PropertyField::ReadOnly { value, .. } => {
+                assert_eq!(value, "909", "the stranded target is still visible")
+            }
+            other => panic!("expected the value, got {other:?}"),
+        }
+        match field_of(&rows(&layer_ref_node(""), ctx), "layer") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(
+                value, NO_SIBLING_LAYERS,
+                "with nothing set, the reason is what there is to say"
+            ),
+            other => panic!("expected the reason, got {other:?}"),
+        }
     }
 
     /// An identifier stored in the **animatable** spelling gets no picker.

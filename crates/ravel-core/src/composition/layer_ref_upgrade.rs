@@ -99,12 +99,26 @@ fn upgrade_level(graph: &Graph) -> Graph {
             value: ParameterValue::String(text),
         }];
         // The graph is cloned into the call because `set_params` consumes it.
-        // The only failure it can report here is a node that is not in the
-        // graph, which the scan above just ruled out; a load must not fail
-        // over a reference either way, so the untouched graph stands.
+        // A load must not fail over one reference, so the untouched graph
+        // stands — but it must not fail *silently* either: the node keeps its
+        // `Int` while the archive is stamped v13, and the int spelling is one
+        // nothing reads any more. The reference stops resolving, the
+        // watermark scan stops seeing it, and no other signal exists. So the
+        // one thing that can still be done is say so.
+        //
+        // `NodeNotFound` is ruled out by the scan above; what remains is a
+        // hand-built node the port rules reject (`ParamAlreadyExposed`, a
+        // port that cannot carry the type).
         upgraded = match upgraded.clone().set_params(id, &update) {
             Ok(graph) => graph,
-            Err(_) => upgraded,
+            Err(err) => {
+                tracing::warn!(
+                    node = ?id,
+                    %err,
+                    "layer.ref target left in the pre-v13 int spelling; the reference will not resolve"
+                );
+                upgraded
+            }
         };
     }
     upgraded

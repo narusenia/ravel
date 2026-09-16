@@ -14,7 +14,7 @@
 //! store there would leak into every other test of that binary — so this
 //! coverage lives in its own binary with the real catalogs loaded.
 
-use ravel_app::panels::properties::read_only_value;
+use ravel_app::panels::properties::{enum_option_label, enum_row_label, read_only_value};
 use ravel_app::panels::timeline::channel_name_label;
 use ravel_app::panels::viewer::resolution_label;
 use ravel_core::color::DisplayChannel;
@@ -31,7 +31,7 @@ use ravel_ui::panels::viewer::{
     display_channel_label_key, playback_status_text,
 };
 use ravel_ui::properties::layer::{
-    DURATION_FRAMES, SOURCE_AUDIO, SOURCE_NETWORK, SOURCE_NULL, sections_for_layer,
+    DURATION_FRAMES, PARENT_NONE, SOURCE_AUDIO, SOURCE_NETWORK, SOURCE_NULL, sections_for_layer,
 };
 use ravel_ui::properties::{PropertyField, split_counted_value};
 use std::sync::Mutex;
@@ -144,6 +144,91 @@ fn property_rows_display_translated_text_with_their_count() {
         read_only_value(&duration),
         "300 frames",
         "the Japanese catalog is not reaching the display boundary"
+    );
+}
+
+/// A dropdown option carries its own label, and only a **fixed** one — a
+/// label equal to its value — is a locale key. A declared label is the
+/// document's own text and must reach the screen verbatim: a layer named
+/// after a locale key would otherwise be renamed by the display boundary.
+#[test]
+fn enum_options_translate_state_words_and_never_a_declared_label() {
+    use ravel_core::registry::ParamOption;
+
+    let _lock = TEST_LOCK.lock().unwrap();
+    init_i18n();
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+
+    assert_eq!(
+        enum_option_label(&ParamOption::fixed(PARENT_NONE)),
+        "(none)",
+        "the Parent picker's state word is a key and translates"
+    );
+    assert_eq!(
+        enum_option_label(&ParamOption::fixed("Normal")),
+        "Normal",
+        "a fixed option that is not a key passes through"
+    );
+    assert_eq!(
+        enum_option_label(&ParamOption::new("3", PARENT_NONE)),
+        PARENT_NONE,
+        "a declared label is user text, even when it spells a locale key"
+    );
+    assert_eq!(
+        enum_option_label(&ParamOption::new("3", "1. Background")),
+        "1. Background"
+    );
+
+    ravel_i18n::set_locale("ja").expect("ja catalog is shipped");
+    assert_ne!(
+        enum_option_label(&ParamOption::fixed(PARENT_NONE)),
+        "(none)",
+        "the Japanese catalog is not reaching the display boundary"
+    );
+    assert_eq!(
+        enum_option_label(&ParamOption::new("3", PARENT_NONE)),
+        PARENT_NONE,
+        "and the declared label is still not translated"
+    );
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+}
+
+/// The row's current value reads as the label of the option carrying it, and
+/// a value no option carries reads as itself — never as nothing. A document
+/// that travelled (a layer reference copied into another project, a file that
+/// lost the stream it named) holds exactly such a value, and a blank row
+/// would claim the parameter has none.
+#[test]
+fn an_enum_row_names_a_value_its_options_do_not_carry() {
+    use ravel_core::registry::ParamOption;
+
+    let _lock = TEST_LOCK.lock().unwrap();
+    init_i18n();
+    ravel_i18n::set_locale("en").expect("en catalog is shipped");
+
+    let options = [
+        ParamOption::fixed(PARENT_NONE),
+        ParamOption::new("3", "1. Background"),
+    ];
+    assert_eq!(
+        enum_row_label(&options, "3"),
+        "1. Background",
+        "the stored value reads as its option's label"
+    );
+    assert_eq!(
+        enum_row_label(&options, PARENT_NONE),
+        "(none)",
+        "and a state word still translates"
+    );
+    assert_eq!(
+        enum_row_label(&options, "404"),
+        "404",
+        "a value no option carries is shown verbatim, not blank"
+    );
+    assert_eq!(
+        enum_row_label(&[], "3"),
+        "3",
+        "an empty option list names the value too"
     );
 }
 

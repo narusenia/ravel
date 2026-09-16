@@ -2209,7 +2209,7 @@ mod tests {
         }
         let component = reg.get("field.component").expect("field.component");
         assert_eq!(
-            component.param_options.get("component").map(Vec::as_slice),
+            component.param_option_values("component"),
             Some(&FIELD_COMPONENTS.map(String::from)[..]),
         );
     }

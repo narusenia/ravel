@@ -1553,9 +1553,13 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     .with_param_range(key, hard, ui)     // ParamRange: hard = clamp bound,
     // ui = default editing span (slider/scrub); ui must be within hard.
     // Every numeric default param MUST declare one (builtin test enforces).
-    .with_param_options(key, options)    // closed option set for a String
-    // param → Properties renders an enum dropdown (merge `operation`,
+    .with_param_options(key, options)    // FIXED closed option set for a
+    // String param → Properties renders an enum dropdown (merge `operation`,
     // math.scalar `op`)
+    .with_contextual_param_options(key, ContextualKind)   // the candidates
+    // come from WHERE THE NODE SITS, not from the template. Closed enum
+    // (SiblingLayer), never a closure: NodeTemplate is data that is cloned and
+    // compared, and the resolution must stay in ravel-core.
     .with_param_role(key, ParamRole)     // Position | Size: what a vector
     // param means on the canvas. The Viewer's ParamManipulator puts a handle
     // on it; Size is measured from the node's first Position param.
@@ -1571,6 +1575,25 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // keys, no repeats, and all-or-nothing coverage per template.
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
+    // the FIXED values only; a contextual declaration answers None here
+registry.param_option_source(type_key, param_key) -> Option<&ParamOptions>
+    // ParamOptions::{Fixed(Vec<String>), Contextual(ContextualKind)} — the
+    // declaration itself, for a reader that can supply a context
+registry::contextual_options(ContextualKind, &Composition, Option<LayerId>)
+    -> Vec<ParamOption>
+    // ParamOption { value, label }: the value an edit writes and the text the
+    // user reads, SEPARATE — a layer is addressed by LayerId and read by name.
+    // `owner` is the layer owning the node's network; None means the node
+    // belongs to no layer, and SiblingLayer then answers EMPTY (a node whose
+    // own place in the stack is unknown must not be offered a self-reference).
+    // A stale owner (a LayerId the composition no longer holds) is treated
+    // as None, not as "every layer is a sibling".
+    // SiblingLayer keeps `comp.layers` order, drops the owner, and labels
+    // `"{row}. {name}"` where row is the TIMELINE ROW: `comp.layers` is
+    // bottom-most first and the Timeline draws its last element first, so
+    // row = comp.layers.len() - index. Never the layer id, never the index
+    // itself, never the position in the candidate list. The conversion lives
+    // only in `registry::layer_param_option(index, total, layer)`.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
 template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node
@@ -2468,8 +2491,19 @@ Unknown type keys are skipped silently (plugin space).
   globally unique across the document).
 - `properties/`: `PropertySection { title, fields }` where `title` is a
   locale key; `PropertyField::{Float, Int, Bool, String, Enum, Color, Vector,
-  Curve, ReadOnly, PortList}` keyed by stable identifiers (`Curve` carries a
-  whole `CurveParam`; the panel renders it as a thumbnail row that expands
+  Curve, ReadOnly, PortList}` keyed by stable identifiers (`Enum` holds
+  `value: String` plus `options: Vec<ParamOption>` — each option carries the
+  value it writes AND its display text, so nothing derives one from the other
+  or packs both into one string; a stored value no option carries stays the
+  value and the row shows it verbatim. `panels::properties::enum_option_label`
+  is the display boundary: a FIXED option, one whose label equals its value,
+  goes through `read_only_value` so a state word such as `PARENT_NONE` is
+  translated, while a DECLARED label — a layer name — is never translated.
+  `enum_row_label(options, value)` is what the row itself calls: the label of
+  the option carrying `value`, or `value` verbatim when no option carries it
+  (a reference that travelled between projects), never blank.
+  `Curve` carries a whole `CurveParam`; the panel renders it as a thumbnail
+  row that expands
   `widgets::param_curve_editor` inline, and which rows are open is panel view
   state that never enters the Document). `PortList { key, side, rows:
   Vec<PortRow { name, port_type, fixed, group }>, options }` is the odd one out: it
@@ -2497,9 +2531,13 @@ Unknown type keys are skipped silently (plugin space).
   is the metadata of the asset the layer's `AudioSource` points at, resolved
   by the caller — it only feeds the Audio section's stream picker options,
   and `comp` is what the Transform section's Parent picker enumerates its
-  candidates from, minus the layer itself and its descendants,
-  `layer::parse_stream_index` reads the container index back out of the
-  selected option, and nothing here ever probes a file),
+  candidates from, minus the layer itself and its descendants
+  (`layer::parent_candidates`, labelled `"{row}. {name}"` by
+  `registry::layer_param_option` — the row is the Timeline's row number,
+  `comp.layers.len()` minus the position in `comp.layers`, because that vector
+  is bottom-most first; not the position in the candidate list).
+  The stream picker's option value is the bare container index and its label
+  the probe's description, and nothing here ever probes a file),
   `sections_for_layers(&[&Layer], comp, &ctx)` for a multi-layer selection (count plus
   the shell fields, all `ReadOnly`, differing values shown as `MIXED_VALUE`, a
   merged boolean as the locale key `VALUE_ON` / `VALUE_OFF` which the panel

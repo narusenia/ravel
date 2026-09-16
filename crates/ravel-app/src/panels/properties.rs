@@ -55,8 +55,8 @@ use ravel_core::exposed::{
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
-use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
+use ravel_core::registry::{NodeRegistry, ParamOption};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
@@ -138,18 +138,51 @@ pub fn read_only_value(value: &str) -> String {
 
 /// Display text of one option of an [`PropertyField::Enum`] row.
 ///
-/// Enum options are stored values, so most of them are data (`Normal`,
-/// `2: pcm_s16le 44100 Hz 1 ch`) and pass through. An option that names a
-/// *state* instead — the Parent picker's
-/// [`ravel_ui::properties::layer::PARENT_NONE`] — is emitted as a locale key
-/// for the same reason read-only state words are, and is translated here at
-/// the display boundary.
+/// An option carries its own label ([`ParamOption`]), so the display text is
+/// declared rather than derived. Only a **fixed** option — one whose label is
+/// its value (`Normal`, `2: pcm_s16le 44100 Hz 1 ch`) — goes through
+/// [`read_only_value`], which is what translates the one that names a *state*
+/// instead of carrying data: the Parent picker's
+/// [`ravel_ui::properties::layer::PARENT_NONE`], emitted as a locale key for
+/// the same reason read-only state words are.
 ///
-/// The panel keeps the raw options beside the labels it builds from them, so
-/// `SelectEvent::Confirm`'s translated answer maps back to the stored value
-/// and the language in use never changes what an edit writes.
-fn enum_option_label(option: &str) -> String {
-    read_only_value(option)
+/// A declared label is **never** translated. It is the document's own text —
+/// a layer name — and a layer named after a locale key would otherwise come
+/// back as that key's translation.
+///
+/// The panel keeps the options beside the labels it builds from them, so
+/// `SelectEvent::Confirm`'s answer maps back to the stored value and the
+/// language in use never changes what an edit writes.
+///
+/// `pub` for the `localized_display_text` integration test, which loads the
+/// real locale catalog (the lib unit tests run with an empty i18n store), and
+/// is the only place the two branches can be told apart.
+pub fn enum_option_label(option: &ParamOption) -> String {
+    if option.label == option.value {
+        read_only_value(&option.label)
+    } else {
+        option.label.clone()
+    }
+}
+
+/// Display text of an [`PropertyField::Enum`] row's **current** value: the
+/// label of the option carrying it, or the value itself when no option does.
+///
+/// A stored value the candidates do not offer is the normal state of a
+/// document that travelled — a layer reference copied into another project, a
+/// media file that lost the stream it named. The row shows it verbatim
+/// because a blank row would read as "this parameter has no value" for one
+/// that has a value the panel cannot name.
+///
+/// Pure, and separate from the row that paints it, for the reason the widget
+/// layer keeps `button_layers` and `checkbox_layers` separate from their
+/// elements: a decision inside `render` is a decision no test can reach.
+pub fn enum_row_label(options: &[ParamOption], value: &str) -> String {
+    options
+        .iter()
+        .find(|option| option.value == value)
+        .map(enum_option_label)
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Append the node type's description to the Node Info section when the
@@ -1133,8 +1166,13 @@ fn build_field_row(
             row
         }
 
-        PropertyField::Enum { key, value, .. } => {
+        PropertyField::Enum {
+            key,
+            value,
+            options,
+        } => {
             let select = selects.iter().find(|(k, _)| k == key);
+            let label = enum_row_label(options, value);
             let mut row = div().flex().flex_col().px_1().py(px(1.0)).child(
                 div()
                     .flex()
@@ -1148,7 +1186,7 @@ fn build_field_row(
                             .truncate()
                             .text_xs()
                             .text_color(fg)
-                            .child(SharedString::from(enum_option_label(value))),
+                            .child(SharedString::from(label)),
                     ),
             );
             if let Some((_, entity)) = select {
@@ -1689,7 +1727,7 @@ fn field_shape_key(field: &PropertyField) -> String {
         PropertyField::Enum { key, options, .. } => {
             let mut shape = key.clone();
             for option in options {
-                let _ = write!(shape, "\n{option}");
+                let _ = write!(shape, "\n{}\t{}", option.value, option.label);
             }
             shape
         }
@@ -3726,13 +3764,11 @@ impl PropertiesGpuiPanel {
                 // The Select holds the option's *label*, so compare like for
                 // like — a value that is a locale key would otherwise never
                 // match and the index would be re-set on every render.
-                let selected = enum_option_label(value);
+                let index = options.iter().position(|o| &o.value == value);
+                let selected = index.map(|i| enum_option_label(&options[i]));
                 let current = binding.state.read(cx).selected_value().cloned();
-                if current.as_deref() != Some(selected.as_str()) {
-                    let idx = options
-                        .iter()
-                        .position(|o| o == value)
-                        .map(|i| gpui_component::IndexPath::default().row(i));
+                if current.as_deref() != selected.as_deref() {
+                    let idx = index.map(|i| gpui_component::IndexPath::default().row(i));
                     updates.push((binding.state.clone(), idx));
                 }
             }
@@ -4286,7 +4322,7 @@ impl PropertiesGpuiPanel {
                         .iter()
                         .map(|option| SharedString::from(enum_option_label(option)))
                         .collect();
-                    let selected_idx = options.iter().position(|o| o == value);
+                    let selected_idx = options.iter().position(|o| &o.value == value);
                     let idx_path =
                         selected_idx.map(|i| gpui_component::IndexPath::default().row(i));
                     let entity = cx.new(|cx| SelectState::new(items.clone(), idx_path, window, cx));
@@ -4308,7 +4344,7 @@ impl PropertiesGpuiPanel {
                                 else {
                                     return;
                                 };
-                                let value = PropertyValue::String(option.clone());
+                                let value = PropertyValue::String(option.value.clone());
                                 this.route_change(&field_key, value, true, &ids, cx);
                             }
                         },
@@ -5198,7 +5234,7 @@ mod tests {
     use ravel_core::id::{DataTypeId, EdgeId, LayerId, OutputPortIndex};
     use ravel_core::network as net;
     use ravel_core::param_curve::CurveParam;
-    use ravel_ui::properties::layer::{PARENT_NONE, parse_parent_option};
+    use ravel_ui::properties::layer::PARENT_NONE;
 
     /// The key toggle appears on `Int` and `String` rows — those parameters
     /// are animatable now — and on the animated spellings of both, reporting
@@ -5824,7 +5860,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             options,
-            ["1: aac 48000 Hz 2 ch", "2: pcm_s16le 44100 Hz 1 ch"],
+            [
+                ParamOption::new("1", "1: aac 48000 Hz 2 ch"),
+                ParamOption::new("2", "2: pcm_s16le 44100 Hz 1 ch"),
+            ],
             "the streams recorded on the asset, not a probe"
         );
 
@@ -5832,7 +5871,7 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.apply_layer_change(
                     "stream_index",
-                    PropertyValue::String(options[1].clone()),
+                    PropertyValue::String(options[1].value.clone()),
                     true,
                     cx,
                 );
@@ -7124,7 +7163,7 @@ mod tests {
     // ----- Parent picker (layer-shell-wiring plan, unit 5) ------------------
 
     /// The `parent` row as the panel currently resolves it.
-    fn parent_row(panel: &PropertiesGpuiPanel) -> (String, Vec<String>) {
+    fn parent_row(panel: &PropertiesGpuiPanel) -> (String, Vec<ParamOption>) {
         panel
             .sections
             .iter()
@@ -7172,8 +7211,9 @@ mod tests {
                 assert_eq!(value, PARENT_NONE, "the layer starts unparented");
                 options
                     .into_iter()
-                    .find(|option| parse_parent_option(option) == Some(other))
+                    .find(|option| option.value == other.raw().to_string())
                     .expect("the sibling is offered as a parent")
+                    .value
             })
             .unwrap();
 
@@ -7244,13 +7284,11 @@ mod tests {
             .update(cx, |panel, _window, cx| {
                 panel.refresh_values(cx);
                 let (_, options) = parent_row(panel);
-                let offered: Vec<Option<LayerId>> = options
-                    .iter()
-                    .map(|option| parse_parent_option(option))
-                    .collect();
+                let offered: Vec<&str> =
+                    options.iter().map(|option| option.value.as_str()).collect();
                 assert_eq!(
                     offered,
-                    [None, Some(free)],
+                    [PARENT_NONE, &free.raw().to_string()],
                     "only (none) and the unrelated layer: {options:?}"
                 );
             })
@@ -7277,7 +7315,11 @@ mod tests {
         let before = window
             .update(cx, |panel, window, cx| {
                 panel.rebuild_widgets(window, cx);
-                assert_eq!(parent_row(panel).1, [PARENT_NONE], "nothing to parent to");
+                assert_eq!(
+                    parent_row(panel).1,
+                    [ParamOption::fixed(PARENT_NONE)],
+                    "nothing to parent to"
+                );
                 select_id(panel)
             })
             .unwrap();
@@ -7289,7 +7331,7 @@ mod tests {
             .update(cx, |panel, _window, _cx| {
                 let (_, options) = parent_row(panel);
                 assert_eq!(options.len(), 2);
-                assert_eq!(parse_parent_option(&options[1]), Some(other));
+                assert_eq!(options[1].value, other.raw().to_string());
                 assert_ne!(
                     select_id(panel),
                     before,
@@ -7305,22 +7347,26 @@ mod tests {
     /// can restock the widget built from them.
     #[test]
     fn an_enum_field_shape_covers_its_options() {
-        let picker = |options: &[&str]| PropertyField::Enum {
+        let picker = |options: &[ParamOption]| PropertyField::Enum {
             key: "parent".into(),
             value: PARENT_NONE.into(),
-            options: options.iter().map(|o| o.to_string()).collect(),
+            options: options.to_vec(),
         };
+        let none = ParamOption::fixed(PARENT_NONE);
+        let second = ParamOption::new("2", "2. L");
+        let renamed = ParamOption::new("2", "2. Renamed");
         assert_eq!(
-            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
-            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
+            field_shape_key(&picker(&[none.clone(), second.clone()])),
+            field_shape_key(&picker(&[none.clone(), second.clone()])),
         );
         assert_ne!(
-            field_shape_key(&picker(&[PARENT_NONE])),
-            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
+            field_shape_key(&picker(std::slice::from_ref(&none))),
+            field_shape_key(&picker(&[none.clone(), second.clone()])),
         );
         assert_ne!(
-            field_shape_key(&picker(&[PARENT_NONE, "2: L"])),
-            field_shape_key(&picker(&[PARENT_NONE, "2: Renamed"])),
+            field_shape_key(&picker(&[none.clone(), second])),
+            field_shape_key(&picker(&[none, renamed])),
+            "a renamed layer is a new option list even at the same layer id"
         );
     }
 

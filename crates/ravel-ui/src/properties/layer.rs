@@ -16,6 +16,7 @@ use ravel_core::eval::EvalContext;
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::{LayerId, NodeId};
 use ravel_core::network as net;
+use ravel_core::registry::{ParamOption, layer_param_option};
 
 /// Field-key prefix of the In node's custom parameters.
 pub const CUSTOM_FIELD_PREFIX: &str = "custom.";
@@ -302,27 +303,6 @@ fn layer_local_frame(layer: &Layer, ctx: &EvalContext) -> u64 {
     layer.local_frame(ctx.frame)
 }
 
-/// Dropdown label of one candidate parent: the layer's raw id first, then its
-/// name.
-///
-/// The leading number is what [`parse_parent_option`] reads back out of the
-/// selected option. Layer names are not unique and the shell stores a
-/// [`LayerId`], so the name alone could not address a parent — the same
-/// reason the audio stream picker leads with the container stream index.
-fn parent_option_label(layer: &Layer) -> String {
-    format!("{}: {}", layer.id.raw(), layer.name)
-}
-
-/// The layer id encoded in an option produced by [`parent_option_label`].
-/// `None` for [`PARENT_NONE`] and for anything the picker never produced.
-pub fn parse_parent_option(option: &str) -> Option<LayerId> {
-    option
-        .split(':')
-        .next()
-        .and_then(|id| id.trim().parse().ok())
-        .map(LayerId::new)
-}
-
 /// The layers `layer` may take a transform from: every other layer of the
 /// owning composition that does not already descend from it, in compositing
 /// order.
@@ -351,17 +331,25 @@ pub fn parent_candidates<'a>(comp: &'a Composition, layer: &Layer) -> Vec<&'a La
 /// — `Composition::remove_layer` clears such links, so only a hand-built
 /// document reaches here, and `Document::validate` rejects that one anyway.
 fn parent_field(layer: &Layer, comp: &Composition) -> PropertyField {
-    let mut options = vec![PARENT_NONE.to_string()];
-    options.extend(
-        parent_candidates(comp, layer)
-            .into_iter()
-            .map(parent_option_label),
-    );
+    let mut options = vec![ParamOption::fixed(PARENT_NONE)];
+    let total = comp.layers.len();
+    options.extend(parent_candidates(comp, layer).into_iter().map(|candidate| {
+        // The label's number is the candidate's Timeline row, which
+        // `layer_param_option` derives from its place in `comp.layers`: the
+        // position inside *this* list would skip the rows `parent_candidates`
+        // excluded. One scan per candidate over a layer stack, next to the
+        // ancestor chain the candidate list already walks.
+        let index = comp
+            .layers
+            .iter()
+            .position(|l| l.id == candidate.id)
+            .unwrap_or_default();
+        layer_param_option(index, total, candidate)
+    }));
     let value = layer
         .parent
-        .and_then(|id| comp.get_layer(id))
-        .map(parent_option_label)
-        .filter(|label| options.contains(label))
+        .map(|id| id.raw().to_string())
+        .filter(|id| options.iter().any(|option| &option.value == id))
         .unwrap_or_else(|| PARENT_NONE.to_string());
     PropertyField::Enum {
         key: "parent".into(),
@@ -478,11 +466,12 @@ fn timing_section(layer: &Layer) -> PropertySection {
 /// Dropdown label of one audio stream: its container index first, then
 /// whatever the probe recorded about it.
 ///
-/// The leading number is the value the shell stores, so
-/// [`parse_stream_index`] reads it back out of the selected option. The rest
-/// is codec name, sample rate and channel count — numbers and identifiers,
-/// deliberately not prose, because enum options reach the panel as literal
-/// strings rather than locale keys.
+/// The leading number is the index the shell stores, shown because a stream
+/// is addressed by it. It is a *label* — the stored value travels beside it
+/// in the option ([`ParamOption`]), so nothing reads the index back out of
+/// this text. The rest is codec name, sample rate and channel count —
+/// numbers and identifiers, deliberately not prose, because an option's
+/// label reaches the panel as a literal string rather than a locale key.
 fn audio_stream_label(stream: &AudioStreamMetadata) -> String {
     let mut details: Vec<String> = Vec::new();
     if let Some(codec) = &stream.codec {
@@ -501,40 +490,35 @@ fn audio_stream_label(stream: &AudioStreamMetadata) -> String {
     }
 }
 
-/// The container stream index encoded in a stream option produced by
-/// [`audio_stream_label`].
-pub fn parse_stream_index(option: &str) -> Option<usize> {
-    option
-        .split(':')
-        .next()
-        .and_then(|index| index.trim().parse().ok())
+/// One stream as an option: the container index is the value, the probe's
+/// description the label.
+fn audio_stream_option(index: usize, label: String) -> ParamOption {
+    ParamOption::new(index.to_string(), label)
 }
 
 /// Options for the stream picker, built from the cached asset metadata.
 ///
 /// A document written before the stream list existed knows only how many
-/// audio streams the file had, so its indices are offered bare. The stored
-/// index is always among the options — an offline asset, a missing asset, or
-/// a file that lost the stream must still show what the layer plays instead
-/// of silently displaying another stream.
-fn audio_stream_options(stream_index: usize, asset: Option<&AssetMetadata>) -> Vec<String> {
-    let mut options: Vec<String> = match asset {
+/// audio streams the file had, so its indices are offered with the index as
+/// their whole label. The stored index is always among the options — an
+/// offline asset, a missing asset, or a file that lost the stream must still
+/// show what the layer plays instead of silently displaying another stream.
+fn audio_stream_options(stream_index: usize, asset: Option<&AssetMetadata>) -> Vec<ParamOption> {
+    let mut options: Vec<ParamOption> = match asset {
         Some(metadata) if !metadata.audio_streams.is_empty() => metadata
             .audio_streams
             .iter()
-            .map(audio_stream_label)
+            .map(|stream| audio_stream_option(stream.stream_index, audio_stream_label(stream)))
             .collect(),
         Some(metadata) => (0..metadata.audio_stream_count)
-            .map(|index| index.to_string())
+            .map(|index| audio_stream_option(index, index.to_string()))
             .collect(),
         None => Vec::new(),
     };
-    if !options
-        .iter()
-        .any(|option| parse_stream_index(option) == Some(stream_index))
-    {
-        options.push(stream_index.to_string());
-        options.sort_by_key(|option| parse_stream_index(option).unwrap_or(usize::MAX));
+    let stored = stream_index.to_string();
+    if !options.iter().any(|option| option.value == stored) {
+        options.push(audio_stream_option(stream_index, stored));
+        options.sort_by_key(|option| option.value.parse::<usize>().unwrap_or(usize::MAX));
     }
     options
 }
@@ -547,11 +531,7 @@ fn audio_section(
     let audio = layer.audio.as_ref()?;
     let frame = layer_local_frame(layer, ctx);
     let stream_options = audio_stream_options(audio.stream_index, audio_asset);
-    let stream_value = stream_options
-        .iter()
-        .find(|option| parse_stream_index(option) == Some(audio.stream_index))
-        .cloned()
-        .unwrap_or_else(|| audio.stream_index.to_string());
+    let stream_value = audio.stream_index.to_string();
     Some(PropertySection {
         title: "properties.section.audio".into(),
         fields: vec![
@@ -607,13 +587,9 @@ fn compositing_section(layer: &Layer) -> PropertySection {
             PropertyField::Enum {
                 key: "blend_mode".into(),
                 value: blend_mode.into(),
-                options: vec![
-                    "Normal".into(),
-                    "Add".into(),
-                    "Multiply".into(),
-                    "Screen".into(),
-                    "Overlay".into(),
-                ],
+                options: ["Normal", "Add", "Multiply", "Screen", "Overlay"]
+                    .map(ParamOption::fixed)
+                    .to_vec(),
             },
             PropertyField::Bool {
                 key: "solo".into(),
@@ -826,8 +802,8 @@ pub fn apply_layer_field(
                 _ => return false,
             };
         }
-        // The picker's option carries the parent's layer id in front of its
-        // name (see `parent_option_label`); `PARENT_NONE` clears the link.
+        // The picker's option stores the parent's layer id and nothing else
+        // (`layer_param_option`); `PARENT_NONE` clears the link.
         //
         // Only the self-parent is refused here: this function edits one
         // layer and cannot see the stack, so the *cycle* rule lives in
@@ -837,7 +813,12 @@ pub fn apply_layer_field(
             if v == PARENT_NONE {
                 layer.parent = None;
             } else {
-                let Some(id) = parse_parent_option(v).filter(|id| *id != layer.id) else {
+                let Some(id) = v
+                    .parse()
+                    .ok()
+                    .map(LayerId::new)
+                    .filter(|id| *id != layer.id)
+                else {
                     return false;
                 };
                 layer.parent = Some(id);
@@ -871,10 +852,10 @@ pub fn apply_layer_field(
             };
             audio.stream_index = (*v).max(0) as usize;
         }
-        // The picker's option carries the container stream index in front of
-        // the stream's description (see `audio_stream_label`).
+        // The picker's option stores the container stream index and nothing
+        // else; its description is the option's label.
         ("stream_index", PropertyValue::String(v)) => {
-            let Some(index) = parse_stream_index(v) else {
+            let Ok(index) = v.parse() else {
                 return false;
             };
             let Some(audio) = layer.audio.as_mut() else {
@@ -1149,7 +1130,7 @@ mod tests {
     }
 
     /// The Parent picker of `layer` inside `comp`.
-    fn parent_picker(layer: &Layer, comp: &Composition) -> (String, Vec<String>) {
+    fn parent_picker(layer: &Layer, comp: &Composition) -> (String, Vec<ParamOption>) {
         let field = sections_for_layer(layer, comp, &ctx(), None)
             .into_iter()
             .find(|section| section.title == "properties.section.transform")
@@ -1186,15 +1167,70 @@ mod tests {
             .collect()
     }
 
-    /// The picker offers "no parent" plus the sibling layers, addressed by
-    /// their layer id so two layers sharing a name stay distinguishable.
+    /// The picker offers "no parent" plus the sibling layers, each addressed
+    /// by its layer id so two layers sharing a name stay distinguishable, and
+    /// each labelled with its row and name.
     #[test]
     fn the_parent_picker_offers_no_parent_and_the_siblings() {
         let layers = stack();
         let comp = comp_of(&layers.iter().collect::<Vec<_>>());
         let (value, options) = parent_picker(&layers[0], &comp);
         assert_eq!(value, PARENT_NONE, "an unparented layer reads as (none)");
-        assert_eq!(options, [PARENT_NONE, "2: L2", "3: L3"]);
+        assert_eq!(
+            options,
+            [
+                ParamOption::fixed(PARENT_NONE),
+                ParamOption::new("2", "2. L2"),
+                ParamOption::new("3", "1. L3"),
+            ],
+            "the last of `comp.layers` is the Timeline's first row"
+        );
+    }
+
+    /// The number in an option's label is the candidate's **Timeline row** —
+    /// not its layer id, not its index in `comp.layers` (the Timeline draws
+    /// that vector's last element in its first row), and not its place in the
+    /// candidate list, which skips whatever the cycle rule excluded.
+    ///
+    /// The stack is built so that all three of those answers differ: the
+    /// surviving candidates sit at `comp.layers` 2 and 3 of 4, which are rows
+    /// 2 and 1, while their places in the candidate list are 1 and 2.
+    #[test]
+    fn a_parent_option_is_numbered_by_its_timeline_row() {
+        let mut layers: Vec<Layer> = [40u64, 7, 99, 5]
+            .iter()
+            .map(|id| {
+                let mut layer = test_layer();
+                layer.id = LayerId::new(*id);
+                layer.name = format!("L{id}");
+                layer
+            })
+            .collect();
+        // The second layer descends from the first, so the cycle rule drops it.
+        layers[1].parent = Some(LayerId::new(40));
+        let comp = comp_of(&layers.iter().collect::<Vec<_>>());
+
+        let (_, options) = parent_picker(&layers[0], &comp);
+        assert_eq!(
+            options,
+            [
+                ParamOption::fixed(PARENT_NONE),
+                ParamOption::new("99", "2. L99"),
+                ParamOption::new("5", "1. L5"),
+            ]
+        );
+    }
+
+    /// A stored parent no option carries — the composition no longer holds
+    /// the layer — reads as "no parent" rather than leaving the row selecting
+    /// an id that is not on offer.
+    #[test]
+    fn the_parent_picker_reads_a_dangling_link_as_no_parent() {
+        let mut layers = stack();
+        layers[0].parent = Some(LayerId::new(404));
+        let comp = comp_of(&layers.iter().collect::<Vec<_>>());
+
+        assert_eq!(parent_picker(&layers[0], &comp).0, PARENT_NONE);
     }
 
     /// A candidate that already descends from the layer would close a
@@ -1216,15 +1252,25 @@ mod tests {
         assert_eq!(value, PARENT_NONE);
         assert_eq!(
             options,
-            [PARENT_NONE, "4: L4"],
+            [
+                ParamOption::fixed(PARENT_NONE),
+                ParamOption::new("4", "1. L4"),
+            ],
             "the direct child (2), the grandchild (3) and the layer itself are all cycles"
         );
 
         // The middle layer keeps its own parent as the selected option and may
         // still move to the unrelated layer, but not onto its own child.
         let (value, options) = parent_picker(&layers[1], &comp);
-        assert_eq!(value, "1: L1");
-        assert_eq!(options, [PARENT_NONE, "1: L1", "4: L4"]);
+        assert_eq!(value, "1");
+        assert_eq!(
+            options,
+            [
+                ParamOption::fixed(PARENT_NONE),
+                ParamOption::new("1", "4. L1"),
+                ParamOption::new("4", "1. L4"),
+            ]
+        );
 
         assert_eq!(
             parent_candidates(&comp, &layers[0])
@@ -1251,12 +1297,13 @@ mod tests {
         let (_, options) = parent_picker(&layers[1], &comp);
         let option = options
             .iter()
-            .find(|option| parse_parent_option(option) == Some(LayerId::new(1)))
+            .find(|option| option.value == LayerId::new(1).raw().to_string())
             .expect("the parent is among the options");
+        assert_eq!(option.label, "2. L1", "the option reads as the parent");
         assert!(apply_layer_field(
             &mut layers[1],
             "parent",
-            &PropertyValue::String(option.clone()),
+            &PropertyValue::String(option.value.clone()),
             0
         ));
         assert_eq!(layers[1].parent, Some(LayerId::new(1)));
@@ -1264,7 +1311,14 @@ mod tests {
         let comp = comp_of(&[&layers[0], &layers[1]]);
         let after = world_matrix(&comp, &layers[1], &ctx()).apply(0.0, 0.0);
         assert_eq!(after, (100.0, 40.0), "the child follows its parent");
-        assert_eq!(parent_picker(&layers[1], &comp).0, "1: L1");
+        let (value, options) = parent_picker(&layers[1], &comp);
+        assert_eq!(value, "1", "the picker reads the parent back");
+        assert!(
+            options
+                .iter()
+                .any(|o| o.value == value && o.label == "2. L1"),
+            "and shows it by name"
+        );
     }
 
     /// "(none)" clears the link; anything the picker never produced (a bare
@@ -1272,6 +1326,7 @@ mod tests {
     #[test]
     fn clearing_the_parent_and_refusing_values_the_picker_never_produced() {
         let mut layer = test_layer();
+        let layer_id = layer.id;
         layer.parent = Some(LayerId::new(2));
 
         assert!(!apply_layer_field(
@@ -1284,7 +1339,7 @@ mod tests {
             !apply_layer_field(
                 &mut layer,
                 "parent",
-                &PropertyValue::String("1: Test Layer".into()),
+                &PropertyValue::String(layer_id.raw().to_string()),
                 0
             ),
             "a layer cannot be its own parent"
@@ -1577,9 +1632,13 @@ mod tests {
         };
         assert_eq!(
             options,
-            ["1: aac 48000 Hz 2 ch", "2: pcm_s16le 44100 Hz 1 ch"]
+            [
+                ParamOption::new("1", "1: aac 48000 Hz 2 ch"),
+                ParamOption::new("2", "2: pcm_s16le 44100 Hz 1 ch"),
+            ],
+            "the container index is the value, the probe's description the label"
         );
-        assert_eq!(value, "2: pcm_s16le 44100 Hz 1 ch", "the stored stream");
+        assert_eq!(value, "2", "the stored stream");
     }
 
     /// Picking an option applies its container stream index to the shell.
@@ -1593,7 +1652,7 @@ mod tests {
         assert!(apply_layer_field(
             &mut layer,
             "stream_index",
-            &PropertyValue::String("2: pcm_s16le 44100 Hz 1 ch".into()),
+            &PropertyValue::String("2".into()),
             0
         ));
         assert_eq!(layer.audio.as_ref().unwrap().stream_index, 2);
@@ -1623,7 +1682,7 @@ mod tests {
         let PropertyField::Enum { value, options, .. } = stream_field(&layer, None) else {
             panic!("expected a picker");
         };
-        assert_eq!(options, ["3"]);
+        assert_eq!(options, [ParamOption::new("3", "3")]);
         assert_eq!(value, "3");
 
         let legacy = AssetMetadata {
@@ -1635,7 +1694,11 @@ mod tests {
         };
         assert_eq!(
             options,
-            ["0", "1", "3"],
+            [
+                ParamOption::new("0", "0"),
+                ParamOption::new("1", "1"),
+                ParamOption::new("3", "3"),
+            ],
             "counted streams plus the stored one"
         );
         assert_eq!(value, "3");

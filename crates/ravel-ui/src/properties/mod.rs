@@ -20,6 +20,7 @@ use ravel_core::graph::PortSide;
 use ravel_core::network::CustomPortType;
 use ravel_core::param_curve::CurveParam;
 use ravel_core::param_ramp::RampParam;
+use ravel_core::registry::ParamOption;
 use std::ops::RangeInclusive;
 
 /// One row of a [`PropertyField::PortList`]: a port that exists on the
@@ -82,10 +83,20 @@ pub enum PropertyField {
         key: String,
         value: String,
     },
+    /// A closed option set rendered as a dropdown.
+    ///
+    /// `value` is the **stored** value, and each option carries its display
+    /// text beside the value it writes ([`ParamOption`]) — the panel never
+    /// derives one from the other. A packed `"3: Background"` option would
+    /// make the display format the only record of where the data ends, and
+    /// every reader would have to know it.
+    ///
+    /// A value no option carries stays the value: the row shows what the
+    /// document holds rather than snapping to a candidate.
     Enum {
         key: String,
         value: String,
-        options: Vec<String>,
+        options: Vec<ParamOption>,
     },
     Color {
         key: String,

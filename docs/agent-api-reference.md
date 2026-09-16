@@ -240,9 +240,14 @@ ParameterValue::identifier() -> Identifier   // THE read mouth for references
     // NOT stand in for each other, because each processor reads back one of
     // them (precomp with i32_or, layer.ref and media with str_or).
     // Everything else is Dynamic — keyframes,
-    // expression, blend, node output, string steps — and Dynamic names
+    // expression, blend, node output — and Dynamic names
     // NOTHING: a reference that changed per frame could not be reserved by
     // Document::id_watermarks, and the next allocation would land on it.
+    // A StringSteps is Dynamic only when it CAN move: one whose every key
+    // equals its default samples to one value forever, so it still names an
+    // id (that is the shape the keyframe toggle produces). The Properties
+    // row refuses a picker on the animatable spelling all the same, because
+    // an edit inserts a key and would make it move.
     // Which parameters are identifiers is composition::validate::
     // is_identifier_parameter (layer.ref `layer`, precomp `comp_id`, media
     // `asset_id`); what one names is this. Evaluation goes through it too, so

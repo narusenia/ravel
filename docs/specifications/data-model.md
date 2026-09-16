@@ -345,8 +345,14 @@ Network/Transform/Opacity/Merge）。再コンパイルで ID が安定し、Eva
 （`time_remap` 予約フィールド）。
 
 **Layer Ref**（`layer.ref`、REQ-LAYER-005）: パラメータは `layer`
-（同一コンポ内の参照先 LayerId、Int）と `port`（参照する `net.out`
-ポート名、既定 `frame`）。所有パスの最内 `PathSegment::Layer` から
+（同一コンポ内の参照先 LayerId の十進表記を持つ String。既定は `""` =
+未指定。v13 で Int から移行、`CPO-5`）と `port`（参照する `net.out`
+ポート名、既定 `frame`）。**String なのは候補にラベルを付けられる行
+（`PropertyField::Enum`）が文字列行しかないから** —
+Properties は `ContextualKind::SiblingLayer` で同じコンポの他レイヤーを
+名前で並べる。読み口は `ParameterValue::static_text_identifier`
+（数値の口ではない。間違えると循環検出・ID 予約・スコープ無効化が
+無言で止まる）。所有パスの最内 `PathSegment::Layer` から
 「同じコンポジション」を解決し、参照先ネットワークの **pre-transform の
 素の出力**を、参照先の殻の時間配置を適用したローカル時刻で評価して返す。
 参照先の表示区間外は型付きゼロ（透明フレーム / 空 Geometry / 0）。
@@ -642,7 +648,7 @@ struct SubgraphTemplate {
 }
 ```
 
-### document/main.ron (RON形式、フォーマット v12)
+### document/main.ron (RON形式、フォーマット v13)
 
 現行フォーマットの主体。`Document`（`ravel-core::composition::Document`）全体を
 pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Layer（各レイヤーの
@@ -652,7 +658,10 @@ pretty RON で永続化する: レガシー平坦グラフ、全 Composition/Lay
 **v10 で `ParameterValue::IntChannel`**（アニメーション可能な整数）、
 **v11 で `ParameterValue::StringSteps`**（アニメーション可能な文字列）が入る。
 **v12 で `Node.param_groups`**（In ノードのカスタムパラメータの表示グループ、
-`PGRP-4`）が入る。
+`PGRP-4`）が入る。**v13 で `layer.ref` の `layer` が Int から String へ**
+（参照先 LayerId の十進表記、`CPO-5`）。v12 以前のファイルはロード後の
+型付きパスで一度だけ変換する（`Document::upgrade_layer_ref_targets`。
+旧 `-1` は `""`、公開されていた SCALAR パラメータポートはエッジごと落ちる）。
 
 **v8 で色の意味が変わった。** 作者が指定した色（ノードの `COLOR` パラメータ、
 `Composition.background_color`、`exposed_parameters` の `color` 既定値）は

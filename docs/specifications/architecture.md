@@ -128,8 +128,9 @@ fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &Ev
 ```
 
 **識別子パラメータは静的な値しか持てない**: 参照先の生の ID を持つ 3 つ
-（`layer.ref` の `layer`、`precomp` の `comp_id`、`media` の `asset_id`。
-判定は `composition::validate::is_identifier_parameter`）は、読み口が
+（`layer.ref` の `layer` と `media` の `asset_id` は十進表記の String、
+`precomp` の `comp_id` は Int。判定は
+`composition::validate::is_identifier_parameter`）は、読み口が
 `ParameterValue::identifier` の 1 つに畳まれている。保存された静的な値だけが
 参照であり、**ワイヤ / キーフレーム / 式 / ブレンド / ステップ曲線は何も
 参照しない**（`layer.ref` は対象なし、`media` はオフライン）。理由は

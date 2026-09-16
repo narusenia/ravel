@@ -177,6 +177,14 @@ v11 の `Node.param_groups`（In ノードのパラメータ表示グループ�
 In ノードのセクション並びが変わるだけなので画面に出ない。同じ判断基準
 （「黙って消えたときに気づけるか」）で答えが**気づけない**側になる。
 
+**既存パラメータの型を変える**のは v13 の `layer.ref` の `layer`
+（Int → 参照先 LayerId の十進表記を持つ String、`CPO-5`）が実例で、これは
+「表現が変わる」側なので型付きパスを持つ（下記）。版を上げる理由は追加
+フィールドの話とは別で、**旧ビルドは v13 の文書を問題なく読めてしまう**:
+旧 `layer.ref` は `i32_or` で読むので、プロジェクト中のレイヤー参照が
+**全部黙って解決しなくなる**。版印があれば `MigrationError::TooNew` で
+開くのを拒否する。
+
 後者は v10 の `IntChannel`（アニメーション可能な整数）と v11 の
 `StringSteps`（アニメーション可能な文字列）が実例。判断基準は上の
 表と同じ「黙って消えたときに気づけるか」で、答えは**気づけない**:
@@ -235,7 +243,7 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 **ロード後のドキュメントに対する型付きパス**として書き、`format_version` で
 ゲートする。
 
-前例が 4 つある。
+前例が 5 つある。
 
 **v4 → v5 のベクタパラメータ畳み込み**
 （`ravel_core::composition::Document::fold_component_params`、実装計画は
@@ -314,6 +322,23 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
   データ駆動でも走らせられるが、上の張り替えは**意図的に不可逆**。v9 文書の
   `name` は編集可能で重複してよいので、そこへ同じパスを掛けると生きている
   参照をオフラインにしてしまう
+
+**v12 → v13 の `layer.ref` 参照の String 化**
+（`Document::upgrade_layer_ref_targets`、実装計画は
+[`../implementation/contextual-parameter-options-plan.md`](../implementation/contextual-parameter-options-plan.md)
+の `CPO-5`）。参照先は `LayerId` のままで、**持ち方だけ**が
+`ParameterValue::Int` から十進表記の `ParameterValue::String` に変わる
+（候補にラベルを付けられる Properties の行が文字列行しかないため）。
+`migrate_v12_to_v13` は版印だけを進め、変換は `source_version < 13` で走る。
+
+- **旧 `-1`（未指定）は `""` へ。** 負の数・`u64` に収まらない値・
+  アニメーションしている `IntChannel` も同じく「何も参照していない」
+  （判定は `ParameterValue::static_identifier` の 1 つ）
+- **公開されていた `layer` のパラメータポートはエッジごと落ちる。**
+  `String` は wire 型を持たないので、書き換えは `Graph::set_params` を通す
+  — 「ポートが運べない型を宣言してはならない」という既存の規則に乗る。
+  失うものは無い: 識別子パラメータへのワイヤは評価が元から無視していた
+- **冪等。** 既に `String` / `StringSteps` の値は触らない
 
 **逆に v6 → v7（`Document.exposed_parameters`、公開パラメータ宣言）は型付き
 パスを持たない。** 版を上げた理由は上の判断表のとおりだが、**変換すべき既存の

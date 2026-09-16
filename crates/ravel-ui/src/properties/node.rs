@@ -12,7 +12,7 @@ use ravel_core::network::{
     CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
 };
 use ravel_core::registry::{
-    NodeRegistry, ParamOption, ParamOptions, ParamRange, contextual_options,
+    ContextualKind, NodeRegistry, ParamOption, ParamOptions, ParamRange, contextual_options,
 };
 
 use std::collections::HashSet;
@@ -35,6 +35,21 @@ pub const FIELD_PORTS: &str = "ports";
 /// told apart from a broken one (UX invariant 6: a control that cannot act is
 /// disabled and *looks* disabled).
 pub const NO_SIBLING_LAYERS: &str = "properties.value.no_sibling_layers";
+
+/// Why a contextual parameter offers nothing, as a locale key the display
+/// boundary translates ([`crate::properties::node::string_field`]).
+///
+/// A `match` over the whole of [`ContextualKind`] rather than one message for
+/// every kind: the reason is the *kind's* reason, and the next kind
+/// ([`ContextualKind::LayerOutputPort`], `CPO-3`) would otherwise inherit
+/// "there are no other layers" while the truth is "that layer has no output
+/// ports". Exhaustive, so adding an arm to `ContextualKind` fails to compile
+/// here instead of showing the wrong sentence.
+fn no_candidates_reason(kind: ContextualKind) -> &'static str {
+    match kind {
+        ContextualKind::SiblingLayer => NO_SIBLING_LAYERS,
+    }
+}
 
 /// Where the node whose sections are being built sits.
 ///
@@ -167,7 +182,7 @@ fn string_field(
             if options.is_empty() {
                 return PropertyField::ReadOnly {
                     key,
-                    value: NO_SIBLING_LAYERS.to_string(),
+                    value: no_candidates_reason(*kind).to_string(),
                 };
             }
             // The unset default is not a candidate — nothing to keep selected

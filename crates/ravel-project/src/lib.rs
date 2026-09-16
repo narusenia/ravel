@@ -344,6 +344,28 @@ impl ProjectFile {
         // rates, missing roots, duplicate or exhausted ids) before anything
         // uses them.
         document.validate()?;
+        // v12 → v13: a `layer.ref` target is the decimal `LayerId` in a
+        // `String` instead of an `Int`, so the Properties row can be a layer
+        // picker whose candidates carry names.
+        //
+        // **Before `advance_id_counters`, and that is not free.** The pass
+        // mints no ids, but it changes what the watermark scan can *see*:
+        // `layer_ref_targets` reads the text spelling, so while the document
+        // still holds `Int`s the scan finds no targets at all. Reserving
+        // after the rewrite is what keeps a reference the composition no
+        // longer holds from being handed its own id again — the silent
+        // mis-link `Document::id_watermarks` exists to prevent
+        // (`asset-identity-plan.md`, and the rule
+        // `validate::precomp_targets` states). Gated on the source version
+        // like the rest; the pass is idempotent, so the gate only keeps the
+        // load from walking every graph of a current document.
+        let document = if source_version < 13 {
+            let upgraded = document.upgrade_layer_ref_targets();
+            upgraded.validate()?;
+            upgraded
+        } else {
+            document
+        };
         // REQ-LAYER-009: ids minted after the load must never collide with
         // ids stored in the document.
         document.advance_id_counters();
@@ -398,20 +420,6 @@ impl ProjectFile {
         } else {
             document
         };
-        // v12 → v13: a `layer.ref` target is the decimal `LayerId` in a
-        // `String` instead of an `Int`, so the Properties row can be a layer
-        // picker whose candidates carry names. Mints no ids, so its position
-        // relative to `advance_id_counters` is free. Gated on the source
-        // version like the rest; the pass is idempotent, so the gate only
-        // keeps the load from walking every graph of a current document.
-        let document = if source_version < 13 {
-            let upgraded = document.upgrade_layer_ref_targets();
-            upgraded.validate()?;
-            upgraded
-        } else {
-            document
-        };
-
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
             Some(bytes) => {
@@ -989,6 +997,62 @@ mod tests {
                 .iter()
                 .any(|port| port.is_param && port.name == PRECOMP_COMP_ID_PARAM),
             "the identifier's parameter port survives, so it can be disconnected"
+        );
+    }
+
+    /// A pre-v13 reference the composition no longer holds still reserves its
+    /// id, which only happens if the v13 rewrite runs **before** the watermark
+    /// scan.
+    ///
+    /// `layer_ref_targets` reads the text spelling, so while the document
+    /// still holds `Int`s the scan finds no targets at all. Upgrading after
+    /// `advance_id_counters` therefore left a live reference whose id nothing
+    /// had reserved: `LayerId::next()` could hand that id to a brand-new
+    /// layer, and the dangling reference would silently start pointing at it —
+    /// the mis-link `Document::id_watermarks` exists to prevent
+    /// (`asset-identity-plan.md`; `validate::precomp_targets` states the same
+    /// rule for compositions).
+    ///
+    /// The target id is deliberately far above every id the document actually
+    /// holds, so the watermark can only reach it through the reference.
+    #[test]
+    fn a_pre_v13_dangling_reference_still_reserves_its_layer_id() {
+        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+
+        const DANGLING: u64 = 16_000_000;
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(400), LAYER_REF_TYPE_KEY)
+                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(DANGLING as i32))
+                    .with_output("output", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap();
+
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        project.document =
+            ravel_ui::document::update_composition(&project.document, root, |comp| {
+                comp.add_layer(Layer::new(LayerId::new(9), "Referrer", network))
+            })
+            .expect("the root composition");
+        project.manifest.format_version = 12;
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        // The loaded document is already upgraded, so reading its watermarks
+        // back would pass whenever the pass ran — the order is only visible in
+        // the **allocator**. `DANGLING` sits above every id any other test in
+        // this binary uses and far below the 24-bit ceiling layer ids live
+        // under (shell-id packing), so the counter can have reached it only
+        // through this load's own reservation.
+        assert!(
+            LayerId::next().raw() > DANGLING,
+            "the upgraded reference must be reserved before ids are minted"
+        );
+        assert_eq!(
+            back.document.id_watermarks().layer,
+            DANGLING,
+            "and the reference itself came back in the text spelling"
         );
     }
 

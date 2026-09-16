@@ -3146,6 +3146,61 @@ mod tests {
         assert!(LayerId::next().raw() > 12_000);
     }
 
+    /// A pre-v13 `layer.ref` target — still an `Int` — is **invisible** to the
+    /// watermark scan, and visible the moment the v13 pass rewrites it.
+    ///
+    /// This is the fact the load order depends on. `layer_ref_targets` reads
+    /// the text spelling only, deliberately: an `Int` on `layer.ref` reaches
+    /// the processor as a number it does not read, so the reference does not
+    /// resolve and reserving its id would make the scan claim an id nothing
+    /// points at ([`crate::graph::ParameterValue::static_identifier`]).
+    ///
+    /// The consequence is that `ProjectFile::from_archive` **must** run the
+    /// v12 → v13 rewrite before `advance_id_counters`, and
+    /// `a_pre_v13_dangling_reference_still_reserves_its_layer_id` in
+    /// `ravel-project` is what holds that order in place.
+    #[test]
+    fn a_pre_v13_layer_ref_target_is_invisible_to_the_watermark_scan() {
+        use crate::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+        use crate::graph::ParameterValue;
+
+        let referrer = |value: ParameterValue| {
+            let node = Node::new(NodeId::new(500), LAYER_REF_TYPE_KEY)
+                .with_param(LAYER_REF_LAYER_PARAM, value);
+            Layer::new(
+                LayerId::new(4),
+                "Referrer",
+                Graph::new().add_node(node).unwrap(),
+            )
+        };
+        let doc = |layer: Layer| {
+            Document::new(Graph::new()).with_composition(
+                Composition::new(
+                    CompId::new(1),
+                    "Comp",
+                    (16, 16),
+                    crate::types::FrameRate::new(30, 1),
+                    10,
+                )
+                .add_layer(layer),
+            )
+        };
+
+        let before = doc(referrer(ParameterValue::Int(31_000)));
+        assert_eq!(
+            before.id_watermarks().layer,
+            4,
+            "the int spelling names no layer, so only the layer's own id counts"
+        );
+
+        let after = doc(referrer(ParameterValue::String("31000".into())));
+        assert_eq!(
+            after.id_watermarks().layer,
+            31_000,
+            "the text spelling is what the scan reads"
+        );
+    }
+
     #[test]
     fn id_watermarks_include_embedded_comp_id_and_layer_ref_targets() {
         use crate::graph::{Node, ParameterValue};

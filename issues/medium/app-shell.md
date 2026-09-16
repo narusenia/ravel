@@ -377,3 +377,38 @@ Escape を受け取れない**。`.agents/rules/ux.md` の不変条件 10
 
 **severity の根拠**: bug。クラッシュはせず、機能が無いだけ。だが
 不変条件 10 と 4 の両方を macOS で満たせなくするので low ではない。
+
+## MED-APP-45 | bug | Viewer の bbox が画像インスタンスの矩形を落とすので、画像ジオメトリのレイヤーが掴めない
+
+**該当**: `crates/ravel-app/src/panels/viewer/geometry.rs` の `geometry_bounds`
+
+`geometry_bounds` は Point / Instance ドメインの**位置だけ**を走査して AABB を作る。
+
+```rust
+for domain in [Domain::Point, Domain::Instance] {
+    let Some(Ok(positions)) = geometry.positions(domain) else { continue };
+    for index in 0..positions.len() { /* min/max だけ */ }
+}
+```
+
+`geometry.from_image` の出力は「**原点に 1 インスタンス**、画像はインスタンスの
+source の `rect()`」という形で、`from_image_outputs_one_instance_stamping_the_image`
+（`crates/ravel-nodes/src/geometry.rs`）が 320×180 の画像に対し
+`rect = (-160, -90, 320, 180)` を返すことを固定している。位置は 1 点しか無いので
+**bbox は 0×0** になる。
+
+結果:
+
+- `layer_comp_rect`（`crates/ravel-app/src/panels/viewer.rs`）が幅 0 高さ 0 を返し、
+  `ShellManipulator` の枠とハンドルが実質出ない
+- **画像ジオメトリを置いたレイヤーが Viewer から掴めない**。評価はできるが
+  編集できない状態（`roadmap.md` の基準 4）
+- クリックによるレイヤー選択も AABB 近似なので、同じ理由で当たらない
+
+矩形はインスタンス位置に対して**中心合わせ**（`rasterize/mod.rs` の
+`raster_image` が「origin-centred rectangle」と書いている）なので、bbox は
+インスタンス位置 ± 矩形の半分を含める必要がある。
+
+`layer-content-size-plan.md` の「問題 2」で見つけた 3 件のうちの 1 つ。
+残りは `MED-CORE-11`（コアと Viewer で bbox の定義が違う）と
+`LOW-APP-33`（ストローク幅が入らない）。

@@ -551,3 +551,17 @@ close 経路（`window_host::close`）も同じ形なので、**元からある�
 `log_err()` を「削除済みウィンドウなら黙る」形にする（`removed` フラグは
 既にあるので条件は書ける）。アプリ側では塞げない。
 
+**LOW-APP-33 | bug | bbox にストローク幅が入らないので、太い線のシェイプが枠から溢れる**
+
+**該当**: `crates/ravel-app/src/panels/viewer/geometry.rs` の `geometry_bounds`
+
+bbox は頂点位置の AABB で、線がそこからどれだけ外へ届くかを見ていない。
+`stroke_width` が大きいシェイプは**描かれるピクセルが枠の外に出る**。
+
+答えは既にラスタライザ側にある。`crates/ravel-nodes/src/rasterize/mod.rs` の
+`stroke_margin(width, join)` が「パスから線がどこまで届くか」を、マイター
+スパイクが `miter_limit` 半幅まで伸びることまで含めて計算している。bbox が
+自前で計算し直すと 2 つ目の答えになるので、そちらを使うこと。
+
+影響は表示のずれだけで、選択もドラッグも動く（当たり判定が内容より少し
+小さいだけ）。`MED-APP-45` / `MED-CORE-11` と同じ走査の中で直すのが安い。

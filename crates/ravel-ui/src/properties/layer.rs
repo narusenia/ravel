@@ -332,18 +332,19 @@ pub fn parent_candidates<'a>(comp: &'a Composition, layer: &Layer) -> Vec<&'a La
 /// document reaches here, and `Document::validate` rejects that one anyway.
 fn parent_field(layer: &Layer, comp: &Composition) -> PropertyField {
     let mut options = vec![ParamOption::fixed(PARENT_NONE)];
+    let total = comp.layers.len();
     options.extend(parent_candidates(comp, layer).into_iter().map(|candidate| {
-        // The label's number is the candidate's row in the composition, which
-        // is what the Timeline shows — the position inside this list would
-        // skip the rows `parent_candidates` excluded. One scan per candidate
-        // over a layer stack, next to the ancestor chain the candidate list
-        // already walks.
+        // The label's number is the candidate's Timeline row, which
+        // `layer_param_option` derives from its place in `comp.layers`: the
+        // position inside *this* list would skip the rows `parent_candidates`
+        // excluded. One scan per candidate over a layer stack, next to the
+        // ancestor chain the candidate list already walks.
         let index = comp
             .layers
             .iter()
             .position(|l| l.id == candidate.id)
             .unwrap_or_default();
-        layer_param_option(index, candidate)
+        layer_param_option(index, total, candidate)
     }));
     let value = layer
         .parent
@@ -1180,17 +1181,23 @@ mod tests {
             [
                 ParamOption::fixed(PARENT_NONE),
                 ParamOption::new("2", "2. L2"),
-                ParamOption::new("3", "3. L3"),
-            ]
+                ParamOption::new("3", "1. L3"),
+            ],
+            "the last of `comp.layers` is the Timeline's first row"
         );
     }
 
-    /// The number in an option's label is the candidate's row in the
-    /// composition — not its layer id, and not its place in the candidate
-    /// list, which skips whatever the cycle rule excluded.
+    /// The number in an option's label is the candidate's **Timeline row** —
+    /// not its layer id, not its index in `comp.layers` (the Timeline draws
+    /// that vector's last element in its first row), and not its place in the
+    /// candidate list, which skips whatever the cycle rule excluded.
+    ///
+    /// The stack is built so that all three of those answers differ: the
+    /// surviving candidates sit at `comp.layers` 2 and 3 of 4, which are rows
+    /// 2 and 1, while their places in the candidate list are 1 and 2.
     #[test]
-    fn a_parent_option_is_numbered_by_its_row_not_its_id() {
-        let mut layers: Vec<Layer> = [40u64, 7, 99]
+    fn a_parent_option_is_numbered_by_its_timeline_row() {
+        let mut layers: Vec<Layer> = [40u64, 7, 99, 5]
             .iter()
             .map(|id| {
                 let mut layer = test_layer();
@@ -1199,8 +1206,7 @@ mod tests {
                 layer
             })
             .collect();
-        // The middle layer descends from the first, so it is excluded and the
-        // third candidate keeps row 3 rather than sliding up to 2.
+        // The second layer descends from the first, so the cycle rule drops it.
         layers[1].parent = Some(LayerId::new(40));
         let comp = comp_of(&layers.iter().collect::<Vec<_>>());
 
@@ -1209,7 +1215,8 @@ mod tests {
             options,
             [
                 ParamOption::fixed(PARENT_NONE),
-                ParamOption::new("99", "3. L99"),
+                ParamOption::new("99", "2. L99"),
+                ParamOption::new("5", "1. L5"),
             ]
         );
     }
@@ -1247,7 +1254,7 @@ mod tests {
             options,
             [
                 ParamOption::fixed(PARENT_NONE),
-                ParamOption::new("4", "4. L4"),
+                ParamOption::new("4", "1. L4"),
             ],
             "the direct child (2), the grandchild (3) and the layer itself are all cycles"
         );
@@ -1260,8 +1267,8 @@ mod tests {
             options,
             [
                 ParamOption::fixed(PARENT_NONE),
-                ParamOption::new("1", "1. L1"),
-                ParamOption::new("4", "4. L4"),
+                ParamOption::new("1", "4. L1"),
+                ParamOption::new("4", "1. L4"),
             ]
         );
 
@@ -1292,7 +1299,7 @@ mod tests {
             .iter()
             .find(|option| option.value == LayerId::new(1).raw().to_string())
             .expect("the parent is among the options");
-        assert_eq!(option.label, "1. L1", "the option reads as the parent");
+        assert_eq!(option.label, "2. L1", "the option reads as the parent");
         assert!(apply_layer_field(
             &mut layers[1],
             "parent",
@@ -1309,7 +1316,7 @@ mod tests {
         assert!(
             options
                 .iter()
-                .any(|o| o.value == value && o.label == "1. L1"),
+                .any(|o| o.value == value && o.label == "2. L1"),
             "and shows it by name"
         );
     }

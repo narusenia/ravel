@@ -1587,8 +1587,11 @@ registry::contextual_options(ContextualKind, &Composition, Option<LayerId>)
     // belongs to no layer, and SiblingLayer then answers EMPTY (a node whose
     // own place in the stack is unknown must not be offered a self-reference).
     // SiblingLayer keeps `comp.layers` order, drops the owner, and labels
-    // `"{index}. {name}"` where index is the position in the COMPOSITION + 1
-    // (the Timeline row number), never the position in the candidate list.
+    // `"{row}. {name}"` where row is the TIMELINE ROW: `comp.layers` is
+    // bottom-most first and the Timeline draws its last element first, so
+    // row = comp.layers.len() - index. Never the layer id, never the index
+    // itself, never the position in the candidate list. The conversion lives
+    // only in `registry::layer_param_option(index, total, layer)`.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
 template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node
@@ -2528,8 +2531,9 @@ Unknown type keys are skipped silently (plugin space).
   and `comp` is what the Transform section's Parent picker enumerates its
   candidates from, minus the layer itself and its descendants
   (`layer::parent_candidates`, labelled `"{row}. {name}"` by
-  `registry::layer_param_option` — the row is the position in `comp.layers`,
-  which is the Timeline's number, not the position in the candidate list).
+  `registry::layer_param_option` — the row is the Timeline's row number,
+  `comp.layers.len()` minus the position in `comp.layers`, because that vector
+  is bottom-most first; not the position in the candidate list).
   The stream picker's option value is the bare container index and its label
   the probe's description, and nothing here ever probes a file),
   `sections_for_layers(&[&Layer], comp, &ctx)` for a multi-layer selection (count plus

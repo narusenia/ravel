@@ -246,18 +246,24 @@ pub enum ContextualKind {
     SiblingLayer,
 }
 
-/// One layer as an option: its [`LayerId`] is the value, `"{index}. {name}"`
-/// the label, where `index` is the layer's **position in the composition**
-/// plus one.
+/// One layer as an option: its [`LayerId`] is the value, `"{row}. {name}"`
+/// the label, where `row` is the layer's **Timeline row number** — the only
+/// number for a layer the user ever sees. A raw `LayerId` is an internal
+/// counter, and a position inside a *filtered* candidate list would disagree
+/// with the Timeline as soon as one candidate is excluded.
 ///
-/// The number is the Timeline's row number, which is the only number for a
-/// layer the user ever sees — a raw `LayerId` is an internal counter and a
-/// position inside a *filtered* candidate list would disagree with the
-/// Timeline as soon as one candidate is excluded.
-pub fn layer_param_option(index: usize, layer: &Layer) -> ParamOption {
+/// `index` is the layer's position in `comp.layers` and `total` that vector's
+/// length, because the row number is **neither of them**: `comp.layers` is
+/// bottom-most first (`Composition::move_layer` calls it the compositing
+/// order) while the Timeline draws the last element in its first row
+/// (`layer_blocks` walks `layers().rev()`). So row 1 is the topmost layer,
+/// which is `comp.layers.len() - index`. Both halves of the conversion live
+/// here, once: a caller that did its own arithmetic is a caller that can get
+/// the direction wrong.
+pub fn layer_param_option(index: usize, total: usize, layer: &Layer) -> ParamOption {
     ParamOption::new(
         layer.id.raw().to_string(),
-        format!("{}. {}", index + 1, layer.name),
+        format!("{}. {}", total.saturating_sub(index), layer.name),
     )
 }
 
@@ -271,7 +277,9 @@ pub fn layer_param_option(index: usize, layer: &Layer) -> ParamOption {
 /// offer a self-reference, which `validate_layer_ref_cycles` then rejects.
 ///
 /// [`ContextualKind::SiblingLayer`] keeps the compositing order of
-/// `comp.layers` and drops the owner — a layer is never its own sibling.
+/// `comp.layers` and drops the owner — a layer is never its own sibling. The
+/// labels are numbered by Timeline row, which runs the other way
+/// ([`layer_param_option`]).
 pub fn contextual_options(
     kind: ContextualKind,
     comp: &Composition,
@@ -282,11 +290,12 @@ pub fn contextual_options(
             let Some(owner) = owner else {
                 return Vec::new();
             };
+            let total = comp.layers.len();
             comp.layers
                 .iter()
                 .enumerate()
                 .filter(|(_, layer)| layer.id != owner)
-                .map(|(index, layer)| layer_param_option(index, layer))
+                .map(|(index, layer)| layer_param_option(index, total, layer))
                 .collect()
         }
     }
@@ -651,20 +660,22 @@ mod tests {
     }
 
     /// The siblings in compositing order, the owner left out, and the label
-    /// numbered by the layer's place in the composition — not by its place in
-    /// the candidate list, which the excluded owner would shift.
+    /// numbered by the layer's **Timeline row** — which counts from the top,
+    /// the opposite end of `comp.layers` — and not by its place in the
+    /// candidate list, which the excluded owner would shift.
     #[test]
-    fn sibling_layer_options_exclude_the_owner_and_number_by_stack_position() {
+    fn sibling_layer_options_exclude_the_owner_and_number_by_timeline_row() {
         let comp = comp_with(&["Background", "Middle", "Foreground"]);
         let options =
             contextual_options(ContextualKind::SiblingLayer, &comp, Some(LayerId::new(17)));
         assert_eq!(
             options,
             vec![
-                ParamOption::new("7", "1. Background"),
-                ParamOption::new("27", "3. Foreground"),
+                ParamOption::new("7", "3. Background"),
+                ParamOption::new("27", "1. Foreground"),
             ],
-            "the middle layer is not its own sibling, and Foreground stays row 3"
+            "the bottom-most layer is the Timeline's last row, and Foreground \
+             stays row 1 even though the candidate list now starts with it"
         );
     }
 

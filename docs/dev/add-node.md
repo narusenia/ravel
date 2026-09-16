@@ -60,7 +60,15 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
 - `param_ranges` はスクラブ入力のソフトクランプに使う。範囲が無い数値は
   無制限スクラブになる
 - `param_options` を付けた文字列パラメータは Properties で dropdown になる
-  （自由入力にしない）
+  （自由入力にしない）。候補が**テンプレートに書ける固定の集合**のときは
+  `with_param_options`
+- 候補が**ノードの置かれた文脈で決まる**ときは
+  `with_contextual_param_options(key, ContextualKind)`。解決は
+  `registry::contextual_options(kind, comp, owner)` の 1 関数で、
+  `ContextualKind` は閉じた列挙（今は `SiblingLayer` だけ）。
+  **Properties はまだこれを引いていない**ので、宣言しても dropdown には
+  ならない（配線は `contextual-parameter-options-plan.md` の `CPO-2`）。
+  固定の集合で足りるなら `with_param_options` を使うこと
 - **パラメータが 6 個を超えたら `with_param_group` で意味ごとに切る。**
   引数はグループ名とキーの並びで、Properties がその順にセクションへ割る
   （`node.<type_key>.group.<name>` のロケールキーを en / ja 両方に足すこと。

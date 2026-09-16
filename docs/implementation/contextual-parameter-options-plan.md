@@ -1,6 +1,8 @@
 # 文脈依存のパラメータ候補と出力型 実装計画
 
-> **Status**: 未着手 — 2026-08-09
+> **Status**: 進行中 — `CPO-1` / `CPO-6` 済（#542、2026-09-16）。
+> 機構は 1 本になったが、まだどの builtin も `Contextual` を宣言していない
+> ので Properties の挙動は変わっていない（配線は `CPO-2`）。
 
 対象: `ravel-core` の `registry`（`NodeTemplate` / `Registry`）、
 `ravel-ui` の `properties::node`、`ravel-app` の Properties とノードエディタ。
@@ -64,8 +66,13 @@ ParamOptions::Contextual(ContextualKind)  // 候補は文脈が決める
 registry::contextual_options(kind, ctx) -> Vec<ParamOption>
 ```
 
-`ctx` は「どの Document のどの Composition のどのネットワークか」を持つ既存の
-`NetworkContext` 相当。`ParamOption` は `{ value: String, label: String }` で、
+`ctx` は **`&Composition` と所有レイヤーの `Option<LayerId>`**。
+当初この計画書は「既存の `NetworkContext` 相当」と書いていたが、
+`ravel_core::network::NetworkContext` は `LayerRoot` / `Subnet` の 2 値しか
+持たず候補を作れない。`comp` と `layer` を持つのは `ravel-ui` の `NetworkPath`
+で、`ravel-core` からは見えないため、core の具体型を取る形で入った（#542）。
+**コンポがもう持っていない `LayerId`** も `None` と同じ「レイヤーに属さない」
+として扱い、候補は空になる。`ParamOption` は `{ value: String, label: String }` で、
 **値と表示名を分ける**（レイヤーは ID が値・名前が表示。`parse_parent_option`
 が同じ問題を文字列の詰め込みで解いているので、そちらもこの型へ寄せる）。
 
@@ -113,7 +120,7 @@ registry::builtin::dependent_port_updates(node, changed) -> Vec<PortRetype>
 | CPO-2 | Properties が文脈付きで候補を引く（`layer.ref` の `layer` が Select になる） | CPO-1 |
 | CPO-3 | `LayerOutputPort` 候補と `port` の Select 化 | CPO-2 |
 | CPO-4 | `dependent_port_updates` と `set_params` での適用 | CPO-3 |
-| CPO-5 | `layer` の Int → String 移行（フォーマット版 +1、型付きパス） | CPO-2 |
+| CPO-5 | `layer` の Int → String 移行（フォーマット版 +1、型付きパス） | CPO-2（**同じ PR で。下記**） |
 | CPO-6 | Parent ドロップダウンを `ParamOption` へ寄せる（機構を 1 本にする） | CPO-1 |
 | CPO-7 | ロケール / 文書 | CPO-1〜6 |
 
@@ -171,6 +178,13 @@ registry::builtin::dependent_port_updates(node, changed) -> Vec<PortRetype>
 
 ### 単位 5: `layer` の Int → String 移行
 
+> **`CPO-2` と同じ PR で入れる。** Select 行は `PropertyValue::String` を吐き、
+> それを受ける `edited_string_param`
+> （`crates/ravel-app/src/panels/param_edit.rs`）は**既存の型を見ずに**
+> `ParameterValue::String` を返す。`layer` が `Int` のまま Select にすると、
+> フォーマット版を上げないまま `.ravprj` の中身が String に変わる。
+> 記憶の型を先に移し、その上に Select を載せる（依存表の向きとは逆順）。
+
 - テンプレートを `string_parameter("layer", "")` にする
 - フォーマット版を 1 つ上げ、ロード後の型付きパスで `Int(n)` → `String(n)`
 - 旧版の `-1`（未設定）は空文字へ
@@ -184,6 +198,14 @@ registry::builtin::dependent_port_updates(node, changed) -> Vec<PortRetype>
 
 - `parse_parent_option` の文字列詰め込みをやめ、`ParamOption` を使う
 - 循環除外は既存のまま（判定の場所は変えない）
+- **表示名は `"{row}. {name}"`**（`"3: Background"` → `"1. Background"`）。
+  `row` は **Timeline の行番号**で、`comp.layers` の添字ではない
+  — `comp.layers` は下層が先、Timeline は `layer_blocks` が `layers().rev()` を
+  歩いて最後の要素を 1 行目に描くので、`row = comp.layers.len() - index`。
+  変換は `registry::layer_param_option(index, total, layer)` の 1 箇所だけに置く
+- 音声ストリームピッカー（`audio_stream_label` + `parse_stream_index`）も
+  同型の詰め込みだったので同時に寄せた。完了条件が「コードベースから消える」
+  なので、`ParamOption` で包んで書式を残すのでは満たせない
 
 **完了条件**
 

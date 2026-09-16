@@ -871,18 +871,19 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| EXT-1 | ⬜ | `shape.rect` の `size_mode` と `auto` の解決（コアと nodes） | — |
+| EXT-1 | 🟡 | `shape.rect` の `sizing` と `auto` の解決（コアと nodes） | — |
 | EXT-2 | ⬜ | 宣言で駆動された行を read-only にする（`ColorParam::When` の一般化） | EXT-1 |
 | EXT-3 | ⬜ | `solid.ron` を `shape.rect` へ差し替え | EXT-1 |
-| EXT-4 | ⬜ | bbox の取りこぼし 3 件（画像インスタンスの矩形 / コアの Instance ドメイン / ストローク幅） | — |
-| EXT-5 | ⬜ | ロケール / 文書 | EXT-1〜4 |
+| EXT-4 | ⬜ | ロケール / 文書 | EXT-1〜3 |
 
 Solid の bbox がコンプ解像度分あるのは bbox の計算のせいではなく、**内容が
 `base_quad(ctx.comp_resolution)`**（`crates/ravel-nodes/src/net.rs:137`）だから。
 `shape.rect` が既に `center` + `width` / `height` を持っているので新ノードは作らず、
-`auto` / `fixed` のモードを足して `solid.ron` を差し替える。
-**フォーマット版は上げない。** ラスタの範囲（RoD）は別の計画書
-（`FrameBuffer` に原点が無く、全ピクセルノードが `ctx.resolution` で確保している）。
+`sizing`（`auto` / `fixed`、**既定 `fixed`**）を足して `solid.ron` が `auto` を
+明示する。**フォーマット版は上げない**（既存文書を 1 バイトも触らない）。
+ラスタの範囲（RoD）は別の計画書（`FrameBuffer` に原点が無く、全ピクセルノードが
+`ctx.resolution` で確保している）。bbox の取りこぼし 3 件は本計画から外し、
+`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33` として独立で回す。
 
 ### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
 

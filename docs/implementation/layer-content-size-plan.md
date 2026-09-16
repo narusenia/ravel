@@ -61,6 +61,11 @@ fn base_quad(resolution: (u32, u32)) -> Geometry {
 **`MED-APP-21`（Viewer の bbox が `type_key` の固定 match で再構成される、解決済み）
 と同じ種類の穴**で、「bbox は何を測るのか」の答えが 2 箇所に分かれているのが根。
 
+**この 3 件は本計画の単位ではない。** `auto` と独立していて単独でも価値があるので、
+`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33` として起票し別に回す。ここに残して
+あるのは、単位 3 の完了条件「Solid の bbox がその矩形になる」が**測る側の穴とは
+別の話**だと読めるようにするため。
+
 ### 3. 「自動で決まる」を表す形が無い
 
 「幅は内容（または解像度）から決まる」を言う手段が `ParameterValue` に無い。
@@ -89,7 +94,7 @@ fn base_quad(resolution: (u32, u32)) -> Geometry {
 ### `auto` の意味は「そのノードが導出できる範囲」
 
 ```text
-size_mode: String   // param_options ["auto", "fixed"] → Properties の dropdown
+sizing: String   // param_options ["auto", "fixed"] → Properties の dropdown
 ```
 
 - **`auto`** — そのノードが導出できる範囲。入力を持たない `shape.rect` では
@@ -134,33 +139,33 @@ width   1920 ← auto
 
 | ID | 単位 | 依存 |
 |---|---|---|
-| EXT-1 | `shape.rect` の `size_mode` と `auto` の解決（コアと nodes、UI 無し） | — |
+| EXT-1 | `shape.rect` の `sizing` と `auto` の解決（コアと nodes、UI 無し） | — |
 | EXT-2 | 宣言で駆動された行を read-only にする（`ColorParam::When` の一般化） | EXT-1 |
 | EXT-3 | `solid.ron` を `shape.rect` へ差し替え | EXT-1 |
-| EXT-4 | bbox の取りこぼし 3 件（画像インスタンスの矩形 / コアの Instance ドメイン / ストローク幅） | — |
-| EXT-5 | ロケール / 文書 | EXT-1〜4 |
+| EXT-4 | ロケール / 文書 | EXT-1〜3 |
 
 **フォーマット版は上げない。** 理由は「範囲外」の最後に書く。
 
-### 単位 1: `shape.rect` の `size_mode` と `auto` の解決
+### 単位 1: `shape.rect` の `sizing` と `auto` の解決
 
-- `shape.rect` に `size_mode: String`（既定 `"auto"`）を足し、
-  `with_param_options("size_mode", ["auto", "fixed"])` を付ける
+- `shape.rect` に `sizing: String`（**既定 `"fixed"`**）を足し、
+  `with_param_options("sizing", ["auto", "fixed"])` を付ける
 - `auto` の矩形を返す関数を 1 つ置き、`shape.rect` のプロセッサがそれを使う。
   入力を持たないので導出は `ctx.comp_resolution` から
-- **既定を `"auto"` にする。** 既存プロジェクトの `shape.rect` は
-  `size_mode` パラメータを持たないので、テンプレート既定が読まれる。
-  `auto` が既定だと**既存のシェイプが全部コンプ全面に化ける**ため、
-  **パラメータが無いノードは `"fixed"` として読む**必要がある。
-  この読み替えを 1 箇所に置く（下記「判断」参照）
+- **既定は `"fixed"`。** 既存プロジェクトの `shape.rect` は `sizing`
+  パラメータを持たないのでテンプレート既定が読まれる。`auto` を既定にすると
+  **既存のシェイプ（100×100 の板）が全部コンプ全面に化ける**。
+  `auto` が要るのは Solid だけなので、**`solid.ron` が `"auto"` を明示して持つ**
+  （テンプレートはノードのパラメータ値を書けるので、これで足りる）。
+  結果として既存文書を 1 バイトも触らず、フォーマット版も消費しない
 
 **完了条件**
 
-- `size_mode = "fixed"` のとき、`center` / `width` / `height` の意味が今と 1 つも変わらない
-- `size_mode = "auto"` のとき、出力ジオメトリが `base_quad(ctx.comp_resolution)` と
+- `sizing = "fixed"` のとき、`center` / `width` / `height` の意味が今と 1 つも変わらない
+- `sizing = "auto"` のとき、出力ジオメトリが `base_quad(ctx.comp_resolution)` と
   **頂点単位で一致する**（既存の `base_quad` を期待値に使うテスト）
 - コンプ解像度を変えると `auto` の矩形が追従する
-- `size_mode` パラメータを持たない（= 既存プロジェクトの）`shape.rect` が
+- `sizing` パラメータを持たない（= 既存プロジェクトの）`shape.rect` が
   **今と同じ矩形**を出す
 
 ### 単位 2: 宣言で駆動された行を read-only にする
@@ -172,13 +177,13 @@ width   1920 ← auto
   `{ key, source, value }` なので、`source` に `"auto"` を入れれば
   既存の描画経路がそのまま使える
 - **エッジによる駆動が優先**。`width` にエッジが繋がっていて、かつ
-  `size_mode = "auto"` のときは、エッジの理由を出す（そちらの方が具体的）
+  `sizing = "auto"` のときは、エッジの理由を出す（そちらの方が具体的）
 - 宣言は EXT-1 のレジストリ側に置き、`type_key` の match にしない
 
 **完了条件**
 
-- `size_mode = "auto"` のとき 3 行が read-only になり、**解決済みの値と `auto` を出す**
-- `size_mode = "fixed"` に戻すと 3 行が編集可能に戻る
+- `sizing = "auto"` のとき 3 行が read-only になり、**解決済みの値と `auto` を出す**
+- `sizing = "fixed"` に戻すと 3 行が編集可能に戻る
   （`field_shape_key` が変わるのでウィジェットが作り直される）
 - エッジで駆動された行は `auto` のときもエッジの理由を出す
 - **行が「押せるのに何も起きない」状態にならない**（不変条件 6）
@@ -186,7 +191,7 @@ width   1920 ← auto
 ### 単位 3: `solid.ron` を `shape.rect` へ差し替え
 
 - `solid.ron` のノードを `net.in.base_geometry` → `rasterize` から
-  `shape.rect`（`size_mode: "auto"`）→ `rasterize` に変える
+  `shape.rect`（`sizing: "auto"`）→ `rasterize` に変える
 - **既存プロジェクトのグラフは書き換えない。** `base_geometry` は In ノードの
   宣言された固定ポート（`REQ-LAYER-002`/`003`）で他の用途もあり、
   任意の便宜のためにユーザー文書へグラフ手術をするのは割に合わない。
@@ -196,26 +201,9 @@ width   1920 ← auto
 **完了条件**
 
 - 新規 Solid レイヤーの見た目が今と変わらない
-- 新規 Solid の `size_mode` を `fixed` にして幅・高さを入れると、
+- 新規 Solid の `sizing` を `fixed` にして幅・高さを入れると、
   **Viewer の bbox がその矩形になる**
 - 旧 `.ravprj` の Solid が読めて、見た目が変わらない
-
-### 単位 4: bbox の取りこぼし
-
-- `geometry_bounds` が**画像インスタンスの矩形**を含める
-  （インスタンス位置 ± source の rect）
-- コアの `positions_bounds` が **Instance ドメイン**も見る。
-  コアと Viewer で bbox の定義を 1 本にする
-- **ストローク幅**を含める。`rasterize::stroke_margin` が
-  「線が点からどこまで届くか」の答えを既に持っているので、それを使う
-  （2 箇所で別に計算しない）
-
-**完了条件**
-
-- 画像 1 枚のジオメトリの bbox が**その画像の矩形**になる（0×0 ではない）
-- インスタンスしか持たないジオメトリで、コアの `bounds()` と Viewer の
-  `geometry_bounds` が**同じ矩形**を答える
-- 太いストロークのシェイプの bbox が、描かれるピクセルを含む
 
 ## 範囲外
 
@@ -248,30 +236,27 @@ width   1920 ← auto
 - **bbox ハンドルで内容のサイズを編集すること。** 今ハンドルが書くのは殻の
   `scale` で、それは変えない（`REQ-UI.md` の移動セマンティクスが
   「位置を自身のパラメータに持つノード」に限っている規則と同じ線）
-- **フォーマット版の変更。** `size_mode` は**新しいパラメータの追加**で、
+- **フォーマット版の変更。** `sizing` は**新しいパラメータの追加**で、
   既存の値の読み替えではない。パラメータは自由な key/value の並びなので、
   持たない文書はテンプレート既定が読まれる（`param_fold.rs` が
   「v4 文書の `center_x` はそのまま deserialize されて読まれなくなるだけ」と
   説明しているのと同じ性質）。ただし**既定が `auto` だと既存シェイプが化ける**ので、
   「パラメータの不在」と「`auto` の明示」を区別する必要がある — 下記「判断」
 
-## 判断が必要な点
+## 決定（2026-09-16）
 
-1. **「`size_mode` が無い」と「`size_mode = "auto"`」の区別。**
-   テンプレート既定を `"auto"` にすると、既存プロジェクトの `shape.rect`
-   （100×100 の板）が全部コンプ全面に化ける。取り得る手は 3 つ:
-   - **(a) テンプレート既定を `"fixed"` にし、`solid.ron` が `"auto"` を明示して持つ。**
-     既存シェイプは無変化、新規 Solid は `auto`。フォーマット版も上げずに済む。
-     代わりに「新しいシェイプを足したとき既定は `fixed`」になる
-   - (b) 既定を `"auto"` にして、`.ravprj` v13 で既存 `shape.rect` に
-     `"fixed"` を書き込む型付きパスを走らせる。挙動は素直だがフォーマット版を消費する
-   - (c) `Solid` 専用のノードを別に作る。`shape.rect` を触らないが、
-     「サイズ付き quad」が 2 つになる
-
-   **(a) を推す。** フォーマット版を消費せず、既存文書を 1 バイトも触らない。
-   「既定は `fixed`」は Solid 以外では自然（シェイプを足す人は寸法を指定したい）
-2. **`size_mode` というキー名。** 他の候補: `size`, `extent`, `fit`。
-   `auto` / `fixed` という値の名前も同時に決める
-3. **EXT-4 を本計画に含めるか、`issues/` へ起票して別で回すか。**
-   bbox の取りこぼし 3 件は `auto` と独立していて、単独でも価値がある。
-   計画書に入れると EXT-1〜3 のレビューと混ざる
+1. **`sizing` の既定は `"fixed"`、`solid.ron` が `"auto"` を明示する。**
+   既存文書を触らず、フォーマット版も消費しない。既定を `"auto"` にして
+   `.ravprj` v13 で既存 `shape.rect` に `"fixed"` を書き込む案と、Solid 専用
+   ノードを別に作る案は却下した — 前者はフォーマット版を消費し、後者は
+   「サイズ付き quad」が 2 つになる
+2. **キー名は `sizing`**、値は `auto` / `fixed`。`extent` を使わないのは、
+   **ラスタの範囲（RoD）の語として空けておく**ため — そちらが入ると
+   「そのノードが出す画像の範囲」を指す語が要る。`sizing` は「どう寸法が
+   決まるか」でモード名として読め、`extent` は範囲そのものを指す名詞なので、
+   モードの値として `extent = "auto"` と書くと意味がずれる。
+   なお既存のモード列挙は `mode` / `<thing>_mode` という綴りが多い
+   （`field.time` の `mode`、`scatter` の `source_mode`、`text` の `writing_mode`）
+   ので、`size_mode` でも規約には合う。1 語で済む方を採った
+3. **bbox の取りこぼし 3 件は本計画から外し、issue として独立で回す**
+   （`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33`）

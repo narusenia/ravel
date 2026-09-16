@@ -2494,7 +2494,11 @@ Unknown type keys are skipped silently (plugin space).
   is the display boundary: a FIXED option, one whose label equals its value,
   goes through `read_only_value` so a state word such as `PARENT_NONE` is
   translated, while a DECLARED label — a layer name — is never translated.
-  `Curve` carries a whole `CurveParam`; the panel renders it as a thumbnail row that expands
+  `enum_row_label(options, value)` is what the row itself calls: the label of
+  the option carrying `value`, or `value` verbatim when no option carries it
+  (a reference that travelled between projects), never blank.
+  `Curve` carries a whole `CurveParam`; the panel renders it as a thumbnail
+  row that expands
   `widgets::param_curve_editor` inline, and which rows are open is panel view
   state that never enters the Document). `PortList { key, side, rows:
   Vec<PortRow { name, port_type, fixed, group }>, options }` is the odd one out: it

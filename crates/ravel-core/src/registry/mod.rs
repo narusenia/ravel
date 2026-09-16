@@ -287,7 +287,11 @@ pub fn contextual_options(
 ) -> Vec<ParamOption> {
     match kind {
         ContextualKind::SiblingLayer => {
-            let Some(owner) = owner else {
+            // An owner the composition does not hold is "no owning layer",
+            // not "every layer is a sibling": a stale target — a layer deleted
+            // while its network was on screen — must offer nothing rather than
+            // a stack the node is no longer part of.
+            let Some(owner) = owner.filter(|id| comp.get_layer(*id).is_some()) else {
                 return Vec::new();
             };
             let total = comp.layers.len();
@@ -676,6 +680,17 @@ mod tests {
             ],
             "the bottom-most layer is the Timeline's last row, and Foreground \
              stays row 1 even though the candidate list now starts with it"
+        );
+    }
+
+    /// A stale owner — a layer the composition no longer holds — is "no
+    /// owning layer", not "every layer is a sibling".
+    #[test]
+    fn sibling_layer_options_are_empty_for_an_owner_the_composition_lost() {
+        let comp = comp_with(&["Background", "Foreground"]);
+        assert!(
+            contextual_options(ContextualKind::SiblingLayer, &comp, Some(LayerId::new(404)))
+                .is_empty()
         );
     }
 

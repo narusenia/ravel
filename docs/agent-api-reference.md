@@ -1586,6 +1586,8 @@ registry::contextual_options(ContextualKind, &Composition, Option<LayerId>)
     // `owner` is the layer owning the node's network; None means the node
     // belongs to no layer, and SiblingLayer then answers EMPTY (a node whose
     // own place in the stack is unknown must not be offered a self-reference).
+    // A stale owner (a LayerId the composition no longer holds) is treated
+    // as None, not as "every layer is a sibling".
     // SiblingLayer keeps `comp.layers` order, drops the owner, and labels
     // `"{row}. {name}"` where row is the TIMELINE ROW: `comp.layers` is
     // bottom-most first and the Timeline draws its last element first, so

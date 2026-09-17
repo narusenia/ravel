@@ -866,7 +866,7 @@ label = "Layer Ref"
 description = "References the output of another layer in the same composition."
 [node."layer.ref".params]
 layer = "The layer in this composition to reference."
-port = "Name of the target layer's output port to read."
+port = "Output port of the referenced layer to read. This node's output takes that port's type."
 
 [node."subnet"]
 label = "Subnet"

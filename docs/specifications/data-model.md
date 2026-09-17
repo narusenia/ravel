@@ -350,7 +350,17 @@ Network/Transform/Opacity/Merge）。再コンパイルで ID が安定し、Eva
 ポート名、既定 `frame`）。**String なのは候補にラベルを付けられる行
 （`PropertyField::Enum`）が文字列行しかないから** —
 Properties は `ContextualKind::SiblingLayer` で同じコンポの他レイヤーを
-名前で並べる。読み口は `ParameterValue::static_text_identifier`
+名前で並べ、`port` は `ContextualKind::LayerOutputPort` で**参照先レイヤーの
+`net.out` の入力ポート**（＝そのレイヤーの出力、REQ-LAYER-002/003）を並べる。
+**出力ポートの型は選ばれた `port` に追随する**（`layer` の変更でも追随する
+— 同じ名前のポートが別のレイヤーでは別の型かもしれない）。決めるのは
+`registry::builtin::dependent_port_updates` で、適用は
+`Graph::set_params_and_output_types` が値・パラメータポート・出力ポートを
+1 回の呼び出しで書くので 1 undo。型が変わって運べなくなったエッジは
+`network::set_custom_port_type` と同じ規則で破棄される（相手側が新しい型を
+受け取れるエッジは残る）。**参照が解決できないときは型を変えない** —
+編集の途中で参照が切れただけで既定へ戻ると、繋がっていたエッジが
+巻き添えで消える。読み口は `ParameterValue::static_text_identifier`
 （数値の口ではない。間違えると循環検出・ID 予約・スコープ無効化が
 無言で止まる）。所有パスの最内 `PathSegment::Layer` から
 「同じコンポジション」を解決し、参照先ネットワークの **pre-transform の

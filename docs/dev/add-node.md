@@ -64,10 +64,11 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   `with_param_options`
 - 候補が**ノードの置かれた文脈で決まる**ときは
   `with_contextual_param_options(key, ContextualKind)`。解決は
-  `registry::contextual_options(kind, comp, owner)` の 1 関数で、
-  `ContextualKind` は閉じた列挙（今は `SiblingLayer` だけ）。
-  **Properties はまだこれを引いていない**ので、宣言しても dropdown には
-  ならない（配線は `contextual-parameter-options-plan.md` の `CPO-2`）。
+  `registry::contextual_options(kind, node, comp, owner)` の 1 関数で、
+  `ContextualKind` は閉じた列挙（`SiblingLayer` / `LayerOutputPort`）。
+  腕を足したら**候補が無いときの理由のロケールキー**も決める
+  （`ravel_ui::properties::node::no_candidates_reason` は網羅 match なので、
+  足さないとコンパイルが落ちる。キーは en / ja 両方に入れる）。
   固定の集合で足りるなら `with_param_options` を使うこと
 - **パラメータが 6 個を超えたら `with_param_group` で意味ごとに切る。**
   引数はグループ名とキーの並びで、Properties がその順にセクションへ割る
@@ -110,6 +111,15 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   `Graph::set_params` を通るようにする（`attribute.set` の `value` が `type` に
   従う形）。値とポート型が 1 回の呼び出しで変わるので、Document スナップショット
   = undo 単位が保たれる
+- **あるパラメータが出力ポートの型を決めるなら**、その対応を
+  `registry::builtin::dependent_port_updates` に足し、書き込み経路が
+  `Graph::set_params_and_output_types` を通るようにする（`layer.ref` の出力が
+  参照先ポートの型に従う形）。返すのは `PortRetype { port, data_type }` で、
+  値・パラメータポート・出力ポートが 1 回の呼び出しで変わるので undo 単位は
+  1 つ。型が変わって運べなくなったエッジは破棄され、相手側が新しい型を
+  受け取れるエッジは残る（規則は `network::set_custom_port_type` と同じ 1 本）。
+  **決められないときは何も返さない** — 既定へ戻すと、参照が一時的に切れただけで
+  繋がっていたエッジが巻き添えで消える
 - パラメータポートが受ける wire 型は `ParameterValue::port_accepted_types()`
   が決める（**集合**。`Channel4` は `[COLOR, VEC4]`）。`port_data_type()` は
   ポート色などで 1 つの型が要る場面のための**主型**なので、接続可否や

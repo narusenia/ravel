@@ -2,13 +2,17 @@
 
 > **Status**: 完了 — 2026-09-17（`BBOX-1` / `BBOX-2` / `BBOX-3` 実装済み。
 > マージ後に `done/` へ移す）
+>
+> **`LOW-APP-33` は半分だけ閉じた。** 属性由来の `stroke_width` は入るように
+> なったが、`rasterize` ノードパラメータの基底値はジオメトリから見えないので
+> 残余として開いたまま（`範囲外` 節）。`MED-APP-45` と `MED-CORE-11` は解決済み。
 
 対象: `ravel-core` の `geometry`（`container` / `ops`）、`ravel-nodes` の
 `rasterize`、`ravel-app` の Viewer（`panels/viewer/geometry.rs`）。
 要件は `REQ-UI-013`（Viewer の bbox）と `REQ-MOGRAPH-001`（シェイプ）、
 `REQ-MOGRAPH-004`（タイポグラフィ）。
 
-解消する issue: `MED-APP-45` / `MED-CORE-11` / `LOW-APP-33`。
+解消する issue: `MED-APP-45` / `MED-CORE-11` と、`LOW-APP-33` の**属性由来の線幅の分**（基底のノードパラメータは `範囲外` 節）。
 3 件とも `layer-content-size-plan.md` の「問題 2」で見つかった同じ走査の中にあり、
 **同じ 1 つの欠陥の別の症状**なので 1 本で直す。
 
@@ -24,7 +28,7 @@
 |---|---|---|---|
 | 1 | 画像ジオメトリのレイヤーが Viewer から掴めない | `InstanceSource::Image` の `rect()` | `MED-APP-45` |
 | 2 | 「このジオメトリの範囲」の答えがコアと Viewer で 2 つある | コアは Instance 域を見ない | `MED-CORE-11` |
-| 3 | 太い線のシェイプが枠から溢れる | ストロークの張り出し | `LOW-APP-33` |
+| 3 | 太い線のシェイプが枠から溢れる | ストロークの張り出し | `LOW-APP-33`（属性由来の分のみ） |
 | 4 | **`text.to_path` 前の Text の bbox が高さ 0 の線になる** | `InstanceSource::Geometry`（グリフ輪郭） | 新規（別起票しない。下記） |
 
 ### 実測（`text.font` → `text.layout`、`"Ravel"`、`size = 72`）
@@ -93,6 +97,27 @@ pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect>
   やめる深さも同じ**でなければ「描かれているのに測られていない」が生まれる
 - `source_index` 列の読み方は `ops::select_source` に既にある。再実装しない
 
+> **独立レビューの修正（2026-09-17）。** 上の「source の `drawn_bounds` を
+> 再帰で取って、インスタンスで置く」形は**足りなかった**。
+> `rasterize::flatten_geometry` はルートから下へ 3 つを持ち回るので、
+> 持ち回らない bbox は描画より小さくなる:
+>
+> 1. **累積した配置**。しかも合成は `InstanceTransform::compose` で、
+>    **厳密なアフィン積ではない**（非一様スケールと 2 つの回転の合成は
+>    shear になるが、この表現は持てない）。`container.rs:389` が「描画と展開が
+>    同じ絵になるように、直さず記述する」と書いているので、**測る側が
+>    `compose` に合わせる**。厳密な積で測ると誰も描かない絵を囲む
+>    （原点中心 20×2 の画像を内側で 90° 回して外側で `(10,1)` に伸ばすと、
+>    描画は 2×200、厳密な積は 20×20）
+> 2. **継承した `stroke_width`**。張り出しは**張り出す階層の
+>    `uniform_scale()` で掛け算**してから測る（`rasterize` は
+>    `stroke_width * placement.uniform_scale()` で描く）。降りていくのは
+>    「その階層の最大値と継承値の max」— bbox は 1 つの幅で膨らませると
+>    決めたので、上界はこれ
+> 3. **ルートの `join`**。`rasterize` はノード入口で 1 度読み
+>    （`detail_join(geo.detail())`）、`Style::shape` で source へそのまま
+>    渡すので、**source 自身の Detail は読まれない**
+
 ### source は重複排除されているので、source ごとに 1 回測る
 
 `text.layout` の `sources()` は重複排除されている（`"Ravel"` で 5 文字 5 source、
@@ -101,6 +126,16 @@ pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect>
 
 **source index → その source のローカル `Rect`** を 1 度だけ計算して持ち、
 インスタンスごとには 4 隅を置くだけにする。`O(sources × points + instances)`。
+
+> **限定（2026-09-17）。** 累積配置を持ち回るようになったので、このキャッシュは
+> **source が自分のインスタンス域を持たないとき**（`instance_count() == 0`）
+> だけに限る。そのときローカル点範囲は配置に依存しないので、1 度測って
+> インスタンスごとには 4 隅を置くだけで正しい。グリフ輪郭・画像・`scatter` が
+> 撒くシェイプは全部ここに入る＝ホットパスの計算量は変わらない。さらに
+> 入れ子を持つ source だけ累積配置を渡して再帰する（深さは
+> `MAX_INSTANCE_DEPTH` = 4 まで）。キャッシュするのは**線幅を含めない
+> ローカル点範囲と、その source 自身の最大線幅**の 2 つ（どちらも
+> `O(points)`）。張り出しは累積倍率に依存するので、置いた後に足す。
 
 これは性能の都合ではなく**約束の維持**で、`viewer/geometry.rs` の doc comment が
 `geometry_bounds` の実測コスト（100 万点で 197 µs、ポインタ移動ごとに支払う）を
@@ -127,6 +162,15 @@ pub fn stroke_reach(width: f32, miter: bool) -> f32
 要素ごとに正確に測るより広く出るが、**足りなくなることはない**
 （`LOW-APP-33` の症状は「小さすぎる」）。`ponytail:` ではなく計画上の決定として
 残す — 要素ごとに必要になったら `drawn_bounds` の走査の中で分ければよい。
+
+Instance 域の `stroke_width` は別扱いで、**その階層の最大値には混ぜない**。
+`rasterize` はそれを「そのインスタンスが押すもの」へ narrow するので
+（`element_style(style, instances, index)`）、ホスト自身のプリミティブには
+効かない。インスタンスごとに正確な値を下へ渡す方が狭く、かつ正しい。
+
+**入らないのはノードパラメータの基底値**（`範囲外` 節）。`stroke_width` 属性を
+1 つも持たない要素は `rasterize` のパラメータで描かれ、ジオメトリはそれを
+知らない。
 
 ### `bounds()` の本番消費者は今いない
 
@@ -176,12 +220,18 @@ pub fn stroke_reach(width: f32, miter: bool) -> f32
 
 **完了条件**
 
-- `stroke_width` を 0 から 40 に上げたシェイプの `bounds()` が、
+- **`stroke_width` 属性**を 0 から 40 に上げたシェイプの `bounds()` が、
   ちょうど `stroke_reach(40, miter)` だけ広がる
-- `join = miter` の bbox が `join = round` の bbox より広い
-- ラスタライザが描くピクセルが `bounds()` の外に出ない
-  （太い線のシェイプを実際にラスタライズして、非ゼロなカバレッジが
-  bbox の内側にあることを確かめる）
+- `join = miter` の bbox が `join = round` の bbox より広い。判定に使うのは
+  **最上位ジオメトリの Detail の `join`** で、source の Detail は読まない
+  （`rasterize` がそうしている）
+- インスタンスが押す source の線幅が**インスタンスの倍率で掛け算される**
+  （`rasterize` は `stroke_width * placement.uniform_scale()` で描く）
+- **`stroke_width` 属性で線幅を持つジオメトリ**について、ラスタライザが描く
+  ピクセルが `bounds()` の外に出ない（太い線のシェイプを実際にラスタライズして、
+  非ゼロなカバレッジが bbox の内側にあることを確かめる。平坦なジオメトリと
+  インスタンスを持つジオメトリの両方で）。**`rasterize` ノードパラメータの
+  基底 `stroke_width` は対象外**（下記 範囲外）
 - `rasterize` の既存ゴールデンが無改変で通る
 
 ### 単位 3（`BBOX-3`）: Viewer が委譲する
@@ -213,6 +263,17 @@ pub fn stroke_reach(width: f32, miter: bool) -> f32
   中心として読んでいる。インクを含めると散布の中心が動く
   ＝ **ユーザーに見える挙動の変更**になるので、この計画では触らない
 - **要素ごとの正確なストローク幅。** 最大値で膨らませる（上記）
+- **`rasterize` ノードパラメータの基底 `stroke_width`。** 線幅の既定は
+  ノードのパラメータで（`rasterize/mod.rs:329`）、`stroke_width` 属性を
+  1 つも持たない要素はその値で描かれる（`element_style` の
+  `attr_f32(…).unwrap_or(inherited.stroke_width)`）。**ジオメトリ 1 つを
+  引数に取る関数では原理的に塞げない** — ジオメトリは自分がどのノードに
+  どう描かれるかを知らない。`shape.rect` は `stroke_width` を書かないので、
+  `shape.rect` → `rasterize(stroke_width = 40)` は本計画の後も bbox が
+  内容より小さい。筋は `style-attributes-plan.md` の方向（線の指定を属性へ
+  寄せる）で、`LOW-APP-33` を**この残余として開いたまま**にしてある。
+  Viewer が下流ノードのパラメータを読む案は採らない — 「測る関数は 1 つ」を
+  2 つに戻す
 - **ラスタの範囲（RoD）。** `layer-content-size-plan.md` の範囲外節がそのまま効く。
   `FrameBuffer` は原点を持たない
 - **Media レイヤーの bbox。** `media` → `net.out` にジオメトリノードが無いので

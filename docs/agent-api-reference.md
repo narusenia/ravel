@@ -1296,7 +1296,7 @@ Geometry        // domains: points / primitives+attrs / instances / detail
     .set_instance_sources(Vec<Arc<Geometry>>)      // replaces every source
     .summary() -> GeometrySummary         // counts + attribute listings
     // implements NodeData (GEOMETRY) + GeometricData; bounds() is the xy
-    // extent of everything it draws (ops::drawn_bounds), zeroed when empty
+    // extent of what it draws (ops::drawn_bounds), zeroed when empty
 
 Primitive::Path { verts: Range<usize>, closed }
 Primitive::Mesh { verts: Range<usize>, indices: Range<usize> }
@@ -1390,18 +1390,30 @@ bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in
     // a PIVOT, not an extent: scatter / field / geometry read it as a centre,
     // so it does NOT include the ink drawn_bounds measures
 drawn_bounds(&geo) -> Option<Rect>
-    // everything the geometry DRAWS: point positions, each instance's source
-    // placed through its own InstanceTransform (an image's rect(), a nested
-    // geometry's own drawn_bounds, recursed to MAX_INSTANCE_DEPTH — the depth
-    // expand_instances stops at), grown by stroke_reach. One source is
-    // measured once, then four corners placed per instance. `GeometricData::
-    // bounds()` and the Viewer's `geometry_bounds` BOTH delegate here — do
-    // not write a third walk. An instance domain with no sources stamps
-    // nothing, so only its placements are measured
+    // what the geometry draws: point positions, each instance's source placed
+    // through the ACCUMULATED InstanceTransform (an image's rect(), a nested
+    // geometry recursed to MAX_INSTANCE_DEPTH — the depth expand_instances
+    // stops at), grown by the stroke_reach its `stroke_width` ATTRIBUTES ask
+    // for. `GeometricData::bounds()` and the Viewer's `geometry_bounds` BOTH
+    // delegate here — do not write a third walk.
+    // The walk is `rasterize::flatten_geometry`'s, and carries what it
+    // carries or it bounds less than the picture:
+    //   - placement via InstanceTransform::compose, NOT the exact affine
+    //     product (compose drops the shear on purpose; drawing does too)
+    //   - the inherited stroke_width, scaled by uniform_scale() at the level
+    //     it strokes, widest-wins per level
+    //   - the ROOT's `join` only; a source's own Detail join is not read
+    // Does NOT see the `rasterize` node's base `stroke_width` parameter — a
+    // geometry does not know which node draws it (open half of LOW-APP-33).
+    // A source with no instance domain of its own is measured once however
+    // many instances stamp it; one that nests further is re-walked per
+    // instance. An instance domain with no sources stamps nothing, so only
+    // its placements are measured
 stroke_reach(width, miter) -> f32
     // how far past the path a stroke reaches: a miter spike runs to 4 half-
     // widths (zeno's default limit), plus one pixel for the antialiased edge.
-    // `rasterize` sizes its coverage rectangle with this same function
+    // `rasterize` sizes its coverage rectangle with this same function.
+    // `width` must ALREADY be scaled by the placement it strokes at
 path_sample(&geo, distance) -> Result<PathSample>   // planar only
 PathArcTable                     // the same walk, held across many samples
     ::build(&geo, operation) -> Result<Self>   // first path primitive; a

@@ -156,31 +156,3 @@ inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
 単なるクリックではコミットされないので refresh で元に戻る、
 または次の無関係な `commit_graph` に相乗りする。
 → ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。
-
-**LOW-APP-33 | bug | bbox にストローク幅が入らないので、太い線のシェイプが枠から溢れる**
-（**解決済み**: `BBOX-2`。`stroke_margin` はコアへ移して
-`ops::stroke_reach(width, miter)` になり、`rasterize` の被覆矩形と
-`ops::drawn_bounds` の膨らませ幅が同じ 1 つの関数になった。`zeno::Join` を
-取らないのはコアが zeno に依存しないためで、判定に要るのは「マイターか否か」
-だけ。`stroke_width` は域ごとの属性なので **見つかった最大値**で全方向に
-膨らませる。テスト: `rasterize::tests::nothing_drawn_falls_outside_the_geometrys_bounds`
-（実際にラスタライズして、非ゼロなカバレッジが bbox の内側にあることを確かめる）、
-`geometry::ops::tests::a_stroke_grows_the_bounds_by_its_reach` /
-`a_miter_join_bounds_wider_than_a_round_one`）
-**該当**: `crates/ravel-app/src/panels/viewer/geometry.rs` の `geometry_bounds`
-
-`geometry_bounds` が測るのは `Domain::Point` と `Domain::Instance` の**位置**の
-AABB で、線がその位置からどれだけ外へ届くかは見ていない。`stroke_width` が
-大きいシェイプは**描かれるピクセルが枠の外に出る**。
-
-`MED-APP-45` とは別件。あちらは**インスタンスの画像矩形**が位置以外の
-情報として落ちている話で、こちらは**位置は正しく測れているが線の張り出しが
-足りない**話。両方とも同じ走査の中にあるだけ。
-
-答えは既にラスタライザ側にある。`crates/ravel-nodes/src/rasterize/mod.rs` の
-`stroke_margin(width, join)` が「パスから線がどこまで届くか」を、マイター
-スパイクが `miter_limit` 半幅まで伸びることまで含めて計算している。bbox が
-自前で計算し直すと 2 つ目の答えになるので、そちらを使うこと。
-
-影響は表示のずれだけで、選択もドラッグも動く（当たり判定が内容より少し
-小さいだけ）。`MED-APP-45` / `MED-CORE-11` と同じ走査の中で直すのが安い。

@@ -613,3 +613,34 @@ retype しない。したがって旧文書を開くと:
 足りる。**
 
 `CPO-3` / `CPO-4` の独立レビューで見つけた残余。
+
+**LOW-APP-33 | bug | bbox が `rasterize` ノードパラメータの基底線幅を見ないので、属性を持たないシェイプが枠から溢れる**
+
+**該当**: `crates/ravel-core/src/geometry/ops.rs` の `drawn_bounds` /
+`local_extent`、`crates/ravel-nodes/src/rasterize/mod.rs:329`
+（`params.f32_or("stroke_width", 0.0)`）
+
+**半分は解決済み。** `BBOX-2`（`geometry-drawn-bounds-plan.md`）が
+`stroke_margin` をコアへ移して `ops::stroke_reach(width, miter)` にし、
+`drawn_bounds` は**属性由来の `stroke_width`**（`style.stroke` が
+Detail / Primitive / Point / Instance のどれかに書く値）の分だけ矩形を膨らませる。
+インスタンスの倍率も掛かる。太い線を属性で持つシェイプは枠に収まる。
+
+**残っているのは基底値。** `rasterize` の線幅は**ノードパラメータ**が既定で、
+`element_style`（`mod.rs:1749`）が `attr_f32(…).unwrap_or(inherited.stroke_width)`
+と書いているとおり、`stroke_width` 属性を 1 つも持たない要素はパラメータの値で
+描かれる。`shape.rect` は `stroke_width` を書かないので、**`shape.rect` →
+`rasterize(stroke_width = 40)` は今も bbox が内容より 21 小さい**。
+
+**ジオメトリ 1 つを引数に取る関数では原理的に塞げない。** ジオメトリは自分が
+どのノードにどう描かれるかを知らない。塞ぐには 2 通りある:
+
+1. **線幅を属性へ寄せる。** `style-attributes-plan.md` の方向（線の指定を
+   ジオメトリの属性に持たせる）と同じで、`rasterize` のパラメータが
+   「属性が無い要素の既定値」でなくなれば `drawn_bounds` が全部見える。
+   **こちらが筋。** この票はそちらに合流する
+2. Viewer が下流の `rasterize` ノードのパラメータを読む。測る関数の外側の
+   機能で、`drawn_bounds` の「1 つの答え」を 2 つに戻すので採らない
+
+影響は表示のずれだけで、選択もドラッグも動く（当たり判定が内容より少し
+小さいだけ）。`BBOX-2` の独立レビューで範囲を切り出した残余。

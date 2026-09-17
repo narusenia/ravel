@@ -1142,8 +1142,9 @@ pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
     ))
 }
 
-/// Axis-aligned bounds of everything a geometry *draws*: point positions, and
-/// each instance's source placed through its own [`InstanceTransform`].
+/// Axis-aligned bounds of everything a geometry *draws*: point positions,
+/// each instance's source placed through its own [`InstanceTransform`], and
+/// the reach of the stroke that covers them ([`stroke_reach`]).
 ///
 /// The one answer to "how big is this geometry". [`GeometricData::bounds`]
 /// and the Viewer's bbox overlay both come from here, so a rectangle drawn on
@@ -1174,10 +1175,14 @@ pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect> {
 /// [`expand_at`] counts it: the top-level geometry is depth 0, and the
 /// instances of a geometry at [`MAX_INSTANCE_DEPTH`] are not reached.
 fn drawn_bounds_at(geometry: &Geometry, depth: u32) -> Option<Rect> {
-    union(
+    let placed = union(
         geometry.positions_bounds(),
         instance_bounds(geometry, depth),
-    )
+    )?;
+    // This geometry's own stroke only. A source's stroke is already inside
+    // the rectangle its own `drawn_bounds` returned, and the host's grows
+    // what it narrows onto the elements it stamps.
+    Some(grown(placed, stroke_reach_of(geometry)))
 }
 
 /// Bounds of what this geometry's instance domain stamps, each source placed
@@ -1279,6 +1284,87 @@ fn placed_bounds(points: impl IntoIterator<Item = Vec2>) -> Option<Rect> {
         width: max_x - min_x,
         height: max_y - min_y,
     })
+}
+
+/// How far past the path a stroke of `width` can reach, joins included: a
+/// miter spike runs out to `miter_limit` half-widths.
+///
+/// One answer for two callers that have to agree: `rasterize` sizes the
+/// rectangle it blends a stroke's coverage into with this, and
+/// [`drawn_bounds`] grows a geometry's extent by it. A bbox that computed the
+/// reach itself would be a second answer, and the one that is too small is
+/// the one that clips the picture.
+///
+/// `miter` rather than a join enum because that is the whole of what the
+/// reach depends on, and the join is spelled `zeno::Join` in the rasterizer —
+/// a type this crate does not (and must not) depend on.
+///
+/// The extra pixel is the antialiased edge: zeno writes coverage into the
+/// pixel the boundary passes through, so the outermost covered pixel is one
+/// past the geometric reach.
+pub fn stroke_reach(width: f32, miter: bool) -> f32 {
+    let half_widths = if miter { ZENO_MITER_LIMIT } else { 1.0 };
+    width * 0.5 * half_widths + 1.0
+}
+
+/// zeno's default miter limit (`zeno::Stroke::default`), which the rasterizer
+/// does not change.
+///
+/// An upper bound on the reach, not the reach itself: zeno also bevels any
+/// turn sharper than a right angle, so a miter never actually exceeds √2
+/// half-widths. Sizing by the declared limit costs a few pixels of scan and
+/// does not depend on that second rule staying true.
+const ZENO_MITER_LIMIT: f32 = 4.0;
+
+/// The widest stroke any element of this geometry asks for, and whether the
+/// geometry joins its corners with a miter.
+///
+/// `stroke_width` is a per-element attribute, and `rasterize::element_style`
+/// narrows it off whichever domain carries it, so every domain is asked and
+/// the bounds grow by the **widest** width found rather than measuring each
+/// element against its own. Wider than necessary where one element is thick
+/// and the rest are hair-thin; never narrower than what is drawn, which is
+/// the direction that matters for a rectangle drawn round a picture.
+/// Splitting it per element belongs in this walk if a caller ever needs it.
+///
+/// `join` is a Detail attribute — one value for the geometry — and absent
+/// means round, as it does in the rasterizer.
+fn stroke_reach_of(geometry: &Geometry) -> f32 {
+    let widest = [
+        Domain::Detail,
+        Domain::Primitive,
+        Domain::Point,
+        Domain::Instance,
+    ]
+    .into_iter()
+    .filter_map(|domain| {
+        geometry
+            .attribute_set(domain)
+            .get(names::STROKE_WIDTH)?
+            .as_f32(names::STROKE_WIDTH)
+            .ok()
+            .map(|widths| widths.iter().copied().fold(0.0_f32, f32::max))
+    })
+    .fold(0.0_f32, f32::max);
+    if widest <= 0.0 {
+        return 0.0;
+    }
+    let miter = geometry
+        .detail()
+        .get(names::JOIN)
+        .and_then(|column| column.as_i32(names::JOIN).ok())
+        .is_some_and(|joins| joins.first() == Some(&names::JOIN_MITER));
+    stroke_reach(widest, miter)
+}
+
+/// `rect` grown by `reach` on every side.
+fn grown(rect: Rect, reach: f32) -> Rect {
+    Rect {
+        x: rect.x - reach,
+        y: rect.y - reach,
+        width: rect.width + reach * 2.0,
+        height: rect.height + reach * 2.0,
+    }
 }
 
 /// The smallest rectangle containing both, with either side absent.
@@ -2561,6 +2647,72 @@ mod tests {
         assert!(
             measured.iter().any(|(flattened, _)| !flattened),
             "the nesting never reached the guard: {measured:?}"
+        );
+    }
+
+    /// `unit_square` with `width` asked for on the Primitive domain, the
+    /// domain `rasterize::element_style` narrows a path's stroke off.
+    fn stroked_square(width: f32, join: Option<i32>) -> Geometry {
+        let mut geometry = unit_square();
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![width]))
+            .expect("one primitive");
+        if let Some(join) = join {
+            geometry
+                .detail_mut()
+                .insert(names::JOIN, AttributeArray::I32(vec![join]))
+                .expect("one detail value");
+        }
+        geometry
+    }
+
+    /// Completion criterion: widening the stroke grows the bounds by exactly
+    /// the reach the rasterizer uses, on every side.
+    #[test]
+    fn a_stroke_grows_the_bounds_by_its_reach() {
+        let bare = drawn_bounds(&stroked_square(0.0, None)).expect("a square has an extent");
+        let stroked = drawn_bounds(&stroked_square(40.0, None)).expect("a square has an extent");
+        let reach = stroke_reach(40.0, false);
+        assert_eq!(
+            as_tuple(stroked),
+            (
+                bare.x - reach,
+                bare.y - reach,
+                bare.width + reach * 2.0,
+                bare.height + reach * 2.0
+            )
+        );
+    }
+
+    /// Completion criterion: a miter reaches further than a round join, so the
+    /// bounds have to be wider for it. The rule lives in [`stroke_reach`];
+    /// this is the bbox actually asking.
+    #[test]
+    fn a_miter_join_bounds_wider_than_a_round_one() {
+        let miter = drawn_bounds(&stroked_square(40.0, Some(names::JOIN_MITER)))
+            .expect("a square has an extent");
+        let round = drawn_bounds(&stroked_square(40.0, Some(names::JOIN_ROUND)))
+            .expect("a square has an extent");
+        assert!(
+            miter.width > round.width && miter.height > round.height,
+            "a miter spike has to widen the bounds: {miter:?} vs {round:?}"
+        );
+    }
+
+    /// A zero stroke is the absence of one, not a one-pixel margin: every
+    /// geometry carries a `stroke_width` column once `style.stroke` has run on
+    /// a group, and the elements outside the group are seeded with zero.
+    #[test]
+    fn a_zero_stroke_width_grows_nothing() {
+        assert_eq!(
+            drawn_bounds(&stroked_square(0.0, None)),
+            drawn_bounds(&unit_square()),
+            "a zero-width stroke reaches nowhere"
         );
     }
 

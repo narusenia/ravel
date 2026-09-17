@@ -326,7 +326,7 @@ Scalar 入力と Vec 出力だけで成立して `constant.vec*`（`VEC-6`）を
 | `DISK-1` | `IntChannel` と解決層（`.ravprj` v10。`done/discrete-keyframes-plan.md`）**済**（#457） |
 | `DISK-2〜6` | `StepCurve<String>`、Properties / Timeline / カーブエディタ、ロケール / 文書。**全部済**（#462 — `.ravprj` v11、識別子パラメータはアニメート不可 / #465 — Timeline の Int / String 行と Int カーブの階段描画。計画書は `done/`） |
 | `PGRP-4` | In ノードのインスタンスグループ（`.ravprj` **v12** / journal v11。`done/parameter-groups-plan.md`）**済**（#466 — `PGRP-1`〜`PGRP-3` も同じ PR） |
-| `CPO-5` | `layer` の Int → String 移行（`.ravprj` **v13**。`contextual-parameter-options-plan.md`）**済**（#544 — `CPO-2` と同じ PR。`layer.ref` のレイヤー指定が兄弟レイヤーの Select になった。残る `CPO-3`〜`CPO-4` / `CPO-7` はフォーマットを触らない） |
+| `CPO-5` | `layer` の Int → String 移行（`.ravprj` **v13**。`contextual-parameter-options-plan.md`）**済**（#544 — `CPO-2` と同じ PR。`layer.ref` のレイヤー指定が兄弟レイヤーの Select になった。`CPO-3` / `CPO-4` / `CPO-7` は #546 で入り、フォーマットは触っていない。計画書は `done/`） |
 | `HIGH-26` | 保存できた `.ravprj` が読み込めない（単位ではないので `backlog.md` には無い）**済**（#455 — `MAX_SUBNET_DEPTH` 64 → 16 と `RON_RECURSION_LIMIT`） |
 
 **`AID-1` / `AID-2` が先頭で、基準 1 ではなく基準 0 で先頭。** 素材の識別子が

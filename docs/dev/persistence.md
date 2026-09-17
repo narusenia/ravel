@@ -325,7 +325,7 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
 
 **v12 → v13 の `layer.ref` 参照の String 化**
 （`Document::upgrade_layer_ref_targets`、実装計画は
-[`../implementation/contextual-parameter-options-plan.md`](../implementation/contextual-parameter-options-plan.md)
+[`../implementation/done/contextual-parameter-options-plan.md`](../implementation/done/contextual-parameter-options-plan.md)
 の `CPO-5`）。参照先は `LayerId` のままで、**持ち方だけ**が
 `ParameterValue::Int` から十進表記の `ParameterValue::String` に変わる
 （候補にラベルを付けられる Properties の行が文字列行しかないため）。

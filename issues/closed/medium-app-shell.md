@@ -1311,7 +1311,7 @@ let names = match components.len() {
 > `network::set_custom_port_type` と同じ規則（相手側が新しい型を受け取れる
 > エッジは残す）で破棄される。参照が解決できないときは型を変えない
 > （`CPO-4`）。数値スクラブとレジストリ静的候補の話は
-> [`../../docs/implementation/contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
+> [`../../docs/implementation/done/contextual-parameter-options-plan.md`](../../docs/implementation/done/contextual-parameter-options-plan.md)
 > にある。
 
 **該当**: `crates/ravel-core/src/registry/builtin.rs:529-540`（`layer_ref`）
@@ -1337,7 +1337,7 @@ let names = match components.len() {
 ドロップダウンはレイヤーフィールドの別経路、パラメータ → 出力ポート型の追随は
 どこにも無い（`set_params` が retype するのはパラメータポートだけ）。
 複数クレートに跨るので Design gate に当たる。
-→ [`contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
+→ [`done/contextual-parameter-options-plan.md`](../../docs/implementation/done/contextual-parameter-options-plan.md)
 の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
 
 **残余**: v13 より前の文書で `port` に `"frame"` 以外が入っていた `layer.ref`

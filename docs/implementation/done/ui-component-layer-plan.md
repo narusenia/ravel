@@ -790,7 +790,7 @@ cache を配線し、ロケールもテーマも設定ダイアログから選�
   Enter / Space がヘッドレスでテストされている**
 - 不変条件 1〜9 を破っている open issue が全部 closed
   （**`MED-APP-29` を除く。** 2026-08-09 に
-  [`contextual-parameter-options-plan.md`](../contextual-parameter-options-plan.md)
+  [`done/contextual-parameter-options-plan.md`](contextual-parameter-options-plan.md)
   へ移した票で、文脈から候補と型が決まる機構そのものが要る。
   `CPO-1`〜`CPO-7` が入った時点で閉じる）
 - **ライトテーマと日本語ロケールが設定から到達できる**

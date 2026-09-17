@@ -1,10 +1,10 @@
 # 文脈依存のパラメータ候補と出力型 実装計画
 
-> **Status**: 進行中 — `CPO-1` / `CPO-6` 済（#542、2026-09-16）、
-> `CPO-2` / `CPO-5` 済（#544、2026-09-17、`.ravprj` **v13**）。
-> `layer.ref` のレイヤー指定は兄弟レイヤーの Select になった。残りは
-> `CPO-3`（`port` の Select 化）→ `CPO-4`（出力型の追随）→ `CPO-7`
-> （ロケール / 文書。ここで `MED-APP-29` が閉じる）。
+> **Status**: **完了** — 2026-09-17。7 単位すべてマージ済み
+> （`CPO-1` / `CPO-6` = #542、`CPO-2` / `CPO-5` = #544（`.ravprj` **v13**）、
+> `CPO-3` / `CPO-4` / `CPO-7` = #546）。**`MED-APP-29` はクローズ**
+> （`issues/closed/medium-app-shell.md`）。残した既知の穴は `LOW-CORE-05`
+> （レイヤー id 0）と `LOW-CORE-06`（v13 前の参照の出力型が追随しない）。
 
 対象: `ravel-core` の `registry`（`NodeTemplate` / `Registry`）、
 `ravel-ui` の `properties::node`、`ravel-app` の Properties とノードエディタ。

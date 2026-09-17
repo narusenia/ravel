@@ -914,6 +914,23 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 `ctx.resolution` で確保している）。bbox の取りこぼし 3 件は本計画から外し、
 `MED-APP-45` / `MED-CORE-11` / `LOW-APP-33` として独立で回す。
 
+### bbox が測るものを 1 箇所にする（`geometry-drawn-bounds-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| BBOX-1 | 🟡 | コアの `drawn_bounds`（インスタンスの source を `InstanceTransform` で置いて測る） | — |
+| BBOX-2 | ⬜ | ストロークの張り出しをラスタライザと共有する（`stroke_reach` をコアへ） | BBOX-1 |
+| BBOX-3 | ⬜ | Viewer の `geometry_bounds` が委譲する。issue 3 件のクローズと文書 | BBOX-1, BBOX-2 |
+
+**bbox は「置かれた位置」しか測っていない**という 1 つの欠陥の症状が 4 つ。
+`MED-APP-45`（画像インスタンスの矩形）/ `MED-CORE-11`（コアと Viewer で定義が
+違う）/ `LOW-APP-33`（線幅）と、**`text.to_path` 前の Text の bbox が高さ 0 の
+線になる**こと（実測: `"Ravel"` size 72 で Viewer が `(0, 0, 162.79, 0)`、真値は
+`(6.62, -51.12, 173.66, 51.98)` ＝ `text.to_path` 出力と同値）。4 つ目は直す箇所が
+`MED-APP-45` と同一行なので別起票しない。測る関数をコアに 1 つ置き、
+`GeometricData::bounds()` と Viewer の両方がそれに委譲する。`ops::bounds_center`
+（散布のピボット）は**触らない** — ユーザーに見える挙動が動く。
+
 ### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |

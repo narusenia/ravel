@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
-use super::names;
+use super::{names, ops};
 use crate::id::DataTypeId;
 use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2, Vec3};
 
@@ -762,7 +762,12 @@ impl Geometry {
     /// The xy extent of the point positions. `Rect` is a 2D value, so a 3D
     /// geometry reports the extent of its projection — depth is a
     /// `scene.render` concern, not a container one.
-    fn positions_bounds(&self) -> Option<Rect> {
+    ///
+    /// The Point domain's part of [`ops::drawn_bounds`](super::ops::drawn_bounds),
+    /// which is why the module next door can see it: a geometry's full extent
+    /// is this unioned with what its instances stamp, and only one of the two
+    /// needs the `P` column.
+    pub(super) fn positions_bounds(&self) -> Option<Rect> {
         let positions = self.positions(Domain::Point)?.ok()?;
         let mut components = positions.iter3();
         let first = components.next()?;
@@ -846,8 +851,16 @@ impl NodeData for Geometry {
 }
 
 impl GeometricData for Geometry {
+    /// Everything the geometry draws, via [`ops::drawn_bounds`](super::ops::drawn_bounds)
+    /// — the one definition of a geometry's extent, shared with the Viewer's
+    /// bbox overlay.
+    ///
+    /// A geometry that draws nothing still owes a `Rect`, and the zero one at
+    /// the origin is the answer this trait has always given. A caller that has
+    /// to tell "nothing" from "a point at the origin" asks `drawn_bounds`
+    /// directly.
     fn bounds(&self) -> Rect {
-        self.positions_bounds().unwrap_or(Rect {
+        ops::drawn_bounds(self).unwrap_or(Rect {
             x: 0.0,
             y: 0.0,
             width: 0.0,

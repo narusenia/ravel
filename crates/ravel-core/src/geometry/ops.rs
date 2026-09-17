@@ -12,7 +12,7 @@ use super::{
     AttrName, AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError,
     InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive, names,
 };
-use crate::types::{Color, Vec2, Vec3, Vec4};
+use crate::types::{Color, Rect, Vec2, Vec3, Vec4};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AttributeValue {
@@ -1142,6 +1142,161 @@ pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
     ))
 }
 
+/// Axis-aligned bounds of everything a geometry *draws*: point positions, and
+/// each instance's source placed through its own [`InstanceTransform`].
+///
+/// The one answer to "how big is this geometry". [`GeometricData::bounds`]
+/// and the Viewer's bbox overlay both come from here, so a rectangle drawn on
+/// screen and one a node reads cannot disagree. What `positions_bounds`
+/// measures — the Point domain's `P` column — is a *part* of this: an
+/// instance geometry places nothing in that domain, so measuring it alone
+/// reports a line of glyph origins for a `text.layout` and nothing at all for
+/// a `geometry.from_image`.
+///
+/// The walk is [`expand_instances`]' walk: the same `P` / `rot` / `scale` /
+/// `source_index` columns, the same [`MAX_INSTANCE_DEPTH`] cutoff, the same
+/// clamping of an out-of-range `source_index`. What is flattened and what is
+/// measured have to be the same set of elements, or a nesting gets drawn
+/// outside the rectangle that claims to bound it.
+///
+/// Each source is measured **once**, not once per instance: `sources()` is
+/// deduplicated (`"Ravel"` is five characters and five sources, but a
+/// repeated character shares one), so per instance all that happens is four
+/// corners placed. `O(sources × points + instances)`.
+///
+/// `None` when the geometry draws nothing at all — an empty geometry has no
+/// rectangle, and a zero-sized one at the origin would be a lie.
+pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect> {
+    drawn_bounds_at(geometry, 0)
+}
+
+/// [`drawn_bounds`] at instance nesting `depth`, counted the way
+/// [`expand_at`] counts it: the top-level geometry is depth 0, and the
+/// instances of a geometry at [`MAX_INSTANCE_DEPTH`] are not reached.
+fn drawn_bounds_at(geometry: &Geometry, depth: u32) -> Option<Rect> {
+    union(
+        geometry.positions_bounds(),
+        instance_bounds(geometry, depth),
+    )
+}
+
+/// Bounds of what this geometry's instance domain stamps, each source placed
+/// by its own instance.
+fn instance_bounds(geometry: &Geometry, depth: u32) -> Option<Rect> {
+    // The depth `rasterize` stops drawing at and `expand_at` stops
+    // flattening at. Measuring deeper would bound elements that do not exist.
+    if depth >= MAX_INSTANCE_DEPTH {
+        return None;
+    }
+    let offsets = geometry.positions(Domain::Instance)?.ok()?;
+    let sources = geometry.sources();
+    if sources.is_empty() {
+        // Nothing is stamped — `rasterize` draws no instance and `expand_at`
+        // drops the domain. The placements are still elements the Viewer
+        // marks, and a `scatter.*` whose source input is unwired is exactly
+        // that, so the extent of the placements is the honest answer.
+        return placed_bounds(offsets.iter3().map(|p| Vec2(p.0, p.1)));
+    }
+    // A 3D instance domain places nothing: `rasterize` reads `P` as `Vec2`
+    // and `expand_at` requires it planar, so both draw nothing here too.
+    let offsets = offsets.planar()?;
+    let instances = geometry.instances();
+    let rots = instances
+        .get(names::ROT)
+        .and_then(|column| column.as_f32(names::ROT).ok());
+    let scales = instances
+        .get(names::SCALE)
+        .and_then(|column| column.as_vec2(names::SCALE).ok());
+    let source_indices = instances
+        .get(names::SOURCE_INDEX)
+        .and_then(|column| column.as_i32(names::SOURCE_INDEX).ok());
+
+    // One rectangle per source, in the source's own space. Deduplicated
+    // sources mean this is where the cost lives; the loop below only places
+    // corners.
+    let local: Vec<Option<Rect>> = sources
+        .iter()
+        .map(|source| match source {
+            InstanceSource::Image(image) => Some(image.rect()),
+            InstanceSource::Geometry(source) => drawn_bounds_at(source, depth + 1),
+        })
+        .collect();
+
+    let mut bounds = None;
+    for (index, offset) in offsets.iter().enumerate() {
+        let selected = source_slot(sources.len(), source_indices, index);
+        let Some(rect) = local[selected] else {
+            continue;
+        };
+        let placement = InstanceTransform {
+            offset: *offset,
+            rot: rots
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(0.0),
+            scale: scales
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(InstanceTransform::IDENTITY.scale),
+        };
+        bounds = union(bounds, placed_rect(rect, placement));
+    }
+    bounds
+}
+
+/// A source rectangle placed by one instance: the axis-aligned bounds of its
+/// four placed corners.
+///
+/// The corners rather than the rectangle, because a turned rectangle is not
+/// one: rotating `(x, y, width, height)` as if it were a rectangle would
+/// report the source's own extent at a new position and lose every pixel the
+/// turn pushed outside it.
+fn placed_rect(rect: Rect, placement: InstanceTransform) -> Option<Rect> {
+    placed_bounds(
+        [
+            Vec2(rect.x, rect.y),
+            Vec2(rect.x + rect.width, rect.y),
+            Vec2(rect.x + rect.width, rect.y + rect.height),
+            Vec2(rect.x, rect.y + rect.height),
+        ]
+        .into_iter()
+        .map(|corner| placement.apply(corner)),
+    )
+}
+
+/// Axis-aligned bounds of a stream of points, or `None` when it is empty.
+fn placed_bounds(points: impl IntoIterator<Item = Vec2>) -> Option<Rect> {
+    let mut points = points.into_iter();
+    let first = points.next()?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.0, first.1, first.0, first.1);
+    for point in points {
+        min_x = min_x.min(point.0);
+        min_y = min_y.min(point.1);
+        max_x = max_x.max(point.0);
+        max_y = max_y.max(point.1);
+    }
+    Some(Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    })
+}
+
+/// The smallest rectangle containing both, with either side absent.
+fn union(left: Option<Rect>, right: Option<Rect>) -> Option<Rect> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let (x, y) = (left.x.min(right.x), left.y.min(right.y));
+            Some(Rect {
+                x,
+                y,
+                width: (left.x + left.width).max(right.x + right.width) - x,
+                height: (left.y + left.height).max(right.y + right.height) - y,
+            })
+        }
+        (some, None) | (None, some) => some,
+    }
+}
+
 fn domain_count(geometry: &Geometry, domain: Domain) -> usize {
     match domain {
         Domain::Point => geometry.point_count(),
@@ -2018,8 +2173,17 @@ fn select_source<'a>(
     source_indices: Option<&[i32]>,
     index: usize,
 ) -> &'a InstanceSource {
+    &sources[source_slot(sources.len(), source_indices, index)]
+}
+
+/// Which slot of the source list instance `index` stamps.
+///
+/// Split out of [`select_source`] because [`drawn_bounds`] measures each
+/// source once and then needs the *slot* rather than the source, and the
+/// clamping rule is one rule.
+fn source_slot(source_count: usize, source_indices: Option<&[i32]>, index: usize) -> usize {
     let selected = source_indices.map_or(0, |indices| indices[index].max(0) as usize);
-    &sources[selected.min(sources.len() - 1)]
+    selected.min(source_count - 1)
 }
 
 /// Rewrites `P`, `in_tan` and `out_tan` of each block with that block's
@@ -2203,6 +2367,7 @@ fn append_rows(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn bounds_center_prefers_points_then_falls_back_to_instances() {
@@ -2226,6 +2391,213 @@ mod tests {
             .unwrap();
         assert_eq!(bounds_center(&instance_only), Some(Vec3(1.0, 5.0, 0.0)));
         assert_eq!(bounds_center(&Geometry::new()), None);
+    }
+
+    // ----- drawn_bounds -------------------------------------------------------
+
+    /// A square source centred on its own origin, so a placement's effect on
+    /// the measured rectangle is the placement itself.
+    fn unit_square() -> Geometry {
+        Geometry::from_points(vec![
+            Vec2(-1.0, -1.0),
+            Vec2(1.0, -1.0),
+            Vec2(1.0, 1.0),
+            Vec2(-1.0, 1.0),
+        ])
+    }
+
+    /// A geometry stamping `source` once, at `offset` and turned by `rot`.
+    fn one_instance(source: InstanceSource, offset: Vec2, rot: f32) -> Geometry {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![offset]))
+            .expect("one offset");
+        if rot != 0.0 {
+            geometry
+                .instances_mut()
+                .insert(names::ROT, AttributeArray::F32(vec![rot]))
+                .expect("one turn");
+        }
+        geometry.set_sources(vec![source]);
+        geometry
+    }
+
+    fn image_source(width: u32, height: u32) -> InstanceSource {
+        InstanceSource::Image(
+            crate::geometry::InstanceImage::new(
+                Arc::new(crate::types::FrameBuffer::new_zeroed(width, height)),
+                width,
+                height,
+            )
+            .expect("a frame buffer is an image source"),
+        )
+    }
+
+    fn as_tuple(rect: Rect) -> (f32, f32, f32, f32) {
+        (rect.x, rect.y, rect.width, rect.height)
+    }
+
+    /// Completion criterion: a geometry that places nothing in the Point
+    /// domain is no longer measured as a zero rectangle. `text.layout` and
+    /// `geometry.from_image` both look like this.
+    #[test]
+    fn an_instance_only_geometry_is_not_zero_sized() {
+        let geometry = one_instance(
+            InstanceSource::Geometry(Arc::new(unit_square())),
+            Vec2(10.0, 20.0),
+            0.0,
+        );
+        assert_eq!(geometry.point_count(), 0);
+        let bounds = drawn_bounds(&geometry).expect("the stamped square has an extent");
+        assert_eq!(as_tuple(bounds), (9.0, 19.0, 2.0, 2.0));
+    }
+
+    /// An instance domain with no source list stamps nothing, so all there is
+    /// to measure is where the placements are — which is what a `scatter.*`
+    /// with its source input unwired looks like, and what the Viewer already
+    /// marks. Unioned with the points, so the curve a scatter ran along stays
+    /// inside the rectangle.
+    #[test]
+    fn instances_with_nothing_to_stamp_measure_their_placements() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 1.0)]);
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(-1.0, 5.0)]))
+            .expect("one placement");
+        assert!(geometry.sources().is_empty());
+        let bounds = drawn_bounds(&geometry).expect("both domains place something");
+        assert_eq!(as_tuple(bounds), (-1.0, 0.0, 3.0, 5.0));
+    }
+
+    /// Completion criterion: an image instance measures the image's own
+    /// rectangle, moved to where the instance puts it.
+    #[test]
+    fn an_image_instance_measures_the_images_rectangle() {
+        let geometry = one_instance(image_source(64, 32), Vec2(100.0, -5.0), 0.0);
+        let rect = geometry.sources()[0]
+            .image()
+            .expect("an image source")
+            .rect();
+        let bounds = drawn_bounds(&geometry).expect("a stamped image has an extent");
+        assert_eq!(
+            as_tuple(bounds),
+            (rect.x + 100.0, rect.y - 5.0, rect.width, rect.height),
+            "the image rectangle was not moved to the instance"
+        );
+    }
+
+    /// Completion criterion: a turned source is bounded by the *circumscribed*
+    /// rectangle of its placed corners, not by its own rectangle relabelled.
+    ///
+    /// A quarter turn would hide the difference on a square, so the source is
+    /// a wide rectangle turned by 45°: its half-diagonal is what the bounds
+    /// have to reach.
+    #[test]
+    fn a_turned_source_is_bounded_by_its_placed_corners() {
+        let mut source = unit_square();
+        source
+            .points_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![
+                    Vec2(-4.0, -1.0),
+                    Vec2(4.0, -1.0),
+                    Vec2(4.0, 1.0),
+                    Vec2(-4.0, 1.0),
+                ]),
+            )
+            .expect("four corners");
+        let upright = drawn_bounds(&one_instance(
+            InstanceSource::Geometry(Arc::new(source.clone())),
+            Vec2(0.0, 0.0),
+            0.0,
+        ))
+        .expect("an upright stamp has an extent");
+        let turned = drawn_bounds(&one_instance(
+            InstanceSource::Geometry(Arc::new(source)),
+            Vec2(0.0, 0.0),
+            std::f32::consts::FRAC_PI_4,
+        ))
+        .expect("a turned stamp has an extent");
+
+        // (4, 1) turned by 45° reaches 5/√2 on both axes, and (4, -1) reaches
+        // 3/√2, so the half-extent is 5/√2 each way.
+        let reach = 5.0 / 2.0_f32.sqrt();
+        assert!(
+            (turned.width - reach * 2.0).abs() < 1e-3 && (turned.height - reach * 2.0).abs() < 1e-3,
+            "the corners were not placed: {turned:?}"
+        );
+        assert!(
+            turned.height > upright.height,
+            "turning a rectangle has to widen its bounds: {turned:?} vs {upright:?}"
+        );
+    }
+
+    /// Completion criterion: what [`expand_instances`] stops flattening at is
+    /// what `drawn_bounds` stops measuring at. A level past the guard is not
+    /// drawn, so bounding it would claim an extent for nothing.
+    #[test]
+    fn the_depth_guard_bounds_exactly_what_expansion_flattens() {
+        let mut level = unit_square();
+        let mut measured = Vec::new();
+        for _ in 0..=MAX_INSTANCE_DEPTH + 1 {
+            let next = one_instance(
+                InstanceSource::Geometry(Arc::new(level)),
+                Vec2(0.0, 0.0),
+                0.0,
+            );
+            let expanded = expand_instances(&next).expect("a nesting answers");
+            measured.push((expanded.point_count() > 0, drawn_bounds(&next).is_some()));
+            level = next;
+        }
+        for (depth, (flattened, bounded)) in measured.iter().enumerate() {
+            assert_eq!(
+                flattened, bounded,
+                "nesting depth {depth}: expansion kept points = {flattened}, \
+                 drawn_bounds measured something = {bounded}"
+            );
+        }
+        assert!(
+            measured.iter().any(|(flattened, _)| !flattened),
+            "the nesting never reached the guard: {measured:?}"
+        );
+    }
+
+    /// The cost condition, opt-in because it is a measurement rather than an
+    /// assertion about behaviour: `cargo test -p ravel-core --release
+    /// drawn_bounds_costs -- --ignored --nocapture`.
+    ///
+    /// A million-point geometry has to cost the same order as the
+    /// `positions_bounds` it replaces, because the Viewer pays it once per
+    /// pointer move. The numbers behind the table on [`drawn_bounds`].
+    ///
+    /// Alternating rounds, best of each: a single A-then-B pair charges the
+    /// first call for whatever the machine was doing when the test started,
+    /// and the answer is a ratio between two numbers that both move.
+    #[test]
+    #[ignore = "a timing measurement, not a behavioural assertion"]
+    fn drawn_bounds_costs_the_same_order_as_positions_bounds() {
+        let geometry = Geometry::from_points(
+            (0..1_000_000)
+                .map(|i| Vec2(i as f32, -(i as f32)))
+                .collect(),
+        );
+        let (mut bare, mut drawn) = (Duration::MAX, Duration::MAX);
+        for _ in 0..8 {
+            let start = Instant::now();
+            let positions = geometry.positions_bounds();
+            bare = bare.min(start.elapsed());
+            let start = Instant::now();
+            let all = drawn_bounds(&geometry);
+            drawn = drawn.min(start.elapsed());
+            assert_eq!(positions, all, "a flat geometry draws exactly its points");
+        }
+        println!("1 000 000 points: positions_bounds {bare:?}, drawn_bounds {drawn:?}");
+        assert!(
+            drawn < bare * 4,
+            "drawn_bounds left the order of positions_bounds: {drawn:?} vs {bare:?}"
+        );
     }
 
     #[test]

@@ -1187,8 +1187,13 @@ fn layer_ref() -> NodeTemplate {
         // "no target", the spelling `ParameterValue::identifier` already
         // reads as `Identifier::Unset`.
         .with_param(string_parameter("layer", ""))
+        // The port the target layer exposes, so the candidates come from that
+        // layer's `net.out` and the output type follows the one picked
+        // (`dependent_port_updates`). `"frame"` is a real port — every layer
+        // network has it — and not a stand-in for "unset".
         .with_param(string_parameter("port", "frame"))
         .with_contextual_param_options("layer", ContextualKind::SiblingLayer)
+        .with_contextual_param_options("port", ContextualKind::LayerOutputPort)
 }
 
 fn constant_color() -> NodeTemplate {

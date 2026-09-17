@@ -36,18 +36,29 @@ pub const FIELD_PORTS: &str = "ports";
 /// disabled and *looks* disabled).
 pub const NO_SIBLING_LAYERS: &str = "properties.value.no_sibling_layers";
 
+/// What the `port` row shows when the referenced layer offers no output port
+/// — no target picked yet, a target this composition does not hold, or a
+/// layer whose network has no `net.out` node. A locale key for the same
+/// reason as [`NO_SIBLING_LAYERS`].
+///
+/// A separate sentence from the sibling one because the reason is the kind's:
+/// "there are no other layers" over a port row would name the wrong thing to
+/// go and fix.
+pub const NO_LAYER_OUTPUT_PORTS: &str = "properties.value.no_layer_output_ports";
+
 /// Why a contextual parameter offers nothing, as a locale key the display
 /// boundary translates ([`crate::properties::node::string_field`]).
 ///
 /// A `match` over the whole of [`ContextualKind`] rather than one message for
-/// every kind: the reason is the *kind's* reason, and the next kind
-/// ([`ContextualKind::LayerOutputPort`], `CPO-3`) would otherwise inherit
-/// "there are no other layers" while the truth is "that layer has no output
-/// ports". Exhaustive, so adding an arm to `ContextualKind` fails to compile
-/// here instead of showing the wrong sentence.
+/// every kind: the reason is the *kind's* reason, and
+/// [`ContextualKind::LayerOutputPort`] would otherwise inherit "there are no
+/// other layers" while the truth is "that layer has no output ports".
+/// Exhaustive, so adding an arm to `ContextualKind` fails to compile here
+/// instead of showing the wrong sentence.
 fn no_candidates_reason(kind: ContextualKind) -> &'static str {
     match kind {
         ContextualKind::SiblingLayer => NO_SIBLING_LAYERS,
+        ContextualKind::LayerOutputPort => NO_LAYER_OUTPUT_PORTS,
     }
 }
 
@@ -157,12 +168,13 @@ fn int_field(key: String, value: i32, ranges: Option<&ParamRange>) -> PropertyFi
 /// renders as an enum dropdown; free-form strings stay editable text.
 ///
 /// Two kinds of option set ([`ParamOptions`]). A `Fixed` one is the
-/// template's own list. A `Contextual` one is resolved against `ctx` — the
-/// candidate layers of `layer.ref`'s `layer`, say — and differs in two ways:
+/// template's own list. A `Contextual` one is resolved against `node` and
+/// `ctx` — the candidate layers of `layer.ref`'s `layer`, the output ports of
+/// the layer that one names — and differs in two ways:
 ///
 /// * **No candidates means no dropdown.** The row becomes a read-only
-///   [`NO_SIBLING_LAYERS`] instead, because an empty dropdown reads as
-///   "broken", not as "nothing to choose".
+///   reason instead ([`no_candidates_reason`]), because an empty dropdown
+///   reads as "broken", not as "nothing to choose".
 /// * **A stored value the candidates do not offer joins them**, keeping the
 ///   row's selection. This is the normal state of a reference that travelled
 ///   — a node copied into another project — and it is the same treatment the
@@ -174,11 +186,11 @@ fn string_field(
     key: String,
     value: String,
     registry: &NodeRegistry,
-    type_key: &str,
+    node: &Node,
     ctx: NodeContext<'_>,
     spelling: StringSpelling,
 ) -> PropertyField {
-    match registry.param_option_source(type_key, &key) {
+    match registry.param_option_source(&node.type_key, &key) {
         Some(ParamOptions::Fixed(options)) => PropertyField::Enum {
             key,
             value,
@@ -200,7 +212,7 @@ fn string_field(
         Some(ParamOptions::Contextual(kind)) => {
             let mut options = ctx
                 .comp
-                .map(|comp| contextual_options(*kind, comp, ctx.owner))
+                .map(|comp| contextual_options(*kind, node, comp, ctx.owner))
                 .unwrap_or_default();
             if options.is_empty() {
                 // Nothing to offer. What the row says then depends on whether
@@ -398,7 +410,7 @@ fn param_field(
             p.key.clone(),
             v.clone(),
             registry,
-            &node.type_key,
+            node,
             ctx,
             StringSpelling::Constant,
         ),
@@ -489,7 +501,7 @@ fn param_field(
             p.key.clone(),
             steps.sample(frame as f64).clone(),
             registry,
-            &node.type_key,
+            node,
             ctx,
             StringSpelling::Animated,
         ),
@@ -1838,11 +1850,12 @@ mod tests {
             ],
             "the owner is never its own sibling, and the labels are Timeline rows"
         );
-        // `port` is a free string in this unit: only `layer` declares
-        // candidates, so the other row must not have turned into a dropdown.
+        // `port` declares candidates too (CPO-3), but these layers own empty
+        // networks with no `net.out` node, so there is nothing to offer and
+        // the row reads as the value it holds.
         assert!(matches!(
             field_of(&fields, "port"),
-            PropertyField::String { .. }
+            PropertyField::ReadOnly { .. }
         ));
     }
 
@@ -1920,6 +1933,136 @@ mod tests {
             panic!("expected a dropdown");
         };
         assert_eq!(options, vec![ParamOption::new("2", "1. Hero")]);
+    }
+
+    // ----- the referenced layer's output ports (CPO-3) ---------------------
+
+    /// A composition whose layer `n + 1` (bottom-most first, ids from 1) owns
+    /// a network whose `net.out` node declares `layers[n]` as its input ports
+    /// — which is what a layer's *output* ports are (REQ-LAYER-002/003).
+    ///
+    /// Every port is a frame buffer: the row shows names, and the type only
+    /// matters to the output that follows the pick (`CPO-4`).
+    fn comp_of_out_ports(layers: &[&[&str]]) -> ravel_core::composition::Composition {
+        use ravel_core::composition::{Composition, Layer};
+        use ravel_core::id::CompId;
+        use ravel_core::types::FrameRate;
+
+        layers.iter().enumerate().fold(
+            Composition::new(CompId::new(1), "C", (16, 16), FrameRate::new(30, 1), 100),
+            |comp, (index, ports)| {
+                let mut out = Node::new(NodeId::new(1000 + index as u64), "net.out");
+                for name in *ports {
+                    out = out.with_input(*name, &[DataTypeId::FRAME_BUFFER]);
+                }
+                let network = ravel_core::graph::Graph::new()
+                    .add_node(out)
+                    .expect("a fresh graph takes the Out node");
+                comp.add_layer(Layer::new(LayerId::new(index as u64 + 1), "L", network))
+            },
+        )
+    }
+
+    /// The `port` row is a picker of the **referenced** layer's output ports,
+    /// and changing the reference swaps them: the candidates follow the
+    /// node's own `layer` parameter, not the composition or the owner.
+    #[test]
+    fn the_port_row_lists_the_referenced_layers_output_ports() {
+        let comp = comp_of_out_ports(&[&[], &["frame", "geo"], &["frame", "field"]]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&comp),
+            owner: Some(LayerId::new(1)),
+        };
+
+        let ports_of = |target: &str| match field_of(&rows(&layer_ref_node(target), ctx), "port") {
+            PropertyField::Enum { value, options, .. } => (value, options),
+            other => panic!("expected a dropdown, got {other:?}"),
+        };
+
+        assert_eq!(
+            ports_of("2"),
+            (
+                "frame".to_string(),
+                vec![ParamOption::fixed("frame"), ParamOption::fixed("geo")]
+            )
+        );
+        assert_eq!(
+            ports_of("3"),
+            (
+                "frame".to_string(),
+                vec![ParamOption::fixed("frame"), ParamOption::fixed("field")]
+            ),
+            "another layer, another set of ports"
+        );
+    }
+
+    /// A stored `port` the referenced layer does not have keeps the row's
+    /// selection instead of falling back to the `"frame"` default: a row that
+    /// silently pointed at another port would change what the node reads
+    /// without the user touching it.
+    #[test]
+    fn a_port_the_referenced_layer_does_not_have_stays_selected() {
+        let comp = comp_of_out_ports(&[&[], &["frame"]]);
+        let node = set_param(
+            layer_ref_node("2"),
+            "port",
+            ParameterValue::String("geo".into()),
+        );
+
+        let PropertyField::Enum { value, options, .. } = field_of(
+            &rows(
+                &node,
+                NodeContext {
+                    network: NetworkContext::LayerRoot,
+                    comp: Some(&comp),
+                    owner: Some(LayerId::new(1)),
+                },
+            ),
+            "port",
+        ) else {
+            panic!("expected a dropdown");
+        };
+        assert_eq!(value, "geo", "the stored port is still what the row holds");
+        assert_eq!(
+            options,
+            vec![ParamOption::fixed("frame"), ParamOption::fixed("geo")],
+            "the port the target lacks is offered last, so it stays the selection"
+        );
+    }
+
+    /// With the reference unresolved there is nothing to pick from, so the
+    /// row reads as the port it holds — `"frame"` is a real port every layer
+    /// network has, not a spelling of "unset", and hiding it behind the
+    /// reason would claim the parameter has no value. The reason is what
+    /// there is to say only when the row holds nothing at all.
+    #[test]
+    fn an_unresolved_reference_leaves_the_port_row_reading_as_its_value() {
+        let comp = comp_of_out_ports(&[&[], &["frame"]]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&comp),
+            owner: Some(LayerId::new(1)),
+        };
+
+        for target in ["", "404"] {
+            match field_of(&rows(&layer_ref_node(target), ctx), "port") {
+                PropertyField::ReadOnly { value, .. } => {
+                    assert_eq!(value, "frame", "target {target:?} hides no value")
+                }
+                other => panic!("expected the value, got {other:?}"),
+            }
+        }
+
+        let blank = set_param(
+            layer_ref_node(""),
+            "port",
+            ParameterValue::String(String::new()),
+        );
+        match field_of(&rows(&blank, ctx), "port") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, NO_LAYER_OUTPUT_PORTS),
+            other => panic!("expected the reason, got {other:?}"),
+        }
     }
 
     /// Every section the split produces reaches [`sections_for_node`], between

@@ -193,24 +193,30 @@ fn enum_options_translate_state_words_and_never_a_declared_label() {
     ravel_i18n::set_locale("en").expect("en catalog is shipped");
 }
 
-/// CPO-2: the reason a contextual row shows instead of an empty dropdown is a
-/// locale key from `ravel-ui`, so it has to come out of the display boundary
-/// as a sentence in both catalogs — never as `properties.value.*`.
+/// The reason a contextual row shows instead of an empty dropdown is a locale
+/// key from `ravel-ui`, so it has to come out of the display boundary as a
+/// sentence in both catalogs — never as `properties.value.*`.
+///
+/// One per `ContextualKind`, and every one of them has to be in both
+/// catalogs: `no_candidates_reason` is an exhaustive match, so a kind added
+/// without its two lines of locale data would put a raw key on screen.
 #[test]
-fn the_no_sibling_layers_reason_is_translated_not_shown_as_a_key() {
-    use ravel_ui::properties::node::NO_SIBLING_LAYERS;
+fn every_contextual_row_reason_is_translated_not_shown_as_a_key() {
+    use ravel_ui::properties::node::{NO_LAYER_OUTPUT_PORTS, NO_SIBLING_LAYERS};
 
     let _lock = TEST_LOCK.lock().unwrap();
     init_i18n();
 
     for locale in ["en", "ja"] {
         ravel_i18n::set_locale(locale).expect("the catalog is shipped");
-        let shown = read_only_value(NO_SIBLING_LAYERS);
-        assert_ne!(shown, NO_SIBLING_LAYERS, "{locale} shows the raw key");
-        assert!(
-            !shown.starts_with("properties."),
-            "{locale} shows a key: {shown}"
-        );
+        for reason in [NO_SIBLING_LAYERS, NO_LAYER_OUTPUT_PORTS] {
+            let shown = read_only_value(reason);
+            assert_ne!(shown, reason, "{locale} shows the raw key");
+            assert!(
+                !shown.starts_with("properties."),
+                "{locale} shows a key: {shown}"
+            );
+        }
     }
     ravel_i18n::set_locale("en").expect("en catalog is shipped");
 }

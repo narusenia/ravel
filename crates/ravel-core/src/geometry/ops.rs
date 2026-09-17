@@ -2954,19 +2954,35 @@ mod tests {
     /// ink by 90 units above and below.
     #[test]
     fn nesting_is_bounded_the_way_the_placements_compose() {
-        let mut inner = one_instance(image_source(20, 2), Vec2(0.0, 0.0), FRAC_PI_2);
+        let mut inner = one_instance(image_source(20, 2), Vec2(3.0, 5.0), FRAC_PI_2);
         inner
             .instances_mut()
             .insert(names::INDEX, AttributeArray::I32(vec![0]))
             .expect("one instance");
-        let outer = scaled_instance(inner, Vec2(10.0, 1.0), 0.0);
+        // Built inline rather than with `scaled_instance`, because **both**
+        // levels have to carry an offset: `compose` differs from its own
+        // arguments reversed only in the offset (the turns add and the scales
+        // multiply either way), so two placements at the origin would pin the
+        // composition without pinning which one is the outer.
+        let mut outer = Geometry::new();
+        outer
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(7.0, 11.0)]))
+            .expect("one offset");
+        outer
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(10.0, 1.0)]))
+            .expect("one scale");
+        outer.set_sources(vec![InstanceSource::Geometry(Arc::new(inner))]);
 
         let bounds = drawn_bounds(&outer).expect("a nested image has an extent");
-        // scale (10, 1) first, then the quarter turn: (±10, ±1) becomes
-        // (±100, ±1) and the turn swaps the axes.
+        // `compose(outer, inner)` is offset `outer.apply((3, 5))` = (37, 16),
+        // a quarter turn, and scale (10, 1). So (±10, ±1) scales to (±100,
+        // ±1), the turn swaps the axes, and (37, 16) moves it. Reversing the
+        // two placements would put it at (-8, 12) instead.
         for (what, got, want) in [
-            ("x", bounds.x, -1.0),
-            ("y", bounds.y, -100.0),
+            ("x", bounds.x, 36.0),
+            ("y", bounds.y, -84.0),
             ("width", bounds.width, 2.0),
             ("height", bounds.height, 200.0),
         ] {

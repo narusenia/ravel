@@ -305,6 +305,25 @@ Graph::new()
     // `registry::builtin::dependent_param_updates(node, &changed)`, which
     // returns the updates a change forces — today only `attribute.set`'s
     // `value`, reshaped when its `type` changes.
+    .set_params_and_output_types(node_id, &[Parameter], &[PortRetype])
+    // The same, plus the OUTPUT ports those values decide. PortRetype
+    // { port, data_type }: the port keeps its slot (no Edge::source_port and
+    // no ChannelSource::NodeOutput binding moves) and the edges the new type
+    // cannot travel are dropped by the same rule
+    // `network::set_custom_port_type` uses — an edge whose other end accepts
+    // the new type is KEPT. A retype to the type already declared, or one
+    // naming a port the node does not have, costs nothing.
+    // A separate entry point rather than a fourth argument on `set_params`
+    // because only a caller holding the document can resolve such a type:
+    // `layer.ref`'s output carries what the referenced port carries, and that
+    // port lives in ANOTHER LAYER's network, which a `Graph` cannot see.
+    // Pair it with `registry::builtin::dependent_port_updates(node, &changed,
+    // Option<&Composition>)` — today only `layer.ref`, whose output follows
+    // `port` AND `layer` (the same port name can carry something else on
+    // another layer). An unresolvable reference (no layer picked, a layer the
+    // composition does not hold, no `net.out`, an absent port, no `comp`)
+    // retypes NOTHING: falling back to the default would drop every edge the
+    // output feeds the moment a reference broke mid-edit.
 graph.replace_node(Arc<Node>) -> Graph                // parameter edits
 node.param_port_index(key) / node.supports_param_ports()
 PortSide::{Input, Output}   // which port list a name-keyed edit means
@@ -1567,8 +1586,9 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // math.scalar `op`)
     .with_contextual_param_options(key, ContextualKind)   // the candidates
     // come from WHERE THE NODE SITS, not from the template. Closed enum
-    // (SiblingLayer), never a closure: NodeTemplate is data that is cloned and
-    // compared, and the resolution must stay in ravel-core.
+    // (SiblingLayer, LayerOutputPort), never a closure: NodeTemplate is data
+    // that is cloned and compared, and the resolution must stay in
+    // ravel-core.
     .with_param_role(key, ParamRole)     // Position | Size: what a vector
     // param means on the canvas. The Viewer's ParamManipulator puts a handle
     // on it; Size is measured from the node's first Position param.
@@ -1588,8 +1608,8 @@ registry.param_options(type_key, param_key) -> Option<&[String]>
 registry.param_option_source(type_key, param_key) -> Option<&ParamOptions>
     // ParamOptions::{Fixed(Vec<String>), Contextual(ContextualKind)} — the
     // declaration itself, for a reader that can supply a context
-registry::contextual_options(ContextualKind, &Composition, Option<LayerId>)
-    -> Vec<ParamOption>
+registry::contextual_options(ContextualKind, &Node, &Composition,
+    Option<LayerId>) -> Vec<ParamOption>
     // ParamOption { value, label }: the value an edit writes and the text the
     // user reads, SEPARATE — a layer is addressed by LayerId and read by name.
     // `owner` is the layer owning the node's network; None means the node
@@ -1603,6 +1623,11 @@ registry::contextual_options(ContextualKind, &Composition, Option<LayerId>)
     // row = comp.layers.len() - index. Never the layer id, never the index
     // itself, never the position in the candidate list. The conversion lives
     // only in `registry::layer_param_option(index, total, layer)`.
+    // LayerOutputPort reads the NODE's own `layer` parameter — the candidates
+    // are the ports of the layer that names, so neither the composition nor
+    // the owner decides them. They are the target layer's `net.out` node's
+    // INPUT ports (a layer's outputs, REQ-LAYER-002/003), each reading as
+    // itself, and a reference that resolves to nothing offers nothing.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
 template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node
@@ -2195,7 +2220,7 @@ Current keys:
 | `vector.dot` | CPU | two vectors of the same arity → Scalar. Both ports accept every arity (the output is a Scalar regardless), so a Vec2 × Vec3 pair is connectable and reported as an evaluation error. One connected side is not a mismatch: the other reads as that arity's zero |
 | `vector.cross.vec2` / `.vec3` | CPU | 2D cross product → Scalar (`ax·by − ay·bx`), 3D cross product → `Vec3`. Two templates because the *output* type differs per arity; there is no 4-component form |
 | `media` | CPU | decodes media via the document asset table (`asset_id`), branching on `AssetKind`: containers via `MediaReader` (layer-local seconds → media frame `floor(t·fps)`, clamped), stills via an injectable `ImageReaderFactory`, sequences by rebuilding the frame file name (`start + floor(t·seq_fps)` clamped to `start..=end`; seq_fps = `metadata.frame_rate` else comp fps); offline / decode failure → transparent frame at ctx resolution (warned once per asset); every decoded frame lands in the shared `MediaFrameCache` the processor was built with, the processor itself keeping only the open reader; FFmpeg backend behind the `ffmpeg` feature; `video` is a load-time alias normalized by `Document::normalize_node_type_aliases` |
-| `layer.ref` | CPU | same-comp reference to another layer's `net.out` port; `layer` is the target `LayerId` as decimal text (`""` = unset, `.ravprj` v13 — a string so Properties can offer named sibling candidates through `ContextualKind::SiblingLayer`) and `port` the port name; pre-transform output at the target's local time; typed zero outside its interval |
+| `layer.ref` | CPU | same-comp reference to another layer's `net.out` port; `layer` is the target `LayerId` as decimal text (`""` = unset, `.ravprj` v13 — a string so Properties can offer named sibling candidates through `ContextualKind::SiblingLayer`) and `port` the port name, picked from the target's own ports (`ContextualKind::LayerOutputPort`) with the node's **output type following it** (`registry::builtin::dependent_port_updates`; an unresolvable reference leaves the type alone); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
 | `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Per-element style: `fill` (Bool), `stroke_width` (F32) and `stroke_color` (Color) on the Primitive domain override the node's parameters for one path; the same attributes on the Instance domain override them for everything that instance expands. An unset `stroke_color` strokes in the element's fill color. Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. An instance whose source is an `InstanceSource::Image` stamps a textured rectangle instead of expanding a geometry: sized by the image's own resolution, origin-centred, sampled bilinearly through the inverse of the composed placement, tinted by `Cd` x `alpha`, with **hard (un-antialiased) half-open edges** so abutting copies do not blend twice. Both paths draw it. The CPU reference reads texels, so a resident source is read back once **per source** at the node entry; the GPU path splits the draw where the sampled source changes and never reads back at all — that asymmetry is deliberate. Magnifying a copy blurs it: the network is evaluated once and the result stamped, never re-evaluated per copy. |

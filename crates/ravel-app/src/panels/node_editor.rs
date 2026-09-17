@@ -2041,7 +2041,10 @@ impl NodeEditorPanel {
     /// Applies a property edit called directly by the Properties panel.
     ///
     /// Numeric values are clamped to the parameter's hard range (registry
-    /// metadata). Channel-backed parameters keep their channel: a constant
+    /// metadata). A value that decides part of the node's shape brings that
+    /// with it in the same commit: `attribute.set`'s `value` follows its
+    /// `type`, and `layer.ref`'s output port takes the type of the port it
+    /// references. Channel-backed parameters keep their channel: a constant
     /// channel updates its constant, a keyframed channel gets a key at the
     /// current layer-local frame (REQ-LAYER-004). Live edits
     /// (`commit == false`, e.g. mid-scrub) update the document without
@@ -2056,6 +2059,18 @@ impl NodeEditorPanel {
         cx: &mut Context<Self>,
     ) {
         let local_frame = self.current_local_frame(cx);
+        // The composition an output type is resolved against: `layer.ref`'s
+        // output carries what the referenced layer's port carries, and that
+        // port lives in another layer's network. Taken once, and owned, so
+        // the loop below holds no borrow of the project.
+        let comp = self.context.as_ref().and_then(|context| {
+            self.project
+                .as_ref()?
+                .read(cx)
+                .document()
+                .get_composition(context.comp)
+                .cloned()
+        });
         let mut graph = self.graph.clone();
         let mut touched = false;
         for node_id in node_ids {
@@ -2083,8 +2098,20 @@ impl NodeEditorPanel {
             };
             let mut updates =
                 ravel_core::registry::builtin::dependent_param_updates(node, &changed);
+            // And the output port types the edit decides — `layer.ref`'s
+            // output follows the port it references — in the same call, so
+            // the value, its parameter ports and its output ports are one
+            // undo step. An unresolvable reference retypes nothing.
+            let retypes = ravel_core::registry::builtin::dependent_port_updates(
+                node,
+                &changed,
+                comp.as_deref(),
+            );
             updates.insert(0, changed);
-            let next = match graph.clone().set_params(*node_id, &updates) {
+            let next = match graph
+                .clone()
+                .set_params_and_output_types(*node_id, &updates, &retypes)
+            {
                 Ok(next) => next,
                 Err(err) => {
                     // Dropping the edit silently would look like the panel
@@ -5874,6 +5901,143 @@ mod tests {
             inspect(cx),
             (Some(1), Some(vec![DataTypeId::SCALAR]), 1),
             "the whole retype is one undo step"
+        );
+    }
+
+    /// Changing `layer.ref`'s `port` retypes its **output**, drops the edge
+    /// the new type cannot travel, and restores value, port and edge together
+    /// on one undo. A reference that then stops resolving leaves the type
+    /// where it is rather than falling back to the template default — which
+    /// would take the remaining edges with it.
+    #[gpui::test]
+    fn changing_a_layer_reference_port_retypes_its_output_in_one_undo(cx: &mut TestAppContext) {
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(crate::project_state::ProjectStateHandle(
+                project.downgrade(),
+            ));
+            cx.set_global(crate::panels::CanvasSelection::default());
+        });
+
+        let (ref_id, merge_id) = (NodeId::next(), NodeId::next());
+        let target_layer = LayerId::next();
+        let (comp_id, path) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+
+            // The referenced layer: one `net.out` offering a frame and a
+            // geometry port.
+            let out =
+                ravel_core::graph::Node::new(NodeId::next(), ravel_core::network::NET_OUT_TYPE_KEY)
+                    .with_input(ravel_core::network::PORT_FRAME, &[DataTypeId::FRAME_BUFFER])
+                    .with_input("geo", &[DataTypeId::GEOMETRY]);
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(target_layer, "Target", Graph::new().add_node(out).unwrap())
+                    .with_time(0, 0, 300),
+            )
+            .unwrap();
+
+            // The referring layer: a `layer.ref` on the target's `frame`,
+            // feeding a merge input that takes frames only.
+            let mut layer_ref = registry.create_node("layer.ref", ref_id).unwrap();
+            for param in &mut layer_ref.parameters {
+                if param.key == "layer" {
+                    param.value = ParameterValue::String(target_layer.raw().to_string());
+                }
+            }
+            let network = Graph::new()
+                .add_node(layer_ref)
+                .unwrap()
+                .add_node(registry.create_node("merge", merge_id).unwrap())
+                .unwrap()
+                .add_edge(
+                    ravel_core::id::EdgeId::next(),
+                    ref_id,
+                    ravel_core::id::OutputPortIndex(0),
+                    merge_id,
+                    ravel_core::id::InputPortIndex(0),
+                )
+                .unwrap();
+            let source_layer = LayerId::next();
+            let doc = ravel_ui::document::add_layer(
+                &doc,
+                comp_id,
+                Layer::new(source_layer, "Ref", network).with_time(0, 0, 300),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, NetworkPath::layer(comp_id, source_layer))
+        });
+
+        let inspect = |cx: &mut TestAppContext| {
+            project.read_with(cx, |project, _| {
+                let graph = resolve_network(project.document(), &path).expect("network");
+                let node = graph.node(ref_id).expect("layer.ref");
+                (node.outputs[0].data_type, graph.edge_count())
+            })
+        };
+        assert_eq!(
+            inspect(cx),
+            (DataTypeId::FRAME_BUFFER, 1),
+            "the template's output type, feeding the merge"
+        );
+
+        let window = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+                panel.apply_property_change(
+                    &[ref_id],
+                    "port",
+                    &PropertyValue::String("geo".into()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            inspect(cx),
+            (DataTypeId::GEOMETRY, 0),
+            "the output follows the referenced port, and the frame edge goes"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            inspect(cx),
+            (DataTypeId::FRAME_BUFFER, 1),
+            "the value, the output type and the edge are one undo step"
+        );
+
+        // Forward again, then delete the layer the reference names: the type
+        // stays geometry, because an unresolvable reference decides nothing.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::remove_layer(project.document(), comp_id, target_layer)
+                .expect("the target layer is there");
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_property_change(
+                    &[ref_id],
+                    "port",
+                    &PropertyValue::String("frame".into()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            inspect(cx).0,
+            DataTypeId::GEOMETRY,
+            "a reference that no longer resolves must not reset the output type"
         );
     }
 

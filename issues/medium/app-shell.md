@@ -108,36 +108,6 @@ authoritative なレジストリは `ProjectState` が所有している（Viewe
 
 ---
 
-## MED-APP-29 | bug / debt | `layer.ref` のレイヤー指定が数値スクラブで、参照ポートを変えても出力型が変わらない
-
-**該当**: `crates/ravel-core/src/registry/builtin.rs:529-540`（`layer_ref`）
-
-```rust
-.with_output(OutputPort { name: "output".into(), data_type: DataTypeId::FRAME_BUFFER })
-.with_param(int_parameter("layer", -1))
-.with_param(string_parameter("port", "frame"))
-.with_param_range("layer", -1.0..=16_777_215.0, -1.0..=1000.0)
-```
-
-2 つある。
-
-1. **`layer` が Int パラメータ**なので、Properties には −1〜16,777,215 の
-   数値スクラブが出る。ユーザーはレイヤー ID を知らないし、スクラブすると
-   存在しないレイヤーを指す。`port` も自由文字列
-2. **出力ポートの型が `FRAME_BUFFER` 固定**。`port` を変えても
-   出力の型が追随しないので、フレーム以外を参照した瞬間に型が嘘になる
-
-**修正方針は計画書へ移した**（2026-08-09）。調べたところ、足りないのは
-`layer.ref` の書き方ではなく**文脈から候補と型が決まる機構**そのものだった:
-`Registry::param_options` はテンプレート静的、`SHELL-5` の Parent
-ドロップダウンはレイヤーフィールドの別経路、パラメータ → 出力ポート型の追随は
-どこにも無い（`set_params` が retype するのはパラメータポートだけ）。
-複数クレートに跨るので Design gate に当たる。
-→ [`contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
-の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
-
----
-
 ## MED-APP-37 | bug | 評価結果が「届いた時点のコンポジション」と対で扱われ、切替中の結果が別コンプの寸法で解釈される
 
 **該当**: `crates/ravel-app/src/project_state.rs:2160-2178`（`ViewerOutput::Frame` /

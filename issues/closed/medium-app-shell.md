@@ -1293,3 +1293,53 @@ let names = match components.len() {
 `X` / `Y` / `Z` になるテスト。`constant.color` が従来どおり `R` / `G` / `B` /
 `A` のままであるテスト。
 
+---
+
+## MED-APP-29 | bug / debt | `layer.ref` のレイヤー指定が数値スクラブで、参照ポートを変えても出力型が変わらない
+
+> **解決済み**: PR #542 / #544 / #546（2026-09-17）。`contextual-parameter-options-plan.md` の
+> `CPO-1`〜`CPO-7` がすべて入り、**2 つとも機構ごと消えた**。`layer` は
+> `String` パラメータ（参照先 `LayerId` の十進表記、`.ravprj` v13）になり、
+> Properties は `ContextualKind::SiblingLayer` で同じコンポの他レイヤーを
+> `"{row}. {name}"` の Select に並べる（`CPO-2` / `CPO-5`、#544）。`port` も
+> `ContextualKind::LayerOutputPort` の Select で、参照先レイヤーの `net.out`
+> の入力ポートを並べる（`CPO-3`）。**出力ポートの型は選ばれた `port`
+> （と `layer`）に追随する** — 決めるのは
+> `registry::builtin::dependent_port_updates`、適用は
+> `Graph::set_params_and_output_types` で、値・パラメータポート・出力ポートが
+> 1 回の呼び出しで書かれるので 1 undo。運べなくなったエッジは
+> `network::set_custom_port_type` と同じ規則（相手側が新しい型を受け取れる
+> エッジは残す）で破棄される。参照が解決できないときは型を変えない
+> （`CPO-4`）。数値スクラブとレジストリ静的候補の話は
+> [`../../docs/implementation/contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
+> にある。
+
+**該当**: `crates/ravel-core/src/registry/builtin.rs:529-540`（`layer_ref`）
+
+```rust
+.with_output(OutputPort { name: "output".into(), data_type: DataTypeId::FRAME_BUFFER })
+.with_param(int_parameter("layer", -1))
+.with_param(string_parameter("port", "frame"))
+.with_param_range("layer", -1.0..=16_777_215.0, -1.0..=1000.0)
+```
+
+2 つある。
+
+1. **`layer` が Int パラメータ**なので、Properties には −1〜16,777,215 の
+   数値スクラブが出る。ユーザーはレイヤー ID を知らないし、スクラブすると
+   存在しないレイヤーを指す。`port` も自由文字列
+2. **出力ポートの型が `FRAME_BUFFER` 固定**。`port` を変えても
+   出力の型が追随しないので、フレーム以外を参照した瞬間に型が嘘になる
+
+**修正方針は計画書へ移した**（2026-08-09）。調べたところ、足りないのは
+`layer.ref` の書き方ではなく**文脈から候補と型が決まる機構**そのものだった:
+`Registry::param_options` はテンプレート静的、`SHELL-5` の Parent
+ドロップダウンはレイヤーフィールドの別経路、パラメータ → 出力ポート型の追随は
+どこにも無い（`set_params` が retype するのはパラメータポートだけ）。
+複数クレートに跨るので Design gate に当たる。
+→ [`contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
+の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
+
+**残余**: v13 より前の文書で `port` に `"frame"` 以外が入っていた `layer.ref`
+は、移行しても出力型が追随しない（追随はパラメータ編集の経路にしか入っていない）。
+`layer` か `port` を一度触れば直る。→ `LOW-CORE-06`

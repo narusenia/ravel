@@ -462,6 +462,7 @@ on = "オン"
 off = "オフ"
 none = "（なし）"
 no_sibling_layers = "このコンポジションに他のレイヤーがない"
+no_layer_output_ports = "そのレイヤーは出力ポートを持っていない"
 source_network = "ネットワーク（{count} ノード）"
 source_audio = "オーディオ"
 source_null = "ヌル"
@@ -853,7 +854,7 @@ label = "レイヤー参照"
 description = "同じコンポジション内の別レイヤーの出力を参照する。"
 [node."layer.ref".params]
 layer = "参照する同じコンポジション内のレイヤー。"
-port = "読み取る対象レイヤーの出力ポート名。"
+port = "読み取る参照先レイヤーの出力ポート。このノードの出力はそのポートの型になる。"
 
 [node."subnet"]
 label = "サブネット"

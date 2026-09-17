@@ -4,7 +4,8 @@
 //! Built-in node template definitions.
 
 use crate::animation::channel::AnimationChannel;
-use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
+use crate::composition::Composition;
+use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue, PortRetype};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
@@ -416,6 +417,73 @@ pub fn dependent_param_updates(node: &Node, changed: &Parameter) -> Vec<Paramete
         }],
         _ => Vec::new(),
     }
+}
+
+/// Output port types that must follow `changed` for `node` to stop lying
+/// about what it produces, so one command writes the value and the type
+/// together (the Document snapshot is the undo unit).
+///
+/// The only such dependency today is `layer.ref`, whose output carries
+/// whatever the referenced port carries: `port` names it and `layer` says
+/// which layer's `net.out` it belongs to, so **either** parameter decides the
+/// type. The parameter not being edited is read off `node`.
+///
+/// **An unresolvable reference changes nothing.** No layer picked yet, a
+/// target this composition does not hold, a network with no `net.out`, a port
+/// the target does not have, a `comp` the caller could not supply: each
+/// answers with no retype, so the declared type stays as it is. Falling back
+/// to the default instead would drop every edge the output feeds the moment a
+/// reference broke — and a broken reference is usually a step in the middle
+/// of an edit, not an end state.
+///
+/// [`Graph::set_params_and_output_types`] applies the result.
+///
+/// [`Graph::set_params_and_output_types`]: crate::graph::Graph::set_params_and_output_types
+pub fn dependent_port_updates(
+    node: &Node,
+    changed: &Parameter,
+    comp: Option<&Composition>,
+) -> Vec<PortRetype> {
+    if node.type_key != "layer.ref" || !matches!(changed.key.as_str(), "layer" | "port") {
+        return Vec::new();
+    }
+    let effective = |key: &str| {
+        if changed.key == key {
+            Some(changed.value.clone())
+        } else {
+            node.parameters
+                .iter()
+                .find(|p| p.key == key)
+                .map(|p| p.value.clone())
+        }
+    };
+    let (Some(comp), Some(layer), Some(port)) = (comp, effective("layer"), effective("port"))
+    else {
+        return Vec::new();
+    };
+    let Some(port) = port.as_str() else {
+        return Vec::new();
+    };
+    // The target layer's output ports are its `net.out` node's *inputs*
+    // (REQ-LAYER-002/003) — the same ports the candidate list offers and the
+    // evaluator reads (`LayerRefProcessor::process`). Its declared type is
+    // read back the one way the rest of the code reads a port's type.
+    let Some(data_type) = super::layer_ref_out_node(comp, &layer)
+        .and_then(|out| crate::network::custom_port_type(out, crate::graph::PortSide::Input, port))
+        .map(|port_type| port_type.data_type())
+    else {
+        return Vec::new();
+    };
+    // One output, whose name the template owns.
+    node.outputs
+        .first()
+        .map(|out| {
+            vec![PortRetype {
+                port: out.name.clone(),
+                data_type,
+            }]
+        })
+        .unwrap_or_default()
 }
 
 /// `value` is one parameter whose arity follows `type` (`f32` → `Channel`,
@@ -1187,8 +1255,13 @@ fn layer_ref() -> NodeTemplate {
         // "no target", the spelling `ParameterValue::identifier` already
         // reads as `Identifier::Unset`.
         .with_param(string_parameter("layer", ""))
+        // The port the target layer exposes, so the candidates come from that
+        // layer's `net.out` and the output type follows the one picked
+        // (`dependent_port_updates`). `"frame"` is a real port — every layer
+        // network has it — and not a stand-in for "unset".
         .with_param(string_parameter("port", "frame"))
         .with_contextual_param_options("layer", ContextualKind::SiblingLayer)
+        .with_contextual_param_options("port", ContextualKind::LayerOutputPort)
 }
 
 fn constant_color() -> NodeTemplate {
@@ -2127,6 +2200,217 @@ mod tests {
     use crate::animation::channel::ChannelSource;
     use crate::graph::Node;
     use crate::id::NodeId;
+
+    // ----- the output type a layer reference follows (CPO-4) ---------------
+
+    /// A composition whose layers (ids from 1, bottom-most first) own a
+    /// network whose `net.out` declares the given ports.
+    fn comp_of(layers: &[&[(&str, DataTypeId)]]) -> Composition {
+        use crate::composition::Layer;
+        use crate::id::{CompId, LayerId};
+        use crate::types::FrameRate;
+
+        layers.iter().enumerate().fold(
+            Composition::new(CompId::new(1), "C", (16, 16), FrameRate::new(30, 1), 100),
+            |comp, (index, ports)| {
+                let mut out = Node::new(
+                    NodeId::new(1000 + index as u64),
+                    crate::network::NET_OUT_TYPE_KEY,
+                );
+                for (name, data_type) in *ports {
+                    out = out.with_input(*name, &[*data_type]);
+                }
+                let network = crate::graph::Graph::new()
+                    .add_node(out)
+                    .expect("a fresh graph takes the Out node");
+                comp.add_layer(Layer::new(LayerId::new(index as u64 + 1), "L", network))
+            },
+        )
+    }
+
+    /// A `layer.ref` node with `layer` / `port` set as given.
+    /// The same node with its target written in the **numeric** spelling — the
+    /// shape a pre-v13 document whose upgrade could not run still carries.
+    fn numeric_target(mut node: Node) -> Node {
+        for param in &mut node.parameters {
+            if param.key == "layer" {
+                param.value = ParameterValue::Int(1);
+            }
+        }
+        node
+    }
+
+    fn layer_ref_node(layer: &str, port: &str) -> Node {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        let mut node = reg
+            .create_node("layer.ref", NodeId::new(1))
+            .expect("layer.ref is registered");
+        for param in &mut node.parameters {
+            match param.key.as_str() {
+                "layer" => param.value = ParameterValue::String(layer.into()),
+                "port" => param.value = ParameterValue::String(port.into()),
+                _ => {}
+            }
+        }
+        node
+    }
+
+    fn changed(key: &str, value: &str) -> Parameter {
+        Parameter {
+            key: key.into(),
+            value: ParameterValue::String(value.into()),
+        }
+    }
+
+    fn retype(data_type: DataTypeId) -> Vec<PortRetype> {
+        vec![PortRetype {
+            port: "output".into(),
+            data_type,
+        }]
+    }
+
+    /// **Either** parameter decides the type: the port names it, and the
+    /// layer says whose port it is. The one not being edited is read off the
+    /// node, so a layer whose same-named port carries something else retypes
+    /// the output too.
+    #[test]
+    fn a_layer_reference_output_follows_the_port_it_names() {
+        let comp = comp_of(&[
+            &[
+                ("frame", DataTypeId::FRAME_BUFFER),
+                ("geo", DataTypeId::GEOMETRY),
+            ],
+            &[("frame", DataTypeId::GEOMETRY)],
+        ]);
+
+        assert_eq!(
+            dependent_port_updates(
+                &layer_ref_node("1", "frame"),
+                &changed("port", "geo"),
+                Some(&comp)
+            ),
+            retype(DataTypeId::GEOMETRY),
+            "the port picked decides the type"
+        );
+        assert_eq!(
+            dependent_port_updates(
+                &layer_ref_node("1", "frame"),
+                &changed("layer", "2"),
+                Some(&comp)
+            ),
+            retype(DataTypeId::GEOMETRY),
+            "`frame` is geometry on layer 2, so changing the layer retypes it"
+        );
+        assert_eq!(
+            dependent_port_updates(
+                &layer_ref_node("2", "frame"),
+                &changed("layer", "1"),
+                Some(&comp)
+            ),
+            retype(DataTypeId::FRAME_BUFFER),
+            "and back again"
+        );
+    }
+
+    /// Every way the reference fails to resolve leaves the declared type
+    /// alone. A reference that broke mid-edit must not take the edges the
+    /// output feeds with it.
+    #[test]
+    fn an_unresolvable_layer_reference_retypes_nothing() {
+        let comp = comp_of(&[&[("frame", DataTypeId::FRAME_BUFFER)]]);
+
+        for (why, node, edit, against) in [
+            (
+                "no composition to resolve against",
+                layer_ref_node("1", "frame"),
+                changed("port", "frame"),
+                None,
+            ),
+            (
+                "no layer picked",
+                layer_ref_node("", "frame"),
+                changed("port", "frame"),
+                Some(&comp),
+            ),
+            (
+                "a layer the composition does not hold",
+                layer_ref_node("404", "frame"),
+                changed("port", "frame"),
+                Some(&comp),
+            ),
+            (
+                "a port the target does not have",
+                layer_ref_node("1", "frame"),
+                changed("port", "geo"),
+                Some(&comp),
+            ),
+            (
+                "another parameter entirely",
+                layer_ref_node("1", "frame"),
+                changed("nothing", "geo"),
+                Some(&comp),
+            ),
+            // The numeric spelling names a layer nothing reads: the processor
+            // takes this parameter with `str_or`, so an `Int` reaches
+            // evaluation as a number and the reference does not resolve
+            // (`ParameterValue::static_identifier` states the rule). Retyping
+            // the output for it would make the graph declare a type the
+            // evaluator refuses to produce — a pre-v13 document whose upgrade
+            // could not run is exactly this state (`LOW-CORE-06`).
+            (
+                "a target in the numeric spelling the evaluator does not read",
+                numeric_target(layer_ref_node("1", "frame")),
+                changed("port", "frame"),
+                Some(&comp),
+            ),
+        ] {
+            assert!(
+                dependent_port_updates(&node, &edit, against).is_empty(),
+                "{why}"
+            );
+        }
+
+        // A layer whose network has no `net.out` node at all.
+        let no_out = {
+            use crate::composition::Layer;
+            use crate::id::{CompId, LayerId};
+            use crate::types::FrameRate;
+            Composition::new(CompId::new(1), "C", (16, 16), FrameRate::new(30, 1), 100)
+                .add_layer(Layer::new(LayerId::new(1), "L", crate::graph::Graph::new()))
+        };
+        assert!(
+            dependent_port_updates(
+                &layer_ref_node("1", "frame"),
+                &changed("port", "frame"),
+                Some(&no_out)
+            )
+            .is_empty(),
+            "a network with no Out node offers no type"
+        );
+    }
+
+    /// No other node type has an output a parameter decides, so nothing else
+    /// is retyped by an edit.
+    #[test]
+    fn only_a_layer_reference_has_an_output_its_parameters_decide() {
+        let comp = comp_of(&[&[("frame", DataTypeId::FRAME_BUFFER)]]);
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for template in reg.all_templates() {
+            if template.type_key == "layer.ref" {
+                continue;
+            }
+            let node = template.create_node(NodeId::new(2));
+            for key in ["layer", "port"] {
+                assert!(
+                    dependent_port_updates(&node, &changed(key, "geo"), Some(&comp)).is_empty(),
+                    "{} retyped an output",
+                    template.type_key
+                );
+            }
+        }
+    }
 
     /// The constant value of a template-declared channel. Template defaults
     /// are always constants, so anything else is a declaration bug.

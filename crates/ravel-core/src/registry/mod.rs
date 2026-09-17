@@ -244,6 +244,12 @@ pub enum ParamOptions {
 pub enum ContextualKind {
     /// The other layers of the composition the node's network belongs to.
     SiblingLayer,
+    /// The output ports of the layer the node's `layer` parameter names —
+    /// which are the **input** ports of that layer's `net.out` node
+    /// (REQ-LAYER-002/003), the same ports `layer.ref` reads at evaluation
+    /// time. Decided by the node's own parameter, so this is the kind that
+    /// makes [`contextual_options`] need the node.
+    LayerOutputPort,
 }
 
 /// One layer as an option: its [`LayerId`] is the value, `"{row}. {name}"`
@@ -267,6 +273,33 @@ pub fn layer_param_option(index: usize, total: usize, layer: &Layer) -> ParamOpt
     )
 }
 
+/// The `net.out` node of the layer a `layer.ref`'s `layer` parameter names,
+/// and `None` when the reference resolves to nothing: no target set, a layer
+/// this composition does not hold, a target that does not stand still
+/// ([`ParameterValue::identifier`] answers `Dynamic`), or a network with no
+/// `net.out` node.
+///
+/// One place parses the stored decimal `LayerId` for both readers of the
+/// reference — the port candidates and the output type that follows them —
+/// so "unresolvable" means the same thing to each.
+///
+/// [`ParameterValue::identifier`]: crate::graph::ParameterValue::identifier
+pub(crate) fn layer_ref_out_node<'a>(
+    comp: &'a Composition,
+    layer: &crate::graph::ParameterValue,
+) -> Option<&'a std::sync::Arc<Node>> {
+    // The **text** mouth, not `identifier()`. The two spellings do not stand
+    // in for each other: the processor reads this parameter with `str_or`, so
+    // an `Int` on it reaches evaluation as a number nothing reads and the
+    // reference does not resolve (`ParameterValue::static_identifier` states
+    // the rule). Accepting the numeric spelling here would make the picker
+    // offer candidates and the output retype itself for a reference the
+    // evaluator then refuses — the UI and the evaluator disagreeing about
+    // whether the same document resolves.
+    let target = comp.get_layer(LayerId::new(layer.static_text_identifier()?))?;
+    crate::network::find_out_node(&target.network)
+}
+
 /// Resolve a [`ParamOptions::Contextual`] declaration against the composition
 /// the node's network lives in.
 ///
@@ -280,8 +313,15 @@ pub fn layer_param_option(index: usize, total: usize, layer: &Layer) -> ParamOpt
 /// `comp.layers` and drops the owner — a layer is never its own sibling. The
 /// labels are numbered by Timeline row, which runs the other way
 /// ([`layer_param_option`]).
+///
+/// [`ContextualKind::LayerOutputPort`] reads `node`'s own `layer` parameter:
+/// the candidates are the ports of the layer *that* names, so neither the
+/// composition nor the owner decides them. A reference that resolves to
+/// nothing offers nothing ([`layer_ref_out_node`]), which is also what keeps
+/// the row from silently pointing somewhere else.
 pub fn contextual_options(
     kind: ContextualKind,
+    node: &Node,
     comp: &Composition,
     owner: Option<LayerId>,
 ) -> Vec<ParamOption> {
@@ -302,6 +342,21 @@ pub fn contextual_options(
                 .map(|(index, layer)| layer_param_option(index, total, layer))
                 .collect()
         }
+        // The port names are the document's own text — a user named those
+        // custom ports — but a port is read as itself, so value and label
+        // coincide and `ParamOption::fixed` is what says so.
+        ContextualKind::LayerOutputPort => node
+            .parameters
+            .iter()
+            .find(|p| p.key == "layer")
+            .and_then(|p| layer_ref_out_node(comp, &p.value))
+            .map(|out| {
+                out.inputs
+                    .iter()
+                    .map(|port| ParamOption::fixed(port.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -670,8 +725,12 @@ mod tests {
     #[test]
     fn sibling_layer_options_exclude_the_owner_and_number_by_timeline_row() {
         let comp = comp_with(&["Background", "Middle", "Foreground"]);
-        let options =
-            contextual_options(ContextualKind::SiblingLayer, &comp, Some(LayerId::new(17)));
+        let options = contextual_options(
+            ContextualKind::SiblingLayer,
+            &probe_node(),
+            &comp,
+            Some(LayerId::new(17)),
+        );
         assert_eq!(
             options,
             vec![
@@ -689,9 +748,22 @@ mod tests {
     fn sibling_layer_options_are_empty_for_an_owner_the_composition_lost() {
         let comp = comp_with(&["Background", "Foreground"]);
         assert!(
-            contextual_options(ContextualKind::SiblingLayer, &comp, Some(LayerId::new(404)))
-                .is_empty()
+            contextual_options(
+                ContextualKind::SiblingLayer,
+                &probe_node(),
+                &comp,
+                Some(LayerId::new(404))
+            )
+            .is_empty()
         );
+    }
+
+    /// A node whose parameters no contextual kind reads: the sibling
+    /// candidates are decided by the composition and the owner alone, so the
+    /// tests below feed the argument something rather than something
+    /// particular.
+    fn probe_node() -> Node {
+        make_template().create_node(NodeId::new(1))
     }
 
     /// A node that belongs to no layer has no siblings: the list is empty and
@@ -699,15 +771,144 @@ mod tests {
     #[test]
     fn sibling_layer_options_are_empty_without_an_owning_layer() {
         let comp = comp_with(&["Background", "Foreground"]);
-        assert!(contextual_options(ContextualKind::SiblingLayer, &comp, None).is_empty());
+        assert!(
+            contextual_options(ContextualKind::SiblingLayer, &probe_node(), &comp, None).is_empty()
+        );
         assert!(
             contextual_options(
                 ContextualKind::SiblingLayer,
+                &probe_node(),
                 &comp_with(&[]),
                 Some(LayerId::new(7))
             )
             .is_empty(),
             "an empty composition offers nothing either"
+        );
+    }
+
+    // ----- the referenced layer's output ports (CPO-3) ---------------------
+
+    /// A composition of one layer whose network holds a `net.out` node with
+    /// `ports` as its inputs — a layer's output ports are the Out node's
+    /// *inputs* (REQ-LAYER-002/003).
+    fn comp_with_out_ports(ports: &[(&str, DataTypeId)]) -> Composition {
+        let mut out = Node::new(NodeId::new(2), crate::network::NET_OUT_TYPE_KEY);
+        for (name, data_type) in ports {
+            out = out.with_input(*name, &[*data_type]);
+        }
+        let network = crate::graph::Graph::new()
+            .add_node(out)
+            .expect("a fresh graph takes the Out node");
+        Composition::new(
+            crate::id::CompId::new(1),
+            "Comp",
+            (16, 16),
+            crate::types::FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(Layer::new(LayerId::new(7), "Target", network).with_time(0, 0, 300))
+    }
+
+    /// A `layer.ref` node pointing at `target`.
+    fn layer_ref(target: &str) -> Node {
+        let mut reg = NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        let mut node = reg
+            .create_node("layer.ref", NodeId::new(1))
+            .expect("layer.ref is registered");
+        for param in &mut node.parameters {
+            if param.key == "layer" {
+                param.value = crate::graph::ParameterValue::String(target.into());
+            }
+        }
+        node
+    }
+
+    /// The candidates are the referenced layer's `net.out` inputs, in the
+    /// order that node declares them, each reading as itself.
+    #[test]
+    fn layer_output_port_options_are_the_targets_out_node_inputs() {
+        let comp = comp_with_out_ports(&[
+            (crate::network::PORT_FRAME, DataTypeId::FRAME_BUFFER),
+            ("geo", DataTypeId::GEOMETRY),
+        ]);
+        assert_eq!(
+            contextual_options(
+                ContextualKind::LayerOutputPort,
+                &layer_ref("7"),
+                &comp,
+                Some(LayerId::new(9))
+            ),
+            vec![ParamOption::fixed("frame"), ParamOption::fixed("geo")],
+            "the owner does not decide these — the node's own target does"
+        );
+    }
+
+    /// Every way the reference fails to resolve offers nothing, which is what
+    /// keeps the row from pointing somewhere the user did not choose.
+    #[test]
+    fn layer_output_port_options_are_empty_when_the_reference_resolves_to_nothing() {
+        use crate::animation::step::StepCurve;
+
+        let comp = comp_with_out_ports(&[(crate::network::PORT_FRAME, DataTypeId::FRAME_BUFFER)]);
+        let empty = |node: &Node| {
+            contextual_options(ContextualKind::LayerOutputPort, node, &comp, None).is_empty()
+        };
+
+        assert!(empty(&layer_ref("")), "no target picked yet");
+        assert!(empty(&layer_ref("404")), "a layer this composition lost");
+        assert!(empty(&layer_ref("not a number")), "a name, not an id");
+
+        // A target that does not stand still names no layer at all.
+        let mut moving = layer_ref("7");
+        for param in &mut moving.parameters {
+            if param.key == "layer" {
+                let mut steps = StepCurve::keyed(0, "7".to_string());
+                steps.insert(10, "9".to_string());
+                param.value = crate::graph::ParameterValue::StringSteps(steps);
+            }
+        }
+        assert!(empty(&moving), "an animated target names no layer");
+
+        // The numeric spelling names a layer the *evaluator* does not read:
+        // the processor takes this parameter with `str_or`, so an `Int` makes
+        // the reference fail to resolve at evaluation time
+        // (`ParameterValue::static_identifier` states the rule). Offering
+        // candidates for it would have the picker and the evaluator disagree
+        // about whether the same document resolves — a pre-v13 document whose
+        // upgrade could not run is exactly that state (`LOW-CORE-06`).
+        let mut numeric = layer_ref("7");
+        for param in &mut numeric.parameters {
+            if param.key == "layer" {
+                param.value = crate::graph::ParameterValue::Int(7);
+            }
+        }
+        assert!(
+            empty(&numeric),
+            "the numeric spelling is not the one the evaluator reads"
+        );
+
+        // A layer whose network has no Out node offers nothing either.
+        let no_out = Composition::new(
+            crate::id::CompId::new(1),
+            "Comp",
+            (16, 16),
+            crate::types::FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(Layer::new(
+            LayerId::new(7),
+            "Target",
+            crate::graph::Graph::new(),
+        ));
+        assert!(
+            contextual_options(
+                ContextualKind::LayerOutputPort,
+                &layer_ref("7"),
+                &no_out,
+                None
+            )
+            .is_empty()
         );
     }
 

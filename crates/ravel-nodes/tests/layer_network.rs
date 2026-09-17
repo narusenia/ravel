@@ -45,6 +45,22 @@ impl NodeProcessor for FbSource {
     }
 }
 
+/// Emits a fixed Geometry regardless of inputs (test source node).
+struct GeoSource(ravel_core::geometry::Geometry);
+
+impl NodeProcessor for GeoSource {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(self.0.clone()))
+    }
+}
+
 /// The chain's output frame in CPU memory.
 ///
 /// The shell's transform and opacity processors leave their result resident in
@@ -1398,5 +1414,134 @@ fn shell_timing_edit_invalidates_boundary_at_same_frame() {
     assert!(
         fb.as_f32().iter().all(|v| v.abs() < 1e-6),
         "shell timing edit must re-evaluate the boundary"
+    );
+}
+
+/// A reference to a **custom** Out port carries that port's value, not the
+/// `frame` one (`REQ-LAYER-005`: "カスタムポート（Geometry 等）を参照できる").
+///
+/// Every other `layer_ref_*` test above reads the target's `frame`, so the
+/// custom-port half of the requirement had no coverage. `CPO-3` / `CPO-4` made
+/// the port pickable and made the declared output type follow it; this is what
+/// says the **value** follows too. A reference whose declared type is geometry
+/// while a frame arrives would be exactly the lie the retype exists to prevent.
+///
+/// The assertion is made by the consumer rather than by reading the chain
+/// output: the geometry has to cross the layer boundary and land in a node
+/// that asked for one, which is the whole path the requirement names.
+#[test]
+fn layer_ref_reads_a_custom_out_port() {
+    use ravel_core::geometry::Geometry;
+    use ravel_core::types::Vec2;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Records the point count of the geometry it receives, and answers a
+    /// frame so the shell chain has something to composite.
+    struct GeometrySink {
+        points: Arc<AtomicUsize>,
+        frame: FrameBuffer,
+    }
+
+    impl NodeProcessor for GeometrySink {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let geo = inputs
+                .first()
+                .and_then(|input| input.as_ref())
+                .and_then(|value| value.downcast_ref::<Geometry>())
+                .ok_or_else(|| anyhow::anyhow!("the reference did not deliver a geometry"))?;
+            self.points.store(geo.point_count(), Ordering::Relaxed);
+            Ok(Arc::new(self.frame.clone()))
+        }
+    }
+
+    // Target: its Out node declares a custom `geo` port and no `frame`, so it
+    // contributes nothing to the merge chain and exists to be referenced.
+    let geo = Geometry::from_points(vec![Vec2(3.0, 5.0), Vec2(-1.0, 2.0), Vec2(0.0, 0.0)]);
+    let target_network = Graph::new()
+        .add_node(
+            Node::new(NodeId::new(900), "geo.src").with_output("output", DataTypeId::GEOMETRY),
+        )
+        .unwrap()
+        .add_node(
+            Node::new(NodeId::new(901), net::NET_OUT_TYPE_KEY)
+                .with_input("geo", &[DataTypeId::GEOMETRY]),
+        )
+        .unwrap()
+        .add_edge(
+            EdgeId::new(9000),
+            NodeId::new(900),
+            OutputPortIndex(0),
+            NodeId::new(901),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    // Referrer: `layer.ref(1, "geo")` declaring the GEOMETRY output that
+    // `dependent_port_updates` writes, into a node that accepts one.
+    let ref_network = Graph::new()
+        .add_node(
+            Node::new(NodeId::new(910), "layer.ref")
+                .with_output("output", DataTypeId::GEOMETRY)
+                .with_param("layer", ParameterValue::String("1".into()))
+                .with_param("port", ParameterValue::String("geo".into())),
+        )
+        .unwrap()
+        .add_node(
+            Node::new(NodeId::new(912), "geo.sink")
+                .with_input("geometry", &[DataTypeId::GEOMETRY])
+                .with_output("output", DataTypeId::FRAME_BUFFER),
+        )
+        .unwrap()
+        .add_node(out_node(911))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(9100),
+            NodeId::new(910),
+            OutputPortIndex(0),
+            NodeId::new(912),
+            InputPortIndex(0),
+        )
+        .unwrap()
+        .add_edge(
+            EdgeId::new(9101),
+            NodeId::new(912),
+            OutputPortIndex(0),
+            NodeId::new(911),
+            InputPortIndex(0),
+        )
+        .unwrap();
+
+    let comp = Composition::new(CompId::new(1), "Ref", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Null", target_network.clone()).with_time(0, 0, 300))
+        .add_layer(Layer::new(LayerId::new(2), "Ref", ref_network.clone()).with_time(0, 0, 300));
+    let doc = Document::default().with_composition(comp.clone());
+
+    let seen = Arc::new(AtomicUsize::new(0));
+    let (mut evaluator, graph, _) = setup(&comp, &[&target_network, &ref_network]);
+    evaluator.register(NodeId::new(900), Arc::new(GeoSource(geo.clone())));
+    evaluator.register(
+        NodeId::new(912),
+        Arc::new(GeometrySink {
+            points: seen.clone(),
+            frame: solid_fb(8, 8, [0.0, 0.0, 0.0, 1.0]),
+        }),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let output = deterministic_node_id(comp.id, LayerId::new(2), NodeRole::Network);
+    evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .expect("the reference resolves");
+    assert_eq!(
+        seen.load(Ordering::Relaxed),
+        geo.point_count(),
+        "the custom port's own geometry crossed the layer boundary"
     );
 }

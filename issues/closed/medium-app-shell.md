@@ -1297,7 +1297,7 @@ let names = match components.len() {
 
 ## MED-APP-29 | bug / debt | `layer.ref` のレイヤー指定が数値スクラブで、参照ポートを変えても出力型が変わらない
 
-> **解決済み**: PR #TBD（2026-09-17）。`contextual-parameter-options-plan.md` の
+> **解決済み**: PR #542 / #544 / #546（2026-09-17）。`contextual-parameter-options-plan.md` の
 > `CPO-1`〜`CPO-7` がすべて入り、**2 つとも機構ごと消えた**。`layer` は
 > `String` パラメータ（参照先 `LayerId` の十進表記、`.ravprj` v13）になり、
 > Properties は `ContextualKind::SiblingLayer` で同じコンポの他レイヤーを

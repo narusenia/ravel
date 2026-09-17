@@ -637,6 +637,85 @@ mod tests {
         );
     }
 
+    /// Completion criterion of the `drawn_bounds` unit: the bbox of a
+    /// `text.font -> text.layout` is the bbox of the same string through
+    /// `text.to_path`.
+    ///
+    /// **Not a number** — the point is the *relation*. `text.to_path` is
+    /// `ops::expand_instances`, so the two geometries hold the same ink in
+    /// different shapes: one as glyph outlines stamped by five character
+    /// instances, the other as one flat set of outline points. A bbox that
+    /// measured only the Point domain reported nothing for the first and the
+    /// ink for the second, and a bbox that measured instance *positions*
+    /// reported a zero-height line of glyph origins. Either way, inserting
+    /// one node changed how big the text was.
+    #[test]
+    fn a_layouts_bbox_is_the_bbox_of_the_same_text_converted_to_paths() {
+        use ravel_core::geometry::drawn_bounds;
+
+        let font = font_node(DEFAULT_FAMILY);
+        let layout = layout_node(2, "Ravel");
+        let to_path = to_path_node(3);
+        let graph = Graph::new()
+            .add_node(font)
+            .expect("the font node")
+            .add_node(layout)
+            .expect("the layout node")
+            .add_node(to_path)
+            .expect("the to_path node")
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .expect("font connects to layout")
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(2),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .expect("layout connects to to_path");
+        let mut evaluator = Evaluator::new();
+        evaluator.register(NodeId::new(1), Arc::new(FontProcessor));
+        evaluator.register(NodeId::new(2), Arc::new(LayoutProcessor));
+        evaluator.register(NodeId::new(3), Arc::new(ToPathProcessor));
+
+        let geometry_at = |evaluator: &mut Evaluator, id: u64| {
+            evaluator
+                .evaluate(&graph, NodeId::new(id), &ctx())
+                .expect("the graph evaluates")
+                .downcast_ref::<Geometry>()
+                .expect("the node produces geometry")
+                .clone()
+        };
+        let laid_out = geometry_at(&mut evaluator, 2);
+        let paths = geometry_at(&mut evaluator, 3);
+        assert_eq!(laid_out.point_count(), 0, "a layout places no points");
+        assert!(paths.point_count() > 0, "`Ravel` has ink to measure");
+
+        let layout_bounds = drawn_bounds(&laid_out).expect("a layout has an extent");
+        let path_bounds = drawn_bounds(&paths).expect("outlines have an extent");
+        for (what, a, b) in [
+            ("x", layout_bounds.x, path_bounds.x),
+            ("y", layout_bounds.y, path_bounds.y),
+            ("width", layout_bounds.width, path_bounds.width),
+            ("height", layout_bounds.height, path_bounds.height),
+        ] {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "{what} changed across the conversion: {layout_bounds:?} vs {path_bounds:?}"
+            );
+        }
+        assert!(
+            layout_bounds.height > 0.0,
+            "a layout measured as a zero-height line of glyph origins: {layout_bounds:?}"
+        );
+    }
+
     /// `text.layout -> text.to_path`: the character instances become one
     /// geometry of outline paths, with the per-character attributes on the
     /// Point domain where a field can read them.

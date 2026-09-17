@@ -1167,6 +1167,32 @@ pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
 ///
 /// `None` when the geometry draws nothing at all — an empty geometry has no
 /// rectangle, and a zero-sized one at the origin would be a lie.
+///
+/// **Walked in full on every call, including once per pointer move**: the
+/// Viewer's hover hint asks for the selected nodes' bounds and a click asks
+/// for every node's, both through `viewer::geometry::geometry_bounds`, which
+/// is this function and a type conversion. Measured rather than assumed,
+/// release build, per call, for a flat point cloud:
+///
+/// | points | per call |
+/// |---|---|
+/// | 1 000 | 0.37 µs |
+/// | 10 000 | 1.9 µs |
+/// | 100 000 | 20 µs |
+/// | 1 000 000 | 197 µs |
+///
+/// An instance domain adds its sources once each and four placed corners per
+/// instance, so the shape of the cost is the same; the
+/// `drawn_bounds_costs_the_same_order_as_positions_bounds` test is what pins
+/// it to the walk these numbers were taken from.
+///
+/// A pointer move pays this for the handful of selected nodes, so even a
+/// hundred-thousand-point geometry costs ~0.1% of a 60 Hz frame. Caching the
+/// rectangle at press time would buy that back and cost a second source of
+/// truth for what the bbox is — worth doing only if a profile ever shows this
+/// line, which at these numbers it will not. Unlike `MED-GPU-04`, the work
+/// here is `O(points)` once per input event, not
+/// `O(primitives × resolution)` per frame.
 pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect> {
     drawn_bounds_at(geometry, 0)
 }

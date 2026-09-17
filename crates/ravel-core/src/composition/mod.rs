@@ -21,6 +21,7 @@ mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
 pub(crate) mod graph_walk;
+mod layer_ref_upgrade;
 mod param_fold;
 pub mod templates;
 pub mod transform;
@@ -1240,6 +1241,18 @@ impl Document {
     /// and is logged. Mints no ids. Idempotent.
     pub fn upgrade_curve_params(self) -> Self {
         self.map_graphs(curve_upgrade::upgrade_graph)
+    }
+
+    /// Hold every `.ravprj` v12 `layer.ref` target as the decimal
+    /// [`LayerId`] of a `String` instead of an `Int`, in every graph of the
+    /// document — the flat graph, each layer network, and nested subnets.
+    ///
+    /// The old `-1` (and any other value that named no layer) becomes the
+    /// empty string. A `layer` that was exposed as a parameter port loses the
+    /// port and its edge, because a `String` has no wire type; see
+    /// [`layer_ref_upgrade`](self) for both rules. Mints no ids. Idempotent.
+    pub fn upgrade_layer_ref_targets(self) -> Self {
+        self.map_graphs(layer_ref_upgrade::upgrade_graph)
     }
 
     /// Point every `.ravprj` v8 asset reference at the [`AssetId`] its display
@@ -3133,15 +3146,73 @@ mod tests {
         assert!(LayerId::next().raw() > 12_000);
     }
 
+    /// A pre-v13 `layer.ref` target — still an `Int` — is **invisible** to the
+    /// watermark scan, and visible the moment the v13 pass rewrites it.
+    ///
+    /// This is the fact the load order depends on. `layer_ref_targets` reads
+    /// the text spelling only, deliberately: an `Int` on `layer.ref` reaches
+    /// the processor as a number it does not read, so the reference does not
+    /// resolve and reserving its id would make the scan claim an id nothing
+    /// points at ([`crate::graph::ParameterValue::static_identifier`]).
+    ///
+    /// The consequence is that `ProjectFile::from_archive` **must** run the
+    /// v12 → v13 rewrite before `advance_id_counters`, and
+    /// `a_pre_v13_dangling_reference_still_reserves_its_layer_id` in
+    /// `ravel-project` is what holds that order in place.
+    #[test]
+    fn a_pre_v13_layer_ref_target_is_invisible_to_the_watermark_scan() {
+        use crate::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+        use crate::graph::ParameterValue;
+
+        let referrer = |value: ParameterValue| {
+            let node = Node::new(NodeId::new(500), LAYER_REF_TYPE_KEY)
+                .with_param(LAYER_REF_LAYER_PARAM, value);
+            Layer::new(
+                LayerId::new(4),
+                "Referrer",
+                Graph::new().add_node(node).unwrap(),
+            )
+        };
+        let doc = |layer: Layer| {
+            Document::new(Graph::new()).with_composition(
+                Composition::new(
+                    CompId::new(1),
+                    "Comp",
+                    (16, 16),
+                    crate::types::FrameRate::new(30, 1),
+                    10,
+                )
+                .add_layer(layer),
+            )
+        };
+
+        let before = doc(referrer(ParameterValue::Int(31_000)));
+        assert_eq!(
+            before.id_watermarks().layer,
+            4,
+            "the int spelling names no layer, so only the layer's own id counts"
+        );
+
+        let after = doc(referrer(ParameterValue::String("31000".into())));
+        assert_eq!(
+            after.id_watermarks().layer,
+            31_000,
+            "the text spelling is what the scan reads"
+        );
+    }
+
     #[test]
     fn id_watermarks_include_embedded_comp_id_and_layer_ref_targets() {
         use crate::graph::{Node, ParameterValue};
         use crate::id::{CompId, DataTypeId, NodeId};
 
-        // A layer.ref parameter targets LayerId(99_000) by raw id; counters
-        // must move past it so a fresh layer never inherits the reference.
+        // A layer.ref parameter targets LayerId(99_000) by raw id — spelled as
+        // text, which is how `.ravprj` v13 stores it; counters must move past
+        // it so a fresh layer never inherits the reference. A watermark scan
+        // reading the *numeric* spelling would see no target at all and hand
+        // 99_000 straight back out, which is what this assertion catches.
         let ref_node = Node::new(NodeId::new(1), "layer.ref")
-            .with_param("layer", ParameterValue::Int(99_000))
+            .with_param("layer", ParameterValue::String("99000".into()))
             .with_output("out", DataTypeId::SCALAR);
         let network = Graph::new().add_node(ref_node).unwrap();
         let comp = Composition::new(CompId::new(7), "c", (16, 16), FrameRate::new(30, 1), 10)
@@ -3181,21 +3252,19 @@ mod tests {
         assert_eq!(doc.id_watermarks().comp, 88_000);
     }
 
-    /// An identifier parameter that has been retyped to `IntChannel` still
-    /// reserves its target. Reading it through
-    /// [`ParameterValue::static_identifier`] is what keeps that true: a
-    /// scanner that only accepted `Int` would stop seeing the reference, and
-    /// a fresh `LayerId` could then land on the layer it names
+    /// An identifier parameter that has been retyped to its animatable
+    /// spelling still reserves its target as long as it stands still. Reading
+    /// it through [`ParameterValue::static_text_identifier`] is what keeps
+    /// that true: a scanner that only accepted `String` would stop seeing the
+    /// reference, and a fresh `LayerId` could then land on the layer it names
     /// (REQ-LAYER-009).
     ///
     /// An **animated** identifier is deliberately not a reference: a curve
     /// names no single id, so there is nothing to reserve. `DISK-3` owns
     /// keeping the keyframe toggle off these parameters.
     #[test]
-    fn id_watermarks_see_a_constant_int_channel_identifier() {
-        use crate::animation::channel::AnimationChannel;
-        use crate::animation::curve::KeyframeCurve;
-        use crate::animation::interpolation::Interpolation;
+    fn id_watermarks_see_a_standing_still_step_curve_identifier() {
+        use crate::animation::step::StepCurve;
         use crate::graph::{Node, ParameterValue};
         use crate::id::{CompId, DataTypeId, NodeId};
 
@@ -3209,25 +3278,26 @@ mod tests {
             Document::default().with_composition(comp)
         };
 
+        // The shape the keyframe toggle produces: one key agreeing with the
+        // default, so the curve samples to one value forever.
         assert_eq!(
-            document(ParameterValue::IntChannel(AnimationChannel::constant(
-                99_000.0
+            document(ParameterValue::StringSteps(StepCurve::keyed(
+                0,
+                "99000".to_string()
             )))
             .id_watermarks()
             .layer,
             99_000,
-            "a constant int channel names the same layer a constant Int does"
+            "a step curve that cannot move names the same layer a String does"
         );
 
-        let mut curve = KeyframeCurve::new();
-        curve.insert(0, 99_000.0, Interpolation::Linear);
-        curve.insert(24, 1.0, Interpolation::Linear);
+        let mut steps = StepCurve::new("99000".to_string());
+        steps.insert(0, "99000".to_string());
+        steps.insert(24, "1".to_string());
         assert_eq!(
-            document(ParameterValue::IntChannel(AnimationChannel::keyframes(
-                curve
-            )))
-            .id_watermarks()
-            .layer,
+            document(ParameterValue::StringSteps(steps))
+                .id_watermarks()
+                .layer,
             2,
             "an animated identifier reserves nothing but the layer that holds it"
         );

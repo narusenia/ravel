@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// but a refusal (see the `migrate_v6_to_v7`, `migrate_v9_to_v10`,
 /// `migrate_v10_to_v11` and `migrate_v11_to_v12` steps in
 /// [`crate::migration`]).
-pub const CURRENT_FORMAT_VERSION: u32 = 12;
+pub const CURRENT_FORMAT_VERSION: u32 = 13;
 
 /// Rational frame rate stored in the manifest (`{ "num": 30, "den": 1 }`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -8,7 +8,7 @@ use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
-use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate, ParamRole};
+use crate::registry::{ContextualKind, NodeCategory, NodeRegistry, NodeTemplate, ParamRole};
 use crate::scene::camera;
 
 /// Direct separable blur loop budget. Larger visual radii need a future
@@ -1179,11 +1179,16 @@ fn layer_ref() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::FRAME_BUFFER,
         })
-        // Target layer id within the same composition (REQ-LAYER-005).
-        // Layer ids fit 24 bits (deterministic shell-id packing).
-        .with_param(int_parameter("layer", -1))
+        // Target layer within the same composition (REQ-LAYER-005), held as
+        // the decimal `LayerId` so the `.ravprj` upgrade is one type change.
+        // A string rather than an int because what the user picks is a
+        // sibling layer, not a number: candidates need labels, and only
+        // `PropertyField::Enum` — a string row — can carry them. `""` is
+        // "no target", the spelling `ParameterValue::identifier` already
+        // reads as `Identifier::Unset`.
+        .with_param(string_parameter("layer", ""))
         .with_param(string_parameter("port", "frame"))
-        .with_param_range("layer", -1.0..=16_777_215.0, -1.0..=1000.0)
+        .with_contextual_param_options("layer", ContextualKind::SiblingLayer)
 }
 
 fn constant_color() -> NodeTemplate {

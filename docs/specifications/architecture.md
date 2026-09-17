@@ -128,15 +128,21 @@ fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &Ev
 ```
 
 **識別子パラメータは静的な値しか持てない**: 参照先の生の ID を持つ 3 つ
-（`layer.ref` の `layer`、`precomp` の `comp_id`、`media` の `asset_id`。
-判定は `composition::validate::is_identifier_parameter`）は、読み口が
+（`layer.ref` の `layer` と `media` の `asset_id` は十進表記の String、
+`precomp` の `comp_id` は Int。判定は
+`composition::validate::is_identifier_parameter`）は、読み口が
 `ParameterValue::identifier` の 1 つに畳まれている。保存された静的な値だけが
-参照であり、**ワイヤ / キーフレーム / 式 / ブレンド / ステップ曲線は何も
-参照しない**（`layer.ref` は対象なし、`media` はオフライン）。理由は
+参照であり、**ワイヤ / キーフレーム / 式 / ブレンド / 動けるステップ曲線は
+何も参照しない**（`layer.ref` は対象なし、`media` はオフライン）。
+ステップ曲線は「動ける」ときだけ — 全部のキーが既定値と同じ曲線は
+いつ見ても同じ値を返すので、参照として成立する。理由は
 `Document::id_watermarks` が予約できる ID の集合と、評価から見える ID の集合を
 構造的に一致させること（REQ-LAYER-009）。フレームごとに変わる参照は予約できず、
 次の採番がその番号を引き当てて参照が無関係な対象へ繋ぎ直る。既存文書を壊さない
 ため、公開済みのパラメータポートは**残したまま無視する**（解除もできる）。
+例外が 1 つあり、`layer.ref` の `layer` は `.ravprj` v13 で `String` になった
+ので**ポートが存在できない**（文字列に wire 型が無い）。v12 で公開されていた
+ものは移行でエッジごと落ちる — 無視されていた値なので絵は変わらない。
 無視した事実は `Document::dynamic_identifiers` から取れ、`ravel-cli render` が
 `identifier-not-static` として報告する。
 

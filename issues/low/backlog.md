@@ -570,3 +570,28 @@ AABB で、線がその位置からどれだけ外へ届くかは見ていない
 
 影響は表示のずれだけで、選択もドラッグも動く（当たり判定が内容より少し
 小さいだけ）。`MED-APP-45` / `MED-CORE-11` と同じ走査の中で直すのが安い。
+
+**LOW-CORE-05 | bug | レイヤー id 0 は保存できるが `layer.ref` からは「対象なし」になる**
+
+**該当**: `crates/ravel-core/src/id.rs` の `LayerId::new` と
+`crates/ravel-nodes/src/layer_ref.rs` の対象解決
+
+`LAYER_ID_COUNTER` は 1 始まりなので `LayerId::next()` は 0 を返さないが、
+`LayerId::new(0)` は公開されていて serde も 0 を受け取り、`Document::validate`
+も 0 を拒否しない。つまり**手編集した `.ravprj` にはレイヤー id 0 が居られる**。
+
+一方 `layer.ref` は 0 を必ず「対象なし」として扱う。そうせざるを得ない理由が
+あって、`eval::identifier_overlay` が「静止していない識別子」に
+`AssetId::UNSET`（= 0）を代入するので、評価側は 0 を未設定と読むしかない。
+
+結果、id 0 のレイヤーは**候補ドロップダウンには出るのに参照できない**
+（UX 不変条件 6「動かない控制は無効化し、無効に見せる」に触る）。
+
+直す向きは 2 つ。`Document::validate` がレイヤー id 0 を拒否して
+「0 は存在しない」を不変条件にするか、未設定の綴りを 0 と別にする
+（`identifier_overlay` の代入値を変える）。前者の方が小さく、
+`AssetId::UNSET` の規約（「0 は未設定のために空けてある」と
+`id.rs:24` のコメントが言っている）とも揃う。
+
+到達には手編集が要るので low。`.ravprj` v13 の `layer.ref` 移行
+（`contextual-parameter-options-plan.md` の `CPO-5`）の独立レビューで見つけた。

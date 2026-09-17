@@ -52,8 +52,11 @@ pub const LAYER_REF_LAYER_PARAM: &str = "layer";
 ///
 /// Three parameters qualify, in the two spellings a raw id has:
 ///
-/// - `precomp`'s `comp_id` and `layer.ref`'s `layer` are `Int`s holding a raw
-///   [`CompId`] / [`LayerId`].
+/// - `precomp`'s `comp_id` is an `Int` holding a raw [`CompId`].
+/// - `layer.ref`'s `layer` is a **`String`** holding a raw [`LayerId`] as
+///   decimal digits (`.ravprj` v13 — see
+///   [`layer_ref_upgrade`](super::layer_ref_upgrade)), so the Properties row
+///   can offer named candidates.
 /// - a media node's `asset_id` is a **`String`** holding a raw
 ///   [`AssetId`](crate::id::AssetId). Re-typing it to
 ///   `ParameterValue::StringSteps` used to make the watermark scan stop seeing
@@ -185,6 +188,18 @@ fn check_precomp_dfs(
 /// Layer ids referenced by `layer.ref` nodes inside a network, including
 /// nested subnet graphs (REQ-LAYER-003). Also used by the evaluator to
 /// invalidate referencing scopes when a referenced layer's shell changes.
+///
+/// Read through [`ParameterValue::static_text_identifier`] because the target
+/// is spelled as **text** (`.ravprj` v13 — the `layer` parameter is a
+/// `String` holding the decimal id so the picker can label its candidates).
+/// The numeric mouth would answer `None` for every node, and three things
+/// would then stop working with no error anywhere: cycles would pass
+/// [`validate_layer_ref_cycles`], a fresh `LayerId` could land on a stored
+/// reference ([`Document::id_watermarks`](crate::composition::Document::id_watermarks)),
+/// and a referring scope would not be invalidated when its target's shell
+/// moves.
+///
+/// [`ParameterValue::static_text_identifier`]: crate::graph::ParameterValue::static_text_identifier
 pub(crate) fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
     for node in network.nodes() {
         if node.type_key == LAYER_REF_TYPE_KEY
@@ -192,7 +207,7 @@ pub(crate) fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
                 .parameters
                 .iter()
                 .find(|p| p.key == LAYER_REF_LAYER_PARAM)
-                .and_then(|p| p.value.static_identifier())
+                .and_then(|p| p.value.static_text_identifier())
                 .map(LayerId::new)
         {
             targets.push(id);
@@ -451,10 +466,16 @@ mod tests {
     // ---- Layer Ref cycles ---------------------------------------------------
 
     /// Layer whose network contains a `layer.ref` node targeting `target`.
+    ///
+    /// The target is a `String` holding the decimal id, as `.ravprj` v13
+    /// stores it. The cycle tests below are what catches a
+    /// [`layer_ref_targets`] that reads the numeric spelling instead: it would
+    /// answer with no targets at all, every cycle would validate, and no other
+    /// test would notice.
     fn layer_ref_layer(id: u64, node_id: u64, target: LayerId) -> Layer {
         let node = Node::new(NodeId::new(node_id), LAYER_REF_TYPE_KEY).with_param(
             LAYER_REF_LAYER_PARAM,
-            ParameterValue::Int(target.raw() as i32),
+            ParameterValue::String(target.raw().to_string()),
         );
         let network = Graph::new().add_node(node).unwrap();
         Layer::new(LayerId::new(id), format!("Ref {id}"), network)
@@ -502,7 +523,7 @@ mod tests {
     fn layer_ref_cycle_inside_subnet_is_detected() {
         // Layer 1's network holds the layer.ref inside a nested subnet.
         let ref_node = Node::new(NodeId::new(100), LAYER_REF_TYPE_KEY)
-            .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(2));
+            .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::String("2".into()));
         let inner = Graph::new().add_node(ref_node).unwrap();
         let subnet_node = Node::new(NodeId::new(101), "subnet").with_subnet(inner);
         let network = Graph::new().add_node(subnet_node).unwrap();
@@ -516,8 +537,10 @@ mod tests {
     fn diamond_layer_refs_are_not_cycles() {
         // 1 and 2 both reference 3; 4 references 1 and 2. No cycle.
         let ref_node = |node_id: u64, target: u64| {
-            Node::new(NodeId::new(node_id), LAYER_REF_TYPE_KEY)
-                .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(target as i32))
+            Node::new(NodeId::new(node_id), LAYER_REF_TYPE_KEY).with_param(
+                LAYER_REF_LAYER_PARAM,
+                ParameterValue::String(target.to_string()),
+            )
         };
         let comp = comp(1)
             .add_layer(layer_ref_layer(1, 100, LayerId::new(3)))

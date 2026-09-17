@@ -140,6 +140,14 @@ fn apply_step(manifest: &mut Value, from: u32) -> Result<u32, MigrationError> {
             })?;
             Ok(12)
         }
+        12 => {
+            migrate_v12_to_v13(manifest).map_err(|reason| MigrationError::StepFailed {
+                from: 12,
+                to: 13,
+                reason,
+            })?;
+            Ok(13)
+        }
         other => Err(MigrationError::NoStep(other)),
     }
 }
@@ -409,6 +417,32 @@ fn migrate_v11_to_v12(_manifest: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+/// `v12 → v13`: a `layer.ref` node holds its target as the decimal
+/// [`LayerId`](ravel_core::id::LayerId) in a `ParameterValue::String` instead
+/// of an `Int`, so the Properties row can be a layer picker whose candidates
+/// carry names (`docs/implementation/contextual-parameter-options-plan.md`,
+/// `CPO-5`).
+///
+/// Like the v4 → v5 fold and the v5 → v6 curve upgrade, the change lives
+/// inside `document/main.ron`, which this chain never sees: a v12
+/// `layer: Int(12)` deserializes intact and merely stops being read, because
+/// the reference is now looked up through
+/// [`ParameterValue::static_text_identifier`](ravel_core::graph::ParameterValue::static_text_identifier).
+/// The conversion is a typed pass over the loaded document
+/// ([`Document::upgrade_layer_ref_targets`](ravel_core::composition::Document::upgrade_layer_ref_targets)),
+/// applied by [`super::ProjectFile::from_archive`] for any archive older than
+/// v13. This step only advances the version stamp that gates it.
+///
+/// **Why the stamp matters here** is not the usual "an older build would drop
+/// a field" argument: an older build reads a v13 `String` target perfectly
+/// well and then resolves nothing, because its `layer.ref` reads the target
+/// with `i32_or`. Every layer reference in the project would silently stop
+/// producing a picture. [`MigrationError::TooNew`] turns that into a refusal
+/// to open.
+fn migrate_v12_to_v13(_manifest: &mut Value) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +589,28 @@ mod tests {
             "format_version": 10,
             "ravel_version": "0.1.0",
             "project_name": "Strings",
+            "created_at": "t",
+            "modified_at": "t",
+            "duration_frames": 120,
+            "frame_rate": { "num": 30, "den": 1 },
+            "resolution": { "width": 1920, "height": 1080 },
+        });
+        let mut expected = m.clone();
+        expected["format_version"] = Value::from(CURRENT_FORMAT_VERSION);
+
+        migrate_to_current(&mut m).unwrap();
+
+        assert_eq!(m, expected);
+    }
+
+    /// `v12 → v13` retypes the `layer.ref` target inside `document/main.ron`;
+    /// the manifest must come through byte-identical apart from the stamp.
+    #[test]
+    fn v12_migration_changes_only_the_version_stamp() {
+        let mut m = serde_json::json!({
+            "format_version": 12,
+            "ravel_version": "0.1.0",
+            "project_name": "Refs",
             "created_at": "t",
             "modified_at": "t",
             "duration_frames": 120,

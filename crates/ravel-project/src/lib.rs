@@ -344,6 +344,28 @@ impl ProjectFile {
         // rates, missing roots, duplicate or exhausted ids) before anything
         // uses them.
         document.validate()?;
+        // v12 → v13: a `layer.ref` target is the decimal `LayerId` in a
+        // `String` instead of an `Int`, so the Properties row can be a layer
+        // picker whose candidates carry names.
+        //
+        // **Before `advance_id_counters`, and that is not free.** The pass
+        // mints no ids, but it changes what the watermark scan can *see*:
+        // `layer_ref_targets` reads the text spelling, so while the document
+        // still holds `Int`s the scan finds no targets at all. Reserving
+        // after the rewrite is what keeps a reference the composition no
+        // longer holds from being handed its own id again — the silent
+        // mis-link `Document::id_watermarks` exists to prevent
+        // (`asset-identity-plan.md`, and the rule
+        // `validate::precomp_targets` states). Gated on the source version
+        // like the rest; the pass is idempotent, so the gate only keeps the
+        // load from walking every graph of a current document.
+        let document = if source_version < 13 {
+            let upgraded = document.upgrade_layer_ref_targets();
+            upgraded.validate()?;
+            upgraded
+        } else {
+            document
+        };
         // REQ-LAYER-009: ids minted after the load must never collide with
         // ids stored in the document.
         document.advance_id_counters();
@@ -398,7 +420,6 @@ impl ProjectFile {
         } else {
             document
         };
-
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
             Some(bytes) => {
@@ -894,7 +915,7 @@ mod tests {
     }
 
     /// A document whose identifier parameters are driven — a wire into a
-    /// `layer.ref` target, a step curve on a `media` reference — opens,
+    /// `precomp` composition id, a step curve on a `media` reference — opens,
     /// round-trips unchanged, and **keeps its parameter port**.
     ///
     /// Evaluation ignores both (`render-warning-channel-plan.md`, `WARN-1`)
@@ -903,10 +924,15 @@ mod tests {
     /// visible for the user to be able to disconnect it. So nothing here may
     /// move — least of all the format version, since only the reading of a
     /// value changed.
+    ///
+    /// The wired parameter is `precomp`'s `comp_id` because that is the
+    /// identifier still held as an `Int`. `layer.ref`'s `layer` became a
+    /// `String` in v13 and a `String` has no wire type at all, so it can no
+    /// longer carry a port for anything to drive.
     #[test]
     fn a_driven_identifier_parameter_round_trips_with_its_port() {
         use ravel_core::animation::step::StepCurve;
-        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+        use ravel_core::composition::validate::{PRECOMP_COMP_ID_PARAM, PRECOMP_TYPE_KEY};
         use ravel_core::composition::{MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS};
 
         let mut steps = StepCurve::new("1".to_string());
@@ -918,8 +944,8 @@ mod tests {
             )
             .unwrap()
             .add_node(
-                Node::new(NodeId::new(201), LAYER_REF_TYPE_KEY)
-                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(12))
+                Node::new(NodeId::new(201), PRECOMP_TYPE_KEY)
+                    .with_param(PRECOMP_COMP_ID_PARAM, ParameterValue::Int(12))
                     .with_output("out", DataTypeId::FRAME_BUFFER),
             )
             .unwrap()
@@ -929,7 +955,7 @@ mod tests {
                     .with_output("out", DataTypeId::FRAME_BUFFER),
             )
             .unwrap()
-            .expose_param_port(NodeId::new(201), LAYER_REF_LAYER_PARAM)
+            .expose_param_port(NodeId::new(201), PRECOMP_COMP_ID_PARAM)
             .unwrap()
             .add_edge(
                 EdgeId::new(203),
@@ -964,13 +990,163 @@ mod tests {
             .expect("the layer came back")
             .network
             .node(NodeId::new(201))
-            .expect("the layer.ref node came back")
+            .expect("the precomp node came back")
             .clone();
         assert!(
             node.inputs
                 .iter()
-                .any(|port| port.is_param && port.name == LAYER_REF_LAYER_PARAM),
+                .any(|port| port.is_param && port.name == PRECOMP_COMP_ID_PARAM),
             "the identifier's parameter port survives, so it can be disconnected"
+        );
+    }
+
+    /// A pre-v13 reference the composition no longer holds still reserves its
+    /// id, which only happens if the v13 rewrite runs **before** the watermark
+    /// scan.
+    ///
+    /// `layer_ref_targets` reads the text spelling, so while the document
+    /// still holds `Int`s the scan finds no targets at all. Upgrading after
+    /// `advance_id_counters` therefore left a live reference whose id nothing
+    /// had reserved: `LayerId::next()` could hand that id to a brand-new
+    /// layer, and the dangling reference would silently start pointing at it —
+    /// the mis-link `Document::id_watermarks` exists to prevent
+    /// (`asset-identity-plan.md`; `validate::precomp_targets` states the same
+    /// rule for compositions).
+    ///
+    /// The target id is deliberately far above every id the document actually
+    /// holds, so the watermark can only reach it through the reference.
+    #[test]
+    fn a_pre_v13_dangling_reference_still_reserves_its_layer_id() {
+        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+
+        const DANGLING: u64 = 16_000_000;
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(400), LAYER_REF_TYPE_KEY)
+                    .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(DANGLING as i32))
+                    .with_output("output", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap();
+
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        project.document =
+            ravel_ui::document::update_composition(&project.document, root, |comp| {
+                comp.add_layer(Layer::new(LayerId::new(9), "Referrer", network))
+            })
+            .expect("the root composition");
+        project.manifest.format_version = 12;
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        // The loaded document is already upgraded, so reading its watermarks
+        // back would pass whenever the pass ran — the order is only visible in
+        // the **allocator**. `DANGLING` sits above every id any other test in
+        // this binary uses and far below the 24-bit ceiling layer ids live
+        // under (shell-id packing), so the counter can have reached it only
+        // through this load's own reservation.
+        assert!(
+            LayerId::next().raw() > DANGLING,
+            "the upgraded reference must be reserved before ids are minted"
+        );
+        assert_eq!(
+            back.document.id_watermarks().layer,
+            DANGLING,
+            "and the reference itself came back in the text spelling"
+        );
+    }
+
+    /// A `.ravprj` written before v13 holds its `layer.ref` targets as
+    /// `Int`s. Every one of them must come back pointing at the same layer, in
+    /// the text spelling — including one inside a nested subnet — and the old
+    /// `-1` "no target" must come back as the empty string the v13 template
+    /// defaults to.
+    ///
+    /// The second load is the other half of the requirement: a project that
+    /// round-trips must not change value, which is what makes the pass
+    /// idempotent in practice and not only in its own unit test.
+    #[test]
+    fn a_pre_v13_layer_ref_target_opens_pointing_at_the_same_layer() {
+        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+
+        let layer_ref = |id: u64, target: i32| {
+            Node::new(NodeId::new(id), LAYER_REF_TYPE_KEY)
+                .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(target))
+                .with_output("output", DataTypeId::FRAME_BUFFER)
+        };
+        let subnet = Node::new(NodeId::new(302), net::SUBNET_TYPE_KEY)
+            .with_subnet(Graph::new().add_node(layer_ref(303, 7)).unwrap());
+        let network = Graph::new()
+            .add_node(layer_ref(300, 7))
+            .unwrap()
+            .add_node(layer_ref(301, -1))
+            .unwrap()
+            .add_node(subnet)
+            .unwrap();
+
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        project.document =
+            ravel_ui::document::update_composition(&project.document, root, |comp| {
+                comp.add_layer(Layer::new(LayerId::new(7), "Target", Graph::new()))
+                    .add_layer(Layer::new(LayerId::new(8), "Referrer", network))
+            })
+            .expect("the root composition");
+        project.manifest.format_version = 12;
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        assert_eq!(back.manifest.format_version, CURRENT_FORMAT_VERSION);
+
+        let referrer = |project: &ProjectFile| {
+            project
+                .document
+                .get_composition(root)
+                .expect("root survives")
+                .layers
+                .iter()
+                .find(|layer| layer.id == LayerId::new(8))
+                .expect("the referring layer came back")
+                .network
+                .clone()
+        };
+        let target_of = |graph: &Graph, id: u64| {
+            graph
+                .node(NodeId::new(id))
+                .expect("the layer.ref node came back")
+                .parameters
+                .iter()
+                .find(|p| p.key == LAYER_REF_LAYER_PARAM)
+                .expect("the target parameter")
+                .value
+                .clone()
+        };
+
+        let network = referrer(&back);
+        assert_eq!(
+            target_of(&network, 300),
+            ParameterValue::String("7".into()),
+            "the reference still points at layer 7"
+        );
+        assert_eq!(
+            target_of(&network, 301),
+            ParameterValue::String(String::new()),
+            "the old -1 default is now the empty string"
+        );
+        let inner = network
+            .node(NodeId::new(302))
+            .and_then(|node| node.subnet.clone())
+            .expect("the subnet came back");
+        assert_eq!(
+            target_of(&inner, 303),
+            ParameterValue::String("7".into()),
+            "the upgrade reaches inside a subnet"
+        );
+
+        let reloaded = ProjectFile::from_archive(&back.to_archive().unwrap()).unwrap();
+        assert_eq!(reloaded.manifest.format_version, CURRENT_FORMAT_VERSION);
+        assert_eq!(
+            reloaded.document, back.document,
+            "a v13 round trip changes no value"
         );
     }
 

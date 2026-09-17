@@ -42,9 +42,15 @@ impl NodeProcessor for LayerRefProcessor {
         params: &ResolvedParams,
         scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let target_raw = params.i32_or("layer", -1);
-        anyhow::ensure!(target_raw >= 0, "layer.ref: no target layer set");
-        let target_id = LayerId::new(target_raw as u64);
+        // The target is the decimal `LayerId` (REQ-LAYER-005). Three spellings
+        // mean "nobody set one" and all resolve to 0, which `LayerId::next`
+        // never hands out: the template default `""`, a string that is not a
+        // number at all, and the `AssetId::UNSET` zero the evaluator
+        // substitutes for an identifier that does not stand still
+        // (`ravel_core::eval::identifier_overlay`).
+        let target_raw: u64 = params.str_or("layer", "").parse().unwrap_or(0);
+        anyhow::ensure!(target_raw != 0, "layer.ref: no target layer set");
+        let target_id = LayerId::new(target_raw);
         let port_name = params.str_or("port", net::PORT_FRAME).to_string();
 
         // The enclosing layer scope identifies "the same composition"

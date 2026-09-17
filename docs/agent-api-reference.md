@@ -234,11 +234,20 @@ ParameterValue::identifier() -> Identifier   // THE read mouth for references
     // .static_raw() -> Option<u64> and .dynamic() -> Option<DynamicIdentifier>.
     // ::static_identifier() is .identifier().static_raw().
     // Reads BOTH spellings of an identifier: Int / constant IntChannel (a raw
-    // LayerId / CompId) and String / a StringSteps no key can move (an
-    // AssetId's decimal form). Everything else is Dynamic — keyframes,
-    // expression, blend, node output, string steps — and Dynamic names
+    // CompId) and String / a StringSteps no key can move (an AssetId's or a
+    // LayerId's decimal form). ::static_identifier() answers for the numeric
+    // spelling only and ::static_text_identifier() for the text one — they do
+    // NOT stand in for each other, because each processor reads back one of
+    // them (precomp with i32_or, layer.ref and media with str_or).
+    // Everything else is Dynamic — keyframes,
+    // expression, blend, node output — and Dynamic names
     // NOTHING: a reference that changed per frame could not be reserved by
     // Document::id_watermarks, and the next allocation would land on it.
+    // A StringSteps is Dynamic only when it CAN move: one whose every key
+    // equals its default samples to one value forever, so it still names an
+    // id (that is the shape the keyframe toggle produces). The Properties
+    // row refuses a picker on the animatable spelling all the same, because
+    // an edit inserts a key and would make it move.
     // Which parameters are identifiers is composition::validate::
     // is_identifier_parameter (layer.ref `layer`, precomp `comp_id`, media
     // `asset_id`); what one names is this. Evaluation goes through it too, so
@@ -2186,7 +2195,7 @@ Current keys:
 | `vector.dot` | CPU | two vectors of the same arity → Scalar. Both ports accept every arity (the output is a Scalar regardless), so a Vec2 × Vec3 pair is connectable and reported as an evaluation error. One connected side is not a mismatch: the other reads as that arity's zero |
 | `vector.cross.vec2` / `.vec3` | CPU | 2D cross product → Scalar (`ax·by − ay·bx`), 3D cross product → `Vec3`. Two templates because the *output* type differs per arity; there is no 4-component form |
 | `media` | CPU | decodes media via the document asset table (`asset_id`), branching on `AssetKind`: containers via `MediaReader` (layer-local seconds → media frame `floor(t·fps)`, clamped), stills via an injectable `ImageReaderFactory`, sequences by rebuilding the frame file name (`start + floor(t·seq_fps)` clamped to `start..=end`; seq_fps = `metadata.frame_rate` else comp fps); offline / decode failure → transparent frame at ctx resolution (warned once per asset); every decoded frame lands in the shared `MediaFrameCache` the processor was built with, the processor itself keeping only the open reader; FFmpeg backend behind the `ffmpeg` feature; `video` is a load-time alias normalized by `Document::normalize_node_type_aliases` |
-| `layer.ref` | CPU | same-comp reference to another layer's `net.out` port (`layer` + `port` params); pre-transform output at the target's local time; typed zero outside its interval |
+| `layer.ref` | CPU | same-comp reference to another layer's `net.out` port; `layer` is the target `LayerId` as decimal text (`""` = unset, `.ravprj` v13 — a string so Properties can offer named sibling candidates through `ContextualKind::SiblingLayer`) and `port` the port name; pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |
 | `rasterize` | GPU render pass | Geometry → resident FrameBuffer; non-zero-winding paths, point sprites, nested instances. Paths with `in_tan`/`out_tan` point attributes are bezier-flattened first (shared `flatten::flatten_path`, CPU and GPU consume the same polyline). Element color: `Cd`/`alpha` attrs > `color` pin > `color` param (REQ-LAYER-008). Per-element style: `fill` (Bool), `stroke_width` (F32) and `stroke_color` (Color) on the Primitive domain override the node's parameters for one path; the same attributes on the Instance domain override them for everything that instance expands. An unset `stroke_color` strokes in the element's fill color. Synthetic Composition nodes remain on the CPU zeno reference path. Planar paths only: a `Vec3` `P` or a `Primitive::Mesh` anywhere in the geometry or its instance sources is an explicit error (`RequiresPlanarP` / `RequiresPathPrimitives`), since 3D and triangles are drawn through `scene.render`. An instance whose source is an `InstanceSource::Image` stamps a textured rectangle instead of expanding a geometry: sized by the image's own resolution, origin-centred, sampled bilinearly through the inverse of the composed placement, tinted by `Cd` x `alpha`, with **hard (un-antialiased) half-open edges** so abutting copies do not blend twice. Both paths draw it. The CPU reference reads texels, so a resident source is read back once **per source** at the node entry; the GPU path splits the draw where the sampled source changes and never reads back at all — that asymmetry is deliberate. Magnifying a copy blurs it: the network is evaluated once and the result stamped, never re-evaluated per copy. |
@@ -2521,10 +2530,20 @@ Unknown type keys are skipped silently (plugin space).
   unchanged. `param_group_titles(node, &registry) -> Vec<(group, title)>` is
   the same split without the fields — the host keys the fold state on
   `(type_key, group)` in `ui_state.json` and shows `title`. Builders: `sections_for_node(node,
-  &registry, frame, driven, NetworkContext)` (samples animated channels at the
-  layer-local frame; the context reaches only `node_ports_section`, which
-  returns `None` for anything but `net.in` / `net.out`. Collapse a
-  `NetworkPath` with `NetworkPath::context()`),
+  &registry, frame, driven, NodeContext)` (samples animated channels at the
+  layer-local frame). `properties::node::NodeContext { network: NetworkContext,
+  comp: Option<&Composition>, owner: Option<LayerId> }` says where the node
+  sits: `network` reaches only `node_ports_section`, which returns `None` for
+  anything but `net.in` / `net.out` (collapse a `NetworkPath` with
+  `NetworkPath::context()`), while `comp` + `owner` resolve a
+  `ParamOptions::Contextual` parameter's candidates. Feed them
+  `document.get_composition(path.comp)` and `Some(path.layer)` — `path.layer`
+  is the owner for a node inside a subnet too. `NodeContext::detached(network)`
+  is the no-document form. Such a row with NO candidates becomes a read-only
+  `properties::node::NO_SIBLING_LAYERS` rather than an empty dropdown, and a
+  stored value the candidates do not offer is APPENDED to them so it stays
+  selected (`enum_row_label` only fixes the display; the Select's index comes
+  from the option list),
   `sections_for_layer(layer, comp, &ctx, audio_asset: Option<&AssetMetadata>)`
   (evaluates transform channels in layer-local time; includes the In node's
   custom parameters as `custom.<name>` fields, REQ-LAYER-002; `audio_asset`

@@ -4,12 +4,16 @@
 //! Property sections for graph nodes.
 
 use ravel_core::animation::channel::AnimationChannel;
+use ravel_core::composition::Composition;
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::{Node, Parameter, ParameterValue, PortSide};
+use ravel_core::id::LayerId;
 use ravel_core::network::{
     CustomPortType, NetworkContext, custom_port_type, is_fixed_port, is_in_node, is_out_node,
 };
-use ravel_core::registry::{NodeRegistry, ParamOption, ParamRange};
+use ravel_core::registry::{
+    ContextualKind, NodeRegistry, ParamOption, ParamOptions, ParamRange, contextual_options,
+};
 
 use std::collections::HashSet;
 
@@ -18,6 +22,78 @@ use super::{DrivenParam, PortRow, PropertyField, PropertySection};
 /// Field key of the interface node's port list. One list per node, so the key
 /// names the section's single field rather than any port.
 pub const FIELD_PORTS: &str = "ports";
+
+/// What a contextual option row shows when the context offers nothing — here,
+/// a network with no sibling layer to reference.
+///
+/// Emitted as a locale key for the same reason as
+/// [`PARENT_NONE`](super::layer::PARENT_NONE): it names a *state* rather than
+/// carrying data, and this crate has no i18n dependency, so the host
+/// translates it at the display boundary (`read_only_value`).
+///
+/// A row rather than an empty dropdown, because an empty dropdown cannot be
+/// told apart from a broken one (UX invariant 6: a control that cannot act is
+/// disabled and *looks* disabled).
+pub const NO_SIBLING_LAYERS: &str = "properties.value.no_sibling_layers";
+
+/// Why a contextual parameter offers nothing, as a locale key the display
+/// boundary translates ([`crate::properties::node::string_field`]).
+///
+/// A `match` over the whole of [`ContextualKind`] rather than one message for
+/// every kind: the reason is the *kind's* reason, and the next kind
+/// ([`ContextualKind::LayerOutputPort`], `CPO-3`) would otherwise inherit
+/// "there are no other layers" while the truth is "that layer has no output
+/// ports". Exhaustive, so adding an arm to `ContextualKind` fails to compile
+/// here instead of showing the wrong sentence.
+fn no_candidates_reason(kind: ContextualKind) -> &'static str {
+    match kind {
+        ContextualKind::SiblingLayer => NO_SIBLING_LAYERS,
+    }
+}
+
+/// Where the node whose sections are being built sits.
+///
+/// One value rather than three parameters: `sections_for_node` already took
+/// six, and the two halves a contextual option set needs — the composition and
+/// the owning layer — are only ever read together. `comp` is `None` for a
+/// caller that has no document to hand (the node editor's hover popover), and
+/// `owner` is `None` for a network that belongs to no layer; either one makes
+/// [`contextual_options`] answer with an empty candidate list, which is the
+/// same answer as "this layer has no siblings".
+#[derive(Clone, Copy)]
+pub struct NodeContext<'a> {
+    /// Whether the network is a layer root or the inside of a subnet. Decides
+    /// the custom port types an interface node may declare (REQ-LAYER-002/003)
+    /// and nothing else.
+    pub network: NetworkContext,
+    /// The composition the network belongs to.
+    pub comp: Option<&'a Composition>,
+    /// The layer that owns the network — the same layer for a node inside a
+    /// subnet, since a subnet does not change which layer the network is part
+    /// of.
+    pub owner: Option<LayerId>,
+}
+
+/// Which of a string parameter's two spellings a row is being built from:
+/// the constant `String` or the animatable `StringSteps`. Only the contextual
+/// option set cares, and only to refuse a picker on the animatable one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StringSpelling {
+    Constant,
+    Animated,
+}
+
+impl NodeContext<'_> {
+    /// A context that resolves no contextual candidates: for a caller holding
+    /// a node but not the document it came out of.
+    pub fn detached(network: NetworkContext) -> Self {
+        Self {
+            network,
+            comp: None,
+            owner: None,
+        }
+    }
+}
 
 /// Display value for an animated channel at `frame` (the owning layer's
 /// local frame, REQ-LAYER-004/006).
@@ -79,18 +155,82 @@ fn int_field(key: String, value: i32, ranges: Option<&ParamRange>) -> PropertyFi
 /// One string row, shared by the constant `String` and the animatable
 /// `StringSteps` for the same reason. A registry-declared closed option set
 /// renders as an enum dropdown; free-form strings stay editable text.
+///
+/// Two kinds of option set ([`ParamOptions`]). A `Fixed` one is the
+/// template's own list. A `Contextual` one is resolved against `ctx` — the
+/// candidate layers of `layer.ref`'s `layer`, say — and differs in two ways:
+///
+/// * **No candidates means no dropdown.** The row becomes a read-only
+///   [`NO_SIBLING_LAYERS`] instead, because an empty dropdown reads as
+///   "broken", not as "nothing to choose".
+/// * **A stored value the candidates do not offer joins them**, keeping the
+///   row's selection. This is the normal state of a reference that travelled
+///   — a node copied into another project — and it is the same treatment the
+///   audio stream picker gives a stored stream the container does not have.
+///   `enum_row_label` already *displays* such a value, but the Select's
+///   selected index comes from the option list, so displaying it is not
+///   enough to keep it selected.
 fn string_field(
     key: String,
     value: String,
     registry: &NodeRegistry,
     type_key: &str,
+    ctx: NodeContext<'_>,
+    spelling: StringSpelling,
 ) -> PropertyField {
-    match registry.param_options(type_key, &key) {
-        Some(options) => PropertyField::Enum {
+    match registry.param_option_source(type_key, &key) {
+        Some(ParamOptions::Fixed(options)) => PropertyField::Enum {
             key,
             value,
             options: options.iter().map(ParamOption::fixed).collect(),
         },
+        // A contextual candidate addresses something the document holds, so
+        // the parameter is an identifier — and an identifier that can change
+        // over time names **nothing**
+        // (`ParameterValue::identifier` answers `Dynamic`, and the evaluator
+        // substitutes the unset id). A picker on the animatable spelling
+        // would write a key into the curve, report success, and leave the
+        // reference resolving to no target at all, so the row says what it
+        // holds instead of offering an edit that cannot land. Only a
+        // hand-edited document reaches here: the keyframe toggle refuses an
+        // identifier parameter (`DISK-2`).
+        Some(ParamOptions::Contextual(_)) if spelling == StringSpelling::Animated => {
+            PropertyField::ReadOnly { key, value }
+        }
+        Some(ParamOptions::Contextual(kind)) => {
+            let mut options = ctx
+                .comp
+                .map(|comp| contextual_options(*kind, comp, ctx.owner))
+                .unwrap_or_default();
+            if options.is_empty() {
+                // Nothing to offer. What the row says then depends on whether
+                // the document holds a target: the reason only when there is
+                // no value to show, because "there are no other layers" over
+                // a reference that *is* set would hide what the document
+                // holds — the copy-between-projects case this row is supposed
+                // to survive. A value with no candidates cannot be a
+                // dropdown either (one option, and it is the current one), so
+                // it reads as itself.
+                return PropertyField::ReadOnly {
+                    key,
+                    value: if value.is_empty() {
+                        no_candidates_reason(*kind).to_string()
+                    } else {
+                        value
+                    },
+                };
+            }
+            // The unset default is not a candidate — nothing to keep selected
+            // — so it stays unselected and the row reads as "pick one".
+            if !value.is_empty() && !options.iter().any(|option| option.value == value) {
+                options.push(ParamOption::fixed(value.clone()));
+            }
+            PropertyField::Enum {
+                key,
+                value,
+                options,
+            }
+        }
         None => PropertyField::String { key, value },
     }
 }
@@ -228,6 +368,7 @@ fn param_field(
     frame: u64,
     eval: &EvalContext,
     driven: &[DrivenParam],
+    ctx: NodeContext<'_>,
 ) -> PropertyField {
     // A parameter driven by a connected port is read-only: the
     // stored value is an inert fallback while the edge exists
@@ -253,9 +394,14 @@ fn param_field(
             key: p.key.clone(),
             value: *v,
         },
-        ParameterValue::String(v) => {
-            string_field(p.key.clone(), v.clone(), registry, &node.type_key)
-        }
+        ParameterValue::String(v) => string_field(
+            p.key.clone(),
+            v.clone(),
+            registry,
+            &node.type_key,
+            ctx,
+            StringSpelling::Constant,
+        ),
         ParameterValue::Channel(ch) => PropertyField::Float {
             key: p.key.clone(),
             value: channel_display_value(ch, frame, eval),
@@ -344,6 +490,8 @@ fn param_field(
             steps.sample(frame as f64).clone(),
             registry,
             &node.type_key,
+            ctx,
+            StringSpelling::Animated,
         ),
     }
 }
@@ -359,6 +507,7 @@ pub fn node_params_sections(
     frame: u64,
     eval: &EvalContext,
     driven: &[DrivenParam],
+    ctx: NodeContext<'_>,
 ) -> Vec<PropertySection> {
     grouped_params(node, registry)
         .into_iter()
@@ -366,7 +515,7 @@ pub fn node_params_sections(
             title,
             fields: params
                 .into_iter()
-                .map(|p| param_field(node, p, registry, frame, eval, driven))
+                .map(|p| param_field(node, p, registry, frame, eval, driven, ctx))
                 .collect(),
         })
         .collect()
@@ -427,21 +576,25 @@ pub fn node_ports_section(node: &Node, context: NetworkContext) -> Option<Proper
 /// Build all sections for a single node, sampling animated channels at
 /// `frame` (the owning layer's local frame).
 ///
-/// `context` only reaches [`node_ports_section`]; every other section is the
-/// same wherever the network sits.
+/// `ctx` reaches two sections and nothing else: its `network` half picks the
+/// port type menu ([`node_ports_section`]), and its composition / owner half
+/// resolves contextual parameter candidates ([`string_field`]). Every other
+/// section is the same wherever the network sits.
 pub fn sections_for_node(
     node: &Node,
     registry: &NodeRegistry,
     frame: u64,
     eval: &EvalContext,
     driven: &[DrivenParam],
-    context: NetworkContext,
+    ctx: NodeContext<'_>,
 ) -> Vec<PropertySection> {
     let mut sections = vec![node_info_section(node, registry)];
-    sections.extend(node_params_sections(node, registry, frame, eval, driven));
+    sections.extend(node_params_sections(
+        node, registry, frame, eval, driven, ctx,
+    ));
     // Last: the ports are the node's shape, and a user reading an In node
     // wants its values before its plumbing.
-    sections.extend(node_ports_section(node, context));
+    sections.extend(node_ports_section(node, ctx.network));
     sections
 }
 
@@ -457,6 +610,10 @@ mod tests {
     /// builder returned). It shadows the glob-imported plural, so a node that
     /// *does* declare groups fails here instead of silently having its extra
     /// sections dropped.
+    ///
+    /// Built with a **detached** context: the node's composition only matters
+    /// to a parameter that declares contextual candidates, and the tests that
+    /// exercise those call `node_params_sections` directly with a real one.
     fn node_params_section(
         node: &Node,
         registry: &NodeRegistry,
@@ -464,7 +621,14 @@ mod tests {
         eval: &EvalContext,
         driven: &[DrivenParam],
     ) -> PropertySection {
-        let mut sections = node_params_sections(node, registry, frame, eval, driven);
+        let mut sections = node_params_sections(
+            node,
+            registry,
+            frame,
+            eval,
+            driven,
+            NodeContext::detached(NetworkContext::LayerRoot),
+        );
         assert!(
             sections.len() <= 1,
             "{} declares parameter groups",
@@ -486,10 +650,17 @@ mod tests {
         eval: &EvalContext,
         driven: &[DrivenParam],
     ) -> Vec<PropertyField> {
-        node_params_sections(node, registry, frame, eval, driven)
-            .into_iter()
-            .flat_map(|section| section.fields)
-            .collect()
+        node_params_sections(
+            node,
+            registry,
+            frame,
+            eval,
+            driven,
+            NodeContext::detached(NetworkContext::LayerRoot),
+        )
+        .into_iter()
+        .flat_map(|section| section.fields)
+        .collect()
     }
 
     /// Display context for the sections. Only `fps` and the resolutions are
@@ -681,7 +852,7 @@ mod tests {
             0,
             &eval(),
             &[],
-            NetworkContext::LayerRoot,
+            NodeContext::detached(NetworkContext::LayerRoot),
         );
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].title, "properties.section.node_info");
@@ -697,7 +868,7 @@ mod tests {
             0,
             &eval(),
             &[],
-            NetworkContext::LayerRoot,
+            NodeContext::detached(NetworkContext::LayerRoot),
         );
         assert_eq!(sections.len(), 1);
     }
@@ -1121,7 +1292,7 @@ mod tests {
             0,
             &eval(),
             &[],
-            NetworkContext::LayerRoot,
+            NodeContext::detached(NetworkContext::LayerRoot),
         );
         let section = sections.last().expect("a ports section");
         assert_eq!(section.title, "properties.section.ports");
@@ -1169,7 +1340,7 @@ mod tests {
             0,
             &eval(),
             &[],
-            NetworkContext::LayerRoot,
+            NodeContext::detached(NetworkContext::LayerRoot),
         );
         let (side, rows, _) = port_list(sections.last().expect("a ports section"));
         assert_eq!(*side, PortSide::Input);
@@ -1191,7 +1362,14 @@ mod tests {
     fn the_type_menu_follows_the_network_context() {
         let node = in_node_with(NetworkContext::LayerRoot, &[]);
         for context in [NetworkContext::LayerRoot, NetworkContext::Subnet] {
-            let sections = sections_for_node(&node, &registry(), 0, &eval(), &[], context);
+            let sections = sections_for_node(
+                &node,
+                &registry(),
+                0,
+                &eval(),
+                &[],
+                NodeContext::detached(context),
+            );
             let (_, _, options) = port_list(sections.last().expect("a ports section"));
             assert_eq!(
                 options,
@@ -1213,7 +1391,7 @@ mod tests {
             0,
             &eval(),
             &[],
-            NetworkContext::LayerRoot,
+            NodeContext::detached(NetworkContext::LayerRoot),
         );
         let (_, _, options) = port_list(sections.last().expect("a ports section"));
         assert_eq!(options, CustomPortType::allowed_for_out());
@@ -1233,7 +1411,7 @@ mod tests {
                 0,
                 &eval(),
                 &[],
-                NetworkContext::LayerRoot
+                NodeContext::detached(NetworkContext::LayerRoot)
             )
             .iter()
             .all(|section| section.title != "properties.section.ports")
@@ -1314,19 +1492,26 @@ mod tests {
     /// The section titles and the field keys under each, which is the whole
     /// observable output of the split.
     fn split(node: &Node, registry: &NodeRegistry) -> Vec<(String, Vec<String>)> {
-        node_params_sections(node, registry, 0, &eval(), &[])
-            .into_iter()
-            .map(|section| {
-                (
-                    section.title,
-                    section
-                        .fields
-                        .iter()
-                        .map(|field| field.key().to_string())
-                        .collect(),
-                )
-            })
-            .collect()
+        node_params_sections(
+            node,
+            registry,
+            0,
+            &eval(),
+            &[],
+            NodeContext::detached(NetworkContext::LayerRoot),
+        )
+        .into_iter()
+        .map(|section| {
+            (
+                section.title,
+                section
+                    .fields
+                    .iter()
+                    .map(|field| field.key().to_string())
+                    .collect(),
+            )
+        })
+        .collect()
     }
 
     /// A type that declares no group keeps the single section it always had,
@@ -1495,6 +1680,248 @@ mod tests {
         );
     }
 
+    // ----- contextual parameter candidates (CPO-2) ------------------------
+
+    /// A composition of `names` layers, bottom-most first (the order
+    /// `comp.layers` keeps), with ids `1..=names.len()`.
+    fn comp_of(names: &[&str]) -> ravel_core::composition::Composition {
+        use ravel_core::composition::{Composition, Layer};
+        use ravel_core::id::CompId;
+        use ravel_core::types::FrameRate;
+
+        names.iter().enumerate().fold(
+            Composition::new(CompId::new(1), "C", (16, 16), FrameRate::new(30, 1), 100),
+            |comp, (index, name)| {
+                comp.add_layer(Layer::new(
+                    LayerId::new(index as u64 + 1),
+                    *name,
+                    ravel_core::graph::Graph::new(),
+                ))
+            },
+        )
+    }
+
+    /// A `layer.ref` node whose stored target is `target`.
+    fn layer_ref_node(target: &str) -> Node {
+        let node = registry()
+            .create_node("layer.ref", NodeId::new(1))
+            .expect("layer.ref is registered");
+        set_param(node, "layer", ParameterValue::String(target.into()))
+    }
+
+    /// Replace a template default rather than appending beside it
+    /// (`Node::with_param` appends).
+    fn set_param(mut node: Node, key: &str, value: ParameterValue) -> Node {
+        match node.parameters.iter_mut().find(|p| p.key == key) {
+            Some(param) => param.value = value,
+            None => node.parameters.push(Parameter {
+                key: key.into(),
+                value,
+            }),
+        }
+        node
+    }
+
+    fn field_of(fields: &[PropertyField], key: &str) -> PropertyField {
+        fields
+            .iter()
+            .find(|field| match field {
+                PropertyField::Enum { key: k, .. }
+                | PropertyField::String { key: k, .. }
+                | PropertyField::ReadOnly { key: k, .. } => k == key,
+                _ => false,
+            })
+            .expect("the row")
+            .clone()
+    }
+
+    fn rows(node: &Node, ctx: NodeContext<'_>) -> Vec<PropertyField> {
+        node_params_sections(node, &registry(), 0, &eval(), &[], ctx)
+            .into_iter()
+            .flat_map(|section| section.fields)
+            .collect()
+    }
+
+    /// With no candidates at all, the row still shows a target the document
+    /// holds — the reason replaces it only when there is nothing to show.
+    ///
+    /// A reference copied out of another project lands in exactly this state:
+    /// a value whose layer is not here, in a composition with no siblings to
+    /// offer. Saying "there are no other layers" over it would hide the one
+    /// thing the row exists to display.
+    #[test]
+    fn no_candidates_still_shows_a_target_the_document_holds() {
+        let alone = comp_of(&["Only"]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&alone),
+            owner: Some(LayerId::new(1)),
+        };
+
+        match field_of(&rows(&layer_ref_node("909"), ctx), "layer") {
+            PropertyField::ReadOnly { value, .. } => {
+                assert_eq!(value, "909", "the stranded target is still visible")
+            }
+            other => panic!("expected the value, got {other:?}"),
+        }
+        match field_of(&rows(&layer_ref_node(""), ctx), "layer") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(
+                value, NO_SIBLING_LAYERS,
+                "with nothing set, the reason is what there is to say"
+            ),
+            other => panic!("expected the reason, got {other:?}"),
+        }
+    }
+
+    /// An identifier stored in the **animatable** spelling gets no picker.
+    ///
+    /// A reference that can change over time names nothing — `identifier()`
+    /// answers `Dynamic(StringSteps)` and the evaluator substitutes the unset
+    /// id — so a dropdown here would write a key into the curve, look like it
+    /// worked, and leave the reference pointing at no layer. The row shows
+    /// what the document holds instead.
+    #[test]
+    fn an_animatable_identifier_shows_its_value_instead_of_a_picker() {
+        use ravel_core::animation::step::StepCurve;
+
+        let comp = comp_of(&["Backdrop", "Middle", "Hero"]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&comp),
+            owner: Some(LayerId::new(2)),
+        };
+        let node = set_param(
+            layer_ref_node("3"),
+            "layer",
+            ParameterValue::StringSteps(StepCurve::keyed(0, "3".to_string())),
+        );
+
+        match field_of(&rows(&node, ctx), "layer") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, "3"),
+            other => panic!("expected the value, not an editor: {other:?}"),
+        }
+
+        // The constant spelling of the very same target still gets the picker,
+        // so this is about the spelling and not about the value.
+        assert!(
+            matches!(
+                field_of(&rows(&layer_ref_node("3"), ctx), "layer"),
+                PropertyField::Enum { .. }
+            ),
+            "the constant spelling is still a picker"
+        );
+    }
+
+    /// CPO-2: `layer.ref`'s target is a dropdown of the composition's *other*
+    /// layers, labelled by Timeline row, and the owner is not among them.
+    #[test]
+    fn a_contextual_parameter_becomes_a_picker_of_its_siblings() {
+        let comp = comp_of(&["Backdrop", "Middle", "Hero"]);
+        let fields = rows(
+            &layer_ref_node(""),
+            NodeContext {
+                network: NetworkContext::LayerRoot,
+                comp: Some(&comp),
+                owner: Some(LayerId::new(2)),
+            },
+        );
+
+        let PropertyField::Enum { value, options, .. } = field_of(&fields, "layer") else {
+            panic!("expected a dropdown");
+        };
+        assert_eq!(value, "", "the template default is still unset");
+        assert_eq!(
+            options,
+            vec![
+                ParamOption::new("1", "3. Backdrop"),
+                ParamOption::new("3", "1. Hero"),
+            ],
+            "the owner is never its own sibling, and the labels are Timeline rows"
+        );
+        // `port` is a free string in this unit: only `layer` declares
+        // candidates, so the other row must not have turned into a dropdown.
+        assert!(matches!(
+            field_of(&fields, "port"),
+            PropertyField::String { .. }
+        ));
+    }
+
+    /// CPO-2: no candidates means no dropdown. An empty `Select` cannot be
+    /// told apart from a broken one, so the row says why instead (UX
+    /// invariant 6). The same answer covers a caller with no composition at
+    /// all and a network that belongs to no layer.
+    #[test]
+    fn no_candidates_gives_a_reason_instead_of_an_empty_dropdown() {
+        let alone = comp_of(&["Only"]);
+
+        for ctx in [
+            NodeContext {
+                network: NetworkContext::LayerRoot,
+                comp: Some(&alone),
+                owner: Some(LayerId::new(1)),
+            },
+            // A network that belongs to no layer has no siblings.
+            NodeContext {
+                network: NetworkContext::LayerRoot,
+                comp: Some(&alone),
+                owner: None,
+            },
+            // An owner the composition no longer holds is the same case.
+            NodeContext {
+                network: NetworkContext::LayerRoot,
+                comp: Some(&alone),
+                owner: Some(LayerId::new(404)),
+            },
+            NodeContext::detached(NetworkContext::LayerRoot),
+        ] {
+            let PropertyField::ReadOnly { value, .. } =
+                field_of(&rows(&layer_ref_node(""), ctx), "layer")
+            else {
+                panic!("expected a read-only reason, not a dropdown");
+            };
+            assert_eq!(value, NO_SIBLING_LAYERS);
+        }
+    }
+
+    /// CPO-2: a stored target the candidates do not offer — a node copied in
+    /// from another project — joins the list so the row keeps showing it as
+    /// the selection. Displaying it would not be enough: the `Select`'s
+    /// selected index is looked up *in the options*, so a value that is not
+    /// there is no selection at all.
+    #[test]
+    fn a_target_the_candidates_do_not_offer_stays_selected() {
+        let comp = comp_of(&["Backdrop", "Hero"]);
+        let ctx = NodeContext {
+            network: NetworkContext::LayerRoot,
+            comp: Some(&comp),
+            owner: Some(LayerId::new(1)),
+        };
+
+        let PropertyField::Enum { value, options, .. } =
+            field_of(&rows(&layer_ref_node("909"), ctx), "layer")
+        else {
+            panic!("expected a dropdown");
+        };
+        assert_eq!(
+            options,
+            vec![ParamOption::new("2", "1. Hero"), ParamOption::fixed("909")],
+            "the stranded id is offered last, as its own label — there is no name for it"
+        );
+        assert!(
+            options.iter().any(|option| option.value == value),
+            "the stored value is selectable, not merely displayed"
+        );
+
+        // And the unset default is *not* pushed in: "nothing chosen yet" is
+        // not an option to choose.
+        let PropertyField::Enum { options, .. } =
+            field_of(&rows(&layer_ref_node(""), ctx), "layer")
+        else {
+            panic!("expected a dropdown");
+        };
+        assert_eq!(options, vec![ParamOption::new("2", "1. Hero")]);
+    }
+
     /// Every section the split produces reaches [`sections_for_node`], between
     /// the info section and the ports section.
     #[test]
@@ -1506,7 +1933,7 @@ mod tests {
             0,
             &eval(),
             &[],
-            NetworkContext::LayerRoot,
+            NodeContext::detached(NetworkContext::LayerRoot),
         )
         .into_iter()
         .map(|section| section.title)

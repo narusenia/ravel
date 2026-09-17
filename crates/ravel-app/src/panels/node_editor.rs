@@ -6227,11 +6227,25 @@ mod tests {
         // A port that already exists — put there through the graph API, which
         // this fix deliberately leaves open — can still be removed from the UI.
         // Refusing that half too would strand a document holding one.
+        //
+        // Shown on `precomp`'s `comp_id`, because that is the identifier still
+        // held as an `Int`: `layer.ref`'s `layer` became a `String` in
+        // `.ravprj` v13 and a `String` has no wire type, so not even the graph
+        // API can put a port on it any more.
+        // Built by hand rather than from the registry: `precomp` has no
+        // builtin template yet (its `Int` `comp_id` is fixed by
+        // `validate::PRECOMP_COMP_ID_PARAM`, not by a node type).
+        let precomp = NodeId::next();
         project.update(cx, |project, cx| {
+            let node = Node::new(precomp, "precomp")
+                .with_param("comp_id", ParameterValue::Int(3))
+                .with_output("out", DataTypeId::FRAME_BUFFER);
             let graph = resolve_network(project.document(), &path)
                 .expect("network")
                 .clone()
-                .expose_param_port(layer_ref, "layer")
+                .add_node(node)
+                .unwrap()
+                .expose_param_port(precomp, "comp_id")
                 .expect("the graph API still allows it");
             let doc = replace_network(project.document(), &path, graph).unwrap();
             project.commit_document(doc, InvalidationHint::Structural, cx);
@@ -6239,16 +6253,16 @@ mod tests {
         window
             .update(cx, |panel, _window, cx| {
                 panel.open_network(path.clone(), cx);
-                panel.toggle_param_port(layer_ref, "layer", cx);
+                panel.toggle_param_port(precomp, "comp_id", cx);
             })
             .unwrap();
         project.read_with(cx, |project, _| {
             assert!(
                 resolve_network(project.document(), &path)
                     .expect("network")
-                    .node(layer_ref)
-                    .expect("layer.ref node")
-                    .param_port_index("layer")
+                    .node(precomp)
+                    .expect("precomp node")
+                    .param_port_index("comp_id")
                     .is_none(),
                 "an existing identifier port is still removable"
             );
@@ -6265,7 +6279,7 @@ mod tests {
         let (window, project, path, _) = setup(cx);
         let layer_ref = add_node_of(&window, &project, &path, "layer.ref", cx);
         let before = param_of(&project, &path, layer_ref, "layer", cx);
-        assert!(matches!(before, ParameterValue::Int(_)));
+        assert!(matches!(before, ParameterValue::String(_)));
 
         window
             .update(cx, |panel, _window, cx| {

@@ -470,6 +470,7 @@ exposed = "Exposed Parameters"
 on = "On"
 off = "Off"
 none = "(none)"
+no_sibling_layers = "No other layer in this composition"
 source_network = "Network ({count} nodes)"
 source_audio = "Audio"
 source_null = "Null"
@@ -863,7 +864,7 @@ asset_id = "The media asset to read, chosen from imported assets."
 label = "Layer Ref"
 description = "References the output of another layer in the same composition."
 [node."layer.ref".params]
-layer = "ID of the target layer (-1 for none)."
+layer = "The layer in this composition to reference."
 port = "Name of the target layer's output port to read."
 
 [node."subnet"]

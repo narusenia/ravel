@@ -73,7 +73,7 @@ use ravel_ui::properties::layer::{
 use ravel_ui::properties::media_asset::{
     SECTION_FILE, apply_media_asset_field, sections_for_media_asset,
 };
-use ravel_ui::properties::node::sections_for_node;
+use ravel_ui::properties::node::{NodeContext, sections_for_node};
 use ravel_ui::properties::{DrivenParam, PropertyField, PropertySection, PropertyValue};
 use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{
@@ -3838,13 +3838,30 @@ impl PropertiesGpuiPanel {
                     // The Ports section of an interface node offers the types
                     // this network's position admits (REQ-LAYER-002/003).
                     let eval = self.node_eval_context(cx);
+                    // The composition and the owning layer are what a
+                    // contextual parameter's candidates are drawn from — the
+                    // sibling layers `layer.ref`'s `layer` offers. `path.layer`
+                    // is the owner even for a node inside a subnet: entering a
+                    // subnet does not change which layer the network is part
+                    // of.
+                    let comp = self
+                        .project
+                        .as_ref()
+                        .and_then(|project| {
+                            project.read(cx).document().get_composition(network.comp)
+                        })
+                        .map(|comp| &**comp);
                     let mut sections = sections_for_node(
                         node,
                         &self.registry,
                         frame,
                         &eval,
                         &driven,
-                        network.context(),
+                        NodeContext {
+                            network: network.context(),
+                            comp,
+                            owner: Some(network.layer),
+                        },
                     );
                     append_node_description(&mut sections, &node.type_key);
                     sections
@@ -6286,6 +6303,92 @@ mod tests {
         assert_eq!(
             node_parameter(&project, &path, node_id, "enabled", cx),
             ParameterValue::Bool(true)
+        );
+    }
+
+    /// CPO-2: `layer.ref`'s target is a picker of the composition's other
+    /// layers, and confirming one writes that layer's id as a single undo
+    /// step. The panel is what supplies the context the candidates come from,
+    /// so nothing below `ravel-ui` can prove this end to end.
+    #[gpui::test]
+    fn the_layer_ref_target_picker_writes_the_chosen_layer_id(cx: &mut TestAppContext) {
+        let node = Node::new(NodeId::next(), "layer.ref")
+            .with_param("layer", ParameterValue::String(String::new()))
+            .with_param("port", ParameterValue::String("frame".into()))
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
+
+        // A sibling to pick. Without one the row is a reason, not a dropdown —
+        // which is the other half of the unit and is tested in `ravel-ui`.
+        let sibling = LayerId::next();
+        project.update(cx, |project, cx| {
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                path.comp,
+                Layer::new(sibling, "Backdrop", Graph::new()),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+        });
+
+        let options = window
+            .update(cx, |panel, _window, cx| {
+                panel.refresh_values(cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::Enum { key, options, .. } if key == "layer" => {
+                            Some(options.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("the layer picker")
+            })
+            .unwrap();
+        assert!(
+            options
+                .iter()
+                .any(|option| option.value == sibling.raw().to_string()),
+            "the sibling layer is offered: {options:?}"
+        );
+        assert!(
+            options
+                .iter()
+                .all(|option| option.value != path.layer.raw().to_string()),
+            "the owning layer is not offered as its own reference"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.route_change(
+                    "layer",
+                    PropertyValue::String(sibling.raw().to_string()),
+                    true,
+                    &[node_id],
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "layer", cx),
+            ParameterValue::String(sibling.raw().to_string())
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "layer", cx),
+            ParameterValue::String(String::new()),
+            "one undo takes the whole pick back"
+        );
+        // Only a committed step can be redone, so this is what proves the
+        // pick was one commit rather than an uncommitted live preview.
+        project.update(cx, |project, cx| assert!(project.redo(cx)));
+        assert_eq!(
+            node_parameter(&project, &path, node_id, "layer", cx),
+            ParameterValue::String(sibling.raw().to_string())
         );
     }
 
@@ -8788,7 +8891,7 @@ mod tests {
             0,
             &eval,
             &[],
-            ravel_core::network::NetworkContext::LayerRoot,
+            NodeContext::detached(ravel_core::network::NetworkContext::LayerRoot),
         );
         let fields_before = sections[0].fields.len();
         append_node_description(&mut sections, &node.type_key);

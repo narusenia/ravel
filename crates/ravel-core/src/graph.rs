@@ -438,12 +438,13 @@ impl ParameterValue {
     /// silently different picture ([`Document::dynamic_identifiers`](crate::composition::Document::dynamic_identifiers)).
     ///
     /// Both spellings of an identifier land here: the `Int` family holds a
-    /// raw [`LayerId`](crate::id::LayerId) / [`CompId`](crate::id::CompId),
-    /// and the `String` family holds an
-    /// [`AssetId`](crate::id::AssetId)'s decimal form
-    /// ([`AssetId::to_param_value`](crate::id::AssetId::to_param_value)).
-    /// Reading them in one place is what keeps the watermark scan and
-    /// evaluation from disagreeing about which ids exist.
+    /// raw [`CompId`](crate::id::CompId), and the `String` family holds the
+    /// decimal form of an [`AssetId`](crate::id::AssetId)
+    /// ([`AssetId::to_param_value`](crate::id::AssetId::to_param_value)) or of
+    /// a [`LayerId`](crate::id::LayerId) (`.ravprj` v13 — a `layer.ref`
+    /// target is text so the picker can label its candidates). Reading them in
+    /// one place is what keeps the watermark scan and evaluation from
+    /// disagreeing about which ids exist.
     pub fn identifier(&self) -> Identifier {
         use crate::animation::channel::ChannelSource;
         let from_int = |raw: i32| match u64::try_from(raw) {
@@ -498,14 +499,14 @@ impl ParameterValue {
     ///
     /// # Why the spelling matters
     ///
-    /// The two identifier flavours are not interchangeable. `layer.ref`'s
-    /// `layer` and `precomp`'s `comp_id` are read back with `i32_or`, and
-    /// `media`'s `asset_id` with `str_or`, so a `String("5")` on `layer.ref`
-    /// reaches the processor as a string it does not read: the reference does
-    /// **not** resolve. Reserving id 5 for it anyway would make the watermark
-    /// scan claim an id nothing points at, which is the disagreement between
-    /// reservation and evaluation this whole path exists to remove. A caller
-    /// that resolves a text-spelled identifier uses
+    /// The two identifier flavours are not interchangeable. `precomp`'s
+    /// `comp_id` is read back with `i32_or`, while `media`'s `asset_id` and
+    /// `layer.ref`'s `layer` are read with `str_or`, so an `Int(5)` on
+    /// `layer.ref` reaches the processor as a number it does not read: the
+    /// reference does **not** resolve. Reserving id 5 for it anyway would make
+    /// the watermark scan claim an id nothing points at, which is the
+    /// disagreement between reservation and evaluation this whole path exists
+    /// to remove. A caller that resolves a text-spelled identifier uses
     /// [`static_text_identifier`](Self::static_text_identifier).
     pub fn static_identifier(&self) -> Option<u64> {
         match self {
@@ -517,8 +518,10 @@ impl ParameterValue {
     }
 
     /// The non-negative integer this parameter names as an identifier **in the
-    /// text spelling** (`media`'s `asset_id`, which holds an [`AssetId`] as
-    /// decimal digits), or `None` if it names none.
+    /// text spelling** — `media`'s `asset_id`, which holds an [`AssetId`] as
+    /// decimal digits, and `layer.ref`'s `layer`, which holds a
+    /// [`LayerId`](crate::id::LayerId) the same way — or `None` if it names
+    /// none.
     ///
     /// The mirror of [`static_identifier`](Self::static_identifier); see there
     /// for why the two spellings do not stand in for each other.

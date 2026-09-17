@@ -288,7 +288,15 @@ pub(crate) fn layer_ref_out_node<'a>(
     comp: &'a Composition,
     layer: &crate::graph::ParameterValue,
 ) -> Option<&'a std::sync::Arc<Node>> {
-    let target = comp.get_layer(LayerId::new(layer.identifier().static_raw()?))?;
+    // The **text** mouth, not `identifier()`. The two spellings do not stand
+    // in for each other: the processor reads this parameter with `str_or`, so
+    // an `Int` on it reaches evaluation as a number nothing reads and the
+    // reference does not resolve (`ParameterValue::static_identifier` states
+    // the rule). Accepting the numeric spelling here would make the picker
+    // offer candidates and the output retype itself for a reference the
+    // evaluator then refuses — the UI and the evaluator disagreeing about
+    // whether the same document resolves.
+    let target = comp.get_layer(LayerId::new(layer.static_text_identifier()?))?;
     crate::network::find_out_node(&target.network)
 }
 
@@ -861,6 +869,24 @@ mod tests {
             }
         }
         assert!(empty(&moving), "an animated target names no layer");
+
+        // The numeric spelling names a layer the *evaluator* does not read:
+        // the processor takes this parameter with `str_or`, so an `Int` makes
+        // the reference fail to resolve at evaluation time
+        // (`ParameterValue::static_identifier` states the rule). Offering
+        // candidates for it would have the picker and the evaluator disagree
+        // about whether the same document resolves — a pre-v13 document whose
+        // upgrade could not run is exactly that state (`LOW-CORE-06`).
+        let mut numeric = layer_ref("7");
+        for param in &mut numeric.parameters {
+            if param.key == "layer" {
+                param.value = crate::graph::ParameterValue::Int(7);
+            }
+        }
+        assert!(
+            empty(&numeric),
+            "the numeric spelling is not the one the evaluator reads"
+        );
 
         // A layer whose network has no Out node offers nothing either.
         let no_out = Composition::new(

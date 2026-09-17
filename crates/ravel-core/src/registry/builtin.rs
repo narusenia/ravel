@@ -2229,6 +2229,17 @@ mod tests {
     }
 
     /// A `layer.ref` node with `layer` / `port` set as given.
+    /// The same node with its target written in the **numeric** spelling — the
+    /// shape a pre-v13 document whose upgrade could not run still carries.
+    fn numeric_target(mut node: Node) -> Node {
+        for param in &mut node.parameters {
+            if param.key == "layer" {
+                param.value = ParameterValue::Int(1);
+            }
+        }
+        node
+    }
+
     fn layer_ref_node(layer: &str, port: &str) -> Node {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
@@ -2338,6 +2349,19 @@ mod tests {
                 "another parameter entirely",
                 layer_ref_node("1", "frame"),
                 changed("nothing", "geo"),
+                Some(&comp),
+            ),
+            // The numeric spelling names a layer nothing reads: the processor
+            // takes this parameter with `str_or`, so an `Int` reaches
+            // evaluation as a number and the reference does not resolve
+            // (`ParameterValue::static_identifier` states the rule). Retyping
+            // the output for it would make the graph declare a type the
+            // evaluator refuses to produce — a pre-v13 document whose upgrade
+            // could not run is exactly this state (`LOW-CORE-06`).
+            (
+                "a target in the numeric spelling the evaluator does not read",
+                numeric_target(layer_ref_node("1", "frame")),
+                changed("port", "frame"),
                 Some(&comp),
             ),
         ] {

@@ -2510,6 +2510,57 @@ mod tests {
         assert!(drawn > 0, "the stroke drew nothing to check");
     }
 
+    /// The same criterion as
+    /// [`nothing_drawn_falls_outside_the_geometrys_bounds`], for a geometry
+    /// that **stamps** what it draws: the stroke is inherited from the
+    /// instance domain and scaled by the instance's placement, which is the
+    /// pair `drawn_bounds` used to miss.
+    ///
+    /// Margins here are one pixel: a reach left in the source's own space
+    /// bounds 17..47 while zeno writes 14..50, so the assertion fails by three
+    /// pixels on every side.
+    #[test]
+    fn nothing_a_scaled_instance_draws_falls_outside_the_bounds() {
+        let mut source =
+            Geometry::from_points(vec![Vec2(-4.0, -4.0), Vec2(4.0, -4.0), Vec2(0.0, 4.0)]);
+        source.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+
+        let mut geo = Geometry::new();
+        geo.set_instance_source(Some(Arc::new(source)));
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(32.0, 32.0)]))
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(3.0, 3.0)]))
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![4.0]))
+            .unwrap();
+
+        let bounds = drawn_bounds(&geo).expect("a stamped stroked path has an extent");
+        let fb = run(false, 0.0, &geo, 64, 64);
+        let mut drawn = 0;
+        for y in 0..fb.height {
+            for x in 0..fb.width {
+                if pixel(&fb, x, y)[3] <= 0.0 {
+                    continue;
+                }
+                drawn += 1;
+                assert!(
+                    x as f32 >= bounds.x
+                        && (x + 1) as f32 <= bounds.x + bounds.width
+                        && y as f32 >= bounds.y
+                        && (y + 1) as f32 <= bounds.y + bounds.height,
+                    "pixel ({x}, {y}) is drawn outside {bounds:?}"
+                );
+            }
+        }
+        assert!(drawn > 0, "the instance drew nothing to check");
+    }
+
     #[test]
     fn point_sprite_uses_pscale_cd_alpha() {
         let mut geo = Geometry::from_points(vec![Vec2(8.0, 8.0)]);

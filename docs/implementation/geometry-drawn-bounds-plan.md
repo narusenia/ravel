@@ -1,6 +1,7 @@
 # ジオメトリの bbox が測るものを 1 箇所にする実装計画
 
-> **Status**: 未着手 — 2026-09-17
+> **Status**: 完了 — 2026-09-17（`BBOX-1` / `BBOX-2` / `BBOX-3` 実装済み。
+> マージ後に `done/` へ移す）
 
 対象: `ravel-core` の `geometry`（`container` / `ops`）、`ravel-nodes` の
 `rasterize`、`ravel-app` の Viewer（`panels/viewer/geometry.rs`）。

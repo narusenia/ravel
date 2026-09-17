@@ -124,7 +124,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | 分類 | 挙動 |
 |---|---|
 | 変換系（`geometry.transform`） | 成分数で分岐して対応する |
-| 境界系（`Geometry::bounds` / `bounds_center`） | 対応する。`bounds` は 2D の `Rect` なので xy 範囲を返す |
+| 境界系（`Geometry::bounds` / `ops::drawn_bounds` / `bounds_center`） | 対応する。`bounds` は 2D の `Rect` なので xy 範囲を返す |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 次元非依存で素通しする |
 | 要素操作系（`geometry.merge`、将来の `blast` / `sort` / `switch`） | 次元非依存 |
 | 複製系（`scatter.*`） | 3D 対応は 3D-6。3D の `P` を読むのは `center_input` の再センタリングだけで、そこは**明示エラー** |
@@ -146,7 +146,8 @@ positions: `P` is Vec3 …`）。「この操作は 2D の `P` を要求する�
 
 | 箇所 | 分類 | 挙動 |
 |---|---|---|
-| `geometry/container.rs` `positions_bounds` | 3D 対応 | Vec2 / Vec3 の xy 範囲から `Rect` |
+| `geometry/container.rs` `positions_bounds`（`ops::drawn_bounds` の Point 域の部品） | 3D 対応 | Vec2 / Vec3 の xy 範囲から `Rect` |
+| `geometry/ops.rs` `drawn_bounds` のインスタンス走査 | 明示スキップ | インスタンスの `P` が Vec3 なら何も置かない。`rasterize` は `as_vec2` で読み、`expand_instances` は `require_planar` で落とすので、**描かれないものを測らない**ため |
 | `geometry/ops.rs` `bounds_center`（2 箇所: point → instance フォールバック） | 3D 対応 | `Vec3` を返す。2D は z = 0 |
 | `geometry/ops.rs` `positions`（`attribute.transfer` が使う） | 3D 対応 | 3 成分距離。2D は z = 0 なので算術が一致する |
 | 同上（`path_sample` が使う） | 明示エラー | 弧長は 3D で未定義 |

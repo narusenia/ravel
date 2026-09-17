@@ -1295,7 +1295,8 @@ Geometry        // domains: points / primitives+attrs / instances / detail
     .set_instance_source(Option<Arc<Geometry>>)    // geometry-only convenience
     .set_instance_sources(Vec<Arc<Geometry>>)      // replaces every source
     .summary() -> GeometrySummary         // counts + attribute listings
-    // implements NodeData (GEOMETRY) + GeometricData; bounds() is the xy extent
+    // implements NodeData (GEOMETRY) + GeometricData; bounds() is the xy
+    // extent of everything it draws (ops::drawn_bounds), zeroed when empty
 
 Primitive::Path { verts: Range<usize>, closed }
 Primitive::Mesh { verts: Range<usize>, indices: Range<usize> }
@@ -1386,6 +1387,21 @@ attribute_delete(&geo, Domain, name) -> Result<Geometry>
     // error. `P` on Point/Instance is refused (RequiredAttribute): validate
     // demands it, and it may be the column holding the element count
 bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in 2D
+    // a PIVOT, not an extent: scatter / field / geometry read it as a centre,
+    // so it does NOT include the ink drawn_bounds measures
+drawn_bounds(&geo) -> Option<Rect>
+    // everything the geometry DRAWS: point positions, each instance's source
+    // placed through its own InstanceTransform (an image's rect(), a nested
+    // geometry's own drawn_bounds, recursed to MAX_INSTANCE_DEPTH — the depth
+    // expand_instances stops at), grown by stroke_reach. One source is
+    // measured once, then four corners placed per instance. `GeometricData::
+    // bounds()` and the Viewer's `geometry_bounds` BOTH delegate here — do
+    // not write a third walk. An instance domain with no sources stamps
+    // nothing, so only its placements are measured
+stroke_reach(width, miter) -> f32
+    // how far past the path a stroke reaches: a miter spike runs to 4 half-
+    // widths (zeno's default limit), plus one pixel for the antialiased edge.
+    // `rasterize` sizes its coverage rectangle with this same function
 path_sample(&geo, distance) -> Result<PathSample>   // planar only
 PathArcTable                     // the same walk, held across many samples
     ::build(&geo, operation) -> Result<Self>   // first path primitive; a

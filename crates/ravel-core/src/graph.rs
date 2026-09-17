@@ -637,6 +637,23 @@ pub struct Parameter {
     pub value: ParameterValue,
 }
 
+/// An output port that must change its declared wire type, because a
+/// parameter of the same node decided it.
+///
+/// `layer.ref` is the one node like this: its output carries whatever the
+/// port it references carries, so `port` (and the `layer` the port belongs
+/// to) decides the type
+/// (`registry::builtin::dependent_port_updates`). Applied by
+/// [`Graph::set_params_and_output_types`] in the same call as the values, so
+/// the value and the type it implies are never committed apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortRetype {
+    /// The output port's name.
+    pub port: String,
+    /// The wire type it must declare.
+    pub data_type: DataTypeId,
+}
+
 /// Metadata attached to a node for the graph editor UI.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeMetadata {
@@ -1376,6 +1393,35 @@ impl Graph {
     /// call = one consistent graph, so the caller's Document commit stays a
     /// single undo step.
     pub fn set_params(self, node_id: NodeId, updates: &[Parameter]) -> Result<Self, GraphError> {
+        self.set_params_and_output_types(node_id, updates, &[])
+    }
+
+    /// [`Self::set_params`], plus the **output** ports those values decide
+    /// ([`PortRetype`]).
+    ///
+    /// A separate entry point rather than a fourth argument on `set_params`
+    /// because only a caller holding the whole document can work out such a
+    /// type: `layer.ref`'s output carries what the port it references
+    /// carries, and that port lives in **another layer's** network, which a
+    /// `Graph` cannot see. Every other caller has nothing to say here and
+    /// keeps calling `set_params`.
+    ///
+    /// A retyped output port **keeps its slot**, so no `Edge::source_port`
+    /// and no `ChannelSource::NodeOutput` binding moves; the edges the new
+    /// type cannot travel are dropped by the same rule
+    /// [`crate::network::set_custom_port_type`] applies — the other end keeps
+    /// its edge when it accepts the new type. A retype to the type the port
+    /// already declares costs nothing.
+    ///
+    /// Still one call = one consistent graph: the values, the parameter ports
+    /// and the output ports land in the single snapshot the caller commits,
+    /// which is what keeps the whole change one undo step.
+    pub fn set_params_and_output_types(
+        self,
+        node_id: NodeId,
+        updates: &[Parameter],
+        retypes: &[PortRetype],
+    ) -> Result<Self, GraphError> {
         let node = self
             .nodes
             .get(&node_id)
@@ -1413,7 +1459,31 @@ impl Graph {
         updated
             .inputs
             .retain(|port| !(port.is_param && retyped.contains(&port.name)));
+
+        // Output ports a parameter just gave a different wire type, and the
+        // edges out of them that can no longer be honoured. A retype naming a
+        // port the node does not have contributes nothing, exactly as an
+        // update naming an absent parameter does.
+        let mut doomed: Vec<EdgeId> = Vec::new();
+        for retype in retypes {
+            let Some(index) = updated
+                .outputs
+                .iter()
+                .position(|port| port.name == retype.port)
+            else {
+                continue;
+            };
+            if updated.outputs[index].data_type == retype.data_type {
+                continue;
+            }
+            doomed.extend(self.edges_output_type_cannot_carry(node_id, index, retype.data_type));
+            updated.outputs[index].data_type = retype.data_type;
+        }
+
         let mut graph = self;
+        for id in doomed {
+            graph = graph.remove_edge(id)?;
+        }
         for key in &retyped {
             graph = graph.remove_param_port(node_id, key)?;
         }
@@ -1429,6 +1499,41 @@ impl Graph {
             }
         }
         Ok(graph)
+    }
+
+    /// The edges out of `node_id`'s output port `index` that would carry a
+    /// value the other end does not accept once the port declares
+    /// `data_type`.
+    ///
+    /// **The rule for what a retype costs, in one place.** A port whose
+    /// declared type lies about what flows through it is worse than a lost
+    /// connection, so such an edge goes; an edge whose target still accepts
+    /// the new type is kept, which is why a change that does not move on the
+    /// wire (`Float` → `Int`, both `SCALAR`) costs nothing. Both retyping
+    /// paths ask here — a custom interface port
+    /// ([`crate::network::set_custom_port_type`]) and an output type a
+    /// parameter decides ([`Self::set_params_and_output_types`]) — so there
+    /// is one rule rather than one per caller.
+    ///
+    /// An edge whose target node or target port has gone is doomed too: a
+    /// dangling edge cannot be shown to accept anything.
+    pub(crate) fn edges_output_type_cannot_carry(
+        &self,
+        node_id: NodeId,
+        index: usize,
+        data_type: DataTypeId,
+    ) -> Vec<EdgeId> {
+        self.edges()
+            .filter(|edge| {
+                edge.source == node_id
+                    && edge.source_port.0 as usize == index
+                    && self
+                        .node(edge.target)
+                        .and_then(|n| n.inputs.get(edge.target_port.0 as usize))
+                        .is_none_or(|port| !port.accepted_types.contains(&data_type))
+            })
+            .map(|edge| edge.id)
+            .collect()
     }
 
     /// Remove the exposed parameter port `key` from `node_id`, atomically:
@@ -3377,6 +3482,124 @@ mod tests {
             "the port did not move"
         );
         assert_eq!(g.edge_count(), 1, "its edge survived");
+    }
+
+    /// An output port a parameter retypes keeps its slot, loses the edges the
+    /// new type cannot travel, and keeps the ones whose other end accepts it
+    /// — the same trade `network::set_custom_port_type` makes, in the same
+    /// call as the values, so the caller commits one state.
+    #[test]
+    fn set_params_and_output_types_retypes_an_output_and_drops_only_the_doomed_edges() {
+        let source = Node::new(NodeId::new(1), "layer.ref")
+            .with_param("port", ParameterValue::String("frame".into()))
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        let frames_only =
+            Node::new(NodeId::new(2), "merge").with_input("A", &[DataTypeId::FRAME_BUFFER]);
+        // Accepts both, so the retype does not move on the wire for it.
+        let anything = Node::new(NodeId::new(3), "sink")
+            .with_input("in", &[DataTypeId::FRAME_BUFFER, DataTypeId::GEOMETRY]);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(frames_only)
+            .unwrap()
+            .add_node(anything)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let g = g
+            .set_params_and_output_types(
+                NodeId::new(1),
+                &[Parameter {
+                    key: "port".into(),
+                    value: ParameterValue::String("geo".into()),
+                }],
+                &[PortRetype {
+                    port: "output".into(),
+                    data_type: DataTypeId::GEOMETRY,
+                }],
+            )
+            .unwrap();
+
+        let node = g.node(NodeId::new(1)).unwrap();
+        assert_eq!(node.outputs.len(), 1, "the port kept its slot");
+        assert_eq!(node.outputs[0].data_type, DataTypeId::GEOMETRY);
+        assert_eq!(
+            node.parameters
+                .iter()
+                .find(|p| p.key == "port")
+                .map(|p| p.value.clone()),
+            Some(ParameterValue::String("geo".into())),
+            "the value that decided the type landed in the same call"
+        );
+        assert!(
+            g.edge(EdgeId::new(1)).is_none(),
+            "the frame-only target cannot take geometry"
+        );
+        assert!(
+            g.edge(EdgeId::new(2)).is_some(),
+            "the target that accepts geometry keeps its edge"
+        );
+    }
+
+    /// A retype to the type the port already declares, and one naming a port
+    /// the node does not have, both cost nothing — no edge is dropped on the
+    /// way to a graph that is identical in the ways that matter.
+    #[test]
+    fn set_params_and_output_types_ignores_a_no_op_retype() {
+        let source = Node::new(NodeId::new(1), "layer.ref")
+            .with_param("port", ParameterValue::String("frame".into()))
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        let target =
+            Node::new(NodeId::new(2), "merge").with_input("A", &[DataTypeId::FRAME_BUFFER]);
+        let g = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(target)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .set_params_and_output_types(
+                NodeId::new(1),
+                &[],
+                &[
+                    PortRetype {
+                        port: "output".into(),
+                        data_type: DataTypeId::FRAME_BUFFER,
+                    },
+                    PortRetype {
+                        port: "nonexistent".into(),
+                        data_type: DataTypeId::GEOMETRY,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(g.edge_count(), 1, "nothing was dropped");
+        assert_eq!(
+            g.node(NodeId::new(1)).unwrap().outputs[0].data_type,
+            DataTypeId::FRAME_BUFFER
+        );
     }
 
     /// Several updates for one key resolve to a single decision about its

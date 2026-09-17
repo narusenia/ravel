@@ -863,10 +863,10 @@ pub fn set_custom_port_type(
         return Ok(graph);
     }
 
-    let doomed: Vec<EdgeId> = graph
-        .edges()
-        .filter(|edge| match side {
-            PortSide::Input => {
+    let doomed: Vec<EdgeId> = match side {
+        PortSide::Input => graph
+            .edges()
+            .filter(|edge| {
                 edge.target == node_id && edge.target_port.0 as usize == index && {
                     let accepted = port_type.accepted_types();
                     graph
@@ -874,18 +874,16 @@ pub fn set_custom_port_type(
                         .and_then(|n| n.outputs.get(edge.source_port.0 as usize))
                         .is_none_or(|port| !accepted.contains(&port.data_type))
                 }
-            }
-            PortSide::Output => {
-                edge.source == node_id && edge.source_port.0 as usize == index && {
-                    graph
-                        .node(edge.target)
-                        .and_then(|n| n.inputs.get(edge.target_port.0 as usize))
-                        .is_none_or(|port| !port.accepted_types.contains(&port_type.data_type()))
-                }
-            }
-        })
-        .map(|edge| edge.id)
-        .collect();
+            })
+            .map(|edge| edge.id)
+            .collect(),
+        // The output side's rule is shared with the output types a parameter
+        // decides (`Graph::set_params_and_output_types`), so it lives in one
+        // place rather than once per retyping path.
+        PortSide::Output => {
+            graph.edges_output_type_cannot_carry(node_id, index, port_type.data_type())
+        }
+    };
     let mut graph = graph;
     for id in doomed {
         graph = graph.remove_edge(id)?;

@@ -76,7 +76,7 @@ fn base_quad(resolution: (u32, u32)) -> Geometry {
 | 「別パラメータの値で行の見せ方が決まる」宣言 | `ColorParam::When` / `with_color_param_when`（`crates/ravel-core/src/registry/mod.rs:301`） | それは「4 成分を色として描くか」専用。**一般化されていない** |
 | 触れないパラメータ行 | 接続されたポートに駆動された行が `PropertyField::ReadOnly` の `"12.000 ← Constant"` になる（`crates/ravel-ui/src/properties/node.rs:233-241`） | **駆動の理由が「エッジ」に限られている** |
 
-3 番目が本計画の土台になる。UX 不変条件 6 は「動かない控制は無効化し、無効に見せる」
+3 番目が本計画の土台になる。UX 不変条件 6 は「動かない制御は無効化し、無効に見せる」
 なので、`auto` のときに数値が編集できる顔で出ていてはいけない。
 
 ## 目標アーキテクチャ

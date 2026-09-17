@@ -850,22 +850,29 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | CPO-1 | ✅ #542 | `ParamOptions` と `contextual_options`（`SiblingLayer`） | — |
-| CPO-2 | 🟡 | Properties が文脈付きで候補を引く。**`CPO-5` と同じ PR でしか成立しない** — Select 行は `PropertyValue::String` を吐き、`edited_string_param` は既存の型を見ずに `ParameterValue::String` を返すので、`layer` が Int のまま Select にするとフォーマット版を上げないまま `.ravprj` の中身が String に変わる | CPO-1 ✅ |
-| CPO-3 | ⬜ | `LayerOutputPort` 候補と `port` の Select 化 | CPO-2 |
+| CPO-2 | ✅ #544 | Properties が文脈付きで候補を引く（`layer.ref` の `layer` が兄弟レイヤーの Select になった） | CPO-1 ✅ |
+| CPO-3 | 🟡 | `LayerOutputPort` 候補と `port` の Select 化 | CPO-2 ✅ |
 | CPO-4 | ⬜ | `dependent_port_updates` と `set_params` での適用 | CPO-3 |
-| CPO-5 | 🟡 | `layer` の Int → String 移行（フォーマット版 +1）。`CPO-2` と 1 PR（上記） | CPO-2 |
+| CPO-5 | ✅ #544 | `layer` の Int → String 移行（**`.ravprj` v13**、ロード後の型付きパス。`CPO-2` と 1 PR） | CPO-2 ✅ |
 | CPO-6 | ✅ #542 | Parent ドロップダウンを `ParamOption` へ寄せる。表示名が `"3: Background"`（レイヤー id）から `"1. Background"`（Timeline の行番号）になった | CPO-1 ✅ |
 | CPO-7 | ⬜ | ロケール / 文書 | CPO-1〜6 |
 
 `MED-APP-29`（`layer.ref` が数値スクラブ、出力型が `port` に追随しない）が
 きっかけだが、直す対象は 1 ノードではなく**文脈から候補と型が決まる機構**。
-フォーマット版は `CPO-5` 着手時に `CURRENT_FORMAT_VERSION` の次を取る
-（#542 の時点で v12 なので **v13**）。
+数値スクラブは #544 で消えた（`layer` は兄弟レイヤーの Select、`.ravprj` **v13**）。
+**個票が閉じるのは出力型の追随まで入ったとき** — `CPO-3` → `CPO-4` → `CPO-7`。
 
-**`CPO-2` と `CPO-5` は 1 PR。** 計画書の依存表は `CPO-5` が `CPO-2` に依存すると
-書いているが、実装順は逆（先に記憶の型を String にし、その上に Select を載せる）。
-`CPO-1` / `CPO-6` が入った時点で機構は 1 本になっていて、どの builtin も
-`Contextual` を宣言していないので Properties の挙動は #542 では変わっていない。
+**`CPO-2` と `CPO-5` は 1 PR で入れた。** 計画書の依存表は `CPO-5` が `CPO-2` に
+依存すると書いているが、実装順は逆（先に記憶の型を String にし、その上に Select を
+載せる）。`edited_string_param` が既存の型を見ずに `ParameterValue::String` を
+返すので、`layer` が Int のまま Select になるとフォーマット版を上げないまま
+`.ravprj` の中身が変わってしまう。
+
+**移行は id 予約より前に走らせること。** `layer_ref_targets` はテキスト綴りを
+読むので、`Int` のままの文書では参照が 1 つも見えない。`advance_id_counters()`
+より後に移行すると、予約されていない生きた参照が残り、dangling な参照が
+新しいレイヤーへ黙って繋がる（`AID-1` / `AID-2` と同じ壊れ方）。#544 の
+独立レビューで見つかった。
 
 ### レイヤーの内容サイズと `auto`（`layer-content-size-plan.md`）
 

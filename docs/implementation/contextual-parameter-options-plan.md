@@ -1,8 +1,10 @@
 # 文脈依存のパラメータ候補と出力型 実装計画
 
-> **Status**: 進行中 — `CPO-1` / `CPO-6` 済（#542、2026-09-16）。
-> 機構は 1 本になったが、まだどの builtin も `Contextual` を宣言していない
-> ので Properties の挙動は変わっていない（配線は `CPO-2`）。
+> **Status**: 進行中 — `CPO-1` / `CPO-6` 済（#542、2026-09-16）、
+> `CPO-2` / `CPO-5` 済（#544、2026-09-17、`.ravprj` **v13**）。
+> `layer.ref` のレイヤー指定は兄弟レイヤーの Select になった。残りは
+> `CPO-3`（`port` の Select 化）→ `CPO-4`（出力型の追随）→ `CPO-7`
+> （ロケール / 文書。ここで `MED-APP-29` が閉じる）。
 
 対象: `ravel-core` の `registry`（`NodeTemplate` / `Registry`）、
 `ravel-ui` の `properties::node`、`ravel-app` の Properties とノードエディタ。
@@ -178,12 +180,19 @@ registry::builtin::dependent_port_updates(node, changed) -> Vec<PortRetype>
 
 ### 単位 5: `layer` の Int → String 移行
 
-> **`CPO-2` と同じ PR で入れる。** Select 行は `PropertyValue::String` を吐き、
+> **`CPO-2` と同じ PR で入れた**（#544）。Select 行は `PropertyValue::String` を吐き、
 > それを受ける `edited_string_param`
 > （`crates/ravel-app/src/panels/param_edit.rs`）は**既存の型を見ずに**
 > `ParameterValue::String` を返す。`layer` が `Int` のまま Select にすると、
 > フォーマット版を上げないまま `.ravprj` の中身が String に変わる。
 > 記憶の型を先に移し、その上に Select を載せる（依存表の向きとは逆順）。
+>
+> **型付きパスは `advance_id_counters()` より前に置く。** `layer_ref_targets` は
+> テキスト綴りを読むので、`Int` のままの文書では参照が 1 つも見えない。
+> 予約の後に移行すると、id を予約していない生きた参照が残り、コンプが持って
+> いないレイヤーを指す参照に `LayerId::next()` がその id を配って、参照が
+> 新しいレイヤーへ黙って繋がる（`AID-1` / `AID-2` と同じ壊れ方。
+> `validate::precomp_targets` が同じ規則を述べている）。
 
 - テンプレートを `string_parameter("layer", "")` にする
 - フォーマット版を 1 つ上げ、ロード後の型付きパスで `Int(n)` → `String(n)`

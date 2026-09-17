@@ -1339,3 +1339,7 @@ let names = match components.len() {
 複数クレートに跨るので Design gate に当たる。
 → [`contextual-parameter-options-plan.md`](../../docs/implementation/contextual-parameter-options-plan.md)
 の `CPO-1`〜`CPO-7`。この issue はその単位が入った時点で閉じる。
+
+**残余**: v13 より前の文書で `port` に `"frame"` 以外が入っていた `layer.ref`
+は、移行しても出力型が追随しない（追随はパラメータ編集の経路にしか入っていない）。
+`layer` か `port` を一度触れば直る。→ `LOW-CORE-06`

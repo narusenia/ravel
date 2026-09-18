@@ -1283,7 +1283,51 @@ fn local_extent(geometry: &Geometry) -> (Option<Rect>, f32) {
                 .map(|widths| widths.iter().copied().fold(0.0_f32, f32::max))
         })
         .fold(0.0_f32, f32::max);
-    (geometry.positions_bounds(), widest)
+    (
+        union(geometry.positions_bounds(), control_hull_bounds(geometry)),
+        widest,
+    )
+}
+
+/// The extent of the path control points — anchors together with
+/// `P + in_tan` and `P + out_tan` — or `None` when the geometry carries no
+/// tangents.
+///
+/// `positions_bounds` measures the anchors, and **a cubic leaves them**: two
+/// anchors on one horizontal line with both tangents pointing up bulge 45 px
+/// above it for a handle length of 60, and that bulge is drawn
+/// (`rasterize::path_polyline` hands `in_tan` / `out_tan` to
+/// `flatten::flatten_path`, which is also what the GPU shader evaluates).
+/// Anchors alone would report zero height for it.
+///
+/// A Bézier never leaves the convex hull of its control points, so this is
+/// the bound that cannot be too small, and it stays a **column scan** rather
+/// than a per-segment root solve — the walk is paid once per pointer move.
+/// Generous only where a curve does not reach its own handles, and it costs
+/// text nothing: a font puts its anchors on the extrema, so a glyph's hull
+/// and its ink are the same rectangle (measured on the bundled Geist
+/// Regular, `"Ravel"` at 72 px, to the last decimal).
+///
+/// Tangents are a 2D attribute, so a 3D `P` column reads as no hull at all
+/// and the anchors answer alone.
+fn control_hull_bounds(geometry: &Geometry) -> Option<Rect> {
+    let points = geometry.points();
+    let positions = points.get(names::P)?.as_vec2(names::P).ok()?;
+    let tangents: Vec<&[Vec2]> = [names::IN_TAN, names::OUT_TAN]
+        .into_iter()
+        .filter_map(|name| points.get(name)?.as_vec2(name).ok())
+        .collect();
+    if tangents.is_empty() {
+        return None;
+    }
+    placed_bounds(positions.iter().enumerate().flat_map(|(index, p)| {
+        std::iter::once(*p).chain(
+            tangents
+                .iter()
+                .filter_map(move |column| column.get(index))
+                .map(move |t| Vec2(p.0 + t.0, p.1 + t.1)),
+        )
+    }))
 }
 
 /// Whether the geometry joins its corners with a miter. A Detail attribute —
@@ -2844,6 +2888,50 @@ mod tests {
             drawn_bounds(&stroked_square(0.0, None)),
             drawn_bounds(&unit_square()),
             "a zero-width stroke reaches nowhere"
+        );
+    }
+
+    /// A cubic leaves its anchors, so the anchors alone are not the extent.
+    ///
+    /// Two anchors on one horizontal line with both handles 60 units up:
+    /// `y(t) = 180t(1 - t)`, which peaks at **45** in the middle. Measuring
+    /// `P` alone reports zero height for a curve that is drawn 45 units tall
+    /// (`rasterize::path_polyline` flattens these tangents, so it is drawn).
+    ///
+    /// The assertion is the apex, not the hull: the control polygon reaches
+    /// 60 and the bound may sit anywhere at or above the ink, but never
+    /// below it.
+    #[test]
+    fn a_curve_that_bulges_past_its_anchors_is_still_inside_the_bounds() {
+        let anchors = || Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(100.0, 0.0)]);
+        let mut geometry = anchors();
+        geometry
+            .points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 60.0), Vec2(0.0, 0.0)]),
+            )
+            .expect("one out tangent per point");
+        geometry
+            .points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(0.0, 60.0)]),
+            )
+            .expect("one in tangent per point");
+
+        let bounds = drawn_bounds(&geometry).expect("a curve has an extent");
+        const APEX: f32 = 45.0;
+        assert!(
+            bounds.y <= 0.0 && bounds.y + bounds.height >= APEX,
+            "the curve peaks at {APEX} and the bounds stop short: {bounds:?}"
+        );
+        assert_eq!(
+            drawn_bounds(&anchors())
+                .expect("two points have an extent")
+                .height,
+            0.0,
+            "the same anchors without tangents are a flat line"
         );
     }
 

@@ -931,8 +931,16 @@ impl ViewerPanel {
     }
 
     /// Restore resize-aware contain fit.
+    ///
+    /// Drops the hover label with it: these two move the picture without
+    /// moving the pointer, and the pointer that asked for them is on a
+    /// toolbar button or a menu row rather than on a mark. Clearing beats
+    /// re-resolving — there is nothing under the pointer to resolve — and it
+    /// happens here rather than at each call site so a new zoom control
+    /// cannot forget.
     pub fn zoom_to_fit(&mut self) {
         self.viewport.zoom_to_fit();
+        self.hovered_handle = None;
     }
 
     /// Set an explicit composition-pixel zoom, preserving the panel center.
@@ -947,6 +955,7 @@ impl ViewerPanel {
             size,
             resolution,
         );
+        self.hovered_handle = None;
     }
 
     fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
@@ -10494,6 +10503,19 @@ mod tests {
                     handle,
                     "and comes back when it stops"
                 );
+
+                // A zoom control jumps the picture from a click on the
+                // toolbar, where there is no mark under the pointer to
+                // re-resolve to.
+                panel.zoom_to_fit();
+                assert_eq!(panel.hovered_handle, None);
+                // Re-read the point through the viewport the fit just set,
+                // so the hover is genuinely back before the next control
+                // takes it away again.
+                panel.resolve_hover(window_point(panel, (160.0, 215.0)), cx);
+                assert_eq!(panel.hovered_handle, handle);
+                panel.set_zoom_percent(100.0);
+                assert_eq!(panel.hovered_handle, None);
             })
             .unwrap();
     }

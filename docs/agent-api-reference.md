@@ -965,7 +965,9 @@ Document::with_exposed_parameters(ExposedParameters)
 // Layer/Composition/Document are serde-capable (deterministic: id/key-sorted
 // adapters; network graphs re-validate through Graph::from_parts on load).
 // A deserialized Document must pass `doc.validate()` (structural invariants:
-// root/comp-id/frame-rate/layer-ref integrity, DocumentValidationError),
+// root/comp-id/frame-rate/layer-ref integrity, and no layer on the reserved
+// id 0 — evaluation reads 0 as "names nothing", so such a layer could never
+// be referenced; DocumentValidationError),
 // then `doc.advance_id_counters()` (REQ-LAYER-009) moves every
 // NodeId/EdgeId/CompId/LayerId/AssetId counter past `doc.id_watermarks()` so
 // fresh ids never collide with loaded ones. The watermarks scan REFERENCES as

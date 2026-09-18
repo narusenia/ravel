@@ -156,3 +156,35 @@ inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
 単なるクリックではコミットされないので refresh で元に戻る、
 または次の無関係な `commit_graph` に相乗りする。
 → ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。
+
+**LOW-CORE-05 | bug | レイヤー id 0 は保存できるが `layer.ref` からは「対象なし」になる**
+（**解決済み**: `Document::validate` がレイヤー id 0 を拒否する
+（`DocumentValidationError::ReservedLayerId`）。個票が推した前者の向きで、
+`AssetId::UNSET` の規約と揃う。`id.rs` の `LayerId::new` は据え置き —
+`composition/compile.rs:158` が Background 合成ノードの決定的 id の材料として
+`LayerId::new(0)` を本番で使っている（レイヤーとしてではなくハッシュの入力として）。
+回帰テストは `validate_rejects_the_reserved_layer_id`
+（`crates/ravel-core/src/composition/mod.rs`）で、2 枚目以降にある 0 も拒否する）
+
+**該当**: `crates/ravel-core/src/id.rs` の `LayerId::new` と
+`crates/ravel-nodes/src/layer_ref.rs` の対象解決
+
+`LAYER_ID_COUNTER` は 1 始まりなので `LayerId::next()` は 0 を返さないが、
+`LayerId::new(0)` は公開されていて serde も 0 を受け取り、`Document::validate`
+も 0 を拒否しない。つまり**手編集した `.ravprj` にはレイヤー id 0 が居られる**。
+
+一方 `layer.ref` は 0 を必ず「対象なし」として扱う。そうせざるを得ない理由が
+あって、`eval::identifier_overlay` が「静止していない識別子」に
+`AssetId::UNSET`（= 0）を代入するので、評価側は 0 を未設定と読むしかない。
+
+結果、id 0 のレイヤーは**候補ドロップダウンには出るのに参照できない**
+（UX 不変条件 6「動かない制御は無効化し、無効に見せる」に触る）。
+
+直す向きは 2 つ。`Document::validate` がレイヤー id 0 を拒否して
+「0 は存在しない」を不変条件にするか、未設定の綴りを 0 と別にする
+（`identifier_overlay` の代入値を変える）。前者の方が小さく、
+`AssetId::UNSET` の規約（「0 は未設定のために空けてある」と
+`id.rs:24` のコメントが言っている）とも揃う。
+
+到達には手編集が要るので low。`.ravprj` v13 の `layer.ref` 移行
+（`contextual-parameter-options-plan.md` の `CPO-5`）の独立レビューで見つけた。

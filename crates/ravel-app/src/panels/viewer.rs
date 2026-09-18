@@ -10396,6 +10396,39 @@ mod tests {
         })
     }
 
+    /// The cursor and the hover label come from one resolution: the state a
+    /// pointer move reads names the handle a press there would grab, and the
+    /// hover is withdrawn for as long as that press holds it.
+    #[gpui::test]
+    fn the_pointer_state_names_the_handle_the_cursor_promises(cx: &mut TestAppContext) {
+        // The project handle the panel reads is weak, so the fixture's entity
+        // has to stay bound for the length of the test.
+        let (window, _project, ..) = param_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let at = window_point(panel, (100.0, 200.0));
+                let (hint, handle) = panel.pointer_state_at(at, cx).expect("the pointer is off");
+                assert_eq!(handle, Some(overlay::OverlayHandleId::Param(0)));
+                assert_eq!(
+                    Some(hint),
+                    panel.pointer_hint_at(at, cx),
+                    "the cursor reads the same hit test the hover does"
+                );
+
+                panel.hovered_handle = handle;
+                assert_eq!(panel.overlay_context(cx).hovered_handle, handle);
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                assert_eq!(
+                    panel.overlay_context(cx).hovered_handle,
+                    None,
+                    "a gesture in flight reports itself through the HUD instead"
+                );
+                panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+    }
+
     /// A whole parameter drag is one undo step, and the press it starts from
     /// is the node's handle rather than the shell grip drawn at the same point.
     #[gpui::test]

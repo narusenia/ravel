@@ -935,6 +935,25 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 `rasterize` ノードパラメータの基底値はジオメトリから見えないので issue は open のまま
 （筋は `style-attributes-plan.md` に合流）。
 
+### ノードの Transform セクション（`node-transform-section-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| TFORM-1 | 🟡 | 宣言（`with_transform_section`）と共有適用（`processor_for_node` の 1 箇所でラップ） | — |
+| TFORM-2 | ⬜ | どのノードに宣言するか。Position ロールの衝突規則 | TFORM-1, `text.layout` の `position` |
+| TFORM-3 | ⬜ | Viewer のハンドルと Properties のフォルダ | TFORM-2 |
+| TFORM-4 | ⬜ | ロケール / 文書 / `REQ-UI-011` の更新 | TFORM-1〜3 |
+
+**きっかけは「ジオメトリ系ノードに `geometry.transform` をわざわざ挿すのがだるい。
+それこそ Text とか」**。`REQ-UI-011` は暗黙のノード自動挿入を明示的に禁じている
+（ノードグラフが正）ので、残る道は「ノードが自分で持つ」。`shape.*` と `scatter.*` は
+`center` を持っていて掴めるが、**回す・縮めるには結局 transform ノードが要る**。
+合成ノードは作らない（ノード id の導出に空きが無い / ネットワークにコンパイル段が
+無い / 隠れたノードを増やさない）。適用の中身は `geometry.transform` の実装を
+切り出して共有する（`ops::stroke_reach` を `rasterize` と `drawn_bounds` で
+共有したのと同じ形）。`text.layout` の `position` は内在的な位置なので
+**先に単独で入れる**（`feat/text-layout-position`）。
+
 ### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |

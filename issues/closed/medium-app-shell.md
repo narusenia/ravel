@@ -1343,3 +1343,53 @@ let names = match components.len() {
 **残余**: v13 より前の文書で `port` に `"frame"` 以外が入っていた `layer.ref`
 は、移行しても出力型が追随しない（追随はパラメータ編集の経路にしか入っていない）。
 `layer` か `port` を一度触れば直る。→ `LOW-CORE-06`
+
+---
+
+## MED-APP-45 | bug | Viewer の bbox が画像インスタンスの矩形を落とすので、画像ジオメトリのレイヤーが掴めない
+
+> **解決済み**: `BBOX-1` / `BBOX-3`。測るのは `ops::drawn_bounds`
+> （`crates/ravel-core/src/geometry/ops.rs`）1 つになり、`geometry_bounds` は
+> その呼び出しと `CompRect` への変換だけになった。インスタンスは
+> `InstanceSource::Image` なら `InstanceImage::rect()`、`InstanceSource::Geometry`
+> なら source 自身の `drawn_bounds` を、それぞれ `InstanceTransform` で置いた
+> 矩形として測る（回転があるときは 4 隅を通して AABB を取る）。
+> `geometry.from_image` のレイヤーは画像の解像度どおりの bbox を持ち、掴める。
+>
+> **テスト**: `panels::viewer::tests::an_image_geometry_layer_has_a_grabbable_bbox`
+> （`layer_comp_rect` が 320×180 の中心合わせ矩形を返し、中心が
+> `MovableBody` になる）、`geometry::ops::tests::an_image_instance_measures_the_images_rectangle`。
+> 計画は `docs/implementation/geometry-drawn-bounds-plan.md`。
+
+**該当**: `crates/ravel-app/src/panels/viewer/geometry.rs` の `geometry_bounds`
+
+`geometry_bounds` は Point / Instance ドメインの**位置だけ**を走査して AABB を作る。
+
+```rust
+for domain in [Domain::Point, Domain::Instance] {
+    let Some(Ok(positions)) = geometry.positions(domain) else { continue };
+    for index in 0..positions.len() { /* min/max だけ */ }
+}
+```
+
+`geometry.from_image` の出力は「**原点に 1 インスタンス**、画像はインスタンスの
+source の `rect()`」という形で、`from_image_outputs_one_instance_stamping_the_image`
+（`crates/ravel-nodes/src/geometry.rs`）が 320×180 の画像に対し
+`rect = (-160, -90, 320, 180)` を返すことを固定している。位置は 1 点しか無いので
+**bbox は 0×0** になる。
+
+結果:
+
+- `layer_comp_rect`（`crates/ravel-app/src/panels/viewer.rs`）が幅 0 高さ 0 を返し、
+  `ShellManipulator` の枠とハンドルが実質出ない
+- **画像ジオメトリを置いたレイヤーが Viewer から掴めない**。評価はできるが
+  編集できない状態（`roadmap.md` の基準 4）
+- クリックによるレイヤー選択も AABB 近似なので、同じ理由で当たらない
+
+矩形はインスタンス位置に対して**中心合わせ**（`rasterize/mod.rs` の
+`raster_image` が「origin-centred rectangle」と書いている）なので、bbox は
+インスタンス位置 ± 矩形の半分を含める必要がある。
+
+`layer-content-size-plan.md` の「問題 2」で見つけた 3 件のうちの 1 つ。
+残りは `MED-CORE-11`（コアと Viewer で bbox の定義が違う）と
+`LOW-APP-33`（ストローク幅が入らない）。

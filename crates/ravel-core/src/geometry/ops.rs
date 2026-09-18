@@ -12,7 +12,7 @@ use super::{
     AttrName, AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError,
     InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive, names,
 };
-use crate::types::{Color, Vec2, Vec3, Vec4};
+use crate::types::{Color, Rect, Vec2, Vec3, Vec4};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AttributeValue {
@@ -1142,6 +1142,421 @@ pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
     ))
 }
 
+/// Axis-aligned bounds of what a geometry draws: point positions, each
+/// instance's source placed through the accumulated [`InstanceTransform`],
+/// and the reach of the stroke its **attributes** ask for ([`stroke_reach`]).
+///
+/// The one answer to "how big is this geometry". [`GeometricData::bounds`]
+/// and the Viewer's bbox overlay both come from here, so a rectangle drawn on
+/// screen and one a node reads cannot disagree. What `positions_bounds`
+/// measures — the Point domain's `P` column — is a *part* of this: an
+/// instance geometry places nothing in that domain, so measuring it alone
+/// reports a line of glyph origins for a `text.layout` and nothing at all for
+/// a `geometry.from_image`.
+///
+/// # The walk is the rasterizer's walk
+///
+/// `rasterize::flatten_geometry` carries three things from the root down
+/// through every source, and a bbox that does not carry the same three is
+/// smaller than the picture:
+///
+/// * **the accumulated placement**, composed with
+///   [`InstanceTransform::compose`] — *not* the exact affine product. The
+///   composition keeps the result a scale-rotate-translate, so a non-uniform
+///   scale under a turn loses the shear; `container.rs` states that rather
+///   than fixing it, so that drawing and flattening stay the same picture.
+///   Measuring with the exact product bounds a picture nobody draws.
+/// * **the inherited `stroke_width`**, scaled by that placement's
+///   [`InstanceTransform::uniform_scale`] at the level it is stroked, because
+///   that is what the rasterizer strokes with. The bbox grows by the widest
+///   width in play rather than per element (the plan's decision), so what
+///   descends is the max of the level's own widest and what it inherited.
+/// * **the root's `join`**, read once from the root's Detail and never again.
+///   The rasterizer reads `join` / `cap` / `dash` at the node entry and
+///   carries them down `Style::shape`; a source's own Detail is not read.
+///
+/// The instance columns and the cutoff are [`expand_instances`]': the same
+/// `P` / `rot` / `scale` / `source_index`, the same [`MAX_INSTANCE_DEPTH`],
+/// the same clamping of an out-of-range `source_index`. What is flattened and
+/// what is measured have to be the same set of elements.
+///
+/// # What it cannot see
+///
+/// **The `rasterize` node's own `stroke_width` parameter.** A path carrying no
+/// `stroke_width` attribute is still stroked, at the width the node's
+/// parameter says, and a geometry does not know which node will draw it — so
+/// a function taking one geometry cannot bound that stroke. Attribute-derived
+/// widths (what `style.stroke` writes, on any domain) are included; the base
+/// parameter is the open half of `LOW-APP-33`.
+///
+/// `None` when the geometry draws nothing at all — an empty geometry has no
+/// rectangle, and a zero-sized one at the origin would be a lie.
+///
+/// # Cost
+///
+/// **Walked in full on every call, including once per pointer move**: the
+/// Viewer's hover hint asks for the selected nodes' bounds and a click asks
+/// for every node's, both through `viewer::geometry::geometry_bounds`, which
+/// is this function and a type conversion. Measured rather than assumed,
+/// release build, per call, for a flat point cloud:
+///
+/// | points | per call |
+/// |---|---|
+/// | 1 000 | 0.37 µs |
+/// | 10 000 | 1.9 µs |
+/// | 100 000 | 20 µs |
+/// | 1 000 000 | 197 µs |
+///
+/// A source with **no instance domain of its own** is measured once however
+/// many instances stamp it, which keeps the instance path
+/// `O(sources × points + instances)` — glyph outlines, images and the shapes
+/// a `scatter` strews are all that case. A source that nests further is
+/// re-walked per instance, because its extent then depends on the placement
+/// it is walked with; [`MAX_INSTANCE_DEPTH`] bounds that at four levels. The
+/// two `#[ignore]`d `drawn_bounds_costs_…` / `a_stamped_source_is_measured_once…`
+/// tests pin both halves.
+///
+/// A pointer move pays this for the handful of selected nodes, so even a
+/// hundred-thousand-point geometry costs ~0.1% of a 60 Hz frame. Caching the
+/// rectangle at press time would buy that back and cost a second source of
+/// truth for what the bbox is — worth doing only if a profile ever shows this
+/// line, which at these numbers it will not. Unlike `MED-GPU-04`, the work
+/// here is `O(points)` once per input event, not
+/// `O(primitives × resolution)` per frame.
+pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect> {
+    // `join` comes from the **root's** Detail and nothing else: `rasterize`
+    // reads it once at the node entry (`detail_join(geo.detail())`) and
+    // carries it down every source through `Style::shape`, so a source's own
+    // `join` is never read. Reading it per level would bound a miter the
+    // picture does not have — and miss the one it does.
+    let miter = root_miter(geometry);
+    drawn_bounds_at(geometry, 0, InstanceTransform::IDENTITY, 0.0, miter)
+}
+
+/// [`drawn_bounds`] mid-walk, carrying what `rasterize::flatten_geometry`
+/// carries: the placement accumulated from the root, the `stroke_width`
+/// inherited from the enclosing instance, and the root's join.
+///
+/// `depth` is counted the way [`expand_at`] counts it — the top-level
+/// geometry is depth 0, and the instances of a geometry at
+/// [`MAX_INSTANCE_DEPTH`] are not reached.
+fn drawn_bounds_at(
+    geometry: &Geometry,
+    depth: u32,
+    placement: InstanceTransform,
+    inherited_width: f32,
+    miter: bool,
+) -> Option<Rect> {
+    let (local, own_width) = local_extent(geometry);
+    // The **max** of the two, not "its own, else inherited". Per element
+    // `rasterize` narrows the attribute over the inherited value, but the
+    // bbox grows by one width for the whole geometry, so the only safe upper
+    // bound is the widest either of them asks for.
+    let width = own_width.max(inherited_width);
+    union(
+        placed_ink(local, placement, width, miter),
+        instance_bounds(geometry, depth, placement, width, miter),
+    )
+}
+
+/// A geometry's extent in **its own** space, and the widest stroke its own
+/// elements ask for.
+///
+/// The two `O(points)` reads of the walk, kept together so a source stamped
+/// by many instances pays them once (see the cache in [`instance_bounds`]).
+/// Neither depends on where the geometry is placed.
+///
+/// The Instance domain's `stroke_width` is deliberately **not** folded in:
+/// `rasterize` narrows it onto what that instance *stamps*
+/// (`element_style(style, instances, index)`), not onto the host's own
+/// primitives, so [`instance_bounds`] passes it down per instance instead —
+/// which is both tighter and where it actually applies.
+fn local_extent(geometry: &Geometry) -> (Option<Rect>, f32) {
+    let widest = [Domain::Detail, Domain::Primitive, Domain::Point]
+        .into_iter()
+        .filter_map(|domain| {
+            geometry
+                .attribute_set(domain)
+                .get(names::STROKE_WIDTH)?
+                .as_f32(names::STROKE_WIDTH)
+                .ok()
+                .map(|widths| widths.iter().copied().fold(0.0_f32, f32::max))
+        })
+        .fold(0.0_f32, f32::max);
+    (
+        union(geometry.positions_bounds(), control_hull_bounds(geometry)),
+        widest,
+    )
+}
+
+/// The extent of the path control points — anchors together with
+/// `P + in_tan` and `P + out_tan` — or `None` when the geometry carries no
+/// tangents.
+///
+/// `positions_bounds` measures the anchors, and **a cubic leaves them**: two
+/// anchors on one horizontal line with both tangents pointing up bulge 45 px
+/// above it for a handle length of 60, and that bulge is drawn
+/// (`rasterize::path_polyline` hands `in_tan` / `out_tan` to
+/// `flatten::flatten_path`, which is also what the GPU shader evaluates).
+/// Anchors alone would report zero height for it.
+///
+/// A Bézier never leaves the convex hull of its control points, so this is
+/// the bound that cannot be too small, and it stays a **column scan** rather
+/// than a per-segment root solve — the walk is paid once per pointer move.
+/// Generous only where a curve does not reach its own handles, and it costs
+/// text nothing: a font puts its anchors on the extrema, so a glyph's hull
+/// and its ink are the same rectangle (measured on the bundled Geist
+/// Regular, `"Ravel"` at 72 px, to the last decimal).
+///
+/// Tangents are a 2D attribute, so a 3D `P` column reads as no hull at all
+/// and the anchors answer alone.
+fn control_hull_bounds(geometry: &Geometry) -> Option<Rect> {
+    let points = geometry.points();
+    let positions = points.get(names::P)?.as_vec2(names::P).ok()?;
+    let tangents: Vec<&[Vec2]> = [names::IN_TAN, names::OUT_TAN]
+        .into_iter()
+        .filter_map(|name| points.get(name)?.as_vec2(name).ok())
+        .collect();
+    if tangents.is_empty() {
+        return None;
+    }
+    placed_bounds(positions.iter().enumerate().flat_map(|(index, p)| {
+        std::iter::once(*p).chain(
+            tangents
+                .iter()
+                .filter_map(move |column| column.get(index))
+                .map(move |t| Vec2(p.0 + t.0, p.1 + t.1)),
+        )
+    }))
+}
+
+/// Whether the geometry joins its corners with a miter. A Detail attribute —
+/// one value for the whole geometry — and absent means round, as it does in
+/// the rasterizer.
+fn root_miter(geometry: &Geometry) -> bool {
+    geometry
+        .detail()
+        .get(names::JOIN)
+        .and_then(|column| column.as_i32(names::JOIN).ok())
+        .is_some_and(|joins| joins.first() == Some(&names::JOIN_MITER))
+}
+
+/// A local rectangle put where `placement` puts it, grown by the stroke that
+/// covers it.
+///
+/// The reach is measured **after** the placement, because `rasterize` scales
+/// the width by the accumulated placement before it strokes
+/// (`self.key.stroke_width * self.scale`, and `PathRun::new(…,
+/// placement.uniform_scale())` on the GPU path). A reach added in the
+/// source's own space and then scaled would be right only for a scale of 1.
+fn placed_ink(
+    local: Option<Rect>,
+    placement: InstanceTransform,
+    width: f32,
+    miter: bool,
+) -> Option<Rect> {
+    let rect = placed_rect(local?, placement)?;
+    if width <= 0.0 {
+        return Some(rect);
+    }
+    Some(grown(
+        rect,
+        stroke_reach(width * placement.uniform_scale(), miter),
+    ))
+}
+
+/// Bounds of what this geometry's instance domain stamps, each source placed
+/// by the composition of `placement` with that instance's own transform.
+///
+/// `InstanceTransform::compose` rather than applying the two placements in
+/// turn. The composition is **not** the exact affine product — the result is
+/// again a scale-rotate-translate, so a non-uniform scale under two turns
+/// loses the shear — and `container.rs` states that rather than fixing it so
+/// that drawing and flattening stay the same picture. Measuring with the
+/// exact product would therefore bound a picture nobody draws: a 20×2 image
+/// turned a quarter-turn inside a 10×-wide instance is drawn 2×200, and the
+/// exact product says 20×20.
+fn instance_bounds(
+    geometry: &Geometry,
+    depth: u32,
+    placement: InstanceTransform,
+    inherited_width: f32,
+    miter: bool,
+) -> Option<Rect> {
+    // The depth `rasterize` stops drawing at and `expand_at` stops
+    // flattening at. Measuring deeper would bound elements that do not exist.
+    if depth >= MAX_INSTANCE_DEPTH {
+        return None;
+    }
+    let offsets = geometry.positions(Domain::Instance)?.ok()?;
+    let sources = geometry.sources();
+    if sources.is_empty() {
+        // Nothing is stamped — `rasterize` draws no instance and `expand_at`
+        // drops the domain. The placements are still elements the Viewer
+        // marks, and a `scatter.*` whose source input is unwired is exactly
+        // that, so the extent of the placements is the honest answer.
+        return placed_bounds(offsets.iter3().map(|p| placement.apply(Vec2(p.0, p.1))));
+    }
+    // A 3D instance domain places nothing: `rasterize` reads `P` as `Vec2`
+    // and `expand_at` requires it planar, so both draw nothing here too.
+    let offsets = offsets.planar()?;
+    let instances = geometry.instances();
+    let rots = instances
+        .get(names::ROT)
+        .and_then(|column| column.as_f32(names::ROT).ok());
+    let scales = instances
+        .get(names::SCALE)
+        .and_then(|column| column.as_vec2(names::SCALE).ok());
+    let source_indices = instances
+        .get(names::SOURCE_INDEX)
+        .and_then(|column| column.as_i32(names::SOURCE_INDEX).ok());
+    let widths = instances
+        .get(names::STROKE_WIDTH)
+        .and_then(|column| column.as_f32(names::STROKE_WIDTH).ok());
+
+    // The `O(points)` half of a source, measured once however many instances
+    // stamp it. Only for a source with **no instance domain of its own**:
+    // that is exactly when its local extent does not depend on where it is
+    // placed, so caching it costs nothing in correctness. Glyph outlines,
+    // images and the shapes a `scatter` strews are all this case, which is
+    // why the hot path stays `O(sources × points + instances)`; a source
+    // that nests further is re-walked per instance, bounded by
+    // `MAX_INSTANCE_DEPTH`.
+    let mut leaf: Vec<Option<(Option<Rect>, f32)>> = vec![None; sources.len()];
+
+    let mut bounds = None;
+    for (index, offset) in offsets.iter().enumerate() {
+        let local = InstanceTransform {
+            offset: *offset,
+            rot: rots
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(0.0),
+            scale: scales
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(InstanceTransform::IDENTITY.scale),
+        };
+        let next = InstanceTransform::compose(placement, local);
+        let width = inherited_width.max(
+            widths
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(0.0),
+        );
+        let slot = source_slot(sources.len(), source_indices, index);
+        let placed = match &sources[slot] {
+            // An image has no contour, so nothing strokes it.
+            InstanceSource::Image(image) => placed_rect(image.rect(), next),
+            InstanceSource::Geometry(source) if source.instance_count() == 0 => {
+                let (extent, own_width) = *leaf[slot].get_or_insert_with(|| local_extent(source));
+                placed_ink(extent, next, width.max(own_width), miter)
+            }
+            InstanceSource::Geometry(source) => {
+                drawn_bounds_at(source, depth + 1, next, width, miter)
+            }
+        };
+        bounds = union(bounds, placed);
+    }
+    bounds
+}
+
+/// A source rectangle placed by one instance: the axis-aligned bounds of its
+/// four placed corners.
+///
+/// The corners rather than the rectangle, because a turned rectangle is not
+/// one: rotating `(x, y, width, height)` as if it were a rectangle would
+/// report the source's own extent at a new position and lose every pixel the
+/// turn pushed outside it.
+fn placed_rect(rect: Rect, placement: InstanceTransform) -> Option<Rect> {
+    placed_bounds(
+        [
+            Vec2(rect.x, rect.y),
+            Vec2(rect.x + rect.width, rect.y),
+            Vec2(rect.x + rect.width, rect.y + rect.height),
+            Vec2(rect.x, rect.y + rect.height),
+        ]
+        .into_iter()
+        .map(|corner| placement.apply(corner)),
+    )
+}
+
+/// Axis-aligned bounds of a stream of points, or `None` when it is empty.
+fn placed_bounds(points: impl IntoIterator<Item = Vec2>) -> Option<Rect> {
+    let mut points = points.into_iter();
+    let first = points.next()?;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.0, first.1, first.0, first.1);
+    for point in points {
+        min_x = min_x.min(point.0);
+        min_y = min_y.min(point.1);
+        max_x = max_x.max(point.0);
+        max_y = max_y.max(point.1);
+    }
+    Some(Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    })
+}
+
+/// How far past the path a stroke of `width` can reach, joins included: a
+/// miter spike runs out to `miter_limit` half-widths.
+///
+/// One answer for two callers that have to agree: `rasterize` sizes the
+/// rectangle it blends a stroke's coverage into with this, and
+/// [`drawn_bounds`] grows a geometry's extent by it. A bbox that computed the
+/// reach itself would be a second answer, and the one that is too small is
+/// the one that clips the picture.
+///
+/// `miter` rather than a join enum because that is the whole of what the
+/// reach depends on, and the join is spelled `zeno::Join` in the rasterizer —
+/// a type this crate does not (and must not) depend on.
+///
+/// The extra pixel is the antialiased edge: zeno writes coverage into the
+/// pixel the boundary passes through, so the outermost covered pixel is one
+/// past the geometric reach.
+///
+/// `width` is a width **already scaled by the placement it is stroked at**:
+/// the rasterizer strokes with `stroke_width * placement.uniform_scale()`, so
+/// a caller measuring a stamped source has to scale before it asks.
+pub fn stroke_reach(width: f32, miter: bool) -> f32 {
+    let half_widths = if miter { ZENO_MITER_LIMIT } else { 1.0 };
+    width * 0.5 * half_widths + 1.0
+}
+
+/// zeno's default miter limit (`zeno::Stroke::default`), which the rasterizer
+/// does not change.
+///
+/// An upper bound on the reach, not the reach itself: zeno also bevels any
+/// turn sharper than a right angle, so a miter never actually exceeds √2
+/// half-widths. Sizing by the declared limit costs a few pixels of scan and
+/// does not depend on that second rule staying true.
+const ZENO_MITER_LIMIT: f32 = 4.0;
+
+/// `rect` grown by `reach` on every side.
+fn grown(rect: Rect, reach: f32) -> Rect {
+    Rect {
+        x: rect.x - reach,
+        y: rect.y - reach,
+        width: rect.width + reach * 2.0,
+        height: rect.height + reach * 2.0,
+    }
+}
+
+/// The smallest rectangle containing both, with either side absent.
+fn union(left: Option<Rect>, right: Option<Rect>) -> Option<Rect> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let (x, y) = (left.x.min(right.x), left.y.min(right.y));
+            Some(Rect {
+                x,
+                y,
+                width: (left.x + left.width).max(right.x + right.width) - x,
+                height: (left.y + left.height).max(right.y + right.height) - y,
+            })
+        }
+        (some, None) | (None, some) => some,
+    }
+}
+
 fn domain_count(geometry: &Geometry, domain: Domain) -> usize {
     match domain {
         Domain::Point => geometry.point_count(),
@@ -2018,8 +2433,17 @@ fn select_source<'a>(
     source_indices: Option<&[i32]>,
     index: usize,
 ) -> &'a InstanceSource {
+    &sources[source_slot(sources.len(), source_indices, index)]
+}
+
+/// Which slot of the source list instance `index` stamps.
+///
+/// Split out of [`select_source`] because [`drawn_bounds`] measures each
+/// source once and then needs the *slot* rather than the source, and the
+/// clamping rule is one rule.
+fn source_slot(source_count: usize, source_indices: Option<&[i32]>, index: usize) -> usize {
     let selected = source_indices.map_or(0, |indices| indices[index].max(0) as usize);
-    &sources[selected.min(sources.len() - 1)]
+    selected.min(source_count - 1)
 }
 
 /// Rewrites `P`, `in_tan` and `out_tan` of each block with that block's
@@ -2202,7 +2626,9 @@ fn append_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_PI_2;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn bounds_center_prefers_points_then_falls_back_to_instances() {
@@ -2226,6 +2652,517 @@ mod tests {
             .unwrap();
         assert_eq!(bounds_center(&instance_only), Some(Vec3(1.0, 5.0, 0.0)));
         assert_eq!(bounds_center(&Geometry::new()), None);
+    }
+
+    // ----- drawn_bounds -------------------------------------------------------
+
+    /// A square source centred on its own origin, so a placement's effect on
+    /// the measured rectangle is the placement itself.
+    fn unit_square() -> Geometry {
+        Geometry::from_points(vec![
+            Vec2(-1.0, -1.0),
+            Vec2(1.0, -1.0),
+            Vec2(1.0, 1.0),
+            Vec2(-1.0, 1.0),
+        ])
+    }
+
+    /// A geometry stamping `source` once, at `offset` and turned by `rot`.
+    fn one_instance(source: InstanceSource, offset: Vec2, rot: f32) -> Geometry {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![offset]))
+            .expect("one offset");
+        if rot != 0.0 {
+            geometry
+                .instances_mut()
+                .insert(names::ROT, AttributeArray::F32(vec![rot]))
+                .expect("one turn");
+        }
+        geometry.set_sources(vec![source]);
+        geometry
+    }
+
+    fn image_source(width: u32, height: u32) -> InstanceSource {
+        InstanceSource::Image(
+            crate::geometry::InstanceImage::new(
+                Arc::new(crate::types::FrameBuffer::new_zeroed(width, height)),
+                width,
+                height,
+            )
+            .expect("a frame buffer is an image source"),
+        )
+    }
+
+    fn as_tuple(rect: Rect) -> (f32, f32, f32, f32) {
+        (rect.x, rect.y, rect.width, rect.height)
+    }
+
+    /// Completion criterion: a geometry that places nothing in the Point
+    /// domain is no longer measured as a zero rectangle. `text.layout` and
+    /// `geometry.from_image` both look like this.
+    #[test]
+    fn an_instance_only_geometry_is_not_zero_sized() {
+        let geometry = one_instance(
+            InstanceSource::Geometry(Arc::new(unit_square())),
+            Vec2(10.0, 20.0),
+            0.0,
+        );
+        assert_eq!(geometry.point_count(), 0);
+        let bounds = drawn_bounds(&geometry).expect("the stamped square has an extent");
+        assert_eq!(as_tuple(bounds), (9.0, 19.0, 2.0, 2.0));
+    }
+
+    /// An instance domain with no source list stamps nothing, so all there is
+    /// to measure is where the placements are — which is what a `scatter.*`
+    /// with its source input unwired looks like, and what the Viewer already
+    /// marks. Unioned with the points, so the curve a scatter ran along stays
+    /// inside the rectangle.
+    #[test]
+    fn instances_with_nothing_to_stamp_measure_their_placements() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 1.0)]);
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(-1.0, 5.0)]))
+            .expect("one placement");
+        assert!(geometry.sources().is_empty());
+        let bounds = drawn_bounds(&geometry).expect("both domains place something");
+        assert_eq!(as_tuple(bounds), (-1.0, 0.0, 3.0, 5.0));
+    }
+
+    /// Completion criterion: an image instance measures the image's own
+    /// rectangle, moved to where the instance puts it.
+    #[test]
+    fn an_image_instance_measures_the_images_rectangle() {
+        let geometry = one_instance(image_source(64, 32), Vec2(100.0, -5.0), 0.0);
+        let rect = geometry.sources()[0]
+            .image()
+            .expect("an image source")
+            .rect();
+        let bounds = drawn_bounds(&geometry).expect("a stamped image has an extent");
+        assert_eq!(
+            as_tuple(bounds),
+            (rect.x + 100.0, rect.y - 5.0, rect.width, rect.height),
+            "the image rectangle was not moved to the instance"
+        );
+    }
+
+    /// Completion criterion: a turned source is bounded by the *circumscribed*
+    /// rectangle of its placed corners, not by its own rectangle relabelled.
+    ///
+    /// A quarter turn would hide the difference on a square, so the source is
+    /// a wide rectangle turned by 45°: its half-diagonal is what the bounds
+    /// have to reach.
+    #[test]
+    fn a_turned_source_is_bounded_by_its_placed_corners() {
+        let mut source = unit_square();
+        source
+            .points_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![
+                    Vec2(-4.0, -1.0),
+                    Vec2(4.0, -1.0),
+                    Vec2(4.0, 1.0),
+                    Vec2(-4.0, 1.0),
+                ]),
+            )
+            .expect("four corners");
+        let upright = drawn_bounds(&one_instance(
+            InstanceSource::Geometry(Arc::new(source.clone())),
+            Vec2(0.0, 0.0),
+            0.0,
+        ))
+        .expect("an upright stamp has an extent");
+        let turned = drawn_bounds(&one_instance(
+            InstanceSource::Geometry(Arc::new(source)),
+            Vec2(0.0, 0.0),
+            std::f32::consts::FRAC_PI_4,
+        ))
+        .expect("a turned stamp has an extent");
+
+        // (4, 1) turned by 45° reaches 5/√2 on both axes, and (4, -1) reaches
+        // 3/√2, so the half-extent is 5/√2 each way.
+        let reach = 5.0 / 2.0_f32.sqrt();
+        assert!(
+            (turned.width - reach * 2.0).abs() < 1e-3 && (turned.height - reach * 2.0).abs() < 1e-3,
+            "the corners were not placed: {turned:?}"
+        );
+        assert!(
+            turned.height > upright.height,
+            "turning a rectangle has to widen its bounds: {turned:?} vs {upright:?}"
+        );
+    }
+
+    /// Completion criterion: what [`expand_instances`] stops flattening at is
+    /// what `drawn_bounds` stops measuring at. A level past the guard is not
+    /// drawn, so bounding it would claim an extent for nothing.
+    #[test]
+    fn the_depth_guard_bounds_exactly_what_expansion_flattens() {
+        let mut level = unit_square();
+        let mut measured = Vec::new();
+        for _ in 0..=MAX_INSTANCE_DEPTH + 1 {
+            let next = one_instance(
+                InstanceSource::Geometry(Arc::new(level)),
+                Vec2(0.0, 0.0),
+                0.0,
+            );
+            let expanded = expand_instances(&next).expect("a nesting answers");
+            measured.push((expanded.point_count() > 0, drawn_bounds(&next).is_some()));
+            level = next;
+        }
+        for (depth, (flattened, bounded)) in measured.iter().enumerate() {
+            assert_eq!(
+                flattened, bounded,
+                "nesting depth {depth}: expansion kept points = {flattened}, \
+                 drawn_bounds measured something = {bounded}"
+            );
+        }
+        assert!(
+            measured.iter().any(|(flattened, _)| !flattened),
+            "the nesting never reached the guard: {measured:?}"
+        );
+    }
+
+    /// `unit_square` with `width` asked for on the Primitive domain, the
+    /// domain `rasterize::element_style` narrows a path's stroke off.
+    fn stroked_square(width: f32, join: Option<i32>) -> Geometry {
+        let mut geometry = unit_square();
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![width]))
+            .expect("one primitive");
+        if let Some(join) = join {
+            geometry
+                .detail_mut()
+                .insert(names::JOIN, AttributeArray::I32(vec![join]))
+                .expect("one detail value");
+        }
+        geometry
+    }
+
+    /// Completion criterion: widening the stroke grows the bounds by exactly
+    /// the reach the rasterizer uses, on every side.
+    #[test]
+    fn a_stroke_grows_the_bounds_by_its_reach() {
+        let bare = drawn_bounds(&stroked_square(0.0, None)).expect("a square has an extent");
+        let stroked = drawn_bounds(&stroked_square(40.0, None)).expect("a square has an extent");
+        let reach = stroke_reach(40.0, false);
+        assert_eq!(
+            as_tuple(stroked),
+            (
+                bare.x - reach,
+                bare.y - reach,
+                bare.width + reach * 2.0,
+                bare.height + reach * 2.0
+            )
+        );
+    }
+
+    /// Completion criterion: a miter reaches further than a round join, so the
+    /// bounds have to be wider for it. The rule lives in [`stroke_reach`];
+    /// this is the bbox actually asking.
+    #[test]
+    fn a_miter_join_bounds_wider_than_a_round_one() {
+        let miter = drawn_bounds(&stroked_square(40.0, Some(names::JOIN_MITER)))
+            .expect("a square has an extent");
+        let round = drawn_bounds(&stroked_square(40.0, Some(names::JOIN_ROUND)))
+            .expect("a square has an extent");
+        assert!(
+            miter.width > round.width && miter.height > round.height,
+            "a miter spike has to widen the bounds: {miter:?} vs {round:?}"
+        );
+    }
+
+    /// A zero stroke is the absence of one, not a one-pixel margin: every
+    /// geometry carries a `stroke_width` column once `style.stroke` has run on
+    /// a group, and the elements outside the group are seeded with zero.
+    #[test]
+    fn a_zero_stroke_width_grows_nothing() {
+        assert_eq!(
+            drawn_bounds(&stroked_square(0.0, None)),
+            drawn_bounds(&unit_square()),
+            "a zero-width stroke reaches nowhere"
+        );
+    }
+
+    /// A cubic leaves its anchors, so the anchors alone are not the extent.
+    ///
+    /// Two anchors on one horizontal line with both handles 60 units up:
+    /// `y(t) = 180t(1 - t)`, which peaks at **45** in the middle. Measuring
+    /// `P` alone reports zero height for a curve that is drawn 45 units tall
+    /// (`rasterize::path_polyline` flattens these tangents, so it is drawn).
+    ///
+    /// The assertion is the apex, not the hull: the control polygon reaches
+    /// 60 and the bound may sit anywhere at or above the ink, but never
+    /// below it.
+    #[test]
+    fn a_curve_that_bulges_past_its_anchors_is_still_inside_the_bounds() {
+        let anchors = || Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(100.0, 0.0)]);
+        let mut geometry = anchors();
+        geometry
+            .points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 60.0), Vec2(0.0, 0.0)]),
+            )
+            .expect("one out tangent per point");
+        geometry
+            .points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(0.0, 60.0)]),
+            )
+            .expect("one in tangent per point");
+
+        let bounds = drawn_bounds(&geometry).expect("a curve has an extent");
+        const APEX: f32 = 45.0;
+        assert!(
+            bounds.y <= 0.0 && bounds.y + bounds.height >= APEX,
+            "the curve peaks at {APEX} and the bounds stop short: {bounds:?}"
+        );
+        assert_eq!(
+            drawn_bounds(&anchors())
+                .expect("two points have an extent")
+                .height,
+            0.0,
+            "the same anchors without tangents are a flat line"
+        );
+    }
+
+    /// An instance stamping `source`, placed at `offset` with `scale`, and
+    /// asking for `stroke_width` on its own domain the way `style.stroke`
+    /// does.
+    fn scaled_instance(source: Geometry, scale: Vec2, stroke_width: f32) -> Geometry {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .expect("one offset");
+        geometry
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![scale]))
+            .expect("one scale");
+        geometry
+            .instances_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![stroke_width]))
+            .expect("one width");
+        geometry.set_sources(vec![InstanceSource::Geometry(Arc::new(source))]);
+        geometry
+    }
+
+    /// The instance's scale multiplies the stroke, because `rasterize` strokes
+    /// with `stroke_width * placement.uniform_scale()`.
+    ///
+    /// A reach measured in the source's own space and left there is right only
+    /// at a scale of 1: at `(3, 3)` the bbox grew by 21 while the drawn half
+    /// width was 60, so a scattered thick-stroked shape spilled out of its own
+    /// rectangle by three quarters of the line.
+    #[test]
+    fn an_instances_scale_multiplies_the_stroke_it_inherits() {
+        let bounds = drawn_bounds(&scaled_instance(unit_square(), Vec2(3.0, 3.0), 40.0))
+            .expect("a stamped square has an extent");
+        // The square is 2×2 about the origin, so the scale puts it at ±3.
+        let reach = stroke_reach(40.0 * 3.0, false);
+        assert_eq!(
+            as_tuple(bounds),
+            (
+                -3.0 - reach,
+                -3.0 - reach,
+                6.0 + reach * 2.0,
+                6.0 + reach * 2.0
+            ),
+            "the reach was not scaled with the placement"
+        );
+    }
+
+    /// A non-uniform scale collapses to the mean absolute scale, which is the
+    /// one number a stroke can have — [`InstanceTransform::uniform_scale`], the
+    /// same collapse the rasterizer makes.
+    #[test]
+    fn a_non_uniform_scale_reaches_by_the_uniform_scale() {
+        let bounds = drawn_bounds(&scaled_instance(unit_square(), Vec2(4.0, 1.0), 40.0))
+            .expect("a stamped square has an extent");
+        let reach = stroke_reach(40.0 * 2.5, false);
+        assert_eq!(
+            (bounds.y, bounds.height),
+            (-1.0 - reach, 2.0 + reach * 2.0),
+            "the thin axis was measured with the unscaled reach"
+        );
+    }
+
+    /// The root's `join` applies to every source, because `rasterize` reads it
+    /// once at the node entry and carries it down `Style::shape`.
+    ///
+    /// Reading it per level made a miter root bound its sources as if they were
+    /// round: 40 wide, the miter spike reaches 81 and a round join 21.
+    #[test]
+    fn the_roots_join_decides_the_reach_of_every_source() {
+        let stamp = |join| {
+            let mut geometry = Geometry::new();
+            geometry
+                .instances_mut()
+                .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+                .expect("one offset");
+            geometry
+                .detail_mut()
+                .insert(names::JOIN, AttributeArray::I32(vec![join]))
+                .expect("one detail value");
+            // The source asks for the width and says nothing about the join.
+            geometry.set_sources(vec![InstanceSource::Geometry(Arc::new(stroked_square(
+                40.0, None,
+            )))]);
+            drawn_bounds(&geometry).expect("a stamped square has an extent")
+        };
+        let miter = stamp(names::JOIN_MITER);
+        let round = stamp(names::JOIN_ROUND);
+        assert_eq!(
+            miter.width - round.width,
+            (stroke_reach(40.0, true) - stroke_reach(40.0, false)) * 2.0,
+            "the source was bounded with its own join instead of the root's"
+        );
+        assert!(miter.width > round.width, "{miter:?} vs {round:?}");
+    }
+
+    /// Nesting composes through [`InstanceTransform::compose`], not through
+    /// the exact affine product.
+    ///
+    /// `compose` keeps the result a scale-rotate-translate, so the turns add
+    /// and the scales multiply per axis — a non-uniform scale under a turn
+    /// loses the shear. `container.rs` **states** that rather than fixing it,
+    /// so that drawing and flattening stay the same picture; measuring with
+    /// the exact product therefore bounds a picture nobody draws. A 20×2 image
+    /// turned a quarter-turn inside a 10×-wide instance is drawn 2 × 200, and
+    /// applying the two placements in turn says 20 × 20 — the bbox missed the
+    /// ink by 90 units above and below.
+    #[test]
+    fn nesting_is_bounded_the_way_the_placements_compose() {
+        let mut inner = one_instance(image_source(20, 2), Vec2(3.0, 5.0), FRAC_PI_2);
+        inner
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0]))
+            .expect("one instance");
+        // Built inline rather than with `scaled_instance`, because **both**
+        // levels have to carry an offset: `compose` differs from its own
+        // arguments reversed only in the offset (the turns add and the scales
+        // multiply either way), so two placements at the origin would pin the
+        // composition without pinning which one is the outer.
+        let mut outer = Geometry::new();
+        outer
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(7.0, 11.0)]))
+            .expect("one offset");
+        outer
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(10.0, 1.0)]))
+            .expect("one scale");
+        outer.set_sources(vec![InstanceSource::Geometry(Arc::new(inner))]);
+
+        let bounds = drawn_bounds(&outer).expect("a nested image has an extent");
+        // `compose(outer, inner)` is offset `outer.apply((3, 5))` = (37, 16),
+        // a quarter turn, and scale (10, 1). So (±10, ±1) scales to (±100,
+        // ±1), the turn swaps the axes, and (37, 16) moves it. Reversing the
+        // two placements would put it at (-8, 12) instead.
+        for (what, got, want) in [
+            ("x", bounds.x, 36.0),
+            ("y", bounds.y, -84.0),
+            ("width", bounds.width, 2.0),
+            ("height", bounds.height, 200.0),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "{what}: {got} is not {want} — {bounds:?}"
+            );
+        }
+        assert!(
+            bounds.height > bounds.width,
+            "the exact product would report a square: {bounds:?}"
+        );
+    }
+
+    /// The cost condition, opt-in because it is a measurement rather than an
+    /// assertion about behaviour: `cargo test -p ravel-core --release
+    /// drawn_bounds_costs -- --ignored --nocapture`.
+    ///
+    /// A million-point geometry has to cost the same order as the
+    /// `positions_bounds` it replaces, because the Viewer pays it once per
+    /// pointer move. The numbers behind the table on [`drawn_bounds`].
+    ///
+    /// Alternating rounds, best of each: a single A-then-B pair charges the
+    /// first call for whatever the machine was doing when the test started,
+    /// and the answer is a ratio between two numbers that both move.
+    #[test]
+    #[ignore = "a timing measurement, not a behavioural assertion"]
+    fn drawn_bounds_costs_the_same_order_as_positions_bounds() {
+        let geometry = Geometry::from_points(
+            (0..1_000_000)
+                .map(|i| Vec2(i as f32, -(i as f32)))
+                .collect(),
+        );
+        let (mut bare, mut drawn) = (Duration::MAX, Duration::MAX);
+        for _ in 0..8 {
+            let start = Instant::now();
+            let positions = geometry.positions_bounds();
+            bare = bare.min(start.elapsed());
+            let start = Instant::now();
+            let all = drawn_bounds(&geometry);
+            drawn = drawn.min(start.elapsed());
+            assert_eq!(positions, all, "a flat geometry draws exactly its points");
+        }
+        println!("1 000 000 points: positions_bounds {bare:?}, drawn_bounds {drawn:?}");
+        assert!(
+            drawn < bare * 4,
+            "drawn_bounds left the order of positions_bounds: {drawn:?} vs {bare:?}"
+        );
+    }
+
+    /// The other half of the cost promise, opt-in for the same reason: a
+    /// source stamped by many instances is measured **once**, so stamping it
+    /// a thousand times costs the same order as measuring it alone.
+    ///
+    /// This is what the `instance_count() == 0` cache in [`instance_bounds`]
+    /// buys. Without it the walk is `O(instances × points)`: a thousand
+    /// instances of a hundred-thousand-point source is a hundred million
+    /// point reads per pointer move, which is two orders out rather than a
+    /// constant factor — hence the loose ceiling here.
+    #[test]
+    #[ignore = "a timing measurement, not a behavioural assertion"]
+    fn a_stamped_source_is_measured_once_however_many_instances_stamp_it() {
+        const INSTANCES: usize = 1_000;
+        let source = Geometry::from_points(
+            (0..100_000)
+                .map(|i| Vec2(i as f32, -(i as f32)))
+                .collect::<Vec<_>>(),
+        );
+        let mut stamped = Geometry::new();
+        stamped
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2((0..INSTANCES).map(|i| Vec2(i as f32, 0.0)).collect()),
+            )
+            .expect("one column");
+        stamped.set_sources(vec![InstanceSource::Geometry(Arc::new(source.clone()))]);
+
+        let (mut once, mut many) = (Duration::MAX, Duration::MAX);
+        for _ in 0..8 {
+            let start = Instant::now();
+            assert!(drawn_bounds(&source).is_some());
+            once = once.min(start.elapsed());
+            let start = Instant::now();
+            assert!(drawn_bounds(&stamped).is_some());
+            many = many.min(start.elapsed());
+        }
+        println!("{INSTANCES} instances of 100 000 points: once {once:?}, stamped {many:?}");
+        assert!(
+            many < once * 8,
+            "the source was re-measured per instance: {many:?} vs {once:?}"
+        );
     }
 
     #[test]

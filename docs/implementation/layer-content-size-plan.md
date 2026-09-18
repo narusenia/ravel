@@ -62,9 +62,24 @@ fn base_quad(resolution: (u32, u32)) -> Geometry {
 と同じ種類の穴**で、「bbox は何を測るのか」の答えが 2 箇所に分かれているのが根。
 
 **この 3 件は本計画の単位ではない。** `auto` と独立していて単独でも価値があるので、
-`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33` として起票し別に回す。ここに残して
+`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33` として起票し別に回した。ここに残して
 あるのは、単位 3 の完了条件「Solid の bbox がその矩形になる」が**測る側の穴とは
 別の話**だと読めるようにするため。
+
+> **上 2 件は解決済み、3 件目は半分。** `geometry-drawn-bounds-plan.md`
+> （`BBOX-1`〜`BBOX-3`）が 1 本で閉じた。測る関数は
+> `ravel_core::geometry::ops::drawn_bounds` 1 つになり、
+> `GeometricData::bounds` と `geometry_bounds` は両方ともそれに委譲する。
+> 走査は `rasterize::flatten_geometry` と同じ形で、累積配置・継承した線幅・
+> ルートの `join` を上から持ち回る。ストロークの張り出しは `stroke_margin` を
+> コアへ移した `ops::stroke_reach(width, miter)` で、`rasterize` の被覆矩形と
+> 同じ関数。**線幅は `stroke_width` 属性由来の分だけ**で、`rasterize` ノード
+> パラメータの基底値はジオメトリから見えないので `LOW-APP-33` は残余として
+> 開いている。
+> 上の表に挙がっていない 4 つ目の症状（`text.to_path` 前の Text の bbox が
+> 高さ 0 になる）も同じ 1 行が原因だったので同時に閉じた。
+> **`auto` サイズ（`EXT-1`〜`4`）はこの修正と独立に残っている** — こちらは
+> 「正しく測る」、あちらは「内容にサイズを持たせる」話。
 
 ### 3. 「自動で決まる」を表す形が無い
 
@@ -263,4 +278,6 @@ width   1920 ← auto
    （`field.time` の `mode`、`scatter` の `source_mode`、`text` の `writing_mode`）
    ので、`size_mode` でも規約には合う。1 語で済む方を採った
 3. **bbox の取りこぼし 3 件は本計画から外し、issue として独立で回す**
-   （`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33`）
+   （`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33`。前 2 件は
+   `geometry-drawn-bounds-plan.md` が解決済み、`LOW-APP-33` は属性由来の
+   線幅だけ解決してノードパラメータの基底値が残余）

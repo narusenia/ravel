@@ -62,59 +62,29 @@ pub fn as_geometry(value: &Arc<dyn NodeData>) -> Option<&Geometry> {
     value.downcast_ref::<Geometry>()
 }
 
-/// Axis-aligned bounds of everything a geometry places: point positions and
-/// instance positions together.
+/// What [`ravel_core::geometry::ops::drawn_bounds`] measured, in the Viewer's
+/// own rectangle type.
 ///
-/// The **union** of the two domains, unlike
-/// [`ravel_core::geometry::ops::bounds_center`], which takes the first
-/// non-empty one. A bbox that dropped the instance domain would cut off a
-/// scatter's copies; one that dropped points would cut off the curve they were
-/// scattered along. `None` when the geometry places nothing at all — an empty
-/// geometry has no rectangle, and a zero-sized one at the origin would be a
-/// lie drawn on screen.
+/// Nothing is decided here. The core answers "how big is this geometry" — the
+/// point positions, each instance's source placed where the instance puts it,
+/// and the reach of the stroke covering them — and the same answer backs
+/// `GeometricData::bounds`. This function used to walk the Point and Instance
+/// domains itself and union their *positions*, which is why a
+/// `geometry.from_image` layer could not be grabbed (an image source has a
+/// rectangle, its instance is one point) and why a `text.layout` measured as a
+/// zero-height line of glyph origins while the same string through
+/// `text.to_path` measured its ink.
 ///
-/// **Walked in full on every call, including once per pointer move** (the hover
-/// hint asks for the selected nodes' bounds, and a click asks for every node's).
-/// Measured rather than assumed, release build, per call:
-///
-/// | points | per call |
-/// |---|---|
-/// | 1 000 | 0.37 µs |
-/// | 10 000 | 1.9 µs |
-/// | 100 000 | 20 µs |
-/// | 1 000 000 | 197 µs |
-///
-/// A pointer move pays this for the handful of selected nodes, so even a
-/// hundred-thousand-point geometry costs ~0.1% of a 60 Hz frame. Caching the
-/// rectangle at press time would buy that back and cost a second source of
-/// truth for what the bbox is — worth doing only if a profile ever shows this
-/// line, which at these numbers it will not. Unlike `MED-GPU-04`, the work here
-/// is `O(points)` once per input event, not `O(primitives x resolution)` per
-/// frame.
+/// `None` when the geometry draws nothing at all — an empty geometry has no
+/// rectangle, and a zero-sized one at the origin would be a lie drawn on
+/// screen.
 pub fn geometry_bounds(geometry: &Geometry) -> Option<CompRect> {
-    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-    let mut any = false;
-    for domain in [Domain::Point, Domain::Instance] {
-        let Some(Ok(positions)) = geometry.positions(domain) else {
-            continue;
-        };
-        for index in 0..positions.len() {
-            let Some(p) = positions.get3(index) else {
-                continue;
-            };
-            any = true;
-            min_x = min_x.min(p.0);
-            min_y = min_y.min(p.1);
-            max_x = max_x.max(p.0);
-            max_y = max_y.max(p.1);
-        }
-    }
-    any.then_some(CompRect {
-        x: min_x,
-        y: min_y,
-        w: max_x - min_x,
-        h: max_y - min_y,
+    let bounds = ravel_core::geometry::drawn_bounds(geometry)?;
+    Some(CompRect {
+        x: bounds.x,
+        y: bounds.y,
+        w: bounds.width,
+        h: bounds.height,
     })
 }
 
@@ -434,6 +404,54 @@ mod tests {
     #[test]
     fn an_empty_geometry_has_no_bounds() {
         assert!(geometry_bounds(&Geometry::new()).is_none());
+    }
+
+    /// Completion criterion: the core and the Viewer answer the same rectangle
+    /// for the same geometry, in all four shapes a geometry can take.
+    ///
+    /// Not "the numbers happen to match" but "there is one answer": the only
+    /// way to break this is to give `geometry_bounds` a walk of its own again,
+    /// which is what `MED-CORE-11` was.
+    #[test]
+    fn the_core_and_the_viewer_measure_one_rectangle() {
+        use ravel_core::types::GeometricData as _;
+
+        let points = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 1.0)]);
+        let mut instances = Geometry::new();
+        instances
+            .instances_mut()
+            .insert(
+                ravel_core::geometry::names::P,
+                AttributeArray::Vec2(vec![Vec2(-1.0, 5.0), Vec2(4.0, 7.0)]),
+            )
+            .unwrap();
+        let mut both = points.clone();
+        both.instances_mut()
+            .insert(
+                ravel_core::geometry::names::P,
+                AttributeArray::Vec2(vec![Vec2(-1.0, 5.0)]),
+            )
+            .unwrap();
+
+        for (what, geometry) in [
+            ("points only", points),
+            ("instances only", instances),
+            ("both", both),
+            ("empty", Geometry::new()),
+        ] {
+            let core = geometry.bounds();
+            let viewer = geometry_bounds(&geometry).unwrap_or(CompRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            });
+            assert_eq!(
+                (core.x, core.y, core.width, core.height),
+                (viewer.x, viewer.y, viewer.w, viewer.h),
+                "{what}: the core and the Viewer disagree"
+            );
+        }
     }
 
     #[test]

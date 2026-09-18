@@ -269,3 +269,54 @@ Viewer と出力が食い違う）。ハードコードされた黒 quad は撤�
 テスト（Rust API を直接叩かない — それが今回の見逃しの原因）。未知の値で警告が
 出るテスト。
 
+---
+
+## MED-CORE-11 | debt | ジオメトリの bbox の定義がコアと Viewer で食い違う（コアは Point ドメインだけ）
+
+> **解決済み**: `BBOX-1` / `BBOX-3`。「何を測るか」の答えは
+> `ops::drawn_bounds` 1 つになった。`GeometricData::bounds` と Viewer の
+> `geometry_bounds` は両方ともこれに委譲するので、定義が 2 つある状態自体が
+> 消えた。`positions_bounds` は「Point 域の位置の範囲」という部品として残り、
+> `drawn_bounds` がその一部として呼ぶ。
+>
+> 個票の表の「インスタンスだけ」の行は、コアも Viewer も
+> **source を置いた矩形**を答えるようになった（インスタンス位置の範囲ではない
+> — 位置だけを測るのが `MED-APP-45` の症状だった）。source を持たない
+> インスタンス域は置くものが無いので、そのときだけ配置の範囲を答える。
+>
+> **テスト**: `panels::viewer::geometry::tests::the_core_and_the_viewer_measure_one_rectangle`
+> （点だけ / インスタンスだけ / 両方 / 空 の 4 つで同じ矩形）。
+> 計画は `docs/implementation/geometry-drawn-bounds-plan.md`。
+
+**該当**: `crates/ravel-core/src/geometry/container.rs` の
+`Geometry::positions_bounds`（`GeometricData::bounds` の実装）
+
+コアの `positions_bounds` は `Domain::Point` しか見ない:
+
+```rust
+fn positions_bounds(&self) -> Option<Rect> {
+    let positions = self.positions(Domain::Point)?.ok()?;
+    ...
+}
+```
+
+一方 Viewer の `geometry_bounds`
+（`crates/ravel-app/src/panels/viewer/geometry.rs`）は Point と Instance の
+両方を走査する。つまり**「このジオメトリの範囲」の答えが 2 つある**:
+
+| ジオメトリ | コアの `bounds()` | Viewer の `geometry_bounds` |
+|---|---|---|
+| 点だけ | 点の範囲 | 同じ |
+| **インスタンスだけ**（`scatter` の出力、`geometry.from_image`） | **0×0**（`positions_bounds` が `None` を返し `bounds()` が既定の 0 矩形へ） | インスタンス位置の範囲 |
+
+インスタンスしか持たないジオメトリはこの系で普通に作られる
+（`from_image` は点を 1 つも作らない — `from_image_outputs_one_instance_stamping_the_image`
+が `point_count() == 0` を固定している）。
+
+`MED-APP-21`（Viewer の bbox が `type_key` の固定 match で再構成される、解決済み）
+と同じ種類の問題で、そのときは「どのノードが描くか」の答えが 2 箇所にあった。
+今回は「**何を測るか**」の答えが 2 箇所にある。片方だけ直すと、もう片方が
+静かにずれ続ける。
+
+`layer-content-size-plan.md` の「問題 2」で見つけた 3 件のうちの 1 つ。
+残りは `MED-APP-45` と `LOW-APP-33`。

@@ -5657,6 +5657,25 @@ mod tests {
         }
     }
 
+    /// A frame buffer of a known resolution, so `geometry.from_image` has an
+    /// image to wrap and the rectangle it stamps is knowable.
+    struct FrameSource(u32, u32);
+
+    impl ravel_core::eval::NodeProcessor for FrameSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+            _params: &ravel_core::eval::ResolvedParams,
+            _scope: &mut dyn ravel_core::eval::EvalScope,
+        ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+            Ok(Arc::new(ravel_core::types::FrameBuffer::new_zeroed(
+                self.0, self.1,
+            )))
+        }
+    }
+
     /// Register the CPU processors these tests evaluate with.
     ///
     /// Explicit rather than `ravel_nodes::register_all_processors`, which
@@ -5674,6 +5693,10 @@ mod tests {
                 "shape.custom_path" => {
                     Arc::new(ravel_nodes::shape::CustomPathProcessor::from_node(node))
                 }
+                "geometry.from_image" => {
+                    Arc::new(ravel_nodes::geometry::GeometryFromImageProcessor::from_node(node))
+                }
+                "test.frame" => Arc::new(FrameSource(IMAGE_SIZE.0, IMAGE_SIZE.1)),
                 "test.unknown_shape" => Arc::new(UnknownShape {
                     center: sample_vec2_param(node, "center", 0, &eval_ctx()).unwrap_or((0.0, 0.0)),
                     half: sample_float_param(node, "half", 0, &eval_ctx()).unwrap_or(1.0),
@@ -6179,6 +6202,73 @@ mod tests {
         // one — a media or effects-only network has nothing to measure.
         let empty = Layer::new(LayerId::next(), "null", Graph::new()).with_time(0, 0, 300);
         assert!(rect_of(&empty).is_none());
+    }
+
+    /// The resolution `FrameSource` emits, and therefore the size of the
+    /// rectangle a `geometry.from_image` stamps in composition units.
+    const IMAGE_SIZE: (u32, u32) = (320, 180);
+
+    /// Completion criterion of the `drawn_bounds` unit (`MED-APP-45`): a layer
+    /// whose network ends in `geometry.from_image` can be grabbed.
+    ///
+    /// The geometry places **one point** — the instance's origin — and stamps
+    /// the picture around it, so a bbox that measured positions returned a
+    /// zero-sized rectangle and every hit test, drag and bbox handle missed
+    /// it. The size is the image's own resolution, centred on the instance
+    /// (`image-instancing-plan.md` decision 5), which is what makes the
+    /// numbers below a statement about the image rather than about the bbox.
+    #[test]
+    fn an_image_geometry_layer_has_a_grabbable_bbox() {
+        use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, LayerId, OutputPortIndex};
+
+        let frame = shape_node("test.frame", &[]).with_output("frame", DataTypeId::FRAME_BUFFER);
+        let frame_id = frame.id;
+        let image = shape_node("geometry.from_image", &[])
+            .with_input("frame", &[DataTypeId::FRAME_BUFFER])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        let image_id = image.id;
+        let network = Graph::new()
+            .add_node(frame)
+            .unwrap()
+            .add_node(image)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                frame_id,
+                OutputPortIndex(0),
+                image_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let layer = Layer::new(LayerId::next(), "image", network.clone()).with_time(0, 0, 300);
+        let comp = comp_with_layers(vec![layer.clone()]);
+        let comp_id = comp.id;
+        let path = NetworkPath::layer(comp_id, layer.id);
+        let document = Document::default().with_composition(comp);
+        let ctx = OverlayContext {
+            resolution: Some((1920, 1080)),
+            playback: Some(super::super::PlaybackPosition {
+                frame: 0,
+                fps: FrameRate::new(30, 1),
+            }),
+            results: evaluated_results(&network, &path),
+            document: Some(document.clone()),
+            ..OverlayContext::default()
+        };
+        let rect = layer_comp_rect(&ctx, &document, comp_id, layer.id)
+            .expect("an image layer has an extent to grab");
+        let (width, height) = (IMAGE_SIZE.0 as f32, IMAGE_SIZE.1 as f32);
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (-width / 2.0, -height / 2.0, width, height),
+            "the bbox is not the stamped image: {rect:?}"
+        );
+        assert_eq!(
+            selected_body_pointer_hint(&[rect], (0.0, 0.0)),
+            Some(ViewerPointerHint::MovableBody),
+            "a rectangle this size has to be grabbable at its centre"
+        );
     }
 
     /// A chain is measured at its end: unioning both the pre- and

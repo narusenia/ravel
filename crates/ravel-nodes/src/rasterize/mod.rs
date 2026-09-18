@@ -56,7 +56,7 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AttributeSet, Domain, Geometry, InstanceImage, InstanceSource, InstanceTransform,
-    MAX_INSTANCE_DEPTH, Primitive, names,
+    MAX_INSTANCE_DEPTH, Primitive, names, stroke_reach,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
@@ -135,28 +135,6 @@ impl StrokeShape<'_> {
         self.cap == Cap::Round && self.join == Join::Round && self.dashes.is_empty()
     }
 }
-
-/// How far past the path a stroke of `width` can reach, joins included: a
-/// miter spike runs out to `miter_limit` half-widths, and zeno writes those
-/// pixels into the shared coverage mask whether or not the blend rectangle
-/// covers them.
-fn stroke_margin(width: f32, join: Join) -> f32 {
-    let half_widths = if join == Join::Miter {
-        ZENO_MITER_LIMIT
-    } else {
-        1.0
-    };
-    width * 0.5 * half_widths + 1.0
-}
-
-/// zeno's default miter limit (`zeno::Stroke::default`), which the rasterizer
-/// does not change.
-///
-/// An upper bound on the reach, not the reach itself: zeno also bevels any
-/// turn sharper than a right angle, so a miter never actually exceeds √2
-/// half-widths. Sizing the blend rectangle by the declared limit costs a few
-/// pixels of scan and does not depend on that second rule staying true.
-const ZENO_MITER_LIMIT: f32 = 4.0;
 
 /// Per-element placement accumulated while expanding instances: the shared
 /// [`InstanceTransform`] plus the multiplicative tint, which only drawing
@@ -1313,7 +1291,10 @@ impl<'a> FillRun<'a> {
             canvas.blend_coverage(
                 coverage_rect(
                     (self.min, self.max),
-                    stroke_margin(stroke_width, self.shape.join),
+                    // The core's reach, not a second copy of it: the bbox
+                    // `ops::drawn_bounds` reports has to contain the pixels
+                    // zeno writes here, and it cannot if the two disagree.
+                    stroke_reach(stroke_width, self.shape.join == Join::Miter),
                     width,
                     height,
                 ),
@@ -1814,7 +1795,7 @@ fn blend_pixel(dst: &mut [f32], color: Color, coverage: f32) {
 mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::AttributeArray;
+    use ravel_core::geometry::{AttributeArray, drawn_bounds};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::{FrameRate, Vec3};
@@ -2483,6 +2464,101 @@ mod tests {
             pixel(&fb, 18, 8)[3] > 0.9,
             "the second instance strokes with its own width"
         );
+    }
+
+    /// Completion criterion of the `drawn_bounds` unit: nothing the rasterizer
+    /// draws lands outside the rectangle the core says bounds it.
+    ///
+    /// The reach is one function ([`stroke_reach`]) precisely so this holds,
+    /// and this is the test that makes it a fact rather than an intention: a
+    /// bbox that measured only the path positions puts the outer half of a
+    /// 12-wide stroke outside itself, and the assertion below fails by six
+    /// pixels on every side.
+    #[test]
+    fn nothing_drawn_falls_outside_the_geometrys_bounds() {
+        let mut geo =
+            Geometry::from_points(vec![Vec2(16.0, 16.0), Vec2(48.0, 16.0), Vec2(32.0, 48.0)]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geo.primitive_attrs_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![12.0]))
+            .unwrap();
+
+        let bounds = drawn_bounds(&geo).expect("a stroked path has an extent");
+        let fb = run(false, 0.0, &geo, 64, 64);
+        let mut drawn = 0;
+        for y in 0..fb.height {
+            for x in 0..fb.width {
+                if pixel(&fb, x, y)[3] <= 0.0 {
+                    continue;
+                }
+                drawn += 1;
+                // The whole pixel, not its centre: a covered pixel is ink
+                // everywhere inside it, and the one pixel `stroke_reach` adds
+                // for the antialiased edge is what pays for this.
+                assert!(
+                    x as f32 >= bounds.x
+                        && (x + 1) as f32 <= bounds.x + bounds.width
+                        && y as f32 >= bounds.y
+                        && (y + 1) as f32 <= bounds.y + bounds.height,
+                    "pixel ({x}, {y}) is drawn outside {bounds:?}"
+                );
+            }
+        }
+        assert!(drawn > 0, "the stroke drew nothing to check");
+    }
+
+    /// The same criterion as
+    /// [`nothing_drawn_falls_outside_the_geometrys_bounds`], for a geometry
+    /// that **stamps** what it draws: the stroke is inherited from the
+    /// instance domain and scaled by the instance's placement, which is the
+    /// pair `drawn_bounds` used to miss.
+    ///
+    /// Margins here are one pixel: a reach left in the source's own space
+    /// bounds 17..47 while zeno writes 14..50, so the assertion fails by three
+    /// pixels on every side.
+    #[test]
+    fn nothing_a_scaled_instance_draws_falls_outside_the_bounds() {
+        let mut source =
+            Geometry::from_points(vec![Vec2(-4.0, -4.0), Vec2(4.0, -4.0), Vec2(0.0, 4.0)]);
+        source.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+
+        let mut geo = Geometry::new();
+        geo.set_instance_source(Some(Arc::new(source)));
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(32.0, 32.0)]))
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(3.0, 3.0)]))
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![4.0]))
+            .unwrap();
+
+        let bounds = drawn_bounds(&geo).expect("a stamped stroked path has an extent");
+        let fb = run(false, 0.0, &geo, 64, 64);
+        let mut drawn = 0;
+        for y in 0..fb.height {
+            for x in 0..fb.width {
+                if pixel(&fb, x, y)[3] <= 0.0 {
+                    continue;
+                }
+                drawn += 1;
+                assert!(
+                    x as f32 >= bounds.x
+                        && (x + 1) as f32 <= bounds.x + bounds.width
+                        && y as f32 >= bounds.y
+                        && (y + 1) as f32 <= bounds.y + bounds.height,
+                    "pixel ({x}, {y}) is drawn outside {bounds:?}"
+                );
+            }
+        }
+        assert!(drawn > 0, "the instance drew nothing to check");
     }
 
     #[test]

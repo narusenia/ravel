@@ -141,38 +141,3 @@ low でないのは、`docs/dev/add-node.md` 自身が警告している穴が
 **severity の根拠**: bug（誤った入力が無言で別の意味になる）。low でないのは
 永続化された値が黙って別解釈されるため、high でないのは誤りが 1 ノードに
 閉じ、データが壊れないため。
-
-## MED-CORE-11 | debt | ジオメトリの bbox の定義がコアと Viewer で食い違う（コアは Point ドメインだけ）
-
-**該当**: `crates/ravel-core/src/geometry/container.rs` の
-`Geometry::positions_bounds`（`GeometricData::bounds` の実装）
-
-コアの `positions_bounds` は `Domain::Point` しか見ない:
-
-```rust
-fn positions_bounds(&self) -> Option<Rect> {
-    let positions = self.positions(Domain::Point)?.ok()?;
-    ...
-}
-```
-
-一方 Viewer の `geometry_bounds`
-（`crates/ravel-app/src/panels/viewer/geometry.rs`）は Point と Instance の
-両方を走査する。つまり**「このジオメトリの範囲」の答えが 2 つある**:
-
-| ジオメトリ | コアの `bounds()` | Viewer の `geometry_bounds` |
-|---|---|---|
-| 点だけ | 点の範囲 | 同じ |
-| **インスタンスだけ**（`scatter` の出力、`geometry.from_image`） | **0×0**（`positions_bounds` が `None` を返し `bounds()` が既定の 0 矩形へ） | インスタンス位置の範囲 |
-
-インスタンスしか持たないジオメトリはこの系で普通に作られる
-（`from_image` は点を 1 つも作らない — `from_image_outputs_one_instance_stamping_the_image`
-が `point_count() == 0` を固定している）。
-
-`MED-APP-21`（Viewer の bbox が `type_key` の固定 match で再構成される、解決済み）
-と同じ種類の問題で、そのときは「どのノードが描くか」の答えが 2 箇所にあった。
-今回は「**何を測るか**」の答えが 2 箇所にある。片方だけ直すと、もう片方が
-静かにずれ続ける。
-
-`layer-content-size-plan.md` の「問題 2」で見つけた 3 件のうちの 1 つ。
-残りは `MED-APP-45` と `LOW-APP-33`。

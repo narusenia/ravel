@@ -157,6 +157,16 @@ processor.map(|inner| transform_section::wrap(node, inner))
 - `transform_section::wrap(node, inner) -> Arc<dyn NodeProcessor>` を
   `ravel-nodes` に追加。`inner` の出力が `Geometry` のときだけ
   `apply_transform` を通す（`Geometry` でなければ素通し）
+- **ラッパーは値を構築時に捕まえない。** `translate` / `rotation` / `scale` /
+  `pivot` は `process` に渡される `ResolvedParams` から**毎回**読む。
+  理由: `GpuEvalHooks::sync` は、`rebuild_on_node_change()` が `false` の
+  プロセッサに対してパラメータ編集で `invalidate_node` だけを呼び、
+  **`processor_for_node` を通らない**（`crates/ravel-nodes/src/eval_hooks.rs:246`）。
+  構築時に捕まえた値は、そのノード型では**編集後も古いまま残る**
+- **`rebuild_on_node_change()` は内側のプロセッサへ委譲する。** ラッパーが
+  無条件に `true` を返すと、オプトアウトしている GPU プロセッサが編集の
+  ティックごとにシェーダ再コンパイルとパイプライン生成を払う
+  （同じコメントがその代償を書いている）
 - `processor_for_node` の返り値を 1 箇所でラップする
 - **この単位ではどのテンプレートにも宣言を足さない**（機構だけ）
 
@@ -173,8 +183,16 @@ processor.map(|inner| transform_section::wrap(node, inner))
   （宣言しないので到達しないが、`wrap` が型で落ちないこと）
 - `geometry.transform` ノード自体の挙動が 1 ビットも変わらない
   （既存のゴールデンとテストが無改変で緑）
+- **`rebuild_on_node_change()` が `false` の内側プロセッサを包んでも、
+  セクションのパラメータ編集が次の評価に効く**（構築時に捕まえていない
+  ことを、再登録しない経路で固定する）
+- ラッパーの `rebuild_on_node_change()` が内側の答えをそのまま返す
 
 ### 単位 2（`TFORM-2`）: どのノードに宣言するか
+
+**前提**: `text.layout` の `position`（内在的な位置、`feat/text-layout-position`）
+が先に入っていること。入っていないと、`text.layout` のセクションの `translate` に
+Position ロールを宣言するかどうかの判断（下記）が逆になる。
 
 - セクションを宣言する:
   - `text.layout`（`position` は内在なので残し、セクションの `translate` は

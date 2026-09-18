@@ -340,6 +340,31 @@ format v4 のまま `#[serde(default)]` の追加フィールドとして入り�
   失うものは無い: 識別子パラメータへのワイヤは評価が元から無視していた
 - **冪等。** 既に `String` / `StringSteps` の値は触らない
 
+**v13 はもう 1 本、出力型を `port` に追随させるパスを持つ**
+（`Document::retype_layer_ref_outputs`、実装は
+`composition/layer_ref_retype.rs`）。`port` は v13 より前は自由文字列で、
+宣言される出力型をそれに追随させる機構は**パラメータ編集の経路にしか
+無かった**ので、`"frame"` 以外を指す旧文書のノードはテンプレート既定の
+`FRAME_BUFFER` を宣言したまま、評価ではその先のポートの値（例: ジオメトリ）を
+返していた。上の String 化の**直後**・同じ `source_version < 13` の内側で走る
+（参照先は文字列綴りで読むので、`Int` のままでは何も解決しない）。
+
+- **コンポジションだけを歩く。** 型は**別のレイヤーの** `net.out` から来る
+  ので、判定は `registry::builtin::dependent_port_updates` に渡す
+  `Composition` が要る。平坦グラフには所有コンポジションが無く、兄弟レイヤー
+  も無いので歩かない（渡せる `Composition` が無い呼び出しには
+  `dependent_port_updates` が空を返す＝確実な no-op）。入れ子は
+  `graph_walk::map_subnets` で届く
+- **型が追随した結果エッジが落ちることがある。** 新しい型を受理しない入力へ
+  のエッジは `Graph::set_params_and_output_types` の既存の規則で落ち、
+  ノード id と前後の型を添えて `tracing::warn!` に出る。落ちるエッジは
+  **元から壊れていた**（宣言が `FRAME_BUFFER` だから繋げただけで、評価は
+  参照先ポートの値を渡していた）
+- **値は書き換えない。** `set_params_and_output_types` に渡す更新は空で、
+  retype だけを渡す
+- **冪等。** 既に正しい型を宣言しているノードは触らない。解決できない参照
+  （レイヤー未指定・対象が居ない・ポート名が無い）も既定に戻さず据え置く
+
 **逆に v6 → v7（`Document.exposed_parameters`、公開パラメータ宣言）は型付き
 パスを持たない。** 版を上げた理由は上の判断表のとおりだが、**変換すべき既存の
 表現が無い**ので `migrate_v6_to_v7` も `from_archive` も版印を進めるだけで終わる。

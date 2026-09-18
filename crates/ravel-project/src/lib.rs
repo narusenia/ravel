@@ -359,10 +359,22 @@ impl ProjectFile {
         // `validate::precomp_targets` states). Gated on the source version
         // like the rest; the pass is idempotent, so the gate only keeps the
         // load from walking every graph of a current document.
+        //
+        // The retype beside it is the same version's other half: `port` was a
+        // free string before v13 and nothing made the declared output type
+        // follow it, so a reference to a non-`frame` port has been evaluating
+        // to that port's value while claiming `FRAME_BUFFER`. It runs second
+        // because it reads the target through the text spelling the rewrite
+        // above produces, and inside the same gate because it is as
+        // idempotent as the rewrite is. It mints no ids and reserves none, so
+        // it is free to sit on either side of `advance_id_counters`; it stays
+        // here so the whole of v13 is one step.
         let document = if source_version < 13 {
             let upgraded = document.upgrade_layer_ref_targets();
             upgraded.validate()?;
-            upgraded
+            let retyped = upgraded.retype_layer_ref_outputs();
+            retyped.validate()?;
+            retyped
         } else {
             document
         };
@@ -1147,6 +1159,139 @@ mod tests {
         assert_eq!(
             reloaded.document, back.document,
             "a v13 round trip changes no value"
+        );
+    }
+
+    /// A pre-v13 `port` could name any of the target layer's out ports,
+    /// while the declared output type stayed the template's `FRAME_BUFFER`
+    /// because nothing made it follow. Opening such a project makes the
+    /// output declare what it actually produces, which costs the edges whose
+    /// targets cannot accept that type — edges evaluation was already failing
+    /// on, because the value on the wire was the referenced port's all along.
+    ///
+    /// The `"frame"` default is the other half: it names a real port whose
+    /// type is the one already declared, so the ordinary project is untouched
+    /// and keeps every edge.
+    #[test]
+    fn a_pre_v13_layer_ref_output_opens_declaring_the_port_it_references() {
+        use ravel_core::composition::validate::{LAYER_REF_LAYER_PARAM, LAYER_REF_TYPE_KEY};
+
+        let layer_ref = |id: u64, port: &str| {
+            Node::new(NodeId::new(id), LAYER_REF_TYPE_KEY)
+                .with_param(LAYER_REF_LAYER_PARAM, ParameterValue::Int(21))
+                .with_param("port", ParameterValue::String(port.into()))
+                .with_output("output", DataTypeId::FRAME_BUFFER)
+        };
+        // The target layer offers `frame` and a geometry port beside it.
+        let target = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(400), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER])
+                    .with_input("geo_out", &[DataTypeId::GEOMETRY]),
+            )
+            .unwrap();
+        // One edge into a frame-only input (doomed by the retype) and one
+        // into an input that accepts geometry too (kept).
+        let referrer = Graph::new()
+            .add_node(layer_ref(401, "geo_out"))
+            .unwrap()
+            .add_node(layer_ref(402, net::PORT_FRAME))
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(403), "merge").with_input("A", &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(404), "switch")
+                    .with_input("any", &[DataTypeId::FRAME_BUFFER, DataTypeId::GEOMETRY]),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(400),
+                NodeId::new(401),
+                OutputPortIndex(0),
+                NodeId::new(403),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(401),
+                NodeId::new(401),
+                OutputPortIndex(0),
+                NodeId::new(404),
+                InputPortIndex(0),
+            )
+            .unwrap()
+            .add_edge(
+                EdgeId::new(402),
+                NodeId::new(402),
+                OutputPortIndex(0),
+                NodeId::new(403),
+                InputPortIndex(0),
+            )
+            .unwrap();
+
+        let mut project = demo_project();
+        let root = project.document.root_comp.expect("root comp");
+        project.document =
+            ravel_ui::document::update_composition(&project.document, root, |comp| {
+                comp.add_layer(Layer::new(LayerId::new(21), "Target", target.clone()))
+                    .add_layer(Layer::new(LayerId::new(22), "Referrer", referrer.clone()))
+            })
+            .expect("the root composition");
+        project.manifest.format_version = 12;
+
+        let back = ProjectFile::from_archive(&project.to_archive().unwrap()).unwrap();
+        let network = |project: &ProjectFile| {
+            project
+                .document
+                .get_composition(root)
+                .expect("root survives")
+                .layers
+                .iter()
+                .find(|layer| layer.id == LayerId::new(22))
+                .expect("the referring layer came back")
+                .network
+                .clone()
+        };
+        let output_type = |graph: &Graph, id: u64| {
+            graph
+                .node(NodeId::new(id))
+                .expect("the layer.ref node came back")
+                .outputs
+                .first()
+                .expect("its output")
+                .data_type
+        };
+
+        let loaded = network(&back);
+        assert_eq!(
+            output_type(&loaded, 401),
+            DataTypeId::GEOMETRY,
+            "the output now declares the port the reference names"
+        );
+        assert_eq!(
+            output_type(&loaded, 402),
+            DataTypeId::FRAME_BUFFER,
+            "the `frame` default declares what it always did"
+        );
+        assert!(
+            loaded.edge(EdgeId::new(400)).is_none(),
+            "the frame-only target cannot accept geometry"
+        );
+        assert!(
+            loaded.edge(EdgeId::new(401)).is_some(),
+            "the target that accepts geometry keeps its edge"
+        );
+        assert!(
+            loaded.edge(EdgeId::new(402)).is_some(),
+            "the untouched reference costs no edge"
+        );
+
+        let reloaded = ProjectFile::from_archive(&back.to_archive().unwrap()).unwrap();
+        assert_eq!(
+            reloaded.document, back.document,
+            "the retype is idempotent across a round trip"
         );
     }
 

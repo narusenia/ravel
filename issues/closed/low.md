@@ -156,3 +156,92 @@ inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
 単なるクリックではコミットされないので refresh で元に戻る、
 または次の無関係な `commit_graph` に相乗りする。
 → ドラッグが実際に動くまで raise を遅延させる。または z が変わったならマウスアップでコミット。
+
+**LOW-CORE-05 | bug | レイヤー id 0 は保存できるが `layer.ref` からは「対象なし」になる**
+（**解決済み**: `Document::validate` がレイヤー id 0 を拒否する
+（`DocumentValidationError::ReservedLayerId`）。個票が推した前者の向きで、
+`AssetId::UNSET` の規約と揃う。`id.rs` の `LayerId::new` は据え置き —
+`composition/compile.rs:158` が Background 合成ノードの決定的 id の材料として
+`LayerId::new(0)` を本番で使っている（レイヤーとしてではなくハッシュの入力として）。
+回帰テストは `validate_rejects_the_reserved_layer_id`
+（`crates/ravel-core/src/composition/mod.rs`）で、2 枚目以降にある 0 も拒否する。
+**代償**: ロードは `document.validate()` を無条件に通す
+（`crates/ravel-project/src/lib.rs:346`）ので、**レイヤー id 0 を持つ
+手編集済みの `.ravprj` はもう開かない** — 「開くが参照が黙って何もしない」が
+「開かない」に変わる。不変条件にするとはそういうことで、`ReservedLayerId` は
+どのコンポジションのどのレイヤーかを名指しする）
+
+**該当**: `crates/ravel-core/src/id.rs` の `LayerId::new` と
+`crates/ravel-nodes/src/layer_ref.rs` の対象解決
+
+`LAYER_ID_COUNTER` は 1 始まりなので `LayerId::next()` は 0 を返さないが、
+`LayerId::new(0)` は公開されていて serde も 0 を受け取り、`Document::validate`
+も 0 を拒否しない。つまり**手編集した `.ravprj` にはレイヤー id 0 が居られる**。
+
+一方 `layer.ref` は 0 を必ず「対象なし」として扱う。そうせざるを得ない理由が
+あって、`eval::identifier_overlay` が「静止していない識別子」に
+`AssetId::UNSET`（= 0）を代入するので、評価側は 0 を未設定と読むしかない。
+
+結果、id 0 のレイヤーは**候補ドロップダウンには出るのに参照できない**
+（UX 不変条件 6「動かない制御は無効化し、無効に見せる」に触る）。
+
+直す向きは 2 つ。`Document::validate` がレイヤー id 0 を拒否して
+「0 は存在しない」を不変条件にするか、未設定の綴りを 0 と別にする
+（`identifier_overlay` の代入値を変える）。前者の方が小さく、
+`AssetId::UNSET` の規約（「0 は未設定のために空けてある」と
+`id.rs:24` のコメントが言っている）とも揃う。
+
+到達には手編集が要るので low。`.ravprj` v13 の `layer.ref` 移行
+（`contextual-parameter-options-plan.md` の `CPO-5`）の独立レビューで見つけた。
+
+**LOW-CORE-06 | bug | v12 以前の `layer.ref` は、移行後も出力型が `port` に追随しないまま残る**
+（**解決済み**: 前者（移行パスに retype を通す）を採った。
+`Document::retype_layer_ref_outputs`（`composition/layer_ref_retype.rs`）が
+v13 の String 化の直後・同じ `source_version < 13` の内側で走り、
+`dependent_port_updates` の答えを `set_params_and_output_types` で適用する。
+コンポジションだけを歩く（型は別レイヤーの `net.out` から来るので
+`Composition` が要る。平坦グラフは所有コンポジションが無く、
+`dependent_port_updates` が空を返すので歩かない）。新しい型を受理しない
+入力へのエッジは落ち、ノード id と前後の型を添えて `tracing::warn!` に出る
+— 個票が書くとおり、そのエッジは元から壊れていた（宣言が `FRAME_BUFFER`
+だから繋げただけで、評価は参照先ポートの値を渡していた）。値は書き換えず、
+既に正しい型のノードと解決できない参照は触らないので冪等。回帰テストは
+`crates/ravel-core/src/composition/layer_ref_retype.rs` の 6 件と、
+`a_pre_v13_layer_ref_output_opens_declaring_the_port_it_references`
+（`crates/ravel-project/src/lib.rs`））
+
+**該当**: `crates/ravel-core/src/composition/layer_ref_upgrade.rs`（v12 → v13 の
+型付きパス）と `crates/ravel-core/src/registry/builtin.rs` の
+`dependent_port_updates`
+
+`port` は v13 より前は自由文字列だったので、**`"frame"` 以外を打ち込んだ文書が
+あり得る**。その文書の `layer.ref` ノードの出力型はテンプレート既定の
+`FRAME_BUFFER` のまま保存されている（追随の機構が無かったので）。
+
+出力型の追随は**パラメータ編集の経路にしか入っていない**
+（`apply_property_change` → `dependent_port_updates` →
+`set_params_and_output_types`）。v13 の移行パスは `set_params` を呼ぶので
+retype しない。したがって旧文書を開くと:
+
+- 評価は `port` の指すポートの値（例: ジオメトリ）を返す
+- 宣言された出力型は `FRAME_BUFFER` のまま
+
+という **`MED-APP-29` の症状がその 1 ノードにだけ残る**。`layer` か `port` を
+一度触れば直る（そこで追随が走る）ので自己修復するが、触るまでは型が嘘をつく。
+
+実害は小さい。旧文書は出力型が `FRAME_BUFFER` だったので**ジオメトリ入力へ
+繋いだエッジは存在し得ない**（型が受理しない）ため、絵が変わる経路は無く、
+繋ごうとしたときに拒否されるだけ。
+
+**UI は評価器と同じ答えを出す。** `layer_ref_out_node` は数値綴りを読まない
+（`static_text_identifier`）ので、この状態のノードでは `port` の候補も空、
+出力型の追随も起きない。つまり「UI では解決しているのに評価が落ちる」には
+ならず、単に**移行が済むまで何も動かない**。
+
+直す向きは 2 つ。移行パスに retype を通す（`Document` 側で走るので
+`Composition` は見えるが、ロード時にエッジを落とす可能性を持ち込む）か、
+ロード後に「型が嘘をついているノード」を警告として出す
+（`ColorMigrationReport` の前例）。**世に出た `.ravprj` が少ないうちは後者でも
+足りる。**
+
+`CPO-3` / `CPO-4` の独立レビューで見つけた残余。

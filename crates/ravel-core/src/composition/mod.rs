@@ -21,6 +21,7 @@ mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
 pub(crate) mod graph_walk;
+mod layer_ref_retype;
 mod layer_ref_upgrade;
 mod param_fold;
 pub mod templates;
@@ -737,6 +738,18 @@ pub enum DocumentValidationError {
     InvalidFrameRate(CompId),
     #[error("composition {comp} contains duplicate layer id {layer}")]
     DuplicateLayerId { comp: CompId, layer: LayerId },
+    /// Layer id 0 is reserved: no layer may carry it.
+    ///
+    /// `eval::identifier_overlay` assigns [`AssetId::UNSET`] — raw 0 — to an
+    /// identifier parameter that does not stand still, so evaluation has to
+    /// read 0 as "names nothing". A layer that carried 0 would therefore be
+    /// offered by the `layer.ref` candidate list and still be unreferenceable,
+    /// which is UX invariant 6 (a control that does nothing must look
+    /// disabled). `LayerId::next` starts at 1, so only a hand-edited file can
+    /// hold one; 0 stays free for "unset", as it is for
+    /// [`AssetId`](crate::id::AssetId).
+    #[error("composition {comp} contains a layer with the reserved id {layer}")]
+    ReservedLayerId { comp: CompId, layer: LayerId },
     #[error("layer {layer} references a missing {kind} layer {target}")]
     DanglingLayerRef {
         comp: CompId,
@@ -1255,6 +1268,24 @@ impl Document {
         self.map_graphs(layer_ref_upgrade::upgrade_graph)
     }
 
+    /// Make every `layer.ref` output declare the type of the port its `port`
+    /// parameter names — the second half of the `.ravprj` v12 → v13 upgrade,
+    /// because before v13 `port` was a free string and no mechanism made the
+    /// declared type follow it.
+    ///
+    /// Runs after [`Self::upgrade_layer_ref_targets`]: the target is read
+    /// through the text spelling, so a `layer` still held as an `Int`
+    /// resolves to nothing and nothing would be retyped.
+    ///
+    /// Only the compositions are walked, because the type comes from a
+    /// sibling layer's `net.out` and the legacy flat graph has no siblings.
+    /// The edges out of a retyped output that its targets cannot accept are
+    /// dropped and logged — they were already broken. Mints no ids.
+    /// Idempotent. See [`layer_ref_retype`](self) for all of it.
+    pub fn retype_layer_ref_outputs(self) -> Self {
+        layer_ref_retype::retype(self)
+    }
+
     /// Point every `.ravprj` v8 asset reference at the [`AssetId`] its display
     /// string was interned to while the document was read — a `media` node's
     /// parameter in every graph, and every layer's [`AudioSource`].
@@ -1666,9 +1697,11 @@ impl Document {
     ///
     /// Checked: the root comp exists, composition map keys match the
     /// embedded ids, frame rates have no zero component (playback divides
-    /// by them), layer ids are unique per composition, parent/track-matte
-    /// references resolve, and no id equals `u64::MAX` (it could not have a
-    /// successor). `layer.ref` network parameters are intentionally NOT
+    /// by them), layer ids are unique per composition and none is the
+    /// reserved 0 ([`DocumentValidationError::ReservedLayerId`]),
+    /// parent/track-matte references resolve, and no id equals `u64::MAX` (it
+    /// could not have a successor). `layer.ref` network parameters are
+    /// intentionally NOT
     /// checked — a reference may legitimately dangle after its target is
     /// deleted and errors at evaluation time instead.
     pub fn validate(&self) -> Result<(), DocumentValidationError> {
@@ -1690,6 +1723,22 @@ impl Document {
             }
             let mut seen = std::collections::HashSet::new();
             for layer in &comp.layers {
+                // Layer id 0 is reserved for "no layer", so a layer that
+                // carries it is not a layer the document can talk about:
+                // `eval::identifier_overlay` writes `AssetId::UNSET` (raw 0)
+                // over an identifier parameter that does not stand still, so
+                // evaluation must read 0 as unset, and a `layer.ref` naming 0
+                // can never resolve. The reference row would offer the layer
+                // and then do nothing. `LayerId::next` starts at 1, so this
+                // rejects only a hand-edited file — and `compile.rs` feeds
+                // `LayerId::new(0)` to the background node's deterministic id
+                // precisely because no layer owns it.
+                if layer.id.raw() == 0 {
+                    return Err(DocumentValidationError::ReservedLayerId {
+                        comp: *comp_id,
+                        layer: layer.id,
+                    });
+                }
                 if !seen.insert(layer.id) {
                     return Err(DocumentValidationError::DuplicateLayerId {
                         comp: *comp_id,
@@ -3468,6 +3517,39 @@ mod tests {
         assert_eq!(
             doc.validate(),
             Err(DocumentValidationError::IdExhausted { kind: "node" })
+        );
+    }
+
+    /// Layer id 0 is the "no layer" spelling, so no layer may carry it: a
+    /// `layer.ref` naming 0 can never resolve, because evaluation reads 0 as
+    /// unset (`eval::identifier_overlay` writes it over an identifier that
+    /// does not stand still). `LayerId::next` starts at 1, so only a
+    /// hand-edited file gets here — including one where the reserved id sits
+    /// on a later layer than the first.
+    #[test]
+    fn validate_rejects_the_reserved_layer_id() {
+        let doc = Document::default().with_composition(test_comp().add_layer(empty_layer(0)));
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::ReservedLayerId {
+                comp: CompId::new(1),
+                layer: LayerId::new(0),
+            })
+        );
+
+        // The scan must not stop at the first layer.
+        let doc = Document::default().with_composition(
+            test_comp()
+                .add_layer(empty_layer(1))
+                .add_layer(empty_layer(2))
+                .add_layer(empty_layer(0)),
+        );
+        assert_eq!(
+            doc.validate(),
+            Err(DocumentValidationError::ReservedLayerId {
+                comp: CompId::new(1),
+                layer: LayerId::new(0),
+            })
         );
     }
 

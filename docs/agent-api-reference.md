@@ -959,6 +959,23 @@ Document::upgrade_asset_references(&LegacyAssetKeys)   // v8 -> v9 typed pass
     // exposed declaration binds) at ids. A reference naming an asset the
     // table lacks becomes AssetId::UNSET — permanently offline rather than
     // re-attaching to a later import. Gate on source_version < 9.
+Document::upgrade_layer_ref_targets()   // v12 -> v13 typed pass
+    // Holds a layer.ref `layer` target as the decimal LayerId in a String
+    // instead of an Int (the Properties row that can carry named candidates
+    // is the string row). The old -1, any other value naming no layer, and
+    // an animated channel all become "". An exposed SCALAR port on `layer`
+    // goes with its edge, because a String has no wire type. Idempotent.
+Document::retype_layer_ref_outputs()   // v12 -> v13, the other half
+    // Makes every layer.ref output declare the type of the port its `port`
+    // parameter names, which before v13 followed only on the parameter-edit
+    // path (registry::builtin::dependent_port_updates). Runs AFTER the pass
+    // above — the target is read through the text spelling — and walks only
+    // the compositions: the type comes from a SIBLING layer's net.out, so the
+    // legacy flat graph has nothing to resolve against. Edges out of the
+    // retyped output whose targets reject the new type are dropped and
+    // warned; they were already broken, since evaluation had been handing
+    // those targets the referenced port's value all along. An unresolvable
+    // reference keeps the type it declares. Idempotent; mints no ids.
 Document::with_exposed_parameters(ExposedParameters)
     // exposed_parameters: the project's external contract (`exposed` above);
     // #[serde(default)], so a pre-v7 document reads as zero declarations

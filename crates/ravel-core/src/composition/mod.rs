@@ -21,6 +21,7 @@ mod color_upgrade;
 pub mod compile;
 mod curve_upgrade;
 pub(crate) mod graph_walk;
+mod layer_ref_retype;
 mod layer_ref_upgrade;
 mod param_fold;
 pub mod templates;
@@ -1265,6 +1266,24 @@ impl Document {
     /// [`layer_ref_upgrade`](self) for both rules. Mints no ids. Idempotent.
     pub fn upgrade_layer_ref_targets(self) -> Self {
         self.map_graphs(layer_ref_upgrade::upgrade_graph)
+    }
+
+    /// Make every `layer.ref` output declare the type of the port its `port`
+    /// parameter names — the second half of the `.ravprj` v12 → v13 upgrade,
+    /// because before v13 `port` was a free string and no mechanism made the
+    /// declared type follow it.
+    ///
+    /// Runs after [`Self::upgrade_layer_ref_targets`]: the target is read
+    /// through the text spelling, so a `layer` still held as an `Int`
+    /// resolves to nothing and nothing would be retyped.
+    ///
+    /// Only the compositions are walked, because the type comes from a
+    /// sibling layer's `net.out` and the legacy flat graph has no siblings.
+    /// The edges out of a retyped output that its targets cannot accept are
+    /// dropped and logged — they were already broken. Mints no ids.
+    /// Idempotent. See [`layer_ref_retype`](self) for all of it.
+    pub fn retype_layer_ref_outputs(self) -> Self {
+        layer_ref_retype::retype(self)
     }
 
     /// Point every `.ravprj` v8 asset reference at the [`AssetId`] its display

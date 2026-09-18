@@ -920,7 +920,7 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 |---|---|---|---|
 | BBOX-1 | 🟡 | コアの `drawn_bounds`（インスタンスの source を `InstanceTransform` で置いて測る） | — |
 | BBOX-2 | ⬜ | ストロークの張り出しをラスタライザと共有する（`stroke_reach` をコアへ） | BBOX-1 |
-| BBOX-3 | ⬜ | Viewer の `geometry_bounds` が委譲する。issue 3 件のクローズと文書 | BBOX-1, BBOX-2 |
+| BBOX-3 | ⬜ | Viewer の `geometry_bounds` が委譲する。issue 2 件のクローズと文書 | BBOX-1, BBOX-2 |
 
 **bbox は「置かれた位置」しか測っていない**という 1 つの欠陥の症状が 4 つ。
 `MED-APP-45`（画像インスタンスの矩形）/ `MED-CORE-11`（コアと Viewer で定義が
@@ -928,8 +928,11 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 線になる**こと（実測: `"Ravel"` size 72 で Viewer が `(0, 0, 162.79, 0)`、真値は
 `(6.62, -51.12, 173.66, 51.98)` ＝ `text.to_path` 出力と同値）。4 つ目は直す箇所が
 `MED-APP-45` と同一行なので別起票しない。測る関数をコアに 1 つ置き、
-`GeometricData::bounds()` と Viewer の両方がそれに委譲する。`ops::bounds_center`
+`GeometricData::bounds()` と Viewer の両方がそれに委譲する。曲線はアンカーだけでは
+測れない（制御点の凸包で測る — cubic はアンカーの外へ膨らむ）。`ops::bounds_center`
 （散布のピボット）は**触らない** — ユーザーに見える挙動が動く。
+**`LOW-APP-33` は半分だけ閉じる**: `stroke_width` **属性**由来の張り出しは入るが、
+`rasterize` ノードパラメータの基底値はジオメトリから見えないので issue は open のまま。
 
 ### Wrangle とユーザー定義パラメータ（`wrangle-plan.md`）
 

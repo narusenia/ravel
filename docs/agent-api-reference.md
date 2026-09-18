@@ -1390,7 +1390,9 @@ bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in
     // a PIVOT, not an extent: scatter / field / geometry read it as a centre,
     // so it does NOT include the ink drawn_bounds measures
 drawn_bounds(&geo) -> Option<Rect>
-    // what the geometry draws: point positions, each instance's source placed
+    // what the geometry draws: point positions AND the path control hull
+    // (P +- in_tan / out_tan, because a cubic leaves its anchors), each
+    // instance's source placed
     // through the ACCUMULATED InstanceTransform (an image's rect(), a nested
     // geometry recursed to MAX_INSTANCE_DEPTH — the depth expand_instances
     // stops at), grown by the stroke_reach its `stroke_width` ATTRIBUTES ask

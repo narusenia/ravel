@@ -751,6 +751,11 @@ impl ViewerPanel {
             }) {
                 this.move_drag = None;
             }
+            // The handle set belongs to the selection, so an id resolved
+            // against the old one names nothing now. Left standing, its label
+            // would print a value for a mark the pointer never rested on —
+            // the pointer has not moved, so nothing else re-resolves it.
+            this.hovered_handle = None;
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -802,6 +807,9 @@ impl ViewerPanel {
             {
                 this.cancel_box_select(cx);
             }
+            // As above: another layer's grips are not the ones the pointer
+            // was resting on.
+            this.hovered_handle = None;
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -10425,6 +10433,33 @@ mod tests {
                     "a gesture in flight reports itself through the HUD instead"
                 );
                 panel.handle_drag_ended(cx);
+            })
+            .unwrap();
+    }
+
+    /// The pointer does not move when the selection does, so nothing else
+    /// would re-resolve the hovered handle: another node's marks must not
+    /// inherit the label the old one earned.
+    #[gpui::test]
+    fn a_selection_change_drops_the_hovered_handle(cx: &mut TestAppContext) {
+        let (window, _project, network, _node) = param_setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.hovered_handle = Some(overlay::OverlayHandleId::Param(0));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            })
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.hovered_handle, None);
             })
             .unwrap();
     }

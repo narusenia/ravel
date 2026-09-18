@@ -2580,9 +2580,11 @@ impl ViewerOverlay for ParamManipulator {
             return Vec::new();
         };
         let mut labels = Vec::new();
-        // The press-time value is matched by key, not by index: a drag can
-        // grow a parameter the saved node never had, and the mark order the
-        // handle id indexes into is the *current* declaration order.
+        // The handle id is an index into the declaration order, which a
+        // gesture holds still — the same assumption [`Self::drag`] makes when
+        // it reads the current marks by that index. The press-time value is
+        // still looked up **by key**, because the two documents need not
+        // declare in the same order for the lookup to be right.
         if let Some(press) = dragged
             .and_then(|(drag, _)| ParamState::resolve_in(ctx, &drag.press_document))
             .and_then(|press| {
@@ -5288,13 +5290,31 @@ mod tests {
     /// and the label sits exactly where the handle it names does.
     #[test]
     fn a_hovered_shell_grip_labels_itself_at_the_grip() {
-        let (mut ctx, ..) = shell_context();
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (mut ctx, comp, layer) = shell_context();
+        // Scaled away from 1.0, so the absolute reading and the "factor since
+        // the press" reading (which would be 100% here) cannot be confused.
+        ctx.document = Some(
+            ravel_ui::document::update_layer(
+                ctx.document.as_ref().unwrap(),
+                comp,
+                layer,
+                |layer| {
+                    layer.transform.scale = [
+                        AnimationChannel::constant(2.0),
+                        AnimationChannel::constant(1.5),
+                    ];
+                },
+            )
+            .unwrap(),
+        );
         ctx.hovered_handle = Some(OverlayHandleId::Shell(ShellHandle::Scale(0)));
 
         let labels = ShellManipulator.labels(&ctx);
         assert_eq!(labels.len(), 1);
         assert!(
-            labels[0].text.ends_with("100.0% × 100.0%"),
+            labels[0].text.ends_with("200.0% × 150.0%"),
             "the scale it stands at, not a factor a drag applied: {:?}",
             labels[0].text
         );
@@ -5333,8 +5353,19 @@ mod tests {
     /// difference in the corner, and the hovered grip says nothing.
     #[test]
     fn a_drag_labels_the_grip_it_holds_and_not_the_hovered_one() {
-        let (mut ctx, ..) = shell_context();
-        let press = ctx.document.clone().unwrap();
+        use ravel_core::animation::channel::AnimationChannel;
+
+        let (mut ctx, comp, layer) = shell_context();
+        let turned = |document: &Document, degrees: f32| {
+            ravel_ui::document::update_layer(document, comp, layer, |layer| {
+                layer.transform.rotation = AnimationChannel::constant(degrees);
+            })
+            .unwrap()
+        };
+        // Two different angles, so the reading on the grip cannot be mistaken
+        // for the swept angle the corner reports.
+        let press = turned(ctx.document.as_ref().unwrap(), 30.0);
+        ctx.document = Some(turned(&press, 45.0));
         ctx.hovered_handle = Some(OverlayHandleId::Shell(ShellHandle::Position));
         ctx.active_drag = Some(ActiveDrag {
             handle: OverlayHandleId::Shell(ShellHandle::Rotate(0)),
@@ -5344,6 +5375,7 @@ mod tests {
         let labels = ShellManipulator.labels(&ctx);
         assert_eq!(labels.len(), 2, "the difference and the value, once each");
         assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
+        assert_eq!(labels[0].text.as_ref(), "Δ +15.0°", "the angle swept");
         let state = ShellState::resolve(&ctx).unwrap();
         assert_eq!(
             labels[1].placement,
@@ -5351,8 +5383,8 @@ mod tests {
             "the value sits on the dragged grip, not on the hovered one"
         );
         assert!(
-            labels[1].text.ends_with("+0.0°"),
-            "the rotation it stands at: {:?}",
+            labels[1].text.ends_with("+45.0°"),
+            "the rotation it stands at, not the one it swept: {:?}",
             labels[1].text
         );
     }
@@ -5401,9 +5433,15 @@ mod tests {
             "the radius it has reached: {:?}",
             labels[1].text
         );
-        assert!(
-            matches!(labels[1].placement, LabelPlacement::Comp(_)),
-            "the value belongs on the mark"
+        let moved = param_handle(&ctx, "radius");
+        assert_eq!(
+            labels[1].placement,
+            LabelPlacement::Comp(moved.position),
+            "the value belongs on the mark as the drag has left it"
+        );
+        assert_ne!(
+            moved.position, handle.position,
+            "the fixture never moved the mark, so the assertion above proves nothing"
         );
     }
 

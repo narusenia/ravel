@@ -755,7 +755,7 @@ impl ViewerPanel {
             // against the old one names nothing now. Left standing, its label
             // would print a value for a mark the pointer never rested on —
             // the pointer has not moved, so nothing else re-resolves it.
-            this.hovered_handle = None;
+            this.set_hovered_handle(None, cx);
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -809,7 +809,7 @@ impl ViewerPanel {
             }
             // As above: another layer's grips are not the ones the pointer
             // was resting on.
-            this.hovered_handle = None;
+            this.set_hovered_handle(None, cx);
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -2157,8 +2157,14 @@ impl ViewerPanel {
             // Only while the pointer is idle, for the reason `snap_guides`
             // above is only filled while it is not: a gesture writes the very
             // value the hover label would report, and the mark it names moves
-            // out from under the pointer as it does.
-            hovered_handle: if self.dragging() {
+            // out from under the pointer as it does. A pan and a zoom marquee
+            // count, even though they edit nothing: they move the picture out
+            // from under a pointer that is not sending the moves that would
+            // re-resolve the handle.
+            hovered_handle: if self.dragging()
+                || self.pan_drag.is_some()
+                || self.zoom_drag.is_some()
+            {
                 None
             } else {
                 self.hovered_handle
@@ -2247,6 +2253,30 @@ impl ViewerPanel {
         let resolution = self.composition_resolution?;
         let rect = self.viewport.rect(self.viewport_size.get(), resolution);
         (rect.width > 0.0).then_some(pixels * resolution.0 as f32 / rect.width)
+    }
+
+    /// Re-read what the pointer rests on and keep the hover label honest.
+    ///
+    /// The pointer-move handler is the usual writer; this is for the moments
+    /// the world moves instead of the pointer — the end of a gesture, the end
+    /// of a pan — where a still hand sends nothing and the stored handle would
+    /// otherwise describe a mark that is no longer under it.
+    fn resolve_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let hovered = self
+            .pointer_state_at(position, cx)
+            .and_then(|(_, handle)| handle);
+        self.set_hovered_handle(hovered, cx);
+    }
+
+    /// The one writer of [`Self::hovered_handle`]. Repaints only on a change,
+    /// the rule [`viewer_pointer_hint_transition`] follows for the cursor: a
+    /// pointer crossing a handle sends dozens of moves that resolve to the
+    /// same grip.
+    fn set_hovered_handle(&mut self, hovered: Option<OverlayHandleId>, cx: &mut Context<Self>) {
+        if self.hovered_handle != hovered {
+            self.hovered_handle = hovered;
+            cx.notify();
+        }
     }
 
     /// The cursor half of [`Self::pointer_state_at`], which is all the tests
@@ -4225,8 +4255,9 @@ impl Render for ViewerPanel {
             )
             .on_mouse_up(
                 MouseButton::Middle,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
                     this.pan_ended(cx);
+                    this.resolve_hover(event.position, cx);
                 }),
             )
             .on_mouse_up(
@@ -4240,6 +4271,12 @@ impl Render for ViewerPanel {
                     this.pen_point_ended(cx);
                     this.handle_drag_ended(cx);
                     this.guide_drag_ended(event.position, cx);
+                    // Last, after every gesture has committed: the handles
+                    // have moved with the drag, so what the pointer rests on
+                    // now is not what it rested on at the press — and a hand
+                    // that does not move afterwards sends nothing else that
+                    // would notice.
+                    this.resolve_hover(event.position, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -4280,11 +4317,7 @@ impl Render for ViewerPanel {
                         // Cleared when the pointer leaves the composition
                         // too: a label left standing would name a grip
                         // nothing points at any more.
-                        let hovered = state.and_then(|(_, handle)| handle);
-                        if this.hovered_handle != hovered {
-                            this.hovered_handle = hovered;
-                            cx.notify();
-                        }
+                        this.set_hovered_handle(state.and_then(|(_, handle)| handle), cx);
                         let Some((next, _)) = state else {
                             return;
                         };
@@ -10419,12 +10452,12 @@ mod tests {
                 let (hint, handle) = panel.pointer_state_at(at, cx).expect("the pointer is off");
                 assert_eq!(handle, Some(overlay::OverlayHandleId::Param(0)));
                 assert_eq!(
-                    Some(hint),
-                    panel.pointer_hint_at(at, cx),
-                    "the cursor reads the same hit test the hover does"
+                    hint,
+                    ViewerPointerHint::MovableBody,
+                    "the cursor the centre handle promises"
                 );
 
-                panel.hovered_handle = handle;
+                panel.resolve_hover(at, cx);
                 assert_eq!(panel.overlay_context(cx).hovered_handle, handle);
                 assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
                 assert_eq!(
@@ -10432,7 +10465,20 @@ mod tests {
                     None,
                     "a gesture in flight reports itself through the HUD instead"
                 );
+
+                // The mark travels with the drag, so the release re-resolves
+                // from where the pointer actually is rather than restoring
+                // what it rested on before the press.
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
                 panel.handle_drag_ended(cx);
+                panel.resolve_hover(at, cx);
+                assert_eq!(
+                    panel.hovered_handle, None,
+                    "the mark moved away from the press point"
+                );
+                panel.resolve_hover(to, cx);
+                assert_eq!(panel.hovered_handle, handle, "it moved under the release");
             })
             .unwrap();
     }

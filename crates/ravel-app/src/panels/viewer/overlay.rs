@@ -309,6 +309,16 @@ pub struct OverlayContext {
     /// The gesture the pointer currently holds, or `None` when it is idle.
     /// Only the drag HUD reads it.
     pub active_drag: Option<ActiveDrag>,
+    /// The handle the pointer rests on, or `None` when it rests on none.
+    ///
+    /// Filled from the very hit test that picks the cursor, so what a handle
+    /// says about itself and what the glyph promises cannot disagree — and no
+    /// second hit test exists to drift from the first.
+    ///
+    /// The panel clears it while a gesture is live: a drag reports itself
+    /// through the HUD, and the mark moves out from under the pointer as it
+    /// writes, so a hover label there would name a place the pointer has left.
+    pub hovered_handle: Option<OverlayHandleId>,
     /// The box-selection drag in flight, or `None` when none is (`TOOLX-2`).
     /// The panel fills the rectangle; the target-collecting context fills the
     /// scope alone.
@@ -2028,10 +2038,58 @@ impl ShellState {
                 scale_ratio(self.scale.1, press.scale.1) * 100.0
             ),
             ShellHandle::Rotate(_) => format!("{:+.1}°", self.rotation - press.rotation),
-            ShellHandle::Anchor => format!("({:.1}, {:.1})", self.anchor.0, self.anchor.1),
-            ShellHandle::Position => format!("({:.1}, {:.1})", self.position.0, self.position.1),
+            ShellHandle::Anchor => vec2_text(self.anchor),
+            ShellHandle::Position => vec2_text(self.position),
         }
     }
+
+    /// What the hover label says about the grip under the pointer: its name
+    /// and the value it stands at, as a locale key and the formatted number.
+    ///
+    /// **Absolute where [`hud`](Self::hud) is relative.** A drag reports what
+    /// the gesture has done so far; a hover answers "what is this handle and
+    /// what is it now", which a difference from a press that never happened
+    /// cannot say.
+    ///
+    /// The key rather than the word, so the formatting is testable without a
+    /// catalog and the one lookup happens at the display boundary.
+    fn hover(&self, handle: ShellHandle) -> (&'static str, String) {
+        match handle {
+            ShellHandle::Scale(_) => (
+                "viewer.manipulator.scale",
+                format!(
+                    "{:.1}% × {:.1}%",
+                    self.scale.0 * 100.0,
+                    self.scale.1 * 100.0
+                ),
+            ),
+            ShellHandle::Rotate(_) => (
+                "viewer.manipulator.rotation",
+                format!("{:+.1}°", self.rotation),
+            ),
+            ShellHandle::Anchor => ("viewer.manipulator.anchor", vec2_text(self.anchor)),
+            ShellHandle::Position => ("viewer.manipulator.position", vec2_text(self.position)),
+        }
+    }
+
+    /// Where a grip sits on the canvas: the very point
+    /// [`ShellManipulator::handles`] anchors it at, so a label lands on the
+    /// mark it names.
+    fn handle_point(&self, handle: ShellHandle) -> Option<(f32, f32)> {
+        match handle {
+            ShellHandle::Anchor => Some(self.anchor_world),
+            ShellHandle::Position => Some(self.rect_center()),
+            ShellHandle::Scale(index) | ShellHandle::Rotate(index) => {
+                self.centers().get(index as usize).copied()
+            }
+        }
+    }
+}
+
+/// A planar value as a label shows it. One spelling for every overlay that
+/// prints a point, so a hover, a HUD and a readout cannot round differently.
+fn vec2_text(value: (f32, f32)) -> String {
+    format!("({:.1}, {:.1})", value.0, value.1)
 }
 
 /// The manipulator for a single selected layer's shell transform: scale on the
@@ -2156,23 +2214,44 @@ impl ViewerOverlay for ShellManipulator {
         paint_handle_mark(painter, state.anchor_world, ANCHOR_MARKER_PX, ANCHOR_COLOR);
     }
 
+    /// The drag HUD while a grip is held, and the hover label while one is
+    /// merely pointed at — never both, because a gesture in flight already
+    /// reports the grip a second line would only repeat.
+    ///
+    /// The hover label sits at the grip rather than in the corner: a grip is
+    /// one of eleven marks, and a corner label would leave the reader
+    /// guessing which of them it speaks for.
     fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
-        let Some(drag) = ctx.active_drag.as_ref() else {
+        if let Some(drag) = ctx.active_drag.as_ref() {
+            let Some(handle) = drag.handle.shell() else {
+                return Vec::new();
+            };
+            let (Some(state), Some(press)) = (
+                ShellState::resolve(ctx),
+                ShellState::resolve_in(ctx, &drag.press_document),
+            ) else {
+                return Vec::new();
+            };
+            return vec![OverlayLabel {
+                text: SharedString::from(state.hud(&press, handle)),
+                color: SELECTION_COLOR,
+                placement: LabelPlacement::CanvasTopLeft,
+            }];
+        }
+        let Some(handle) = ctx.hovered_handle.and_then(OverlayHandleId::shell) else {
             return Vec::new();
         };
-        let Some(handle) = drag.handle.shell() else {
+        let Some(state) = ShellState::resolve(ctx) else {
             return Vec::new();
         };
-        let (Some(state), Some(press)) = (
-            ShellState::resolve(ctx),
-            ShellState::resolve_in(ctx, &drag.press_document),
-        ) else {
+        let Some(point) = state.handle_point(handle) else {
             return Vec::new();
         };
+        let (name, value) = state.hover(handle);
         vec![OverlayLabel {
-            text: SharedString::from(state.hud(&press, handle)),
+            text: SharedString::from(format!("{} {value}", ravel_i18n::t!(name))),
             color: SELECTION_COLOR,
-            placement: LabelPlacement::CanvasTopLeft,
+            placement: LabelPlacement::Comp(point),
         }]
     }
 
@@ -2263,6 +2342,11 @@ const PARAM_MARK_PX: f32 = 9.0;
 struct ParamMark {
     key: String,
     role: ParamRole,
+    /// The parameter's own value, the number an editor shows for it. Not
+    /// derivable from `local`, which a [`ParamRole::Size`] measures from the
+    /// position — so a label built from that one would report a point where
+    /// the parameter holds an offset.
+    value: (f32, f32),
     /// The layer-local point the mark sits at.
     local: (f32, f32),
     /// The same point on the canvas: `world · local`.
@@ -2347,6 +2431,7 @@ impl ParamState {
                 ParamMark {
                     key: key.clone(),
                     role: *role,
+                    value: *value,
                     local,
                     world: world.apply(local.0, local.1),
                     range: template.param_range(key).cloned(),
@@ -2434,6 +2519,32 @@ impl ViewerOverlay for ParamManipulator {
             }
             paint_handle_mark(painter, mark.world, PARAM_MARK_PX, color);
         }
+    }
+
+    /// The name and value of the mark under the pointer.
+    ///
+    /// The name is the one the Properties row carries, resolved through the
+    /// same lookup: a handle and a row that named the same parameter
+    /// differently would read as two parameters.
+    fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
+        let Some(index) = ctx.hovered_handle.and_then(OverlayHandleId::param) else {
+            return Vec::new();
+        };
+        let Some(state) = ParamState::resolve(ctx) else {
+            return Vec::new();
+        };
+        let Some(mark) = state.marks.get(index as usize) else {
+            return Vec::new();
+        };
+        vec![OverlayLabel {
+            text: SharedString::from(format!(
+                "{} {}",
+                crate::panels::properties::field_label(&mark.key),
+                vec2_text(mark.value)
+            )),
+            color: ctx.colors.path,
+            placement: LabelPlacement::Comp(mark.world),
+        }]
     }
 
     fn handles(&self, ctx: &OverlayContext) -> Vec<OverlayHandle> {
@@ -2974,6 +3085,7 @@ mod tests {
 
     fn base_context() -> OverlayContext {
         OverlayContext {
+            hovered_handle: None,
             pixel_readout: None,
             playback_status: PlaybackStatus::default(),
             preview_factors: None,
@@ -5079,6 +5191,97 @@ mod tests {
             "50.0% × 25.0%",
             "the factor this drag applied, not the scale reached"
         );
+    }
+
+    /// A hovered grip names itself and the value it stands at, on the grip —
+    /// and the label sits exactly where the handle it names does.
+    #[test]
+    fn a_hovered_shell_grip_labels_itself_at_the_grip() {
+        let (mut ctx, ..) = shell_context();
+        ctx.hovered_handle = Some(OverlayHandleId::Shell(ShellHandle::Scale(0)));
+
+        let labels = ShellManipulator.labels(&ctx);
+        assert_eq!(labels.len(), 1);
+        assert!(
+            labels[0].text.ends_with("100.0% × 100.0%"),
+            "the scale it stands at, not a factor a drag applied: {:?}",
+            labels[0].text
+        );
+        let handle = ShellManipulator
+            .handles(&ctx)
+            .into_iter()
+            .find(|handle| handle.id == OverlayHandleId::Shell(ShellHandle::Scale(0)))
+            .expect("the grip has no handle");
+        assert_eq!(
+            labels[0].placement,
+            LabelPlacement::Comp(handle.position),
+            "the label sits on the mark it names"
+        );
+    }
+
+    /// Every grip the manipulator exposes can be labelled where it sits: a
+    /// label resolved from an id alone must not drift from the handle list.
+    #[test]
+    fn every_shell_grip_labels_at_its_own_handle() {
+        let (mut ctx, ..) = shell_context();
+        for handle in ShellManipulator.handles(&ctx) {
+            ctx.hovered_handle = Some(handle.id);
+            let labels = ShellManipulator.labels(&ctx);
+            assert_eq!(labels.len(), 1, "{:?} has no label", handle.id);
+            assert_eq!(
+                labels[0].placement,
+                LabelPlacement::Comp(handle.position),
+                "{:?} labels somewhere else",
+                handle.id
+            );
+        }
+    }
+
+    /// The gesture reports itself; the hover does not report it a second time.
+    #[test]
+    fn the_drag_hud_wins_over_the_hover_label() {
+        let (mut ctx, ..) = shell_context();
+        let press = ctx.document.clone().unwrap();
+        ctx.hovered_handle = Some(OverlayHandleId::Shell(ShellHandle::Position));
+        ctx.active_drag = Some(ActiveDrag {
+            handle: OverlayHandleId::Shell(ShellHandle::Rotate(0)),
+            press_document: press,
+        });
+
+        let labels = ShellManipulator.labels(&ctx);
+        assert_eq!(labels.len(), 1, "one line, never both");
+        assert_eq!(
+            labels[0].placement,
+            LabelPlacement::CanvasTopLeft,
+            "the HUD's corner, not the hovered grip"
+        );
+    }
+
+    /// A hovered parameter mark reports the parameter's **own** value — the
+    /// number its Properties row holds — not the point the mark sits at.
+    #[test]
+    fn a_hovered_parameter_mark_reports_the_parameter_value() {
+        let (mut ctx, ..) = param_context(ellipse_node((100.0, 200.0), (50.0, 30.0)));
+        let handle = param_handle(&ctx, "radius");
+        ctx.hovered_handle = Some(handle.id);
+
+        let labels = ParamManipulator.labels(&ctx);
+        assert_eq!(labels.len(), 1);
+        assert!(
+            labels[0].text.ends_with("(50.0, 30.0)"),
+            "the radius, not the canvas point it is drawn at: {:?}",
+            labels[0].text
+        );
+        assert_eq!(labels[0].placement, LabelPlacement::Comp(handle.position));
+    }
+
+    /// Nothing under the pointer, nothing to say.
+    #[test]
+    fn no_hover_labels_without_a_hovered_handle() {
+        let (ctx, ..) = shell_context();
+        assert!(ShellManipulator.labels(&ctx).is_empty());
+        let (ctx, ..) = param_context(ellipse_node((100.0, 200.0), (50.0, 30.0)));
+        assert!(ParamManipulator.labels(&ctx).is_empty());
     }
 
     #[test]

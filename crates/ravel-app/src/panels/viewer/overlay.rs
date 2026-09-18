@@ -2021,26 +2021,29 @@ impl ShellState {
         ])
     }
 
-    /// What the drag HUD shows for the grip being held: how far the gesture
-    /// has got, read as the difference between the previewed document (`self`)
-    /// and the one the press captured (`press`).
+    /// What the drag HUD shows for the grip being held: **how far the gesture
+    /// has got**, read as the difference between the previewed document
+    /// (`self`) and the one the press captured (`press`).
     ///
-    /// Scale reports the factor this drag applied and rotation the angle it
-    /// swept, because "200%" tells you nothing while you are dragging a layer
-    /// that was already at 200%. The two positional channels report
-    /// coordinates instead — the plan's "位置なら座標" — since where the
-    /// anchor or the layer now sits is the thing being aimed.
+    /// Only the difference. Where the grip now stands is reported at the grip
+    /// itself ([`hover`](Self::hover)), which leaves the corner one job: a
+    /// number that is meaningless anywhere else, since "200%" tells you
+    /// nothing while you are dragging a layer that was already at 200%.
+    ///
+    /// Scale reports the factor this drag applied, rotation the angle it
+    /// swept, and the two positional channels the offset they have travelled.
     fn hud(&self, press: &ShellState, handle: ShellHandle) -> String {
-        match handle {
+        let delta = match handle {
             ShellHandle::Scale(_) => format!(
                 "{:.1}% × {:.1}%",
                 scale_ratio(self.scale.0, press.scale.0) * 100.0,
                 scale_ratio(self.scale.1, press.scale.1) * 100.0
             ),
             ShellHandle::Rotate(_) => format!("{:+.1}°", self.rotation - press.rotation),
-            ShellHandle::Anchor => vec2_text(self.anchor),
-            ShellHandle::Position => vec2_text(self.position),
-        }
+            ShellHandle::Anchor => delta_text(self.anchor, press.anchor),
+            ShellHandle::Position => delta_text(self.position, press.position),
+        };
+        format!("{DELTA} {delta}")
     }
 
     /// What the hover label says about the grip under the pointer: its name
@@ -2072,6 +2075,21 @@ impl ShellState {
         }
     }
 
+    /// The name and current value of one grip, placed on the grip.
+    ///
+    /// The one builder for both readings: a hovered grip and a dragged one
+    /// say the same thing about themselves, and a drag that formatted its own
+    /// copy could drift from the hover it grew out of.
+    fn value_label(&self, handle: ShellHandle) -> Option<OverlayLabel> {
+        let point = self.handle_point(handle)?;
+        let (name, value) = self.hover(handle);
+        Some(OverlayLabel {
+            text: SharedString::from(format!("{} {value}", ravel_i18n::t!(name))),
+            color: SELECTION_COLOR,
+            placement: LabelPlacement::Comp(point),
+        })
+    }
+
     /// Where a grip sits on the canvas: the very point
     /// [`ShellManipulator::handles`] anchors it at, so a label lands on the
     /// mark it names.
@@ -2090,6 +2108,17 @@ impl ShellState {
 /// prints a point, so a hover, a HUD and a readout cannot round differently.
 fn vec2_text(value: (f32, f32)) -> String {
     format!("({:.1}, {:.1})", value.0, value.1)
+}
+
+/// The notation a drag readout is marked with. Not translated, for the reason
+/// `f` / `fps` / `X` / `Y` are not: it is a symbol, and the word beside it
+/// (the handle's own name, at the handle) already carries the meaning.
+const DELTA: &str = "Δ";
+
+/// How far a planar channel has travelled since the press, signed so the
+/// direction reads without comparing two numbers.
+fn delta_text(now: (f32, f32), press: (f32, f32)) -> String {
+    format!("({:+.1}, {:+.1})", now.0 - press.0, now.1 - press.1)
 }
 
 /// The manipulator for a single selected layer's shell transform: scale on the
@@ -2214,13 +2243,18 @@ impl ViewerOverlay for ShellManipulator {
         paint_handle_mark(painter, state.anchor_world, ANCHOR_MARKER_PX, ANCHOR_COLOR);
     }
 
-    /// The drag HUD while a grip is held, and the hover label while one is
-    /// merely pointed at — never both, because a gesture in flight already
-    /// reports the grip a second line would only repeat.
+    /// What the grip under the pointer stands at, and — while it is being
+    /// dragged — how far the gesture has moved it.
     ///
-    /// The hover label sits at the grip rather than in the corner: a grip is
-    /// one of eleven marks, and a corner label would leave the reader
-    /// guessing which of them it speaks for.
+    /// The two numbers are split by where they are read from. **At the grip**
+    /// goes the name and the value it holds now, because a grip is one of
+    /// eleven marks and a corner line would leave the reader guessing which
+    /// of them it speaks for. **In the corner** goes the difference from the
+    /// press, which belongs to the gesture rather than to a place, and which
+    /// a fixed corner keeps clear of the marks the drag is moving.
+    ///
+    /// A hover shows the first alone: nothing has moved, so there is no
+    /// difference to report.
     fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
         if let Some(drag) = ctx.active_drag.as_ref() {
             let Some(handle) = drag.handle.shell() else {
@@ -2232,11 +2266,13 @@ impl ViewerOverlay for ShellManipulator {
             ) else {
                 return Vec::new();
             };
-            return vec![OverlayLabel {
+            let mut labels = vec![OverlayLabel {
                 text: SharedString::from(state.hud(&press, handle)),
                 color: SELECTION_COLOR,
                 placement: LabelPlacement::CanvasTopLeft,
             }];
+            labels.extend(state.value_label(handle));
+            return labels;
         }
         let Some(handle) = ctx.hovered_handle.and_then(OverlayHandleId::shell) else {
             return Vec::new();
@@ -2244,15 +2280,7 @@ impl ViewerOverlay for ShellManipulator {
         let Some(state) = ShellState::resolve(ctx) else {
             return Vec::new();
         };
-        let Some(point) = state.handle_point(handle) else {
-            return Vec::new();
-        };
-        let (name, value) = state.hover(handle);
-        vec![OverlayLabel {
-            text: SharedString::from(format!("{} {value}", ravel_i18n::t!(name))),
-            color: SELECTION_COLOR,
-            placement: LabelPlacement::Comp(point),
-        }]
+        state.value_label(handle).into_iter().collect()
     }
 
     fn handles(&self, ctx: &OverlayContext) -> Vec<OverlayHandle> {
@@ -2375,7 +2403,13 @@ struct ParamState {
 
 impl ParamState {
     fn resolve(ctx: &OverlayContext) -> Option<Self> {
-        let (document, resolution, playback) = ctx.resolved()?;
+        Self::resolve_in(ctx, ctx.document.as_ref()?)
+    }
+
+    /// The same resolution against a document the caller supplies, so a drag
+    /// can read its marks as they stood when the gesture pressed.
+    fn resolve_in(ctx: &OverlayContext, document: &Document) -> Option<Self> {
+        let (resolution, playback) = (ctx.resolution?, ctx.playback?);
         let registry = ctx.registry.as_ref()?;
         let selection = ctx.selection.as_ref()?;
         let network = selection.path.clone()?;
@@ -2521,13 +2555,22 @@ impl ViewerOverlay for ParamManipulator {
         }
     }
 
-    /// The name and value of the mark under the pointer.
+    /// What the mark under the pointer holds, and — while it is being dragged
+    /// — how far the gesture has moved it. The split [`ShellManipulator`]
+    /// states: the value at the mark, the difference in the corner.
     ///
     /// The name is the one the Properties row carries, resolved through the
     /// same lookup: a handle and a row that named the same parameter
     /// differently would read as two parameters.
     fn labels(&self, ctx: &OverlayContext) -> Vec<OverlayLabel> {
-        let Some(index) = ctx.hovered_handle.and_then(OverlayHandleId::param) else {
+        let dragged = ctx
+            .active_drag
+            .as_ref()
+            .and_then(|drag| Some((drag, drag.handle.param()?)));
+        let Some(index) = dragged
+            .map(|(_, index)| index)
+            .or_else(|| ctx.hovered_handle.and_then(OverlayHandleId::param))
+        else {
             return Vec::new();
         };
         let Some(state) = ParamState::resolve(ctx) else {
@@ -2536,7 +2579,27 @@ impl ViewerOverlay for ParamManipulator {
         let Some(mark) = state.marks.get(index as usize) else {
             return Vec::new();
         };
-        vec![OverlayLabel {
+        let mut labels = Vec::new();
+        // The press-time value is matched by key, not by index: a drag can
+        // grow a parameter the saved node never had, and the mark order the
+        // handle id indexes into is the *current* declaration order.
+        if let Some(press) = dragged
+            .and_then(|(drag, _)| ParamState::resolve_in(ctx, &drag.press_document))
+            .and_then(|press| {
+                press
+                    .marks
+                    .iter()
+                    .find(|press| press.key == mark.key)
+                    .map(|press| press.value)
+            })
+        {
+            labels.push(OverlayLabel {
+                text: SharedString::from(format!("{DELTA} {}", delta_text(mark.value, press))),
+                color: ctx.colors.path,
+                placement: LabelPlacement::CanvasTopLeft,
+            });
+        }
+        labels.push(OverlayLabel {
             text: SharedString::from(format!(
                 "{} {}",
                 crate::panels::properties::field_label(&mark.key),
@@ -2544,7 +2607,8 @@ impl ViewerOverlay for ParamManipulator {
             )),
             color: ctx.colors.path,
             placement: LabelPlacement::Comp(mark.world),
-        }]
+        });
+        labels
     }
 
     fn handles(&self, ctx: &OverlayContext) -> Vec<OverlayHandle> {
@@ -5173,24 +5237,52 @@ mod tests {
             press_document: pressed.clone(),
         });
 
-        let labels = ShellManipulator.labels(&ctx);
-        assert_eq!(labels.len(), 1);
+        let corner = |ctx: &OverlayContext| {
+            ShellManipulator
+                .labels(ctx)
+                .into_iter()
+                .find(|label| label.placement == LabelPlacement::CanvasTopLeft)
+                .expect("no corner readout")
+                .text
+                .to_string()
+        };
         assert_eq!(
-            labels[0].text.as_ref(),
-            "+15.0°",
+            corner(&ctx),
+            "Δ +15.0°",
             "the angle swept, not the angle reached"
         );
-        assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
 
         ctx.active_drag = Some(ActiveDrag {
             handle: OverlayHandleId::Shell(ShellHandle::Scale(0)),
-            press_document: pressed,
+            press_document: pressed.clone(),
         });
         assert_eq!(
-            ShellManipulator.labels(&ctx)[0].text.as_ref(),
-            "50.0% × 25.0%",
+            corner(&ctx),
+            "Δ 50.0% × 25.0%",
             "the factor this drag applied, not the scale reached"
         );
+
+        // The positional channels report a difference too: where the layer
+        // now sits is said at the grip, so the corner is free to say how far
+        // this gesture moved it.
+        let moved = ravel_ui::document::update_layer(
+            ctx.document.as_ref().unwrap(),
+            comp,
+            layer,
+            |layer| {
+                layer.transform.position = [
+                    AnimationChannel::constant(60.0),
+                    AnimationChannel::constant(-15.0),
+                ];
+            },
+        )
+        .unwrap();
+        ctx.document = Some(moved);
+        ctx.active_drag = Some(ActiveDrag {
+            handle: OverlayHandleId::Shell(ShellHandle::Position),
+            press_document: pressed,
+        });
+        assert_eq!(corner(&ctx), "Δ (+60.0, -15.0)");
     }
 
     /// A hovered grip names itself and the value it stands at, on the grip —
@@ -5237,9 +5329,11 @@ mod tests {
         }
     }
 
-    /// The gesture reports itself; the hover does not report it a second time.
+    /// A drag speaks for the grip it holds, not for the one the pointer
+    /// happens to be over: the value lands on the dragged grip and the
+    /// difference in the corner, and the hovered grip says nothing.
     #[test]
-    fn the_drag_hud_wins_over_the_hover_label() {
+    fn a_drag_labels_the_grip_it_holds_and_not_the_hovered_one() {
         let (mut ctx, ..) = shell_context();
         let press = ctx.document.clone().unwrap();
         ctx.hovered_handle = Some(OverlayHandleId::Shell(ShellHandle::Position));
@@ -5249,11 +5343,18 @@ mod tests {
         });
 
         let labels = ShellManipulator.labels(&ctx);
-        assert_eq!(labels.len(), 1, "one line, never both");
+        assert_eq!(labels.len(), 2, "the difference and the value, once each");
+        assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
+        let state = ShellState::resolve(&ctx).unwrap();
         assert_eq!(
-            labels[0].placement,
-            LabelPlacement::CanvasTopLeft,
-            "the HUD's corner, not the hovered grip"
+            labels[1].placement,
+            LabelPlacement::Comp(state.handle_point(ShellHandle::Rotate(0)).unwrap()),
+            "the value sits on the dragged grip, not on the hovered one"
+        );
+        assert!(
+            labels[1].text.ends_with("+0.0°"),
+            "the rotation it stands at: {:?}",
+            labels[1].text
         );
     }
 
@@ -5273,6 +5374,38 @@ mod tests {
             labels[0].text
         );
         assert_eq!(labels[0].placement, LabelPlacement::Comp(handle.position));
+    }
+
+    /// A parameter drag says both things: what the mark holds now, on the
+    /// mark, and how far this gesture has moved it, in the corner.
+    #[test]
+    fn a_dragged_parameter_mark_reports_its_value_and_its_delta() {
+        let (mut ctx, ..) = param_context(ellipse_node((100.0, 200.0), (50.0, 30.0)));
+        let press = ctx.document.clone().unwrap();
+        let handle = param_handle(&ctx, "radius");
+
+        let edit = ParamManipulator
+            .drag(&handle, (20.0, 5.0), DragModifiers::default(), &ctx)
+            .expect("the radius handle produced no edit");
+        ctx.document = Some(edit.apply(&press).unwrap());
+        ctx.active_drag = Some(ActiveDrag {
+            handle: handle.id,
+            press_document: press,
+        });
+
+        let labels = ParamManipulator.labels(&ctx);
+        assert_eq!(labels.len(), 2, "the difference and the value, once each");
+        assert_eq!(labels[0].placement, LabelPlacement::CanvasTopLeft);
+        assert_eq!(labels[0].text.as_ref(), "Δ (+20.0, +5.0)");
+        assert!(
+            labels[1].text.ends_with("(70.0, 35.0)"),
+            "the radius it has reached: {:?}",
+            labels[1].text
+        );
+        assert!(
+            matches!(labels[1].placement, LabelPlacement::Comp(_)),
+            "the value belongs on the mark"
+        );
     }
 
     /// Nothing under the pointer, nothing to say.

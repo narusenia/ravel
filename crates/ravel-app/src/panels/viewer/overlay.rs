@@ -5264,24 +5264,23 @@ mod tests {
 
         // The positional channels report a difference too: where the layer
         // now sits is said at the grip, so the corner is free to say how far
-        // this gesture moved it.
-        let moved = ravel_ui::document::update_layer(
-            ctx.document.as_ref().unwrap(),
-            comp,
-            layer,
-            |layer| {
+        // this gesture moved it. Pressed away from the origin, so a corner
+        // that printed the coordinate instead of the offset would say
+        // something else.
+        let at = |document: &Document, position: (f32, f32)| {
+            ravel_ui::document::update_layer(document, comp, layer, |layer| {
                 layer.transform.position = [
-                    AnimationChannel::constant(60.0),
-                    AnimationChannel::constant(-15.0),
+                    AnimationChannel::constant(position.0),
+                    AnimationChannel::constant(position.1),
                 ];
-            },
-        )
-        .unwrap();
-        ctx.document = Some(moved);
+            })
+            .unwrap()
+        };
         ctx.active_drag = Some(ActiveDrag {
             handle: OverlayHandleId::Shell(ShellHandle::Position),
-            press_document: pressed,
+            press_document: at(&pressed, (10.0, 5.0)),
         });
+        ctx.document = Some(at(ctx.document.as_ref().unwrap(), (70.0, -10.0)));
         assert_eq!(corner(&ctx), "Δ (+60.0, -15.0)");
     }
 

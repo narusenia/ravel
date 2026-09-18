@@ -2128,16 +2128,27 @@ fn text_layout() -> NodeTemplate {
             crate::text::TEXT_WRITING_MODES[0],
         ))
         .with_param_options("writing_mode", crate::text::TEXT_WRITING_MODES)
+        // `position`, not `center`: `anchor` and `align` decide how the block
+        // is placed *against* this point, so it is the layout's origin rather
+        // than the middle of anything (a `center`-anchored block does put its
+        // middle here, but a `left` / `first_baseline` one does not).
+        .with_param(channel2_parameter("position", 0.0, 0.0))
         .with_param_range("size", 0.0..=10000.0, 8.0..=400.0)
         .with_param_range("tracking", -1000.0..=1000.0, -20.0..=100.0)
         .with_param_range("leading", 0.0..=10000.0, 0.0..=400.0)
         .with_param_range("wrap_width", 0.0..=100000.0, 0.0..=2000.0)
+        .with_param_range("position", -1e5..=1e5, -2000.0..=2000.0)
+        // Declaring the role is the whole of what makes the block grabbable in
+        // the Viewer (REQ-UI-011's movement semantics): without a position of
+        // its own, moving text meant inserting a `geometry.transform`.
+        .with_param_role("position", ParamRole::Position)
         .with_param_group("content", ["text"])
         .with_param_group("metrics", ["size", "tracking", "leading"])
         .with_param_group(
             "paragraph",
             ["writing_mode", "align", "wrap_width", "anchor"],
         )
+        .with_param_group("placement", ["position"])
 }
 
 /// `text.to_path`: flattens a text layout's character instances into one
@@ -3184,6 +3195,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `text.layout` carries its own origin so the Viewer's manipulator can
+    /// grab the text block (REQ-UI-011's movement semantics limit that to
+    /// nodes holding a position parameter of their own). The declaration is
+    /// the whole mechanism, so a test on it is a test on the handle.
+    #[test]
+    fn text_layout_declares_its_origin_as_a_position() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+
+        assert_eq!(
+            reg.param_role("text.layout", "position"),
+            Some(ParamRole::Position),
+            "text.layout.position declares no role, so the block is not grabbable"
+        );
+        let node = reg
+            .create_node("text.layout", crate::id::NodeId::new(1))
+            .expect("text.layout is registered");
+        let position = node
+            .parameters
+            .iter()
+            .find(|param| param.key == "position")
+            .expect("text.layout declares a position parameter");
+        assert!(
+            matches!(position.value, ParameterValue::Channel2(_)),
+            "text.layout.position is {:?}, which carries no canvas point",
+            position.value
+        );
     }
 
     #[test]

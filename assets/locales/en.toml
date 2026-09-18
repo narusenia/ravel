@@ -1469,10 +1469,12 @@ writing_mode = "Whether characters run along a horizontal line, or downwards alo
 align = "Where each line sits against the origin: starting at it, centred on it, ending at it, or stretched to the wrap width. Vertical text reads it down the column instead of across the line."
 wrap_width = "Wrap lines longer than this many composition pixels — the length of a column in vertical text. Zero wraps only at the newlines in the string."
 anchor = "Which line of the block lands on the origin: the first baseline, or the top, middle or bottom of the block. Vertical text reads it across the columns, so it picks the first column's centreline or the block's right, middle or left edge."
+position = "Where the layout's origin sits, in composition pixels. Anchor and align decide how the block is placed against this point, so it is the origin rather than the centre. A text on path re-places every character from the path, which leaves this with nothing to move."
 [node."text.layout".group]
 content = "Content"
 metrics = "Metrics"
 paragraph = "Paragraph"
+placement = "Placement"
 
 [node."text.to_path"]
 label = "Text To Path"

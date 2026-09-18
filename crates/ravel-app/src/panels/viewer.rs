@@ -202,6 +202,11 @@ fn tool_pointer_hint(tool: ravel_ui::ToolKind) -> ViewerPointerHint {
 #[derive(Clone)]
 struct MoveOrigin {
     node: NodeId,
+    /// The key the origin was read from and the move is written back to —
+    /// `ravel_core::registry::position_param_key`, so a node is dragged by
+    /// whichever parameter it declares `ParamRole::Position`. `None` for a
+    /// node with no position of its own, which only a `points` offset moves.
+    position_key: Option<String>,
     center: (f32, f32),
     path_points: Option<Vec<ravel_core::graph::PathPoint>>,
 }
@@ -1215,17 +1220,20 @@ impl ViewerPanel {
         let Some(graph) = ravel_ui::document::resolve_network(&document, &network) else {
             return;
         };
+        let registry = project.read(cx).shared_registry();
         let origins: Vec<_> = nodes
             .iter()
             .filter_map(|id| {
                 let node = graph.node(*id)?;
                 let bounds = geometry::evaluated_bounds(&overlay_ctx, &network, *id)?;
-                Some(MoveOrigin {
-                    node: *id,
-                    center: sample_vec2_param(node, "center", local_frame, &eval)
-                        .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
-                    path_points: path_points(node).map(<[ravel_core::graph::PathPoint]>::to_vec),
-                })
+                Some(move_origin(
+                    &registry,
+                    node,
+                    *id,
+                    bounds,
+                    local_frame,
+                    &eval,
+                ))
             })
             .collect();
         if !origins.is_empty() {
@@ -1279,6 +1287,7 @@ impl ViewerPanel {
             return;
         };
         let document = project.read(cx).document().clone();
+        let registry = project.read(cx).shared_registry();
         let Some(comp) = document.get_composition(comp_id) else {
             return;
         };
@@ -1309,13 +1318,7 @@ impl ViewerPanel {
                 .filter_map(|id| {
                     let node = layer.network.node(id)?;
                     let bounds = geometry::evaluated_bounds(&overlay_ctx, &network, id)?;
-                    Some(MoveOrigin {
-                        node: id,
-                        center: sample_vec2_param(node, "center", local_frame, &eval)
-                            .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
-                        path_points: path_points(node)
-                            .map(<[ravel_core::graph::PathPoint]>::to_vec),
-                    })
+                    Some(move_origin(&registry, node, id, bounds, local_frame, &eval))
                 })
                 .collect();
             if origins.is_empty() {
@@ -1399,6 +1402,7 @@ impl ViewerPanel {
                     };
                     let Some(updated) = moved_shape_node(
                         node,
+                        origin.position_key.as_deref(),
                         origin.center,
                         origin.path_points.as_deref(),
                         delta,
@@ -4662,8 +4666,33 @@ fn selection_after_click(
     }
 }
 
+/// One [`MoveOrigin`], with the node's position parameter resolved from the
+/// role it declares rather than from a spelling this file knows.
+fn move_origin(
+    registry: &ravel_core::registry::NodeRegistry,
+    node: &Node,
+    id: NodeId,
+    bounds: CompRect,
+    local_frame: u64,
+    eval: &EvalContext,
+) -> MoveOrigin {
+    let key = ravel_core::registry::position_param_key(registry, node);
+    MoveOrigin {
+        node: id,
+        position_key: key.map(str::to_owned),
+        center: key
+            .and_then(|key| sample_vec2_param(node, key, local_frame, eval))
+            .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
+        path_points: path_points(node).map(<[ravel_core::graph::PathPoint]>::to_vec),
+    }
+}
+
+/// `node` with the drag's `delta` applied: a `points` offset when it carries a
+/// path, otherwise a write to `position_key` — the parameter the node declares
+/// as its position. A node with neither does not move.
 fn moved_shape_node(
     node: &Node,
+    position_key: Option<&str>,
     origin: (f32, f32),
     original_path: Option<&[PathPoint]>,
     delta: (f32, f32),
@@ -4686,10 +4715,11 @@ fn moved_shape_node(
         }
         return Some(updated);
     }
+    let position_key = position_key?;
     let parameter = updated
         .parameters
         .iter_mut()
-        .find(|param| param.key == "center")?;
+        .find(|param| param.key == position_key)?;
     parameter.value = edited_vector_param(
         &parameter.value,
         &[origin.0 + delta.0, origin.1 + delta.1],
@@ -5693,6 +5723,7 @@ mod tests {
                 "shape.custom_path" => {
                     Arc::new(ravel_nodes::shape::CustomPathProcessor::from_node(node))
                 }
+                "text.layout" => Arc::new(ravel_nodes::text::LayoutProcessor::from_node(node)),
                 "geometry.from_image" => {
                     Arc::new(ravel_nodes::geometry::GeometryFromImageProcessor::from_node(node))
                 }
@@ -6031,10 +6062,23 @@ mod tests {
                 f("height", 30.0),
             ],
         );
-        let moved = moved_shape_node(&node, (10.0, 20.0), None, (4.5, -2.0), 7).unwrap();
+        let moved =
+            moved_shape_node(&node, Some("center"), (10.0, 20.0), None, (4.5, -2.0), 7).unwrap();
         assert_eq!(
             sample_vec2_param(&moved, "center", 7, &eval_ctx()),
             Some((14.5, 18.0))
+        );
+    }
+
+    /// A node that declares no `ParamRole::Position` and carries no path has
+    /// nothing a move can be written into, so the drag leaves it alone
+    /// instead of inventing a parameter.
+    #[test]
+    fn a_node_with_no_position_parameter_does_not_move() {
+        let node = shape_node("geometry.merge", &[]);
+        assert!(
+            moved_shape_node(&node, None, (0.0, 0.0), None, (5.0, -5.0), 0).is_none(),
+            "a node with no position is not movable"
         );
     }
 
@@ -6048,7 +6092,8 @@ mod tests {
                 f("height", 30.0),
             ],
         );
-        let moved = moved_shape_node(&node, (10.0, 20.0), None, (0.0, 0.0), 0).unwrap();
+        let moved =
+            moved_shape_node(&node, Some("center"), (10.0, 20.0), None, (0.0, 0.0), 0).unwrap();
         assert_eq!(
             sample_vec2_param(&moved, "center", 0, &eval_ctx()),
             Some((10.0, 20.0))
@@ -7157,14 +7202,29 @@ mod tests {
             false,
         );
         let original = path_points(&node).unwrap().to_vec();
-        let moved = moved_shape_node(&node, (10.0, 20.0), Some(&original), (7.0, -2.0), 0).unwrap();
+        let moved = moved_shape_node(
+            &node,
+            Some("center"),
+            (10.0, 20.0),
+            Some(&original),
+            (7.0, -2.0),
+            0,
+        )
+        .unwrap();
         let point = path_points(&moved).unwrap()[0];
         assert_eq!(point.p, Vec2(17.0, 18.0));
         assert_eq!(point.in_tan, Vec2(-3.0, 4.0));
         assert_eq!(point.out_tan, Vec2(5.0, -6.0));
 
-        let repeated =
-            moved_shape_node(&moved, (10.0, 20.0), Some(&original), (7.0, -2.0), 0).unwrap();
+        let repeated = moved_shape_node(
+            &moved,
+            Some("center"),
+            (10.0, 20.0),
+            Some(&original),
+            (7.0, -2.0),
+            0,
+        )
+        .unwrap();
         assert_eq!(
             path_points(&repeated),
             path_points(&moved),
@@ -8912,6 +8972,163 @@ mod tests {
             .unwrap();
         publish_geometry_results(&project, cx);
         (window, project, comp_id, layer)
+    }
+
+    /// [`shell_setup`] with a `text.layout` in the layer instead of a rect, so
+    /// a drag test has a node whose position parameter is **not** spelled
+    /// `center`. Built through the registry, which is what puts the declared
+    /// `ParamRole::Position` in the test's path.
+    fn text_layout_setup(
+        cx: &mut TestAppContext,
+    ) -> (
+        WindowHandle<ViewerPanel>,
+        Entity<ProjectState>,
+        NetworkPath,
+        NodeId,
+    ) {
+        use ravel_core::id::LayerId;
+
+        crate::project_state::disable_background_eval_for_tests();
+        cx.update(gpui_component::init);
+
+        let project = cx.new(ProjectState::new);
+        cx.update(|cx| {
+            cx.set_global(ProjectStateHandle(project.downgrade()));
+            cx.set_global(crate::panels::SelectedPropertiesTarget::default());
+            cx.set_global(CanvasSelection::default());
+            cx.set_global(crate::panels::PlaybackPosition::default());
+            cx.set_global(ToolState::default());
+        });
+
+        let (comp_id, layer, node_id) = project.update(cx, |project, cx| {
+            let comp_id = project.document().root_comp.expect("root comp");
+            let layer = LayerId::next();
+            let mut node = project
+                .registry()
+                .create_node("text.layout", NodeId::next())
+                .expect("text.layout is registered");
+            let text = node
+                .parameters
+                .iter_mut()
+                .find(|param| param.key == "text")
+                .expect("the template declares a text parameter");
+            text.value = ParameterValue::String("Ravel".into());
+            let node_id = node.id;
+            let network = Graph::new().add_node(node).unwrap();
+            let doc = ravel_ui::document::add_layer(
+                project.document(),
+                comp_id,
+                Layer::new(layer, "T", network).with_time(0, 0, 300),
+            )
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::Structural, cx);
+            (comp_id, layer, node_id)
+        });
+        let network = NetworkPath::layer(comp_id, layer);
+        cx.update(|cx| {
+            crate::panels::set_layer_selection(vec![layer], cx);
+            cx.set_global(CanvasSelection {
+                path: Some(network.clone()),
+                nodes: HashSet::new(),
+            });
+        });
+
+        let window = cx.add_window(|window, cx| {
+            ViewerPanel::new(ravel_ui::layout::PanelInstanceId(0), window, cx)
+        });
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.composition_resolution = Some((1920, 1080));
+                panel.viewport_origin.set((0.0, 0.0));
+                panel.viewport_size.set((1920.0, 1080.0));
+            })
+            .unwrap();
+        publish_geometry_results(&project, cx);
+        (window, project, network, node_id)
+    }
+
+    /// The `key` vector parameter of `node` as the live document holds it, at
+    /// frame 0.
+    fn node_vec2(
+        project: &Entity<ProjectState>,
+        network: &NetworkPath,
+        node: NodeId,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Option<(f32, f32)> {
+        project.read_with(cx, |project, _| {
+            let graph = ravel_ui::document::resolve_network(project.document(), network).unwrap();
+            sample_vec2_param(graph.node(node).unwrap(), key, 0, &eval_ctx())
+        })
+    }
+
+    /// The move path reads the node's position parameter from the
+    /// `ParamRole::Position` it declares, so a bbox drag moves **any** node
+    /// that declares one — `text.layout`'s `position` included (REQ-UI-011's
+    /// movement semantics). The old path spelled `"center"` into the drag and
+    /// silently refused to move a node that spelled it anything else.
+    #[gpui::test]
+    fn a_bbox_drag_writes_the_position_parameter_the_node_declares(cx: &mut TestAppContext) {
+        let (window, project, network, node) = text_layout_setup(cx);
+        assert_eq!(
+            node_vec2(&project, &network, node, "position", cx),
+            Some((0.0, 0.0)),
+            "the fixture starts at the origin"
+        );
+
+        // Read off the measured ink rather than hard-coded: the bbox is
+        // whatever the bundled face shapes. A quarter in, not the middle —
+        // the layer shell's move grip sits on the centre and answers the
+        // pointer before any tool does.
+        let inside = window
+            .update(cx, |panel, _window, cx| {
+                let ctx = panel.overlay_context(cx);
+                let rect = node_comp_rect(&ctx, &network, node).expect("the text has a bbox");
+                (rect.x + rect.w * 0.25, rect.y + rect.h * 0.25)
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.left_mouse_down(&press_comp(panel, inside, Modifiers::default()), cx);
+                assert!(panel.move_drag.is_some(), "the press grabbed the text");
+                // The primary modifier suppresses snapping, so the assertion
+                // below is about the parameter write and not about a guide.
+                let to = window_point(panel, (inside.0 + 120.0, inside.1 - 40.0));
+                panel.move_dragged(
+                    to,
+                    DragModifiers {
+                        primary: true,
+                        ..DragModifiers::default()
+                    },
+                    cx,
+                );
+                panel.move_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // The press point is a quarter across a measured bbox, so the window
+        // round-trip costs the delta its last bit; what is asserted is that
+        // the offset arrived, not that it survived float arithmetic exactly.
+        let moved = node_vec2(&project, &network, node, "position", cx).expect("position is set");
+        assert!(
+            (moved.0 - 120.0).abs() < 1e-3 && (moved.1 + 40.0).abs() < 1e-3,
+            "the drag delta landed in the declared position parameter: {moved:?}"
+        );
+        assert_eq!(
+            node_vec2(&project, &network, node, "center", cx),
+            None,
+            "and no `center` parameter was invented to hold it"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            node_vec2(&project, &network, node, "position", cx),
+            Some((0.0, 0.0)),
+            "one undo covers the whole drag"
+        );
     }
 
     /// The window position of a composition point, read from the panel's

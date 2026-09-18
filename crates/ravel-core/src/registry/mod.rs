@@ -172,6 +172,28 @@ pub fn is_color_parameter(registry: &NodeRegistry, node: &Node, key: &str) -> bo
         .is_some_and(|declaration| declaration.holds_for(node))
 }
 
+/// The key of `node`'s **position** parameter — the one declared
+/// [`ParamRole::Position`] — or `None` when the node has no position of its
+/// own.
+///
+/// The single answer to "where does this node think it is": the Viewer's
+/// manipulator draws its handle on it, and the bbox drag writes the move
+/// into it. Both used to decide separately, the drag by spelling `"center"`
+/// into the move path, which made the literal a second source of truth —
+/// a node that declared the role got a handle it could not be dragged by
+/// (`text.layout`'s `position` was the first).
+///
+/// **The first declared one wins** when a node declares several, which is
+/// the convention [`ParamRole::Size`] already measures against. Order is the
+/// node's parameter order, so it is the template's declaration order.
+pub fn position_param_key<'a>(registry: &NodeRegistry, node: &'a Node) -> Option<&'a str> {
+    let template = registry.get(&node.type_key)?;
+    node.parameters
+        .iter()
+        .find(|param| template.param_role(&param.key) == Some(ParamRole::Position))
+        .map(|param| param.key.as_str())
+}
+
 /// One entry of a closed option set: the value that is **stored** and the text
 /// that is **shown**.
 ///

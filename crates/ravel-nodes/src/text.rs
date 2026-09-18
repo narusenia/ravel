@@ -687,18 +687,33 @@ mod tests {
         );
     }
 
-    /// The default has to be inert to the bit: every project authored before
-    /// the parameter existed reads `(0, 0)`, and its text must not shift.
+    /// The zero offset has to be inert **to the bit**: every project authored
+    /// before the parameter existed lays its text out through this node now,
+    /// and not one glyph may shift.
+    ///
+    /// Compared on `to_bits`, not on value: `assert_eq!` on `f32` cannot tell
+    /// `+0.0` from `-0.0`, so a value comparison would pass an implementation
+    /// that added a signed zero to every placement and call it unchanged.
+    ///
+    /// Three ways a document reads zero: the template's own default, an
+    /// explicit **negative** zero (which `x != 0.0` is required to treat as
+    /// no offset), and a node saved before `position` existed, which falls
+    /// through to `vec2_or`'s default.
+    ///
+    /// `NaN` is a different question — it passes `x != 0.0` and propagates
+    /// into `P` — and not this test's: nothing here promises what a
+    /// non-finite offset does.
     #[test]
-    fn the_default_position_places_the_text_exactly_where_the_layout_put_it() {
-        let laid_out = laid_out_at("Ravel wraps\nhere", 0, |_| {});
+    fn a_zero_position_places_the_text_bit_for_bit_where_the_layout_put_it() {
+        const TEXT: &str = "Ravel wraps\nhere";
+
         let bare = text::layout_text(
             &text::shared().resolve(&FontQuery::new(
                 text::DEFAULT_FAMILY,
                 text::weight_from_name("regular"),
                 false,
             )),
-            "Ravel wraps\nhere",
+            TEXT,
             &LayoutParams {
                 size: text::DEFAULT_SIZE,
                 tracking: 0.0,
@@ -710,7 +725,39 @@ mod tests {
             },
         )
         .expect("the bundled face lays text out");
-        assert_eq!(placements(&laid_out), placements(&bare));
+        let expected: Vec<(u32, u32)> = placements(&bare)
+            .iter()
+            .map(|p| (p.0.to_bits(), p.1.to_bits()))
+            .collect();
+        assert!(!expected.is_empty(), "the fixture places no characters");
+
+        for (what, tweak) in [
+            ("the template default", None),
+            (
+                "an explicit negative zero",
+                Some(
+                    Box::new(|node: &mut Node| set_vec2(node, "position", -0.0, -0.0))
+                        as Box<dyn FnOnce(&mut Node)>,
+                ),
+            ),
+            (
+                "a node saved before the parameter existed",
+                Some(Box::new(|node: &mut Node| {
+                    node.parameters.retain(|param| param.key != "position");
+                }) as Box<dyn FnOnce(&mut Node)>),
+            ),
+        ] {
+            let laid_out = laid_out_at(TEXT, 0, |node| {
+                if let Some(tweak) = tweak {
+                    tweak(node);
+                }
+            });
+            let bits: Vec<(u32, u32)> = placements(&laid_out)
+                .iter()
+                .map(|p| (p.0.to_bits(), p.1.to_bits()))
+                .collect();
+            assert_eq!(bits, expected, "{what} moved a placement");
+        }
     }
 
     /// `position` is a `Channel2`, so animating it is the unified channel

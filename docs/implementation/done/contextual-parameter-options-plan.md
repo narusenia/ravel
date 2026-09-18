@@ -3,8 +3,9 @@
 > **Status**: **完了** — 2026-09-17。7 単位すべてマージ済み
 > （`CPO-1` / `CPO-6` = #542、`CPO-2` / `CPO-5` = #544（`.ravprj` **v13**）、
 > `CPO-3` / `CPO-4` / `CPO-7` = #546）。**`MED-APP-29` はクローズ**
-> （`issues/closed/medium-app-shell.md`）。残した既知の穴は `LOW-CORE-05`
-> （レイヤー id 0）と `LOW-CORE-06`（v13 前の参照の出力型が追随しない）。
+> （`issues/closed/medium-app-shell.md`）。残していた穴 `LOW-CORE-05`
+> （レイヤー id 0）と `LOW-CORE-06`（v13 前の参照の出力型が追随しない）も
+> **#549 で閉じた**（`issues/closed/low.md`）。
 
 対象: `ravel-core` の `registry`（`NodeTemplate` / `Registry`）、
 `ravel-ui` の `properties::node`、`ravel-app` の Properties とノードエディタ。

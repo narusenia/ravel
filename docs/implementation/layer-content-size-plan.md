@@ -66,7 +66,7 @@ fn base_quad(resolution: (u32, u32)) -> Geometry {
 あるのは、単位 3 の完了条件「Solid の bbox がその矩形になる」が**測る側の穴とは
 別の話**だと読めるようにするため。
 
-> **上 2 件は解決済み、3 件目は半分。** `geometry-drawn-bounds-plan.md`
+> **上 2 件は解決済み、3 件目は半分。** `done/geometry-drawn-bounds-plan.md`
 > （`BBOX-1`〜`BBOX-3`）が 1 本で閉じた。測る関数は
 > `ravel_core::geometry::ops::drawn_bounds` 1 つになり、
 > `GeometricData::bounds` と `geometry_bounds` は両方ともそれに委譲する。
@@ -279,5 +279,5 @@ width   1920 ← auto
    ので、`size_mode` でも規約には合う。1 語で済む方を採った
 3. **bbox の取りこぼし 3 件は本計画から外し、issue として独立で回す**
    （`MED-APP-45` / `MED-CORE-11` / `LOW-APP-33`。前 2 件は
-   `geometry-drawn-bounds-plan.md` が解決済み、`LOW-APP-33` は属性由来の
+   `done/geometry-drawn-bounds-plan.md` が解決済み、`LOW-APP-33` は属性由来の
    線幅だけ解決してノードパラメータの基底値が残余）

@@ -286,7 +286,7 @@ Viewer と出力が食い違う）。ハードコードされた黒 quad は撤�
 >
 > **テスト**: `panels::viewer::geometry::tests::the_core_and_the_viewer_measure_one_rectangle`
 > （点だけ / インスタンスだけ / 両方 / 空 の 4 つで同じ矩形）。
-> 計画は `docs/implementation/geometry-drawn-bounds-plan.md`。
+> 計画は `docs/implementation/done/geometry-drawn-bounds-plan.md`。
 
 **該当**: `crates/ravel-core/src/geometry/container.rs` の
 `Geometry::positions_bounds`（`GeometricData::bounds` の実装）

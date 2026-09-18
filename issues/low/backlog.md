@@ -620,7 +620,7 @@ retype しない。したがって旧文書を開くと:
 `local_extent`、`crates/ravel-nodes/src/rasterize/mod.rs:329`
 （`params.f32_or("stroke_width", 0.0)`）
 
-**半分は解決済み。** `BBOX-2`（`geometry-drawn-bounds-plan.md`）が
+**半分は解決済み。** `BBOX-2`（`done/geometry-drawn-bounds-plan.md`）が
 `stroke_margin` をコアへ移して `ops::stroke_reach(width, miter)` にし、
 `drawn_bounds` は**属性由来の `stroke_width`**（`style.stroke` が
 Detail / Primitive / Point / Instance のどれかに書く値）の分だけ矩形を膨らませる。

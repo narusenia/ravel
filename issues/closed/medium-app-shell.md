@@ -1359,7 +1359,7 @@ let names = match components.len() {
 > **テスト**: `panels::viewer::tests::an_image_geometry_layer_has_a_grabbable_bbox`
 > （`layer_comp_rect` が 320×180 の中心合わせ矩形を返し、中心が
 > `MovableBody` になる）、`geometry::ops::tests::an_image_instance_measures_the_images_rectangle`。
-> 計画は `docs/implementation/geometry-drawn-bounds-plan.md`。
+> 計画は `docs/implementation/done/geometry-drawn-bounds-plan.md`。
 
 **該当**: `crates/ravel-app/src/panels/viewer/geometry.rs` の `geometry_bounds`
 

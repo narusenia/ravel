@@ -164,7 +164,12 @@ inbound 側（`:1561-1565`）は `PORT_BASE_GEOMETRY` / `PORT_TIME` /
 `composition/compile.rs:158` が Background 合成ノードの決定的 id の材料として
 `LayerId::new(0)` を本番で使っている（レイヤーとしてではなくハッシュの入力として）。
 回帰テストは `validate_rejects_the_reserved_layer_id`
-（`crates/ravel-core/src/composition/mod.rs`）で、2 枚目以降にある 0 も拒否する）
+（`crates/ravel-core/src/composition/mod.rs`）で、2 枚目以降にある 0 も拒否する。
+**代償**: ロードは `document.validate()` を無条件に通す
+（`crates/ravel-project/src/lib.rs:346`）ので、**レイヤー id 0 を持つ
+手編集済みの `.ravprj` はもう開かない** — 「開くが参照が黙って何もしない」が
+「開かない」に変わる。不変条件にするとはそういうことで、`ReservedLayerId` は
+どのコンポジションのどのレイヤーかを名指しする）
 
 **該当**: `crates/ravel-core/src/id.rs` の `LayerId::new` と
 `crates/ravel-nodes/src/layer_ref.rs` の対象解決

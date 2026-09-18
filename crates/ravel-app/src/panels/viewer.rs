@@ -49,8 +49,8 @@ use viewport::ViewerViewport;
 use super::param_edit::edited_vector_param;
 use overlay::{
     ActiveDrag, BoxSelect, BoxSelectScope, DragModifiers, EvalResults, LabelPlacement,
-    OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter, OverlayRegistry,
-    ShellHandle,
+    OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayHandleId, OverlayPainter,
+    OverlayRegistry, ShellHandle,
 };
 use snap::{SnapGuides, SnapLines};
 
@@ -579,6 +579,10 @@ pub struct ViewerPanel {
     /// outlive the correction it reports.
     snap_guides: SnapGuides,
     pointer_hint: ViewerPointerHint,
+    /// The overlay handle the pointer rests on, from the hit test that also
+    /// picked [`pointer_hint`](Self::pointer_hint) — one resolution, so the
+    /// label a handle shows and the cursor glyph always name the same grip.
+    hovered_handle: Option<OverlayHandleId>,
     /// The evaluated frame behind the picture, held only while the pixel
     /// readout is on (`INSP-3`). The readout indexes this; nothing evaluates
     /// or reads back when the pointer moves.
@@ -881,6 +885,7 @@ impl ViewerPanel {
             guide_drag: None,
             snap_guides: SnapGuides::default(),
             pointer_hint: ViewerPointerHint::default(),
+            hovered_handle: None,
             linear: content.linear,
             readout_pointer: None,
             show_grid: false,
@@ -2141,6 +2146,15 @@ impl ViewerPanel {
                 handle: drag.handle.id,
                 press_document: drag.original_document.clone(),
             }),
+            // Only while the pointer is idle, for the reason `snap_guides`
+            // above is only filled while it is not: a gesture writes the very
+            // value the hover label would report, and the mark it names moves
+            // out from under the pointer as it does.
+            hovered_handle: if self.dragging() {
+                None
+            } else {
+                self.hovered_handle
+            },
             colors: OverlayColors {
                 // A bright semantic info color keeps the editable path legible
                 // over both dark footage and the black composition background.
@@ -2227,7 +2241,25 @@ impl ViewerPanel {
         (rect.width > 0.0).then_some(pixels * resolution.0 as f32 / rect.width)
     }
 
+    /// The cursor half of [`Self::pointer_state_at`], which is all the tests
+    /// that pin cursor behaviour ask for.
+    #[cfg(test)]
     fn pointer_hint_at(&self, position: Point<Pixels>, cx: &App) -> Option<ViewerPointerHint> {
+        self.pointer_state_at(position, cx).map(|(hint, _)| hint)
+    }
+
+    /// The cursor the pointer earns and the handle it rests on, resolved
+    /// together.
+    ///
+    /// One hit test for both: the handle decides the glyph already, so a
+    /// second traversal for the hover label could only disagree with the
+    /// first — and would pay for a second [`Self::overlay_context`], which
+    /// clones the document on every pointer move.
+    fn pointer_state_at(
+        &self,
+        position: Point<Pixels>,
+        cx: &App,
+    ) -> Option<(ViewerPointerHint, Option<OverlayHandleId>)> {
         let pointer = self.comp_position(position)?;
         let tool = active_tool(cx);
         let radius = self.comp_hit_radius(8.0).unwrap_or(8.0);
@@ -2237,7 +2269,7 @@ impl ViewerPanel {
             && let Some(points) = self.session_points(session, cx)
             && pen_close_pointer_hint(&points, pointer, radius).is_some()
         {
-            return Some(ViewerPointerHint::PenClose);
+            return Some((ViewerPointerHint::PenClose, None));
         }
 
         if let Some(handle) = OverlayRegistry::builtin().hit_test(
@@ -2245,7 +2277,7 @@ impl ViewerPanel {
             pointer,
             self.comp_per_pixel(),
         ) {
-            return Some(handle.hint);
+            return Some((handle.hint, Some(handle.id)));
         }
 
         // Only where a press would actually do something: hidden or locked
@@ -2256,18 +2288,18 @@ impl ViewerPanel {
                 && let Some(axis) =
                     guides::ruler_axis(self.local_position(position), self.viewport_size.get())
             {
-                return Some(guide_hint(axis));
+                return Some((guide_hint(axis), None));
             }
             if let Some(axis) = self.guide_axis_at(pointer, cx) {
-                return Some(guide_hint(axis));
+                return Some((guide_hint(axis), None));
             }
         }
 
         if tool == ravel_ui::ToolKind::Select && self.selected_body_contains(pointer, cx) {
-            return Some(ViewerPointerHint::MovableBody);
+            return Some((ViewerPointerHint::MovableBody, None));
         }
 
-        Some(tool_pointer_hint(tool))
+        Some((tool_pointer_hint(tool), None))
     }
 
     /// The composition rectangle in composition units — the very extent
@@ -4236,7 +4268,16 @@ impl Render for ViewerPanel {
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
                         this.cancel_guide_drag(cx);
-                        let Some(next) = this.pointer_hint_at(event.position, cx) else {
+                        let state = this.pointer_state_at(event.position, cx);
+                        // Cleared when the pointer leaves the composition
+                        // too: a label left standing would name a grip
+                        // nothing points at any more.
+                        let hovered = state.and_then(|(_, handle)| handle);
+                        if this.hovered_handle != hovered {
+                            this.hovered_handle = hovered;
+                            cx.notify();
+                        }
+                        let Some((next, _)) = state else {
                             return;
                         };
                         if let Some(next) = viewer_pointer_hint_transition(

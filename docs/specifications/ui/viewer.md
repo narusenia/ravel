@@ -212,8 +212,11 @@ MediaBin から画面へドロップすると、**再生ヘッド位置**にレ�
 bbox の内側からのドラッグで移動する。動かせるのは**位置を自身のパラメータに
 持つノード**だけ:
 
-- 位置パラメータを持つノード（shape 系 / scatter 系の `center`、`text.layout` の
-  `position`。宣言は `ParamRole::Position` だけで、Viewer 側に型キーの表は無い）
+- **`ParamRole::Position` を宣言したパラメータを持つノード**（shape 系 /
+  scatter 系の `center`、`text.layout` の `position`）。書き込み先は
+  `ravel_core::registry::position_param_key` が役割から解決し、複数宣言なら
+  最初の 1 つ。Viewer 側に型キーやパラメータ名の表は持たないので、役割を
+  宣言したノードはハンドルもドラッグも同時に得る
 - `PathPoints` を持つノード（全制御点を一括オフセット。接線は相対なので保持）
 - 直下流に `geometry.transform` があるノード（その translate を書く）
 

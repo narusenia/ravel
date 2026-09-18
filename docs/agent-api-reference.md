@@ -1678,6 +1678,14 @@ registry::contextual_options(ContextualKind, &Node, &Composition,
     // INPUT ports (a layer's outputs, REQ-LAYER-002/003), each reading as
     // itself, and a reference that resolves to nothing offers nothing.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
+registry::position_param_key(&NodeRegistry, &Node) -> Option<&str>
+    // the node's ParamRole::Position parameter — the FIRST declared one, the
+    // convention ParamRole::Size measures against. The single answer to
+    // "where does this node think it is": the Viewer's manipulator draws its
+    // handle on it and the bbox drag writes the move into it. Do not spell a
+    // parameter name into a move path — that literal was a second source of
+    // truth, and a node declaring the role got a handle it could not be
+    // dragged by (`text.layout`'s `position`). None = not movable by a drag.
 template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node
     // NOT a pure function of the template for one type key: a `subnet`

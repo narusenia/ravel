@@ -442,10 +442,10 @@ background_solid = "Solid"
 shell = "Layer transform handles"
 parameter = "Parameter handles"
 motion_path = "Motion path"
-move = "Move"
+position = "Position"
 scale = "Scale"
-rotate = "Rotate"
-anchor = "Anchor point"
+rotation = "Rotation"
+anchor = "Anchor"
 
 [panel.properties]
 _self = "Properties"

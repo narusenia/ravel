@@ -49,8 +49,8 @@ use viewport::ViewerViewport;
 use super::param_edit::edited_vector_param;
 use overlay::{
     ActiveDrag, BoxSelect, BoxSelectScope, DragModifiers, EvalResults, LabelPlacement,
-    OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayPainter, OverlayRegistry,
-    ShellHandle,
+    OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayHandleId, OverlayPainter,
+    OverlayRegistry, ShellHandle,
 };
 use snap::{SnapGuides, SnapLines};
 
@@ -579,6 +579,10 @@ pub struct ViewerPanel {
     /// outlive the correction it reports.
     snap_guides: SnapGuides,
     pointer_hint: ViewerPointerHint,
+    /// The overlay handle the pointer rests on, from the hit test that also
+    /// picked [`pointer_hint`](Self::pointer_hint) — one resolution, so the
+    /// label a handle shows and the cursor glyph always name the same grip.
+    hovered_handle: Option<OverlayHandleId>,
     /// The evaluated frame behind the picture, held only while the pixel
     /// readout is on (`INSP-3`). The readout indexes this; nothing evaluates
     /// or reads back when the pointer moves.
@@ -747,6 +751,11 @@ impl ViewerPanel {
             }) {
                 this.move_drag = None;
             }
+            // The handle set belongs to the selection, so an id resolved
+            // against the old one names nothing now. Left standing, its label
+            // would print a value for a mark the pointer never rested on —
+            // the pointer has not moved, so nothing else re-resolves it.
+            this.set_hovered_handle(None, cx);
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -798,6 +807,9 @@ impl ViewerPanel {
             {
                 this.cancel_box_select(cx);
             }
+            // As above: another layer's grips are not the ones the pointer
+            // was resting on.
+            this.set_hovered_handle(None, cx);
             this.request_overlay_eval(cx);
             cx.notify();
         });
@@ -881,6 +893,7 @@ impl ViewerPanel {
             guide_drag: None,
             snap_guides: SnapGuides::default(),
             pointer_hint: ViewerPointerHint::default(),
+            hovered_handle: None,
             linear: content.linear,
             readout_pointer: None,
             show_grid: false,
@@ -918,8 +931,16 @@ impl ViewerPanel {
     }
 
     /// Restore resize-aware contain fit.
+    ///
+    /// Drops the hover label with it: these two move the picture without
+    /// moving the pointer, and the pointer that asked for them is on a
+    /// toolbar button or a menu row rather than on a mark. Clearing beats
+    /// re-resolving — there is nothing under the pointer to resolve — and it
+    /// happens here rather than at each call site so a new zoom control
+    /// cannot forget.
     pub fn zoom_to_fit(&mut self) {
         self.viewport.zoom_to_fit();
+        self.hovered_handle = None;
     }
 
     /// Set an explicit composition-pixel zoom, preserving the panel center.
@@ -934,6 +955,7 @@ impl ViewerPanel {
             size,
             resolution,
         );
+        self.hovered_handle = None;
     }
 
     fn local_position(&self, position: Point<Pixels>) -> (f32, f32) {
@@ -2141,6 +2163,21 @@ impl ViewerPanel {
                 handle: drag.handle.id,
                 press_document: drag.original_document.clone(),
             }),
+            // Only while the pointer is idle, for the reason `snap_guides`
+            // above is only filled while it is not: a gesture writes the very
+            // value the hover label would report, and the mark it names moves
+            // out from under the pointer as it does. A pan and a zoom marquee
+            // count, even though they edit nothing: they move the picture out
+            // from under a pointer that is not sending the moves that would
+            // re-resolve the handle.
+            hovered_handle: if self.dragging()
+                || self.pan_drag.is_some()
+                || self.zoom_drag.is_some()
+            {
+                None
+            } else {
+                self.hovered_handle
+            },
             colors: OverlayColors {
                 // A bright semantic info color keeps the editable path legible
                 // over both dark footage and the black composition background.
@@ -2227,7 +2264,49 @@ impl ViewerPanel {
         (rect.width > 0.0).then_some(pixels * resolution.0 as f32 / rect.width)
     }
 
+    /// Re-read what the pointer rests on and keep the hover label honest.
+    ///
+    /// The pointer-move handler is the usual writer; this is for the moments
+    /// the world moves instead of the pointer — the end of a gesture, the end
+    /// of a pan — where a still hand sends nothing and the stored handle would
+    /// otherwise describe a mark that is no longer under it.
+    fn resolve_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let hovered = self
+            .pointer_state_at(position, cx)
+            .and_then(|(_, handle)| handle);
+        self.set_hovered_handle(hovered, cx);
+    }
+
+    /// The one writer of [`Self::hovered_handle`]. Repaints only on a change,
+    /// the rule [`viewer_pointer_hint_transition`] follows for the cursor: a
+    /// pointer crossing a handle sends dozens of moves that resolve to the
+    /// same grip.
+    fn set_hovered_handle(&mut self, hovered: Option<OverlayHandleId>, cx: &mut Context<Self>) {
+        if self.hovered_handle != hovered {
+            self.hovered_handle = hovered;
+            cx.notify();
+        }
+    }
+
+    /// The cursor half of [`Self::pointer_state_at`], which is all the tests
+    /// that pin cursor behaviour ask for.
+    #[cfg(test)]
     fn pointer_hint_at(&self, position: Point<Pixels>, cx: &App) -> Option<ViewerPointerHint> {
+        self.pointer_state_at(position, cx).map(|(hint, _)| hint)
+    }
+
+    /// The cursor the pointer earns and the handle it rests on, resolved
+    /// together.
+    ///
+    /// One hit test for both: the handle decides the glyph already, so a
+    /// second traversal for the hover label could only disagree with the
+    /// first — and would pay for a second [`Self::overlay_context`], which
+    /// clones the document on every pointer move.
+    fn pointer_state_at(
+        &self,
+        position: Point<Pixels>,
+        cx: &App,
+    ) -> Option<(ViewerPointerHint, Option<OverlayHandleId>)> {
         let pointer = self.comp_position(position)?;
         let tool = active_tool(cx);
         let radius = self.comp_hit_radius(8.0).unwrap_or(8.0);
@@ -2237,7 +2316,7 @@ impl ViewerPanel {
             && let Some(points) = self.session_points(session, cx)
             && pen_close_pointer_hint(&points, pointer, radius).is_some()
         {
-            return Some(ViewerPointerHint::PenClose);
+            return Some((ViewerPointerHint::PenClose, None));
         }
 
         if let Some(handle) = OverlayRegistry::builtin().hit_test(
@@ -2245,7 +2324,7 @@ impl ViewerPanel {
             pointer,
             self.comp_per_pixel(),
         ) {
-            return Some(handle.hint);
+            return Some((handle.hint, Some(handle.id)));
         }
 
         // Only where a press would actually do something: hidden or locked
@@ -2256,18 +2335,18 @@ impl ViewerPanel {
                 && let Some(axis) =
                     guides::ruler_axis(self.local_position(position), self.viewport_size.get())
             {
-                return Some(guide_hint(axis));
+                return Some((guide_hint(axis), None));
             }
             if let Some(axis) = self.guide_axis_at(pointer, cx) {
-                return Some(guide_hint(axis));
+                return Some((guide_hint(axis), None));
             }
         }
 
         if tool == ravel_ui::ToolKind::Select && self.selected_body_contains(pointer, cx) {
-            return Some(ViewerPointerHint::MovableBody);
+            return Some((ViewerPointerHint::MovableBody, None));
         }
 
-        Some(tool_pointer_hint(tool))
+        Some((tool_pointer_hint(tool), None))
     }
 
     /// The composition rectangle in composition units — the very extent
@@ -4185,8 +4264,9 @@ impl Render for ViewerPanel {
             )
             .on_mouse_up(
                 MouseButton::Middle,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
                     this.pan_ended(cx);
+                    this.resolve_hover(event.position, cx);
                 }),
             )
             .on_mouse_up(
@@ -4200,6 +4280,12 @@ impl Render for ViewerPanel {
                     this.pen_point_ended(cx);
                     this.handle_drag_ended(cx);
                     this.guide_drag_ended(event.position, cx);
+                    // Last, after every gesture has committed: the handles
+                    // have moved with the drag, so what the pointer rests on
+                    // now is not what it rested on at the press — and a hand
+                    // that does not move afterwards sends nothing else that
+                    // would notice.
+                    this.resolve_hover(event.position, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -4236,7 +4322,12 @@ impl Render for ViewerPanel {
                         this.cancel_shape(cx);
                         this.cancel_handle_drag(cx);
                         this.cancel_guide_drag(cx);
-                        let Some(next) = this.pointer_hint_at(event.position, cx) else {
+                        let state = this.pointer_state_at(event.position, cx);
+                        // Cleared when the pointer leaves the composition
+                        // too: a label left standing would name a grip
+                        // nothing points at any more.
+                        this.set_hovered_handle(state.and_then(|(_, handle)| handle), cx);
+                        let Some((next, _)) = state else {
                             return;
                         };
                         if let Some(next) = viewer_pointer_hint_transition(
@@ -10353,6 +10444,107 @@ mod tests {
             let graph = ravel_ui::document::resolve_network(project.document(), network).unwrap();
             sample_vec2_param(graph.node(node).unwrap(), "center", 0, &eval_ctx()).unwrap()
         })
+    }
+
+    /// The cursor and the hover label come from one resolution: the state a
+    /// pointer move reads names the handle a press there would grab, and the
+    /// hover is withdrawn for as long as that press holds it.
+    #[gpui::test]
+    fn the_pointer_state_names_the_handle_the_cursor_promises(cx: &mut TestAppContext) {
+        // The project handle the panel reads is weak, so the fixture's entity
+        // has to stay bound for the length of the test.
+        let (window, _project, ..) = param_setup(cx);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let at = window_point(panel, (100.0, 200.0));
+                let (hint, handle) = panel.pointer_state_at(at, cx).expect("the pointer is off");
+                assert_eq!(handle, Some(overlay::OverlayHandleId::Param(0)));
+                assert_eq!(
+                    hint,
+                    ViewerPointerHint::MovableBody,
+                    "the cursor the centre handle promises"
+                );
+
+                panel.resolve_hover(at, cx);
+                assert_eq!(panel.overlay_context(cx).hovered_handle, handle);
+                assert!(panel.overlay_handle_mouse_down(&press_at(panel, (100.0, 200.0)), cx));
+                assert_eq!(
+                    panel.overlay_context(cx).hovered_handle,
+                    None,
+                    "a gesture in flight reports itself through the HUD instead"
+                );
+
+                // The mark travels with the drag, so the release re-resolves
+                // from where the pointer actually is rather than restoring
+                // what it rested on before the press.
+                let to = window_point(panel, (160.0, 215.0));
+                panel.handle_dragged(to, DragModifiers::default(), cx);
+                panel.handle_drag_ended(cx);
+                panel.resolve_hover(at, cx);
+                assert_eq!(
+                    panel.hovered_handle, None,
+                    "the mark moved away from the press point"
+                );
+                panel.resolve_hover(to, cx);
+                assert_eq!(panel.hovered_handle, handle, "it moved under the release");
+
+                // A pan edits nothing, so `dragging()` is false — but it drags
+                // the picture out from under a pointer that sends no moves.
+                panel.pan_mouse_down(&press_at(panel, (160.0, 215.0)), cx);
+                assert_eq!(
+                    panel.overlay_context(cx).hovered_handle,
+                    None,
+                    "the picture is moving under the pointer"
+                );
+                panel.pan_ended(cx);
+                assert_eq!(
+                    panel.overlay_context(cx).hovered_handle,
+                    handle,
+                    "and comes back when it stops"
+                );
+
+                // A zoom control jumps the picture from a click on the
+                // toolbar, where there is no mark under the pointer to
+                // re-resolve to.
+                panel.zoom_to_fit();
+                assert_eq!(panel.hovered_handle, None);
+                // Re-read the point through the viewport the fit just set,
+                // so the hover is genuinely back before the next control
+                // takes it away again.
+                panel.resolve_hover(window_point(panel, (160.0, 215.0)), cx);
+                assert_eq!(panel.hovered_handle, handle);
+                panel.set_zoom_percent(100.0);
+                assert_eq!(panel.hovered_handle, None);
+            })
+            .unwrap();
+    }
+
+    /// The pointer does not move when the selection does, so nothing else
+    /// would re-resolve the hovered handle: another node's marks must not
+    /// inherit the label the old one earned.
+    #[gpui::test]
+    fn a_selection_change_drops_the_hovered_handle(cx: &mut TestAppContext) {
+        let (window, _project, network, _node) = param_setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                panel.hovered_handle = Some(overlay::OverlayHandleId::Param(0));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            cx.set_global(CanvasSelection {
+                path: Some(network),
+                nodes: HashSet::new(),
+            })
+        });
+        cx.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.hovered_handle, None);
+            })
+            .unwrap();
     }
 
     /// A whole parameter drag is one undo step, and the press it starts from

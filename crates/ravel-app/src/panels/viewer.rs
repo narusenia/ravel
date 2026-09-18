@@ -202,11 +202,18 @@ fn tool_pointer_hint(tool: ravel_ui::ToolKind) -> ViewerPointerHint {
 #[derive(Clone)]
 struct MoveOrigin {
     node: NodeId,
-    /// The key the origin was read from and the move is written back to —
-    /// `ravel_core::registry::position_param_key`, so a node is dragged by
+    /// The parameter the origin was read from and the move is written back
+    /// to — `ravel_core::registry::position_param`, so a node is dragged by
     /// whichever parameter it declares `ParamRole::Position`. `None` for a
-    /// node with no position of its own, which only a `points` offset moves.
-    position_key: Option<String>,
+    /// node whose template declares no position, which only a `points`
+    /// offset moves.
+    ///
+    /// The **template's** declaration, carried whole rather than by key: a
+    /// node saved before the parameter existed has no value of its own, and
+    /// the default is both the origin the evaluator placed its geometry at
+    /// and the shape (`Channel2` / `Channel3`, keyframes or not) the write
+    /// has to produce.
+    position: Option<Parameter>,
     center: (f32, f32),
     path_points: Option<Vec<ravel_core::graph::PathPoint>>,
 }
@@ -1402,7 +1409,7 @@ impl ViewerPanel {
                     };
                     let Some(updated) = moved_shape_node(
                         node,
-                        origin.position_key.as_deref(),
+                        origin.position.as_ref(),
                         origin.center,
                         origin.path_points.as_deref(),
                         delta,
@@ -4334,7 +4341,7 @@ impl Render for ViewerPanel {
 
 use ravel_core::composition::Document;
 use ravel_core::eval::EvalContext;
-use ravel_core::graph::{Graph, Node, ParameterValue, PathPoint};
+use ravel_core::graph::{Graph, Node, Parameter, ParameterValue, PathPoint};
 use ravel_core::types::{FrameRate, Vec2};
 
 #[cfg(test)]
@@ -4352,9 +4359,17 @@ fn sample_float_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> 
 /// read a pair from a single key instead of two `_x` / `_y` Floats.
 fn sample_vec2_param(node: &Node, key: &str, frame: u64, ctx: &EvalContext) -> Option<(f32, f32)> {
     let param = node.parameters.iter().find(|p| p.key == key)?;
+    sample_vec2_value(&param.value, frame, ctx)
+}
+
+/// The XY of a vector parameter **value** at `frame`.
+///
+/// Split out of [`sample_vec2_param`] so a template default — a value no node
+/// carries yet — can be read the same way a stored one is.
+fn sample_vec2_value(value: &ParameterValue, frame: u64, ctx: &EvalContext) -> Option<(f32, f32)> {
     let sample =
         |ch: &ravel_core::animation::channel::AnimationChannel| ch.evaluate(frame as f64, ctx);
-    match &param.value {
+    match value {
         ParameterValue::Channel2(chs) => Some((sample(&chs[0]), sample(&chs[1]))),
         ParameterValue::Channel3(chs) => Some((sample(&chs[0]), sample(&chs[1]))),
         _ => None,
@@ -4676,23 +4691,41 @@ fn move_origin(
     local_frame: u64,
     eval: &EvalContext,
 ) -> MoveOrigin {
-    let key = ravel_core::registry::position_param_key(registry, node);
+    let declared = ravel_core::registry::position_param(registry, node);
     MoveOrigin {
         node: id,
-        position_key: key.map(str::to_owned),
-        center: key
-            .and_then(|key| sample_vec2_param(node, key, local_frame, eval))
+        position: declared.cloned(),
+        center: declared
+            .and_then(|declared| {
+                // The node's own value first. A node saved before the
+                // parameter existed has none, and the evaluator placed its
+                // geometry at the **template default** — so that is the
+                // origin the delta is measured from. Measuring from the bbox
+                // centre instead would teleport the geometry on the first
+                // drag, by exactly the distance between the two.
+                sample_vec2_param(node, &declared.key, local_frame, eval)
+                    .or_else(|| sample_vec2_value(&declared.value, local_frame, eval))
+            })
+            // Only for a node that declares no position at all: nothing is
+            // written for one, so this is the bbox the `points` branch or a
+            // refused move reads.
             .unwrap_or((bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5)),
         path_points: path_points(node).map(<[ravel_core::graph::PathPoint]>::to_vec),
     }
 }
 
 /// `node` with the drag's `delta` applied: a `points` offset when it carries a
-/// path, otherwise a write to `position_key` — the parameter the node declares
+/// path, otherwise a write to `position` — the parameter its template declares
 /// as its position. A node with neither does not move.
+///
+/// `position` is the **template's** declaration, so a node saved before that
+/// parameter existed is moved too: the parameter is inserted rather than
+/// looked up and missed, which is what `bind_media_asset_id` already does on
+/// the production edit path (`ravel-ui/src/document.rs`). An undo restores
+/// the document snapshot, so the inserted parameter goes away with it.
 fn moved_shape_node(
     node: &Node,
-    position_key: Option<&str>,
+    position: Option<&Parameter>,
     origin: (f32, f32),
     original_path: Option<&[PathPoint]>,
     delta: (f32, f32),
@@ -4715,16 +4748,31 @@ fn moved_shape_node(
         }
         return Some(updated);
     }
-    let position_key = position_key?;
-    let parameter = updated
+    let declared = position?;
+    // Edited against the node's own value when it has one, so keyframes and
+    // expressions survive, and against the template default when it does
+    // not, which is where the geometry already sat.
+    let existing = updated
         .parameters
-        .iter_mut()
-        .find(|param| param.key == position_key)?;
-    parameter.value = edited_vector_param(
-        &parameter.value,
+        .iter()
+        .find(|param| param.key == declared.key)
+        .map_or(&declared.value, |param| &param.value);
+    let value = edited_vector_param(
+        existing,
         &[origin.0 + delta.0, origin.1 + delta.1],
         Some(local_frame),
     )?;
+    match updated
+        .parameters
+        .iter_mut()
+        .find(|param| param.key == declared.key)
+    {
+        Some(parameter) => parameter.value = value,
+        None => updated.parameters.push(Parameter {
+            key: declared.key.clone(),
+            value,
+        }),
+    }
     Some(updated)
 }
 
@@ -5649,6 +5697,15 @@ mod tests {
         (key, ParameterValue::vec2(x, y))
     }
 
+    /// The position parameter a template declares, as `moved_shape_node`
+    /// receives it.
+    fn declared(key: &str, x: f32, y: f32) -> Parameter {
+        Parameter {
+            key: key.into(),
+            value: ParameterValue::vec2(x, y),
+        }
+    }
+
     /// A scalar parameter, as a `shape_node` entry.
     fn f(key: &str, value: f32) -> (&str, ParameterValue) {
         (key, ParameterValue::Float(value))
@@ -6062,8 +6119,15 @@ mod tests {
                 f("height", 30.0),
             ],
         );
-        let moved =
-            moved_shape_node(&node, Some("center"), (10.0, 20.0), None, (4.5, -2.0), 7).unwrap();
+        let moved = moved_shape_node(
+            &node,
+            Some(&declared("center", 0.0, 0.0)),
+            (10.0, 20.0),
+            None,
+            (4.5, -2.0),
+            7,
+        )
+        .unwrap();
         assert_eq!(
             sample_vec2_param(&moved, "center", 7, &eval_ctx()),
             Some((14.5, 18.0))
@@ -6113,8 +6177,15 @@ mod tests {
                 f("height", 30.0),
             ],
         );
-        let moved =
-            moved_shape_node(&node, Some("center"), (10.0, 20.0), None, (0.0, 0.0), 0).unwrap();
+        let moved = moved_shape_node(
+            &node,
+            Some(&declared("center", 0.0, 0.0)),
+            (10.0, 20.0),
+            None,
+            (0.0, 0.0),
+            0,
+        )
+        .unwrap();
         assert_eq!(
             sample_vec2_param(&moved, "center", 0, &eval_ctx()),
             Some((10.0, 20.0))
@@ -7225,7 +7296,7 @@ mod tests {
         let original = path_points(&node).unwrap().to_vec();
         let moved = moved_shape_node(
             &node,
-            Some("center"),
+            Some(&declared("center", 0.0, 0.0)),
             (10.0, 20.0),
             Some(&original),
             (7.0, -2.0),
@@ -7239,7 +7310,7 @@ mod tests {
 
         let repeated = moved_shape_node(
             &moved,
-            Some("center"),
+            Some(&declared("center", 0.0, 0.0)),
             (10.0, 20.0),
             Some(&original),
             (7.0, -2.0),
@@ -9001,6 +9072,7 @@ mod tests {
     /// `ParamRole::Position` in the test's path.
     fn text_layout_setup(
         cx: &mut TestAppContext,
+        legacy: bool,
     ) -> (
         WindowHandle<ViewerPanel>,
         Entity<ProjectState>,
@@ -9034,6 +9106,12 @@ mod tests {
                 .find(|param| param.key == "text")
                 .expect("the template declares a text parameter");
             text.value = ParameterValue::String("Ravel".into());
+            if legacy {
+                // What a document authored before the template declared
+                // `position` holds. Nothing backfills it at load, so this is
+                // the node the drag has to cope with.
+                node.parameters.retain(|param| param.key != "position");
+            }
             let node_id = node.id;
             let network = Graph::new().add_node(node).unwrap();
             let doc = ravel_ui::document::add_layer(
@@ -9090,7 +9168,7 @@ mod tests {
     /// silently refused to move a node that spelled it anything else.
     #[gpui::test]
     fn a_bbox_drag_writes_the_position_parameter_the_node_declares(cx: &mut TestAppContext) {
-        let (window, project, network, node) = text_layout_setup(cx);
+        let (window, project, network, node) = text_layout_setup(cx, false);
         assert_eq!(
             node_vec2(&project, &network, node, "position", cx),
             Some((0.0, 0.0)),
@@ -9149,6 +9227,72 @@ mod tests {
             node_vec2(&project, &network, node, "position", cx),
             Some((0.0, 0.0)),
             "one undo covers the whole drag"
+        );
+    }
+
+    /// A `text.layout` **saved before the parameter existed** is draggable
+    /// too: the key comes from the template rather than from the node's own
+    /// list, and the write inserts the parameter the node is missing.
+    ///
+    /// Two failures this pins at once. Resolving the key off `node.parameters`
+    /// answers `None` here, so the text would not move at all — no preview,
+    /// no undo step. And measuring the origin from the **bbox centre**, which
+    /// is where the old fallback landed for a node with no value, would put
+    /// the text at `bbox centre + delta` on the first drag: a jump of however
+    /// far the ink sits from the origin. The delta has to be measured from
+    /// the template default, because that is the value the evaluator has
+    /// been placing the geometry with.
+    #[gpui::test]
+    fn a_bbox_drag_grows_the_position_a_legacy_node_never_saved(cx: &mut TestAppContext) {
+        let (window, project, network, node) = text_layout_setup(cx, true);
+        assert_eq!(
+            node_vec2(&project, &network, node, "position", cx),
+            None,
+            "the fixture is a node saved before the parameter existed"
+        );
+
+        let inside = window
+            .update(cx, |panel, _window, cx| {
+                let ctx = panel.overlay_context(cx);
+                let rect = node_comp_rect(&ctx, &network, node).expect("the text has a bbox");
+                (rect.x + rect.w * 0.25, rect.y + rect.h * 0.25)
+            })
+            .unwrap();
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.left_mouse_down(&press_comp(panel, inside, Modifiers::default()), cx);
+                assert!(
+                    panel.move_drag.is_some(),
+                    "the press has to grab a node whose position was never saved"
+                );
+                let to = window_point(panel, (inside.0 + 120.0, inside.1 - 40.0));
+                panel.move_dragged(
+                    to,
+                    DragModifiers {
+                        primary: true,
+                        ..DragModifiers::default()
+                    },
+                    cx,
+                );
+                panel.move_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let moved =
+            node_vec2(&project, &network, node, "position", cx).expect("the parameter was grown");
+        assert!(
+            (moved.0 - 120.0).abs() < 1e-3 && (moved.1 + 40.0).abs() < 1e-3,
+            "the delta was measured from something other than the template default: {moved:?}"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            node_vec2(&project, &network, node, "position", cx),
+            None,
+            "one undo takes the grown parameter away with the rest of the drag"
         );
     }
 

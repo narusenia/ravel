@@ -10479,6 +10479,21 @@ mod tests {
                 );
                 panel.resolve_hover(to, cx);
                 assert_eq!(panel.hovered_handle, handle, "it moved under the release");
+
+                // A pan edits nothing, so `dragging()` is false — but it drags
+                // the picture out from under a pointer that sends no moves.
+                panel.pan_mouse_down(&press_at(panel, (160.0, 215.0)), cx);
+                assert_eq!(
+                    panel.overlay_context(cx).hovered_handle,
+                    None,
+                    "the picture is moving under the pointer"
+                );
+                panel.pan_ended(cx);
+                assert_eq!(
+                    panel.overlay_context(cx).hovered_handle,
+                    handle,
+                    "and comes back when it stops"
+                );
             })
             .unwrap();
     }

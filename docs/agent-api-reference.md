@@ -1678,6 +1678,7 @@ registry::contextual_options(ContextualKind, &Node, &Composition,
     // INPUT ports (a layer's outputs, REQ-LAYER-002/003), each reading as
     // itself, and a reference that resolves to nothing offers nothing.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
+registry::position_param(&NodeRegistry, &Node) -> Option<&Parameter>
 registry::position_param_key(&NodeRegistry, &Node) -> Option<&str>
     // the node's ParamRole::Position parameter — the FIRST declared one, the
     // convention ParamRole::Size measures against. The single answer to
@@ -1686,6 +1687,19 @@ registry::position_param_key(&NodeRegistry, &Node) -> Option<&str>
     // parameter name into a move path — that literal was a second source of
     // truth, and a node declaring the role got a handle it could not be
     // dragged by (`text.layout`'s `position`). None = not movable by a drag.
+    // Resolved from the TEMPLATE's default_params, NOT from node.parameters:
+    // a node saved before the template declared the parameter does not carry
+    // it and nothing backfills one at load (the `normalize_*` passes are
+    // ports and type aliases only), so reading the node would answer None
+    // for every older document. The lifetime says so — the result borrows
+    // the registry, not the node. `position_param` hands back the whole
+    // declaration because an edit needs the DEFAULT too: it is the origin an
+    // older node's geometry was placed at AND the arity/channel shape the
+    // write must produce (`geometry.sort`'s center is Channel3, every other
+    // Position is Channel2). `position_param_key` is that read for its name
+    // alone. A write to a parameter the node lacks INSERTS it, the way
+    // `ravel_ui::document::bind_media_asset_id` does; undo restores the
+    // document snapshot, so the inserted parameter leaves with it.
 template.param_group_declarations() -> &[(String, Vec<String>)]
 template.create_node(id) / registry.create_node(type_key, id) -> Node
     // NOT a pure function of the template for one type key: a `subnet`

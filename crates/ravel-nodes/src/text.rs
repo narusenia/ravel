@@ -115,8 +115,23 @@ impl NodeProcessor for LayoutProcessor {
                 params.str_or("writing_mode", text::TEXT_WRITING_MODES[0]),
             ),
         };
-        let geometry = text::layout_text(font, params.str_or("text", ""), &layout)
+        let mut geometry = text::layout_text(font, params.str_or("text", ""), &layout)
             .with_context(|| format!("laying text out in {}", font.family))?;
+        // The offset is applied here rather than inside `LayoutParams`:
+        // `layout_text` stays a pure shaping function whose origin is the
+        // origin, and placement is the node's business — the same split
+        // `text.on_path` relies on when it throws the layout's `P` away.
+        let [x, y] = params.vec2_or("position", [0.0, 0.0]);
+        if x != 0.0 || y != 0.0 {
+            for position in geometry
+                .instances_mut()
+                .make_mut(names::P)?
+                .as_vec2_mut(names::P)?
+            {
+                position.0 += x;
+                position.1 += y;
+            }
+        }
         Ok(Arc::new(geometry))
     }
 }
@@ -345,6 +360,7 @@ fn optional_geometry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::animation::{AnimationChannel, Interpolation, KeyframeCurve};
     use ravel_core::eval::Evaluator;
     use ravel_core::geometry::{Geometry, Primitive, names};
     use ravel_core::graph::{Graph, ParameterValue};
@@ -611,6 +627,126 @@ mod tests {
         );
     }
 
+    /// Overwrite a template `Channel2` parameter in place, for the same
+    /// reason [`set_param`] exists.
+    fn set_vec2(node: &mut Node, key: &str, x: f32, y: f32) {
+        let param = node
+            .parameters
+            .iter_mut()
+            .find(|param| param.key == key)
+            .unwrap_or_else(|| panic!("the template declares no {key} parameter"));
+        param.value = ParameterValue::vec2(x, y);
+    }
+
+    /// The geometry a lone `text.layout` produces at `frame`, with `tweak`
+    /// applied to its parameters. A fresh `Evaluator` per call, so a test
+    /// that samples two frames is not reading one cached answer twice.
+    fn laid_out_at(text: &str, frame: u64, tweak: impl FnOnce(&mut Node)) -> Geometry {
+        let mut node = layout_node(1, text);
+        tweak(&mut node);
+        let graph = Graph::new().add_node(node).expect("a single-node graph");
+        let mut evaluator = Evaluator::new();
+        evaluator.register(NodeId::new(1), Arc::new(LayoutProcessor));
+        evaluator
+            .evaluate(
+                &graph,
+                NodeId::new(1),
+                &EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080)),
+            )
+            .expect("the graph evaluates")
+            .downcast_ref::<Geometry>()
+            .expect("text.layout produces geometry")
+            .clone()
+    }
+
+    /// The whole point of the parameter (REQ-UI-011's movement semantics): a
+    /// text block can be placed without inserting a `geometry.transform`.
+    /// Measured on `drawn_bounds` rather than on `P`, because what the user
+    /// moved is the ink, and the ink has to move **rigidly** — the same
+    /// width and height at the new place.
+    #[test]
+    fn the_position_parameter_moves_the_drawn_bounds_by_exactly_that_offset() {
+        use ravel_core::geometry::drawn_bounds;
+
+        let origin =
+            drawn_bounds(&laid_out_at("Ravel", 0, |_| {})).expect("a layout has an extent");
+        let moved = drawn_bounds(&laid_out_at("Ravel", 0, |node| {
+            set_vec2(node, "position", 120.0, -40.0);
+        }))
+        .expect("a moved layout has an extent");
+
+        assert!(
+            (moved.x - (origin.x + 120.0)).abs() < 1e-3
+                && (moved.y - (origin.y - 40.0)).abs() < 1e-3,
+            "the ink moved by something other than the offset: {origin:?} then {moved:?}"
+        );
+        assert!(
+            (moved.width - origin.width).abs() < 1e-3
+                && (moved.height - origin.height).abs() < 1e-3,
+            "the offset resized the text: {origin:?} then {moved:?}"
+        );
+    }
+
+    /// The default has to be inert to the bit: every project authored before
+    /// the parameter existed reads `(0, 0)`, and its text must not shift.
+    #[test]
+    fn the_default_position_places_the_text_exactly_where_the_layout_put_it() {
+        let laid_out = laid_out_at("Ravel wraps\nhere", 0, |_| {});
+        let bare = text::layout_text(
+            &text::shared().resolve(&FontQuery::new(
+                text::DEFAULT_FAMILY,
+                text::weight_from_name("regular"),
+                false,
+            )),
+            "Ravel wraps\nhere",
+            &LayoutParams {
+                size: text::DEFAULT_SIZE,
+                tracking: 0.0,
+                leading: 0.0,
+                align: Align::from_name(text::TEXT_ALIGNS[0]),
+                wrap_width: 0.0,
+                anchor: VerticalAnchor::from_name(text::TEXT_ANCHORS[0]),
+                writing_mode: WritingMode::from_name(text::TEXT_WRITING_MODES[0]),
+            },
+        )
+        .expect("the bundled face lays text out");
+        assert_eq!(placements(&laid_out), placements(&bare));
+    }
+
+    /// `position` is a `Channel2`, so animating it is the unified channel
+    /// path rather than anything this node owns — but nothing else asserts
+    /// that the node reads the value *per frame* instead of once.
+    #[test]
+    fn an_animated_position_moves_the_text_frame_by_frame() {
+        let animate = |node: &mut Node| {
+            let mut x = KeyframeCurve::new();
+            x.insert(0, 0.0, Interpolation::Linear);
+            x.insert(10, 100.0, Interpolation::Linear);
+            let param = node
+                .parameters
+                .iter_mut()
+                .find(|param| param.key == "position")
+                .expect("the template declares a position parameter");
+            param.value = ParameterValue::Channel2([
+                AnimationChannel::keyframes(x),
+                AnimationChannel::constant(0.0),
+            ]);
+        };
+        let at = |frame: u64| placements(&laid_out_at("Ravel", frame, animate))[0];
+
+        let start = at(0);
+        let middle = at(5);
+        let end = at(10);
+        assert!(
+            (middle.0 - start.0 - 50.0).abs() < 1e-3 && (end.0 - start.0 - 100.0).abs() < 1e-3,
+            "the animated offset is not read per frame: {start:?}, {middle:?}, {end:?}"
+        );
+        assert!(
+            (middle.1 - start.1).abs() < 1e-4,
+            "a keyed X moved Y as well: {start:?} then {middle:?}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // text.to_path
     // -----------------------------------------------------------------------
@@ -794,6 +930,50 @@ mod tests {
         assert!(
             paths.points().get(names::IN_TAN).is_some(),
             "the bezier tangents have to survive the conversion"
+        );
+    }
+
+    /// `position` survives the conversion, because `expand_instances` bakes
+    /// each instance's placement into its outline points and the offset is
+    /// part of that placement. Worth fixing: the conversion is the one
+    /// operation that throws the instance domain — where the offset was
+    /// applied — away entirely.
+    #[test]
+    fn the_layouts_position_survives_the_conversion_to_paths() {
+        use ravel_core::geometry::drawn_bounds;
+
+        let converted = |x: f32, y: f32| {
+            let mut layout = layout_node(1, "Ravel");
+            set_vec2(&mut layout, "position", x, y);
+            let graph = Graph::new()
+                .add_node(layout)
+                .expect("the layout node")
+                .add_node(to_path_node(2))
+                .expect("the to_path node")
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .expect("layout connects to to_path");
+            let mut evaluator = Evaluator::new();
+            evaluator.register(NodeId::new(1), Arc::new(LayoutProcessor));
+            evaluator.register(NodeId::new(2), Arc::new(ToPathProcessor));
+            let value = evaluator
+                .evaluate(&graph, NodeId::new(2), &ctx())
+                .expect("the conversion evaluates");
+            drawn_bounds(value.downcast_ref::<Geometry>().expect("geometry"))
+                .expect("outlines have an extent")
+        };
+
+        let origin = converted(0.0, 0.0);
+        let moved = converted(120.0, -40.0);
+        assert!(
+            (moved.x - (origin.x + 120.0)).abs() < 1e-3
+                && (moved.y - (origin.y - 40.0)).abs() < 1e-3,
+            "the offset was lost converting to paths: {origin:?} then {moved:?}"
         );
     }
 
@@ -1109,6 +1289,28 @@ mod tests {
         assert!(
             (end - (length - span)).abs() < 1e-3,
             "end lands the run's end on the path's end: {end} against a span of {span}"
+        );
+    }
+
+    /// `text.layout`'s `position` has **no effect** through this node, and
+    /// that is the intended reading of "only `P` and `rot` are rewritten":
+    /// the placement the offset moved is exactly the placement the path
+    /// replaces. Where the run sits is `offset` / `align` here.
+    #[test]
+    fn the_layouts_position_does_not_move_a_run_placed_on_a_path() {
+        let placed_with = |x: f32, y: f32| {
+            let (_, placed) = on_path_of(
+                "Ravel",
+                Some(straight_path(2000.0)),
+                |layout| set_vec2(layout, "position", x, y),
+                |_| {},
+            );
+            placements(&placed)
+        };
+        assert_eq!(
+            placed_with(0.0, 0.0),
+            placed_with(120.0, -40.0),
+            "the path has to decide the placement on its own"
         );
     }
 

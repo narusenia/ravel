@@ -6082,6 +6082,27 @@ mod tests {
         );
     }
 
+    /// **Carrying a `center` parameter is not the same as declaring one.**
+    /// `field.radial` and `field.falloff` both hold a `center` that is the
+    /// middle of a falloff rather than a place on the canvas, and neither
+    /// declares `ParamRole::Position` — so the drag must read the declaration
+    /// and not the spelling. Falling back to `"center"` when no role was
+    /// resolved would make a value a gesture has no business writing
+    /// drag-editable the moment such a node grew a geometry output.
+    #[test]
+    fn a_center_parameter_without_the_role_is_not_a_drag_target() {
+        let node = shape_node("field.radial", &[v2("center", 10.0, 20.0)]);
+        assert!(
+            moved_shape_node(&node, None, (10.0, 20.0), None, (5.0, -5.0), 0).is_none(),
+            "an undeclared `center` was written by a move"
+        );
+        assert_eq!(
+            ravel_core::registry::position_param_key(&registry(), &node),
+            None,
+            "field.radial declares no position, and that is what the drag reads"
+        );
+    }
+
     #[test]
     fn zero_delta_restores_the_origin() {
         let node = shape_node(

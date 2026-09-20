@@ -1646,7 +1646,11 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     .with_derived_params(keys, on, equals, DerivedFrom)   // those `keys` are
     // RESOLVED BY THE NODE while its `on` parameter reads `equals`, so their
     // Properties rows are read-only (`1920 ← auto`) and the stored values are
-    // an inert fallback. One call per derivation: the keys share the
+    // an inert fallback — including a value a connected port is driving: the
+    // derivation OUTRANKS the edge on a row that is both, because the
+    // processor's derived branch reads no parameter at all. The rows also
+    // lose their keyframe and expression toggles, and the deciding parameter
+    // itself cannot be keyed. One call per derivation: the keys share the
     // condition. `shape.rect`'s center/width/height under `sizing = "auto"`
     // are the only ones today.
     .with_param_group(name, keys)        // one Properties section per group,
@@ -1696,6 +1700,16 @@ registry::derived_param(&NodeRegistry, &Node, key) -> Option<&DerivedParam>
     // `is_color_parameter`: the template declares, the node's own parameters
     // decide. A Properties row asks this; it NEVER matches on type_key.
 DerivedFrom::CompFrame       // the composition frame, (0,0)–(w,h)
+registry::is_mode_parameter(&NodeRegistry, type_key, key) -> bool
+    // `key` is a MODE: a parameter some DerivedParam condition reads. Not an
+    // ordinary string — it decides the shape of other rows, so no reader may
+    // offer to animate it or draw a sampled value.
+registry::mode_param(&Node, key) -> Option<&str>
+    // the one mouth every reader of a mode goes through, declarations and
+    // processors alike. The CONSTANT spelling only: an animated mode decides
+    // nothing, everywhere, so the panel (which cannot sample) and the
+    // processor (which could) still agree. A String exposes no wire type, so
+    // an edge cannot drive a mode either.
 registry::comp_frame_rect(resolution) -> DerivedRect { center, width, height }
     // the typed derivation, for a processor. `shape.rect` under
     // `sizing = "auto"` answers exactly `net.in`'s base_quad, vertex for

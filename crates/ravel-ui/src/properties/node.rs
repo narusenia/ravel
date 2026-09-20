@@ -13,7 +13,7 @@ use ravel_core::network::{
 };
 use ravel_core::registry::{
     ContextualKind, NodeRegistry, ParamOption, ParamOptions, ParamRange, contextual_options,
-    derived_param, derived_param_value,
+    derived_param, derived_param_value, is_mode_parameter, mode_param,
 };
 
 use std::collections::HashSet;
@@ -374,6 +374,16 @@ pub fn param_group_titles(node: &Node, registry: &NodeRegistry) -> Vec<(String, 
 /// variant. Numeric fields pick up hard/UI ranges from the node's registry
 /// template when one is declared. String parameters with a registry-declared
 /// option set (e.g. merge `operation`, math `op`) render as an `Enum`.
+/// What a mode row says when its stored spelling is animated.
+///
+/// The whole value is the locale key, the shape
+/// [`no_candidates_reason`] already uses: the row names a *state* instead of
+/// carrying data, and this crate cannot translate, so the host resolves it at
+/// the display boundary (`read_only_value`). A `value ← reason` row would not
+/// work here — that suffix is never translated, because on a driven row it is
+/// a node's own label.
+pub const MODE_NOT_STATIC: &str = "properties.value.mode_not_static";
+
 /// Display text of a derived value: the number for a scalar, the components
 /// in parentheses for a point.
 ///
@@ -401,26 +411,19 @@ fn param_field(
     driven: &[DrivenParam],
     ctx: NodeContext<'_>,
 ) -> PropertyField {
-    // A parameter driven by a connected port is read-only: the
-    // stored value is an inert fallback while the edge exists
-    // (param-input-ports-plan Phase 4).
+    // A parameter the node resolves itself is read-only: the stored value is
+    // an inert fallback, and the row reads the resolved value followed by
+    // what resolved it (`1920 ← auto`). Which parameters those are is the
+    // registry's declaration — never this panel matching on `type_key`,
+    // which is the shape `MED-APP-21` cost once.
     //
-    // **The edge is asked first.** A row can be driven and derived at once
-    // (an edge on `width` while `sizing` reads `auto`), and the edge is the
-    // more specific answer: it names a node the user can go and look at,
-    // where the mode only says the node decided.
-    if let Some(driving) = driven.iter().find(|d| d.key == p.key) {
-        let value = driving.value.as_deref().unwrap_or("connected");
-        return PropertyField::ReadOnly {
-            key: p.key.clone(),
-            value: format!("{value} ← {}", driving.source),
-        };
-    }
-    // A parameter the node resolves itself is read-only for the same reason,
-    // and reads the same way: the resolved value, then what resolved it
-    // (`1920 ← auto`). Which parameters those are is the registry's
-    // declaration — never this panel matching on `type_key`, which is the
-    // shape `MED-APP-21` cost once.
+    // **The derivation is asked before the edge.** A row can be driven and
+    // derived at once (an edge on `width` while `sizing` reads `auto`), and
+    // the derivation wins because it is the one that is true: the processor's
+    // `auto` branch reads no parameter at all, so naming the driving node
+    // there would credit an edge for a number it did not produce. (The plan
+    // called for the opposite on the grounds that an edge is the more
+    // specific answer; it is, when it is an answer.)
     if let Some(declaration) = derived_param(registry, node, &p.key)
         && let Some(components) =
             derived_param_value(declaration.from, &p.key, eval.comp_resolution)
@@ -432,6 +435,28 @@ fn param_field(
                 derived_value_text(&components),
                 declaration.condition.value
             ),
+        };
+    }
+    // A parameter driven by a connected port is read-only for the same
+    // reason: the stored value is an inert fallback while the edge exists
+    // (param-input-ports-plan Phase 4).
+    if let Some(driving) = driven.iter().find(|d| d.key == p.key) {
+        let value = driving.value.as_deref().unwrap_or("connected");
+        return PropertyField::ReadOnly {
+            key: p.key.clone(),
+            value: format!("{value} ← {}", driving.source),
+        };
+    }
+    // A **mode** — the parameter a derivation reads — has one more state than
+    // its own options: an animated spelling, which `mode_param` reads as no
+    // mode at all. Drawing its sampled value would say the node switches
+    // per frame while the rows it gates, and the processor, all read the
+    // fallback. The row says what is in force instead, and is not an edit,
+    // because the edit that would land here is the one that cannot work.
+    if is_mode_parameter(registry, &node.type_key, &p.key) && mode_param(node, &p.key).is_none() {
+        return PropertyField::ReadOnly {
+            key: p.key.clone(),
+            value: MODE_NOT_STATIC.to_string(),
         };
     }
     let ranges = registry.param_range(&node.type_key, &p.key);
@@ -1156,25 +1181,59 @@ mod tests {
         ));
     }
 
-    /// An edge and the `auto` mode can hold at once. The edge wins: it names
-    /// a node the user can go and look at.
+    /// A keyframed mode is the one state its own dropdown cannot show. The
+    /// evaluator reads no mode at all there, so the row says that instead of
+    /// drawing a sampled `auto` the node is not acting on — and the rows it
+    /// would gate stay the user's.
     #[test]
-    fn an_edge_outranks_the_derivation_on_the_same_row() {
+    fn an_animated_mode_says_it_decides_nothing() {
         let registry = registry();
-        let node = sized_rect(&registry, ravel_core::registry::SIZING_AUTO);
+        let mut node = sized_rect(&registry, ravel_core::registry::SIZING_AUTO);
+        let mut steps =
+            ravel_core::animation::StepCurve::new(ravel_core::registry::SIZING_AUTO.to_string());
+        steps.insert(0, ravel_core::registry::SIZING_AUTO.to_string());
+        for param in &mut node.parameters {
+            if param.key == ravel_core::registry::SIZING_PARAM {
+                param.value = ParameterValue::StringSteps(steps.clone());
+            }
+        }
+        let fields = node_params_fields(&node, &registry, 0, &eval(), &[]);
+        match field_named(&fields, ravel_core::registry::SIZING_PARAM) {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, MODE_NOT_STATIC),
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+        assert!(
+            matches!(field_named(&fields, "width"), PropertyField::Float { .. }),
+            "the rows an unreadable mode would gate stay editable"
+        );
+    }
+
+    /// An edge and the `auto` mode can hold at once. The **derivation** wins,
+    /// because the processor's `auto` branch reads no parameter: crediting
+    /// the driving node would put a number on the row that nothing draws.
+    /// Switch back to `fixed` and the edge is the answer again.
+    #[test]
+    fn the_derivation_outranks_an_edge_on_the_same_row() {
+        let registry = registry();
         let driven = [DrivenParam {
             key: "width".into(),
             source: "Constant".into(),
             value: Some("12.000".into()),
         }];
-        let fields = node_params_fields(&node, &registry, 0, &eval(), &driven);
+
+        let auto = sized_rect(&registry, ravel_core::registry::SIZING_AUTO);
+        let fields = node_params_fields(&auto, &registry, 0, &eval(), &driven);
+        for (key, expected) in [("width", "1920 ← auto"), ("height", "1080 ← auto")] {
+            match field_named(&fields, key) {
+                PropertyField::ReadOnly { value, .. } => assert_eq!(value, expected),
+                other => panic!("expected ReadOnly for {key}, got {other:?}"),
+            }
+        }
+
+        let fixed = sized_rect(&registry, ravel_core::registry::SIZING_FIXED);
+        let fields = node_params_fields(&fixed, &registry, 0, &eval(), &driven);
         match field_named(&fields, "width") {
             PropertyField::ReadOnly { value, .. } => assert_eq!(value, "12.000 ← Constant"),
-            other => panic!("expected ReadOnly, got {other:?}"),
-        }
-        // The rows without an edge still say what resolved them.
-        match field_named(&fields, "height") {
-            PropertyField::ReadOnly { value, .. } => assert_eq!(value, "1080 ← auto"),
             other => panic!("expected ReadOnly, got {other:?}"),
         }
     }

@@ -277,6 +277,23 @@ pub fn derived_param<'a>(
         .filter(|declaration| declaration.condition.holds_for(node))
 }
 
+/// Whether `key` is a **mode** on the type `type_key`: a parameter some
+/// [`DerivedParam`] declaration reads to decide whether other rows are the
+/// node's answer rather than the user's.
+///
+/// A mode is not an ordinary string. It decides the *shape* of other rows, so
+/// a reader that offers to animate it (or draws its sampled value) would be
+/// promising a per-frame switch [`mode_param`] deliberately does not make —
+/// see there for why an animated mode decides nothing anywhere.
+pub fn is_mode_parameter(registry: &NodeRegistry, type_key: &str, key: &str) -> bool {
+    registry.get(type_key).is_some_and(|template| {
+        template
+            .derived_params
+            .values()
+            .any(|declaration| declaration.condition.key == key)
+    })
+}
+
 /// The parameter that picks how a node decides its extent, and its two
 /// values.
 ///

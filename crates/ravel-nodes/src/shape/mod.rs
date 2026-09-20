@@ -12,6 +12,7 @@ use std::sync::Arc;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
 use ravel_core::graph::Node;
+use ravel_core::registry::{SIZING_AUTO, SIZING_FIXED, SIZING_PARAM, comp_frame_rect};
 use ravel_core::types::{NodeData, Vec2};
 
 // ---------------------------------------------------------------------------
@@ -30,14 +31,26 @@ impl NodeProcessor for RectProcessor {
     fn process(
         &self,
         _node: &Node,
-        _ctx: &EvalContext,
+        ctx: &EvalContext,
         _inputs: &[Option<Arc<dyn NodeData>>],
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
-        let width = params.f32_or("width", 100.0);
-        let height = params.f32_or("height", 100.0);
+        // `SIZING_FIXED` is the fallback, not merely the template's seed: a
+        // rectangle saved before `sizing` existed arrives without the
+        // parameter, and reading that absence as `auto` would turn every
+        // stored board into a full-frame one.
+        let ([center_x, center_y], width, height) =
+            if params.str_or(SIZING_PARAM, SIZING_FIXED) == SIZING_AUTO {
+                let rect = comp_frame_rect(ctx.comp_resolution);
+                (rect.center, rect.width, rect.height)
+            } else {
+                (
+                    params.vec2_or("center", [0.0, 0.0]),
+                    params.f32_or("width", 100.0),
+                    params.f32_or("height", 100.0),
+                )
+            };
 
         let hw = width / 2.0;
         let hh = height / 2.0;
@@ -416,11 +429,24 @@ mod tests {
     }
 
     fn run(node: &Node, proc: Arc<dyn NodeProcessor>) -> Geometry {
+        run_at(node, proc, &ctx())
+    }
+
+    fn run_at(node: &Node, proc: Arc<dyn NodeProcessor>, ctx: &EvalContext) -> Geometry {
         let graph = Graph::new().add_node(node.clone()).unwrap();
         let mut ev = Evaluator::new();
         ev.register(node.id, proc);
-        let out = ev.evaluate(&graph, node.id, &ctx()).unwrap();
+        let out = ev.evaluate(&graph, node.id, ctx).unwrap();
         out.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    fn point_positions(geo: &Geometry) -> Vec<Vec2> {
+        geo.positions(ravel_core::geometry::Domain::Point)
+            .expect("a P column")
+            .expect("a position column")
+            .planar()
+            .expect("2D positions")
+            .to_vec()
     }
 
     fn bounds_of(geo: &Geometry) -> (f32, f32, f32, f32) {
@@ -467,6 +493,100 @@ mod tests {
         assert!((y - 40.0).abs() < 1e-5);
         assert!((w - 40.0).abs() < 1e-5);
         assert!((h - 20.0).abs() < 1e-5);
+    }
+
+    /// `auto` has to reproduce `net.in`'s base quad **vertex for vertex**,
+    /// not merely a rectangle of the same size: a Solid layer moves from
+    /// that port onto this node, and a half-pixel difference in the centre
+    /// would move every existing Solid.
+    #[test]
+    fn rect_auto_sizing_reproduces_the_base_quad() {
+        let node = make_node(
+            "shape.rect",
+            &[(
+                "sizing",
+                ParameterValue::String(ravel_core::registry::SIZING_AUTO.into()),
+            )],
+        );
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080));
+        let geo = run_at(&node, Arc::new(RectProcessor::from_node(&node)), &ctx);
+        assert_eq!(
+            point_positions(&geo),
+            point_positions(&crate::net::base_quad(ctx.comp_resolution)),
+        );
+    }
+
+    /// The stored `center` / `width` / `height` are inert under `auto`: the
+    /// row is read-only in the panel, and the processor has to agree.
+    #[test]
+    fn rect_auto_sizing_ignores_the_stored_rectangle_and_follows_the_resolution() {
+        let node = make_node(
+            "shape.rect",
+            &[
+                (
+                    "sizing",
+                    ParameterValue::String(ravel_core::registry::SIZING_AUTO.into()),
+                ),
+                ("center", ParameterValue::vec2(7.0, 9.0)),
+                ("width", ParameterValue::Float(40.0)),
+                ("height", ParameterValue::Float(20.0)),
+            ],
+        );
+        let proc = Arc::new(RectProcessor::from_node(&node));
+        let wide = run_at(
+            &node,
+            proc.clone(),
+            &EvalContext::new(0, FrameRate::new(30, 1), (800, 600)),
+        );
+        assert_eq!(bounds_of(&wide), (0.0, 0.0, 800.0, 600.0));
+        let tall = run_at(
+            &node,
+            proc,
+            &EvalContext::new(0, FrameRate::new(30, 1), (400, 900)),
+        );
+        assert_eq!(bounds_of(&tall), (0.0, 0.0, 400.0, 900.0));
+    }
+
+    /// A rectangle stored before `sizing` existed loads without the
+    /// parameter. It keeps its own board — reading the absence as `auto`
+    /// would turn every saved shape into a full-frame one.
+    #[test]
+    fn rect_without_a_sizing_parameter_keeps_its_stored_rectangle() {
+        let node = make_node(
+            "shape.rect",
+            &[
+                ("center", ParameterValue::vec2(50.0, 50.0)),
+                ("width", ParameterValue::Float(40.0)),
+                ("height", ParameterValue::Float(20.0)),
+            ],
+        );
+        assert!(node.parameters.iter().all(|p| p.key != "sizing"));
+        let geo = run(&node, Arc::new(RectProcessor::from_node(&node)));
+        assert_eq!(bounds_of(&geo), (30.0, 40.0, 40.0, 20.0));
+    }
+
+    /// And the explicit `fixed` spelling means the same thing as its
+    /// absence.
+    #[test]
+    fn rect_fixed_sizing_uses_the_stored_rectangle() {
+        let node = make_node(
+            "shape.rect",
+            &[
+                (
+                    "sizing",
+                    ParameterValue::String(ravel_core::registry::SIZING_FIXED.into()),
+                ),
+                ("center", ParameterValue::vec2(50.0, 50.0)),
+                ("width", ParameterValue::Float(40.0)),
+                ("height", ParameterValue::Float(20.0)),
+            ],
+        );
+        let geo = run_at(
+            &node,
+            Arc::new(RectProcessor::from_node(&node)),
+            &EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080)),
+        );
+        assert_eq!(bounds_of(&geo), (30.0, 40.0, 40.0, 20.0));
     }
 
     // -- Ellipse ------------------------------------------------------------

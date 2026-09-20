@@ -114,13 +114,12 @@ pub enum ParamRole {
 pub enum ColorParam {
     /// The parameter is always a colour.
     Always,
-    /// The parameter is a colour only while the node's `key` parameter reads
-    /// `value`.
+    /// The parameter is a colour only while the condition holds.
     ///
     /// `attribute.set` needs this: its `value` is the same `Channel4` for
     /// `type = "color"` and for `type = "vec4"`, and only the first is a
     /// colour (`Graph::port_accepted_types` states the same split).
-    When { key: String, value: String },
+    When(ParamCondition),
 }
 
 impl ColorParam {
@@ -128,15 +127,152 @@ impl ColorParam {
     fn holds_for(&self, node: &Node) -> bool {
         match self {
             Self::Always => true,
-            Self::When { key, value } => node
-                .parameters
-                .iter()
-                .find(|p| &p.key == key)
-                .and_then(|p| p.value.as_str())
-                .is_some_and(|current| current == value),
+            Self::When(condition) => condition.holds_for(node),
         }
     }
 }
+
+/// "While the node's `key` parameter reads `value`" — the one way a
+/// declaration may depend on another parameter of the same node.
+///
+/// Two declarations need it and neither owns it: [`ColorParam::When`] (is
+/// this four-component parameter a colour?) and [`DerivedParam`] (is this row
+/// the node's answer rather than the user's?). A second spelling of "look at
+/// another parameter" would let the two disagree about what counts as
+/// reading a value — [`ParameterValue::as_str`] in particular, which answers
+/// the constant spelling only, so an animated string decides nothing.
+///
+/// [`ParameterValue::as_str`]: crate::graph::ParameterValue::as_str
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParamCondition {
+    /// The parameter that decides.
+    pub key: String,
+    /// The value it has to read.
+    pub value: String,
+}
+
+impl ParamCondition {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Whether the condition holds for `node` right now.
+    pub fn holds_for(&self, node: &Node) -> bool {
+        node.parameters
+            .iter()
+            .find(|p| p.key == self.key)
+            .and_then(|p| p.value.as_str())
+            .is_some_and(|current| current == self.value)
+    }
+}
+
+/// Declares that a parameter is **resolved by the node** while
+/// `condition` holds, so the row is read-only and the stored value is an
+/// inert fallback — the same standing a parameter driven by a connected port
+/// has, for the same reason (UX invariant 6: a control that decides nothing
+/// must not look editable).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedParam {
+    /// When the derivation is in force.
+    pub condition: ParamCondition,
+    /// What the node derives the value from.
+    pub from: DerivedFrom,
+}
+
+/// What a [`DerivedParam`]'s value is derived from.
+///
+/// One arm today, and an enum rather than an implied constant because the
+/// *reader* that has to resolve the value — the Properties row — knows only
+/// that the registry declared this key derived. Answering "derived from
+/// what" by matching the node's `type_key` there is the shape `MED-APP-21`
+/// already cost once. When the raster range (RoD) lands, "the input's
+/// content range" joins this enum and no reader changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedFrom {
+    /// The composition frame: the rectangle `(0, 0)`–`(width, height)`.
+    CompFrame,
+}
+
+/// The rectangle [`DerivedFrom::CompFrame`] resolves to.
+///
+/// Exactly the quad `net.in`'s `base_geometry` has always answered
+/// (`base_quad`), which is what lets a Solid layer move onto a sized node
+/// without a single pixel moving.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DerivedRect {
+    pub center: [f32; 2],
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The rectangle covering a composition of `resolution`.
+pub fn comp_frame_rect(resolution: (u32, u32)) -> DerivedRect {
+    let (w, h) = (resolution.0 as f32, resolution.1 as f32);
+    DerivedRect {
+        center: [w / 2.0, h / 2.0],
+        width: w,
+        height: h,
+    }
+}
+
+/// The components `key` resolves to under `from` — one for a scalar, two for
+/// a point — and `None` for a key the derivation does not name.
+///
+/// The untyped half of [`comp_frame_rect`], for the reader that has only a
+/// parameter key: a Properties row showing what the node decided. The
+/// processor takes the typed half, so the two cannot drift — a derivation
+/// that answered one number here and another one there is the failure
+/// `MED-APP-21` was.
+pub fn derived_param_value(
+    from: DerivedFrom,
+    key: &str,
+    resolution: (u32, u32),
+) -> Option<Vec<f32>> {
+    let rect = match from {
+        DerivedFrom::CompFrame => comp_frame_rect(resolution),
+    };
+    match key {
+        "center" => Some(rect.center.to_vec()),
+        "width" => Some(vec![rect.width]),
+        "height" => Some(vec![rect.height]),
+        _ => None,
+    }
+}
+
+/// The derivation in force for `key` on `node`, or `None` when the row is
+/// the user's to edit.
+///
+/// The counterpart of [`is_color_parameter`]: the template declares, the
+/// node's current parameters decide whether the declaration holds now.
+pub fn derived_param<'a>(
+    registry: &'a NodeRegistry,
+    node: &Node,
+    key: &str,
+) -> Option<&'a DerivedParam> {
+    registry
+        .get(&node.type_key)
+        .and_then(|template| template.derived_param(key))
+        .filter(|declaration| declaration.condition.holds_for(node))
+}
+
+/// The parameter that picks how a node decides its extent, and its two
+/// values.
+///
+/// `auto` means "whatever this node can derive" — the composition frame for
+/// a node with no inputs — and deliberately not "the composition
+/// resolution": when a node that reads an input gains the mode, the same
+/// word has to keep meaning the node's own answer.
+///
+/// **`fixed` is the default a processor falls back to**, not just the
+/// template's seed: a `shape.rect` stored before this parameter existed
+/// loads without it, and reading it as `auto` would turn every saved
+/// rectangle into a full-frame one.
+pub const SIZING_PARAM: &str = "sizing";
+pub const SIZING_AUTO: &str = "auto";
+pub const SIZING_FIXED: &str = "fixed";
 
 /// Whether `key` on `node` is drawn as a colour rather than as a plain
 /// 4-component vector.
@@ -418,6 +554,9 @@ pub struct NodeTemplate {
     /// whether an editor draws a swatch or four numbered components
     /// ([`is_color_parameter`]).
     pub color_params: HashMap<String, ColorParam>,
+    /// Parameters the node resolves itself under a declared condition, which
+    /// is what makes their rows read-only ([`derived_param`]).
+    pub derived_params: HashMap<String, DerivedParam>,
     /// Display groups for this type's parameters: a group name (whose locale
     /// key is `node.<type_key>.group.<name>`) and the parameter keys it
     /// holds, in the order the Properties sections should appear.
@@ -449,6 +588,7 @@ impl NodeTemplate {
             param_options: HashMap::new(),
             param_roles: HashMap::new(),
             color_params: HashMap::new(),
+            derived_params: HashMap::new(),
             param_groups: Vec::new(),
         }
     }
@@ -558,16 +698,43 @@ impl NodeTemplate {
     ) -> Self {
         self.color_params.insert(
             key.into(),
-            ColorParam::When {
-                key: on.into(),
-                value: equals.into(),
-            },
+            ColorParam::When(ParamCondition::new(on, equals)),
         );
         self
     }
 
     pub fn color_param(&self, key: &str) -> Option<&ColorParam> {
         self.color_params.get(key)
+    }
+
+    /// Declares `keys` resolved from `from` while the node's `on` parameter
+    /// reads `equals`.
+    ///
+    /// One call per derivation rather than one per key: the keys of a
+    /// derivation share its condition, and splitting them would let a
+    /// template read `auto` for the width and `fixed` for the height.
+    pub fn with_derived_params<S: Into<String>>(
+        mut self,
+        keys: impl IntoIterator<Item = S>,
+        on: impl Into<String>,
+        equals: impl Into<String>,
+        from: DerivedFrom,
+    ) -> Self {
+        let condition = ParamCondition::new(on, equals);
+        for key in keys {
+            self.derived_params.insert(
+                key.into(),
+                DerivedParam {
+                    condition: condition.clone(),
+                    from,
+                },
+            );
+        }
+        self
+    }
+
+    pub fn derived_param(&self, key: &str) -> Option<&DerivedParam> {
+        self.derived_params.get(key)
     }
 
     /// Declares one display group: `name` (the group's locale key is
@@ -1055,6 +1222,66 @@ mod tests {
             ids
         };
         assert_ne!(ids(&node), ids(&other));
+    }
+
+    // ----- derived parameters (EXT-1) --------------------------------------
+
+    fn rect(sizing: &str) -> Node {
+        Node::new(crate::id::NodeId::new(1), "shape.rect").with_param(
+            SIZING_PARAM,
+            crate::graph::ParameterValue::String(sizing.into()),
+        )
+    }
+
+    fn builtin_registry() -> NodeRegistry {
+        let mut reg = NodeRegistry::new();
+        crate::registry::builtin::register_builtins(&mut reg);
+        reg
+    }
+
+    /// The declaration is read through the node's current parameters, so the
+    /// same template answers differently for two nodes — that is what makes
+    /// the Properties row flip back to editable when the mode is changed.
+    #[test]
+    fn a_derived_declaration_holds_only_while_its_condition_does() {
+        let reg = builtin_registry();
+        for key in ["center", "width", "height"] {
+            assert_eq!(
+                derived_param(&reg, &rect(SIZING_AUTO), key).map(|d| d.from),
+                Some(DerivedFrom::CompFrame),
+                "{key} is derived under auto"
+            );
+            assert!(
+                derived_param(&reg, &rect(SIZING_FIXED), key).is_none(),
+                "{key} is the user's under fixed"
+            );
+        }
+        // The mode itself is never derived: it is the thing that decides.
+        assert!(derived_param(&reg, &rect(SIZING_AUTO), SIZING_PARAM).is_none());
+    }
+
+    /// A `shape.rect` stored before `sizing` existed carries no such
+    /// parameter, so the condition cannot hold and every row stays the
+    /// user's.
+    #[test]
+    fn a_node_without_the_deciding_parameter_derives_nothing() {
+        let reg = builtin_registry();
+        let node = Node::new(crate::id::NodeId::new(1), "shape.rect");
+        assert!(derived_param(&reg, &node, "width").is_none());
+    }
+
+    /// The untyped reader (a Properties row) and the typed one (the
+    /// processor) have to answer the same numbers, which is the whole reason
+    /// one of them delegates to the other.
+    #[test]
+    fn the_untyped_derivation_agrees_with_the_typed_one() {
+        let rect = comp_frame_rect((1920, 1080));
+        assert_eq!(rect.center, [960.0, 540.0]);
+        let value = |key| derived_param_value(DerivedFrom::CompFrame, key, (1920, 1080));
+        assert_eq!(value("center"), Some(vec![960.0, 540.0]));
+        assert_eq!(value("width"), Some(vec![1920.0]));
+        assert_eq!(value("height"), Some(vec![1080.0]));
+        assert_eq!(value("radius"), None);
     }
 
     #[test]

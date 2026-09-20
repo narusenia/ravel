@@ -1,5 +1,11 @@
-// Solid layer: the base quad rasterized with a color constant
-// (REQ-LAYER-008: In → Rasterize(color ← RGB Color) → Out).
+// Solid layer: a composition-sized rectangle rasterized with a color constant
+// (REQ-LAYER-008: Rect → Rasterize(color ← RGB Color) → Out).
+//
+// The rectangle is the layer's own content, which is what gives a Solid a size
+// it can be asked to change (`sizing: "fixed"` plus a width and height). It
+// starts at `"auto"`, whose value is the composition frame — the same quad
+// `net.in`'s `base_geometry` answered before, vertex for vertex, so an
+// existing Solid and a new one look identical.
 LayerTemplate(
     key: "solid",
     display_name: "Solid",
@@ -16,9 +22,17 @@ LayerTemplate(
             ],
         ),
         TemplateNode(
+            key: "rect",
+            type_key: "shape.rect",
+            position: (-360.0, 180.0),
+            params: [
+                Parameter(key: "sizing", value: String("auto")),
+            ],
+        ),
+        TemplateNode(
             key: "color",
             type_key: "constant.color",
-            position: (-360.0, 180.0),
+            position: (-360.0, 360.0),
         ),
         TemplateNode(
             key: "rasterize",
@@ -36,7 +50,7 @@ LayerTemplate(
         ),
     ],
     edges: [
-        TemplateEdge(from: ("in", "base_geometry"), to: ("rasterize", "geometry")),
+        TemplateEdge(from: ("rect", "output"), to: ("rasterize", "geometry")),
         TemplateEdge(from: ("color", "color"), to: ("rasterize", "color")),
         TemplateEdge(from: ("rasterize", "output"), to: ("out", "frame")),
     ],

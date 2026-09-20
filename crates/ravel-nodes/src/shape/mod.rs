@@ -12,7 +12,7 @@ use std::sync::Arc;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
 use ravel_core::graph::Node;
-use ravel_core::registry::{SIZING_AUTO, SIZING_FIXED, SIZING_PARAM, comp_frame_rect};
+use ravel_core::registry::{SIZING_AUTO, SIZING_FIXED, SIZING_PARAM, comp_frame_rect, mode_param};
 use ravel_core::types::{NodeData, Vec2};
 
 // ---------------------------------------------------------------------------
@@ -30,18 +30,21 @@ impl RectProcessor {
 impl NodeProcessor for RectProcessor {
     fn process(
         &self,
-        _node: &Node,
+        node: &Node,
         ctx: &EvalContext,
         _inputs: &[Option<Arc<dyn NodeData>>],
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        // `SIZING_FIXED` is the fallback, not merely the template's seed: a
-        // rectangle saved before `sizing` existed arrives without the
-        // parameter, and reading that absence as `auto` would turn every
-        // stored board into a full-frame one.
+        // The mode comes off the node through `mode_param`, the same mouth the
+        // registry declaration reads, so the Properties row and this processor
+        // can never disagree about which rows are inert. `SIZING_FIXED` is the
+        // fallback, not merely the template's seed: a rectangle saved before
+        // `sizing` existed arrives without the parameter, and reading that
+        // absence as `auto` would turn every stored board into a full-frame
+        // one.
         let ([center_x, center_y], width, height) =
-            if params.str_or(SIZING_PARAM, SIZING_FIXED) == SIZING_AUTO {
+            if mode_param(node, SIZING_PARAM).unwrap_or(SIZING_FIXED) == SIZING_AUTO {
                 let rect = comp_frame_rect(ctx.comp_resolution);
                 (rect.center, rect.width, rect.height)
             } else {
@@ -562,6 +565,32 @@ mod tests {
         );
         assert!(node.parameters.iter().all(|p| p.key != "sizing"));
         let geo = run(&node, Arc::new(RectProcessor::from_node(&node)));
+        assert_eq!(bounds_of(&geo), (30.0, 40.0, 40.0, 20.0));
+    }
+
+    /// An **animated** mode decides nothing. The Properties row cannot sample
+    /// a step curve, so if this processor did, the three rows would look
+    /// editable at a frame where the node was ignoring them (UX invariant 6).
+    /// Both readers go through `mode_param`, so both read this as `fixed`.
+    #[test]
+    fn rect_ignores_an_animated_sizing_and_keeps_its_rectangle() {
+        let mut steps =
+            ravel_core::animation::StepCurve::new(ravel_core::registry::SIZING_AUTO.to_string());
+        steps.insert(0, ravel_core::registry::SIZING_AUTO.to_string());
+        let node = make_node(
+            "shape.rect",
+            &[
+                ("sizing", ParameterValue::StringSteps(steps)),
+                ("center", ParameterValue::vec2(50.0, 50.0)),
+                ("width", ParameterValue::Float(40.0)),
+                ("height", ParameterValue::Float(20.0)),
+            ],
+        );
+        let geo = run_at(
+            &node,
+            Arc::new(RectProcessor::from_node(&node)),
+            &EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080)),
+        );
         assert_eq!(bounds_of(&geo), (30.0, 40.0, 40.0, 20.0));
     }
 

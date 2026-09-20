@@ -161,12 +161,31 @@ impl ParamCondition {
 
     /// Whether the condition holds for `node` right now.
     pub fn holds_for(&self, node: &Node) -> bool {
-        node.parameters
-            .iter()
-            .find(|p| p.key == self.key)
-            .and_then(|p| p.value.as_str())
-            .is_some_and(|current| current == self.value)
+        mode_param(node, &self.key).is_some_and(|current| current == self.value)
     }
+}
+
+/// The value of a **mode** parameter: `node`'s `key` read as a constant
+/// string, and `None` when the node has no such parameter or when it is not a
+/// constant one.
+///
+/// The single mouth every reader of a mode goes through — the declarations
+/// above and the processors that act on the same parameter. A processor that
+/// read it off [`crate::eval::ResolvedParams`] instead would sample an
+/// animated spelling and switch behaviour mid-timeline while the Properties
+/// row, which cannot sample, still showed the parameters as the user's to
+/// edit: a row that looks editable and decides nothing (UX invariant 6). An
+/// animated mode therefore decides **nothing, everywhere** — the two readers
+/// agree because there is one answer, not two.
+///
+/// A mode parameter cannot be driven by an edge either: a `String` exposes no
+/// wire type ([`crate::graph::ParameterValue::port_data_type`]), so the node's
+/// own value is the whole story.
+pub fn mode_param<'a>(node: &'a Node, key: &str) -> Option<&'a str> {
+    node.parameters
+        .iter()
+        .find(|p| p.key == key)
+        .and_then(|p| p.value.as_str())
 }
 
 /// Declares that a parameter is **resolved by the node** while

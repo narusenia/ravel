@@ -1643,6 +1643,12 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // on it; Size is measured from the node's first Position param.
     // Channel2/Channel3 only, and a param driven by a connected port gets no
     // handle. Drag writes are clamped to the param's hard ParamRange.
+    .with_derived_params(keys, on, equals, DerivedFrom)   // those `keys` are
+    // RESOLVED BY THE NODE while its `on` parameter reads `equals`, so their
+    // Properties rows are read-only (`1920 ← auto`) and the stored values are
+    // an inert fallback. One call per derivation: the keys share the
+    // condition. `shape.rect`'s center/width/height under `sizing = "auto"`
+    // are the only ones today.
     .with_param_group(name, keys)        // one Properties section per group,
     // in declaration order (a Vec, not a map: the order IS the display
     // order). Heading = locale key `node.<type_key>.group.<name>`. Keys the
@@ -1678,6 +1684,35 @@ registry::contextual_options(ContextualKind, &Node, &Composition,
     // INPUT ports (a layer's outputs, REQ-LAYER-002/003), each reading as
     // itself, and a reference that resolves to nothing offers nothing.
 registry.param_role(type_key, param_key) -> Option<ParamRole>
+ParamCondition { key, value }.holds_for(&Node) -> bool
+    // "while the node's `key` parameter reads `value`" — the ONE predicate a
+    // declaration may use to depend on another parameter of the same node.
+    // Shared by ColorParam::When and DerivedParam; do not write a second one.
+    // Reads the CONSTANT string spelling only (`ParameterValue::as_str`), so
+    // an animated string decides nothing.
+registry::derived_param(&NodeRegistry, &Node, key) -> Option<&DerivedParam>
+    // DerivedParam { condition: ParamCondition, from: DerivedFrom } — the
+    // declaration IF it holds for this node right now. The counterpart of
+    // `is_color_parameter`: the template declares, the node's own parameters
+    // decide. A Properties row asks this; it NEVER matches on type_key.
+DerivedFrom::CompFrame       // the composition frame, (0,0)–(w,h)
+registry::comp_frame_rect(resolution) -> DerivedRect { center, width, height }
+    // the typed derivation, for a processor. `shape.rect` under
+    // `sizing = "auto"` answers exactly `net.in`'s base_quad, vertex for
+    // vertex — which is what lets the Solid layer template sit on this node
+    // without moving a pixel.
+registry::derived_param_value(DerivedFrom, key, resolution) -> Option<Vec<f32>>
+    // the same derivation for a reader that has only a parameter key (the
+    // Properties row): one component for a scalar, two for a point. None for
+    // a key the derivation does not name. Delegates to `comp_frame_rect`, so
+    // the panel and the processor cannot drift (MED-APP-21).
+SIZING_PARAM = "sizing" / SIZING_AUTO = "auto" / SIZING_FIXED = "fixed"
+    // `auto` means "whatever this node can derive", NOT "the composition
+    // resolution" — a node reading an input keeps the same word when RoD
+    // lands. **A processor must fall back to `fixed`**: a node stored before
+    // the parameter existed loads without it, and reading that as `auto`
+    // would resize every saved rectangle. Nothing backfills the parameter,
+    // so an older `shape.rect` has no mode row at all.
 registry::position_param(&NodeRegistry, &Node) -> Option<&Parameter>
 registry::position_param_key(&NodeRegistry, &Node) -> Option<&str>
     // the node's ParamRole::Position parameter — the FIRST declared one, the

@@ -570,6 +570,7 @@ constant = "Hold each stop's colour until the next (hard bands)"
 
 [properties.field]
 selected_count = "Selected"
+sizing = "Sizing"
 name = "Name"
 width = "Width"
 height = "Height"
@@ -1108,6 +1109,7 @@ color = "Draw color. Element Cd/alpha attributes and a connected color input tak
 label = "Rectangle"
 description = "Creates a rectangle."
 [node."shape.rect".params]
+sizing = "How the extent is decided: auto (the composition frame) or fixed (the values below)."
 center = "Center position in pixels."
 width = "Width in pixels."
 height = "Height in pixels."

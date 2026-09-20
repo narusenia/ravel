@@ -70,6 +70,18 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   （`ravel_ui::properties::node::no_candidates_reason` は網羅 match なので、
   足さないとコンパイルが落ちる。キーは en / ja 両方に入れる）。
   固定の集合で足りるなら `with_param_options` を使うこと
+- **あるパラメータがノード自身で決まるなら `with_derived_params` を宣言する。**
+  引数はキーの並び・条件のキー・条件の値・`DerivedFrom` で、「`sizing` が
+  `auto` を読む間、`center` / `width` / `height` はノードが解決する」を言う。
+  Properties はこの宣言だけを見て行を read-only（`1920 ← auto`）にするので、
+  **パネル側に `type_key` の match を書かない**（`MED-APP-21` で一度払った）。
+  値の導出は `DerivedFrom` の腕ごとに 1 関数
+  （`registry::comp_frame_rect`）で、プロセッサは型付きの方、パネルは
+  `registry::derived_param_value`（キーだけ渡す方）を呼ぶ。2 つに分けて
+  書き直さない — 導出が 2 箇所にあると bbox とラスタがずれる。
+  **プロセッサ側のフォールバックは必ず「宣言していない側」**（`fixed`）に
+  すること。そのパラメータを持たずに保存されたノードがロードされるので、
+  既定を `auto` 側にすると既存の文書が全部化ける
 - **パラメータが 6 個を超えたら `with_param_group` で意味ごとに切る。**
   引数はグループ名とキーの並びで、Properties がその順にセクションへ割る
   （`node.<type_key>.group.<name>` のロケールキーを en / ja 両方に足すこと。

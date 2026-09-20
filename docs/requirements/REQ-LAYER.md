@@ -198,7 +198,10 @@ HDA 的ネットワーク共有等）。
 - **ステータス**: Draft
 - **説明**: 「Solid を追加」等の操作はレイヤー種の構造分岐ではなく、
   初期ネットワークを生成する**テンプレート**となる。標準テンプレート:
-  Solid（`In → Rasterize(color ← RGBColor) → Out`）、Video
+  Solid（`Rect(sizing: auto) → Rasterize(color ← RGBColor) → Out`。
+  レイヤーの内容にサイズを持たせるため、`In` の `base_geometry` ではなく
+  `shape.rect` に載る。`auto` が答える矩形はコンプのフレームそのものなので
+  従来の見た目と同一）、Video
   （`In → Video(asset_id) → Out`）、Shape（`Shape 系 → Rasterize → Out`）、
   Text（`Text(GEOMETRY) → Rasterize → Out`）、PreComp
   （`In → PreComp(comp_id) → Out`）、Null（空ネットワーク、`frame` なし

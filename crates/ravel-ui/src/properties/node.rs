@@ -13,6 +13,7 @@ use ravel_core::network::{
 };
 use ravel_core::registry::{
     ContextualKind, NodeRegistry, ParamOption, ParamOptions, ParamRange, contextual_options,
+    derived_param, derived_param_value,
 };
 
 use std::collections::HashSet;
@@ -373,6 +374,24 @@ pub fn param_group_titles(node: &Node, registry: &NodeRegistry) -> Vec<(String, 
 /// variant. Numeric fields pick up hard/UI ranges from the node's registry
 /// template when one is declared. String parameters with a registry-declared
 /// option set (e.g. merge `operation`, math `op`) render as an `Enum`.
+/// Display text of a derived value: the number for a scalar, the components
+/// in parentheses for a point.
+///
+/// Plain `{}` rather than the `{:.3}` a driven constant uses, because these
+/// are pixel extents read off the composition — `1920`, not `1920.000`.
+fn derived_value_text(components: &[f32]) -> String {
+    match components {
+        [only] => only.to_string(),
+        many => format!(
+            "({})",
+            many.iter()
+                .map(f32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn param_field(
     node: &Node,
     p: &Parameter,
@@ -385,11 +404,34 @@ fn param_field(
     // A parameter driven by a connected port is read-only: the
     // stored value is an inert fallback while the edge exists
     // (param-input-ports-plan Phase 4).
+    //
+    // **The edge is asked first.** A row can be driven and derived at once
+    // (an edge on `width` while `sizing` reads `auto`), and the edge is the
+    // more specific answer: it names a node the user can go and look at,
+    // where the mode only says the node decided.
     if let Some(driving) = driven.iter().find(|d| d.key == p.key) {
         let value = driving.value.as_deref().unwrap_or("connected");
         return PropertyField::ReadOnly {
             key: p.key.clone(),
             value: format!("{value} ← {}", driving.source),
+        };
+    }
+    // A parameter the node resolves itself is read-only for the same reason,
+    // and reads the same way: the resolved value, then what resolved it
+    // (`1920 ← auto`). Which parameters those are is the registry's
+    // declaration — never this panel matching on `type_key`, which is the
+    // shape `MED-APP-21` cost once.
+    if let Some(declaration) = derived_param(registry, node, &p.key)
+        && let Some(components) =
+            derived_param_value(declaration.from, &p.key, eval.comp_resolution)
+    {
+        return PropertyField::ReadOnly {
+            key: p.key.clone(),
+            value: format!(
+                "{} ← {}",
+                derived_value_text(&components),
+                declaration.condition.value
+            ),
         };
     }
     let ranges = registry.param_range(&node.type_key, &p.key);
@@ -1044,6 +1086,97 @@ mod tests {
             "color.ramp must offer the same editable ramp row: {:?}",
             section.fields
         );
+    }
+
+    /// A `shape.rect` seeded from the template, with `sizing` set to
+    /// `mode` — the shape the Solid layer's node has.
+    fn sized_rect(registry: &NodeRegistry, mode: &str) -> Node {
+        let mut node = registry
+            .create_node("shape.rect", NodeId::new(1))
+            .expect("shape.rect is registered");
+        // Assigned in place: `with_param` appends, and a second row under the
+        // same key would leave the template's seed as the one the condition
+        // reads.
+        for param in &mut node.parameters {
+            if param.key == ravel_core::registry::SIZING_PARAM {
+                param.value = ParameterValue::String(mode.into());
+            }
+        }
+        node
+    }
+
+    fn field_named<'a>(fields: &'a [PropertyField], key: &str) -> &'a PropertyField {
+        fields
+            .iter()
+            .find(|field| field.key() == key)
+            .unwrap_or_else(|| panic!("no {key} row in {fields:?}"))
+    }
+
+    /// Under `auto` the node decides its own extent, so the three rows show
+    /// what it decided and cannot be edited (UX invariant 6). The value is
+    /// the composition's, read through the same derivation the processor
+    /// uses.
+    #[test]
+    fn derived_params_render_read_only_with_the_resolved_value() {
+        let registry = registry();
+        let node = sized_rect(&registry, ravel_core::registry::SIZING_AUTO);
+        let fields = node_params_fields(&node, &registry, 0, &eval(), &[]);
+        for (key, expected) in [
+            ("center", "(960, 540) ← auto"),
+            ("width", "1920 ← auto"),
+            ("height", "1080 ← auto"),
+        ] {
+            match field_named(&fields, key) {
+                PropertyField::ReadOnly { value, .. } => assert_eq!(value, expected),
+                other => panic!("expected ReadOnly for {key}, got {other:?}"),
+            }
+        }
+        // The mode itself stays a dropdown: it is the one row that acts.
+        assert!(matches!(
+            field_named(&fields, ravel_core::registry::SIZING_PARAM),
+            PropertyField::Enum { .. }
+        ));
+    }
+
+    /// And switching back hands the rows to the user again — the variant
+    /// change is what rebuilds the widgets (`field_shape_key` is paired with
+    /// the field's discriminant).
+    #[test]
+    fn fixed_sizing_leaves_the_rows_editable() {
+        let registry = registry();
+        let node = sized_rect(&registry, ravel_core::registry::SIZING_FIXED);
+        let fields = node_params_fields(&node, &registry, 0, &eval(), &[]);
+        assert!(matches!(
+            field_named(&fields, "width"),
+            PropertyField::Float { .. }
+        ));
+        assert!(matches!(
+            field_named(&fields, "center"),
+            PropertyField::Vector { .. }
+        ));
+    }
+
+    /// An edge and the `auto` mode can hold at once. The edge wins: it names
+    /// a node the user can go and look at.
+    #[test]
+    fn an_edge_outranks_the_derivation_on_the_same_row() {
+        let registry = registry();
+        let node = sized_rect(&registry, ravel_core::registry::SIZING_AUTO);
+        let driven = [DrivenParam {
+            key: "width".into(),
+            source: "Constant".into(),
+            value: Some("12.000".into()),
+        }];
+        let fields = node_params_fields(&node, &registry, 0, &eval(), &driven);
+        match field_named(&fields, "width") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, "12.000 ← Constant"),
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+        // The rows without an edge still say what resolved them.
+        match field_named(&fields, "height") {
+            PropertyField::ReadOnly { value, .. } => assert_eq!(value, "1080 ← auto"),
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
     }
 
     #[test]

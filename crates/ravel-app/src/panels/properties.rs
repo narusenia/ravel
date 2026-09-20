@@ -96,7 +96,7 @@ use super::{PropertiesTarget, SelectedPropertiesTarget, port_error_message};
 /// Localized display label for a property field key. Custom In-node
 /// parameters show their bare name; other unknown keys (dynamic node
 /// parameters) fall back to the key rather than the lookup path.
-fn field_label(key: &str) -> String {
+pub(crate) fn field_label(key: &str) -> String {
     if let Some(name) = key.strip_prefix(CUSTOM_FIELD_PREFIX) {
         return name.to_string();
     }

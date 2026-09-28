@@ -5882,7 +5882,13 @@ mod tests {
                 }),
                 _ => continue,
             };
-            evaluator.register(node.id, processor);
+            // Through the same wrapper `processor_for_node` applies, so a
+            // node's declared transform section reaches the bbox the overlay
+            // measures exactly as it reaches a render.
+            evaluator.register(
+                node.id,
+                ravel_nodes::transform_section::wrap(node, processor),
+            );
         }
     }
 
@@ -6230,7 +6236,10 @@ mod tests {
     /// instead of inventing a parameter.
     #[test]
     fn a_node_with_no_position_parameter_does_not_move() {
-        let node = shape_node("geometry.merge", &[]);
+        // `geometry.connect` adds connectivity to what it is given and holds
+        // no place of its own — unlike `geometry.merge`, which declares the
+        // transform section and is therefore movable now.
+        let node = shape_node("geometry.connect", &[]);
         assert!(
             moved_shape_node(&node, None, (0.0, 0.0), None, (5.0, -5.0), 0).is_none(),
             "a node with no position is not movable"
@@ -9170,6 +9179,42 @@ mod tests {
         NetworkPath,
         NodeId,
     ) {
+        let mut node = registry()
+            .create_node("text.layout", NodeId::next())
+            .expect("text.layout is registered");
+        let text = node
+            .parameters
+            .iter_mut()
+            .find(|param| param.key == "text")
+            .expect("the template declares a text parameter");
+        text.value = ParameterValue::String("Ravel".into());
+        if legacy {
+            // What a document authored before the template declared
+            // `position` holds. Nothing backfills it at load, so this is
+            // the node the drag has to cope with.
+            node.parameters.retain(|param| param.key != "position");
+        }
+        let node_id = node.id;
+        let (window, project, network) =
+            network_setup(cx, Graph::new().add_node(node).unwrap(), cx_nodes(&[]));
+        (window, project, network, node_id)
+    }
+
+    /// The canvas node selection a [`network_setup`] starts with.
+    fn cx_nodes(nodes: &[NodeId]) -> HashSet<NodeId> {
+        nodes.iter().copied().collect()
+    }
+
+    /// A one-layer document holding `network`, open in a Viewer panel with
+    /// `selected` picked on the canvas and the overlay results published.
+    ///
+    /// The generic half of [`text_layout_setup`]: everything a drag test needs
+    /// that is not the graph it drags.
+    fn network_setup(
+        cx: &mut TestAppContext,
+        network: Graph,
+        selected: HashSet<NodeId>,
+    ) -> (WindowHandle<ViewerPanel>, Entity<ProjectState>, NetworkPath) {
         use ravel_core::id::LayerId;
 
         crate::project_state::disable_background_eval_for_tests();
@@ -9184,27 +9229,9 @@ mod tests {
             cx.set_global(ToolState::default());
         });
 
-        let (comp_id, layer, node_id) = project.update(cx, |project, cx| {
+        let (comp_id, layer) = project.update(cx, |project, cx| {
             let comp_id = project.document().root_comp.expect("root comp");
             let layer = LayerId::next();
-            let mut node = project
-                .registry()
-                .create_node("text.layout", NodeId::next())
-                .expect("text.layout is registered");
-            let text = node
-                .parameters
-                .iter_mut()
-                .find(|param| param.key == "text")
-                .expect("the template declares a text parameter");
-            text.value = ParameterValue::String("Ravel".into());
-            if legacy {
-                // What a document authored before the template declared
-                // `position` holds. Nothing backfills it at load, so this is
-                // the node the drag has to cope with.
-                node.parameters.retain(|param| param.key != "position");
-            }
-            let node_id = node.id;
-            let network = Graph::new().add_node(node).unwrap();
             let doc = ravel_ui::document::add_layer(
                 project.document(),
                 comp_id,
@@ -9212,14 +9239,14 @@ mod tests {
             )
             .unwrap();
             project.commit_document(doc, InvalidationHint::Structural, cx);
-            (comp_id, layer, node_id)
+            (comp_id, layer)
         });
-        let network = NetworkPath::layer(comp_id, layer);
+        let path = NetworkPath::layer(comp_id, layer);
         cx.update(|cx| {
             crate::panels::set_layer_selection(vec![layer], cx);
             cx.set_global(CanvasSelection {
-                path: Some(network.clone()),
-                nodes: HashSet::new(),
+                path: Some(path.clone()),
+                nodes: selected,
             });
         });
 
@@ -9234,7 +9261,7 @@ mod tests {
             })
             .unwrap();
         publish_geometry_results(&project, cx);
-        (window, project, network, node_id)
+        (window, project, path)
     }
 
     /// The `key` vector parameter of `node` as the live document holds it, at
@@ -9318,6 +9345,151 @@ mod tests {
             node_vec2(&project, &network, node, "position", cx),
             Some((0.0, 0.0)),
             "one undo covers the whole drag"
+        );
+    }
+
+    /// A `test.frame` feeding a `geometry.from_image`: the network that has
+    /// no place of its own, which is what the transform section gives it.
+    fn image_network() -> (Graph, NodeId) {
+        use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
+
+        let frame = shape_node("test.frame", &[]).with_output("frame", DataTypeId::FRAME_BUFFER);
+        let frame_id = frame.id;
+        let image = registry()
+            .create_node("geometry.from_image", NodeId::next())
+            .expect("geometry.from_image is registered");
+        let image_id = image.id;
+        let graph = Graph::new()
+            .add_node(frame)
+            .unwrap()
+            .add_node(image)
+            .unwrap()
+            .add_edge(
+                EdgeId::next(),
+                frame_id,
+                OutputPortIndex(0),
+                image_id,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        (graph, image_id)
+    }
+
+    /// The drag of `node`'s bbox by `delta`, pressed a quarter in from its
+    /// top-left corner — the middle belongs to the layer shell's move grip.
+    fn drag_node_bbox(
+        window: &WindowHandle<ViewerPanel>,
+        network: &NetworkPath,
+        node: NodeId,
+        delta: (f32, f32),
+        cx: &mut TestAppContext,
+    ) {
+        let inside = window
+            .update(cx, |panel, _window, cx| {
+                let ctx = panel.overlay_context(cx);
+                let rect = node_comp_rect(&ctx, network, node).expect("the node has a bbox");
+                (rect.x + rect.w * 0.25, rect.y + rect.h * 0.25)
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.left_mouse_down(&press_comp(panel, inside, Modifiers::default()), cx);
+                assert!(panel.move_drag.is_some(), "the press grabbed nothing");
+                let to = window_point(panel, (inside.0 + delta.0, inside.1 + delta.1));
+                // The primary modifier suppresses snapping, so what is
+                // asserted is the parameter write and not a guide.
+                panel.move_dragged(
+                    to,
+                    DragModifiers {
+                        primary: true,
+                        ..DragModifiers::default()
+                    },
+                    cx,
+                );
+                panel.move_ended(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// A node whose **transform section** carries the position role is
+    /// dragged by the section's `translate` (REQ-UI-011's movement
+    /// semantics). `geometry.from_image` stamps its picture on the origin and
+    /// has no parameter saying otherwise, so before the section a drag had
+    /// nothing to write and the image could not be placed without inserting a
+    /// `geometry.transform` by hand.
+    #[gpui::test]
+    fn a_bbox_drag_writes_the_sections_translate(cx: &mut TestAppContext) {
+        let (graph, image) = image_network();
+        let (window, project, network) = network_setup(cx, graph, cx_nodes(&[]));
+        assert_eq!(
+            node_vec2(&project, &network, image, "translate", cx),
+            Some((0.0, 0.0)),
+            "the section starts at its default"
+        );
+
+        drag_node_bbox(&window, &network, image, (120.0, -40.0), cx);
+
+        let moved =
+            node_vec2(&project, &network, image, "translate", cx).expect("translate is set");
+        assert!(
+            (moved.0 - 120.0).abs() < 1e-3 && (moved.1 + 40.0).abs() < 1e-3,
+            "the drag delta landed in the section's translate: {moved:?}"
+        );
+        assert_eq!(
+            node_vec2(&project, &network, image, "center", cx),
+            None,
+            "and no `center` parameter was invented to hold it"
+        );
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            node_vec2(&project, &network, image, "translate", cx),
+            Some((0.0, 0.0)),
+            "one undo covers the whole drag"
+        );
+    }
+
+    /// The same gesture on a `shape.rect` still writes **`center`**. The
+    /// section it now declares is an extra move on top of an intrinsic place,
+    /// not a replacement for it, and the template says so by leaving the
+    /// section's `translate` without the role.
+    #[gpui::test]
+    fn a_bbox_drag_on_a_shape_still_writes_its_center(cx: &mut TestAppContext) {
+        let mut rect = registry()
+            .create_node("shape.rect", NodeId::next())
+            .expect("shape.rect is registered");
+        for (key, value) in [
+            (
+                "sizing",
+                ParameterValue::String(ravel_core::registry::SIZING_FIXED.into()),
+            ),
+            ("width", ParameterValue::Float(200.0)),
+            ("height", ParameterValue::Float(100.0)),
+        ] {
+            let slot = rect
+                .parameters
+                .iter_mut()
+                .find(|param| param.key == key)
+                .expect("shape.rect declares it");
+            slot.value = value;
+        }
+        let rect_id = rect.id;
+        let (window, project, network) =
+            network_setup(cx, Graph::new().add_node(rect).unwrap(), cx_nodes(&[]));
+
+        drag_node_bbox(&window, &network, rect_id, (60.0, 25.0), cx);
+
+        let moved = node_vec2(&project, &network, rect_id, "center", cx).expect("center is set");
+        assert!(
+            (moved.0 - 60.0).abs() < 1e-3 && (moved.1 - 25.0).abs() < 1e-3,
+            "the drag delta landed in `center`: {moved:?}"
+        );
+        assert_eq!(
+            node_vec2(&project, &network, rect_id, "translate", cx),
+            Some((0.0, 0.0)),
+            "the section's translate is not what a shape drag writes"
         );
     }
 

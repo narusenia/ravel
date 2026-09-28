@@ -2274,7 +2274,20 @@ impl Evaluator {
     ///
     /// [`InvalidationHint::Shell`]: crate::runtime::InvalidationHint::Shell
     pub fn invalidate_shell_readers(&mut self, scopes: &[ShellScope]) {
-        if scopes.is_empty() {
+        self.invalidate_readers_of(scopes, SHELL_READER_TYPE_KEYS);
+    }
+
+    /// The walk [`invalidate_shell_readers`](Self::invalidate_shell_readers)
+    /// runs, with the reader types as an argument.
+    ///
+    /// Split out so the walk itself is testable: `SHELL_READER_TYPE_KEYS` is
+    /// empty until `layer.info` exists, and a walk that can only be driven
+    /// with an empty list is a walk nothing checks. A test passes a type it
+    /// builds a document out of; the production path above passes the real
+    /// list, so nothing is swapped out under `cfg(test)` and the caller of
+    /// record stays the one that runs.
+    fn invalidate_readers_of(&mut self, scopes: &[ShellScope], keys: &[&str]) {
+        if scopes.is_empty() || keys.is_empty() {
             return;
         }
         let Some(document) = self.document.clone() else {
@@ -2285,7 +2298,7 @@ impl Evaluator {
                 continue;
             }
             for layer in &comp.layers {
-                if holds_a_node_of(&layer.network, SHELL_READER_TYPE_KEYS) {
+                if holds_a_node_of(&layer.network, keys) {
                     self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
                 }
             }
@@ -3796,6 +3809,121 @@ mod tests {
             .add_node(Node::new(NodeId::new(4), "subnet").with_subnet(nested))
             .unwrap();
         assert!(holds_a_node_of(&deeper, &["layer.info"]));
+    }
+
+    /// The walk itself, end to end: a shell hint drops the evaluator scope of
+    /// every layer whose network holds a reader, and leaves the rest cached.
+    ///
+    /// Driven through `invalidate_readers_of` with a type this test builds a
+    /// document out of. The production entry point runs the same code with
+    /// `SHELL_READER_TYPE_KEYS`, which is empty until `layer.info` exists —
+    /// asserted below as well, so that "today it invalidates nothing" is a
+    /// pinned property of the real path rather than an untested claim.
+    #[test]
+    fn a_shell_hint_drops_the_scopes_of_the_layers_that_read_a_shell() {
+        use crate::composition::Composition;
+        const READER: &str = "test.shell_reader";
+        let comp_id = CompId::new(1);
+        let (reads, plain) = (LayerId::new(1), LayerId::new(2));
+
+        let reads_calls = Arc::new(AtomicUsize::new(0));
+        let plain_calls = Arc::new(AtomicUsize::new(0));
+
+        let reads_network = Graph::new()
+            .add_node(scalar_node(7))
+            .unwrap()
+            .add_node(Node::new(NodeId::new(70), READER))
+            .unwrap();
+        let plain_network = Graph::new().add_node(scalar_node(8)).unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(7),
+            Arc::new(FrameSource {
+                calls: reads_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(8),
+            Arc::new(FrameSource {
+                calls: plain_calls.clone(),
+            }),
+        );
+        ev.set_document(Arc::new(
+            Document::default().with_composition(
+                Composition::new(comp_id, "C", (16, 16), FPS, 100)
+                    .add_layer(Layer::new(reads, "reads a shell", reads_network.clone()))
+                    .add_layer(Layer::new(plain, "reads nothing", plain_network.clone())),
+            ),
+        ));
+
+        let pull = |ev: &mut Evaluator| {
+            ev.evaluate_sub(
+                PathSegment::Layer(comp_id, reads),
+                &reads_network,
+                NodeId::new(7),
+                &ctx_at(0),
+                Vec::new(),
+            )
+            .unwrap();
+            ev.evaluate_sub(
+                PathSegment::Layer(comp_id, plain),
+                &plain_network,
+                NodeId::new(8),
+                &ctx_at(0),
+                Vec::new(),
+            )
+            .unwrap();
+            (
+                reads_calls.load(Ordering::Relaxed),
+                plain_calls.load(Ordering::Relaxed),
+            )
+        };
+
+        assert_eq!(pull(&mut ev), (1, 1), "the first pull evaluated both");
+        assert_eq!(pull(&mut ev), (1, 1), "the second pull was not a cache hit");
+
+        // A scope in another composition reaches neither.
+        ev.invalidate_readers_of(
+            &[ShellScope {
+                comp: CompId::new(9),
+                layer: None,
+            }],
+            &[READER],
+        );
+        assert_eq!(
+            pull(&mut ev),
+            (1, 1),
+            "another composition's shell edit dropped a scope"
+        );
+
+        // The production entry point, on the right composition: no type reads
+        // a shell yet, so it is a no-op — by running the walk with an empty
+        // list, not by being left uncalled.
+        ev.invalidate_shell_readers(&[ShellScope {
+            comp: comp_id,
+            layer: None,
+        }]);
+        assert_eq!(
+            pull(&mut ev),
+            (1, 1),
+            "a reader type appeared in SHELL_READER_TYPE_KEYS without this test being updated"
+        );
+
+        // The walk with a reader type: only the layer that holds one loses
+        // its scope.
+        ev.invalidate_readers_of(
+            &[ShellScope {
+                comp: comp_id,
+                layer: None,
+            }],
+            &[READER],
+        );
+        assert_eq!(
+            pull(&mut ev),
+            (2, 1),
+            "the reading layer's scope survived, or the other layer's did not"
+        );
     }
 
     // ---- EvalContext::sample_frame ----------------------------------------

@@ -1483,3 +1483,31 @@ Properties の行は **`&node.parameters` を回して**作られる。ノード
 **既存プロジェクトでだけ編集できないパラメータ**が生まれる。UX 不変条件 6
 （動かない制御は無効に見せる）と 7（値の意味が編集器に出る）の隣で、
 「制御そのものが出ない」形。パラメータを足すたびに増えるので low ではない。
+
+---
+
+## MED-APP-02 | bug | タイムライン終端の自動一時停止が publish されない（再生ボタンが戻らず、音声も止まらない）
+
+> **解決済み**: `2ba8d007`（2026-07-30、`HIGH-24` の修正）で同時に塞がった。
+> `Transport::tick_with` の「変化なし」判定が `frame == last_frame` だけでなく
+> `playing == was_playing` も見るようになり、**フレームが動かないまま再生状態だけが
+> false に落ちたティックが `TransportUpdate` を返す**。ティックループはそれを
+> `publish` して `forward_transport(false, …)` へ渡すので、再生ボタンも音声エンジンも
+> 終端で止まる。`wall_tick_reports_auto_pause_after_the_last_frame_was_published` が
+> この経路を固定している（2026-09-28 に変異で確認 — 判定から状態の比較を外すと落ちる）。
+> 個票は `HIGH-24` と別経路として起票されたまま残っていた。
+
+
+**該当**: `crates/ravel-app/src/playback.rs:220-236`, `:437-472`
+
+通常のティック間隔では最終フレームが `playing=true` で publish される。
+次のティックで `frame_from` 内部が自動一時停止するが、フレームが変わらないため
+`tick_with` が `None` を返し、`publish` / `forward_transport(false)` が走らない。
+再生 / 一時停止アイコンは「再生中」のまま（notify されない）、
+音声エンジンには Pause が送られない。
+（一時停止が publish されるのはフレームがまだ動く late-tick 経路のみ。）
+
+**修正方針**: フレーム移動が無くても `is_playing()` が false に遷移した時点で
+更新を emit する（またはティックループで明示的に publish / forward する）。
+
+---

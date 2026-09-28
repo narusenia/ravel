@@ -2,22 +2,6 @@
 
 ---
 
-## MED-APP-02 | bug | タイムライン終端の自動一時停止が publish されない（再生ボタンが戻らず、音声も止まらない）
-
-**該当**: `crates/ravel-app/src/playback.rs:220-236`, `:437-472`
-
-通常のティック間隔では最終フレームが `playing=true` で publish される。
-次のティックで `frame_from` 内部が自動一時停止するが、フレームが変わらないため
-`tick_with` が `None` を返し、`publish` / `forward_transport(false)` が走らない。
-再生 / 一時停止アイコンは「再生中」のまま（notify されない）、
-音声エンジンには Pause が送られない。
-（一時停止が publish されるのはフレームがまだ動く late-tick 経路のみ。）
-
-**修正方針**: フレーム移動が無くても `is_playing()` が false に遷移した時点で
-更新を emit する（またはティックループで明示的に publish / forward する）。
-
----
-
 ## MED-APP-09 | bug | 音声トラック構築がライブ編集ごとに UI スレッドで無制限の作業を行う
 
 **該当**: `crates/ravel-app/src/audio/mixdown.rs:213-219`, `:255-272`,

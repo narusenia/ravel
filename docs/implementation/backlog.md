@@ -42,6 +42,7 @@
 | KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
 | KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
 | KIT-3 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | `gpui-kit-migration-plan.md` |
+| KIT-6 | 借りられる primitive の採否（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | `gpui-kit-migration-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
@@ -718,7 +719,7 @@ BLUR-3 の `quality` は CACHE-2 の `CacheIdentity` に軸として足す。
 | KIT-2 | 🟡 | gpui-component フォークの棚卸し（**上流 PR は範囲外** — 2026-09-08 の決定） | KIT-1 ✅ |
 | KIT-3 | 🟡 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す（`UIX-4` が実質これ） | KIT-1 ✅ |
 | KIT-4 | 🟡 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較（判断の単位） | KIT-1 ✅ |
-| KIT-6 | ⬜ | 借りられる primitive の採否を 1 つずつ決める（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | KIT-1 ✅ |
+| KIT-6 | 🟡 | 借りられる primitive の採否を 1 つずつ決める（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | KIT-1 ✅ |
 | KIT-5 | ⬜ | 文書更新（`architecture.md` のフォーク方針、`gpui-ui-guide.md`） | KIT-1 ✅ |
 
 **`KIT-0` / `KIT-0b` は済み。判断は GO**（2026-09-07）。上流 API を

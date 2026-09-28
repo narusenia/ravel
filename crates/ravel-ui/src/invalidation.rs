@@ -22,6 +22,16 @@
 //!   time. Nothing in the chain goes stale, but a node that *reads* the
 //!   shell does, and `Shell` is what says so without dragging in the full
 //!   `Structural` rebuild a scrub would pay per mouse move (`RESP-3`, #193).
+//!
+//! The third arm is deliberately a catch-all, and that makes it wider than
+//! it strictly has to be: `locked` gates editing rather than rendering and
+//! no information node reads it, so its `Shell` hint invalidates readers
+//! that could not have changed. That is the cheaper mistake. Splitting the
+//! catch-all would mean a second list of field keys, and the next shell
+//! field would then have to be added to the right one of two — which is the
+//! drift this module exists to remove. Over-invalidating on a click costs
+//! one composition-wide scan; missing a field costs a stale picture nobody
+//! can explain.
 
 use crate::keyframes::PropertyRowId;
 use crate::properties::layer::{CUSTOM_FIELD_PREFIX, in_node_id};
@@ -93,10 +103,14 @@ fn shell_hint(comp: CompId, layer: LayerId) -> InvalidationHint {
 mod tests {
     use super::*;
     use crate::panels::timeline::PropertyGroup;
+    use crate::properties::layer::sections_for_layer;
+    use ravel_core::composition::Composition;
+    use ravel_core::eval::EvalContext;
     use ravel_core::graph::{Graph, Node};
     use ravel_core::id::{DataTypeId, NodeId};
     use ravel_core::network as net;
     use ravel_core::runtime::ShellScope;
+    use ravel_core::types::FrameRate;
 
     fn layer_with_in_node() -> Layer {
         let network = Graph::new()
@@ -109,6 +123,17 @@ mod tests {
         Layer::new(LayerId::next(), "L", network).with_time(0, 0, 300)
     }
 
+    fn comp_of(layer: &Layer) -> Composition {
+        Composition::new(
+            CompId::next(),
+            "Comp",
+            (1920, 1080),
+            FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(layer.clone())
+    }
+
     fn scope(comp: CompId, layer: LayerId) -> ShellScope {
         ShellScope {
             comp,
@@ -116,50 +141,98 @@ mod tests {
         }
     }
 
-    /// `RESP-3` (#193): a shell field edit names the shell it touched and
-    /// stays below `Structural`, which a transform scrub would otherwise pay
-    /// once per mouse move.
+    /// Every field key the Properties panel actually offers for a layer,
+    /// taken from the production section builder rather than written out
+    /// here — a list typed by hand drifts, and a key that no longer exists
+    /// falls into the catch-all and pins nothing.
+    fn offered_field_keys(layer: &Layer) -> Vec<String> {
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080));
+        let keys: Vec<String> = sections_for_layer(layer, &comp_of(layer), &ctx, None)
+            .iter()
+            .flat_map(|section| section.fields.iter())
+            .map(|field| field.key().to_string())
+            .collect();
+        // The enumeration is the test's foundation: if it ever comes back
+        // empty or without the transform, everything below passes vacuously.
+        for expected in [
+            "position_x",
+            "position_y",
+            "rotation",
+            "opacity",
+            "blend_mode",
+        ] {
+            assert!(
+                keys.iter().any(|key| key == expected),
+                "the layer sections no longer offer {expected}: {keys:?}"
+            );
+        }
+        keys
+    }
+
+    /// `RESP-3` (#193): every offered field is classified, and the shell
+    /// fields get `Shell` naming their own shell rather than `Structural` —
+    /// which a transform scrub would pay once per mouse move, dropping every
+    /// cache and recompiling every GPU pipeline at that rate.
+    ///
+    /// Asserting equality, not `!= Structural`: a catch-all that returned
+    /// `None` would satisfy the weaker form while leaving every shell reader
+    /// stale.
     #[test]
-    fn every_shell_field_posts_a_shell_hint_without_escalating() {
-        let comp = CompId::next();
+    fn every_offered_field_is_classified_and_shell_fields_post_shell() {
         let layer = layer_with_in_node();
-        let expected = InvalidationHint::Shell {
+        let comp = comp_of(&layer).id;
+        let shell = InvalidationHint::Shell {
             scopes: vec![scope(comp, layer.id)],
             params: Vec::new(),
         };
-        for key in [
-            "transform.position",
-            "transform.rotation",
-            "transform.scale",
-            "transform.anchor",
-            "opacity",
-            "start_frame",
-            "in_frame",
-            "out_frame",
-            "audio_gain",
-            "name",
-            "locked",
-        ] {
+        let in_node = in_node_id(&layer).expect("the fixture network has an In node");
+
+        for key in offered_field_keys(&layer) {
+            let expected = if key.starts_with(CUSTOM_FIELD_PREFIX) {
+                InvalidationHint::Params(vec![in_node])
+            } else if STRUCTURAL_LAYER_FIELDS.contains(&key.as_str()) {
+                InvalidationHint::Structural
+            } else {
+                shell.clone()
+            };
             assert_eq!(
-                layer_field_hint(key, comp, &layer),
+                layer_field_hint(&key, comp, &layer),
                 expected,
-                "{key} did not post a Shell hint naming its own shell"
+                "{key} is classified wrongly"
             );
         }
     }
 
-    /// The two edits that are *not* shell hints, and why.
+    /// The five that stay `Structural`, named one by one so that dropping
+    /// one from the list is a failure rather than a silent reclassification
+    /// the loop above would happily agree with.
     #[test]
-    fn merge_chain_fields_stay_structural_and_custom_params_stay_params() {
-        let comp = CompId::next();
+    fn the_merge_chain_fields_stay_structural() {
         let layer = layer_with_in_node();
-        for key in STRUCTURAL_LAYER_FIELDS {
+        let comp = comp_of(&layer).id;
+        for key in ["blend_mode", "solo", "muted", "adjustment", "parent"] {
             assert_eq!(
                 layer_field_hint(key, comp, &layer),
                 InvalidationHint::Structural,
                 "{key} stopped rebuilding the compiled chain"
             );
+            assert!(
+                STRUCTURAL_LAYER_FIELDS.contains(&key),
+                "{key} left STRUCTURAL_LAYER_FIELDS"
+            );
         }
+        assert_eq!(
+            STRUCTURAL_LAYER_FIELDS.len(),
+            5,
+            "a field joined or left the structural list without a reason here"
+        );
+    }
+
+    /// A custom parameter is the layer network's In node, not the shell.
+    #[test]
+    fn a_custom_parameter_names_the_in_node() {
+        let layer = layer_with_in_node();
+        let comp = comp_of(&layer).id;
         let in_node = in_node_id(&layer).expect("the fixture network has an In node");
         assert_eq!(
             layer_field_hint(&format!("{CUSTOM_FIELD_PREFIX}amount"), comp, &layer),
@@ -171,15 +244,15 @@ mod tests {
     /// a shell group scrubs the shell, a network row names its node.
     #[test]
     fn a_property_row_agrees_with_the_field_key_it_stands_for() {
-        let comp = CompId::next();
         let layer = layer_with_in_node();
+        let comp = comp_of(&layer).id;
         assert_eq!(
             property_row_hint(
                 &PropertyRowId::Shell(PropertyGroup::Position),
                 comp,
                 layer.id
             ),
-            layer_field_hint("transform.position", comp, &layer),
+            layer_field_hint("position_x", comp, &layer),
             "the Timeline and the Properties panel disagree about a shell edit"
         );
 

@@ -5930,18 +5930,16 @@ mod tests {
             };
             let before = compiled_merge(project);
 
-            // A layer shell scrub (`apply_layer_change` sends `Shell` for
-            // every field that is not one of the merge-chain flags).
+            // A layer shell scrub: the `opacity` field, edited and
+            // classified under the **same** key, so the hint is the one the
+            // Properties panel would send for this very edit.
             let document =
                 ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
                     layer.opacity = AnimationChannel::constant(0.25);
                 })
                 .unwrap();
-            // The hint the Properties panel itself decides on, not a
-            // stand-in: what `RESP-3` guards is that *that* decision stays
-            // below `Structural`.
             let hint = ravel_ui::invalidation::layer_field_hint(
-                "transform.position",
+                "opacity",
                 comp_id,
                 document
                     .get_composition(comp_id)
@@ -5949,9 +5947,15 @@ mod tests {
                     .get_layer(layer_id)
                     .unwrap(),
             );
-            assert!(
-                !matches!(hint, InvalidationHint::Structural),
-                "a shell edit escalated to Structural: RESP-3 (#193) all over again"
+            // Spelt out rather than `!= Structural`: a decision that posted
+            // `None` would satisfy the weaker form and leave every shell
+            // reader stale, so the assertion has to name what it wants.
+            assert_eq!(
+                hint,
+                InvalidationHint::shell(comp_id, Some(layer_id)),
+                "a shell edit no longer posts Shell naming its own shell: \
+                 RESP-3 (#193) is guarded by what this hint is, not only by \
+                 what it is not"
             );
             project.apply_document(document, hint, cx);
             assert!(

@@ -17,6 +17,7 @@ use ravel_core::geometry::{
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 fn geometry_input<'a>(
@@ -68,144 +69,160 @@ impl NodeProcessor for GeometryTransformProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "geometry.transform")?;
-
-        let [tx, ty, tz] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
-        let translate = Vec2(tx, ty);
-        let euler = params.vec3_or("rotation", [0.0, 0.0, 0.0]);
-        let rotation = euler[2].to_radians();
-        let [sx, sy, sz] = params.vec3_or("scale", [1.0, 1.0, 1.0]);
-        let scale = Vec2(sx, sy);
-        // Only the components a domain actually carries can do anything, so
-        // "identity" is a wider condition for a 3D geometry than a 2D one.
-        let spatial = has_spatial_positions(geometry)?;
-
-        let planar_identity =
-            translate == Vec2(0.0, 0.0) && rotation == 0.0 && scale == Vec2(1.0, 1.0);
-        let identity = planar_identity
-            && (!spatial || (tz == 0.0 && euler[0] == 0.0 && euler[1] == 0.0 && sz == 1.0));
-        if identity {
+        Ok(match apply_transform(geometry, params)? {
             // Identity: share the input wholesale.
-            return Ok(inputs[0].as_ref().expect("checked above").clone());
-        }
-
-        let pivot3 = if params.bool_or("use_centroid", true) {
-            bounds_center(geometry).unwrap_or(Vec3(0.0, 0.0, 0.0))
-        } else {
-            let [px, py, pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
-            Vec3(px, py, pz)
-        };
-        let pivot = Vec2(pivot3.0, pivot3.1);
-
-        let (sin_r, cos_r) = rotation.sin_cos();
-        let apply = |p: Vec2| -> Vec2 {
-            let local = Vec2((p.0 - pivot.0) * scale.0, (p.1 - pivot.1) * scale.1);
-            Vec2(
-                pivot.0 + translate.0 + cos_r * local.0 - sin_r * local.1,
-                pivot.1 + translate.1 + sin_r * local.0 + cos_r * local.1,
-            )
-        };
-        let (sin_x, cos_x) = euler[0].to_radians().sin_cos();
-        let (sin_y, cos_y) = euler[1].to_radians().sin_cos();
-        let apply3 = |p: Vec3| -> Vec3 {
-            let local = Vec3(
-                (p.0 - pivot3.0) * scale.0,
-                (p.1 - pivot3.1) * scale.1,
-                (p.2 - pivot3.2) * sz,
-            );
-            // ZYX intrinsic: Z first, then Y, then X.
-            let z = Vec3(
-                cos_r * local.0 - sin_r * local.1,
-                sin_r * local.0 + cos_r * local.1,
-                local.2,
-            );
-            let y = Vec3(cos_y * z.0 + sin_y * z.2, z.1, -sin_y * z.0 + cos_y * z.2);
-            Vec3(
-                pivot3.0 + tx + y.0,
-                pivot3.1 + ty + cos_x * y.1 - sin_x * y.2,
-                pivot3.2 + tz + sin_x * y.1 + cos_x * y.2,
-            )
-        };
-
-        let mut out = geometry.clone();
-        if out.points().get(names::P).is_some() {
-            transform_positions(out.points_mut(), &apply, &apply3)?;
-        }
-        // Bezier tangents are **offsets from their point**, so they take the
-        // linear part of the transform and none of the translation — the same
-        // distinction `InstanceTransform::apply_vector` draws for an expanded
-        // instance, which is why the placement type states it once instead of
-        // this node spelling a second rotation matrix. Leaving them behind is
-        // what turned a rotated circle into an egg (`MED-GPU-10`): the points
-        // moved and their control offsets did not.
-        //
-        // The pivot does not enter a difference. A 3D rotation would take a
-        // planar tangent out of its plane and the column cannot hold that, so
-        // only the planar part is applied; paths are planar by construction
-        // (`require_planar`), and a Vec3 geometry carrying tangents is not a
-        // shape this node can honour either way.
-        let linear = InstanceTransform {
-            offset: Vec2(0.0, 0.0),
-            rot: rotation,
-            scale,
-        };
-        if !planar_identity {
-            for name in [names::IN_TAN, names::OUT_TAN] {
-                if out.points().get(name).is_none() {
-                    continue;
-                }
-                for tangent in out.points_mut().make_mut(name)?.as_vec2_mut(name)? {
-                    *tangent = linear.apply_vector(*tangent);
-                }
-            }
-        }
-        if out.detail().get(names::ANCHOR).is_some() {
-            for anchor in out
-                .detail_mut()
-                .make_mut(names::ANCHOR)?
-                .as_vec2_mut(names::ANCHOR)?
-            {
-                *anchor = apply(*anchor);
-            }
-        }
-        if out.instance_count() > 0 {
-            if out.instances().get(names::P).is_some() {
-                transform_positions(out.instances_mut(), &apply, &apply3)?;
-            }
-            // Valid instance geometry may omit rot/scale — consumers
-            // default them to 0 / (1,1) — so materialize the column from
-            // its implicit default before composing.
-            let count = out.instance_count();
-            if rotation != 0.0 {
-                if out.instances().get(names::ROT).is_none() {
-                    out.instances_mut()
-                        .insert(names::ROT, AttributeArray::F32(vec![0.0; count]))?;
-                }
-                for r in out
-                    .instances_mut()
-                    .make_mut(names::ROT)?
-                    .as_f32_mut(names::ROT)?
-                {
-                    *r += rotation;
-                }
-            }
-            if scale != Vec2(1.0, 1.0) {
-                if out.instances().get(names::SCALE).is_none() {
-                    out.instances_mut().insert(
-                        names::SCALE,
-                        AttributeArray::Vec2(vec![Vec2(1.0, 1.0); count]),
-                    )?;
-                }
-                for s in out
-                    .instances_mut()
-                    .make_mut(names::SCALE)?
-                    .as_vec2_mut(names::SCALE)?
-                {
-                    *s = Vec2(s.0 * scale.0, s.1 * scale.1);
-                }
-            }
-        }
-        Ok(Arc::new(out))
+            Cow::Borrowed(_) => inputs[0].as_ref().expect("checked above").clone(),
+            Cow::Owned(out) => Arc::new(out),
+        })
     }
+}
+
+/// The body of `geometry.transform`, shared with the **transform section** a
+/// template declares with `NodeTemplate::with_transform_section`
+/// (`docs/implementation/node-transform-section-plan.md`). A node that
+/// declares the section reads the same parameter spellings, so one function
+/// serves both and the two can never drift apart.
+///
+/// [`Cow::Borrowed`] is the identity answer: the caller then shares its input
+/// wholesale instead of cloning a geometry that would come back unchanged.
+pub fn apply_transform<'a>(
+    geometry: &'a Geometry,
+    params: &ResolvedParams,
+) -> anyhow::Result<Cow<'a, Geometry>> {
+    let [tx, ty, tz] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
+    let translate = Vec2(tx, ty);
+    let euler = params.vec3_or("rotation", [0.0, 0.0, 0.0]);
+    let rotation = euler[2].to_radians();
+    let [sx, sy, sz] = params.vec3_or("scale", [1.0, 1.0, 1.0]);
+    let scale = Vec2(sx, sy);
+    // Only the components a domain actually carries can do anything, so
+    // "identity" is a wider condition for a 3D geometry than a 2D one.
+    let spatial = has_spatial_positions(geometry)?;
+
+    let planar_identity = translate == Vec2(0.0, 0.0) && rotation == 0.0 && scale == Vec2(1.0, 1.0);
+    let identity = planar_identity
+        && (!spatial || (tz == 0.0 && euler[0] == 0.0 && euler[1] == 0.0 && sz == 1.0));
+    if identity {
+        return Ok(Cow::Borrowed(geometry));
+    }
+
+    let pivot3 = if params.bool_or("use_centroid", true) {
+        bounds_center(geometry).unwrap_or(Vec3(0.0, 0.0, 0.0))
+    } else {
+        let [px, py, pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
+        Vec3(px, py, pz)
+    };
+    let pivot = Vec2(pivot3.0, pivot3.1);
+
+    let (sin_r, cos_r) = rotation.sin_cos();
+    let apply = |p: Vec2| -> Vec2 {
+        let local = Vec2((p.0 - pivot.0) * scale.0, (p.1 - pivot.1) * scale.1);
+        Vec2(
+            pivot.0 + translate.0 + cos_r * local.0 - sin_r * local.1,
+            pivot.1 + translate.1 + sin_r * local.0 + cos_r * local.1,
+        )
+    };
+    let (sin_x, cos_x) = euler[0].to_radians().sin_cos();
+    let (sin_y, cos_y) = euler[1].to_radians().sin_cos();
+    let apply3 = |p: Vec3| -> Vec3 {
+        let local = Vec3(
+            (p.0 - pivot3.0) * scale.0,
+            (p.1 - pivot3.1) * scale.1,
+            (p.2 - pivot3.2) * sz,
+        );
+        // ZYX intrinsic: Z first, then Y, then X.
+        let z = Vec3(
+            cos_r * local.0 - sin_r * local.1,
+            sin_r * local.0 + cos_r * local.1,
+            local.2,
+        );
+        let y = Vec3(cos_y * z.0 + sin_y * z.2, z.1, -sin_y * z.0 + cos_y * z.2);
+        Vec3(
+            pivot3.0 + tx + y.0,
+            pivot3.1 + ty + cos_x * y.1 - sin_x * y.2,
+            pivot3.2 + tz + sin_x * y.1 + cos_x * y.2,
+        )
+    };
+
+    let mut out = geometry.clone();
+    if out.points().get(names::P).is_some() {
+        transform_positions(out.points_mut(), &apply, &apply3)?;
+    }
+    // Bezier tangents are **offsets from their point**, so they take the
+    // linear part of the transform and none of the translation — the same
+    // distinction `InstanceTransform::apply_vector` draws for an expanded
+    // instance, which is why the placement type states it once instead of
+    // this node spelling a second rotation matrix. Leaving them behind is
+    // what turned a rotated circle into an egg (`MED-GPU-10`): the points
+    // moved and their control offsets did not.
+    //
+    // The pivot does not enter a difference. A 3D rotation would take a
+    // planar tangent out of its plane and the column cannot hold that, so
+    // only the planar part is applied; paths are planar by construction
+    // (`require_planar`), and a Vec3 geometry carrying tangents is not a
+    // shape this node can honour either way.
+    let linear = InstanceTransform {
+        offset: Vec2(0.0, 0.0),
+        rot: rotation,
+        scale,
+    };
+    if !planar_identity {
+        for name in [names::IN_TAN, names::OUT_TAN] {
+            if out.points().get(name).is_none() {
+                continue;
+            }
+            for tangent in out.points_mut().make_mut(name)?.as_vec2_mut(name)? {
+                *tangent = linear.apply_vector(*tangent);
+            }
+        }
+    }
+    if out.detail().get(names::ANCHOR).is_some() {
+        for anchor in out
+            .detail_mut()
+            .make_mut(names::ANCHOR)?
+            .as_vec2_mut(names::ANCHOR)?
+        {
+            *anchor = apply(*anchor);
+        }
+    }
+    if out.instance_count() > 0 {
+        if out.instances().get(names::P).is_some() {
+            transform_positions(out.instances_mut(), &apply, &apply3)?;
+        }
+        // Valid instance geometry may omit rot/scale — consumers
+        // default them to 0 / (1,1) — so materialize the column from
+        // its implicit default before composing.
+        let count = out.instance_count();
+        if rotation != 0.0 {
+            if out.instances().get(names::ROT).is_none() {
+                out.instances_mut()
+                    .insert(names::ROT, AttributeArray::F32(vec![0.0; count]))?;
+            }
+            for r in out
+                .instances_mut()
+                .make_mut(names::ROT)?
+                .as_f32_mut(names::ROT)?
+            {
+                *r += rotation;
+            }
+        }
+        if scale != Vec2(1.0, 1.0) {
+            if out.instances().get(names::SCALE).is_none() {
+                out.instances_mut().insert(
+                    names::SCALE,
+                    AttributeArray::Vec2(vec![Vec2(1.0, 1.0); count]),
+                )?;
+            }
+            for s in out
+                .instances_mut()
+                .make_mut(names::SCALE)?
+                .as_vec2_mut(names::SCALE)?
+            {
+                *s = Vec2(s.0 * scale.0, s.1 * scale.1);
+            }
+        }
+    }
+    Ok(Cow::Owned(out))
 }
 
 /// Whether any positional domain of `geometry` carries three-dimensional `P`.

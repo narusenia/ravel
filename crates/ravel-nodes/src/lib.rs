@@ -35,6 +35,7 @@ pub mod style;
 pub mod subnet;
 pub mod text;
 pub mod transform;
+pub mod transform_section;
 pub mod vector;
 
 use ravel_core::eval::{EvalContext, ProcessorRegistry};
@@ -120,6 +121,10 @@ pub fn shared_texture_pool_with_budget(
 /// Processors never capture parameter values — the evaluator resolves them
 /// per frame into [`ravel_core::eval::ResolvedParams`] — so parameter edits
 /// only require dirty marking, not a rebuild.
+///
+/// A type whose template declares a transform section comes back wrapped in
+/// [`transform_section::wrap`], which applies the node's own `translate` /
+/// `rotation` / `scale` to the geometry it produced.
 pub fn processor_for_node(
     node: &Node,
     ctx: &GpuContext,
@@ -331,7 +336,10 @@ pub fn processor_for_node(
         "net.out" => Some(Arc::new(net::NetOutProcessor::from_node(node))),
         _ => None,
     };
-    processor
+    // One site decides whether a built-in carries its own transform section,
+    // and the registry answers whether it does — no consumer repeats the
+    // `type_key` match (`node-transform-section-plan.md`, TFORM-1).
+    processor.map(|inner| transform_section::wrap(node, inner))
 }
 
 #[cfg(test)]

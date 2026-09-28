@@ -19,6 +19,23 @@ use crate::scene::camera;
 /// downsampled or multi-pass approximation instead of an unbounded shader loop.
 pub const MAX_BLUR_RADIUS: f32 = 64.0;
 
+/// Built-in types whose template declares the transform section
+/// ([`NodeTemplate::with_transform_section`]).
+///
+/// The list and the `.with_transform_section()` calls in the template
+/// functions below are checked against each other by
+/// `the_transform_section_list_matches_the_templates`, so the declaration
+/// site stays the single source: a consumer asks [`has_transform_section`]
+/// and never matches on a `type_key` of its own.
+pub const TRANSFORM_SECTION_NODES: &[&str] = &[];
+
+/// Whether `type_key`'s built-in template declares the transform section, so
+/// its geometry output is put through
+/// `ravel_nodes::geometry::apply_transform` with the node's own parameters.
+pub fn has_transform_section(type_key: &str) -> bool {
+    TRANSFORM_SECTION_NODES.contains(&type_key)
+}
+
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
@@ -2261,6 +2278,7 @@ mod tests {
     use crate::animation::channel::ChannelSource;
     use crate::graph::Node;
     use crate::id::NodeId;
+    use crate::registry::{TRANSFORM_SECTION_GROUP, TRANSFORM_SECTION_PARAMS};
 
     // ----- the output type a layer reference follows (CPO-4) ---------------
 
@@ -3274,6 +3292,87 @@ mod tests {
             "text.layout.position is {:?}, which carries no canvas point",
             position.value
         );
+    }
+
+    /// The transform section **is** `geometry.transform`: the same spellings,
+    /// the same defaults, the same ranges. One applying function serves both
+    /// (`ravel_nodes::geometry::apply_transform`), so a drift here would be a
+    /// node whose Properties rows no longer describe what the evaluator does.
+    #[test]
+    fn the_transform_section_declares_geometry_transforms_own_parameters() {
+        let node = geometry_transform();
+        let section = NodeTemplate::new("test.section", "Section", NodeCategory::Geometry)
+            .with_transform_section();
+
+        let declared: Vec<&str> = section
+            .default_params
+            .iter()
+            .map(|param| param.key.as_str())
+            .collect();
+        assert_eq!(declared, TRANSFORM_SECTION_PARAMS);
+
+        for key in TRANSFORM_SECTION_PARAMS {
+            let of = |tmpl: &NodeTemplate| {
+                tmpl.default_params
+                    .iter()
+                    .find(|param| param.key == key)
+                    .unwrap_or_else(|| panic!("geometry.transform has no {key}"))
+                    .value
+                    .clone()
+            };
+            assert_eq!(of(&section), of(&node), "{key} defaults differ");
+            assert_eq!(
+                section.param_range(key),
+                node.param_range(key),
+                "{key} ranges differ"
+            );
+        }
+
+        assert_eq!(
+            section.param_group_declarations(),
+            [(
+                TRANSFORM_SECTION_GROUP.to_string(),
+                TRANSFORM_SECTION_PARAMS.map(str::to_string).to_vec(),
+            )]
+        );
+        // The section's own `translate` is not a Position: the node it sits on
+        // decides that, because a node with two of them has the manipulator
+        // writing whichever `find` reaches first.
+        assert_eq!(section.param_role("translate"), None);
+    }
+
+    /// [`TRANSFORM_SECTION_NODES`] and the `.with_transform_section()` calls
+    /// are two spellings of one fact, so they are checked against each other:
+    /// `has_transform_section` is what every consumer asks, and a template
+    /// that declares the parameters without being listed would carry rows the
+    /// evaluator never applies.
+    #[test]
+    fn the_transform_section_list_matches_the_templates() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+
+        for tmpl in reg.all_templates() {
+            let declares = TRANSFORM_SECTION_PARAMS.iter().all(|key| {
+                tmpl.default_params
+                    .iter()
+                    .any(|param| &param.key.as_str() == key)
+            }) && tmpl
+                .param_group_declarations()
+                .iter()
+                .any(|(name, _)| name == TRANSFORM_SECTION_GROUP);
+            assert_eq!(
+                declares,
+                has_transform_section(&tmpl.type_key),
+                "{} declares the section parameters but has_transform_section disagrees",
+                tmpl.type_key
+            );
+        }
+        for type_key in TRANSFORM_SECTION_NODES {
+            assert!(
+                reg.get(type_key).is_some(),
+                "{type_key} is listed but is not a built-in"
+            );
+        }
     }
 
     #[test]

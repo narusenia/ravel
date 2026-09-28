@@ -53,6 +53,23 @@ paths:
   entry points in particular: naming the toolkit's device type is what they are
   for, so replacing the backend changes those signatures too. That is the
   definition of the interop boundary, not a leak through it.
+- Keep the headless crates GUI-free **by construction**, not by convention.
+  `ravel-project` depends on `ravel-core` and `ravel-ui` only, never on `gpui`,
+  so a headless caller can load and save projects. `ravel-cli` additionally
+  depends on none of `gpui`, `ravel-ui`, `ravel-dock`, `ravel-app`. A
+  dependency edge is what makes this checkable at all; without it "headless"
+  is a claim nobody can verify.
+- **Build the CLI with `cargo build -p ravel-cli`, never as part of a
+  `--workspace` build.** Cargo unifies features across one build, so
+  `ravel-app`'s `ravel-audio/playback` reaches `ravel-cli` too and the binary
+  ends up linking CoreAudio / ALSA — the very thing the feature split exists
+  to avoid. `cargo build -p ravel-cli` links no audio framework;
+  `cargo build --workspace` links two. Whoever adds packaging owns this.
+- The bundled UI fonts in `assets/fonts/` are SIL OFL 1.1. Their licence texts
+  live beside the faces and must stay there, and because the faces are
+  compiled into the binary, **any release bundle or installer has to carry
+  those three files too**. There is no packaging step yet; whoever adds one
+  owns this.
 - New Rust files must use the existing Apache-2.0 OR MIT license header.
 - Route user-visible text through `t!` and locale assets.
 - Use `thiserror` for typed library errors and `anyhow` at orchestration

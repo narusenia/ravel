@@ -875,14 +875,14 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 新しいレイヤーへ黙って繋がる（`AID-1` / `AID-2` と同じ壊れ方）。#544 の
 独立レビューで見つかった。
 
-### インスタンスをピースとして配り分ける（`instance-pieces-plan.md`）
+### インスタンスをピースとして配り分ける（`done/instance-pieces-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PIECE-1 | 🟡 | インスタンスをピースへ分解するコアの操作 | — |
-| PIECE-2 | ⬜ | `scatter.*` のモードと既存の配り分け経路への接続 | PIECE-1 |
-| PIECE-3 | ⬜ | ピースの属性を出力インスタンスへ写す | PIECE-2 |
-| PIECE-4 | ⬜ | ロケール / 文書 | PIECE-1〜3 |
+| PIECE-1 | ✅ | インスタンスをピースへ分解するコアの操作（#553） | — |
+| PIECE-2 | ✅ | `scatter.*` のモードと既存の配り分け経路への接続（#553） | PIECE-1 |
+| PIECE-3 | ✅ | ピースの属性を出力インスタンスへ写す（#553） | PIECE-2 |
+| PIECE-4 | ✅ | ロケール / 文書（#553） | PIECE-1〜3 |
 
 `text.layout` を `scatter.*` に繋ぐとテキスト全体が各点にクローンされる。
 配り分けの機構（`set_instance_sources` + `source_index` を `index % count` か

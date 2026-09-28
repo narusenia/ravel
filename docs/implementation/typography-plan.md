@@ -316,7 +316,8 @@ GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-p
 **逆向きの接続（`text.layout` → `scatter.*`）はこの計画書の対象ではない。**
 繋ぐとテキスト全体が各点にクローンされるので、1 文字ごとに配るには
 `scatter.*` 側にピース分解のモードが要る →
-[`instance-pieces-plan.md`](instance-pieces-plan.md)（`PIECE-1`〜`PIECE-4`）。
+[`done/instance-pieces-plan.md`](done/instance-pieces-plan.md)（`PIECE-1`〜`PIECE-4`、
+#553 でマージ済み）。
 出力形は `TYPE-2` のままで足りる。
 
 ### 単位 5: `text.to_path`（ジオメトリ化）とフィールド被変調

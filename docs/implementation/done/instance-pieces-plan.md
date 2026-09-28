@@ -1,7 +1,12 @@
 # インスタンスをピースとして配り分ける 実装計画
 
-> **Status**: 実装済み — 2026-09-28（`PIECE-1`〜`PIECE-4`）。マージ時に完了へ
-> 書き換え `done/` へ移す。
+> **Status**: 完了 — 2026-09-28（`PIECE-1`〜`PIECE-4`、#553）
+>
+> **ピースの持ち方は実装時に変えた。** 計画書は「ピースの 1 行の Instance
+> ドメインとして出自を持たせる」と書いていたが、画像ピースは Geometry を
+> 持たず、入れ子のピースは自分の Instance ドメインを既に使っているので、
+> `InstancePiece { source: InstanceSource, attributes: AttributeSet }` の
+> 組にした。単位 1 の節を参照。
 
 対象: `ravel-core` の `geometry`（`ops` とインスタンスの標準属性）、
 `ravel-nodes` の `scatter`、`ravel-core` の `registry`、ロケールと文書。

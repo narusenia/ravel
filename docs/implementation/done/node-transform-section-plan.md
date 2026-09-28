@@ -1,6 +1,6 @@
 # ノードの Transform セクション実装計画
 
-> **Status**: 未着手 — 2026-09-18
+> **Status**: 実装済み — PR #555（2026-09-28）
 
 対象: `ravel-core` の `registry`（`NodeTemplate`）、`ravel-nodes` の
 `processor_for_node` と `geometry`、`ravel-ui` の `properties`、`ravel-app` の

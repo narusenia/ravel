@@ -939,10 +939,10 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| TFORM-1 | 🟡 | 宣言（`with_transform_section`）と共有適用（`processor_for_node` の 1 箇所でラップ） | — |
-| TFORM-2 | ⬜ | どのノードに宣言するか。Position ロールの衝突規則 | TFORM-1, `text.layout` の `position` |
-| TFORM-3 | ⬜ | Viewer のハンドルと Properties のフォルダ | TFORM-2 |
-| TFORM-4 | ⬜ | ロケール / 文書 / `REQ-UI-011` の更新 | TFORM-1〜3 |
+| TFORM-1 | ✅ #555 | 宣言（`with_transform_section`）と共有適用（`processor_for_node` の 1 箇所でラップ） | — |
+| TFORM-2 | ✅ #555 | どのノードに宣言するか。Position ロールの衝突規則 | TFORM-1, `text.layout` の `position` |
+| TFORM-3 | ✅ #555 | Viewer のハンドルと Properties のフォルダ | TFORM-2 |
+| TFORM-4 | ✅ #555 | ロケール / 文書 / `REQ-UI-011` の更新 | TFORM-1〜3 |
 
 **きっかけは「ジオメトリ系ノードに `geometry.transform` をわざわざ挿すのがだるい。
 それこそ Text とか」**。`REQ-UI-011` は暗黙のノード自動挿入を明示的に禁じている

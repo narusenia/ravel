@@ -13,11 +13,13 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::geometry::ops::{attach_piece_attributes, instance_pieces};
 use ravel_core::geometry::{
-    AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center, element_hash as hash,
-    names,
+    AttributeArray, AttributeSet, Domain, Geometry, InstanceSource, Primitive, bounds_center,
+    element_hash as hash, names,
 };
 use ravel_core::graph::Node;
+use ravel_core::registry::{PIECE_MODE_INSTANCES, PIECE_MODE_PARAM, PIECE_MODE_WHOLE};
 use ravel_core::types::{NodeData, Vec2};
 
 fn populate_instances(geo: &mut Geometry, positions: Vec<Vec2>, rotations: Vec<f32>) {
@@ -93,41 +95,107 @@ fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<
     Ok(Arc::new(centered))
 }
 
+/// Attaches what the scattered points stamp, and returns the pieces when the
+/// node was asked to deal instances out.
+///
+/// Two modes, and they answer different questions
+/// ([`PIECE_MODE_PARAM`]):
+///
+/// * `whole` — a wire is a source. One wire stamps its whole geometry at
+///   every point; two or more are dealt out by `source_mode`. **Unchanged**,
+///   and what a graph saved before this parameter existed falls back to
+///   (`str_or`'s default is the processor's, not the template's).
+/// * `instances` — every wire is split into its own instances
+///   ([`instance_pieces`]) and the results are dealt out as one list, in
+///   wire order then instance order. Whatever the wire count: a mode that
+///   only worked on one wire would be a control the user can pick and not
+///   get (UX invariant 6).
+///
+/// In `instances` mode each piece's own row rides along onto the instances
+/// that stamp it ([`attach_piece_attributes`]), which is what lets a stagger
+/// still read `char_progress` after the characters have been dealt out.
+/// There is nothing to broadcast in `whole` mode — a "piece" there is a
+/// whole source, whose instance domain has as many rows as it likes, and no
+/// one of them describes the source as a whole.
 fn attach_instance_sources(
     geometry: &mut Geometry,
     sources: &[&Geometry],
     params: &ResolvedParams,
 ) -> anyhow::Result<()> {
     let center_input = params.bool_or("center_input", false);
+    if params.str_or(PIECE_MODE_PARAM, PIECE_MODE_WHOLE) == PIECE_MODE_INSTANCES {
+        let pieces = sources
+            .iter()
+            .map(|source| instance_pieces(source))
+            .collect::<Result<Vec<_>, _>>()?
+            .concat();
+        let stamped = pieces
+            .iter()
+            .map(|piece| match &piece.source {
+                // Centering reads and rewrites positions, which a picture
+                // has none of; an image piece is stamped as it is.
+                InstanceSource::Geometry(source) => Ok(InstanceSource::Geometry(instance_source(
+                    source,
+                    center_input,
+                )?)),
+                image => Ok(image.clone()),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        deal_sources(geometry, stamped, params)?;
+        attach_piece_attributes(geometry, &pieces)?;
+        return Ok(());
+    }
     match sources {
         [] => {}
         [source] => {
             geometry.set_instance_source(Some(instance_source(source, center_input)?));
         }
         sources => {
-            geometry.set_instance_sources(
-                sources
-                    .iter()
-                    .map(|source| instance_source(source, center_input))
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            );
-            let source_count = sources.len();
-            let source_seed = params.i32_or("source_seed", 0) as u32;
-            let random = params.str_or("source_mode", "sequential") == "random";
-            let source_indices = (0..geometry.instance_count())
-                .map(|index| {
-                    if random {
-                        (hash(source_seed, index as u32) as usize % source_count) as i32
-                    } else {
-                        (index % source_count) as i32
-                    }
+            let stamped = sources
+                .iter()
+                .map(|source| {
+                    Ok(InstanceSource::Geometry(instance_source(
+                        source,
+                        center_input,
+                    )?))
                 })
-                .collect();
-            geometry
-                .instances_mut()
-                .insert(names::SOURCE_INDEX, AttributeArray::I32(source_indices))?;
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            deal_sources(geometry, stamped, params)?;
         }
     }
+    Ok(())
+}
+
+/// Hands `sources` out to the instances already populated on `geometry`,
+/// writing the `source_index` that says which one each stamps.
+///
+/// The one place `source_mode` / `source_seed` are read, so a piece list and
+/// a wire list are dealt by the same rule — the two modes differ in what the
+/// list holds, never in how it is handed out.
+fn deal_sources(
+    geometry: &mut Geometry,
+    sources: Vec<InstanceSource>,
+    params: &ResolvedParams,
+) -> anyhow::Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let source_count = sources.len();
+    geometry.set_sources(sources);
+    let source_seed = params.i32_or("source_seed", 0) as u32;
+    let random = params.str_or("source_mode", "sequential") == "random";
+    let source_indices = (0..geometry.instance_count())
+        .map(|index| {
+            if random {
+                (hash(source_seed, index as u32) as usize % source_count) as i32
+            } else {
+                (index % source_count) as i32
+            }
+        })
+        .collect();
+    geometry
+        .instances_mut()
+        .insert(names::SOURCE_INDEX, AttributeArray::I32(source_indices))?;
     Ok(())
 }
 
@@ -1049,6 +1117,346 @@ mod tests {
 
         assert_eq!(geo.instance_count(), 4);
         assert!(geo.instance_source().is_none());
+    }
+
+    // -- Piece mode (instance-pieces-plan unit 2) ---------------------------
+
+    /// A text-shaped source: `chars` instances of one deduplicated outline,
+    /// numbered the way `text.layout` numbers them.
+    fn text_like(chars: usize) -> Geometry {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2((0..chars).map(|i| Vec2(i as f32 * 30.0, 0.0)).collect()),
+            )
+            .expect("one offset per character");
+        geometry
+            .instances_mut()
+            .insert(
+                names::CHAR_INDEX,
+                AttributeArray::I32((0..chars as i32).collect()),
+            )
+            .expect("one number per character");
+        geometry
+            .instances_mut()
+            .insert(
+                names::CHAR_PROGRESS,
+                AttributeArray::F32(
+                    (0..chars)
+                        .map(|i| i as f32 / (chars.max(2) - 1) as f32)
+                        .collect(),
+                ),
+            )
+            .expect("one progress per character");
+        geometry.set_instance_source(Some(Arc::new(small_square())));
+        geometry
+    }
+
+    fn scatter_grid(count: i32, params: &[(&str, ParameterValue)]) -> Node {
+        let mut all = vec![
+            ("count_x", ParameterValue::Int(count)),
+            ("count_y", ParameterValue::Int(1)),
+        ];
+        all.extend(params.iter().cloned());
+        make_node("scatter.grid", &all)
+    }
+
+    /// The default is the old behaviour to the letter: one wire is one
+    /// source, whatever that wire holds. A graph saved before `piece_mode`
+    /// existed carries no such parameter and lands here.
+    #[test]
+    fn a_node_without_piece_mode_stamps_the_whole_source() {
+        let node = scatter_grid(3, &[]);
+        assert!(
+            node.parameters.iter().all(|p| p.key != "piece_mode"),
+            "the fixture has to stand in for an older document"
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        assert_eq!(geo.sources().len(), 1, "one wire, one source");
+        assert!(source_indices(&geo).is_none(), "nothing to deal out");
+        assert_eq!(
+            source_geometry(&geo, 0).instance_count(),
+            3,
+            "the whole text is stamped, characters and all"
+        );
+    }
+
+    /// The explicit `whole` spelling means the same thing as its absence,
+    /// two wires included.
+    #[test]
+    fn whole_mode_still_deals_one_source_per_wire() {
+        let node = scatter_grid(
+            4,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_WHOLE.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3)), arc_geo(small_square())],
+        );
+        assert_eq!(geo.sources().len(), 2, "two wires, two sources");
+        assert_eq!(source_indices(&geo).expect("dealt out"), [0, 1, 0, 1]);
+    }
+
+    /// The point of the mode: each point gets its own character.
+    #[test]
+    fn instances_mode_deals_one_piece_per_character() {
+        let node = scatter_grid(
+            3,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        assert_eq!(geo.sources().len(), 3, "one source per character");
+        assert_eq!(source_indices(&geo).expect("dealt out"), [0, 1, 2]);
+        for index in 0..3 {
+            assert_eq!(
+                source_geometry(&geo, index).instance_count(),
+                0,
+                "a piece is the character itself, not the text around it"
+            );
+        }
+    }
+
+    /// More points than characters walks the string again — the existing
+    /// `sequential` rule, over the piece list instead of the wire list.
+    #[test]
+    fn instances_mode_repeats_the_pieces_sequentially() {
+        let node = scatter_grid(
+            7,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        assert_eq!(
+            source_indices(&geo).expect("dealt out"),
+            [0, 1, 2, 0, 1, 2, 0]
+        );
+    }
+
+    /// `piece_mode` and `source_mode` are different axes: the first decides
+    /// what the pieces are, the second the order they are handed out in.
+    /// Random over a piece list is the same `hash(seed, index)` it always
+    /// was, and a different seed deals differently.
+    #[test]
+    fn instances_mode_and_random_are_separate_axes() {
+        let deal = |seed: i32| {
+            let node = scatter_grid(
+                6,
+                &[
+                    (
+                        "piece_mode",
+                        ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+                    ),
+                    ("source_mode", ParameterValue::String("random".into())),
+                    ("source_seed", ParameterValue::Int(seed)),
+                ],
+            );
+            let geo = run(
+                &node,
+                Arc::new(GridProcessor::from_node(&node)),
+                &[arc_geo(text_like(3))],
+            );
+            source_indices(&geo).expect("dealt out").to_vec()
+        };
+        let expected: Vec<i32> = (0..6).map(|i| (hash(11, i) % 3) as i32).collect();
+        assert_eq!(deal(11), expected, "the existing hash decides the order");
+        assert_ne!(deal(11), deal(12), "the seed still moves the deal");
+        assert!(
+            deal(11).iter().all(|index| (0..3).contains(index)),
+            "every index names a piece"
+        );
+    }
+
+    /// Two wires become one piece list: wire order, then instance order.
+    /// The mode is about pieces, so it cannot go back to being about wires
+    /// once there is more than one.
+    #[test]
+    fn instances_mode_flattens_every_wire_into_one_piece_list() {
+        let node = scatter_grid(
+            5,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3)), arc_geo(text_like(2))],
+        );
+        assert_eq!(geo.sources().len(), 5, "3 + 2 pieces");
+        assert_eq!(source_indices(&geo).expect("dealt out"), [0, 1, 2, 3, 4]);
+    }
+
+    /// A source with no instances is one piece — itself. Choosing the mode
+    /// on a plain shape is pointless, not broken.
+    #[test]
+    fn instances_mode_passes_a_sourceless_geometry_through() {
+        let node = scatter_grid(
+            3,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(small_square())],
+        );
+        assert_eq!(geo.sources().len(), 1);
+        assert_eq!(source_geometry(&geo, 0).point_count(), 4);
+        assert_eq!(source_indices(&geo).expect("dealt out"), [0, 0, 0]);
+    }
+
+    fn i32_instances(geometry: &Geometry, name: &str) -> Vec<i32> {
+        geometry
+            .instances()
+            .get(name)
+            .unwrap_or_else(|| panic!("the output carries {name}"))
+            .as_i32(name)
+            .expect("an I32 column")
+            .to_vec()
+    }
+
+    /// The piece's row rides along onto the instances that stamp it. This is
+    /// what a stagger reads after the characters have been dealt out
+    /// (REQ-MOGRAPH-004), and the reason the mode is worth having at all.
+    #[test]
+    fn instances_mode_carries_the_piece_attributes_onto_the_output() {
+        let node = scatter_grid(
+            7,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        // Seven points over three characters: the string is walked twice
+        // and a bit, and every point knows which character it drew.
+        assert_eq!(
+            i32_instances(&geo, names::CHAR_INDEX),
+            [0, 1, 2, 0, 1, 2, 0]
+        );
+        let progress = geo
+            .instances()
+            .get(names::CHAR_PROGRESS)
+            .expect("progress descends")
+            .as_f32(names::CHAR_PROGRESS)
+            .expect("an F32 column")
+            .to_vec();
+        assert_eq!(progress.len(), 7);
+        assert!((progress[1] - 0.5).abs() < 1e-6, "{progress:?}");
+    }
+
+    /// The scatter's own answers are not overwritten by the source's. `P`
+    /// above all: where a character sat in its layout is exactly what the
+    /// split threw away.
+    #[test]
+    fn the_scatter_keeps_its_own_placement_columns() {
+        let node = scatter_grid(
+            3,
+            &[
+                (
+                    "piece_mode",
+                    ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+                ),
+                ("spacing", ParameterValue::vec2(20.0, 20.0)),
+                ("center", ParameterValue::vec2(0.0, 0.0)),
+            ],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        // The grid's own row, not the text's 0 / 30 / 60 layout.
+        assert_eq!(
+            positions(&geo, true),
+            [Vec2(-20.0, 0.0), Vec2(0.0, 0.0), Vec2(20.0, 0.0)]
+        );
+        assert_eq!(i32_instances(&geo, names::INDEX), [0, 1, 2]);
+        assert_eq!(source_indices(&geo).expect("dealt out"), [0, 1, 2]);
+        assert!(geo.instances().get(names::ROT).is_some());
+        assert!(geo.instances().get(names::SCALE).is_some());
+    }
+
+    /// `whole` gains no columns at all: there is no single row of a whole
+    /// source to broadcast, so nothing is broadcast.
+    #[test]
+    fn whole_mode_adds_no_source_attributes() {
+        let node = scatter_grid(
+            3,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_WHOLE.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        for name in [names::CHAR_INDEX, names::CHAR_PROGRESS] {
+            assert!(
+                geo.instances().get(name).is_none(),
+                "{name} has no single row to come from in whole mode"
+            );
+        }
+    }
+
+    /// Two wires whose instance domains differ: the piece that lacks a
+    /// column contributes that column's typed zero, the fill rule
+    /// `geometry.merge` uses.
+    #[test]
+    fn a_piece_without_a_column_fills_with_the_typed_zero() {
+        let mut plain = Geometry::new();
+        plain
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .expect("one offset");
+        plain.set_instance_source(Some(Arc::new(small_square())));
+
+        let node = scatter_grid(
+            3,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(2)), arc_geo(plain)],
+        );
+        assert_eq!(geo.sources().len(), 3, "2 + 1 pieces");
+        assert_eq!(i32_instances(&geo, names::CHAR_INDEX), [0, 1, 0]);
     }
 
     // -- Circular -----------------------------------------------------------

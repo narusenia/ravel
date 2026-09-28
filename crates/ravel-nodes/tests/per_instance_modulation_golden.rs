@@ -645,3 +645,182 @@ fn a_time_and_index_composition_staggers_instance_rotation() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A stagger over pieces (instance-pieces-plan unit 3)
+// ---------------------------------------------------------------------------
+
+/// How many "characters" the source carries, and how many points they are
+/// dealt to. Six over three so the deal wraps: a piece's row has to reach
+/// every instance that stamps it, not just the first.
+const PIECES: i32 = 3;
+const PIECE_POINTS: i32 = 6;
+
+/// `shape.rect -> scatter.grid(3) -> field.apply(char_progress, set)`, which
+/// stands in for a `text.layout`: an instance geometry whose instances carry
+/// a per-character number. Then
+/// `scatter.grid(6, piece_mode = instances) -> field.attribute(char_progress)
+/// x field.constant -> field.apply(rot, add)`.
+///
+/// Built out of `scatter.grid` rather than `text.layout` because a font is
+/// not the thing under test: what is under test is that a **column on the
+/// source's instance domain** survives being dealt out as pieces and can
+/// still drive a field. `text.layout` writes `char_progress` on exactly that
+/// domain (typography-plan unit 2), so the shape of the input is the same
+/// one text presents.
+fn staggered_pieces() -> (Graph, Evaluator) {
+    let registry = registry();
+    let nodes = [
+        node(
+            &registry,
+            "shape.rect",
+            1,
+            &[
+                ("center", ParameterValue::vec2(0.0, 0.0)),
+                ("width", ParameterValue::Float(BAR.0)),
+                ("height", ParameterValue::Float(BAR.1)),
+            ],
+        ),
+        // The "text": three characters in a row.
+        node(
+            &registry,
+            "scatter.grid",
+            2,
+            &[
+                ("count_x", ParameterValue::Int(PIECES)),
+                ("count_y", ParameterValue::Int(1)),
+                ("spacing", ParameterValue::vec2(20.0, 20.0)),
+                ("center", ParameterValue::vec2(32.0, 32.0)),
+            ],
+        ),
+        node(
+            &registry,
+            "field.attribute",
+            3,
+            &[
+                ("name", text(names::INDEX)),
+                ("component", text("x")),
+                ("normalize", ParameterValue::Bool(false)),
+            ],
+        ),
+        // Each character now knows which character it is.
+        node(
+            &registry,
+            "field.apply",
+            4,
+            &[
+                ("domain", text("instance")),
+                ("target", text(names::CHAR_PROGRESS)),
+                ("combine", text("set")),
+            ],
+        ),
+        // Deal the characters out, one per point.
+        node(
+            &registry,
+            "scatter.grid",
+            5,
+            &[
+                ("count_x", ParameterValue::Int(PIECE_POINTS)),
+                ("count_y", ParameterValue::Int(1)),
+                (
+                    "spacing",
+                    ParameterValue::vec2(2.0 * ROW_HALF_CELL, 2.0 * ROW_HALF_CELL),
+                ),
+                ("center", ParameterValue::vec2(32.0, 32.0)),
+                ("center_input", ParameterValue::Bool(false)),
+                ("piece_mode", text("instances")),
+            ],
+        ),
+        // Read the column that rode along, and turn by it.
+        node(
+            &registry,
+            "field.attribute",
+            6,
+            &[
+                ("name", text(names::CHAR_PROGRESS)),
+                ("component", text("x")),
+                ("normalize", ParameterValue::Bool(false)),
+            ],
+        ),
+        node(
+            &registry,
+            "field.constant",
+            7,
+            &[("value", ParameterValue::Float(STAGGER))],
+        ),
+        node(&registry, "field.multiply", 8, &[]),
+        node(
+            &registry,
+            "field.apply",
+            9,
+            &[
+                ("domain", text("instance")),
+                ("target", text(names::ROT)),
+                ("combine", text("add")),
+            ],
+        ),
+        node(&registry, "rasterize", 10, &[]),
+    ];
+    wire(
+        &nodes,
+        &[
+            (1, 2, 0),
+            (2, 4, 0),
+            (3, 4, 1),
+            (4, 5, 0),
+            (6, 8, 0),
+            (7, 8, 1),
+            (5, 9, 0),
+            (8, 9, 1),
+            (9, 10, 0),
+        ],
+    )
+}
+
+/// The eye of `instance-pieces-plan` unit 3, and of REQ-MOGRAPH-004: a
+/// per-character column survives being dealt out as pieces, so a stagger
+/// still works on characters that have been scattered.
+///
+/// Dealing them out without the column would leave every instance reading
+/// the same missing value, and the whole row would turn together — which is
+/// exactly what the per-index assertion below rejects.
+#[test]
+fn a_piece_attribute_still_drives_a_stagger_after_the_deal() {
+    let (graph, mut evaluator) = staggered_pieces();
+    let dealt = geometry(&graph, &mut evaluator, 9, EARLY);
+    let rot = rot_column(&dealt);
+    assert_eq!(rot.len() as i32, PIECE_POINTS);
+
+    // Six points over three pieces: `sequential` walks the characters twice,
+    // so the turns are 0, 1, 2, 0, 1, 2 delays.
+    for (index, turn) in rot.iter().enumerate() {
+        let piece = index as i32 % PIECES;
+        let expected = piece as f32 * STAGGER;
+        assert!(
+            (turn - expected).abs() < 1e-6,
+            "instance {index} stamps piece {piece} and should be turned by \
+             {expected}, not {turn}",
+        );
+    }
+    // Not a constant: the deal has to produce more than one turn, or the
+    // assertion above would pass on a column of zeros.
+    assert!(
+        rot.iter().any(|turn| *turn != rot[0]),
+        "every instance turned the same: the piece column did not ride along",
+    );
+
+    // And it reaches the pixels, not just the column. Instance 0 stamps the
+    // unturned piece and instance 1 the one turned by a single delay; a bar
+    // turning away from the horizontal spreads further in y.
+    let frame = render(&graph, &mut evaluator, 10, EARLY);
+    let cell = |index: i32| {
+        let x = 32.0 + (index as f32 - (PIECE_POINTS as f32 - 1.0) / 2.0) * 2.0 * ROW_HALF_CELL;
+        footprint(&frame, (x, 32.0), ROW_HALF_CELL)
+    };
+    assert!(
+        cell(1).spread_y > cell(0).spread_y * 1.1,
+        "the stagger is not in the picture: {:?} then {:?}",
+        cell(0),
+        cell(1),
+    );
+}

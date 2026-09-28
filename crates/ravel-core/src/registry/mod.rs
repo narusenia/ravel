@@ -310,6 +310,27 @@ pub const SIZING_PARAM: &str = "sizing";
 pub const SIZING_AUTO: &str = "auto";
 pub const SIZING_FIXED: &str = "fixed";
 
+/// The parameter that picks what a `scatter.*` deals out, and its two
+/// values.
+///
+/// A different axis from `source_mode`, which the similar spelling makes
+/// worth saying twice: this one decides **what the pieces are**, and
+/// `source_mode` decides **in what order** they are handed to the points.
+///
+/// - `whole` — one wire is one piece, the way it always was. A text stamps
+///   the whole string at every point
+/// - `instances` — every wire is split into its own instances
+///   ([`crate::geometry::ops::instance_pieces`]) and the results are dealt
+///   out as one list, so a text stamps one character per point
+///
+/// **`whole` is the default a processor falls back to**, not just the
+/// template's seed: a `scatter.*` stored before this parameter existed loads
+/// without it, and reading that absence as `instances` would silently change
+/// what every saved graph draws.
+pub const PIECE_MODE_PARAM: &str = "piece_mode";
+pub const PIECE_MODE_WHOLE: &str = "whole";
+pub const PIECE_MODE_INSTANCES: &str = "instances";
+
 /// Whether `key` on `node` is drawn as a colour rather than as a plain
 /// 4-component vector.
 ///

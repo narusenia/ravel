@@ -1,6 +1,7 @@
 # インスタンスをピースとして配り分ける 実装計画
 
-> **Status**: 未着手 — 2026-09-17
+> **Status**: 実装済み — 2026-09-28（`PIECE-1`〜`PIECE-4`）。マージ時に完了へ
+> 書き換え `done/` へ移す。
 
 対象: `ravel-core` の `geometry`（`ops` とインスタンスの標準属性）、
 `ravel-nodes` の `scatter`、`ravel-core` の `registry`、ロケールと文書。

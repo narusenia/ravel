@@ -1430,6 +1430,37 @@ drawn_bounds(&geo) -> Option<Rect>
     // many instances stamp it; one that nests further is re-walked per
     // instance. An instance domain with no sources stamps nothing, so only
     // its placements are measured
+expand_instances(&geo) -> Result<Geometry>
+    // FLATTENS an instance geometry into one: each instance's source is
+    // copied with its InstanceTransform baked in, and the instance row's
+    // non-placement columns descend onto the copy's Point/Primitive domains.
+    // Idempotent on a flat geometry. An IMAGE instance is dropped (a picture
+    // has no contours), and nesting stops at MAX_INSTANCE_DEPTH.
+instance_pieces(&geo) -> Result<Vec<InstancePiece>>
+    // the SIBLING that DIVIDES instead of flattening: one piece per
+    // INSTANCE (never per `sources()` entry — that list is deduplicated, so
+    // splitting it collapses "aa" into one piece and loses the order).
+    // InstancePiece { source: InstanceSource, attributes: AttributeSet } —
+    // the attributes are the originating instance's row, one element per
+    // column, minus the placement. Each piece carries its instance's `rot`
+    // and `scale` BAKED IN and its `P` dropped: the caller is replacing the
+    // layout, which is the point. A source with instances of its own keeps
+    // them, with the outer placement composed onto each (inner applies
+    // first), so a split adds no level and MAX_INSTANCE_DEPTH means the same
+    // thing either side of it.
+    // UNLIKE expand_instances an IMAGE instance becomes a piece — a split
+    // only chooses what is dealt where. Nothing bakes into a picture, so an
+    // image piece carries no turn of its own.
+    // A geometry with no instances is one piece: itself.
+attach_piece_attributes(&mut geo, &[InstancePiece]) -> Result<()>
+    // broadcasts each piece's row onto the output instances that stamp it,
+    // selected by `source_index` with the rasterizer's clamping rule. **A
+    // column the output already carries is left alone** — that one rule is
+    // what protects `index` / `P` / `rot` / `scale` / `source_index`, which
+    // are the scatter's own answers. A piece missing a column contributes
+    // that column's typed zero. This is what lets a stagger read
+    // `char_progress` after the characters have been dealt out
+    // (REQ-MOGRAPH-004).
 stroke_reach(width, miter) -> f32
     // how far past the path a stroke reaches: a miter spike runs to 4 half-
     // widths (zeno's default limit), plus one pixel for the antialiased edge.
@@ -1720,6 +1751,15 @@ registry::derived_param_value(DerivedFrom, key, resolution) -> Option<Vec<f32>>
     // Properties row): one component for a scalar, two for a point. None for
     // a key the derivation does not name. Delegates to `comp_frame_rect`, so
     // the panel and the processor cannot drift (MED-APP-21).
+PIECE_MODE_PARAM = "piece_mode" / PIECE_MODE_WHOLE = "whole"
+    / PIECE_MODE_INSTANCES = "instances"
+    // what a `scatter.*` deals out. A DIFFERENT AXIS from `source_mode`,
+    // which the similar spelling makes worth repeating: this decides what
+    // the pieces ARE, `source_mode` the ORDER they are handed out in.
+    // `instances` splits EVERY connected wire (wire order, then instance
+    // order) into one list — a mode that only worked on one wire would be a
+    // control the user can pick and not get. **A processor falls back to
+    // `whole`**: a node stored before the parameter existed loads without it.
 SIZING_PARAM = "sizing" / SIZING_AUTO = "auto" / SIZING_FIXED = "fixed"
     // `auto` means "whatever this node can derive", NOT "the composition
     // resolution" — a node reading an input keeps the same word when RoD

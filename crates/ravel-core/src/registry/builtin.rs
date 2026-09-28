@@ -10,8 +10,8 @@ use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
 use crate::registry::{
-    ContextualKind, DerivedFrom, NodeCategory, NodeRegistry, NodeTemplate, ParamRole, SIZING_AUTO,
-    SIZING_FIXED, SIZING_PARAM,
+    ContextualKind, DerivedFrom, NodeCategory, NodeRegistry, NodeTemplate, PIECE_MODE_INSTANCES,
+    PIECE_MODE_PARAM, PIECE_MODE_WHOLE, ParamRole, SIZING_AUTO, SIZING_FIXED, SIZING_PARAM,
 };
 use crate::scene::camera;
 
@@ -1865,6 +1865,11 @@ fn scatter_grid() -> NodeTemplate {
             key: "source_seed".into(),
             value: ParameterValue::Int(0),
         })
+        .with_param(Parameter {
+            key: PIECE_MODE_PARAM.into(),
+            value: ParameterValue::String(PIECE_MODE_WHOLE.into()),
+        })
+        .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         // `count_x` / `count_y` stay separate Ints: `Channel2` is a pair of
         // float channels, so folding them would change what the value means.
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
@@ -1876,7 +1881,10 @@ fn scatter_grid() -> NodeTemplate {
         // Where the points are, then how the connected geometries are handed
         // out to them — the same split on all three scatter nodes.
         .with_param_group("layout", ["count_x", "count_y", "spacing", "center"])
-        .with_param_group("source", ["center_input", "source_mode", "source_seed"])
+        .with_param_group(
+            "source",
+            ["center_input", "piece_mode", "source_mode", "source_seed"],
+        )
 }
 
 fn scatter_circular() -> NodeTemplate {
@@ -1917,13 +1925,21 @@ fn scatter_circular() -> NodeTemplate {
             key: "source_seed".into(),
             value: ParameterValue::Int(0),
         })
+        .with_param(Parameter {
+            key: PIECE_MODE_PARAM.into(),
+            value: ParameterValue::String(PIECE_MODE_WHOLE.into()),
+        })
+        .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         .with_param_range("count", 1.0..=10000.0, 1.0..=100.0)
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
         .with_param_group("layout", ["count", "radius", "center", "align_rotation"])
-        .with_param_group("source", ["center_input", "source_mode", "source_seed"])
+        .with_param_group(
+            "source",
+            ["center_input", "piece_mode", "source_mode", "source_seed"],
+        )
 }
 
 fn scatter_path_array() -> NodeTemplate {
@@ -1961,6 +1977,11 @@ fn scatter_path_array() -> NodeTemplate {
             key: "source_seed".into(),
             value: ParameterValue::Int(0),
         })
+        .with_param(Parameter {
+            key: PIECE_MODE_PARAM.into(),
+            value: ParameterValue::String(PIECE_MODE_WHOLE.into()),
+        })
+        .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         .with_param_range("count", 1.0..=100000.0, 1.0..=100.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
 }
@@ -2000,6 +2021,11 @@ fn scatter_scatter() -> NodeTemplate {
             key: "source_seed".into(),
             value: ParameterValue::Int(0),
         })
+        .with_param(Parameter {
+            key: PIECE_MODE_PARAM.into(),
+            value: ParameterValue::String(PIECE_MODE_WHOLE.into()),
+        })
+        .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
         .with_param_range("area", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
@@ -2009,7 +2035,10 @@ fn scatter_scatter() -> NodeTemplate {
         // `seed` places the points; `source_seed` picks which geometry lands
         // on each. Two seeds, two groups.
         .with_param_group("layout", ["count", "area", "center", "seed"])
-        .with_param_group("source", ["center_input", "source_mode", "source_seed"])
+        .with_param_group(
+            "source",
+            ["center_input", "piece_mode", "source_mode", "source_seed"],
+        )
 }
 
 /// `shape.line`: one open path from `start` to `end`.

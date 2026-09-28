@@ -1003,6 +1003,12 @@ pivot = "use_centroid がオフのときの変換原点。"
 [node."geometry.merge"]
 label = "ジオメトリマージ"
 description = "2 つのジオメトリを 1 つに結合する。"
+[node."geometry.merge".params]
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."geometry.merge".group]
 transform = "トランスフォーム"
 
@@ -1028,6 +1034,12 @@ attribute = "attribute モードが読むアトリビュート名。ベクトル
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
 description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"
+[node."geometry.from_image".params]
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."geometry.from_image".group]
 transform = "トランスフォーム"
 
@@ -1107,6 +1119,11 @@ sizing = "大きさの決め方。auto はコンポジションのフレーム�
 center = "中心位置（ピクセル）。"
 width = "幅（ピクセル）。"
 height = "高さ（ピクセル）。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.rect".group]
 transform = "トランスフォーム"
 
@@ -1117,6 +1134,11 @@ description = "線分で近似した楕円を作成する。"
 center = "中心位置（ピクセル）。"
 radius = "軸ごとの半径（ピクセル）。"
 segments = "輪郭を近似する線分の数。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.ellipse".group]
 transform = "トランスフォーム"
 
@@ -1127,6 +1149,11 @@ description = "正多角形を作成する。"
 center = "中心位置（ピクセル）。"
 radius = "外接円の半径（ピクセル）。"
 sides = "辺の数。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.polygon".group]
 transform = "トランスフォーム"
 
@@ -1138,6 +1165,11 @@ center = "中心位置（ピクセル）。"
 outer_radius = "外側の頂点の半径（ピクセル）。"
 inner_radius = "内側の頂点の半径（ピクセル）。"
 points = "頂点の数。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.star".group]
 transform = "トランスフォーム"
 
@@ -1148,6 +1180,11 @@ description = "2 点を結ぶ開いたパスを 1 本作成する。"
 start = "始点の位置（ピクセル）。"
 end = "終点の位置（ピクセル）。"
 segments = "分割数。2 以上で中間点を等間隔に追加する。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.line".group]
 transform = "トランスフォーム"
 
@@ -1159,6 +1196,11 @@ center = "中心位置（ピクセル）。"
 size = "全体の幅と高さ（ピクセル）。"
 rows = "水平線の本数。"
 columns = "垂直線の本数。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.grid".group]
 transform = "トランスフォーム"
 
@@ -1168,6 +1210,11 @@ description = "ペンツールで作ったベジェパス。制御点はキャ�
 [node."shape.custom_path".params]
 points = "ベジェ接線オフセット付きの制御点（ここでは読み取り専用）。"
 closed = "パスを閉じる。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.custom_path".group]
 transform = "トランスフォーム"
 
@@ -1183,6 +1230,11 @@ center_input = "インスタンス化の前に各ソースジオメトリをア�
 piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する（テキストなら 1 点に 1 文字）。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."scatter.grid".group]
 layout = "配置"
 source = "ソース"
@@ -1200,6 +1252,11 @@ center_input = "インスタンス化の前に各ソースジオメトリをア�
 piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する（テキストなら 1 点に 1 文字）。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."scatter.circular".group]
 layout = "配置"
 source = "ソース"
@@ -1214,6 +1271,11 @@ center_input = "インスタンス化の前に各ソースジオメトリをア�
 piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する（テキストなら 1 点に 1 文字）。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."scatter.path_array".group]
 transform = "トランスフォーム"
 
@@ -1229,6 +1291,11 @@ center_input = "インスタンス化の前に各ソースジオメトリをア�
 piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する（テキストなら 1 点に 1 文字）。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."scatter.scatter".group]
 layout = "配置"
 source = "ソース"
@@ -1489,6 +1556,11 @@ align = "各行を原点に対しどう置くか。原点から始める／原�
 wrap_width = "この幅（コンポジションピクセル）を超える行を折り返す。縦組みでは列の長さ。0 なら文字列中の改行だけで折り返す。"
 anchor = "ブロックのどの行を原点に置くか。最初のベースライン、またはブロックの上端・中央・下端。縦組みでは列を横切る向きになり、最初の列の中心線、またはブロックの右端・中央・左端を指す。"
 position = "レイアウトの原点の位置（コンポジションピクセル）。anchor と align がこの点に対する置き方を決めるので、中心ではなく原点。テキストをパスに乗せると各文字はパスから置き直されるため、この値は効かなくなる。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."text.layout".group]
 content = "内容"
 metrics = "字面"

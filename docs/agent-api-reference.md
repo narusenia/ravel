@@ -1691,7 +1691,25 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // key named twice belongs to the first group. Params in no group stay in
     // one leading `properties.section.parameters` section, so a template that
     // declares nothing looks exactly as it did. Builtin tests enforce: real
-    // keys, no repeats, and all-or-nothing coverage per template.
+    // keys, no repeats, and all-or-nothing coverage per template (the
+    // transform section's group does not trigger the coverage rule — it is
+    // one call, not the author sorting these rows).
+    .with_transform_section()            // the node's geometry output is
+    // moved, turned and scaled by parameters OF ITS OWN, applied after its
+    // processor runs: translate/rotation/scale/use_centroid/pivot, spelled,
+    // defaulted and ranged exactly as `geometry.transform` spells them, in
+    // the `transform` group. No node is inserted and nothing is hidden from
+    // the node editor. `translate` gets NO ParamRole::Position here — a node
+    // with an intrinsic place of its own (`shape.rect`'s center,
+    // `text.layout`'s position) keeps that one, and a node without declares
+    // the role at its own call site, because two Positions on one node make
+    // the drag target an accident of declaration order.
+    // `builtin::has_transform_section(type_key) -> bool` is the single answer
+    // to "does it" (backed by `builtin::TRANSFORM_SECTION_NODES`); a consumer
+    // asks it instead of matching type keys, and a builtin test requires
+    // every geometry-emitting template to be in one list or the other.
+    // `registry::TRANSFORM_SECTION_PARAMS` / `TRANSFORM_SECTION_GROUP` name
+    // the keys and the group.
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
     // the FIXED values only; a contextual declaration answers None here
@@ -1784,8 +1802,8 @@ registry::position_param_key(&NodeRegistry, &Node) -> Option<&str>
     // the registry, not the node. `position_param` hands back the whole
     // declaration because an edit needs the DEFAULT too: it is the origin an
     // older node's geometry was placed at AND the arity/channel shape the
-    // write must produce (`geometry.sort`'s center is Channel3, every other
-    // Position is Channel2). `position_param_key` is that read for its name
+    // write must produce (`geometry.sort`'s center and a transform section's
+    // `translate` are Channel3, every other Position is Channel2). `position_param_key` is that read for its name
     // alone. A write to a parameter the node lacks INSERTS it, the way
     // `ravel_ui::document::bind_media_asset_id` does; undo restores the
     // document snapshot, so the inserted parameter leaves with it.
@@ -2189,7 +2207,20 @@ maps `Node::type_key` → processor and recurses into subnet inner graphs;
 `processor_for_node(&Node, &GpuContext, &mut ShaderManager, &Arc<Mutex<TexturePool>>, &MediaFrameCache)`
 builds one node's processor (processors never capture parameter values —
 edits only require dirty marking, not a rebuild; the GPU ones say so via
-`NodeProcessor::rebuild_on_node_change() == false`);
+`NodeProcessor::rebuild_on_node_change() == false`) and returns it wrapped by
+`transform_section::wrap(&Node, Arc<dyn NodeProcessor>) -> Arc<dyn NodeProcessor>`,
+a no-op unless `registry::builtin::has_transform_section` says the type
+declares one — one site, so no consumer repeats the type-key match. The
+wrapper reads its values off the `ResolvedParams` of **every** `process`
+(capturing them would strand a processor that opts out of rebuilding at its
+pre-edit transform, since `GpuEvalHooks::sync` answers such an edit with
+`invalidate_node` alone) and delegates `rebuild_on_node_change` /
+`is_time_dependent` to the inner processor. The applying code is
+`geometry::apply_transform(&Geometry, &ResolvedParams) -> Result<Cow<'_, Geometry>>`,
+`geometry.transform`'s own body, shared the way `ops::stroke_reach` is:
+`Cow::Borrowed` is the identity answer, so both callers hand their input
+`Arc` straight back instead of cloning a geometry that would come back
+unchanged. A non-`Geometry` output passes through untouched;
 `shared_texture_pool(&GpuContext)` makes a standalone per-eval-worker pool
 with a fixed 512 MiB idle budget (tests, examples).
 `shared_texture_pool_with_budget(&GpuContext, SharedCacheBudget)` is the
@@ -2361,7 +2392,13 @@ geometry differs frame to frame) and one bind group per run is created and
 counted in `bind_groups_created`. Rasterize draws analytic-AA path/point quads into a
 premultiplied RGBA16Float attachment, then converts to straight-alpha
 RGBA32Float without a CPU transfer.
-Current keys:
+Current keys. A row marked **§** declares the transform section
+(`NodeTemplate::with_transform_section`): its geometry output is put through
+`geometry::apply_transform` with the node's own
+`translate` / `rotation` / `scale` / `use_centroid` / `pivot` after the
+processor runs, and **§P** means the section's `translate` also carries
+`ParamRole::Position` because the node holds no place of its own.
+`registry::builtin::has_transform_section` is the answer in code.
 
 | type_key | processor | notes |
 |----------|-----------|-------|
@@ -2392,19 +2429,19 @@ Current keys:
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `text.font` | CPU | `family` / `weight` / `style` → `FontRef` (`DataTypeId::FONT`), through `ravel_core::text::shared()`. **Never fails**: a family this machine does not have yields the built-in face with `is_fallback` set plus one warning, so a project authored elsewhere renders in the wrong font rather than erroring. Stateless — the library owns the index and both caches |
-| `text.layout` | CPU | `FontRef` + `text` / `size` / `tracking` / `leading` / `align` / `wrap_width` / `anchor` / `writing_mode` / `position` → Geometry of one instance per grapheme cluster, glyph outlines in `instance_sources` (one per distinct cluster, addressed by `source_index`) — the same output shape `scatter.*` produces, so the existing instance path in `rasterize` draws it. Writes `index` / `P` / `rot` / `scale` plus `char_index` (per line) / `word_index` / `line_index` / `char_progress` (0..1) / `advance`; per-character animation is `field.attribute` → `field.curve_remap` → `field.apply`, not a parameter here. An unconnected `font` input resolves `DEFAULT_FAMILY` rather than failing. `writing_mode = vertical` is `vertical-rl`: it shapes with the `vert` / `vrt2` alternates, takes the column width from `vhea` and the step down the column from `vmtx` (a face with neither gets a column one em wide and rustybuzz's own `ascender - descender` step, so the two stay in proportion), and **swaps the axes** — `advance` becomes a Y step, `align` acts down the column, `anchor` across the columns leftwards, `wrap_width` limits a column's length. Line breaking pushes out (追い出し) at a cut that would begin a line with `。』」` or end one with `「（`, giving up rather than emptying a line; no hanging punctuation, no 縦中横. `position` (`ParamRole::Position`) offsets the instance `P` column after shaping, which is what makes a text block grabbable in the Viewer without a `geometry.transform` (REQ-UI-011's movement semantics): `layout_text` itself stays a pure shaping function whose origin is the origin, and `anchor` / `align` decide how the block sits against the point — hence `position` rather than `center`. **`text.on_path` rebuilds `P` from the path, so `position` has no effect downstream of it**; `text.to_path` bakes it in with the rest of the placement and keeps it |
+| `text.layout` § | CPU | `FontRef` + `text` / `size` / `tracking` / `leading` / `align` / `wrap_width` / `anchor` / `writing_mode` / `position` → Geometry of one instance per grapheme cluster, glyph outlines in `instance_sources` (one per distinct cluster, addressed by `source_index`) — the same output shape `scatter.*` produces, so the existing instance path in `rasterize` draws it. Writes `index` / `P` / `rot` / `scale` plus `char_index` (per line) / `word_index` / `line_index` / `char_progress` (0..1) / `advance`; per-character animation is `field.attribute` → `field.curve_remap` → `field.apply`, not a parameter here. An unconnected `font` input resolves `DEFAULT_FAMILY` rather than failing. `writing_mode = vertical` is `vertical-rl`: it shapes with the `vert` / `vrt2` alternates, takes the column width from `vhea` and the step down the column from `vmtx` (a face with neither gets a column one em wide and rustybuzz's own `ascender - descender` step, so the two stay in proportion), and **swaps the axes** — `advance` becomes a Y step, `align` acts down the column, `anchor` across the columns leftwards, `wrap_width` limits a column's length. Line breaking pushes out (追い出し) at a cut that would begin a line with `。』」` or end one with `「（`, giving up rather than emptying a line; no hanging punctuation, no 縦中横. `position` (`ParamRole::Position`) offsets the instance `P` column after shaping, which is what makes a text block grabbable in the Viewer without a `geometry.transform` (REQ-UI-011's movement semantics): `layout_text` itself stays a pure shaping function whose origin is the origin, and `anchor` / `align` decide how the block sits against the point — hence `position` rather than `center`. **`text.on_path` rebuilds `P` from the path, so `position` has no effect downstream of it**; `text.to_path` bakes it in with the rest of the placement and keeps it |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
-| `geometry.from_image` | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
-| `geometry.merge` | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
+| `geometry.from_image` §P | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
+| `geometry.merge` §P | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
 | `scene.add` | CPU | places one value in a `Scene` with a `Transform3D`. `object` accepts GEOMETRY / SCENE — a scene on that port is the **nesting** case, which is how a transform hierarchy is built; `scene` is the scene to add into and may be unconnected, so a chain accumulates. A frame buffer is **not** placeable: an image reaches a scene as a geometry carrying it, and the processor fails with an error pointing at `geometry.from_image`. `translate` / `rotation` / `scale` / `pivot` are Channel3, same keys as `geometry.transform`; `rotation` is Euler degrees, extrinsic ZYX. Never touches `P` — projection is `scene.render`'s |
 | `scene.merge` | CPU | union of two scenes, objects and cameras alike; a missing side passes the other through |
 | `scene.camera` | CPU | source node emitting a `Scene` with exactly one `Camera` and no objects, so `scene.merge` combines cameras and objects with one node. `position` / `target` are Channel3, `projection` is a `perspective`/`orthographic` enum, `fov` / `ortho_height` / `near` / `far` are Floats (an unknown `projection` falls back to perspective rather than failing). The aspect ratio is **not** baked in here — it is read from `comp_resolution` when a projection matrix is asked for |
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations, dimension-agnostic (`.transfer` measures distance in three components, so the two sides may differ in dimension). `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
 | `text.on_path` | CPU | re-places a text layout's character instances along the `path` input: a character's arc length is the **running sum of its `advance` column** (the writing-axis step in either writing mode, so a vertical run spreads along the path instead of stacking), its `P` is the sampled position and its `rot` the tangent's angle. `offset` slides the run, `spacing` is tracking measured along the path (added after every character, the last included), `align` puts the run's `start` / `center` / `end` against the path's, and `flip` adds half a turn. **Only `P` and `rot` are rewritten**, so `instance_sources` / `source_index` and the per-character columns survive for a field to read. An unconnected `path` passes the text through unchanged; a run longer than the path clamps its overflow onto the last point; `text.layout`'s own `align` / `anchor` and its line separation drop out, a multi-line layout becoming one continuous run. Instances without an `advance` column are an explicit error, and a `Vec3` instance `P` is refused the way `path_sample` refuses a 3D path |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` or a `Primitive::Mesh` is an explicit error (`GeometryError::RequiresPlanarP` / `RequiresPathPrimitives`) |
-| `shape.rect` / `.ellipse` / `.polygon` / `.star` | CPU | emit `Geometry` (closed path + P column) |
-| `shape.custom_path` | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
-| `scatter.grid` / `.circular` / `.path_array` / `.scatter` | CPU | emit `Geometry` with instance domain (index/P/rot/scale). A 3D source is stamped as-is, but `center_input` and `scatter.path_array` are planar-only and error explicitly on a `Vec3` `P`; `path_array` also rejects a `Primitive::Mesh` since it walks arc length |
+| `shape.rect` / `.ellipse` / `.polygon` / `.star` § | CPU | emit `Geometry` (closed path + P column) |
+| `shape.custom_path` § | CPU | pen-tool path: `points` (`PathPoints`) + `closed` params → Geometry with P + `in_tan`/`out_tan` point attributes; curves are flattened by rasterize (`ravel_nodes::flatten`, 0.25px tolerance), shared by the CPU/GPU paths |
+| `scatter.grid` / `.circular` / `.path_array` / `.scatter` § (`.path_array` is §P) | CPU | emit `Geometry` with instance domain (index/P/rot/scale). A 3D source is stamped as-is, but `center_input` and `scatter.path_array` are planar-only and error explicitly on a `Vec3` `P`; `path_array` also rejects a `Primitive::Mesh` since it walks arc length |
 | `comp.network` | CPU | layer network boundary: layer-local `EvalContext`, scoped evaluation of the layer's owned network |
 | `comp.background` | CPU | fills the composition-sized RGBA f32 buffer from `Composition.background_color`; bottom of every compiled shell chain |
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |

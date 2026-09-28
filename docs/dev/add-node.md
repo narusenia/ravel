@@ -103,6 +103,17 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   （`shape.rect` の `center` が例）。役割は `Channel2` / `Channel3` にだけ
   付ける — スカラーにはハンドルを置く点が無い。**役割を増やすときは
   ハンドルの実装と同じ単位で入れる**（宣言だけ足しても何も掴めない）
+- **ジオメトリを出すノードなら `with_transform_section` を宣言するか決める。**
+  宣言すると `geometry.transform` と同じ綴り・既定値・範囲の
+  `translate` / `rotation` / `scale` / `use_centroid` / `pivot` が
+  `transform` グループに付き、`processor_for_node` が返すプロセッサを
+  `transform_section::wrap` が包む（適用は `geometry::apply_transform` 1 本）。
+  自前の位置を持たないノードは、そのうえで
+  `with_param_role("translate", ParamRole::Position)` を宣言する。持つノードは
+  **宣言しない** — 1 ノードに Position が 2 つあると Viewer が書く先が宣言順
+  まかせになる。どちらに決めても
+  `every_geometry_producing_built_in_decides_about_the_section` に載せるまで
+  テストが落ちる
 - 可変長入力は `variadic_input_group`
 - **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
   Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /

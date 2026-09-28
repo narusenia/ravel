@@ -262,7 +262,11 @@
 - **移動セマンティクス**: bbox ドラッグで移動できるのは「位置を自身の
   パラメータに持つノード」のみ — `center_x`/`center_y` を持つノード
   （shape 系・scatter 系）、`PathPoints` を持つノード（全制御点 `p` の
-  一括オフセット。接線は点からの相対オフセットなので値を保持）、および
+  一括オフセット。接線は点からの相対オフセットなので値を保持）、
+  **Transform セクションを宣言したノード**（その `translate` を書く。
+  自前の位置を持たない `geometry.from_image` / `geometry.merge` /
+  `scatter.path_array` がこれに当たり、`center` や `position` を持つ
+  ノードはそちらを書き続ける — 1 ノードに位置は 1 つ）、および
   直下流に既存の `geometry.transform` がある
   ノード（その translate を書く）。ツールによる暗黙のノード自動挿入は
   行わない（ノードグラフが正という原則を守る）。ドラッグ中は bbox 枠を

@@ -723,6 +723,36 @@ fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
         .collect()
 }
 
+/// The invalidation a layer field edit posts (REQ-LAYER-009). One function
+/// for both entry points — editing a field and toggling a key on it commit
+/// the same kind of change, and two copies of this list drift.
+///
+/// Three outcomes, by what the edit moves:
+///
+/// * a custom parameter feeds the layer network's In node, so only that
+///   node's processor is stale — `Params`;
+/// * `blend_mode` / `solo` / `muted` / `adjustment` / `parent` move the shape
+///   of the compiled chain (REQ-LAYER-007), not a value in it, so it has to
+///   be rebuilt — `Structural`. `parent` belongs with the merge flags
+///   because `compile.rs` wires an edge from the parent's synthetic Transform
+///   node;
+/// * everything else — transform, time placement, opacity, audio — is a
+///   shell value the shell processors read off the `Document` at process
+///   time. Nothing in the chain goes stale, but a node that *reads* the shell
+///   does, and `Shell` is what says so without dragging in the full
+///   `Structural` rebuild a scrub would pay per mouse move (`RESP-3`, #193).
+pub(crate) fn layer_field_hint(key: &str, comp: CompId, layer: &Layer) -> InvalidationHint {
+    if key.starts_with(CUSTOM_FIELD_PREFIX) {
+        return in_node_id(layer)
+            .map(|id| InvalidationHint::Params(vec![id]))
+            .unwrap_or(InvalidationHint::None);
+    }
+    match key {
+        "blend_mode" | "solo" | "muted" | "adjustment" | "parent" => InvalidationHint::Structural,
+        _ => InvalidationHint::shell(comp, Some(layer.id)),
+    }
+}
+
 /// Default height of an expanded inline editor (curve or ramp), and the
 /// bounds the resize drag keeps it between. The minimum leaves room for the
 /// editor's own toolbar (the selected point or stop, the interpolation
@@ -2857,24 +2887,7 @@ impl PropertiesGpuiPanel {
         };
         let local_frame = layer_local_frame(&layer, Self::playback_frame(cx));
 
-        // Custom parameter edits invalidate the In node; solo/mute/blend/
-        // adjustment change the compiled merge chain (REQ-LAYER-007).
-        let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
-            in_node_id(&layer)
-                .map(|id| InvalidationHint::Params(vec![id]))
-                .unwrap_or(InvalidationHint::None)
-        } else {
-            match key {
-                // `parent` is structural for the same reason as the merge
-                // flags: `compile.rs` wires an edge from the parent's
-                // synthetic Transform node, so re-parenting changes the
-                // compiled graph's shape, not just a value in it.
-                "blend_mode" | "solo" | "muted" | "adjustment" | "parent" => {
-                    InvalidationHint::Structural
-                }
-                _ => InvalidationHint::None,
-            }
-        };
+        let hint = layer_field_hint(key, comp_id, &layer);
 
         let key = key.to_string();
         project.update(cx, |project, cx| {
@@ -2911,18 +2924,16 @@ impl PropertiesGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
-            project
-                .read(cx)
-                .document()
-                .get_composition(comp_id)
-                .and_then(|comp| comp.get_layer(layer_id))
-                .and_then(in_node_id)
-                .map(|id| InvalidationHint::Params(vec![id]))
-                .unwrap_or(InvalidationHint::None)
-        } else {
-            InvalidationHint::None
+        let Some(layer) = project
+            .read(cx)
+            .document()
+            .get_composition(comp_id)
+            .and_then(|comp| comp.get_layer(layer_id))
+            .cloned()
+        else {
+            return;
         };
+        let hint = layer_field_hint(key, comp_id, &layer);
 
         let key = key.to_string();
         project.update(cx, |project, cx| {
@@ -5276,6 +5287,62 @@ mod tests {
     use ravel_core::network as net;
     use ravel_core::param_curve::CurveParam;
     use ravel_ui::properties::layer::PARENT_NONE;
+
+    /// `RESP-3` (#193): a shell field edit posts `Shell`, naming the shell it
+    /// touched — and **not** `Structural`, which would drop every cache and
+    /// recompile every GPU pipeline once per mouse move of a transform scrub.
+    #[test]
+    fn a_shell_field_edit_names_its_shell_without_escalating() {
+        let comp = CompId::next();
+        let layer_id = LayerId::next();
+        let layer = Layer::new(layer_id, "L", network_with_custom_param()).with_time(0, 0, 300);
+        let expected = InvalidationHint::Shell {
+            scopes: vec![ravel_core::runtime::ShellScope {
+                comp,
+                layer: Some(layer_id),
+            }],
+            params: Vec::new(),
+        };
+        for key in [
+            "transform.position",
+            "transform.rotation",
+            "transform.scale",
+            "opacity",
+            "start_frame",
+            "in_frame",
+            "out_frame",
+            "audio_gain",
+            "name",
+        ] {
+            assert_eq!(
+                layer_field_hint(key, comp, &layer),
+                expected,
+                "{key} did not post a Shell hint naming its own shell"
+            );
+        }
+    }
+
+    /// The two edits that are *not* shell hints, and why: the merge chain's
+    /// shape is compiled (REQ-LAYER-007) so it has to be rebuilt, and a
+    /// custom parameter is the layer network's In node rather than the shell.
+    #[test]
+    fn merge_chain_flags_stay_structural_and_custom_params_stay_params() {
+        let comp = CompId::next();
+        let layer =
+            Layer::new(LayerId::next(), "L", network_with_custom_param()).with_time(0, 0, 300);
+        for key in ["blend_mode", "solo", "muted", "adjustment", "parent"] {
+            assert_eq!(
+                layer_field_hint(key, comp, &layer),
+                InvalidationHint::Structural,
+                "{key} stopped rebuilding the compiled chain"
+            );
+        }
+        let in_node = in_node_id(&layer).expect("the fixture network has an In node");
+        assert_eq!(
+            layer_field_hint(&format!("{CUSTOM_FIELD_PREFIX}amount"), comp, &layer),
+            InvalidationHint::Params(vec![in_node])
+        );
+    }
 
     /// The key toggle appears on `Int` and `String` rows — those parameters
     /// are animatable now — and on the animated spellings of both, reporting

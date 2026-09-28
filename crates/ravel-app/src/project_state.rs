@@ -5860,11 +5860,17 @@ mod tests {
     /// processor reads them from there at process time.
     ///
     /// Both halves matter, so both are asserted: the chain survives a value
-    /// edit (`None` for a layer shell field, `Params` for a node parameter —
+    /// edit (`Shell` for a layer shell field, `Params` for a node parameter —
     /// the two hints the scrub paths actually send), *and* the edited value is
     /// in the document the next request carries. A test that only checked
     /// retention would pass just as well if the edit stopped reaching the
     /// viewer entirely.
+    ///
+    /// The `Shell` half is also `RESP-3`'s guard (#193): a shell edit carries
+    /// a hint of its own so that information nodes reading the shell are
+    /// invalidated, and that hint must stay below `Structural` — the gate
+    /// above drops the chain on `Structural` alone, and a scrub posts one
+    /// hint per mouse move.
     #[gpui::test]
     fn a_value_edit_keeps_the_compiled_chain_and_still_reaches_the_viewer(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
@@ -5913,14 +5919,30 @@ mod tests {
             };
             let before = compiled_merge(project);
 
-            // A layer shell scrub (`apply_layer_change` sends `None` for every
-            // field that is not one of the merge-chain flags).
+            // A layer shell scrub (`apply_layer_change` sends `Shell` for
+            // every field that is not one of the merge-chain flags).
             let document =
                 ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
                     layer.opacity = AnimationChannel::constant(0.25);
                 })
                 .unwrap();
-            project.apply_document(document, InvalidationHint::None, cx);
+            // The hint the Properties panel itself decides on, not a
+            // stand-in: what `RESP-3` guards is that *that* decision stays
+            // below `Structural`.
+            let hint = crate::panels::properties::layer_field_hint(
+                "transform.position",
+                comp_id,
+                document
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer_id)
+                    .unwrap(),
+            );
+            assert!(
+                !matches!(hint, InvalidationHint::Structural),
+                "a shell edit escalated to Structural: RESP-3 (#193) all over again"
+            );
+            project.apply_document(document, hint, cx);
             assert!(
                 Arc::ptr_eq(&before, &compiled_merge(project)),
                 "a layer value edit must not discard the compiled chain"

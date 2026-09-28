@@ -425,15 +425,19 @@ mod declared_nodes {
             Arc::new(Geometry::from_points(vec![Vec2(1.0, 2.0), Vec2(-3.0, 4.0)]));
         for type_key in TRANSFORM_SECTION_NODES {
             let node = node(&reg, 1, type_key, &[]);
-            let wrapped = wrap(&node, Arc::new(Fixed(geometry.clone())));
-            let out = wrapped
-                .process(
-                    &node,
-                    &ctx(),
-                    &[],
-                    &ResolvedParams::default(),
-                    &mut Evaluator::new(),
-                )
+            // **Through the evaluator, not `process` with
+            // `ResolvedParams::default()`.** The claim is that the
+            // *template's* defaults are identity, and an empty `ResolvedParams`
+            // would only exercise `apply_transform`'s own `_or` fallbacks — a
+            // template that declared `scale: 3.0` would sail through.
+            let graph = Graph::new().add_node(node.clone()).expect("one node");
+            let mut ev = Evaluator::new();
+            ev.register(
+                NodeId::new(1),
+                wrap(&node, Arc::new(Fixed(geometry.clone()))),
+            );
+            let out = ev
+                .evaluate(&graph, NodeId::new(1), &ctx())
                 .expect("the section evaluates");
             assert!(
                 Arc::ptr_eq(&geometry, &out),

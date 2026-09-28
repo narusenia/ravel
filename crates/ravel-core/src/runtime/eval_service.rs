@@ -35,7 +35,7 @@ use crate::eval::{
     CacheIdentity, EvalContext, EvalError, Evaluator, PathSegment, ProcessorRegistry,
 };
 use crate::graph::Graph;
-use crate::id::{CompId, NodeId};
+use crate::id::{CompId, LayerId, NodeId};
 use crate::runtime::frame_cache::SharedFrameCache;
 use crate::types::NodeData;
 use crossbeam_channel::{Receiver, Sender, TryRecvError, select, unbounded};
@@ -54,30 +54,114 @@ pub enum InvalidationHint {
     /// Only parameters of these nodes changed; rebuilding just their
     /// processors preserves the evaluator cache for everything else.
     Params(Vec<NodeId>),
+    /// Shell fields changed (transform, time placement, opacity, audio) on
+    /// the shells [`scopes`](Self::Shell::scopes) names.
+    ///
+    /// Deliberately **not** `Structural`: the compiled shell chain bakes in
+    /// none of those values — every shell processor reads them off the
+    /// request's `Document` at process time — and a transform scrub posts one
+    /// hint per mouse move, so escalating would drop every cache and rebuild
+    /// every GPU pipeline at that rate. That is the regression `RESP-3`
+    /// (#193) removed.
+    ///
+    /// What a shell edit does invalidate is whatever *reads* those fields
+    /// without an edge to carry the change
+    /// ([`Evaluator::invalidate_shell_readers`]).
+    ///
+    /// `params` carries the node lists of coalesced [`Params`](Self::Params)
+    /// requests. `Shell` outranks `Params` but names different work, so
+    /// absorbing one outright would lose its processor rebuilds — the very
+    /// thing merging exists to prevent.
+    Shell {
+        scopes: Vec<ShellScope>,
+        params: Vec<NodeId>,
+    },
     /// Topology changed (nodes/edges added or removed, undo/redo);
     /// registrations must be rebuilt from scratch.
     Structural,
 }
 
+/// One shell an [`InvalidationHint::Shell`] names.
+///
+/// `layer: None` means *every* layer shell of `comp`, so it absorbs that
+/// composition's per-layer entries when scope sets are merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShellScope {
+    pub comp: CompId,
+    pub layer: Option<LayerId>,
+}
+
 impl InvalidationHint {
+    /// The hint a shell edit posts: one composition, one layer — or the whole
+    /// composition's shell when `layer` is `None`.
+    pub fn shell(comp: CompId, layer: Option<LayerId>) -> Self {
+        InvalidationHint::Shell {
+            scopes: vec![ShellScope { comp, layer }],
+            params: Vec::new(),
+        }
+    }
+
     /// Merge with the hint of a newer request, keeping the strongest.
-    /// `Structural` absorbs everything; `Params` unions node lists.
+    ///
+    /// `Structural > Shell > Params > None`. `Structural` absorbs everything;
+    /// `Params` unions node lists; `Shell` unions scope sets and **keeps** any
+    /// `Params` it meets in its own `params` rather than dropping it.
     pub fn merge(self, newer: Self) -> Self {
         use InvalidationHint::*;
         match (self, newer) {
             (Structural, _) | (_, Structural) => Structural,
-            (Params(mut a), Params(b)) => {
-                for id in b {
-                    if !a.contains(&id) {
-                        a.push(id);
-                    }
+            (
+                Shell {
+                    scopes: a,
+                    params: pa,
+                },
+                Shell {
+                    scopes: b,
+                    params: pb,
+                },
+            ) => Shell {
+                scopes: merge_scopes(a, b),
+                params: union_nodes(pa, pb),
+            },
+            (Shell { scopes, params }, Params(ids)) | (Params(ids), Shell { scopes, params }) => {
+                Shell {
+                    scopes,
+                    params: union_nodes(params, ids),
                 }
-                Params(a)
             }
+            (Shell { scopes, params }, None) => Shell { scopes, params },
+            (Params(a), Params(b)) => Params(union_nodes(a, b)),
             (Params(a), None) => Params(a),
             (None, other) => other,
         }
     }
+}
+
+fn union_nodes(mut a: Vec<NodeId>, b: Vec<NodeId>) -> Vec<NodeId> {
+    for id in b {
+        if !a.contains(&id) {
+            a.push(id);
+        }
+    }
+    a
+}
+
+/// Union two scope sets, keeping the widest entry per composition: a
+/// `layer: None` scope covers the whole composition, so it replaces that
+/// composition's per-layer entries instead of sitting beside them.
+fn merge_scopes(a: Vec<ShellScope>, b: Vec<ShellScope>) -> Vec<ShellScope> {
+    let mut out = a;
+    for scope in b {
+        if scope.layer.is_none() {
+            out.retain(|kept| kept.comp != scope.comp);
+        } else if out.iter().any(|kept| {
+            kept.comp == scope.comp && (kept.layer.is_none() || kept.layer == scope.layer)
+        }) {
+            continue;
+        }
+        out.push(scope);
+    }
+    out
 }
 
 /// What one target of an [`EvalRequest`] evaluated to.
@@ -557,7 +641,13 @@ impl ReadAheadTemplate {
 fn params_of(hint: &InvalidationHint) -> Option<Vec<NodeId>> {
     match hint {
         InvalidationHint::Params(ids) => Some(ids.clone()),
-        InvalidationHint::None | InvalidationHint::Structural => None,
+        // A shell edit changes the document in a way no node list explains —
+        // its `params` only name what a coalesced `Params` asked for — so the
+        // frame cache falls back to dropping whole compositions, exactly as it
+        // did while shell edits posted `None`.
+        InvalidationHint::Shell { .. } | InvalidationHint::None | InvalidationHint::Structural => {
+            None
+        }
     }
 }
 
@@ -796,6 +886,14 @@ impl EvalService {
                             narrow.as_deref(),
                         );
                         cached_document = Some(document.clone());
+                    }
+                    // A shell field is a document-side input no edge carries,
+                    // so nothing downstream of a node that reads one is dirty
+                    // by the graph's own reckoning. Done *after* the document
+                    // install: `set_document` removes store entries, which
+                    // would drop dirty marks set before it.
+                    if let InvalidationHint::Shell { scopes, .. } = &request.hint {
+                        evaluator.invalidate_shell_readers(scopes);
                     }
                     // Only the first target is the composition output, and
                     // only a root-scope request with a document has the
@@ -1107,6 +1205,161 @@ mod tests {
         EvalContext::new(0, FPS, (16, 16))
     }
 
+    // ----- InvalidationHint::merge ----------------------------------------
+
+    fn comp(n: u64) -> CompId {
+        CompId::new(n)
+    }
+
+    fn layer(n: u64) -> LayerId {
+        LayerId::new(n)
+    }
+
+    fn scopes_of(hint: &InvalidationHint) -> &[ShellScope] {
+        match hint {
+            InvalidationHint::Shell { scopes, .. } => scopes,
+            other => panic!("expected a Shell hint, got {other:?}"),
+        }
+    }
+
+    fn params_in(hint: &InvalidationHint) -> &[NodeId] {
+        match hint {
+            InvalidationHint::Shell { params, .. } => params,
+            InvalidationHint::Params(ids) => ids,
+            other => panic!("expected a hint naming nodes, got {other:?}"),
+        }
+    }
+
+    /// The top of the order: nothing survives a `Structural`, from either
+    /// side of the merge.
+    #[test]
+    fn structural_absorbs_every_other_hint() {
+        for other in [
+            InvalidationHint::None,
+            InvalidationHint::Params(vec![NodeId::new(1)]),
+            InvalidationHint::shell(comp(1), Some(layer(2))),
+            InvalidationHint::Structural,
+        ] {
+            assert_eq!(
+                other.clone().merge(InvalidationHint::Structural),
+                InvalidationHint::Structural,
+                "{other:?} merged with a newer Structural"
+            );
+            assert_eq!(
+                InvalidationHint::Structural.merge(other.clone()),
+                InvalidationHint::Structural,
+                "Structural merged with a newer {other:?}"
+            );
+        }
+    }
+
+    /// Two shell edits union their scopes rather than one winning: coalescing
+    /// drops the older *request*, not the shells it named.
+    #[test]
+    fn shell_hints_union_their_scopes() {
+        let merged = InvalidationHint::shell(comp(1), Some(layer(1)))
+            .merge(InvalidationHint::shell(comp(2), Some(layer(9))));
+        assert_eq!(
+            scopes_of(&merged),
+            [
+                ShellScope {
+                    comp: comp(1),
+                    layer: Some(layer(1))
+                },
+                ShellScope {
+                    comp: comp(2),
+                    layer: Some(layer(9))
+                },
+            ]
+        );
+
+        // The same shell twice — the shape of a scrub — stays one entry.
+        let merged = InvalidationHint::shell(comp(1), Some(layer(1)))
+            .merge(InvalidationHint::shell(comp(1), Some(layer(1))));
+        assert_eq!(scopes_of(&merged).len(), 1, "a scrub grew its scope set");
+    }
+
+    /// `layer: None` is "the whole composition's shell", so it absorbs that
+    /// composition's per-layer entries — and is not re-narrowed by a later
+    /// per-layer one.
+    #[test]
+    fn a_whole_composition_scope_absorbs_its_layers() {
+        let merged = InvalidationHint::shell(comp(1), Some(layer(1)))
+            .merge(InvalidationHint::shell(comp(1), None));
+        assert_eq!(
+            scopes_of(&merged),
+            [ShellScope {
+                comp: comp(1),
+                layer: None
+            }]
+        );
+
+        let merged = InvalidationHint::shell(comp(1), None)
+            .merge(InvalidationHint::shell(comp(1), Some(layer(1))));
+        assert_eq!(
+            scopes_of(&merged),
+            [ShellScope {
+                comp: comp(1),
+                layer: None
+            }],
+            "a per-layer scope narrowed a whole-composition one"
+        );
+    }
+
+    /// `Shell` outranks `Params` but names different work: the rebuild the
+    /// `Params` asked for has to survive the merge, from either side.
+    #[test]
+    fn shell_keeps_the_params_it_outranks() {
+        let node = NodeId::new(7);
+        let merged =
+            InvalidationHint::Params(vec![node]).merge(InvalidationHint::shell(comp(1), None));
+        assert_eq!(params_in(&merged), [node], "the older Params was dropped");
+        assert_eq!(scopes_of(&merged).len(), 1);
+
+        let merged =
+            InvalidationHint::shell(comp(1), None).merge(InvalidationHint::Params(vec![node]));
+        assert_eq!(params_in(&merged), [node], "the newer Params was dropped");
+        assert_eq!(scopes_of(&merged).len(), 1);
+    }
+
+    /// `None` means "nothing changed", so it neither weakens nor strengthens
+    /// what it meets.
+    #[test]
+    fn none_leaves_the_other_hint_alone() {
+        let shell = InvalidationHint::shell(comp(1), Some(layer(1)));
+        assert_eq!(shell.clone().merge(InvalidationHint::None), shell);
+        assert_eq!(InvalidationHint::None.merge(shell.clone()), shell);
+    }
+
+    /// Node lists union, and a shell hint's `params` union with them.
+    #[test]
+    fn params_union_their_node_lists() {
+        let (a, b, c) = (NodeId::new(1), NodeId::new(2), NodeId::new(3));
+        let merged =
+            InvalidationHint::Params(vec![a, b]).merge(InvalidationHint::Params(vec![b, c]));
+        assert_eq!(params_in(&merged), [a, b, c]);
+
+        let merged = InvalidationHint::Params(vec![a])
+            .merge(InvalidationHint::shell(comp(1), None))
+            .merge(InvalidationHint::Params(vec![b]));
+        assert_eq!(params_in(&merged), [a, b]);
+    }
+
+    /// A shell edit changes the document in a way no node list explains, so
+    /// it must not narrow the frame cache — the behaviour it had while shell
+    /// edits posted `None` (`CACHE-7`).
+    #[test]
+    fn a_shell_hint_narrows_nothing() {
+        assert_eq!(params_of(&InvalidationHint::shell(comp(1), None)), None);
+        assert_eq!(
+            params_of(
+                &InvalidationHint::Params(vec![NodeId::new(1)])
+                    .merge(InvalidationHint::shell(comp(1), None))
+            ),
+            None
+        );
+    }
+
     /// A hooks implementation that owns one budgeted thing, the way
     /// `GpuEvalHooks` owns the shared decode cache (`CACHE-8`).
     #[derive(Default)]
@@ -1304,7 +1557,9 @@ mod tests {
             self.hints.lock().unwrap().push(hint.clone());
             match hint {
                 InvalidationHint::None => {}
-                InvalidationHint::Params(ids) => {
+                // Same as `GpuEvalHooks`: a shell edit rebuilds no processor
+                // of its own, and only the `Params` coalesced into it does.
+                InvalidationHint::Params(ids) | InvalidationHint::Shell { params: ids, .. } => {
                     for id in ids {
                         if let Some(node) = graph.node(*id) {
                             self.register_node(evaluator, node);

@@ -233,7 +233,12 @@ impl EvalWorkerHooks for GpuEvalHooks {
         crate::gpu_util::begin_upload_scope(&self.pool);
         match hint {
             InvalidationHint::None => {}
-            InvalidationHint::Params(ids) => {
+            // Shell fields are read off the `Document` at process time, so no
+            // processor holds a stale copy of one and none needs rebuilding
+            // here; dirtying the nodes that *read* a shell is the evaluator's
+            // job (`Evaluator::invalidate_shell_readers`). A coalesced
+            // `Params` rides along in `params` and still wants its rebuild.
+            InvalidationHint::Params(ids) | InvalidationHint::Shell { params: ids, .. } => {
                 for id in ids {
                     // A processor that reads everything from the node and
                     // params handed to `process` holds nothing stale, so the

@@ -134,7 +134,11 @@ impl NodeProcessor for NetOutProcessor {
 // ===========================================================================
 
 /// The layer's base quad: a closed path covering the composition coordinate space.
-fn base_quad(resolution: (u32, u32)) -> Geometry {
+///
+/// `pub(crate)` for the `shape.rect` tests, which pin that `sizing = "auto"`
+/// reproduces this rectangle vertex for vertex — the guarantee that lets a
+/// Solid layer move off this port without moving a pixel.
+pub(crate) fn base_quad(resolution: (u32, u32)) -> Geometry {
     let (w, h) = (resolution.0 as f32, resolution.1 as f32);
     let mut geo =
         Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(w, 0.0), Vec2(w, h), Vec2(0.0, h)]);

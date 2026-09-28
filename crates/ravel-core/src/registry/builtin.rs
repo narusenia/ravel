@@ -9,7 +9,10 @@ use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue, PortR
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
-use crate::registry::{ContextualKind, NodeCategory, NodeRegistry, NodeTemplate, ParamRole};
+use crate::registry::{
+    ContextualKind, DerivedFrom, NodeCategory, NodeRegistry, NodeTemplate, ParamRole, SIZING_AUTO,
+    SIZING_FIXED, SIZING_PARAM,
+};
 use crate::scene::camera;
 
 /// Direct separable blur loop budget. Larger visual radii need a future
@@ -1718,11 +1721,22 @@ fn color_correct() -> NodeTemplate {
         .with_param_range("saturation", 0.0..=10.0, 0.0..=2.0)
 }
 
+/// `shape.rect`: a sized quad, and the one node a Solid layer's network is
+/// built on (`assets/layer-templates/solid.ron`).
+///
+/// `sizing` seeds to [`SIZING_FIXED`] so a rectangle created here is the
+/// 100×100 board it always was; the Solid template asks for
+/// [`SIZING_AUTO`] on its own node, which is the only place the composition
+/// frame is wanted by default.
 fn shape_rect() -> NodeTemplate {
     NodeTemplate::new("shape.rect", "Rectangle", NodeCategory::Geometry)
         .with_output(OutputPort {
             name: "output".into(),
             data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: SIZING_PARAM.into(),
+            value: ParameterValue::String(SIZING_FIXED.into()),
         })
         .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
@@ -1733,6 +1747,13 @@ fn shape_rect() -> NodeTemplate {
             key: "height".into(),
             value: ParameterValue::Float(100.0),
         })
+        .with_param_options(SIZING_PARAM, [SIZING_AUTO, SIZING_FIXED])
+        .with_derived_params(
+            ["center", "width", "height"],
+            SIZING_PARAM,
+            SIZING_AUTO,
+            DerivedFrom::CompFrame,
+        )
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("width", 0.0..=1e5, 0.0..=1000.0)
         .with_param_range("height", 0.0..=1e5, 0.0..=1000.0)

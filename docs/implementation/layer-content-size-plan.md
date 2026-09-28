@@ -1,6 +1,7 @@
 # レイヤーの内容サイズと `auto` 実装計画
 
-> **Status**: 未着手 — 2026-09-16
+> **Status**: 実装済み — 2026-09-21（`EXT-1`〜`EXT-4`）。マージ時に完了へ書き換え
+> `done/` へ移す。
 
 対象: `ravel-core` の `registry`（`NodeTemplate`）と `composition`（`base_geometry`）、
 `ravel-nodes` の `shape`、`ravel-ui` の `properties::node`、`ravel-app` の
@@ -195,16 +196,22 @@ width   1920 ← auto
   （`crates/ravel-ui/src/properties/mod.rs:235`）は
   `{ key, source, value }` なので、`source` に `"auto"` を入れれば
   既存の描画経路がそのまま使える
-- **エッジによる駆動が優先**。`width` にエッジが繋がっていて、かつ
-  `sizing = "auto"` のときは、エッジの理由を出す（そちらの方が具体的）
+- **宣言による駆動が優先**（実装時に方針を反転した）。`width` にエッジが
+  繋がっていて、かつ `sizing = "auto"` のときは **`auto` の理由**を出す。
+  当初は「エッジの方が具体的」としてエッジを優先すると書いていたが、
+  `auto` の分岐はパラメータを 1 つも読まないので**エッジの値は描画に効かない**。
+  駆動元の名前を出すと、そのノードが出していない数値をその行に書くことになる。
+  `fixed` に戻せばエッジが再び答えになる
 - 宣言は EXT-1 のレジストリ側に置き、`type_key` の match にしない
 
 **完了条件**
 
-- `sizing = "auto"` のとき 3 行が read-only になり、**解決済みの値と `auto` を出す**
+- `sizing = "auto"` のとき 3 行が read-only になり、**解決済みの値と `auto` を出す**。
+  キーフレーム ◆ と式 Σ もその行から消える（読まれない値にキーや式を足せる顔を
+  残さない）
 - `sizing = "fixed"` に戻すと 3 行が編集可能に戻る
   （`field_shape_key` が変わるのでウィジェットが作り直される）
-- エッジで駆動された行は `auto` のときもエッジの理由を出す
+- エッジで駆動された行も `auto` のときは `auto` の理由を出す（上記の反転）
 - **行が「押せるのに何も起きない」状態にならない**（不変条件 6）
 
 ### 単位 3: `solid.ron` を `shape.rect` へ差し替え

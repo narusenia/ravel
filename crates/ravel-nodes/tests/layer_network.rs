@@ -814,6 +814,70 @@ fn shape_template_layer_rasterizes_rect() {
     assert!(alpha(60, 60) < 0.05, "outside the default rect");
 }
 
+/// The Solid layer's content is a rectangle it owns, so it has a size — the
+/// thing `net.in`'s `base_geometry` could never give it. `auto` answers the
+/// composition frame (what the layer always looked like), and `fixed` answers
+/// whatever was written on the node, which is the rectangle the Viewer's bbox
+/// then measures (`GeometricData::bounds`, the one `drawn_bounds` behind it).
+#[test]
+fn solid_template_rect_carries_the_layers_own_size() {
+    use ravel_core::composition::templates::builtin_layer_template;
+    use ravel_core::geometry::Geometry;
+    use ravel_core::types::GeometricData;
+
+    let reg = builtin_registry();
+    let network = builtin_layer_template("solid")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let rect = network
+        .nodes()
+        .find(|n| n.type_key == "shape.rect")
+        .expect("the solid layer is built on a rectangle")
+        .as_ref()
+        .clone();
+
+    let bounds = |node: &Node, resolution: (u32, u32)| {
+        let graph = Graph::new().add_node(node.clone()).unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            node.id,
+            Arc::new(ravel_nodes::shape::RectProcessor::from_node(node)),
+        );
+        let out = ev
+            .evaluate(&graph, node.id, &EvalContext::new(0, FPS, resolution))
+            .unwrap();
+        let geo = out.downcast_ref::<Geometry>().unwrap();
+        let b = GeometricData::bounds(geo);
+        (b.x, b.y, b.width, b.height)
+    };
+
+    assert_eq!(bounds(&rect, (1920, 1080)), (0.0, 0.0, 1920.0, 1080.0));
+
+    let sized = Node {
+        parameters: vec![
+            ravel_core::graph::Parameter {
+                key: "sizing".into(),
+                value: ParameterValue::String("fixed".into()),
+            },
+            ravel_core::graph::Parameter {
+                key: "center".into(),
+                value: ParameterValue::vec2(200.0, 250.0),
+            },
+            ravel_core::graph::Parameter {
+                key: "width".into(),
+                value: ParameterValue::Float(200.0),
+            },
+            ravel_core::graph::Parameter {
+                key: "height".into(),
+                value: ParameterValue::Float(200.0),
+            },
+        ],
+        ..rect
+    };
+    assert_eq!(bounds(&sized, (1920, 1080)), (100.0, 150.0, 200.0, 200.0));
+}
+
 #[test]
 fn media_template_layer_decodes_in_local_time() {
     use ravel_core::composition::templates::builtin_layer_template;

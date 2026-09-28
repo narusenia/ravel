@@ -2691,7 +2691,11 @@ impl PropertiesGpuiPanel {
             .iter()
             // A parameter driven by a connected port renders read-only; its
             // stored expression is inert, so the row must not offer to edit it.
+            // A parameter the node resolves itself is inert in the same way.
             .filter(|parameter| !driven.iter().any(|d| d.key == parameter.key))
+            .filter(|parameter| {
+                ravel_core::registry::derived_param(&self.registry, node, &parameter.key).is_none()
+            })
             .filter_map(|parameter| {
                 let count = expression::channel_count(&parameter.value)?;
                 let components = (0..count)
@@ -4933,13 +4937,33 @@ impl Render for PropertiesGpuiPanel {
                 },
                 PropertiesTarget::Nodes { .. } => match &resolved_nodes {
                     // Driven parameters render read-only; their stored
-                    // keyframes are inert, so the key toggle is hidden.
+                    // keyframes are inert, so the key toggle is hidden. A
+                    // parameter the node resolves itself (`sizing = "auto"`)
+                    // is inert for the same reason and hides it too — the row
+                    // is read-only, and a diamond beside it would add keys to
+                    // a value nothing reads (UX invariant 6). The mode that
+                    // decides that is itself not keyable: an animated mode
+                    // decides nothing (`registry::mode_param`), so offering to
+                    // animate it would promise a switch that never happens.
                     Some((nodes, driven, frame)) => {
                         let node = nodes.first().expect("resolved nodes are non-empty");
                         sections
                             .iter()
                             .flat_map(|section| &section.fields)
                             .filter(|field| !driven.iter().any(|d| d.key == field.key()))
+                            .filter(|field| {
+                                ravel_core::registry::derived_param(
+                                    &self.registry,
+                                    node,
+                                    field.key(),
+                                )
+                                .is_none()
+                                    && !ravel_core::registry::is_mode_parameter(
+                                        &self.registry,
+                                        &node.type_key,
+                                        field.key(),
+                                    )
+                            })
                             .filter_map(|field| {
                                 node_param_keyed(node, field.key(), Some(*frame))
                                     .map(|keyed| (field.key().to_string(), keyed))

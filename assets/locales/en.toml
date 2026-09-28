@@ -472,6 +472,7 @@ off = "Off"
 none = "(none)"
 no_sibling_layers = "No other layer in this composition"
 no_layer_output_ports = "That layer has no output port"
+mode_not_static = "Keyframed — an animated mode decides nothing"
 source_network = "Network ({count} nodes)"
 source_audio = "Audio"
 source_null = "Null"
@@ -570,6 +571,7 @@ constant = "Hold each stop's colour until the next (hard bands)"
 
 [properties.field]
 selected_count = "Selected"
+sizing = "Sizing"
 name = "Name"
 width = "Width"
 height = "Height"
@@ -1108,6 +1110,7 @@ color = "Draw color. Element Cd/alpha attributes and a connected color input tak
 label = "Rectangle"
 description = "Creates a rectangle."
 [node."shape.rect".params]
+sizing = "How the extent is decided: auto (the composition frame) or fixed (the values below)."
 center = "Center position in pixels."
 width = "Width in pixels."
 height = "Height in pixels."

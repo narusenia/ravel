@@ -224,6 +224,29 @@ PY
     [ "$req_missing" -gt 0 ] && failures=$((failures + 1))
 
     echo
+    # AGENTS.md は索引であって手引きではない。長くなったら、規範は
+    # .agents/rules/ へ、手順は docs/dev/ へ移す（AGENTS.md「Path-specific
+    # rules」節）。ルールファイル自体も同じ上限で、超えたら観点で割る。
+    bold "── 索引とルールの行数（上限 200 行）"
+    local over=0 doc lines
+    for doc in AGENTS.md .agents/rules/*.md; do
+        [ -f "$doc" ] || continue
+        # ux.md は例外。12 個の不変条件がそれぞれ「破れたときの見え方」を
+        # 連れている形が本体で（UIX-0）、割ると読めなくなる。12 番だけ別
+        # ファイルへ出す案は、`不変条件 12` を名指しする文書が 5 つある
+        # （gpui-ui-guide / add-widget / write-a-theme / 計画書 2 つ）ので
+        # 採らない。**新しい超過は落とす**ことがこの検査の目的。
+        [ "$doc" = ".agents/rules/ux.md" ] && continue
+        lines=$(wc -l < "$doc" | tr -d ' ')
+        if [ "$lines" -gt 200 ]; then
+            echo "  OVER $doc （$lines 行）"
+            over=$((over + 1))
+        fi
+    done
+    echo "  $over 件が上限超過"
+    [ "$over" -gt 0 ] && failures=$((failures + 1))
+
+    echo
     if [ "$failures" -eq 0 ]; then
         echo "docs check: clean"
     else

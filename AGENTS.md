@@ -16,104 +16,51 @@ model is still current.
 
 ## Repository map
 
+One line per crate: what lives there. The invariants each crate must keep are
+in `.agents/rules/` (see **Path-specific rules**), not here.
+
 - `crates/ravel-core`: immutable graph, evaluator, data types, animation,
   Composition/Layer model, geometry (attributes, container, fields), undo,
   recovery, and runtimes
-- `crates/ravel-nodes`: built-in CPU/GPU node processors and WGSL shaders. The
-  processors sit directly under `src/` (`transform.rs`, `merge.rs`, `scene.rs`,
-  …), with a module directory only where one node family needs several files
-  (`shape/`, `rasterize/`, `scatter/`, `field/`, `attribute/`, `comp/`). There
-  is no `builtin/` directory
+- `crates/ravel-nodes`: built-in CPU/GPU node processors and WGSL shaders,
+  directly under `src/` with a module directory only where one node family
+  needs several files (`shape/`, `rasterize/`, `scatter/`, `field/`,
+  `attribute/`, `comp/`). There is no `builtin/` directory
 - `crates/ravel-gpu`: shared wgpu device, compute pipelines, shader management,
   texture pooling, and transfers
-- `crates/ravel-media`: FFmpeg-backed media decode/encode, hardware acceleration,
-  format detection, image sequences, and the FFmpeg-free render writers
-  (PNG / EXR sequences and the 32-bit float `WavWriter` beside them)
+- `crates/ravel-media`: FFmpeg-backed media decode/encode, hardware
+  acceleration, format detection, image sequences, and the FFmpeg-free render
+  writers (PNG / EXR sequences and the 32-bit float `WavWriter`)
 - `crates/ravel-audio`: mixing, resampling, synchronization, effects, waveform
   generation, the document → mixer track mapping (`mixdown`), and the offline
-  range mixdown a render uses (`offline`). CPAL output lives behind the
-  default-on `playback` feature, so a headless caller such as `ravel-cli`
-  depends on this crate without linking an audio device library
+  range mixdown a render uses (`offline`). CPAL output sits behind the
+  default-on `playback` feature
 - `crates/ravel-i18n`: locale loading and the `t!` translation macro
 - `crates/ravel-ui`: headless shell state, commands, keybindings, panels,
   properties, menus, and workspace presets
 - `crates/ravel-dock`: the docking UI for the v2 layout model (split/tab
-  rendering, splitter drag, tab drag-and-drop, `PaneContent` interface). It
-  replaces the former `gpui_component::dock` wiring; the bundled
-  `examples/gallery` binary exercises it without the application. `menu.rs`
-  is a lodger rather than part of the docking model: a `ravel_widgets::Button`
-  that opens a borrowed `gpui_component::PopupMenu` needs a local type to
-  carry gpui-component's `DropdownMenu`, and this is the lowest crate that may
-  name both. It goes when the menu is Ravel's own
-- `crates/ravel-widgets`: Ravel's own widget layer, and the design tokens
-  (colors, spacing, row heights, typography, motion, radii) the UI is built
-  from — `tokens.rs` is the single source and the authoritative theme schema.
-  `theme.rs` is the one path from a widget to the set in force (`cx.tokens()`,
-  installed by `ravel-app`). `icon.rs`, `button.rs`, `tooltip.rs`, `input.rs`,
-  `number_input.rs`, `checkbox.rs` and `color_picker.rs` are the parts Ravel
-  owns outright, built on `gpui-base`'s unstyled primitives so focus,
-  Enter/Space activation, toggling, text editing and accessibility stay
-  borrowed while the appearance is Ravel's. The three that carry states decide
-  them in one pure function — `button_layers`, `input_layers`,
-  `checkbox_layers` — which a test and `examples/gallery` call without a
-  window; the colour picker's pure functions are a different shape, because
-  what it has to decide is a value rather than a state (`swatch_layers` for
-  the trigger, `pointer_color` / `nudged` for the surfaces).
-  `docs/dev/add-widget.md` is the checklist for adding the next one. The
-  two input widgets paint a caller-owned `gpui_base::input::InputState`, which
-  this crate re-exports (with `InputEvent` and the input actions) so a host
-  needs no `gpui-base` dependency of its own; **the state is read, never
-  written, from `render`**. `scrub_input.rs` (the AE-style drag-a-label
-  numeric field), the curve-editor geometry (`curve_editor.rs`,
-  `curve_view.rs`) and the two parameter editors built on it
-  (`param_curve_editor.rs`, `param_ramp_editor.rs`) live here too, and the
-  widgets that still borrow from gpui-component stay in `ravel-app`.
-  `fonts.rs` builds the `Font` the canvas painters shape text with out of the
-  typography tokens, with the Japanese fallback attached; the embedded faces
-  and their registration stay in `ravel-app`, which re-exports everything here
-  so a panel keeps one import path. It depends on `gpui`, `gpui-base`,
-  `ravel-core`, `ravel-i18n` (the parameter editors label their own toolbars)
-  and `serde`: **never on `gpui-component`**, because
-  gpui-component's `ThemeConfig` is *derived* from Ravel's schema by
-  `ravel-app`, never the reverse. The bundled `examples/gallery` binary
-  renders every widget and every token in both palettes without the
-  application, and binds Tab itself so the focus ring can be seen
+  rendering, splitter drag, tab drag-and-drop, `PaneContent`). `examples/gallery`
+  exercises it without the application
+- `crates/ravel-widgets`: Ravel's own widget layer and the design tokens
+  (`tokens.rs`), the parameter editors and curve-editor geometry, and `fonts.rs`.
+  `docs/dev/add-widget.md` is the checklist for adding one; `examples/gallery`
+  renders every widget and token in both palettes without the application
 - `crates/ravel-project`: the `.ravprj` container, format migration, the
-  settings layers, UI state, and atomic writes. GUI-free by construction — it
-  depends on `ravel-core` and `ravel-ui` only, never on `gpui`, so headless
-  callers can load and save projects
+  settings layers, UI state, and atomic writes
 - `crates/ravel-app`: GPUI host, windows and docking, concrete panels, the
-  widgets that still borrow from gpui-component, and the application entry
-  point. There is no `src/widgets/` any more — every widget Ravel owns lives in
-  `ravel-widgets`
+  widgets that still borrow from gpui-component, and the entry point
 - `crates/ravel-cli`: the `ravel-cli` binary — headless rendering
   (`ravel-cli render`), the machine-readable enumerations
-  (`ravel-cli list comps | params | codecs`), and the interactive mode that
-  sits on them (`ravel-cli interactive`, which refuses to start without a
-  terminal on standard input). GUI-free by
-  construction: it does not depend on `gpui`, `ravel-ui`, `ravel-dock`, or
-  `ravel-app`, so a headless host cannot link a window toolkit by accident.
-  Releases therefore ship **two** binaries, `ravel` and `ravel-cli`. A render
-  whose composition has audio writes a WAV beside the frames.
-  **Build it with `cargo build -p ravel-cli`, never as part of a
-  `--workspace` build.** Cargo unifies features across one build, so
-  `ravel-app`'s `ravel-audio/playback` reaches `ravel-cli` too and the
-  binary ends up linking CoreAudio / ALSA — the very thing the feature split
-  exists to avoid. `cargo build -p ravel-cli` links no audio framework;
-  `cargo build --workspace` links two. Whoever adds packaging owns this
-- `assets`: locales, keybindings, workspace preset data, and the bundled
-  UI fonts (`assets/fonts/`). The fonts are SIL OFL 1.1: their license texts
-  live beside them, must stay there, and — because the faces are compiled
-  into the binary — **any release bundle or installer has to carry those
-  three files too**. There is no packaging step yet; whoever adds one owns
-  this
+  (`ravel-cli list comps | params | codecs`), and `ravel-cli interactive`.
+  Releases ship **two** binaries, `ravel` and `ravel-cli`
+- `assets`: locales, keybindings, workspace preset data, and the bundled UI
+  fonts (`assets/fonts/`)
 - `docs/requirements`: product requirements
 - `docs/specifications`: architecture, data model, and UI specifications
 - `docs/implementation`: per-feature implementation plans, indexed by
   `docs/implementation/README.md`. Live plans sit at the top level; completed
   ones move to `docs/implementation/done/`. The historical TASK-ID generation
-  lives in `docs/implementation/archive/` and is provenance only, not current
-  design
+  in `docs/implementation/archive/` is provenance only, not current design
 - `issues`: audit findings split by severity (`high`, `medium`, `low`), indexed
   by `issues/README.md`, which covers **open findings only**. Known debt,
   performance problems, and bugs live here rather than in the plans. Resolved
@@ -148,11 +95,22 @@ whose `paths` frontmatter matches the files in scope. Claude Code discovers the
 same rules through `.claude/rules`; Codex and other agents should follow this
 instruction explicitly.
 
-- `.agents/rules/rust.md`: Rust, Cargo, architecture, and verification rules
-- `.agents/rules/gpui.md`: GPUI and gpui-component UI rules
+- `.agents/rules/rust.md`: Rust, Cargo, architecture, crate boundaries
+  (which crate may depend on what, and how the CLI is built), and verification
+- `.agents/rules/gpui.md`: GPUI usage, the command path, focus ownership, and
+  the UI stack's crate boundaries (`ravel-app`, `ravel-ui`, `ravel-dock`,
+  `ravel-widgets`)
 - `.agents/rules/ux.md`: the twelve UX invariants (selection ownership, undo
   granularity, keyboard reach, motion budget, token literals)
 - `.agents/rules/documentation.md`: documentation consistency rules
+
+**This file is an index, not a manual.** It stays at or under 200 lines and
+each rule file does too; `mise run docs:check` enforces both (`ux.md` is the
+one documented exception — the check says why). Anything longer belongs in a
+rule file (what must hold), `docs/dev/` (how to do it), or
+`docs/specifications/` (intended behaviour) — `documentation.md` states the
+split. When a rule moves, **its reason moves with it**; a rule with the reason
+stripped off gets deleted again by the next person who cannot see why.
 
 Repository-specific reusable workflows and framework references live under
 `.agents/skills/`. Invoke or load a matching skill when the task falls within

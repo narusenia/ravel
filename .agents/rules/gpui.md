@@ -2,6 +2,8 @@
 paths:
   - "crates/ravel-app/**/*.rs"
   - "crates/ravel-ui/**/*.rs"
+  - "crates/ravel-dock/**/*.rs"
+  - "crates/ravel-widgets/**/*.rs"
   - "assets/keybindings/**/*.toml"
 ---
 
@@ -35,6 +37,37 @@ The grep-detectable subset of these rules is enforced by
 CI). Exceptions require a justified entry in `scripts/lint-patterns.allow`.
 The invariants below are context-dependent; the `ravel-review` skill checks
 them before every pull request.
+
+## Crate boundaries in the UI stack
+
+- **`ravel-widgets` never depends on `gpui-component`.** It depends on `gpui`,
+  `gpui-base`, `ravel-core`, `ravel-i18n` and `serde`. gpui-component's
+  `ThemeConfig` is *derived* from Ravel's schema by `ravel-app`, never the
+  reverse — an edge the other way would make the borrowed library the source
+  of truth for Ravel's own appearance.
+- **`tokens.rs` is the single source of the design tokens and the
+  authoritative theme schema**, and `theme.rs` (`cx.tokens()`, installed by
+  `ravel-app`) is the one path from a widget to the set in force. A widget
+  that reads colours or spacing from anywhere else cannot be re-themed.
+- **Every widget Ravel owns lives in `ravel-widgets`.** There is no
+  `crates/ravel-app/src/widgets/`; the widgets that still borrow from
+  gpui-component are the only UI parts left in `ravel-app`.
+- **The input widgets read `InputState`, never write it, from `render`.**
+  `ravel-widgets` re-exports `gpui_base::input::InputState` (with `InputEvent`
+  and the input actions) so a host needs no `gpui-base` dependency of its own,
+  and the state belongs to the caller. Writing it from `render` is the render
+  purity rule above, in the one place it is easiest to break.
+- A widget that carries states decides them in **one pure function**
+  (`button_layers`, `input_layers`, `checkbox_layers`), which a test and
+  `examples/gallery` call without a window. The colour picker's pure functions
+  are a different shape because what they decide is a value rather than a
+  state (`swatch_layers`, `pointer_color`, `nudged`). `docs/dev/add-widget.md`
+  is the checklist.
+- **`ravel-dock/src/menu.rs` is a lodger, not part of the docking model.** A
+  `ravel_widgets::Button` that opens a borrowed `gpui_component::PopupMenu`
+  needs a local type to carry gpui-component's `DropdownMenu`, and this is the
+  lowest crate that may name both. It goes when the menu is Ravel's own; do
+  not grow it.
 
 ## Command path invariants
 

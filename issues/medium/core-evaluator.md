@@ -117,7 +117,12 @@ low でないのは、`docs/dev/add-node.md` 自身が警告している穴が
 **ノードを足すたびに踏まれる可能性を持ち続ける**ため。2026-09-03 の
 `MOD-3` / `MOD-4` / `OPS-2` の実装で**3 回独立に指摘された**。
 
-## MED-CORE-10 | bug | ドメインパラメータの選択肢を宣言していないノードがあり、タイポが既定値に黙って吸われる
+## MED-CORE-12 | bug | ドメインパラメータの選択肢を宣言していないノードがあり、タイポが既定値に黙って吸われる
+
+> 起票時は `MED-CORE-10` を名乗っていたが、その番号は
+> [closed/medium-core-evaluator.md](../closed/medium-core-evaluator.md) の
+> 「閉集合の文字列パラメータが dropdown でない」（解決済み）が既に使っている。
+> **同じ監査の取りこぼし分**なので内容は続きだが、ID は別に取り直した（2026-09-28）。
 
 **該当**: `crates/ravel-core/src/registry/builtin.rs`（`attribute.promote` の
 `source_domain` / `target_domain`、`attribute.curveu`）

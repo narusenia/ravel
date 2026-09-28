@@ -432,6 +432,30 @@ impl ProjectFile {
         } else {
             document
         };
+        // A node written before its type declared a parameter does not carry
+        // it, so the Properties panel has no row for it and `set_params`
+        // refuses to write it, while the manipulator the template declares is
+        // grabbable — `MED-APP-46`. Backfill the template's default so the
+        // registry is the one answer to "which parameters does this node
+        // have".
+        //
+        // **Last, after every version-gated upgrade above**, and that is the
+        // whole of its placement: each of those migrations recognises its
+        // work by a parameter being *absent* (`fold_component_params` reads
+        // `center_x` only while there is no `center`) or rewrites values once
+        // (`linearize_colors`). Backfilling first would hide the fold's input
+        // behind a default and hand the colour pass a linear value to darken.
+        // Ungated by format version, because a template gains a parameter
+        // without the container format changing — drift repair like
+        // `sync_subnet_pins`, not a migration step. Idempotent, and it reaches
+        // the v1/v2 legacy path here as well.
+        let document = {
+            let mut registry = NodeRegistry::new();
+            register_builtins(&mut registry);
+            let backfilled = document.normalize_template_params(&registry);
+            backfilled.validate()?;
+            backfilled
+        };
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
             Some(bytes) => {
@@ -728,7 +752,13 @@ mod tests {
         // Layer network: net.in (keyframed custom param) + subnet + net.out.
         let inner = Graph::new()
             .add_node(
-                Node::new(NodeId::new(110), "constant").with_output("value", DataTypeId::SCALAR),
+                Node::new(NodeId::new(110), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    // Current-format nodes carry every parameter their type
+                    // declares, the same reason the In node below carries
+                    // `f`: without it the load-time backfill would add one
+                    // and the roundtrip would no longer be exact.
+                    .with_param("value", ParameterValue::Float(0.0)),
             )
             .unwrap()
             .add_node(
@@ -825,7 +855,9 @@ mod tests {
         // Legacy flat graph (preserved as-is).
         let flat = Graph::new()
             .add_node(
-                Node::new(NodeId::new(1), "constant").with_output("value", DataTypeId::SCALAR),
+                Node::new(NodeId::new(1), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    .with_param("value", ParameterValue::Float(0.0)),
             )
             .unwrap();
 
@@ -952,7 +984,9 @@ mod tests {
         steps.insert(30, "2".to_string());
         let network = Graph::new()
             .add_node(
-                Node::new(NodeId::new(200), "constant").with_output("value", DataTypeId::SCALAR),
+                Node::new(NodeId::new(200), "constant")
+                    .with_output("value", DataTypeId::SCALAR)
+                    .with_param("value", ParameterValue::Float(0.0)),
             )
             .unwrap()
             .add_node(
@@ -1644,11 +1678,24 @@ mod tests {
             .document
             .graph
             .clone()
-            .add_node(
-                Node::new(NodeId::new(900), "shape.polygon")
-                    .with_output("out", DataTypeId::GEOMETRY)
-                    .with_param("sides", stored.clone()),
-            )
+            .add_node({
+                // From the template, so the node carries every parameter its
+                // type declares and the load-time backfill has nothing to add
+                // — the same reason the In node in `demo_document` carries
+                // `f`.
+                let mut registry = NodeRegistry::new();
+                register_builtins(&mut registry);
+                let mut polygon = registry
+                    .create_node("shape.polygon", NodeId::new(900))
+                    .expect("shape.polygon is a builtin");
+                polygon
+                    .parameters
+                    .iter_mut()
+                    .find(|p| p.key == "sides")
+                    .expect("shape.polygon declares sides")
+                    .value = stored.clone();
+                polygon
+            })
             .unwrap();
 
         let archive = project.to_archive().unwrap();
@@ -3551,6 +3598,62 @@ mod tests {
             .find(|e| e.id == EdgeId::new(210))
             .expect("edge survives");
         assert_eq!(edge.source_port, OutputPortIndex(2));
+    }
+
+    /// `MED-APP-46`: a `shape.rect` written before the type declared `sizing`
+    /// gains it on load, at the template's position, so the Properties row
+    /// exists and the edit path can write it. The pass is wired into
+    /// `from_archive`, which is the only place that knows the registry.
+    #[test]
+    fn load_backfills_a_parameter_the_stored_node_predates() {
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(300), "shape.rect")
+                    .with_output("output", DataTypeId::GEOMETRY)
+                    .with_param("width", ParameterValue::Float(640.0))
+                    .with_param("height", ParameterValue::Float(360.0)),
+            )
+            .unwrap();
+        let comp_id = CompId::next();
+        let doc = Document::default().with_composition(
+            Composition::new(comp_id, "Legacy", (64, 64), FrameRate::new(30, 1), 30)
+                .add_layer(Layer::new(LayerId::new(31), "Old", network)),
+        );
+        let archive = ProjectFile::from_document("Legacy", "t", doc)
+            .to_archive()
+            .unwrap();
+        let back = ProjectFile::from_archive(&archive).unwrap();
+
+        let comp = back.document.get_composition(comp_id).unwrap();
+        let rect = comp.layers[0].network.node(NodeId::new(300)).unwrap();
+        assert_eq!(
+            rect.parameters
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            ["sizing", "center", "width", "height"],
+            "the two keys the archive predates land where shape.rect declares \
+             them, not after the ones it stored"
+        );
+        assert_eq!(
+            rect.parameters
+                .iter()
+                .find(|p| p.key == "sizing")
+                .map(|p| &p.value),
+            Some(&ParameterValue::String(
+                ravel_core::registry::SIZING_FIXED.into()
+            )),
+            "the backfilled mode is the template default, which is the \
+             fallback the processor already resolved to"
+        );
+        assert_eq!(
+            rect.parameters
+                .iter()
+                .find(|p| p.key == "width")
+                .map(|p| &p.value),
+            Some(&ParameterValue::Float(640.0)),
+            "the stored value survives the backfill"
+        );
     }
 
     #[test]

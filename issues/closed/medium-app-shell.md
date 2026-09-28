@@ -1393,3 +1393,93 @@ source の `rect()`」という形で、`from_image_outputs_one_instance_stampin
 `layer-content-size-plan.md` の「問題 2」で見つけた 3 件のうちの 1 つ。
 残りは `MED-CORE-11`（コアと Viewer で bbox の定義が違う）と
 `LOW-APP-33`（ストローク幅が入らない）。
+
+## MED-APP-46 | bug | テンプレートに足したパラメータが、既存の保存済みノードに届かない
+
+> **解決済み**: 方向 1（ロード時にテンプレート宣言のパラメータを実体化する）。
+> `Document::normalize_template_params` がノードの型が宣言していて本体が持って
+> いないパラメータをテンプレートの既定値で補い、`ProjectFile::from_archive` の
+> **最後**（バージョン別アップグレードを全部終えたあと）で走る。挿入位置は
+> テンプレートの宣言順に対する相対位置なので、`shape.rect` の `sizing` は
+> 保存時期によらず先頭に出る。これで「どのパラメータを持つか」の答えが
+> レジストリ 1 つになり、Properties の行も宣言駆動 UI も一度で揃う。
+>
+> 位置が最後なのが要点。バージョン別アップグレードは「パラメータが**無い**こと」で
+> 仕事を見分ける（`fold_component_params` は `center` が無い間だけ `center_x` を
+> 読む）か、値を 1 回だけ書き換える（`linearize_colors`）。先に補うと fold の
+> 入力が既定値に隠れ、色は線形値をもう一度暗くされる。
+>
+> 方向 2（Properties がテンプレートから行を作る）は取らなかった: Properties しか
+> 直らず、編集経路ごとに push を足すことになる。「旧文書がロード後に書き換わる」
+> 懸念は既存の `normalize_*` 5 本が同じことを既にしているので新しい性質ではない。
+>
+> **挙動が変わるものが 1 つあった。** テンプレートの既定と processor 側の
+> `_or` フォールバックが食い違っていると、補完は出力を変える。
+> ravel-nodes の `_or` 呼び出し 114 箇所を機械的に突き合わせ、実差分は
+> `scatter.*` の `center_input` 1 件だけだった（#124 が宣言を `true` に
+> したのに `bool_or("center_input", false)` が残り、**同じノード型が保存
+> 時期で違う絵になっていた**）。processor 側を宣言に合わせ
+> （`CENTER_INPUT_DEFAULT`）、両者が再び割れないようテストで固定した。
+> **#124 より前に保存された `scatter.*` は、開くとソースが
+> アンカーに寄る。** 宣言が `true` である以上これが意図された既定。
+>
+> テスト: `composition::tests::normalize_template_params_*`（挿入位置・既定値・
+> レイヤーネットワークとサブネット・冪等）と
+> `ravel-project` の `load_backfills_a_parameter_the_stored_node_predates`
+> （実際の `shape.rect` が保存往復で `sizing` / `center` を得る）。
+
+**該当**: `crates/ravel-ui/src/properties/node.rs:309` の行の組み立てと、
+ロード時の正規化（`crates/ravel-core/src/composition/mod.rs` の
+`normalize_*` 一式）
+
+Properties の行は **`&node.parameters` を回して**作られる。ノードが持って
+いないパラメータは行が出ない。一方、評価は `ResolvedParams` の既定
+（`f32_or` / `str_or` / `vec2_or`）に落ちるので**値としては効く**。
+
+そしてロード時に「テンプレートが宣言しているのにノードが持っていない
+パラメータ」を補う経路が**無い**:
+
+| 正規化 | 何をするか |
+|---|---|
+| `normalize_param_ports` | 旧い露出ピンを `is_param` ポートへ |
+| `normalize_net_in_ports` | `net.in` の固定ポートを補う |
+| `normalize_variadic_input_ports` | 可変長入力ポートの数を合わせる |
+| `normalize_node_type_aliases` | 旧 `type_key` の読み替え |
+
+どれもポートと型エイリアスの話で、パラメータは触らない。
+`composition/templates.rs:108` の push は**レイヤーテンプレートの実体化**
+（`.ron` から新しいネットワークを組む）で、既存文書の正規化ではない。
+
+したがって**既存ノードの型に後からパラメータを足すと、そのパラメータは
+既存プロジェクトでは編集できない**:
+
+- Properties に行が出ない（数値入力もキーフレームも打てない）
+- 宣言駆動の UI（`ParamRole` のマニピュレータ、`ParamOptions` の候補、
+  `ColorParam` の色判定）はテンプレートを引くので**ハンドルや候補は出る**。
+  つまり「ハンドルは出るのに行が無い」という食い違いが起こる
+
+**実例**: `text.layout` の `position`（#550）。新規ノードは掴めて行も出るが、
+**#550 より前に保存されたテキストは行が出ない**。#550 は bbox ドラッグ側だけ
+「テンプレートから解決して、無ければ書き込み時に挿す」形で塞いだので、
+ドラッグでは動く。行は出ないまま。
+
+`media` ノードの `asset` は本番の編集経路
+（`ravel-ui/src/document.rs:600` の `bind_media_asset_id`）が
+「無ければ push」を既にやっている。つまり**「書くときに挿す」は前例がある**
+が、「**読む側（行の一覧）がテンプレートを見ない**」のが残っている。
+
+直す向きは 2 つ:
+
+1. **ロード時にテンプレート宣言のパラメータを実体化する。**
+   全ノード型に効き、Properties も宣言駆動 UI も一度で揃う。ただし
+   **旧文書がロード後に必ず書き換わる**（保存すると差分が出る）ので、
+   `.ravprj` の「開いて閉じただけで変わらない」性質に触る
+2. **Properties の行をテンプレートの宣言から作り、値はノード → 既定の順で
+   引く。** 文書を書き換えない。編集した時点で `bind_media_asset_id` と
+   同じく push する。行の並びもテンプレート順になるので
+   `with_param_group` の意図に沿う
+
+**severity の根拠**: bug。クラッシュしないし評価は既定で動くが、
+**既存プロジェクトでだけ編集できないパラメータ**が生まれる。UX 不変条件 6
+（動かない制御は無効に見せる）と 7（値の意味が編集器に出る）の隣で、
+「制御そのものが出ない」形。パラメータを足すたびに増えるので low ではない。

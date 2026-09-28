@@ -1015,6 +1015,78 @@ fn normalize_variadic_input_ports(graph: &Graph, registry: &NodeRegistry) -> Gra
     normalized
 }
 
+/// Give every node the parameters its registry template declares but the
+/// stored node does not carry (`MED-APP-46`).
+///
+/// A node is written with the parameters its template declared **when it was
+/// created**. Adding one to a template later therefore reaches new nodes
+/// only: evaluation still behaves, because the processor's own `_or` fallback
+/// answers for the absent key, but the Properties panel builds its rows from
+/// `node.parameters` and [`Graph::set_params`] refuses a key the node does
+/// not hold — so the row is missing and nothing can write it. The
+/// declaration-driven UI beside it (manipulator roles, option sets, colour
+/// detection) reads the *template*, which is how "the handle is grabbable but
+/// there is no row" happens.
+///
+/// Backfilling on load makes the template the single answer to *which*
+/// parameters a node has, so every reader agrees without any of them learning
+/// to consult the registry. The value inserted is the template's default,
+/// which is what those `_or` fallbacks resolve to, so the backfill changes no
+/// output — **as long as the two agree**. Where they did not, the processor
+/// was the one that had drifted: `scatter.*` declared `center_input: true`
+/// from #124 on while the processor still answered `false` for a node without
+/// the key, so the same node type rendered differently by save date. That
+/// fallback now names the declared value
+/// (`ravel_nodes::scatter::CENTER_INPUT_DEFAULT`). A new parameter owes the
+/// same check: the declaration is the answer, and a fallback that disagrees
+/// with it is the bug.
+///
+/// Each missing parameter lands at its **template position relative to the
+/// parameters the node already has** rather than at the end: `shape.rect`
+/// declares `sizing` first, and a row order that depends on when the project
+/// was saved is half of what this repairs. A type that declares no parameters
+/// — `net.in` and `subnet`, whose parameters are the user's rather than the
+/// type's — can gain nothing, so it is untouched by construction.
+///
+/// Idempotent: a node already holding every declared key is left alone.
+fn backfill_template_params(graph: &Graph, registry: &NodeRegistry) -> Graph {
+    let mut normalized = graph.clone();
+    for id in normalized.node_ids().collect::<Vec<_>>() {
+        let Some(node) = normalized.node(id) else {
+            continue;
+        };
+        let Some(template) = registry.get(&node.type_key) else {
+            continue;
+        };
+        let missing: Vec<(usize, Parameter)> = template
+            .default_params
+            .iter()
+            .enumerate()
+            .filter(|(_, declared)| !node.parameters.iter().any(|p| p.key == declared.key))
+            .map(|(rank, declared)| (rank, declared.clone()))
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let rank_of = |key: &str| template.default_params.iter().position(|d| d.key == key);
+        let mut updated = (**node).clone();
+        for (rank, param) in missing {
+            // Before the first parameter the node already has that the
+            // template declares *after* this one; at the end when there is
+            // none, which also covers the keys no template declares (an
+            // exposed custom parameter) — they stay where the node put them.
+            let at = updated
+                .parameters
+                .iter()
+                .position(|p| rank_of(&p.key).is_some_and(|other| other > rank))
+                .unwrap_or(updated.parameters.len());
+            updated.parameters.insert(at, param);
+        }
+        normalized = normalized.replace_node(std::sync::Arc::new(updated));
+    }
+    normalized
+}
+
 /// Rewrite renamed node type keys to their canonical form in one graph.
 ///
 /// Currently the only rename is `video` → `media` (the unified media node,
@@ -1197,6 +1269,25 @@ impl Document {
             self.compositions.insert(id, std::sync::Arc::new(updated));
         }
         self
+    }
+
+    /// Backfill the template-declared parameters a stored node is missing in
+    /// every graph of the document — the flat graph, each layer network, and
+    /// nested subnets ([`backfill_template_params`]).
+    ///
+    /// Run on load, after [`Self::normalize_param_ports`]: that pass decides
+    /// which *existing* ports shadow a parameter, and it must judge the
+    /// parameter set the archive actually wrote rather than the one this pass
+    /// completes. Idempotent, and ungated by format version — a template
+    /// gains a parameter without the container format changing, so "does this
+    /// node hold what its type declares" is drift repair like
+    /// [`Self::sync_subnet_pins`], not a migration step.
+    pub fn normalize_template_params(self, registry: &NodeRegistry) -> Self {
+        self.map_graphs(|graph| {
+            graph_walk::map_subnets(graph, &|graph: &Graph| {
+                backfill_template_params(graph, registry)
+            })
+        })
     }
 
     /// Re-derive every subnet node's pins from the inner graph it owns
@@ -2691,6 +2782,128 @@ mod tests {
             .clone();
         assert_eq!(nested.inputs.len(), 2, "empty legacy slot is reused");
         assert!(nested.inputs[1].is_variadic, "nested subnet is migrated");
+    }
+
+    /// `MED-APP-46`: a node stored before its type declared a parameter gains
+    /// it on load, at the position the template declares it in, everywhere in
+    /// the document.
+    #[test]
+    fn normalize_template_params_backfills_missing_params_at_the_template_position() {
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::NodeId;
+        use crate::registry::{NodeCategory, NodeRegistry, NodeTemplate};
+
+        let mut registry = NodeRegistry::new();
+        registry.register(
+            NodeTemplate::new("shape.rect", "Rectangle", NodeCategory::Geometry)
+                // Declared *first*, which is the half of this repair that
+                // appending would get wrong.
+                .with_param(Parameter {
+                    key: "sizing".into(),
+                    value: ParameterValue::String("fixed".into()),
+                })
+                .with_param(Parameter {
+                    key: "width".into(),
+                    value: ParameterValue::Float(100.0),
+                })
+                .with_param(Parameter {
+                    key: "height".into(),
+                    value: ParameterValue::Float(100.0),
+                }),
+        );
+
+        // A pre-`sizing` rectangle, carrying an edited width and a custom
+        // parameter no template declares.
+        let legacy = || {
+            Node::new(NodeId::new(1), "shape.rect")
+                .with_param("width", ParameterValue::Float(640.0))
+                .with_param("height", ParameterValue::Float(360.0))
+                .with_param("custom", ParameterValue::Float(1.0))
+        };
+        let nested = Node::new(NodeId::new(2), "subnet")
+            .with_subnet(Graph::new().add_node(legacy()).unwrap());
+        let network = Graph::new()
+            .add_node(legacy())
+            .unwrap()
+            .add_node(nested)
+            .unwrap();
+        let doc = Document::new(Graph::new().add_node(legacy()).unwrap())
+            .with_composition(test_comp().add_layer(Layer::new(LayerId::new(1), "Legacy", network)))
+            .normalize_template_params(&registry);
+
+        fn keys(node: &Node) -> Vec<&str> {
+            node.parameters.iter().map(|p| p.key.as_str()).collect()
+        }
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let layer_network = &comp.layers[0].network;
+        let repaired = layer_network.node(NodeId::new(1)).unwrap();
+        assert_eq!(
+            keys(repaired),
+            ["sizing", "width", "height", "custom"],
+            "the missing key lands where the template declares it; the key no \
+             template declares keeps its place"
+        );
+        assert_eq!(
+            repaired
+                .parameters
+                .iter()
+                .find(|p| p.key == "sizing")
+                .map(|p| &p.value),
+            Some(&ParameterValue::String("fixed".into())),
+            "the value is the template default, which is what the processor's \
+             own fallback already resolved to"
+        );
+        assert_eq!(
+            repaired
+                .parameters
+                .iter()
+                .find(|p| p.key == "width")
+                .map(|p| &p.value),
+            Some(&ParameterValue::Float(640.0)),
+            "a parameter the node already carries keeps its stored value"
+        );
+        assert_eq!(
+            keys(doc.graph.node(NodeId::new(1)).unwrap()),
+            ["sizing", "width", "height", "custom"],
+            "the flat graph is repaired too"
+        );
+        assert_eq!(
+            keys(
+                layer_network
+                    .node(NodeId::new(2))
+                    .unwrap()
+                    .subnet
+                    .as_deref()
+                    .unwrap()
+                    .node(NodeId::new(1))
+                    .unwrap()
+            ),
+            ["sizing", "width", "height", "custom"],
+            "nested subnets are repaired too"
+        );
+
+        assert_eq!(
+            doc.clone().normalize_template_params(&registry),
+            doc,
+            "idempotent: a node already holding every declared key is untouched"
+        );
+    }
+
+    /// A type the registry does not know — and a type whose parameters are the
+    /// user's rather than its own (`net.in`, `subnet`) — can gain nothing.
+    #[test]
+    fn normalize_template_params_leaves_a_type_with_no_declaration_alone() {
+        use crate::graph::{Node, ParameterValue};
+        use crate::id::NodeId;
+        use crate::registry::NodeRegistry;
+
+        let in_node = Node::new(NodeId::new(1), crate::network::NET_IN_TYPE_KEY)
+            .with_param("user_added", ParameterValue::Float(3.0));
+        let doc = Document::new(Graph::new().add_node(in_node).unwrap());
+        assert_eq!(
+            doc.clone().normalize_template_params(&NodeRegistry::new()),
+            doc
+        );
     }
 
     #[test]

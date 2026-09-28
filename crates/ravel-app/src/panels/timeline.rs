@@ -1138,10 +1138,16 @@ impl TimelineGpuiPanel {
     /// Flip a boolean shell flag on every operation target as one undo step.
     /// The clicked row decides the new value, so a mixed selection ends up
     /// uniform instead of each layer flipping its own way.
+    ///
+    /// `key` is the flag's field key, and the invalidation is looked up from
+    /// it rather than passed in: `solo` and `muted` rebuild the compiled
+    /// chain while `locked` does not, and that classification belongs in the
+    /// one place both panels read it from
+    /// ([`ravel_ui::invalidation`]), not in three call sites here.
     fn toggle_layer_flag(
         &mut self,
         lid: LayerId,
-        hint: InvalidationHint,
+        key: &'static str,
         read: impl Fn(&Layer) -> bool,
         write: impl Fn(&mut Layer, bool),
         cx: &mut Context<Self>,
@@ -1166,6 +1172,7 @@ impl TimelineGpuiPanel {
                 return;
             };
             let value = !read(clicked);
+            let hint = invalidation::layer_field_hint(key, comp_id, clicked);
             let Some(doc) = update_layers(project.document(), comp_id, &targets, |layer| {
                 write(layer, value)
             }) else {
@@ -1176,37 +1183,15 @@ impl TimelineGpuiPanel {
     }
 
     fn toggle_solo(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        // Solo/mute change the compiled merge chain (REQ-LAYER-007).
-        self.toggle_layer_flag(
-            lid,
-            InvalidationHint::Structural,
-            |l| l.solo,
-            |l, value| l.solo = value,
-            cx,
-        );
+        self.toggle_layer_flag(lid, "solo", |l| l.solo, |l, value| l.solo = value, cx);
     }
 
     fn toggle_mute(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        self.toggle_layer_flag(
-            lid,
-            InvalidationHint::Structural,
-            |l| l.muted,
-            |l, value| l.muted = value,
-            cx,
-        );
+        self.toggle_layer_flag(lid, "muted", |l| l.muted, |l, value| l.muted = value, cx);
     }
 
     fn toggle_lock(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        // `locked` is a shell field, so it takes the shell hint like the
-        // rest — not `Structural` (it is not compiled into the chain the way
-        // `muted` and `solo` are) and not `None` (the Properties panel posts
-        // a hint for the same field, and one decision means one answer).
-        let hint = self
-            .state
-            .comp_id()
-            .map(|comp| invalidation::shell_hint_for_layers(comp, [lid]))
-            .unwrap_or(InvalidationHint::None);
-        self.toggle_layer_flag(lid, hint, |l| l.locked, |l, value| l.locked = value, cx);
+        self.toggle_layer_flag(lid, "locked", |l| l.locked, |l, value| l.locked = value, cx);
     }
 
     /// Duplicate a layer directly above its source and select the copy.
@@ -7603,6 +7588,44 @@ mod tests {
                 "a bar drag did not post a Shell hint naming both dragged layers"
             );
         });
+    }
+
+    /// The three flag toggles classify through the shared decision, not by
+    /// writing `Structural` at the call site: `solo` and `muted` rebuild the
+    /// compiled merge chain (REQ-LAYER-007) and `locked` does not, and the
+    /// panel must not hold a second copy of that split.
+    ///
+    /// Behaviour is unchanged by the refactor — this pins it so that it
+    /// stays that way.
+    #[gpui::test]
+    fn the_layer_flags_classify_through_the_shared_decision(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+
+        for (toggle, expected) in [
+            ("solo", InvalidationHint::Structural),
+            ("muted", InvalidationHint::Structural),
+            ("locked", InvalidationHint::shell(comp_id, Some(a))),
+        ] {
+            // Drop whatever the previous step left pending: `Structural`
+            // absorbs everything, so a leftover would hide the next answer.
+            project.update(cx, |project, _cx| {
+                project.take_pending_hint();
+            });
+            window
+                .update(cx, |panel, _window, cx| match toggle {
+                    "solo" => panel.toggle_solo(a, cx),
+                    "muted" => panel.toggle_mute(a, cx),
+                    _ => panel.toggle_lock(a, cx),
+                })
+                .unwrap();
+            project.update(cx, |project, _cx| {
+                assert_eq!(
+                    project.take_pending_hint(),
+                    expected,
+                    "{toggle} posted the wrong invalidation"
+                );
+            });
+        }
     }
 
     /// Trimming the in edge keeps the out edge fixed and clamps into the

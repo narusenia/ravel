@@ -2697,6 +2697,16 @@ fn placed(geometry: &Geometry, placement: InstanceTransform) -> Result<Geometry,
     let mut out = geometry.clone();
     let point_count = out.point_count();
     bake_placements(out.points_mut(), &[(0..point_count, placement)])?;
+    // `anchor` is a position in the same space as the points, so it moves
+    // with them. Leaving it behind would matter the moment somebody reads
+    // it: `scatter.*`'s `center_input` recentres a piece on its anchor, and
+    // a stale one would pull every turned piece off its point.
+    if out.detail().get(names::ANCHOR).is_some() {
+        let anchor = out.detail_mut().make_mut(names::ANCHOR)?;
+        for value in anchor.as_vec2_mut(names::ANCHOR)? {
+            *value = placement.apply(*value);
+        }
+    }
 
     let instances = out.instances();
     if instances.element_count() == 0 || instances.get(names::P).is_none() {
@@ -5826,6 +5836,44 @@ mod tests {
         assert!(
             second.0.abs() < 1e-3 && (second.1 - 6.0).abs() < 1e-3,
             "the turn has to be baked too: {second:?}"
+        );
+    }
+
+    /// `anchor` is a position, so it moves with the points it describes.
+    /// `scatter.*` recentres a piece on its anchor, and a stale one would
+    /// pull every turned piece off the point it was dealt to.
+    #[test]
+    fn a_piece_carries_its_anchor_through_the_placement() {
+        let mut source = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(4.0, 0.0)]);
+        source
+            .detail_mut()
+            .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(2.0, 0.0)]))
+            .expect("one anchor");
+
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(90.0, 90.0)]))
+            .expect("one offset");
+        geometry
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(3.0, 3.0)]))
+            .expect("one scale");
+        geometry.set_instance_source(Some(Arc::new(source)));
+
+        let pieces = instance_pieces(&geometry).expect("the geometry splits");
+        let piece = piece_geometry(&pieces[0]);
+        // The points tripled, so the anchor has to triple with them.
+        assert_eq!(vec2_column(piece, names::P)[1], Vec2(12.0, 0.0));
+        let anchor = piece
+            .detail()
+            .get(names::ANCHOR)
+            .expect("the anchor rides along")
+            .as_vec2(names::ANCHOR)
+            .expect("a Vec2 column")[0];
+        assert!(
+            (anchor.0 - 6.0).abs() < 1e-4 && anchor.1.abs() < 1e-4,
+            "the anchor stayed behind the points it describes: {anchor:?}"
         );
     }
 

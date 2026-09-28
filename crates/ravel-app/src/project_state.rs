@@ -2292,6 +2292,17 @@ impl ProjectState {
         }
     }
 
+    /// The hint accumulated for the next evaluation request, taken out.
+    ///
+    /// Tests run without a worker, so the hint stays pending here instead of
+    /// leaving with the request — which is what lets a panel test read back
+    /// what its own gesture posted, rather than a stand-in written by the
+    /// test itself.
+    #[cfg(test)]
+    pub(crate) fn take_pending_hint(&mut self) -> InvalidationHint {
+        std::mem::replace(&mut self.pending_hint, InvalidationHint::None)
+    }
+
     /// Assemble the active-composition evaluation request, without the hint
     /// (filled by the caller). `Ok(None)` when nothing is evaluable,
     /// `Err` when the composition fails to compile.
@@ -5929,7 +5940,7 @@ mod tests {
             // The hint the Properties panel itself decides on, not a
             // stand-in: what `RESP-3` guards is that *that* decision stays
             // below `Structural`.
-            let hint = crate::panels::properties::layer_field_hint(
+            let hint = ravel_ui::invalidation::layer_field_hint(
                 "transform.position",
                 comp_id,
                 document

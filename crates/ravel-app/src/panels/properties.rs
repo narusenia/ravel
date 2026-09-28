@@ -61,13 +61,14 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
+use ravel_ui::invalidation::layer_field_hint;
 use ravel_ui::keyframes::{PropertyRowId, layer_local_frame};
 use ravel_ui::panels::timeline::PropertyGroup;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
 use ravel_ui::properties::expression;
 use ravel_ui::properties::layer::{
-    CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
+    CUSTOM_FIELD_PREFIX, apply_layer_field, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
 };
 use ravel_ui::properties::media_asset::{
@@ -721,36 +722,6 @@ fn vector_component_keys(key: &str, count: usize) -> Vec<String> {
     (0..count.min(SUFFIXES.len()))
         .map(|i| format!("{key}#{}", SUFFIXES[i]))
         .collect()
-}
-
-/// The invalidation a layer field edit posts (REQ-LAYER-009). One function
-/// for both entry points — editing a field and toggling a key on it commit
-/// the same kind of change, and two copies of this list drift.
-///
-/// Three outcomes, by what the edit moves:
-///
-/// * a custom parameter feeds the layer network's In node, so only that
-///   node's processor is stale — `Params`;
-/// * `blend_mode` / `solo` / `muted` / `adjustment` / `parent` move the shape
-///   of the compiled chain (REQ-LAYER-007), not a value in it, so it has to
-///   be rebuilt — `Structural`. `parent` belongs with the merge flags
-///   because `compile.rs` wires an edge from the parent's synthetic Transform
-///   node;
-/// * everything else — transform, time placement, opacity, audio — is a
-///   shell value the shell processors read off the `Document` at process
-///   time. Nothing in the chain goes stale, but a node that *reads* the shell
-///   does, and `Shell` is what says so without dragging in the full
-///   `Structural` rebuild a scrub would pay per mouse move (`RESP-3`, #193).
-pub(crate) fn layer_field_hint(key: &str, comp: CompId, layer: &Layer) -> InvalidationHint {
-    if key.starts_with(CUSTOM_FIELD_PREFIX) {
-        return in_node_id(layer)
-            .map(|id| InvalidationHint::Params(vec![id]))
-            .unwrap_or(InvalidationHint::None);
-    }
-    match key {
-        "blend_mode" | "solo" | "muted" | "adjustment" | "parent" => InvalidationHint::Structural,
-        _ => InvalidationHint::shell(comp, Some(layer.id)),
-    }
 }
 
 /// Default height of an expanded inline editor (curve or ramp), and the
@@ -5287,62 +5258,6 @@ mod tests {
     use ravel_core::network as net;
     use ravel_core::param_curve::CurveParam;
     use ravel_ui::properties::layer::PARENT_NONE;
-
-    /// `RESP-3` (#193): a shell field edit posts `Shell`, naming the shell it
-    /// touched — and **not** `Structural`, which would drop every cache and
-    /// recompile every GPU pipeline once per mouse move of a transform scrub.
-    #[test]
-    fn a_shell_field_edit_names_its_shell_without_escalating() {
-        let comp = CompId::next();
-        let layer_id = LayerId::next();
-        let layer = Layer::new(layer_id, "L", network_with_custom_param()).with_time(0, 0, 300);
-        let expected = InvalidationHint::Shell {
-            scopes: vec![ravel_core::runtime::ShellScope {
-                comp,
-                layer: Some(layer_id),
-            }],
-            params: Vec::new(),
-        };
-        for key in [
-            "transform.position",
-            "transform.rotation",
-            "transform.scale",
-            "opacity",
-            "start_frame",
-            "in_frame",
-            "out_frame",
-            "audio_gain",
-            "name",
-        ] {
-            assert_eq!(
-                layer_field_hint(key, comp, &layer),
-                expected,
-                "{key} did not post a Shell hint naming its own shell"
-            );
-        }
-    }
-
-    /// The two edits that are *not* shell hints, and why: the merge chain's
-    /// shape is compiled (REQ-LAYER-007) so it has to be rebuilt, and a
-    /// custom parameter is the layer network's In node rather than the shell.
-    #[test]
-    fn merge_chain_flags_stay_structural_and_custom_params_stay_params() {
-        let comp = CompId::next();
-        let layer =
-            Layer::new(LayerId::next(), "L", network_with_custom_param()).with_time(0, 0, 300);
-        for key in ["blend_mode", "solo", "muted", "adjustment", "parent"] {
-            assert_eq!(
-                layer_field_hint(key, comp, &layer),
-                InvalidationHint::Structural,
-                "{key} stopped rebuilding the compiled chain"
-            );
-        }
-        let in_node = in_node_id(&layer).expect("the fixture network has an In node");
-        assert_eq!(
-            layer_field_hint(&format!("{CUSTOM_FIELD_PREFIX}amount"), comp, &layer),
-            InvalidationHint::Params(vec![in_node])
-        );
-    }
 
     /// The key toggle appears on `Int` and `String` rows — those parameters
     /// are animatable now — and on the animated spellings of both, reporting

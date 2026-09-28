@@ -447,6 +447,11 @@ trait ProcessorRegistry { register / processor / invalidate_node }
     .mark_dirty(&graph, node_id) / .mark_dirty_at(&graph, &[segments], node_id)
     .is_dirty(id) / .invalidate_all() / .invalidate_scope(&[segments])
     .set_document(Arc<Document>)                // required by comp.network / Layer Ref
+    .invalidate_shell_readers(&[ShellScope])    // drops the layer scopes whose
+        // networks hold a node reading shell fields off the Document. Called by
+        // the worker for an InvalidationHint::Shell, AFTER set_document (which
+        // removes store entries). No node type reads a shell yet, so this finds
+        // nothing until `layer.info` / `comp.info` exist
     .set_read_ahead(Option<CancelCheck>)        // CACHE-9; Some = this pull is
         // read-ahead: node results reserve at the speculative rank, and the
         // check is asked before EVERY process(); true ends the pull with
@@ -1857,7 +1862,17 @@ roll a newer project back to an older revision).
 ### `runtime::eval_service` — background evaluation (UI non-blocking)
 
 ```rust
-InvalidationHint::{None, Params(Vec<NodeId>), Structural}
+InvalidationHint::{None, Params(Vec<NodeId>),
+    Shell { scopes: Vec<ShellScope>, params: Vec<NodeId> }, Structural}
+    // merge order: Structural > Shell > Params > None. Shell unions its
+    // scopes (`ShellScope { comp, layer: Option<LayerId> }`; `layer: None`
+    // = the whole composition, absorbing that comp's per-layer entries) and
+    // KEEPS a merged Params in its own `params` rather than absorbing it.
+    // Posted by shell edits (transform / timing / opacity / audio) so that
+    // nodes reading shell fields off the Document can be dirtied
+    // (`Evaluator::invalidate_shell_readers`) — deliberately *not*
+    // Structural, which a scrub would pay per mouse move (RESP-3, #193)
+InvalidationHint::shell(CompId, Option<LayerId>) -> InvalidationHint
 trait EvalWorkerHooks: Send {          // host-supplied, runs on the worker
     fn sync(&mut self, &mut Evaluator, &Graph, Option<&Document>, &InvalidationHint);
     fn finalize(&mut self, &Arc<dyn NodeData>, &EvalContext)

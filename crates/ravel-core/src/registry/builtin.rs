@@ -19,6 +19,38 @@ use crate::scene::camera;
 /// downsampled or multi-pass approximation instead of an unbounded shader loop.
 pub const MAX_BLUR_RADIUS: f32 = 64.0;
 
+/// Built-in types whose template declares the transform section
+/// ([`NodeTemplate::with_transform_section`]).
+///
+/// The list and the `.with_transform_section()` calls in the template
+/// functions below are checked against each other by
+/// `the_transform_section_list_matches_the_templates`, so the declaration
+/// site stays the single source: a consumer asks [`has_transform_section`]
+/// and never matches on a `type_key` of its own.
+pub const TRANSFORM_SECTION_NODES: &[&str] = &[
+    "geometry.from_image",
+    "geometry.merge",
+    "scatter.circular",
+    "scatter.grid",
+    "scatter.path_array",
+    "scatter.scatter",
+    "shape.custom_path",
+    "shape.ellipse",
+    "shape.grid",
+    "shape.line",
+    "shape.polygon",
+    "shape.rect",
+    "shape.star",
+    "text.layout",
+];
+
+/// Whether `type_key`'s built-in template declares the transform section, so
+/// its geometry output is put through
+/// `ravel_nodes::geometry::apply_transform` with the node's own parameters.
+pub fn has_transform_section(type_key: &str) -> bool {
+    TRANSFORM_SECTION_NODES.contains(&type_key)
+}
+
 pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(constant());
     reg.register(constant_color());
@@ -1436,6 +1468,10 @@ fn geometry_merge() -> NodeTemplate {
         .with_input(geometry_input("A"))
         .with_input(geometry_input("B"))
         .with_output(geometry_output())
+        // A merge has no position of its own — the branches arrive where they
+        // are — so the section's `translate` is the one and takes the role.
+        .with_transform_section()
+        .with_param_role("translate", ParamRole::Position)
 }
 
 /// `geometry.from_image`: a frame buffer as one instance stamping it.
@@ -1459,6 +1495,10 @@ fn geometry_from_image() -> NodeTemplate {
         is_variadic: false,
     })
     .with_output(geometry_output())
+    // The rectangle is centred on the origin and the node has no parameter
+    // saying otherwise, so the section's `translate` is its position.
+    .with_transform_section()
+    .with_param_role("translate", ParamRole::Position)
 }
 
 /// `geometry.connect`: add connectivity to a point cloud without adding
@@ -1760,6 +1800,9 @@ fn shape_rect() -> NodeTemplate {
         // `width` / `height` are separate scalars, not an offset from the
         // centre, so they carry no role: a role is a point on the canvas.
         .with_param_role("center", ParamRole::Position)
+        // `center` is where the rectangle is; the section's `translate` is an
+        // extra move on top of it, so the grabbable point stays `center`.
+        .with_transform_section()
 }
 
 fn shape_ellipse() -> NodeTemplate {
@@ -1781,6 +1824,9 @@ fn shape_ellipse() -> NodeTemplate {
         // The radius *is* the offset from the centre to the rim, which is
         // what a `Size` handle writes.
         .with_param_role("radius", ParamRole::Size)
+        // `center` stays the grabbable point: the section moves the ellipse a
+        // second time rather than replacing where it is.
+        .with_transform_section()
 }
 
 fn shape_polygon() -> NodeTemplate {
@@ -1802,6 +1848,8 @@ fn shape_polygon() -> NodeTemplate {
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("sides", 3.0..=128.0, 3.0..=32.0)
         .with_param_role("center", ParamRole::Position)
+        // `center` stays the grabbable point; the section is the extra move.
+        .with_transform_section()
 }
 
 fn shape_star() -> NodeTemplate {
@@ -1828,6 +1876,8 @@ fn shape_star() -> NodeTemplate {
         .with_param_range("inner_radius", 0.0..=1e5, 0.0..=500.0)
         .with_param_range("points", 3.0..=128.0, 3.0..=32.0)
         .with_param_role("center", ParamRole::Position)
+        // `center` stays the grabbable point; the section is the extra move.
+        .with_transform_section()
 }
 
 fn scatter_grid() -> NodeTemplate {
@@ -1885,6 +1935,8 @@ fn scatter_grid() -> NodeTemplate {
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
         )
+        // `center` stays the grabbable point; the section is the extra move.
+        .with_transform_section()
 }
 
 fn scatter_circular() -> NodeTemplate {
@@ -1940,6 +1992,8 @@ fn scatter_circular() -> NodeTemplate {
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
         )
+        // `center` stays the grabbable point; the section is the extra move.
+        .with_transform_section()
 }
 
 fn scatter_path_array() -> NodeTemplate {
@@ -1984,6 +2038,10 @@ fn scatter_path_array() -> NodeTemplate {
         .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         .with_param_range("count", 1.0..=100000.0, 1.0..=100.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
+        // The array is placed by its input path, so this node holds no position
+        // of its own: the section's `translate` is the one, and it takes the role.
+        .with_transform_section()
+        .with_param_role("translate", ParamRole::Position)
 }
 
 fn scatter_scatter() -> NodeTemplate {
@@ -2039,6 +2097,8 @@ fn scatter_scatter() -> NodeTemplate {
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
         )
+        // `center` stays the grabbable point; the section is the extra move.
+        .with_transform_section()
 }
 
 /// `shape.line`: one open path from `start` to `end`.
@@ -2063,6 +2123,9 @@ fn shape_line() -> NodeTemplate {
         // node would measure from; the line declares neither.
         .with_param_role("start", ParamRole::Position)
         .with_param_role("end", ParamRole::Position)
+        // `start` is already the grabbable point, so the section's `translate`
+        // declares no role of its own.
+        .with_transform_section()
 }
 
 /// `shape.grid`: a lattice of open paths — `rows` horizontal lines and
@@ -2092,6 +2155,8 @@ fn shape_grid() -> NodeTemplate {
         // centre, so it is not a `Size` handle: dragging one would move the
         // corner at half the pointer's speed.
         .with_param_role("center", ParamRole::Position)
+        // `center` stays the grabbable point; the section is the extra move.
+        .with_transform_section()
 }
 
 fn shape_custom_path() -> NodeTemplate {
@@ -2110,6 +2175,10 @@ fn shape_custom_path() -> NodeTemplate {
             key: "closed".into(),
             value: ParameterValue::Bool(false),
         })
+        // The control points *are* where this node is, and REQ-UI-011 already
+        // moves a `PathPoints` node by shifting all of them; the section adds the
+        // rotation and scale a path had to borrow a `geometry.transform` for.
+        .with_transform_section()
 }
 
 /// `text.font`: resolves a family, weight, and style into a font face.
@@ -2199,6 +2268,9 @@ fn text_layout() -> NodeTemplate {
             ["writing_mode", "align", "wrap_width", "anchor"],
         )
         .with_param_group("placement", ["position"])
+        // `position` is the layout's own origin, so it stays the grabbable point
+        // and the section's `translate` declares no role.
+        .with_transform_section()
 }
 
 /// `text.to_path`: flattens a text layout's character instances into one
@@ -2261,6 +2333,7 @@ mod tests {
     use crate::animation::channel::ChannelSource;
     use crate::graph::Node;
     use crate::id::NodeId;
+    use crate::registry::{TRANSFORM_SECTION_GROUP, TRANSFORM_SECTION_PARAMS};
 
     // ----- the output type a layer reference follows (CPO-4) ---------------
 
@@ -3276,6 +3349,87 @@ mod tests {
         );
     }
 
+    /// The transform section **is** `geometry.transform`: the same spellings,
+    /// the same defaults, the same ranges. One applying function serves both
+    /// (`ravel_nodes::geometry::apply_transform`), so a drift here would be a
+    /// node whose Properties rows no longer describe what the evaluator does.
+    #[test]
+    fn the_transform_section_declares_geometry_transforms_own_parameters() {
+        let node = geometry_transform();
+        let section = NodeTemplate::new("test.section", "Section", NodeCategory::Geometry)
+            .with_transform_section();
+
+        let declared: Vec<&str> = section
+            .default_params
+            .iter()
+            .map(|param| param.key.as_str())
+            .collect();
+        assert_eq!(declared, TRANSFORM_SECTION_PARAMS);
+
+        for key in TRANSFORM_SECTION_PARAMS {
+            let of = |tmpl: &NodeTemplate| {
+                tmpl.default_params
+                    .iter()
+                    .find(|param| param.key == key)
+                    .unwrap_or_else(|| panic!("geometry.transform has no {key}"))
+                    .value
+                    .clone()
+            };
+            assert_eq!(of(&section), of(&node), "{key} defaults differ");
+            assert_eq!(
+                section.param_range(key),
+                node.param_range(key),
+                "{key} ranges differ"
+            );
+        }
+
+        assert_eq!(
+            section.param_group_declarations(),
+            [(
+                TRANSFORM_SECTION_GROUP.to_string(),
+                TRANSFORM_SECTION_PARAMS.map(str::to_string).to_vec(),
+            )]
+        );
+        // The section's own `translate` is not a Position: the node it sits on
+        // decides that, because a node with two of them has the manipulator
+        // writing whichever `find` reaches first.
+        assert_eq!(section.param_role("translate"), None);
+    }
+
+    /// [`TRANSFORM_SECTION_NODES`] and the `.with_transform_section()` calls
+    /// are two spellings of one fact, so they are checked against each other:
+    /// `has_transform_section` is what every consumer asks, and a template
+    /// that declares the parameters without being listed would carry rows the
+    /// evaluator never applies.
+    #[test]
+    fn the_transform_section_list_matches_the_templates() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+
+        for tmpl in reg.all_templates() {
+            let declares = TRANSFORM_SECTION_PARAMS.iter().all(|key| {
+                tmpl.default_params
+                    .iter()
+                    .any(|param| &param.key.as_str() == key)
+            }) && tmpl
+                .param_group_declarations()
+                .iter()
+                .any(|(name, _)| name == TRANSFORM_SECTION_GROUP);
+            assert_eq!(
+                declares,
+                has_transform_section(&tmpl.type_key),
+                "{} declares the section parameters but has_transform_section disagrees",
+                tmpl.type_key
+            );
+        }
+        for type_key in TRANSFORM_SECTION_NODES {
+            assert!(
+                reg.get(type_key).is_some(),
+                "{type_key} is listed but is not a built-in"
+            );
+        }
+    }
+
     #[test]
     fn every_numeric_param_declares_a_range() {
         let mut reg = NodeRegistry::new();
@@ -3408,15 +3562,114 @@ mod tests {
         }
     }
 
-    /// A template that groups anything groups **everything**: a leftover
-    /// parameter would sit in the untitled leading section above the named
-    /// ones, which reads as an oversight rather than a decision.
+    /// Every built-in that emits geometry is **classified**: it either
+    /// declares the transform section or is named here as deliberately
+    /// without one. Adding a geometry node and saying nothing about its
+    /// placement fails this test, which is the only mechanism that makes the
+    /// list exhaustive — a `&str` match cannot be.
+    #[test]
+    fn every_geometry_producing_built_in_decides_about_the_section() {
+        // Operators. They pass a geometry through and change what it carries,
+        // not where it is, so the placement belongs to whatever produced it;
+        // wiring a `geometry.transform` in stays the way to move one branch of
+        // a chain. `geometry.transform` is the section itself.
+        const WITHOUT: &[&str] = &[
+            "attribute.curveu",
+            "attribute.delete",
+            "attribute.path_sample",
+            "attribute.promote",
+            "attribute.set",
+            "attribute.transfer",
+            "field.apply",
+            "geometry.connect",
+            "geometry.sort",
+            "geometry.transform",
+            "style.dash",
+            "style.fill",
+            "style.stroke",
+            "text.on_path",
+            "text.to_path",
+        ];
+
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for tmpl in reg.all_templates() {
+            if !tmpl
+                .outputs
+                .iter()
+                .any(|out| out.data_type == DataTypeId::GEOMETRY)
+            {
+                continue;
+            }
+            let key = tmpl.type_key.as_str();
+            assert_ne!(
+                has_transform_section(key),
+                WITHOUT.contains(&key),
+                "{key} emits geometry but is in neither list (or in both)"
+            );
+        }
+        for key in WITHOUT {
+            assert!(reg.get(key).is_some(), "{key} is listed but is no built-in");
+        }
+    }
+
+    /// A node that declares the section carries **one** position: either its
+    /// own or the section's `translate`, never both. The Viewer's manipulator
+    /// takes the first role it finds, so two would make the drag target an
+    /// accident of declaration order (`position_param`).
+    #[test]
+    fn a_section_node_declares_exactly_one_position() {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        for key in TRANSFORM_SECTION_NODES {
+            let tmpl = reg.get(key).expect("a listed built-in");
+            let positions: Vec<&str> = tmpl
+                .default_params
+                .iter()
+                .filter(|param| tmpl.param_role(&param.key) == Some(ParamRole::Position))
+                .map(|param| param.key.as_str())
+                .collect();
+            // `shape.line` is the one node with two ends, and both were
+            // already positions before the section existed.
+            let expected = if *key == "shape.line" { 2 } else { 1 };
+            // `shape.custom_path` places itself by its control points, which
+            // carry no role at all (REQ-UI-011 moves a `PathPoints` node by
+            // shifting every point), so its section adds none either.
+            let expected = if *key == "shape.custom_path" {
+                0
+            } else {
+                expected
+            };
+            assert_eq!(
+                positions.len(),
+                expected,
+                "{key} declares the positions {positions:?}"
+            );
+        }
+    }
+
+    /// A template that groups anything of **its own** groups all of its own:
+    /// a leftover parameter would sit in the untitled leading section above
+    /// the named ones, which reads as an oversight rather than a decision.
+    ///
+    /// The transform section does not trigger it. Its group is not the
+    /// template author choosing to sort these rows — it arrives with
+    /// `with_transform_section()`, one call, on types that grouped nothing
+    /// before — and the layout it produces is the deliberate one the registry
+    /// documents: the node's own parameters in the leading section, the
+    /// section folded below them. A template that groups anything *else*
+    /// still has to cover everything, and the section's own parameters count
+    /// as grouped there.
     #[test]
     fn a_template_that_declares_groups_covers_every_parameter() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         for tmpl in reg.all_templates() {
-            if tmpl.param_group_declarations().is_empty() {
+            if tmpl
+                .param_group_declarations()
+                .iter()
+                .all(|(name, _)| name == TRANSFORM_SECTION_GROUP)
+            {
                 continue;
             }
             let grouped: std::collections::HashSet<&String> = tmpl

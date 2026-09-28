@@ -6,7 +6,7 @@
 pub mod builtin;
 
 use crate::composition::{Composition, Layer};
-use crate::graph::{InputPort, Node, OutputPort, Parameter};
+use crate::graph::{InputPort, Node, OutputPort, Parameter, ParameterValue};
 use crate::id::{LayerId, NodeId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -91,6 +91,17 @@ pub enum ParamRole {
     /// An offset from the position: a radius, a half extent.
     Size,
 }
+
+/// Display group [`NodeTemplate::with_transform_section`] puts its parameters
+/// in. The locale key of the section header is
+/// `node.<type_key>.group.transform`.
+pub const TRANSFORM_SECTION_GROUP: &str = "transform";
+
+/// The parameters [`NodeTemplate::with_transform_section`] declares, in the
+/// order Properties shows them. Spelled exactly as `geometry.transform`
+/// spells them, which is what lets one applying function serve both.
+pub const TRANSFORM_SECTION_PARAMS: [&str; 5] =
+    ["translate", "rotation", "scale", "use_centroid", "pivot"];
 
 /// Declares that a four-component parameter is a **colour**, so the editors
 /// draw it as one.
@@ -814,6 +825,53 @@ impl NodeTemplate {
     /// The declared display groups, in section order.
     pub fn param_group_declarations(&self) -> &[(String, Vec<String>)] {
         &self.param_groups
+    }
+
+    /// Declares this node's **transform section**: the geometry it outputs is
+    /// moved, turned and scaled by parameters of its own, applied after the
+    /// processor runs (`docs/implementation/node-transform-section-plan.md`).
+    ///
+    /// The spelling, the defaults and the ranges are `geometry.transform`'s,
+    /// so the same quantity never carries two names, and the applying code is
+    /// literally that node's (`ravel_nodes::geometry::apply_transform`). The
+    /// parameters land in the `transform` display group, appended after any
+    /// group the type declared before it.
+    ///
+    /// **`translate` gets no [`ParamRole::Position`] here.** A node with an
+    /// intrinsic position of its own (`shape.rect`'s `center`,
+    /// `text.layout`'s `position`) keeps that one as the grabbable point; a
+    /// node without one declares the role at its own call site. Two Position
+    /// parameters on one node and the Viewer's manipulator writes whichever
+    /// `find` reaches first, which is not a decision a template should leave
+    /// to iteration order.
+    pub fn with_transform_section(self) -> Self {
+        self.with_param(Parameter {
+            key: "translate".into(),
+            value: ParameterValue::vec3(0.0, 0.0, 0.0),
+        })
+        // Euler angles in degrees, Z last — the same convention
+        // `geometry.transform` documents.
+        .with_param(Parameter {
+            key: "rotation".into(),
+            value: ParameterValue::vec3(0.0, 0.0, 0.0),
+        })
+        .with_param(Parameter {
+            key: "scale".into(),
+            value: ParameterValue::vec3(1.0, 1.0, 1.0),
+        })
+        .with_param(Parameter {
+            key: "use_centroid".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param(Parameter {
+            key: "pivot".into(),
+            value: ParameterValue::vec3(0.0, 0.0, 0.0),
+        })
+        .with_param_range("translate", -1e9..=1e9, -1000.0..=1000.0)
+        .with_param_range("rotation", -1e9..=1e9, -360.0..=360.0)
+        .with_param_range("scale", -1e9..=1e9, -10.0..=10.0)
+        .with_param_range("pivot", -1e9..=1e9, -1000.0..=1000.0)
+        .with_param_group(TRANSFORM_SECTION_GROUP, TRANSFORM_SECTION_PARAMS)
     }
 
     /// Instantiate this template as a node with `id`.

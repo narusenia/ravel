@@ -222,6 +222,11 @@ bbox の内側からのドラッグで移動する。動かせるのは**位置�
   ジオメトリが跳ぶ）、書き込みはパラメータが無ければ挿す。undo は Document
   スナップショットなので、挿さったパラメータもドラッグと一緒に消える
 - `PathPoints` を持つノード（全制御点を一括オフセット。接線は相対なので保持）
+- **Transform セクションを宣言したノードのうち、自前の位置を持たないもの**
+  （`geometry.from_image` / `geometry.merge` / `scatter.path_array`）。
+  セクションの `translate` が `ParamRole::Position` を持つので、上の 1 つ目の
+  条件がそのまま当たる。`center` / `position` を持つノードはセクションを
+  宣言しても書き込み先は自前の位置のまま — 1 ノードに位置は 1 つ
 - 直下流に `geometry.transform` があるノード（その translate を書く）
 
 ツールによる暗黙のノード自動挿入は行わない（ノードグラフが正という原則）。

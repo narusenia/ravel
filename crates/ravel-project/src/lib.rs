@@ -3626,14 +3626,27 @@ mod tests {
 
         let comp = back.document.get_composition(comp_id).unwrap();
         let rect = comp.layers[0].network.node(NodeId::new(300)).unwrap();
+        // Against the template's own order rather than a written-out list:
+        // the claim is *where* a backfilled key lands, and a literal roster
+        // would have to be re-typed every time `shape.rect` gains a
+        // parameter (the transform section added five).
+        let mut registry = NodeRegistry::new();
+        register_builtins(&mut registry);
         assert_eq!(
             rect.parameters
                 .iter()
                 .map(|p| p.key.as_str())
                 .collect::<Vec<_>>(),
-            ["sizing", "center", "width", "height"],
-            "the two keys the archive predates land where shape.rect declares \
-             them, not after the ones it stored"
+            registry
+                .get("shape.rect")
+                .expect("shape.rect is a builtin")
+                .default_params
+                .iter()
+                .map(|p| p.key.as_str())
+                .collect::<Vec<_>>(),
+            "a node holding only declared keys comes back in the template's \
+             declaration order — the keys the archive predates land where the \
+             template puts them, not after the ones it stored"
         );
         assert_eq!(
             rect.parameters

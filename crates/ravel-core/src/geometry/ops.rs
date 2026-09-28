@@ -2597,6 +2597,84 @@ pub fn instance_pieces(geometry: &Geometry) -> Result<Vec<InstancePiece>, Geomet
     Ok(pieces)
 }
 
+/// Broadcasts each piece's provenance row onto the output instances that
+/// stamp it.
+///
+/// The other half of a split (`instance-pieces-plan` unit 3), and the half
+/// the requirement actually turns on: dealing glyphs out is only useful if a
+/// field can still tell them apart afterwards, and what tells them apart is
+/// `char_index` / `char_progress` riding along from
+/// [`InstancePiece::attributes`] (REQ-MOGRAPH-004).
+///
+/// Which output instance gets which row is `source_index`, read with the
+/// same clamping rule the rasterizer selects a source by — an instance that
+/// stamps piece *i* gets piece *i*'s row, and one row is broadcast to every
+/// instance stamping it. A `scatter.grid(500)` dealt five characters
+/// therefore sees each `char_index` a hundred times, which is what a stagger
+/// reads.
+///
+/// **A column the output already carries is left alone.** That is the whole
+/// rule, and it is what protects the placement: `index`, `P`, `rot`,
+/// `scale` and `source_index` are the scatter's own answers, and a source's
+/// idea of where it sat is exactly what a split threw away. It also means a
+/// user column the scatter happens to write wins over the source's, which
+/// is the precedence [`expand_instances`] already applies.
+///
+/// A piece that does not carry a column contributes that column's typed
+/// zero for its instances, the fill rule `geometry.merge` uses.
+pub fn attach_piece_attributes(
+    geometry: &mut Geometry,
+    pieces: &[InstancePiece],
+) -> Result<(), GeometryError> {
+    let count = geometry.instance_count();
+    if pieces.is_empty() || count == 0 {
+        return Ok(());
+    }
+    let source_indices = geometry
+        .instances()
+        .get(names::SOURCE_INDEX)
+        .map(|column| column.as_i32(names::SOURCE_INDEX).map(<[i32]>::to_vec))
+        .transpose()?;
+
+    // First appearance across the pieces, so the column order does not
+    // depend on a hash map's iteration order.
+    let mut pending: Vec<AttrName> = Vec::new();
+    for piece in pieces {
+        for (name, _) in piece.attributes.iter() {
+            if geometry.instances().get(name.as_str()).is_some() {
+                continue;
+            }
+            if !pending.iter().any(|seen| seen == name) {
+                pending.push(name.clone());
+            }
+        }
+    }
+
+    for name in pending {
+        let sample = pieces
+            .iter()
+            .find_map(|piece| piece.attributes.get(name.as_str()))
+            .expect("the name came from one of the pieces");
+        let mut accumulated = empty_like(sample);
+        for index in 0..count {
+            let slot = source_slot(pieces.len(), source_indices.as_deref(), index);
+            append_rows(
+                name.as_str(),
+                &mut accumulated,
+                pieces[slot]
+                    .attributes
+                    .get(name.as_str())
+                    .map(|column| column.as_ref()),
+                1,
+            )?;
+        }
+        geometry
+            .instances_mut()
+            .insert(name.as_str(), accumulated)?;
+    }
+    Ok(())
+}
+
 /// The whole geometry as its own single piece.
 fn whole_piece(geometry: Geometry) -> InstancePiece {
     InstancePiece {

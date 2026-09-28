@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::ops::{InstancePiece, instance_pieces};
+use ravel_core::geometry::ops::{attach_piece_attributes, instance_pieces};
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, Domain, Geometry, InstanceSource, Primitive, bounds_center,
     element_hash as hash, names,
@@ -111,15 +111,17 @@ fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<
 ///   only worked on one wire would be a control the user can pick and not
 ///   get (UX invariant 6).
 ///
-/// The returned pieces are `Some` only in `instances` mode, because they are
-/// what [`attach_piece_attributes`] broadcasts onto the output instances,
-/// and in `whole` mode there is no row to broadcast — a "piece" there is a
-/// whole source, whose instance domain has as many rows as it likes.
+/// In `instances` mode each piece's own row rides along onto the instances
+/// that stamp it ([`attach_piece_attributes`]), which is what lets a stagger
+/// still read `char_progress` after the characters have been dealt out.
+/// There is nothing to broadcast in `whole` mode — a "piece" there is a
+/// whole source, whose instance domain has as many rows as it likes, and no
+/// one of them describes the source as a whole.
 fn attach_instance_sources(
     geometry: &mut Geometry,
     sources: &[&Geometry],
     params: &ResolvedParams,
-) -> anyhow::Result<Option<Vec<InstancePiece>>> {
+) -> anyhow::Result<()> {
     let center_input = params.bool_or("center_input", false);
     if params.str_or(PIECE_MODE_PARAM, PIECE_MODE_WHOLE) == PIECE_MODE_INSTANCES {
         let pieces = sources
@@ -140,7 +142,8 @@ fn attach_instance_sources(
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         deal_sources(geometry, stamped, params)?;
-        return Ok(Some(pieces));
+        attach_piece_attributes(geometry, &pieces)?;
+        return Ok(());
     }
     match sources {
         [] => {}
@@ -160,7 +163,7 @@ fn attach_instance_sources(
             deal_sources(geometry, stamped, params)?;
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 /// Hands `sources` out to the instances already populated on `geometry`,
@@ -1326,6 +1329,134 @@ mod tests {
         assert_eq!(geo.sources().len(), 1);
         assert_eq!(source_geometry(&geo, 0).point_count(), 4);
         assert_eq!(source_indices(&geo).expect("dealt out"), [0, 0, 0]);
+    }
+
+    fn i32_instances(geometry: &Geometry, name: &str) -> Vec<i32> {
+        geometry
+            .instances()
+            .get(name)
+            .unwrap_or_else(|| panic!("the output carries {name}"))
+            .as_i32(name)
+            .expect("an I32 column")
+            .to_vec()
+    }
+
+    /// The piece's row rides along onto the instances that stamp it. This is
+    /// what a stagger reads after the characters have been dealt out
+    /// (REQ-MOGRAPH-004), and the reason the mode is worth having at all.
+    #[test]
+    fn instances_mode_carries_the_piece_attributes_onto_the_output() {
+        let node = scatter_grid(
+            7,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        // Seven points over three characters: the string is walked twice
+        // and a bit, and every point knows which character it drew.
+        assert_eq!(
+            i32_instances(&geo, names::CHAR_INDEX),
+            [0, 1, 2, 0, 1, 2, 0]
+        );
+        let progress = geo
+            .instances()
+            .get(names::CHAR_PROGRESS)
+            .expect("progress descends")
+            .as_f32(names::CHAR_PROGRESS)
+            .expect("an F32 column")
+            .to_vec();
+        assert_eq!(progress.len(), 7);
+        assert!((progress[1] - 0.5).abs() < 1e-6, "{progress:?}");
+    }
+
+    /// The scatter's own answers are not overwritten by the source's. `P`
+    /// above all: where a character sat in its layout is exactly what the
+    /// split threw away.
+    #[test]
+    fn the_scatter_keeps_its_own_placement_columns() {
+        let node = scatter_grid(
+            3,
+            &[
+                (
+                    "piece_mode",
+                    ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+                ),
+                ("spacing", ParameterValue::vec2(20.0, 20.0)),
+                ("center", ParameterValue::vec2(0.0, 0.0)),
+            ],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        // The grid's own row, not the text's 0 / 30 / 60 layout.
+        assert_eq!(
+            positions(&geo, true),
+            [Vec2(-20.0, 0.0), Vec2(0.0, 0.0), Vec2(20.0, 0.0)]
+        );
+        assert_eq!(i32_instances(&geo, names::INDEX), [0, 1, 2]);
+        assert_eq!(source_indices(&geo).expect("dealt out"), [0, 1, 2]);
+        assert!(geo.instances().get(names::ROT).is_some());
+        assert!(geo.instances().get(names::SCALE).is_some());
+    }
+
+    /// `whole` gains no columns at all: there is no single row of a whole
+    /// source to broadcast, so nothing is broadcast.
+    #[test]
+    fn whole_mode_adds_no_source_attributes() {
+        let node = scatter_grid(
+            3,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_WHOLE.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(3))],
+        );
+        for name in [names::CHAR_INDEX, names::CHAR_PROGRESS] {
+            assert!(
+                geo.instances().get(name).is_none(),
+                "{name} has no single row to come from in whole mode"
+            );
+        }
+    }
+
+    /// Two wires whose instance domains differ: the piece that lacks a
+    /// column contributes that column's typed zero, the fill rule
+    /// `geometry.merge` uses.
+    #[test]
+    fn a_piece_without_a_column_fills_with_the_typed_zero() {
+        let mut plain = Geometry::new();
+        plain
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .expect("one offset");
+        plain.set_instance_source(Some(Arc::new(small_square())));
+
+        let node = scatter_grid(
+            3,
+            &[(
+                "piece_mode",
+                ParameterValue::String(PIECE_MODE_INSTANCES.into()),
+            )],
+        );
+        let geo = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(text_like(2)), arc_geo(plain)],
+        );
+        assert_eq!(geo.sources().len(), 3, "2 + 1 pieces");
+        assert_eq!(i32_instances(&geo, names::CHAR_INDEX), [0, 1, 0]);
     }
 
     // -- Circular -----------------------------------------------------------

@@ -1,7 +1,9 @@
 # レイヤーの内容サイズと `auto` 実装計画
 
-> **Status**: 実装済み — 2026-09-21（`EXT-1`〜`EXT-4`）。マージ時に完了へ書き換え
-> `done/` へ移す。
+> **Status**: 完了 — 2026-09-28（`EXT-1`〜`EXT-4`、#552）
+>
+> **単位 2 の「エッジ優先」は実装時に反転した。** `auto` の分岐はパラメータを
+> 1 つも読まないので、エッジの値は描画に効かない。詳細は単位 2 の節。
 
 対象: `ravel-core` の `registry`（`NodeTemplate`）と `composition`（`base_geometry`）、
 `ravel-nodes` の `shape`、`ravel-ui` の `properties::node`、`ravel-app` の

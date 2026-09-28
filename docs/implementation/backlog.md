@@ -896,14 +896,14 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 掛けられない（`MOD-*` が読む属性）。既定は今の挙動なので既存プロジェクトは
 1 つも動かない。
 
-### レイヤーの内容サイズと `auto`（`layer-content-size-plan.md`）
+### レイヤーの内容サイズと `auto`（`done/layer-content-size-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| EXT-1 | 🟡 | `shape.rect` の `sizing` と `auto` の解決（コアと nodes） | — |
-| EXT-2 | ⬜ | 宣言で駆動された行を read-only にする（`ColorParam::When` の一般化） | EXT-1 |
-| EXT-3 | ⬜ | `solid.ron` を `shape.rect` へ差し替え | EXT-1 |
-| EXT-4 | ⬜ | ロケール / 文書 | EXT-1〜3 |
+| EXT-1 | ✅ | `shape.rect` の `sizing` と `auto` の解決（コアと nodes、#552） | — |
+| EXT-2 | ✅ | 宣言で駆動された行を read-only にする（`ColorParam::When` の一般化、#552） | EXT-1 |
+| EXT-3 | ✅ | `solid.ron` を `shape.rect` へ差し替え（#552） | EXT-1 |
+| EXT-4 | ✅ | ロケール / 文書（#552） | EXT-1〜3 |
 
 Solid の bbox がコンプ解像度分あるのは bbox の計算のせいではなく、**内容が
 `base_quad(ctx.comp_resolution)`**（`crates/ravel-nodes/src/net.rs:137`）だから。

@@ -1031,9 +1031,15 @@ fn normalize_variadic_input_ports(graph: &Graph, registry: &NodeRegistry) -> Gra
 /// Backfilling on load makes the template the single answer to *which*
 /// parameters a node has, so every reader agrees without any of them learning
 /// to consult the registry. The value inserted is the template's default,
-/// which is what those `_or` fallbacks already resolved to — the backfill
-/// changes no output, and a template default that disagrees with its
-/// processor's fallback is a bug in the template, not something to preserve.
+/// which is what those `_or` fallbacks resolve to, so the backfill changes no
+/// output — **as long as the two agree**. Where they did not, the processor
+/// was the one that had drifted: `scatter.*` declared `center_input: true`
+/// from #124 on while the processor still answered `false` for a node without
+/// the key, so the same node type rendered differently by save date. That
+/// fallback now names the declared value
+/// (`ravel_nodes::scatter::CENTER_INPUT_DEFAULT`). A new parameter owes the
+/// same check: the declaration is the answer, and a fallback that disagrees
+/// with it is the bug.
 ///
 /// Each missing parameter lands at its **template position relative to the
 /// parameters the node already has** rather than at the end: `shape.rect`

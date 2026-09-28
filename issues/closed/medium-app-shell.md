@@ -1413,6 +1413,16 @@ source の `rect()`」という形で、`from_image_outputs_one_instance_stampin
 > 直らず、編集経路ごとに push を足すことになる。「旧文書がロード後に書き換わる」
 > 懸念は既存の `normalize_*` 5 本が同じことを既にしているので新しい性質ではない。
 >
+> **挙動が変わるものが 1 つあった。** テンプレートの既定と processor 側の
+> `_or` フォールバックが食い違っていると、補完は出力を変える。
+> ravel-nodes の `_or` 呼び出し 114 箇所を機械的に突き合わせ、実差分は
+> `scatter.*` の `center_input` 1 件だけだった（#124 が宣言を `true` に
+> したのに `bool_or("center_input", false)` が残り、**同じノード型が保存
+> 時期で違う絵になっていた**）。processor 側を宣言に合わせ
+> （`CENTER_INPUT_DEFAULT`）、両者が再び割れないようテストで固定した。
+> **#124 より前に保存された `scatter.*` は、開くとソースが
+> アンカーに寄る。** 宣言が `true` である以上これが意図された既定。
+>
 > テスト: `composition::tests::normalize_template_params_*`（挿入位置・既定値・
 > レイヤーネットワークとサブネット・冪等）と
 > `ravel-project` の `load_backfills_a_parameter_the_stored_node_predates`

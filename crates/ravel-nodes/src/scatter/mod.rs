@@ -22,6 +22,18 @@ use ravel_core::graph::Node;
 use ravel_core::registry::{PIECE_MODE_INSTANCES, PIECE_MODE_PARAM, PIECE_MODE_WHOLE};
 use ravel_core::types::{NodeData, Vec2};
 
+/// What `center_input` means on a node that does not carry the parameter.
+///
+/// It has to be the value the registry template declares, because that is
+/// what every node the user can make today holds and what the load-time
+/// backfill writes into the ones that predate it (`MED-APP-46`). This stayed
+/// `false` after #124 enabled centring by default, so a `scatter.*` saved
+/// before #124 evaluated with centring off while an identical fresh node had
+/// it on — the same node type rendering differently by save date.
+/// `the_center_input_fallback_matches_the_template_declaration` pins the two
+/// together.
+const CENTER_INPUT_DEFAULT: bool = true;
+
 fn populate_instances(geo: &mut Geometry, positions: Vec<Vec2>, rotations: Vec<f32>) {
     let n = positions.len();
     let indices: Vec<i32> = (0..n as i32).collect();
@@ -122,7 +134,7 @@ fn attach_instance_sources(
     sources: &[&Geometry],
     params: &ResolvedParams,
 ) -> anyhow::Result<()> {
-    let center_input = params.bool_or("center_input", false);
+    let center_input = params.bool_or("center_input", CENTER_INPUT_DEFAULT);
     if params.str_or(PIECE_MODE_PARAM, PIECE_MODE_WHOLE) == PIECE_MODE_INSTANCES {
         let pieces = sources
             .iter()
@@ -519,6 +531,38 @@ mod tests {
 
     use ravel_core::geometry::InstanceSource;
 
+    /// The fallback this module answers with when a node does not carry
+    /// `center_input` is the value the registry declares. Two answers to one
+    /// parameter is how a `scatter.*` saved before #124 came back centred
+    /// differently from a fresh one; `MED-APP-46` removed the way that
+    /// happens, and this keeps the two spellings from drifting apart again.
+    #[test]
+    fn the_center_input_fallback_matches_the_template_declaration() {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        for type_key in [
+            "scatter.grid",
+            "scatter.circular",
+            "scatter.path_array",
+            "scatter.scatter",
+        ] {
+            let declared = registry
+                .get(type_key)
+                .expect("a builtin scatter template")
+                .default_params
+                .iter()
+                .find(|p| p.key == "center_input")
+                .expect("the template declares center_input")
+                .value
+                .clone();
+            assert_eq!(
+                declared,
+                ParameterValue::Bool(CENTER_INPUT_DEFAULT),
+                "{type_key}"
+            );
+        }
+    }
+
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (100, 100))
     }
@@ -818,6 +862,10 @@ mod tests {
                 ("count_y", ParameterValue::Int(1)),
                 ("source_mode", ParameterValue::String("random".into())),
                 ("source_seed", ParameterValue::Int(42)),
+                // Pinned, because the subject here is the source *layout* and
+                // the last assertion compares raw positions: centring is the
+                // default now and would move them.
+                ("center_input", ParameterValue::Bool(false)),
             ],
         );
         let without_source = run(&node, Arc::new(GridProcessor::from_node(&node)), &[]);
@@ -1000,35 +1048,37 @@ mod tests {
     }
 
     #[test]
-    fn center_input_off_and_absent_preserve_raw_source_columns() {
-        for params in [
-            vec![("count_x", ParameterValue::Int(1))],
-            vec![
-                ("count_x", ParameterValue::Int(1)),
-                ("center_input", ParameterValue::Bool(false)),
-            ],
-        ] {
-            let input = off_center_square(true);
-            let shared = input.clone();
-            let node = make_node("scatter.grid", &params);
-            let output = run(
-                &node,
-                Arc::new(GridProcessor::from_node(&node)),
-                &[arc_geo(input)],
-            );
-            let source = output.instance_source().unwrap();
+    fn center_input_off_preserves_raw_source_columns() {
+        // Only the explicit `false`. An **absent** `center_input` used to be
+        // covered here too, and the answer has changed: the fallback is the
+        // template's `true` now
+        // (`the_center_input_fallback_matches_the_template_declaration`), and
+        // a loaded document no longer has the parameter absent at all —
+        // `MED-APP-46` backfills it.
+        let params = vec![
+            ("count_x", ParameterValue::Int(1)),
+            ("center_input", ParameterValue::Bool(false)),
+        ];
+        let input = off_center_square(true);
+        let shared = input.clone();
+        let node = make_node("scatter.grid", &params);
+        let output = run(
+            &node,
+            Arc::new(GridProcessor::from_node(&node)),
+            &[arc_geo(input)],
+        );
+        let source = output.instance_source().unwrap();
 
-            assert_eq!(positions(source, false), positions(&shared, false));
-            assert_eq!(positions(source, true), positions(&shared, true));
-            assert!(Arc::ptr_eq(
-                source.points().get(names::P).unwrap(),
-                shared.points().get(names::P).unwrap(),
-            ));
-            assert!(Arc::ptr_eq(
-                source.detail().get(names::ANCHOR).unwrap(),
-                shared.detail().get(names::ANCHOR).unwrap(),
-            ));
-        }
+        assert_eq!(positions(source, false), positions(&shared, false));
+        assert_eq!(positions(source, true), positions(&shared, true));
+        assert!(Arc::ptr_eq(
+            source.points().get(names::P).unwrap(),
+            shared.points().get(names::P).unwrap(),
+        ));
+        assert!(Arc::ptr_eq(
+            source.detail().get(names::ANCHOR).unwrap(),
+            shared.detail().get(names::ANCHOR).unwrap(),
+        ));
     }
 
     #[test]

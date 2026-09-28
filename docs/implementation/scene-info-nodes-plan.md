@@ -89,27 +89,38 @@ pull しない。よって `layer.ref` のような評価再帰も、グラフ�
 
 ### 殻フィールドの変更を invalidation に載せる
 
-現状、殻の transform / 時間配置 / opacity の編集は
-`InvalidationHint::None` でコミットされる（`crates/ravel-app/src/panels/properties.rs:839-842`。
-`blend_mode` / `solo` / `muted` / `adjustment` だけが `Structural`）。
-殻の値がグラフ評価の入力になっているのは現状 `custom.*` だけで、それは
-`Params([in_node])` を出している（`:834-837`）。
+殻の transform / 時間配置 / opacity の編集は、かつて
+`InvalidationHint::None` でコミットされていた（`blend_mode` / `solo` /
+`muted` / `adjustment` / `parent` だけが `Structural`）。
+殻の値がグラフ評価の入力になっているのは `custom.*` だけで、それは
+`Params([in_node])` を出している。
 
 情報ノードを入れると**殻の任意フィールドがグラフの入力になる**ため、
-ヒントを追加する。
+ヒントを追加する。**単位 1 で実装済み**。
 
 ```rust
 pub enum InvalidationHint {
     None,
     Params(Vec<NodeId>),
-    Shell { comp: CompId, layer: Option<LayerId> },   // 追加
+    Shell {                                          // 追加
+        scopes: Vec<ShellScope>,                     // ShellScope { comp, layer: Option<LayerId> }
+        params: Vec<NodeId>,
+    },
     Structural,
 }
 ```
 
 `merge` の強さは `Structural > Shell > Params > None`
-（`crates/ravel-core/src/runtime/eval_service.rs:46-64` を拡張）。
-`Shell` 同士は comp / layer の集合を統合する。
+（`crates/ravel-core/src/runtime/eval_service.rs`）。
+`Shell` 同士は comp / layer の集合を統合し、`layer: None`（その comp の殻全体）は
+同 comp の per-layer エントリを吸収する。
+
+**`Shell { comp, layer }` という単一 comp の形では完了条件を満たせないので採らない。**
+「`Shell` 同士が統合」は集合でなければ表現できず、「`Shell` が `Params` を吸収しない」は
+`Shell` がノード ID を運べなければ成立しない（吸収すれば coalesce された
+`Params` のプロセッサ再構築が失われ、`EvalService` の「skip した要求の
+リビルドを落とさない」契約が壊れる）。よって `scopes` と `params` の 2 本を持つ。
+発行側は `InvalidationHint::shell(comp, Some(layer))` の 1 行で済む。
 
 **殻編集を一律 `Structural` に格上げする案は採らない。** transform スクラブ中に
 毎フレーム全キャッシュ破棄 + 全パイプライン再構築になり、RESP-3（#193）で

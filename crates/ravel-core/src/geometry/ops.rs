@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -2485,6 +2486,204 @@ fn bake_placements(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Instance pieces (instance-pieces-plan unit 1)
+// ---------------------------------------------------------------------------
+
+/// One piece an instance geometry breaks into: what a single instance
+/// stamped, and where that instance came from.
+///
+/// The sibling of [`expand_instances`]: both walk the instance domain with
+/// the same rules (the same source selection, the same placement, the same
+/// non-placement columns descending), but an expansion *flattens* the whole
+/// geometry into one and a split *divides* it into many. A `scatter.*` asked
+/// to hand out pieces wants the second: the point of the mode is that the
+/// placement is the scatter's to decide.
+#[derive(Clone, Debug)]
+pub struct InstancePiece {
+    /// What this piece stamps — a geometry, or an image the way the
+    /// originating instance stamped one.
+    pub source: InstanceSource,
+    /// The originating instance's **non-placement** attributes, as a set of
+    /// one-element columns: `char_index`, `char_progress`, `index`, and any
+    /// column a user's `attribute.*` put on the instance domain.
+    ///
+    /// This is a piece's provenance, and the reason a scattered glyph can
+    /// still be staggered (REQ-MOGRAPH-004): [`attach_piece_attributes`]
+    /// hands these to the output instances that stamp the piece. Empty when
+    /// the geometry had no instance domain to come from.
+    pub attributes: AttributeSet,
+}
+
+/// Breaks an instance geometry into one piece per **instance**.
+///
+/// Per instance, not per entry of [`Geometry::sources`]: the source list is
+/// deduplicated (`text.layout` shares one outline between both `a`s of
+/// "aa"), so splitting that would collapse repeated characters into one
+/// piece and lose the order besides. The instance domain is in character
+/// order, which is the order a caller wants to deal them out in.
+///
+/// Each piece carries its instance's `rot` and `scale` **baked in**, and its
+/// `P` dropped: a turned character stays turned wherever it is dealt, while
+/// where it sat in the original layout is exactly what the caller is
+/// replacing. The placement is [`InstanceTransform`] with the offset removed
+/// — the one formula, not a second one. A source that has instances of its
+/// own keeps them, with the outer placement composed onto each
+/// ([`InstanceTransform::compose`], outer ∘ inner), so the inner placement
+/// applies first and the nesting depth is unchanged — a piece is never
+/// deeper than the geometry it came from, so [`MAX_INSTANCE_DEPTH`] means
+/// the same thing on both sides of a split.
+///
+/// **An image instance becomes a piece**, where [`expand_instances`] drops
+/// it. The two differ because they are doing different things: an expansion
+/// has to turn the instance into contours and a picture has none, while a
+/// split only chooses what gets dealt where, and the rasterizer stamps an
+/// image instance perfectly well. Nothing can be baked into a picture,
+/// though, so an image piece does not carry its instance's turn or scale —
+/// it is stamped at whatever placement the caller gives it.
+///
+/// A geometry with no instances (or no sources) is one piece: itself. The
+/// pass-through keeps the caller from having to ask first, the way
+/// `expand_instances` is idempotent on an already flat geometry. An instance
+/// domain that cannot be placed answers the way an expansion does — one
+/// piece, with the unplaceable instances dropped — rather than inventing an
+/// origin for each.
+pub fn instance_pieces(geometry: &Geometry) -> Result<Vec<InstancePiece>, GeometryOpError> {
+    let instances = geometry.instances();
+    if instances.element_count() == 0 || geometry.sources().is_empty() {
+        return Ok(vec![whole_piece(geometry.clone())]);
+    }
+    let Some(offsets) = geometry.positions(Domain::Instance) else {
+        return Ok(vec![whole_piece(without_instances(geometry))]);
+    };
+    let count = offsets?.require_planar("instance pieces")?.len();
+    let rots = instances
+        .get(names::ROT)
+        .map(|column| column.as_f32(names::ROT).map(<[f32]>::to_vec))
+        .transpose()?;
+    let scales = instances
+        .get(names::SCALE)
+        .map(|column| column.as_vec2(names::SCALE).map(<[Vec2]>::to_vec))
+        .transpose()?;
+    let source_indices = instances
+        .get(names::SOURCE_INDEX)
+        .map(|column| column.as_i32(names::SOURCE_INDEX).map(<[i32]>::to_vec))
+        .transpose()?;
+
+    let mut pieces = Vec::with_capacity(count);
+    for index in 0..count {
+        // The offset is deliberately absent: `P` is the layout this split
+        // exists to replace.
+        let placement = InstanceTransform {
+            offset: Vec2(0.0, 0.0),
+            rot: rots.as_ref().map_or(0.0, |values| values[index]),
+            scale: scales
+                .as_ref()
+                .map_or(InstanceTransform::IDENTITY.scale, |values| values[index]),
+        };
+        let source = match select_source(geometry.sources(), source_indices.as_deref(), index) {
+            InstanceSource::Geometry(source) => {
+                InstanceSource::Geometry(Arc::new(placed(source, placement)?))
+            }
+            image => image.clone(),
+        };
+        pieces.push(InstancePiece {
+            source,
+            attributes: instance_row(instances, index)?,
+        });
+    }
+    Ok(pieces)
+}
+
+/// The whole geometry as its own single piece.
+fn whole_piece(geometry: Geometry) -> InstancePiece {
+    InstancePiece {
+        source: InstanceSource::Geometry(Arc::new(geometry)),
+        attributes: AttributeSet::new(),
+    }
+}
+
+/// `geometry` with `placement` baked in: its points moved, its tangents
+/// turned, and its own instances' placements composed under it.
+///
+/// The instance half is what keeps a nesting honest. Composing rather than
+/// recursing is what makes "inner first, then outer" true without adding a
+/// level: the inner instance's own placement is still the one nearest its
+/// source.
+fn placed(geometry: &Geometry, placement: InstanceTransform) -> Result<Geometry, GeometryError> {
+    if placement == InstanceTransform::IDENTITY {
+        return Ok(geometry.clone());
+    }
+    let mut out = geometry.clone();
+    let point_count = out.point_count();
+    bake_placements(out.points_mut(), &[(0..point_count, placement)])?;
+
+    let instances = out.instances();
+    if instances.element_count() == 0 || instances.get(names::P).is_none() {
+        return Ok(out);
+    }
+    let inner: Vec<InstanceTransform> = {
+        let offsets = instances
+            .get(names::P)
+            .expect("checked above")
+            .as_vec2(names::P)?
+            .to_vec();
+        let rots = instances
+            .get(names::ROT)
+            .map(|column| column.as_f32(names::ROT).map(<[f32]>::to_vec))
+            .transpose()?;
+        let scales = instances
+            .get(names::SCALE)
+            .map(|column| column.as_vec2(names::SCALE).map(<[Vec2]>::to_vec))
+            .transpose()?;
+        offsets
+            .iter()
+            .enumerate()
+            .map(|(index, offset)| {
+                InstanceTransform::compose(
+                    placement,
+                    InstanceTransform {
+                        offset: *offset,
+                        rot: rots.as_ref().map_or(0.0, |values| values[index]),
+                        scale: scales
+                            .as_ref()
+                            .map_or(InstanceTransform::IDENTITY.scale, |values| values[index]),
+                    },
+                )
+            })
+            .collect()
+    };
+    let instances = out.instances_mut();
+    instances.insert(
+        names::P,
+        AttributeArray::Vec2(inner.iter().map(|t| t.offset).collect()),
+    )?;
+    // A turn or a scale the nesting did not carry has to be written, not
+    // merged into a column that is not there.
+    instances.insert(
+        names::ROT,
+        AttributeArray::F32(inner.iter().map(|t| t.rot).collect()),
+    )?;
+    instances.insert(
+        names::SCALE,
+        AttributeArray::Vec2(inner.iter().map(|t| t.scale).collect()),
+    )?;
+    Ok(out)
+}
+
+/// Row `index` of `instances`, minus the placement columns: the set a piece
+/// carries as its provenance.
+fn instance_row(instances: &AttributeSet, index: usize) -> Result<AttributeSet, GeometryError> {
+    let mut row = AttributeSet::new();
+    for (name, column) in instances.iter() {
+        if is_placement_attribute(name) {
+            continue;
+        }
+        row.insert(name.as_str(), select_values(column, std::iter::once(index)))?;
+    }
+    Ok(row)
 }
 
 /// Concatenates attribute sets of differing shape, one block at a time.
@@ -5471,6 +5670,219 @@ mod tests {
             0,
             "the level past the guard contributes nothing"
         );
+    }
+
+    // ----- instance pieces (instance-pieces-plan unit 1) -------------------
+
+    fn piece_geometry(piece: &InstancePiece) -> &Geometry {
+        piece
+            .source
+            .geometry()
+            .expect("this piece stamps a geometry")
+    }
+
+    /// One piece per **instance**, not per source. The three characters of
+    /// `laid_out_text` share one deduplicated outline, so a split that
+    /// counted sources would answer one piece and lose two characters.
+    #[test]
+    fn a_split_answers_one_piece_per_instance_not_per_source() {
+        let text = laid_out_text();
+        assert_eq!(text.sources().len(), 1, "the outline is shared");
+        let pieces = instance_pieces(&text).expect("a layout splits");
+        assert_eq!(pieces.len(), 3);
+    }
+
+    /// The order is the instance domain's, which for text is character
+    /// order — what makes `index % piece_count` walk a string from the
+    /// front.
+    #[test]
+    fn pieces_keep_the_instance_order() {
+        let pieces = instance_pieces(&laid_out_text()).expect("a layout splits");
+        let char_indices: Vec<i32> = pieces
+            .iter()
+            .map(|piece| i32_column(&piece.attributes, names::CHAR_INDEX)[0])
+            .collect();
+        assert_eq!(char_indices, [0, 1, 2]);
+    }
+
+    /// A piece carries the row it came from, minus the placement: that row
+    /// is what lets a stagger still read `char_progress` after the piece has
+    /// been dealt somewhere else (REQ-MOGRAPH-004).
+    #[test]
+    fn a_piece_carries_its_instance_row_without_the_placement() {
+        let pieces = instance_pieces(&laid_out_text()).expect("a layout splits");
+        let row = &pieces[1].attributes;
+        assert_eq!(row.element_count(), 1, "one row, broadcast later");
+        assert_eq!(i32_column(row, names::CHAR_INDEX), [1]);
+        assert_eq!(i32_column(row, names::WORD_INDEX), [3]);
+        assert_eq!(
+            row.get(names::CHAR_PROGRESS)
+                .expect("progress descends")
+                .as_f32(names::CHAR_PROGRESS)
+                .expect("an F32 column"),
+            [0.5]
+        );
+        for placement in [names::P, names::ROT, names::SCALE, names::SOURCE_INDEX] {
+            assert!(
+                row.get(placement).is_none(),
+                "{placement} is a placement, and the placement is the caller's now"
+            );
+        }
+    }
+
+    /// The turn and the scale are baked into the outline; the layout
+    /// position is not, because replacing it is the point of the split.
+    #[test]
+    fn a_piece_bakes_rot_and_scale_but_drops_the_position() {
+        let pieces = instance_pieces(&laid_out_text()).expect("a layout splits");
+        // Instance 0: no turn, scale 2, at (40, 90). The glyph's first point
+        // is (2, 0), so a baked piece has it at (4, 0) and a piece that kept
+        // the layout would have it at (44, 90).
+        let first = vec2_column(piece_geometry(&pieces[0]), names::P)[0];
+        assert!(
+            (first.0 - 4.0).abs() < 1e-4 && first.1.abs() < 1e-4,
+            "scale baked, position dropped: {first:?}"
+        );
+        // Instance 1: a quarter turn and scale 3 take (2, 0) to (0, 6).
+        let second = vec2_column(piece_geometry(&pieces[1]), names::P)[0];
+        assert!(
+            second.0.abs() < 1e-3 && (second.1 - 6.0).abs() < 1e-3,
+            "the turn has to be baked too: {second:?}"
+        );
+    }
+
+    /// An image instance becomes a piece where an expansion drops it: a
+    /// split only chooses what is dealt where, and the rasterizer stamps a
+    /// picture perfectly well.
+    #[test]
+    fn an_image_instance_becomes_a_piece() {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]),
+            )
+            .expect("two offsets");
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1]))
+            .expect("two source indices");
+        geometry.set_sources(vec![
+            InstanceSource::Geometry(Arc::new(glyph_source())),
+            image_source(4, 4),
+        ]);
+
+        let pieces = instance_pieces(&geometry).expect("a mixed geometry splits");
+        assert_eq!(pieces.len(), 2);
+        assert!(pieces[0].source.geometry().is_some());
+        assert!(
+            pieces[1].source.image().is_some(),
+            "the picture is a piece, not a dropped instance"
+        );
+    }
+
+    /// The inner placement applies first and the outer is composed over it,
+    /// which is the order `expand_instances` already draws. Pinned with a
+    /// turn *and* a scale, because an order mistake is invisible when either
+    /// is the identity.
+    #[test]
+    fn a_nested_piece_applies_the_inner_placement_first() {
+        let leaf = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        let mut inner = Geometry::new();
+        inner
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(4.0, 0.0)]))
+            .expect("one offset");
+        inner
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(3.0, 3.0)]))
+            .expect("one scale");
+        inner.set_instance_source(Some(Arc::new(leaf)));
+
+        let mut outer = Geometry::new();
+        outer
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 100.0)]))
+            .expect("one offset");
+        outer
+            .instances_mut()
+            .insert(
+                names::ROT,
+                AttributeArray::F32(vec![std::f32::consts::FRAC_PI_2]),
+            )
+            .expect("one turn");
+        outer.set_instance_source(Some(Arc::new(inner)));
+
+        let pieces = instance_pieces(&outer).expect("a nesting splits");
+        assert_eq!(pieces.len(), 1);
+        let piece = piece_geometry(&pieces[0]);
+        // The piece keeps its own nesting; expanding it has to land where
+        // the outer instance would have drawn it, minus the layout position
+        // the split drops: (0, 107) becomes (0, 7).
+        let expanded = expand_instances(piece).expect("the piece expands");
+        let placed = vec2_column(&expanded, names::P)[0];
+        assert!(
+            placed.0.abs() < 1e-3 && (placed.1 - 7.0).abs() < 1e-3,
+            "the outer turn has to compose over the inner scale: {placed:?}"
+        );
+    }
+
+    /// A split adds no level, so what is too deep to draw is exactly what
+    /// was too deep to draw before it — [`MAX_INSTANCE_DEPTH`] means the
+    /// same thing on both sides.
+    #[test]
+    fn a_split_leaves_the_nesting_depth_alone() {
+        let mut level = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        for _ in 0..=MAX_INSTANCE_DEPTH {
+            let mut next = Geometry::new();
+            next.instances_mut()
+                .insert(names::P, AttributeArray::Vec2(vec![Vec2(1.0, 0.0)]))
+                .expect("one offset");
+            next.set_instance_source(Some(Arc::new(level)));
+            level = next;
+        }
+        let pieces = instance_pieces(&level).expect("a deep nesting splits");
+        assert_eq!(pieces.len(), 1);
+        // The piece is one level shallower than the geometry it came from,
+        // so it reaches exactly as far as an expansion of the original did.
+        let from_piece = expand_instances(piece_geometry(&pieces[0])).expect("the piece expands");
+        assert_eq!(from_piece.instance_count(), 0, "the answer stays flat");
+        assert_eq!(
+            from_piece.point_count(),
+            1,
+            "one level shallower is one level inside the guard"
+        );
+    }
+
+    /// No instances, so nothing to divide: the geometry is its own piece,
+    /// the way an expansion of a flat geometry is a pass-through.
+    #[test]
+    fn a_geometry_without_instances_is_one_piece() {
+        let flat = glyph_source();
+        let pieces = instance_pieces(&flat).expect("a flat geometry splits");
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(piece_geometry(&pieces[0]).point_count(), flat.point_count());
+        assert!(pieces[0].attributes.iter().next().is_none());
+    }
+
+    /// An instance domain with no `P` places nothing, and a split answers
+    /// what an expansion answers rather than inventing an origin.
+    #[test]
+    fn instances_that_cannot_be_placed_answer_like_an_expansion() {
+        let mut geometry = glyph_source();
+        geometry
+            .instances_mut()
+            .insert(names::CHAR_INDEX, AttributeArray::I32(vec![0, 1]))
+            .expect("two rows, no position");
+        geometry.set_instance_source(Some(Arc::new(glyph_source())));
+
+        let pieces = instance_pieces(&geometry).expect("an unplaceable domain splits");
+        assert_eq!(pieces.len(), 1);
+        let piece = piece_geometry(&pieces[0]);
+        assert_eq!(piece.instance_count(), 0);
+        assert!(piece.sources().is_empty());
+        assert_eq!(piece.point_count(), geometry.point_count());
     }
 
     /// A geometry's own points and primitives keep their place at the front,

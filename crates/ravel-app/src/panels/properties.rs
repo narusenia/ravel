@@ -7621,15 +7621,16 @@ mod tests {
                 let groups = ravel_ui::properties::node::param_group_titles(&node, &panel.registry);
                 assert_eq!(
                     groups.iter().map(|(g, _)| g.as_str()).collect::<Vec<_>>(),
-                    vec!["layout", "source"],
-                    "scatter.grid declares both groups and leaves nothing ungrouped"
+                    vec!["layout", "source", "transform"],
+                    "scatter.grid declares its own groups, leaves nothing \
+                     ungrouped, and carries the transform section last"
                 );
                 // The fold identity of each section, from the same helper
                 // `render` uses. Only the parameter sections have one.
                 let keys = param_group_keys(&node, &panel.registry, &panel.sections);
                 assert_eq!(
                     keys.iter().filter(|key| key.is_some()).count(),
-                    2,
+                    3,
                     "the info and ports sections are not foldable"
                 );
                 let source = keys

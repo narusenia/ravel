@@ -336,3 +336,286 @@ mod tests {
         }
     }
 }
+
+/// The built-ins that declare the section, exercised through the registry:
+/// every node here is created from its own template, so what is fixed is the
+/// declaration and not a second list of parameters kept in the test.
+#[cfg(test)]
+mod declared_nodes {
+    use super::*;
+    use crate::geometry::{GeometryFromImageProcessor, GeometryTransformProcessor};
+    use crate::shape::RectProcessor;
+    use crate::text::{LayoutProcessor, ToPathProcessor};
+    use ravel_core::eval::Evaluator;
+    use ravel_core::geometry::{names, ops};
+    use ravel_core::graph::{Graph, ParameterValue};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+    use ravel_core::registry::NodeRegistry;
+    use ravel_core::registry::builtin::{TRANSFORM_SECTION_NODES, register_builtins};
+    use ravel_core::types::{FrameBuffer, FrameRate, Rect, Vec2};
+
+    fn ctx() -> EvalContext {
+        EvalContext::new(0, FrameRate::new(30, 1), (64, 64))
+    }
+
+    fn registry() -> NodeRegistry {
+        let mut reg = NodeRegistry::new();
+        register_builtins(&mut reg);
+        reg
+    }
+
+    /// A node of `type_key` with its template's parameters, `params` applied
+    /// over them.
+    fn node(
+        reg: &NodeRegistry,
+        id: u64,
+        type_key: &str,
+        params: &[(&str, ParameterValue)],
+    ) -> Node {
+        let mut node = reg
+            .create_node(type_key, NodeId::new(id))
+            .unwrap_or_else(|| panic!("{type_key} is a built-in"));
+        for (key, value) in params {
+            let slot = node
+                .parameters
+                .iter_mut()
+                .find(|param| &param.key == key)
+                .unwrap_or_else(|| panic!("{type_key} declares no {key}"));
+            slot.value = value.clone();
+        }
+        node
+    }
+
+    fn positions(value: &Arc<dyn NodeData>) -> Vec<Vec2> {
+        value
+            .downcast_ref::<Geometry>()
+            .expect("output is Geometry")
+            .points()
+            .get(names::P)
+            .expect("P")
+            .as_vec2(names::P)
+            .expect("Vec2 P")
+            .to_vec()
+    }
+
+    /// Hands back the value it was given, so a test can compare `Arc`s.
+    struct Fixed(Arc<dyn NodeData>);
+
+    impl NodeProcessor for Fixed {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// **The section costs nothing at its defaults.** A document that never
+    /// touched these rows evaluates to the very `Arc` the inner processor
+    /// produced, for every type that declares the section — which is what
+    /// "output unchanged by this feature" means for every existing project.
+    #[test]
+    fn a_declared_node_at_its_defaults_hands_the_inner_value_straight_back() {
+        let reg = registry();
+        let geometry: Arc<dyn NodeData> =
+            Arc::new(Geometry::from_points(vec![Vec2(1.0, 2.0), Vec2(-3.0, 4.0)]));
+        for type_key in TRANSFORM_SECTION_NODES {
+            let node = node(&reg, 1, type_key, &[]);
+            let wrapped = wrap(&node, Arc::new(Fixed(geometry.clone())));
+            let out = wrapped
+                .process(
+                    &node,
+                    &ctx(),
+                    &[],
+                    &ResolvedParams::default(),
+                    &mut Evaluator::new(),
+                )
+                .expect("the section evaluates");
+            assert!(
+                Arc::ptr_eq(&geometry, &out),
+                "{type_key} is not identity at its template defaults"
+            );
+        }
+    }
+
+    /// `shape.rect`'s `center` keeps meaning what it meant, and the section's
+    /// `translate` is an **extra** move on top of it: the two add up, the
+    /// intrinsic one first, because the shape is built around `center` before
+    /// the section ever sees the geometry.
+    #[test]
+    fn a_rect_adds_its_center_and_the_sections_translate() {
+        let reg = registry();
+        let bbox = |params: &[(&str, ParameterValue)]| -> Rect {
+            let node = node(&reg, 1, "shape.rect", params);
+            let graph = Graph::new().add_node(node.clone()).expect("one node");
+            let mut ev = Evaluator::new();
+            ev.register(
+                NodeId::new(1),
+                wrap(&node, Arc::new(RectProcessor::from_node(&node))),
+            );
+            let out = ev
+                .evaluate(&graph, NodeId::new(1), &ctx())
+                .expect("the rect evaluates");
+            ops::drawn_bounds(out.downcast_ref::<Geometry>().expect("geometry"))
+                .expect("a rectangle has bounds")
+        };
+        let mid = |r: Rect| Vec2(r.x + r.width / 2.0, r.y + r.height / 2.0);
+
+        let origin = bbox(&[]);
+        let centred = bbox(&[("center", ParameterValue::vec2(10.0, -4.0))]);
+        assert_eq!(
+            mid(centred),
+            Vec2(mid(origin).0 + 10.0, mid(origin).1 - 4.0),
+            "`center` alone must keep doing exactly what it did"
+        );
+
+        let both = bbox(&[
+            ("center", ParameterValue::vec2(10.0, -4.0)),
+            ("translate", ParameterValue::vec3(3.0, 7.0, 0.0)),
+        ]);
+        assert_eq!(
+            mid(both),
+            Vec2(mid(centred).0 + 3.0, mid(centred).1 + 7.0),
+            "`center` and the section's `translate` add up"
+        );
+        assert_eq!(
+            (both.width, both.height),
+            (centred.width, centred.height),
+            "a translation changes nothing but the place"
+        );
+    }
+
+    /// Turning a `text.layout` with the section lands the outlines exactly
+    /// where a `geometry.transform` between the layout and `text.to_path`
+    /// would: the relation, not a table of glyph coordinates.
+    #[test]
+    fn rotating_a_text_layout_matches_a_geometry_transform_downstream() {
+        let reg = registry();
+        let rotation = ParameterValue::vec3(0.0, 0.0, 30.0);
+
+        let layout = node(
+            &reg,
+            1,
+            "text.layout",
+            &[
+                ("text", ParameterValue::String("Ravel".into())),
+                ("rotation", rotation.clone()),
+            ],
+        );
+        let to_path = node(&reg, 2, "text.to_path", &[]);
+        let graph = Graph::new()
+            .add_node(layout.clone())
+            .expect("layout")
+            .add_node(to_path.clone())
+            .expect("to_path")
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .expect("edge");
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), wrap(&layout, Arc::new(LayoutProcessor)));
+        ev.register(NodeId::new(2), Arc::new(ToPathProcessor));
+        let sectioned = ev
+            .evaluate(&graph, NodeId::new(2), &ctx())
+            .expect("the sectioned chain evaluates");
+
+        let plain = node(
+            &reg,
+            1,
+            "text.layout",
+            &[("text", ParameterValue::String("Ravel".into()))],
+        );
+        let transform = node(&reg, 3, "geometry.transform", &[("rotation", rotation)]);
+        let graph = Graph::new()
+            .add_node(plain.clone())
+            .expect("layout")
+            .add_node(transform)
+            .expect("transform")
+            .add_node(to_path)
+            .expect("to_path")
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(3),
+                InputPortIndex(0),
+            )
+            .expect("layout to transform")
+            .add_edge(
+                EdgeId::new(2),
+                NodeId::new(3),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .expect("transform to to_path");
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), wrap(&plain, Arc::new(LayoutProcessor)));
+        ev.register(NodeId::new(3), Arc::new(GeometryTransformProcessor));
+        ev.register(NodeId::new(2), Arc::new(ToPathProcessor));
+        let chained = ev
+            .evaluate(&graph, NodeId::new(2), &ctx())
+            .expect("the explicit chain evaluates");
+
+        let turned = positions(&sectioned);
+        assert!(!turned.is_empty(), "the text has to produce outlines");
+        assert_eq!(turned, positions(&chained));
+    }
+
+    /// The section turns what `geometry.from_image` places, and
+    /// `drawn_bounds` answers with the **outer** rectangle of the turned one:
+    /// a 100×50 image at 45° bounds a square of (100 + 50) / sqrt(2) a side.
+    #[test]
+    fn rotating_an_image_rectangle_bounds_the_turned_rectangle() {
+        let reg = registry();
+        let bounds = |params: &[(&str, ParameterValue)]| -> Rect {
+            let node = node(&reg, 2, "geometry.from_image", params);
+            let source = Node::new(NodeId::new(1), "test.image")
+                .with_output("output", DataTypeId::FRAME_BUFFER);
+            let graph = Graph::new()
+                .add_node(source)
+                .expect("source")
+                .add_node(node.clone())
+                .expect("from_image")
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .expect("edge");
+            let mut ev = Evaluator::new();
+            let frame: Arc<dyn NodeData> =
+                Arc::new(FrameBuffer::from_f32(100, 50, vec![0.0; 100 * 50 * 4]));
+            ev.register(NodeId::new(1), Arc::new(Fixed(frame)));
+            ev.register(
+                NodeId::new(2),
+                wrap(&node, Arc::new(GeometryFromImageProcessor)),
+            );
+            let out = ev
+                .evaluate(&graph, NodeId::new(2), &ctx())
+                .expect("from_image evaluates");
+            ops::drawn_bounds(out.downcast_ref::<Geometry>().expect("geometry"))
+                .expect("the stamped image has bounds")
+        };
+
+        let flat = bounds(&[]);
+        assert_eq!((flat.width, flat.height), (100.0, 50.0));
+
+        let turned = bounds(&[("rotation", ParameterValue::vec3(0.0, 0.0, 45.0))]);
+        let side = 150.0 / 2.0_f32.sqrt();
+        assert!(
+            (turned.width - side).abs() < 0.01 && (turned.height - side).abs() < 0.01,
+            "a 45-degree turn must bound the outer square, got {turned:?}"
+        );
+    }
+}

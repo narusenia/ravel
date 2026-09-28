@@ -1003,6 +1003,8 @@ pivot = "use_centroid がオフのときの変換原点。"
 [node."geometry.merge"]
 label = "ジオメトリマージ"
 description = "2 つのジオメトリを 1 つに結合する。"
+[node."geometry.merge".group]
+transform = "トランスフォーム"
 
 [node."geometry.connect"]
 label = "コネクト"
@@ -1026,6 +1028,8 @@ attribute = "attribute モードが読むアトリビュート名。ベクトル
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
 description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"
+[node."geometry.from_image".group]
+transform = "トランスフォーム"
 
 [node."scene.add"]
 label = "シーン追加"
@@ -1103,6 +1107,8 @@ sizing = "大きさの決め方。auto はコンポジションのフレーム�
 center = "中心位置（ピクセル）。"
 width = "幅（ピクセル）。"
 height = "高さ（ピクセル）。"
+[node."shape.rect".group]
+transform = "トランスフォーム"
 
 [node."shape.ellipse"]
 label = "楕円"
@@ -1111,6 +1117,8 @@ description = "線分で近似した楕円を作成する。"
 center = "中心位置（ピクセル）。"
 radius = "軸ごとの半径（ピクセル）。"
 segments = "輪郭を近似する線分の数。"
+[node."shape.ellipse".group]
+transform = "トランスフォーム"
 
 [node."shape.polygon"]
 label = "多角形"
@@ -1119,6 +1127,8 @@ description = "正多角形を作成する。"
 center = "中心位置（ピクセル）。"
 radius = "外接円の半径（ピクセル）。"
 sides = "辺の数。"
+[node."shape.polygon".group]
+transform = "トランスフォーム"
 
 [node."shape.star"]
 label = "星形"
@@ -1128,6 +1138,8 @@ center = "中心位置（ピクセル）。"
 outer_radius = "外側の頂点の半径（ピクセル）。"
 inner_radius = "内側の頂点の半径（ピクセル）。"
 points = "頂点の数。"
+[node."shape.star".group]
+transform = "トランスフォーム"
 
 [node."shape.line"]
 label = "直線"
@@ -1136,6 +1148,8 @@ description = "2 点を結ぶ開いたパスを 1 本作成する。"
 start = "始点の位置（ピクセル）。"
 end = "終点の位置（ピクセル）。"
 segments = "分割数。2 以上で中間点を等間隔に追加する。"
+[node."shape.line".group]
+transform = "トランスフォーム"
 
 [node."shape.grid"]
 label = "グリッド線"
@@ -1145,6 +1159,8 @@ center = "中心位置（ピクセル）。"
 size = "全体の幅と高さ（ピクセル）。"
 rows = "水平線の本数。"
 columns = "垂直線の本数。"
+[node."shape.grid".group]
+transform = "トランスフォーム"
 
 [node."shape.custom_path"]
 label = "カスタムパス"
@@ -1152,6 +1168,8 @@ description = "ペンツールで作ったベジェパス。制御点はキャ�
 [node."shape.custom_path".params]
 points = "ベジェ接線オフセット付きの制御点（ここでは読み取り専用）。"
 closed = "パスを閉じる。"
+[node."shape.custom_path".group]
+transform = "トランスフォーム"
 
 [node."scatter.grid"]
 label = "グリッド"
@@ -1168,6 +1186,7 @@ source_seed = "ソース割り当ての乱数シード。"
 [node."scatter.grid".group]
 layout = "配置"
 source = "ソース"
+transform = "トランスフォーム"
 
 [node."scatter.circular"]
 label = "円形配置"
@@ -1184,6 +1203,7 @@ source_seed = "ソース割り当ての乱数シード。"
 [node."scatter.circular".group]
 layout = "配置"
 source = "ソース"
+transform = "トランスフォーム"
 
 [node."scatter.path_array"]
 label = "パス配列"
@@ -1194,6 +1214,8 @@ center_input = "インスタンス化の前に各ソースジオメトリをア�
 piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する（テキストなら 1 点に 1 文字）。"
 source_mode = "複数ソース接続時の割り当て方: sequential / random。"
 source_seed = "ソース割り当ての乱数シード。"
+[node."scatter.path_array".group]
+transform = "トランスフォーム"
 
 [node."scatter.scatter"]
 label = "スキャッター"
@@ -1210,6 +1232,7 @@ source_seed = "ソース割り当ての乱数シード。"
 [node."scatter.scatter".group]
 layout = "配置"
 source = "ソース"
+transform = "トランスフォーム"
 
 [node."attribute.set"]
 label = "アトリビュート設定"
@@ -1471,6 +1494,7 @@ content = "内容"
 metrics = "字面"
 paragraph = "段落"
 placement = "配置"
+transform = "トランスフォーム"
 
 [node."text.to_path"]
 label = "テキストをパスへ"

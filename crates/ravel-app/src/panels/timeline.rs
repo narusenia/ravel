@@ -43,6 +43,7 @@ use ravel_ui::document::{
     duplicate_layer as duplicate_layer_document, duplicate_layers, remove_layers, reorder_layer,
     split_layers, update_layer, update_layers,
 };
+use ravel_ui::invalidation;
 use ravel_ui::keyframes::{self, PropertyRow, PropertyRowId};
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::timeline::{
@@ -1000,17 +1001,20 @@ impl TimelineGpuiPanel {
         };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
-            let mut edited = false;
+            let mut edited = Vec::new();
             for baseline in baselines {
                 if let Some(next) =
                     update_layer(&doc, comp_id, baseline.layer, |layer| f(baseline, layer))
                 {
                     doc = next;
-                    edited = true;
+                    edited.push(baseline.layer);
                 }
             }
-            if edited {
-                project.apply_document(doc, InvalidationHint::None, cx);
+            // Every caller of this moves time placement — `start_frame`,
+            // `in_frame`, `out_frame` — which is a shell edit like any other.
+            if !edited.is_empty() {
+                let hint = invalidation::shell_hint_for_layers(comp_id, edited);
+                project.apply_document(doc, hint, cx);
             }
         });
     }
@@ -1193,13 +1197,16 @@ impl TimelineGpuiPanel {
     }
 
     fn toggle_lock(&mut self, lid: LayerId, cx: &mut Context<Self>) {
-        self.toggle_layer_flag(
-            lid,
-            InvalidationHint::None,
-            |l| l.locked,
-            |l, value| l.locked = value,
-            cx,
-        );
+        // `locked` is a shell field, so it takes the shell hint like the
+        // rest — not `Structural` (it is not compiled into the chain the way
+        // `muted` and `solo` are) and not `None` (the Properties panel posts
+        // a hint for the same field, and one decision means one answer).
+        let hint = self
+            .state
+            .comp_id()
+            .map(|comp| invalidation::shell_hint_for_layers(comp, [lid]))
+            .unwrap_or(InvalidationHint::None);
+        self.toggle_layer_flag(lid, hint, |l| l.locked, |l, value| l.locked = value, cx);
     }
 
     /// Duplicate a layer directly above its source and select the copy.
@@ -1488,6 +1495,10 @@ impl TimelineGpuiPanel {
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             let mut removed_any = false;
+            // The selection spans rows and layers, so the hint is the merge
+            // of what each removed key invalidates: a shell row scrubs the
+            // shell, a network row names its node.
+            let mut hint = InvalidationHint::None;
             for keyframe in selection {
                 let Some(layer) = doc
                     .get_composition(comp_id)
@@ -1517,11 +1528,18 @@ impl TimelineGpuiPanel {
                     );
                 }) {
                     doc = updated;
+                    if removed {
+                        hint = hint.merge(invalidation::property_row_hint(
+                            &keyframe.row,
+                            comp_id,
+                            keyframe.layer,
+                        ));
+                    }
                     removed_any |= removed;
                 }
             }
             if removed_any {
-                project.commit_document(doc, InvalidationHint::None, cx);
+                project.commit_document(doc, hint, cx);
             }
         });
         self.selected_keyframes = retained;
@@ -1594,6 +1612,9 @@ impl TimelineGpuiPanel {
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
             let mut changed = false;
+            // As in the deletion above: one hint merged over a selection that
+            // may span both kinds of row and several layers.
+            let mut hint = InvalidationHint::None;
             for keyframe in selection {
                 let Some(layer) = doc
                     .get_composition(comp_id)
@@ -1630,10 +1651,15 @@ impl TimelineGpuiPanel {
                 {
                     doc = updated;
                     changed = true;
+                    hint = hint.merge(invalidation::property_row_hint(
+                        &keyframe.row,
+                        comp_id,
+                        keyframe.layer,
+                    ));
                 }
             }
             if changed {
-                project.commit_document(doc, InvalidationHint::None, cx);
+                project.commit_document(doc, hint, cx);
             }
         });
         cx.notify();
@@ -1979,6 +2005,9 @@ impl TimelineGpuiPanel {
         };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
+            // A baseline is one row of one layer, and a gesture may hold
+            // several of both — the merge names every one it moved.
+            let mut hint = InvalidationHint::None;
             for baseline in baselines {
                 let Some(updated) = update_layer(&doc, comp_id, baseline.layer, |layer| {
                     keyframes::preview_row_key_moves(
@@ -1993,8 +2022,13 @@ impl TimelineGpuiPanel {
                     continue;
                 };
                 doc = updated;
+                hint = hint.merge(invalidation::property_row_hint(
+                    &baseline.row,
+                    comp_id,
+                    baseline.layer,
+                ));
             }
-            project.apply_document(doc, InvalidationHint::None, cx);
+            project.apply_document(doc, hint, cx);
         });
     }
 
@@ -2013,6 +2047,9 @@ impl TimelineGpuiPanel {
         };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
+            // A baseline is one row of one layer, and a gesture may hold
+            // several of both — the merge names every one it moved.
+            let mut hint = InvalidationHint::None;
             for baseline in baselines {
                 // The value axis needs a float curve; a step row never reaches
                 // the graph view (it has no curve to plot), so there is nothing
@@ -2034,8 +2071,13 @@ impl TimelineGpuiPanel {
                     continue;
                 };
                 doc = updated;
+                hint = hint.merge(invalidation::property_row_hint(
+                    &baseline.row,
+                    comp_id,
+                    baseline.layer,
+                ));
             }
-            project.apply_document(doc, InvalidationHint::None, cx);
+            project.apply_document(doc, hint, cx);
         });
     }
 
@@ -2055,6 +2097,9 @@ impl TimelineGpuiPanel {
         };
         project.update(cx, |project, cx| {
             let mut doc = project.document().clone();
+            // A baseline is one row of one layer, and a gesture may hold
+            // several of both — the merge names every one it moved.
+            let mut hint = InvalidationHint::None;
             for baseline in baselines {
                 // Only a float row has tangents to edit.
                 let Some(curve) = baseline.keys.curve() else {
@@ -2077,8 +2122,13 @@ impl TimelineGpuiPanel {
                     continue;
                 };
                 doc = updated;
+                hint = hint.merge(invalidation::property_row_hint(
+                    &baseline.row,
+                    comp_id,
+                    baseline.layer,
+                ));
             }
-            project.apply_document(doc, InvalidationHint::None, cx);
+            project.apply_document(doc, hint, cx);
         });
     }
 
@@ -3013,7 +3063,8 @@ impl TimelineGpuiPanel {
             // Only a real insertion earns an undo step (a non-key-editable
             // channel rejects the edit).
             if inserted {
-                project.commit_document(doc, InvalidationHint::None, cx);
+                let hint = invalidation::property_row_hint(&row, comp_id, lid);
+                project.commit_document(doc, hint, cx);
             }
         });
         cx.notify();
@@ -3124,7 +3175,8 @@ impl TimelineGpuiPanel {
                 return;
             };
             if changed {
-                project.commit_document(doc, InvalidationHint::None, cx);
+                let hint = invalidation::property_row_hint(row, comp_id, lid);
+                project.commit_document(doc, hint, cx);
             }
         });
         cx.notify();
@@ -3406,10 +3458,7 @@ impl TimelineGpuiPanel {
         self.active_scrub = (!commit).then_some((key, local));
 
         let stored = display / channel_scrub_style(&channel.row).factor;
-        let hint = match &channel.row {
-            PropertyRowId::Network { node, .. } => InvalidationHint::Params(vec![*node]),
-            PropertyRowId::Shell(_) => InvalidationHint::None,
-        };
+        let hint = invalidation::property_row_hint(&channel.row, comp_id, channel.layer);
         let channel = channel.clone();
         project.update(cx, |project, cx| {
             let mut applied = false;
@@ -7499,6 +7548,61 @@ mod tests {
                 assert_eq!(panel.state.layer(a).unwrap().start_frame, 0);
             })
             .unwrap();
+    }
+
+    /// `RESP-3` (#193): a bar gesture is a shell edit. It posts `Shell`
+    /// naming the layers it moved — not `Structural`, which the drag would
+    /// pay once per mouse move, dropping every cache and recompiling every
+    /// GPU pipeline at that rate.
+    ///
+    /// The hint is read back off `ProjectState` rather than written out by
+    /// the test: without a worker the request never leaves, so what stays
+    /// pending is exactly what the panel decided.
+    #[gpui::test]
+    fn a_bar_gesture_posts_a_shell_hint_for_the_layers_it_moved(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, b) = setup(cx);
+        // `setup` builds the composition, which is `Structural` — and
+        // `Structural` absorbs everything, so the gesture's own hint would be
+        // invisible behind it.
+        project.update(cx, |project, _cx| {
+            project.take_pending_hint();
+        });
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.drag = TimelineDrag::MoveBar {
+                    baselines: vec![
+                        BarBaseline {
+                            layer: a,
+                            start: 0,
+                            in_frame: 0,
+                            out_frame: 100,
+                        },
+                        BarBaseline {
+                            layer: b,
+                            start: 0,
+                            in_frame: 0,
+                            out_frame: 100,
+                        },
+                    ],
+                    pressed: a,
+                    collapse_on_click: false,
+                    grab_x: 0.0,
+                    changed: false,
+                };
+                panel.drag_moved(20.0, 0.0, false, false, cx);
+                panel.drag_ended(cx);
+            })
+            .unwrap();
+        assert_eq!(layer(&project, comp_id, a, cx).start_frame, 5);
+
+        project.update(cx, |project, _cx| {
+            assert_eq!(
+                project.take_pending_hint(),
+                ravel_ui::invalidation::shell_hint_for_layers(comp_id, [a, b]),
+                "a bar drag did not post a Shell hint naming both dragged layers"
+            );
+        });
     }
 
     /// Trimming the in edge keeps the out edge fixed and clamps into the

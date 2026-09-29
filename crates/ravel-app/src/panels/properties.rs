@@ -317,6 +317,56 @@ fn fixed_port_row(row: &ravel_ui::properties::PortRow, gutter: bool, muted: Hsla
     )
 }
 
+/// One candidate row of an info node's Ports section: a checkbox carrying the
+/// port name, and the type the candidate declares.
+///
+/// The checkbox is the whole control — [`ravel_widgets::Checkbox`] is a Tab
+/// stop and activates on Enter and Space through the same handler a click
+/// uses (UX invariant 10), and the label is part of it, so the name is
+/// clickable too. There is no name Input and no type Select: the candidate
+/// decides both, and a control that could only ever write back what it
+/// already shows is a control that does nothing (UX invariant 6).
+fn port_candidate_row(
+    candidate: &ravel_ui::properties::PortCandidate,
+    panel: &WeakEntity<PropertiesGpuiPanel>,
+    muted: Hsla,
+) -> Div {
+    let panel = panel.clone();
+    let name = candidate.name.clone();
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_1()
+        .py(px(1.0))
+        .child(
+            Checkbox::new(SharedString::from(format!(
+                "port-option-{}",
+                candidate.name
+            )))
+            .compact()
+            .checked(candidate.present)
+            .label(SharedString::from(candidate.name.clone()))
+            .on_change(move |state: &CheckboxState, _window, cx| {
+                let present = *state == CheckboxState::Checked;
+                let name = name.clone();
+                panel
+                    .update(cx, move |this, cx| {
+                        this.set_output_option(&name, present, cx);
+                    })
+                    .ok();
+            }),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(muted)
+                .child(SharedString::from(port_type_label(candidate.port_type))),
+        )
+}
+
 /// A small icon button of the Ports section (move, remove, add).
 fn port_button(
     id: String,
@@ -1066,6 +1116,27 @@ fn build_field_row(
                 ));
             }
             list = list.child(add_port_row(ports, gutter, editor, muted));
+            if let Some(message) = &ports.error {
+                list = list.child(
+                    div()
+                        .px_1()
+                        .py(px(1.0))
+                        .text_xs()
+                        .text_color(danger)
+                        .child(message.clone()),
+                );
+            }
+            list
+        }
+
+        // An info node's ports: the type's whole candidate set, each row a
+        // checkbox. The refusal line is the port list's, because the edit
+        // lands in the same place.
+        PropertyField::PortPicker { candidates, .. } => {
+            let mut list = div().flex().flex_col();
+            for candidate in candidates {
+                list = list.child(port_candidate_row(candidate, editor, muted));
+            }
             if let Some(message) = &ports.error {
                 list = list.child(
                     div()
@@ -3225,6 +3296,19 @@ impl PropertiesGpuiPanel {
         });
     }
 
+    /// Add or remove the picked output port `name` on the target info node.
+    ///
+    /// One checkbox activation is one Document undo step, and a toggle that
+    /// asks for the state the node already holds commits nothing — the core
+    /// answers with the graph it was given and `edit_custom_ports` drops it.
+    /// Unchecking a wired port takes its edges with it, in that same step.
+    fn set_output_option(&mut self, name: &str, present: bool, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.route_port_edit(cx, move |editor, node_id, cx| {
+            editor.set_output_option(node_id, &name, present, cx)
+        });
+    }
+
     /// Move a row one slot, which always changes the order.
     ///
     /// No "did anything happen?" guard like [`Self::retype_port`]'s: a handle
@@ -3277,7 +3361,9 @@ impl PropertiesGpuiPanel {
             .filter(|field| {
                 !matches!(
                     field,
-                    PropertyField::PortList { .. } | PropertyField::ExposedList { .. }
+                    PropertyField::PortList { .. }
+                        | PropertyField::PortPicker { .. }
+                        | PropertyField::ExposedList { .. }
                 )
             })
             .filter_map(|field| {
@@ -8632,6 +8718,224 @@ mod tests {
             );
             history.pop();
         }
+    }
+
+    /// Selects a `layer.info` node in a layer network and returns the
+    /// Properties panel bound to it, with the node editor its port edits
+    /// route through already open on the same network.
+    fn setup_info_node_target(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<PropertiesGpuiPanel>,
+        Entity<ProjectState>,
+        ravel_ui::document::NetworkPath,
+        NodeId,
+    ) {
+        let mut registry = ravel_core::registry::NodeRegistry::new();
+        ravel_core::registry::builtin::register_builtins(&mut registry);
+        let info_id = NodeId::next();
+        let info = registry
+            .create_node("layer.info", info_id)
+            .expect("layer.info is registered");
+        let network = network_with_custom_param().add_node(info).unwrap();
+
+        let (properties, project, comp_id, lid) = setup_with_network(cx, network);
+        let path = ravel_ui::document::NetworkPath::layer(comp_id, lid);
+        let target_path = path.clone();
+        cx.update(|cx| {
+            cx.set_global(super::super::CanvasSelection {
+                path: Some(path.clone()),
+                nodes: [info_id].into_iter().collect(),
+            });
+        });
+        let editor = cx.add_window(|window, cx| {
+            super::super::node_editor::NodeEditorPanel::new(
+                ravel_ui::layout::PanelInstanceId(0),
+                window,
+                cx,
+            )
+        });
+        editor
+            .update(cx, |panel, _window, cx| {
+                panel.open_network(path.clone(), cx);
+            })
+            .unwrap();
+        properties
+            .update(cx, |panel, window, cx| {
+                panel.target = PropertiesTarget::Nodes {
+                    network: path,
+                    ids: vec![info_id],
+                };
+                panel.rebuild_widgets(window, cx);
+            })
+            .unwrap();
+        (properties, project, target_path, info_id)
+    }
+
+    /// The candidates the picker shows, as `(name, picked)`, re-resolved from
+    /// the live document.
+    fn port_candidates(
+        properties: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        cx: &mut TestAppContext,
+    ) -> Vec<(String, bool)> {
+        properties
+            .update(cx, |panel, window, cx| {
+                panel.refresh_values(cx);
+                panel.rebuild_widgets(window, cx);
+                panel
+                    .sections
+                    .iter()
+                    .flat_map(|section| &section.fields)
+                    .find_map(|field| match field {
+                        PropertyField::PortPicker { candidates, .. } => Some(
+                            candidates
+                                .iter()
+                                .map(|c| (c.name.clone(), c.present))
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .expect("the info node has a Ports section")
+            })
+            .unwrap()
+    }
+
+    fn picked(rows: &[(String, bool)]) -> Vec<&str> {
+        rows.iter()
+            .filter(|(_, present)| *present)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Checking and unchecking a candidate is one Document undo step each,
+    /// and a toggle that asks for the state the node already has is none at
+    /// all (UX invariant 3).
+    #[gpui::test]
+    fn each_port_pick_is_one_undo_step(cx: &mut TestAppContext) {
+        let (properties, project, _path, _info_id) = setup_info_node_target(cx);
+        let mut history = vec![port_candidates(&properties, cx)];
+        assert_eq!(
+            picked(history.last().unwrap()),
+            ["index", "size", "local_t"],
+            "a new info node starts on the template's three defaults"
+        );
+
+        for (name, present, expected) in [
+            (
+                "rotation",
+                true,
+                vec!["index", "size", "local_t", "rotation"],
+            ),
+            ("size", false, vec!["index", "local_t", "rotation"]),
+        ] {
+            properties
+                .update(cx, |panel, _window, cx| {
+                    panel.set_output_option(name, present, cx)
+                })
+                .unwrap();
+            cx.run_until_parked();
+            history.push(port_candidates(&properties, cx));
+            assert_eq!(picked(history.last().unwrap()), expected, "{name}");
+        }
+
+        // A checkbox that answers with the state it already shows changes
+        // nothing, so there is no step to undo past.
+        let before = port_candidates(&properties, cx);
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.set_output_option("index", true, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(port_candidates(&properties, cx), before);
+
+        while history.len() > 1 {
+            let expected = history[history.len() - 2].clone();
+            project.update(cx, |project, cx| assert!(project.undo(cx)));
+            assert_eq!(
+                port_candidates(&properties, cx),
+                expected,
+                "pick {} is a single undo step",
+                history.len() - 1
+            );
+            history.pop();
+        }
+    }
+
+    /// Unchecking a wired candidate takes its edge with it — and only its
+    /// edge: the ports that stay keep the connections they had across the
+    /// re-index.
+    #[gpui::test]
+    fn unpicking_a_wired_port_drops_its_edge_and_keeps_the_others(cx: &mut TestAppContext) {
+        let (properties, project, path, info_id) = setup_info_node_target(cx);
+
+        // Wire the first and the third default port into two nodes, so
+        // removing the first shifts the third.
+        let (sink_a, sink_b) = project.update(cx, |project, cx| {
+            let document = project.document().clone();
+            let graph = resolve_network(&document, &path).expect("network").clone();
+            let sink_a = NodeId::next();
+            let sink_b = NodeId::next();
+            let graph = graph
+                .add_node(Node::new(sink_a, "math.abs").with_input("x", &[DataTypeId::SCALAR]))
+                .unwrap()
+                .add_node(Node::new(sink_b, "math.abs").with_input("x", &[DataTypeId::SCALAR]))
+                .unwrap()
+                .add_edge(
+                    ravel_core::id::EdgeId::next(),
+                    info_id,
+                    ravel_core::id::OutputPortIndex(0),
+                    sink_a,
+                    ravel_core::id::InputPortIndex(0),
+                )
+                .unwrap()
+                .add_edge(
+                    ravel_core::id::EdgeId::next(),
+                    info_id,
+                    ravel_core::id::OutputPortIndex(2),
+                    sink_b,
+                    ravel_core::id::InputPortIndex(0),
+                )
+                .unwrap();
+            let document =
+                ravel_ui::document::replace_network(&document, &path, graph).expect("replace");
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            (sink_a, sink_b)
+        });
+
+        // Which info port each sink reads, by name, so the answer survives a
+        // re-index.
+        let wired = |project: &Entity<ProjectState>, cx: &mut TestAppContext, sink: NodeId| {
+            project.read_with(cx, |project, _| {
+                let graph = resolve_network(project.document(), &path).expect("network");
+                let edge = graph.edges().find(|e| e.target == sink)?;
+                graph
+                    .node(edge.source)?
+                    .outputs
+                    .get(edge.source_port.0 as usize)
+                    .map(|p| p.name.clone())
+            })
+        };
+        assert_eq!(wired(&project, cx, sink_a).as_deref(), Some("index"));
+        assert_eq!(wired(&project, cx, sink_b).as_deref(), Some("local_t"));
+
+        properties
+            .update(cx, |panel, _window, cx| {
+                panel.set_output_option("index", false, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            wired(&project, cx, sink_a),
+            None,
+            "the edge into the unchecked port goes with it"
+        );
+        assert_eq!(
+            wired(&project, cx, sink_b).as_deref(),
+            Some("local_t"),
+            "and the port that stayed keeps the edge it had"
+        );
     }
 
     /// The Ports row's group cell assigns an In node's custom parameter to a

@@ -511,6 +511,93 @@ mod tests {
         );
     }
 
+    /// A `comp.info` in composition A pointed at composition B is dropped by
+    /// **B's** hint, not A's.
+    ///
+    /// This is the first node type that can read a composition it does not
+    /// live in, and the walk `invalidate_shell_readers` runs used to filter
+    /// by the composition the reader **sits in** — the whole answer for
+    /// `layer.ref` and `layer.info`, which can only name a layer of their
+    /// own. Take the target resolution back out of
+    /// `eval::names_an_edited_composition` and this reads the old duration
+    /// forever.
+    ///
+    /// A third composition's hint must leave it alone, or the fix would be
+    /// "invalidate everything" wearing a walk's clothes.
+    ///
+    /// The field edited is `duration_frames` on purpose: `resolution`,
+    /// `frame_rate` and `background` already trip `set_document`'s own
+    /// structural short-circuit, which drops **every** cache, so they cannot
+    /// show whether the walk reached anything.
+    #[test]
+    fn a_cross_composition_reader_is_dropped_by_its_targets_hint() {
+        use ravel_core::runtime::ShellScope;
+
+        let there = CompId::new(7);
+        let elsewhere = CompId::new(9);
+        let node = info_node(10, "7", &["duration_frames"]);
+        let graph = Graph::new().add_node(node).unwrap();
+        let here_comp = with_network(
+            &comp_of(here(), "Here", FPS, vec![layer(1, "Reader")]),
+            LayerId::new(1),
+            &graph,
+        );
+        let mut there_comp = comp_of(there, "There", FPS, vec![]);
+        there_comp.duration_frames = 120;
+        let elsewhere_comp = comp_of(elsewhere, "Elsewhere", FPS, vec![]);
+
+        let document = |target: &Composition| {
+            Arc::new(
+                Document::default()
+                    .with_composition(here_comp.clone())
+                    .with_composition(target.clone())
+                    .with_composition(elsewhere_comp.clone()),
+            )
+        };
+
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(10), Arc::new(CompInfoProcessor));
+        ev.set_document(document(&there_comp));
+        let path = [PathSegment::Layer(here(), LayerId::new(1))];
+        let ctx = EvalContext::new(0, FPS, RES);
+        let read = |ev: &mut Evaluator| {
+            scalar_of(
+                &ev.evaluate_at(&path, &graph, NodeId::new(10), &ctx)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(read(&mut ev), 120.0);
+
+        // The target grows. Nothing in `here` moved and no network changed,
+        // so `set_document`'s diff leaves the reader's cache alone; only the
+        // walk can drop it.
+        let mut longer = there_comp.clone();
+        longer.duration_frames = 300;
+        ev.set_document(document(&longer));
+
+        // A hint for an unrelated composition must not reach it.
+        ev.invalidate_shell_readers(&[ShellScope {
+            comp: elsewhere,
+            layer: None,
+        }]);
+        assert_eq!(
+            read(&mut ev),
+            120.0,
+            "an unrelated composition's hint must not drop this reader"
+        );
+
+        // The target's own hint must.
+        ev.invalidate_shell_readers(&[ShellScope {
+            comp: there,
+            layer: None,
+        }]);
+        assert_eq!(
+            read(&mut ev),
+            300.0,
+            "the target composition's hint must reach a reader in another comp"
+        );
+    }
+
     /// The error names the composition that was asked for — the id is the
     /// only part of the message that tells the user which node to go and fix.
     #[test]

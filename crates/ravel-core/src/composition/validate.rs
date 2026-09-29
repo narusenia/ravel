@@ -527,20 +527,30 @@ fn shell_bind_edges(layer: &Layer) -> Vec<ShellBindEdge> {
 ///
 /// # What is approximated, and what that costs
 ///
-/// Two steps cannot be taken exactly, and both are marked rather than
+/// Leaving a subnet through its **input** pins is answered the same way, in
+/// the other direction: an inner `net.in` output is one of the node's pins,
+/// and [`outer_pin_of_in_port`] resolves which through the same
+/// [`network::is_fixed_port`](crate::network::is_fixed_port) the pin list is
+/// built with.
+///
+/// # What is approximated, and what that costs
+///
+/// Three steps cannot be taken exactly, and all three are marked rather than
 /// guessed, because a wrong "yes" here deletes a user's binding while a wrong
 /// "no" only leaves a shell reading the zero it already reads:
 ///
 /// - an ordinary node with **more than one output**: its inputs are followed
 ///   for whichever output was asked about.
-/// - leaving a subnet through its **input** pins: the pin list drops the
-///   `net.in` node's fixed ports, so inner output index and outer input index
-///   do not line up. The subnet's outer edges are followed like any other
-///   node's instead.
+/// - a subnet whose stored pins have **drifted** from its inner graph
+///   ([`subnet_pins_in_step`]): every port index on it, inner and outer
+///   alike, is indexed by the list that drifted, so none of them can be read.
+/// - a subnet's **promoted parameters**: the promotion is keyed by name, not
+///   by port index, so which output one feeds is not the question the pin
+///   mapping answers.
 ///
-/// An edge that rests on either is still reported — [`validate_shell_bind_cycles`]
-/// is the strict question — but [`Document::break_shell_bind_cycles`] will
-/// not act on it.
+/// An edge that rests on any of them is still reported —
+/// [`validate_shell_bind_cycles`] is the strict question — but
+/// [`Document::break_shell_bind_cycles`] will not act on it.
 ///
 /// [`Document::break_shell_bind_cycles`]: crate::composition::Document::break_shell_bind_cycles
 fn readers_feeding(
@@ -594,6 +604,9 @@ fn readers_feeding(
             reached_in_ports.push((port, exact));
         }
 
+        // Set when this node is a subnet the walk could not read: its port
+        // indices mean nothing certain, so nothing may leave it exactly.
+        let mut drifted_subnet = false;
         if let Some(inner) = node.subnet.as_deref() {
             let in_step = subnet_pins_in_step(node, inner);
             let out_node = crate::network::find_out_node(inner);
@@ -657,6 +670,7 @@ fn readers_feeding(
                 }
                 continue;
             }
+            drifted_subnet = true;
         }
 
         // Which of an ordinary node's inputs feed which of its outputs is not
@@ -664,7 +678,11 @@ fn readers_feeding(
         // and nothing about where its value comes from. So every input is
         // followed, and that is exact only while the node has one output to
         // be the answer.
-        let exact = exact && node.outputs.len() <= 1;
+        // `drifted_subnet` is the half a one-output subnet would otherwise
+        // slip past: `outputs.len() <= 1` says nothing about a node whose
+        // **input** pin list is the one that drifted, and those pins are what
+        // the loop below indexes.
+        let exact = exact && node.outputs.len() <= 1 && !drifted_subnet;
         for (source, source_port, _) in incoming.get(&id).into_iter().flatten() {
             stack.push((*source, *source_port, exact));
         }
@@ -1476,6 +1494,70 @@ mod tests {
         assert!(
             first_exact_shell_bind_cycle(&comp).is_none(),
             "an index the graph does not vouch for must not drive a repair"
+        );
+    }
+
+    /// The same drift, seen from **outside**: a reader on the subnet's own
+    /// pin.
+    ///
+    /// One output, so `outputs.len() <= 1` says the node is transparent — but
+    /// what drifted here is the **input** pin list, and those are the indices
+    /// the outer edges carry. A path that leaves a subnet nobody can read has
+    /// to leave it approximated, or the load deletes a binding on the
+    /// strength of an index the graph does not vouch for.
+    #[test]
+    fn a_reader_on_a_drifted_subnets_pin_is_not_repairable() {
+        let in_id = 202;
+        // Two inner pins declared, one stored on the node: drift.
+        let in_node = Node::new(NodeId::new(in_id), crate::network::NET_IN_TYPE_KEY)
+            .with_output("pin0", DataTypeId::VEC2)
+            .with_output("pin1", DataTypeId::VEC2);
+        let out_node = Node::new(NodeId::new(102), crate::network::NET_OUT_TYPE_KEY)
+            .with_input("p0", &[DataTypeId::VEC2]);
+        let inner = Graph::new()
+            .add_node(in_node)
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(104),
+                NodeId::new(in_id),
+                OutputPortIndex(0),
+                NodeId::new(102),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let subnet = Node::new(NodeId::new(101), "subnet")
+            .with_input("pin0", &[DataTypeId::VEC2])
+            .with_output("p0", DataTypeId::SCALAR)
+            .with_subnet(inner);
+        let network = Graph::new()
+            .add_node(layer_info_node(100, "2"))
+            .unwrap()
+            .add_node(subnet)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(103),
+                NodeId::new(100),
+                OutputPortIndex(0),
+                NodeId::new(101),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let comp = comp(1)
+            .add_layer(bind_shell(
+                Layer::new(LayerId::new(1), "Drifted pin", network),
+                101,
+            ))
+            .add_layer(shell_reader(2, 200, "1"));
+
+        assert!(
+            validate_shell_bind_cycles(&comp).is_err(),
+            "the dependency is still reported"
+        );
+        assert!(
+            first_exact_shell_bind_cycle(&comp).is_none(),
+            "but nothing may be deleted over a pin index that drifted"
         );
     }
 

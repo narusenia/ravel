@@ -786,6 +786,121 @@ mod tests {
         );
     }
 
+    /// Registers the `layer.info` processor the way `register_all_processors`
+    /// would, without needing a GPU device.
+    ///
+    /// **Only on a structural hint**, which is what the real hook does
+    /// (`EvalService`'s own `sync` re-registers a `Params` / `Shell` hint's
+    /// named nodes and nothing else). Registering unconditionally would drop
+    /// the node's cache on every request — `Evaluator::register` invalidates
+    /// what it registers — and the test below would go green whether or not
+    /// the worker ever called `invalidate_shell_readers`.
+    struct InfoHooks;
+
+    fn register_info_nodes(evaluator: &mut ravel_core::runtime::ProcessorSync<'_>, graph: &Graph) {
+        use ravel_core::eval::ProcessorRegistry;
+        for node in graph.nodes() {
+            if node.type_key == "layer.info" {
+                evaluator.register(node.id, Arc::new(LayerInfoProcessor));
+            }
+        }
+    }
+
+    impl ravel_core::runtime::EvalWorkerHooks for InfoHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
+            graph: &Graph,
+            document: Option<&Document>,
+            hint: &ravel_core::runtime::InvalidationHint,
+        ) {
+            if !matches!(hint, ravel_core::runtime::InvalidationHint::Structural) {
+                return;
+            }
+            register_info_nodes(evaluator, graph);
+            if let Some(document) = document {
+                for comp in document.compositions.values() {
+                    for layer in &comp.layers {
+                        register_info_nodes(evaluator, &layer.network);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same guarantee as the test above, but through the **service**: the
+    /// worker loop has to notice `InvalidationHint::Shell` on a request and
+    /// call `invalidate_shell_readers` itself.
+    ///
+    /// That call site had no reader to exercise it until this node existed,
+    /// so deleting it left every test green. This is the one that fails.
+    #[test]
+    fn the_worker_acts_on_a_shell_hint_end_to_end() {
+        use ravel_core::runtime::{EvalRequest, EvalService, InvalidationHint};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut target = layer(2, "Target");
+        target.transform.position[0] = AnimationChannel::constant(10.0);
+        let node = info_node(10, "2", &["position"]);
+        let graph = Graph::new().add_node(node).unwrap();
+        let comp = with_network(
+            &comp_of(vec![layer(1, "Source"), target]),
+            LayerId::new(1),
+            &graph,
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let mut service = EvalService::spawn(InfoHooks, move |update| {
+            let _ = tx.send(update);
+        });
+
+        let request = |document: Arc<Document>, hint: InvalidationHint| EvalRequest {
+            graph: graph.clone(),
+            nodes: vec![NodeId::new(10)],
+            scoped: Vec::new(),
+            comp: None,
+            path: vec![PathSegment::Layer(comp_id(), LayerId::new(1))],
+            ctx: EvalContext::new(0, FPS, RES),
+            document: Some(document),
+            hint,
+        };
+        let read = |rx: &mpsc::Receiver<ravel_core::runtime::EvalUpdate>| {
+            let update = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the worker answered");
+            vec2_of(update.results[0].1.as_ref().expect("evaluation succeeded"))
+        };
+
+        // First request: escalated to Structural, so the hook registers.
+        service.request(request(
+            Arc::new(Document::default().with_composition(comp.clone())),
+            InvalidationHint::None,
+        ));
+        assert_eq!(read(&rx), (10.0, 0.0));
+
+        // A shell edit and nothing else: the graph is identical and the
+        // reader's own shell did not move.
+        let mut moved = comp;
+        let index = moved
+            .layers
+            .iter()
+            .position(|l| l.id == LayerId::new(2))
+            .unwrap();
+        let mut edited = moved.layers[index].clone();
+        edited.transform.position[0] = AnimationChannel::constant(90.0);
+        moved.layers.set(index, edited);
+        service.request(request(
+            Arc::new(Document::default().with_composition(moved)),
+            InvalidationHint::shell(comp_id(), Some(LayerId::new(2))),
+        ));
+        assert_eq!(
+            read(&rx),
+            (90.0, 0.0),
+            "the worker must act on the Shell hint, not just carry it"
+        );
+    }
+
     /// `layer.info(index) → color.ramp` gives each layer its own colour: the
     /// index port drives a real downstream node through a parameter port.
     #[test]

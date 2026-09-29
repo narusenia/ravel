@@ -41,6 +41,20 @@ pub const LAYER_INFO_TYPE_KEY: &str = "layer.info";
 /// has not.
 pub const LAYER_INFO_LAYER_PARAM: &str = "layer";
 
+/// Type key of the Comp Info node (reads a composition's own fields —
+/// resolution, frame rate, duration, background, layer count — without
+/// evaluating anything, REQ-LAYER-002/005).
+pub const COMP_INFO_TYPE_KEY: &str = "comp.info";
+
+/// Parameter on the Comp Info node holding the composition it reads. `-1` is
+/// the composition the node's network belongs to.
+///
+/// Spelled as **text** holding the decimal [`CompId`], like `layer.ref`'s and
+/// `layer.info`'s target and unlike `precomp`'s [`PRECOMP_COMP_ID_PARAM`]:
+/// what the user picks is a composition, and only a string parameter can
+/// carry a labelled candidate list.
+pub const COMP_INFO_COMP_PARAM: &str = "comp";
+
 /// Every node type whose `layer` parameter names a layer by raw id.
 ///
 /// The reservation in
@@ -77,9 +91,12 @@ const LAYER_TARGET_TYPE_KEYS: &[&str] = &[LAYER_REF_TYPE_KEY, LAYER_INFO_TYPE_KE
 /// [`Document::dynamic_identifiers`](crate::composition::Document::dynamic_identifiers)
 /// hands it to `ravel-cli render` to report.
 ///
-/// Three parameters qualify, in the two spellings a raw id has:
+/// Four parameters qualify, in the two spellings a raw id has:
 ///
 /// - `precomp`'s `comp_id` is an `Int` holding a raw [`CompId`].
+/// - `comp.info`'s `comp` is a **`String`** holding a raw [`CompId`], for the
+///   same reason `layer.info`'s target is text: the picker labels its
+///   candidates.
 /// - `layer.ref`'s `layer` is a **`String`** holding a raw [`LayerId`] as
 ///   decimal digits (`.ravprj` v13 — see
 ///   [`layer_ref_upgrade`](super::layer_ref_upgrade)), so the Properties row
@@ -105,6 +122,7 @@ pub fn is_identifier_parameter(type_key: &str, param_key: &str) -> bool {
         (PRECOMP_TYPE_KEY, PRECOMP_COMP_ID_PARAM)
             | (LAYER_REF_TYPE_KEY, LAYER_REF_LAYER_PARAM)
             | (LAYER_INFO_TYPE_KEY, LAYER_INFO_LAYER_PARAM)
+            | (COMP_INFO_TYPE_KEY, COMP_INFO_COMP_PARAM)
     )
 }
 
@@ -143,30 +161,43 @@ fn precomp_references(comp: &Composition) -> Vec<CompId> {
         .collect()
 }
 
-/// Composition ids referenced by `precomp` nodes inside a network, including
-/// nested subnet graphs — the composition-valued twin of
-/// [`layer_ref_targets`].
+/// Composition ids referenced by **any** composition-reading node inside a
+/// network — `precomp` and `comp.info` — including nested subnet graphs. The
+/// composition-valued twin of [`layer_target_ids`].
 ///
 /// Used by [`Document::id_watermarks`](crate::composition::Document::id_watermarks)
-/// so a fresh `CompId` can never land on an id a stored `precomp` already
+/// so a fresh `CompId` can never land on an id a stored reference already
 /// names. That matters most for a reference the composition table no longer
 /// holds: allocating its id would reconnect the reference to an unrelated
 /// composition, the same silent mis-link the asset watermark exists to
-/// prevent.
-pub(crate) fn precomp_targets(network: &Graph, targets: &mut Vec<CompId>) {
+/// prevent — and `comp.info` would then read that unrelated composition's
+/// resolution and frame rate with no error anywhere.
+///
+/// The two type keys are read through **different mouths** because they store
+/// the id differently: `precomp`'s `comp_id` is an `Int`, `comp.info`'s
+/// `comp` is decimal text. Asking the numeric one for a string parameter
+/// answers `None` for every node, which is the shape this reservation exists
+/// to prevent.
+pub(crate) fn comp_target_ids(network: &Graph, targets: &mut Vec<CompId>) {
     for node in network.nodes() {
-        if node.type_key == PRECOMP_TYPE_KEY
-            && let Some(id) = node
+        let target = match node.type_key.as_str() {
+            PRECOMP_TYPE_KEY => node
                 .parameters
                 .iter()
                 .find(|p| p.key == PRECOMP_COMP_ID_PARAM)
-                .and_then(|p| p.value.static_identifier())
-                .map(CompId::new)
-        {
-            targets.push(id);
+                .and_then(|p| p.value.static_identifier()),
+            COMP_INFO_TYPE_KEY => node
+                .parameters
+                .iter()
+                .find(|p| p.key == COMP_INFO_COMP_PARAM)
+                .and_then(|p| p.value.static_text_identifier()),
+            _ => None,
+        };
+        if let Some(id) = target {
+            targets.push(CompId::new(id));
         }
         if let Some(inner) = node.subnet.as_deref() {
-            precomp_targets(inner, targets);
+            comp_target_ids(inner, targets);
         }
     }
 }

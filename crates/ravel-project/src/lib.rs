@@ -356,7 +356,7 @@ impl ProjectFile {
         // longer holds from being handed its own id again — the silent
         // mis-link `Document::id_watermarks` exists to prevent
         // (`asset-identity-plan.md`, and the rule
-        // `validate::precomp_targets` states). Gated on the source version
+        // `validate::comp_target_ids` states). Gated on the source version
         // like the rest; the pass is idempotent, so the gate only keeps the
         // load from walking every graph of a current document.
         //
@@ -1056,7 +1056,7 @@ mod tests {
     /// had reserved: `LayerId::next()` could hand that id to a brand-new
     /// layer, and the dangling reference would silently start pointing at it —
     /// the mis-link `Document::id_watermarks` exists to prevent
-    /// (`asset-identity-plan.md`; `validate::precomp_targets` states the same
+    /// (`asset-identity-plan.md`; `validate::comp_target_ids` states the same
     /// rule for compositions).
     ///
     /// The target id is deliberately far above every id the document actually

@@ -2272,6 +2272,11 @@ impl Evaluator {
     /// type knows how to resolve — and a reader nested in a subnet is at a
     /// path this walk does not enumerate.
     ///
+    /// That composition filter is the whole answer only for a reader that
+    /// cannot name a composition other than its own, which `layer.ref` and
+    /// `layer.info` cannot. `comp.info` can, so its target **is** resolved —
+    /// see [`names_an_edited_composition`].
+    ///
     /// [`InvalidationHint::Shell`]: crate::runtime::InvalidationHint::Shell
     pub fn invalidate_shell_readers(&mut self, scopes: &[ShellScope]) {
         self.invalidate_readers_of(scopes, SHELL_READER_TYPE_KEYS);
@@ -2293,11 +2298,19 @@ impl Evaluator {
             return;
         };
         for (comp_id, comp) in &document.compositions {
-            if !scopes.iter().any(|scope| scope.comp == *comp_id) {
-                continue;
-            }
+            // A reader sitting **in** an edited composition is affected
+            // whatever it names: the `-1` default is that composition, and a
+            // layer-scoped target is one of its own layers. Asking only this
+            // is what the walk used to do, and for `layer.ref` / `layer.info`
+            // it stays the whole question.
+            let own = scopes.iter().any(|scope| scope.comp == *comp_id);
             for layer in &comp.layers {
-                if holds_a_node_of(&layer.network, keys) {
+                let reads_an_edit = if own {
+                    holds_a_node_of(&layer.network, keys)
+                } else {
+                    names_an_edited_composition(&layer.network, keys, scopes)
+                };
+                if reads_an_edit {
                     self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
                 }
             }
@@ -3422,9 +3435,49 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
 /// driven by this list alone, so a reader that is not named reads a stale
 /// shell for as long as its cache lives.
 ///
-/// `comp.info` is unit 3 of `docs/implementation/scene-info-nodes-plan.md`
-/// and belongs here when it lands.
-const SHELL_READER_TYPE_KEYS: &[&str] = &[crate::composition::validate::LAYER_INFO_TYPE_KEY];
+/// A reader is dropped when a scope names the composition its own network
+/// sits in, **or** — for the one type that can point outside it — when its
+/// target is a composition a scope names ([`names_an_edited_composition`]).
+const SHELL_READER_TYPE_KEYS: &[&str] = &[
+    crate::composition::validate::LAYER_INFO_TYPE_KEY,
+    crate::composition::validate::COMP_INFO_TYPE_KEY,
+];
+
+/// Whether `network` holds a reader of one of `keys` that names a
+/// composition **other than the one it sits in** which `scopes` names —
+/// subnets included, for the same reason [`holds_a_node_of`] recurses.
+///
+/// Only `comp.info` can be such a reader. `layer.ref` and `layer.info` name a
+/// layer of their own composition, so for those the composition filter in
+/// [`Evaluator::invalidate_readers_of`] already decided; `comp.info` is the
+/// first node type that can read a composition it does not live in, and
+/// without this its cached values survive an edit to what it is reading.
+///
+/// **The parameter is read only once the type key has matched.** A shell edit
+/// arrives every frame of a transform scrub, so a network holding no reader
+/// must cost what it costs [`holds_a_node_of`]: one string compare per node.
+/// `-1` names no id ([`ParameterValue::static_text_identifier`] answers
+/// `None`), which is correct — a reader pointed at its own composition is the
+/// case the filter above already answered.
+///
+/// [`ParameterValue::static_text_identifier`]: crate::graph::ParameterValue::static_text_identifier
+fn names_an_edited_composition(network: &Graph, keys: &[&str], scopes: &[ShellScope]) -> bool {
+    use crate::composition::validate::{COMP_INFO_COMP_PARAM, COMP_INFO_TYPE_KEY};
+    network.nodes().any(|node| {
+        (keys.contains(&node.type_key.as_str())
+            && node.type_key == COMP_INFO_TYPE_KEY
+            && node
+                .parameters
+                .iter()
+                .find(|param| param.key == COMP_INFO_COMP_PARAM)
+                .and_then(|param| param.value.static_text_identifier())
+                .is_some_and(|raw| scopes.iter().any(|scope| scope.comp == CompId::new(raw))))
+            || node
+                .subnet
+                .as_deref()
+                .is_some_and(|inner| names_an_edited_composition(inner, keys, scopes))
+    })
+}
 
 /// Whether `network` holds a node of one of `keys` — **subnets included**,
 /// because a reader nested in a subnet reads the same shell as one at the top
@@ -3772,9 +3825,8 @@ mod tests {
     // ---- shell readers ----------------------------------------------------
 
     /// The walk [`Evaluator::invalidate_shell_readers`] runs over each layer
-    /// network. Driven with an explicit key list because
-    /// `SHELL_READER_TYPE_KEYS` is empty until `layer.info` exists — with it,
-    /// the shell hint invalidates nothing, which is the point of unit 1.
+    /// network. Driven with an explicit key list so the recursion is pinned
+    /// independently of which node types happen to be registered as readers.
     ///
     /// What is worth pinning now is the subnet recursion: a reader dropped
     /// into a subnet reads the same shell as one at the top of the network,
@@ -3788,7 +3840,7 @@ mod tests {
         assert!(!holds_a_node_of(&bare, &["layer.info"]));
         assert!(
             !holds_a_node_of(&bare, SHELL_READER_TYPE_KEYS),
-            "no node type reads a shell yet"
+            "a shape is not a shell reader"
         );
 
         let top = bare
@@ -3812,14 +3864,73 @@ mod tests {
         assert!(holds_a_node_of(&deeper, &["layer.info"]));
     }
 
+    /// The cross-composition half of the same walk, and the same subnet
+    /// question asked of it.
+    ///
+    /// `comp.info` is the one reader that can name a composition it does not
+    /// sit in, so its target is resolved rather than assumed — including
+    /// inside a subnet, where a reader reads exactly the composition one at
+    /// the top would. `-1` names no composition here on purpose: a reader
+    /// pointed at its own is the case the composition filter in
+    /// `invalidate_readers_of` has already answered.
+    #[test]
+    fn a_cross_composition_target_is_resolved_through_subnets() {
+        use crate::composition::validate::{COMP_INFO_COMP_PARAM, COMP_INFO_TYPE_KEY};
+        use crate::graph::ParameterValue;
+
+        let edited = [ShellScope {
+            comp: CompId::new(7),
+            layer: None,
+        }];
+        let reader = |target: &str| {
+            Node::new(NodeId::new(2), COMP_INFO_TYPE_KEY)
+                .with_param(COMP_INFO_COMP_PARAM, ParameterValue::String(target.into()))
+        };
+        let network = |node: Node| Graph::new().add_node(node).unwrap();
+
+        assert!(
+            names_an_edited_composition(&network(reader("7")), SHELL_READER_TYPE_KEYS, &edited),
+            "a reader naming the edited composition must be found"
+        );
+        assert!(
+            !names_an_edited_composition(&network(reader("8")), SHELL_READER_TYPE_KEYS, &edited),
+            "another composition's id must not match"
+        );
+        assert!(
+            !names_an_edited_composition(&network(reader("-1")), SHELL_READER_TYPE_KEYS, &edited),
+            "the self target names no composition here"
+        );
+        assert!(
+            !names_an_edited_composition(&network(reader("7")), &["layer.info"], &edited),
+            "a key list without comp.info resolves nothing"
+        );
+
+        // A layer network holding nothing but a subnet, and the reader two
+        // levels down inside it.
+        let nested = Graph::new()
+            .add_node(Node::new(NodeId::new(3), "subnet").with_subnet(network(reader("7"))))
+            .unwrap();
+        assert!(
+            names_an_edited_composition(&nested, SHELL_READER_TYPE_KEYS, &edited),
+            "a reader inside a subnet was missed"
+        );
+        let deeper = Graph::new()
+            .add_node(Node::new(NodeId::new(4), "subnet").with_subnet(nested))
+            .unwrap();
+        assert!(names_an_edited_composition(
+            &deeper,
+            SHELL_READER_TYPE_KEYS,
+            &edited
+        ));
+    }
+
     /// The walk itself, end to end: a shell hint drops the evaluator scope of
     /// every layer whose network holds a reader, and leaves the rest cached.
     ///
     /// Driven through `invalidate_readers_of` with a type this test builds a
-    /// document out of. The production entry point runs the same code with
-    /// `SHELL_READER_TYPE_KEYS`, which is empty until `layer.info` exists —
-    /// asserted below as well, so that "today it invalidates nothing" is a
-    /// pinned property of the real path rather than an untested claim.
+    /// document out of, so the walk is pinned whatever the registered reader
+    /// list holds. The production entry point runs the same code with
+    /// `SHELL_READER_TYPE_KEYS`.
     #[test]
     fn a_shell_hint_drops_the_scopes_of_the_layers_that_read_a_shell() {
         use crate::composition::Composition;

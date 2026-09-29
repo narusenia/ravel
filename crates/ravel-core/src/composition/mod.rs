@@ -1684,9 +1684,9 @@ impl Document {
     }
 
     /// The largest id of each kind used anywhere in the document
-    /// (compositions — map keys, embedded ids and `precomp` targets alike —
-    /// layers, every network recursively including subnets, `layer.ref`
-    /// parameter targets, and the legacy flat graph). Reference ids are
+    /// (compositions — map keys, embedded ids and `precomp` / `comp.info`
+    /// targets alike — layers, every network recursively including subnets,
+    /// `layer.ref` parameter targets, and the legacy flat graph). Reference ids are
     /// included so a fresh allocation can never retarget a persisted
     /// reference (REQ-LAYER-009).
     ///
@@ -1721,12 +1721,12 @@ impl Document {
                     watermarks.asset = watermarks.asset.max(asset.raw());
                 }
             }
-            // `precomp` parameters reference compositions by raw id, in any
-            // graph. A reference the table no longer holds is the case that
-            // needs the reservation: allocating its id would point the stored
-            // `precomp` at an unrelated composition.
+            // `precomp` / `comp.info` parameters reference compositions by
+            // raw id, in any graph. A reference the table no longer holds is
+            // the case that needs the reservation: allocating its id would
+            // point the stored reference at an unrelated composition.
             let mut comps = Vec::new();
-            validate::precomp_targets(graph, &mut comps);
+            validate::comp_target_ids(graph, &mut comps);
             for target in comps {
                 watermarks.comp = watermarks.comp.max(target.raw());
             }

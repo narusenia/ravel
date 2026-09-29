@@ -878,6 +878,12 @@ description = "Reads a layer's shell — placement, size, transform, opacity —
 [node."layer.info".params]
 layer = "The layer to read. Defaults to the layer this network belongs to."
 
+[node."comp.info"]
+label = "Comp Info"
+description = "Reads a composition's resolution, frame rate, duration, background and layer count without evaluating anything. comp_t and comp_f are the evaluated instant converted back to the composition's clock, not the layer's local time. Across compositions the seconds (comp_t) are the authority and comp_f is that instant in the target's frames, i.e. the seconds times the target's frame rate."
+[node."comp.info".params]
+comp = "The composition to read. Defaults to the composition this network belongs to; anything else is a CompId in decimal."
+
 [node."subnet"]
 label = "Subnet"
 description = "Groups a nested node network. Its inner net.in / net.out nodes become this node's ports."

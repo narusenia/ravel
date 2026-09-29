@@ -12,6 +12,7 @@ pub mod blur;
 pub mod color;
 pub mod color_correct;
 pub mod comp;
+pub mod comp_info;
 pub mod constant;
 pub mod display;
 pub use display::{DisplayFrame, DisplayTransform};
@@ -328,6 +329,8 @@ pub fn processor_for_node(
             node,
             media_frames,
         ))),
+        // Scene information (REQ-LAYER-002/005) — Document reads, no pull
+        "comp.info" => Some(Arc::new(comp_info::CompInfoProcessor::from_node(node))),
         // Cross-layer reference (REQ-LAYER-005)
         "layer.info" => Some(Arc::new(layer_info::LayerInfoProcessor::from_node(node))),
         "layer.ref" => Some(Arc::new(layer_ref::LayerRefProcessor::from_node(node))),

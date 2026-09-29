@@ -255,6 +255,18 @@ mod tests {
         node: Node,
         frame: u64,
     ) -> Result<Arc<dyn NodeData>, ravel_core::eval::EvalError> {
+        let ctx = EvalContext::new(frame, comps[0].frame_rate, RES);
+        eval_in_ctx(comps, owner, node, &ctx)
+    }
+
+    /// [`eval_in`] at an arbitrary context, for the instants that do not sit
+    /// on the frame grid.
+    fn eval_in_ctx(
+        comps: &[Composition],
+        owner: LayerId,
+        node: Node,
+        ctx: &EvalContext,
+    ) -> Result<Arc<dyn NodeData>, ravel_core::eval::EvalError> {
         let id = node.id;
         let graph = Graph::new().add_node(node).unwrap();
         let mut document = Document::default();
@@ -269,12 +281,7 @@ mod tests {
         let mut ev = Evaluator::new();
         ev.register(id, Arc::new(CompInfoProcessor));
         ev.set_document(Arc::new(document));
-        ev.evaluate_at(
-            &[PathSegment::Layer(host, owner)],
-            &graph,
-            id,
-            &EvalContext::new(frame, comps[0].frame_rate, RES),
-        )
+        ev.evaluate_at(&[PathSegment::Layer(host, owner)], &graph, id, ctx)
     }
 
     /// The whole error chain, since the evaluator wraps a processor's
@@ -461,6 +468,45 @@ mod tests {
         assert!(
             (scalar_of(&v[0]) - 1.5).abs() < 1e-6,
             "comp frame 45 at 30 fps is 1.5 s, got {}",
+            scalar_of(&v[0])
+        );
+    }
+
+    /// An instant **between** two frames keeps its fraction all the way
+    /// through the conversion.
+    ///
+    /// The test above places the layer off zero but still lands on the frame
+    /// grid, where dropping the sub-frame term changes nothing. Here the
+    /// context sits half a frame past local 20 — composition frame 45.5 —
+    /// and both ports have to say so. Time remapping and motion blur sample
+    /// exactly like this, and a `comp_f` that had silently snapped to 45
+    /// would drive whatever reads it one full frame per sample.
+    #[test]
+    fn a_sub_frame_instant_keeps_its_fraction() {
+        let comp = comp_of(
+            here(),
+            "Here",
+            FPS,
+            vec![layer(1, "Off zero").with_time(30, 5, 300)],
+        );
+        let mut ctx = EvalContext::new(20, FPS, RES);
+        ctx.time += 0.5 / FPS.as_f64();
+        let out = eval_in_ctx(
+            &[comp],
+            LayerId::new(1),
+            info_node(10, "-1", &["comp_t", "comp_f"]),
+            &ctx,
+        )
+        .unwrap();
+        let v = record(&out);
+        assert!(
+            (scalar_of(&v[1]) - 45.5).abs() < 1e-4,
+            "local 20.5 → comp 45.5, got {}",
+            scalar_of(&v[1])
+        );
+        assert!(
+            (scalar_of(&v[0]) - 45.5 / 30.0).abs() < 1e-5,
+            "comp frame 45.5 at 30 fps is 1.51666…s, got {}",
             scalar_of(&v[0])
         );
     }

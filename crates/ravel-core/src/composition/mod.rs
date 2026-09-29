@@ -30,14 +30,21 @@ pub mod validate;
 
 pub use color_upgrade::{ColorMigrationNote, ColorMigrationReport, is_color_param};
 
-/// One shell-binding cycle [`Document::break_shell_bind_cycles`] broke on
+/// One shell-binding cycle [`Document::break_shell_bind_cycles`] found on
 /// load: the layers it ran through, and how many bindings went with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShellBindCycleNote {
     pub comp: CompId,
     /// The cycle, first layer repeated last.
     pub chain: Vec<LayerId>,
+    /// How many shell bindings were dropped. **Zero when the cycle was left
+    /// in place** — see [`exact`](Self::exact).
     pub cleared: usize,
+    /// Whether every edge of the cycle is one the graph states exactly. A
+    /// cycle that rests on an approximated edge is reported and **not**
+    /// repaired: it may not be a cycle at all, and deleting a binding over a
+    /// guess is the one failure this pass must not have.
+    pub exact: bool,
 }
 
 pub use asset::{
@@ -345,18 +352,26 @@ impl Layer {
     /// which answers `NodeOutput` with exactly that. So dropping the binding
     /// changes no rendered pixel — which is what makes it safe for the
     /// load-time repair to do without asking.
-    pub(crate) fn clear_shell_bindings(&mut self) -> usize {
-        fn clear(source: &mut ChannelSource, cleared: &mut usize) {
+    pub(crate) fn clear_shell_bindings(
+        &mut self,
+        drop: &std::collections::HashSet<(NodeId, OutputPortIndex)>,
+    ) -> usize {
+        fn clear(
+            source: &mut ChannelSource,
+            drop: &std::collections::HashSet<(NodeId, OutputPortIndex)>,
+            cleared: &mut usize,
+        ) {
             match source {
-                ChannelSource::NodeOutput(_, _) => {
+                ChannelSource::NodeOutput(node, port) if drop.contains(&(*node, *port)) => {
                     *source = ChannelSource::Constant(ChannelSource::DEFAULT_VALUE);
                     *cleared += 1;
                 }
                 ChannelSource::Blend(a, b, _, _) => {
-                    clear(a, cleared);
-                    clear(b, cleared);
+                    clear(a, drop, cleared);
+                    clear(b, drop, cleared);
                 }
-                ChannelSource::Constant(_)
+                ChannelSource::NodeOutput(_, _)
+                | ChannelSource::Constant(_)
                 | ChannelSource::Keyframes(_)
                 | ChannelSource::Expression(_)
                 | ChannelSource::AudioReactive(_) => {}
@@ -364,7 +379,7 @@ impl Layer {
         }
         let mut cleared = 0;
         for channel in self.shell_channels_mut() {
-            clear(&mut channel.source, &mut cleared);
+            clear(&mut channel.source, drop, &mut cleared);
         }
         cleared
     }
@@ -1572,10 +1587,13 @@ impl Document {
         let mut notes = Vec::new();
         let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
         for comp in comp_ids {
-            while let Some(chain) = self
+            // Only the cycles every edge of which the graph states exactly.
+            // Each round drops at least the bindings of one edge, so the
+            // loop shrinks the edge set and terminates.
+            while let Some(cycle) = self
                 .compositions
                 .get(&comp)
-                .and_then(|c| validate::first_shell_bind_cycle(c))
+                .and_then(|c| validate::first_exact_shell_bind_cycle(c))
             {
                 let mut updated = (**self
                     .compositions
@@ -1584,26 +1602,48 @@ impl Document {
                 .clone();
                 let mut cleared = 0;
                 for layer in updated.layers.iter_mut() {
-                    if chain.contains(&layer.id) {
-                        cleared += layer.clear_shell_bindings();
+                    let drop: std::collections::HashSet<(NodeId, OutputPortIndex)> = cycle
+                        .bindings
+                        .iter()
+                        .filter(|(owner, _, _)| *owner == layer.id)
+                        .map(|(_, node, port)| (*node, *port))
+                        .collect();
+                    if !drop.is_empty() {
+                        cleared += layer.clear_shell_bindings(&drop);
                     }
                 }
                 self.compositions.insert(comp, std::sync::Arc::new(updated));
                 notes.push(ShellBindCycleNote {
                     comp,
-                    chain,
+                    chain: cycle.chain,
                     cleared,
+                    exact: true,
                 });
-                // Unreachable while every edge is drawn from a shell binding:
-                // a layer in a cycle has an outgoing edge, so it has a
-                // binding to lose. It is checked anyway because the cost of
-                // being wrong is not a bad repair but a **load that never
-                // returns** — an edge added here without a binding behind it
-                // would spin this loop forever on the user's machine, with no
-                // window up to say why.
+                // Unreachable while every edge names the binding that carries
+                // it. It is checked anyway because the cost of being wrong is
+                // not a bad repair but a **load that never returns** — an
+                // edge whose binding the walk failed to name would spin this
+                // loop forever on the user's machine, with no window up to
+                // say why.
                 if cleared == 0 {
                     break;
                 }
+            }
+            // What is left rests on an edge the walk had to approximate.
+            // Reported once — looping would not converge, because nothing is
+            // dropped — so the user learns the shell is reading zero and can
+            // fix it, while the binding they wrote stays where they put it.
+            if let Some(cycle) = self
+                .compositions
+                .get(&comp)
+                .and_then(|c| validate::first_shell_bind_cycle(c))
+            {
+                notes.push(ShellBindCycleNote {
+                    comp,
+                    chain: cycle.chain,
+                    cleared: 0,
+                    exact: false,
+                });
             }
         }
         // `compositions` is an unordered map, so the notes come out in
@@ -2394,7 +2434,26 @@ mod tests {
             FrameRate::new(30, 1),
             300,
         )
-        .add_layer(reader(1, 100, 2))
+        .add_layer({
+            // Layer 1 holds a **second** shell binding, to a node whose
+            // upstream reaches no reader at all. It is not on the cycle, so
+            // the repair must not take it: clearing every binding of a
+            // layer that appears in the chain would delete work the user did
+            // for an unrelated parameter.
+            let mut layer = reader(1, 100, 2);
+            layer.network = layer
+                .network
+                .add_node(
+                    Node::new(NodeId::new(150), "math.scalar")
+                        .with_output("out", DataTypeId::SCALAR),
+                )
+                .unwrap();
+            layer.transform.scale[0] = AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(150),
+                OutputPortIndex(0),
+            ));
+            layer
+        })
         .add_layer(reader(2, 200, 1))
         // A bystander: bound to a reader of layer 1, which is in the cycle,
         // but nothing reads layer 3 back. Its binding is not part of any
@@ -2412,7 +2471,11 @@ mod tests {
             notes[0].chain,
             vec![LayerId::new(1), LayerId::new(2), LayerId::new(1)]
         );
-        assert_eq!(notes[0].cleared, 2, "one binding per layer of the chain");
+        assert_eq!(
+            notes[0].cleared, 2,
+            "one binding per edge of the cycle, not every binding its layers hold"
+        );
+        assert!(notes[0].exact, "the walk followed every edge of it exactly");
 
         let comp = repaired.get_composition(CompId::new(1)).unwrap();
         for layer in comp.layers.iter() {
@@ -2430,8 +2493,20 @@ mod tests {
                 layer.opacity, keyed_opacity,
                 "an unbound shell channel is left alone"
             );
-            assert_eq!(layer.network.node_count(), 1, "the network is untouched");
+            assert!(
+                layer
+                    .network
+                    .node(NodeId::new(layer.id.raw() * 100))
+                    .is_some(),
+                "the network is untouched"
+            );
         }
+        let first = &comp.layers[0];
+        assert_eq!(
+            first.transform.scale[0].source,
+            ChannelSource::NodeOutput(NodeId::new(150), OutputPortIndex(0)),
+            "the binding that carries no cycle edge survives on a layer that is on the cycle"
+        );
         assert!(validate::validate_shell_bind_cycles(comp).is_ok());
         assert_eq!(repaired.validate(), Ok(()));
 
@@ -2443,6 +2518,82 @@ mod tests {
                 .position[0]
                 .source,
             ChannelSource::Constant(ChannelSource::DEFAULT_VALUE)
+        );
+    }
+
+    /// A cycle the walk could only approximate is **warned about and left
+    /// alone**. The shell reads zero from those bindings either way, so
+    /// dropping them buys nothing — and if the approximation was wrong, it
+    /// would delete a binding over a loop that never existed.
+    #[test]
+    fn loading_reports_an_inexact_cycle_without_touching_its_bindings() {
+        use crate::animation::channel::ChannelSource;
+        use crate::composition::validate::{LAYER_INFO_LAYER_PARAM, LAYER_INFO_TYPE_KEY};
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+        // Each layer drives its shell from a node with two outputs, fed by a
+        // reader of the other layer. Which of the two outputs the reader
+        // reaches is not something the graph says.
+        let reader = |id: u64, info: u64, split: u64, target: u64| {
+            let network = Graph::new()
+                .add_node(
+                    Node::new(NodeId::new(info), LAYER_INFO_TYPE_KEY)
+                        .with_param(
+                            LAYER_INFO_LAYER_PARAM,
+                            crate::graph::ParameterValue::String(target.to_string()),
+                        )
+                        .with_output("position", DataTypeId::VEC2),
+                )
+                .unwrap()
+                .add_node(
+                    Node::new(NodeId::new(split), "math.scalar")
+                        .with_input("value", &[DataTypeId::VEC2])
+                        .with_output("a", DataTypeId::SCALAR)
+                        .with_output("b", DataTypeId::SCALAR),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(split + 1),
+                    NodeId::new(info),
+                    OutputPortIndex(0),
+                    NodeId::new(split),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            let mut layer = Layer::new(LayerId::new(id), format!("Split {id}"), network);
+            layer.transform.position[0] = AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(split),
+                OutputPortIndex(0),
+            ));
+            layer
+        };
+        let comp = Composition::new(
+            CompId::new(1),
+            "Approximate",
+            (16, 16),
+            FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(reader(1, 100, 110, 2))
+        .add_layer(reader(2, 200, 210, 1));
+        let document = Document::default().with_composition(comp);
+
+        let (repaired, notes) = document.break_shell_bind_cycles();
+
+        assert_eq!(notes.len(), 1, "reported once, not looped over");
+        assert!(!notes[0].exact);
+        assert_eq!(notes[0].cleared, 0, "nothing was dropped");
+
+        let comp = repaired.get_composition(CompId::new(1)).unwrap();
+        assert_eq!(
+            comp.layers[0].transform.position[0].source,
+            ChannelSource::NodeOutput(NodeId::new(110), OutputPortIndex(0)),
+            "the user's binding is still there"
+        );
+        assert_eq!(
+            comp.layers[1].transform.position[0].source,
+            ChannelSource::NodeOutput(NodeId::new(210), OutputPortIndex(0))
         );
     }
 

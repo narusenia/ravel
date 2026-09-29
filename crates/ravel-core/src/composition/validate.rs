@@ -10,7 +10,7 @@
 
 use crate::composition::{Composition, Layer};
 use crate::graph::{Graph, Node};
-use crate::id::{CompId, LayerId, NodeId};
+use crate::id::{CompId, LayerId, NodeId, OutputPortIndex};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
@@ -277,27 +277,19 @@ pub(crate) fn layer_target_ids(network: &Graph, targets: &mut Vec<LayerId>) {
 
 fn targets_of(network: &Graph, type_keys: &[&str], targets: &mut Vec<LayerId>) {
     for node in network.nodes() {
-        targets_of_node(node, type_keys, targets);
-    }
-}
-
-/// [`targets_of`] for a single node and the subnet it owns. Split out so a
-/// caller that has already decided *which* nodes matter — the shell-binding
-/// walk below, which looks only at the ones feeding a bound channel — asks
-/// the same question about them, subnets included.
-fn targets_of_node(node: &Node, type_keys: &[&str], targets: &mut Vec<LayerId>) {
-    if type_keys.contains(&node.type_key.as_str())
-        && let Some(id) = node
-            .parameters
-            .iter()
-            .find(|p| p.key == LAYER_REF_LAYER_PARAM)
-            .and_then(|p| p.value.static_text_identifier())
-            .map(LayerId::new)
-    {
-        targets.push(id);
-    }
-    if let Some(inner) = node.subnet.as_deref() {
-        targets_of(inner, type_keys, targets);
+        if type_keys.contains(&node.type_key.as_str())
+            && let Some(id) = node
+                .parameters
+                .iter()
+                .find(|p| p.key == LAYER_REF_LAYER_PARAM)
+                .and_then(|p| p.value.static_text_identifier())
+                .map(LayerId::new)
+        {
+            targets.push(id);
+        }
+        if let Some(inner) = node.subnet.as_deref() {
+            targets_of(inner, type_keys, targets);
+        }
     }
 }
 
@@ -364,9 +356,9 @@ pub fn validate_layer_ref_cycles(comp: &Composition) -> Result<(), ValidationErr
 /// [`AnimationChannel`]: crate::animation::channel::AnimationChannel
 pub fn validate_shell_bind_cycles(comp: &Composition) -> Result<(), ValidationError> {
     match first_shell_bind_cycle(comp) {
-        Some(chain) => Err(ValidationError::CircularShellBinding {
+        Some(cycle) => Err(ValidationError::CircularShellBinding {
             comp: comp.id,
-            chain,
+            chain: cycle.chain,
         }),
         None => Ok(()),
     }
@@ -377,76 +369,236 @@ pub fn validate_shell_bind_cycles(comp: &Composition) -> Result<(), ValidationEr
 /// The load-time repair calls this directly and in a loop: it clears the
 /// chain's bindings and asks again, which is why the answer is the chain
 /// rather than a [`ValidationError`].
-pub(crate) fn first_shell_bind_cycle(comp: &Composition) -> Option<Vec<LayerId>> {
-    let refs: HashMap<LayerId, Vec<LayerId>> = comp
+pub(crate) fn first_shell_bind_cycle(comp: &Composition) -> Option<ShellBindCycle> {
+    shell_bind_cycle(comp, false)
+}
+
+/// [`first_shell_bind_cycle`] restricted to the edges the graph states
+/// **exactly** — the ones the load-time repair is allowed to act on.
+pub(crate) fn first_exact_shell_bind_cycle(comp: &Composition) -> Option<ShellBindCycle> {
+    shell_bind_cycle(comp, true)
+}
+
+/// One shell-binding cycle, with the bindings that carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ShellBindCycle {
+    /// The layers it runs through, the first repeated last.
+    pub chain: Vec<LayerId>,
+    /// The shell bindings on the cycle's own edges — `(layer, node, port)`.
+    ///
+    /// **Not every binding the chain's layers hold.** A layer may drive its
+    /// position from one node and its opacity from another; only the one
+    /// whose upstream reaches the next layer of the chain is part of the
+    /// cycle, and dropping the other would delete work the user did for a
+    /// problem it is not part of.
+    pub bindings: Vec<(LayerId, NodeId, OutputPortIndex)>,
+    /// Whether every edge of the chain is one [`readers_feeding`] could
+    /// follow exactly. A cycle that rests on an approximated edge may not be
+    /// a cycle at all, so the load-time repair leaves it alone.
+    pub exact: bool,
+}
+
+fn shell_bind_cycle(comp: &Composition, exact_only: bool) -> Option<ShellBindCycle> {
+    let edges: HashMap<LayerId, Vec<ShellBindEdge>> = comp
         .layers
         .iter()
-        .map(|layer| (layer.id, shell_bind_targets(layer)))
+        .map(|layer| {
+            let mut found = shell_bind_edges(layer);
+            if exact_only {
+                found.retain(|edge| edge.exact);
+            }
+            (layer.id, found)
+        })
         .collect();
-    first_layer_cycle(comp, &refs)
+    let refs: HashMap<LayerId, Vec<LayerId>> = edges
+        .iter()
+        .map(|(id, found)| (*id, found.iter().map(|edge| edge.target).collect()))
+        .collect();
+    let chain = first_layer_cycle(comp, &refs)?;
+
+    // Back from the chain to the bindings that carry it. `chain` repeats its
+    // first layer last, so every edge of the cycle is one window.
+    let mut bindings = Vec::new();
+    let mut exact = true;
+    for step in chain.windows(2) {
+        let (from, to) = (step[0], step[1]);
+        let on_the_edge: Vec<&ShellBindEdge> = edges
+            .get(&from)
+            .into_iter()
+            .flatten()
+            .filter(|edge| edge.target == to)
+            .collect();
+        // One exact edge is enough to make the step real, and then the
+        // approximated ones beside it say nothing extra.
+        let mut certain = on_the_edge.iter().filter(|edge| edge.exact).peekable();
+        let chosen: Vec<&ShellBindEdge> = if certain.peek().is_some() {
+            certain.copied().collect()
+        } else {
+            exact = false;
+            on_the_edge
+        };
+        bindings.extend(
+            chosen
+                .into_iter()
+                .map(|edge| (from, edge.binding.0, edge.binding.1)),
+        );
+    }
+    bindings.sort();
+    bindings.dedup();
+    Some(ShellBindCycle {
+        chain,
+        bindings,
+        exact,
+    })
 }
 
-/// The layers whose **shell** `layer`'s shell reads — the edges
-/// [`validate_shell_bind_cycles`] looks for a cycle in.
+/// One way a layer's shell depends on another layer's shell: a shell binding
+/// whose upstream reaches a `layer.info` naming `target`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShellBindEdge {
+    target: LayerId,
+    /// The shell binding that carries it — the node output a shell channel
+    /// names.
+    binding: (NodeId, OutputPortIndex),
+    /// Whether the path from the binding to the reader is one the graph
+    /// states, as opposed to one [`readers_feeding`] had to assume.
+    exact: bool,
+}
+
+/// The shell-to-shell dependencies `layer`'s own shell bindings create —
+/// the edges [`validate_shell_bind_cycles`] looks for a cycle in.
 ///
 /// Empty unless the shell is bound to a node output at all, which is the
-/// common case and costs one walk of the shell's channels.
-fn shell_bind_targets(layer: &Layer) -> Vec<LayerId> {
-    let bound: HashSet<NodeId> = layer
-        .shell_parameter_sources()
-        .into_iter()
-        .map(|(node, _port)| node)
-        .collect();
-    if bound.is_empty() {
-        return Vec::new();
-    }
-
-    // Flood *upstream* from the bound nodes once, rather than downstream from
-    // each candidate reader: one inversion plus one traversal is linear in the
-    // network, where asking each reader separately is quadratic in it.
-    let mut upstream: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    for (source, targets) in layer.network.downstream_adjacency() {
-        for target in targets {
-            upstream.entry(target).or_default().push(source);
+/// common case and costs one walk of the shell's channels. One walk of the
+/// network **per binding**, because each edge has to name the binding that
+/// carries it or the repair cannot drop that one and keep the others; a
+/// layer holds a handful of shell channels, so the factor is bounded by the
+/// shell, not by the network.
+fn shell_bind_edges(layer: &Layer) -> Vec<ShellBindEdge> {
+    let mut edges: Vec<ShellBindEdge> = Vec::new();
+    for binding in layer.shell_parameter_sources() {
+        let mut reached = Vec::new();
+        readers_feeding(
+            &layer.network,
+            vec![(binding.0, binding.1, true)],
+            layer.id,
+            &mut reached,
+        );
+        for (target, exact) in reached {
+            // One binding can reach one reader by two paths, and a reader
+            // answers at every output port it declares. Keep the best answer
+            // per (binding, target): an exact path found anywhere makes the
+            // edge exact.
+            match edges
+                .iter_mut()
+                .find(|edge| edge.target == target && edge.binding == binding)
+            {
+                Some(existing) => existing.exact |= exact,
+                None => edges.push(ShellBindEdge {
+                    target,
+                    binding,
+                    exact,
+                }),
+            }
         }
     }
-    let mut feeds_the_shell: HashSet<NodeId> = HashSet::new();
-    let mut stack: Vec<NodeId> = bound.into_iter().collect();
-    while let Some(id) = stack.pop() {
-        if !feeds_the_shell.insert(id) {
-            continue;
-        }
-        if let Some(sources) = upstream.get(&id) {
-            stack.extend(sources.iter().copied());
-        }
-    }
-
-    let mut targets = Vec::new();
-    for node in layer.network.nodes() {
-        if feeds_the_shell.contains(&node.id) {
-            layer_info_targets_of_node(node, layer.id, &mut targets);
-        }
-    }
-    targets
+    edges
 }
 
-/// The layers a node's `layer.info` reads, the ones inside the subnet it owns
-/// included, with `-1` resolved to `owner`.
+/// Flood **upstream** inside `graph` from `seeds` — `(node, output port,
+/// whether the path so far is one the graph states)` — collecting the layers
+/// the `layer.info` nodes it reaches read, each with the exactness of the
+/// path that found it.
 ///
-/// A subnet is taken whole: whatever is inside it reaches the enclosing
-/// network through the subnet node's outputs, so a subnet that feeds the
-/// shell feeds it everything it reads. Same treatment [`targets_of_node`]
-/// gives a subnet, and the reason the brief's "a `layer.info` nested in a
-/// subnet still counts" holds.
-fn layer_info_targets_of_node(node: &Node, owner: LayerId, targets: &mut Vec<LayerId>) {
-    if node.type_key == LAYER_INFO_TYPE_KEY
-        && let Some(target) = layer_info_target(node, owner)
-    {
-        targets.push(target);
+/// # Why the output port is carried
+///
+/// "Which inputs feed which output" is a question the model answers for
+/// exactly one node kind. [`OutputPort`](crate::graph::OutputPort) carries a
+/// name and a type and nothing about where its value comes from, so for an
+/// ordinary node every input has to be followed. A **subnet** is different:
+/// its output port `N` *is* its inner `net.out` node's input port `N`
+/// ([`network::subnet_pins`](crate::network::subnet_pins) builds the list
+/// from that node's inputs, in order), so the walk descends into the inner
+/// graph from that one input and sees only what actually leaves through the
+/// port the shell named. Without it, a `layer.info` sitting in a subnet
+/// branch that feeds a *different* output — or no output at all — would be
+/// read as a dependency of the shell, and the load-time repair would delete
+/// a binding over a cycle that does not exist.
+///
+/// # What is approximated, and what that costs
+///
+/// Two steps cannot be taken exactly, and both are marked rather than
+/// guessed, because a wrong "yes" here deletes a user's binding while a wrong
+/// "no" only leaves a shell reading the zero it already reads:
+///
+/// - an ordinary node with **more than one output**: its inputs are followed
+///   for whichever output was asked about.
+/// - leaving a subnet through its **input** pins: the pin list drops the
+///   `net.in` node's fixed ports, so inner output index and outer input index
+///   do not line up. The subnet's outer edges are followed like any other
+///   node's instead.
+///
+/// An edge that rests on either is still reported — [`validate_shell_bind_cycles`]
+/// is the strict question — but [`Document::break_shell_bind_cycles`] will
+/// not act on it.
+///
+/// [`Document::break_shell_bind_cycles`]: crate::composition::Document::break_shell_bind_cycles
+fn readers_feeding(
+    graph: &Graph,
+    seeds: Vec<(NodeId, OutputPortIndex, bool)>,
+    owner: LayerId,
+    out: &mut Vec<(LayerId, bool)>,
+) {
+    // Built once per graph: the walk asks for a node's incoming edges as
+    // often as it has nodes, and scanning the edge list each time would make
+    // a validation pass quadratic in a network the user can make as large as
+    // they like.
+    let mut incoming: HashMap<NodeId, Vec<(NodeId, OutputPortIndex)>> = HashMap::new();
+    for edge in graph.edges() {
+        incoming
+            .entry(edge.target)
+            .or_default()
+            .push((edge.source, edge.source_port));
     }
-    if let Some(inner) = node.subnet.as_deref() {
-        for inner_node in inner.nodes() {
-            layer_info_targets_of_node(inner_node, owner, targets);
+
+    let mut seen: HashMap<(NodeId, OutputPortIndex), bool> = HashMap::new();
+    let mut stack = seeds;
+    while let Some((id, port, exact)) = stack.pop() {
+        // Re-expand only when this arrival is exact and the last one was
+        // not: the exactness of a reader is the best path that found it.
+        match seen.get(&(id, port)) {
+            Some(&before) if before || !exact => continue,
+            _ => {
+                seen.insert((id, port), exact);
+            }
+        }
+        let Some(node) = graph.node(id) else {
+            continue;
+        };
+
+        if node.type_key == LAYER_INFO_TYPE_KEY
+            && let Some(target) = layer_info_target(node, owner)
+        {
+            out.push((target, exact));
+        }
+
+        if let Some(inner) = node.subnet.as_deref()
+            && let Some(out_node) = crate::network::find_out_node(inner)
+        {
+            let inner_seeds: Vec<(NodeId, OutputPortIndex, bool)> = inner
+                .edges()
+                .filter(|edge| edge.target == out_node.id && edge.target_port.0 == port.0)
+                .map(|edge| (edge.source, edge.source_port, exact))
+                .collect();
+            readers_feeding(inner, inner_seeds, owner, out);
+        }
+
+        let exact = exact && node.outputs.len() <= 1;
+        for (source, source_port) in incoming.get(&id).into_iter().flatten() {
+            stack.push((*source, *source_port, exact));
+        }
+        for (source, source_port) in node.parameter_sources() {
+            stack.push((source, source_port, exact));
         }
     }
 }
@@ -934,18 +1086,135 @@ mod tests {
         ));
     }
 
-    /// The reader nested inside a subnet still feeds the shell: its value
-    /// leaves through the subnet node's output like any other.
+    /// A subnet node with `ports` outputs whose inner graph holds a
+    /// `layer.info(target)`, wired into the inner `net.out` node's input
+    /// `wired_to` — or into nothing, when that is `None`.
+    ///
+    /// A subnet's output `N` is its inner Out node's input `N`
+    /// (`network::subnet_pins`), so this is what lets a test say "the shell
+    /// bound output 0, the reader only reaches output 1".
+    fn subnet_with_reader(
+        node_id: u64,
+        info_id: u64,
+        out_id: u64,
+        target: &str,
+        ports: usize,
+        wired_to: Option<usize>,
+    ) -> Node {
+        let mut out_node = Node::new(NodeId::new(out_id), crate::network::NET_OUT_TYPE_KEY);
+        let mut subnet = Node::new(NodeId::new(node_id), "subnet");
+        for index in 0..ports {
+            out_node = out_node.with_input(format!("p{index}"), &[DataTypeId::VEC2]);
+            subnet = subnet.with_output(format!("p{index}"), DataTypeId::SCALAR);
+        }
+        let mut inner = Graph::new()
+            .add_node(layer_info_node(info_id, target))
+            .unwrap()
+            .add_node(out_node)
+            .unwrap();
+        if let Some(index) = wired_to {
+            inner = inner
+                .add_edge(
+                    EdgeId::new(out_id + 1),
+                    NodeId::new(info_id),
+                    OutputPortIndex(0),
+                    NodeId::new(out_id),
+                    InputPortIndex(index as u32),
+                )
+                .unwrap();
+        }
+        subnet.with_subnet(inner)
+    }
+
+    /// One layer bound to a subnet's output, and layer 2 reading it back.
+    fn comp_with_subnet(subnet: Node) -> Composition {
+        let node_id = subnet.id.raw();
+        let network = Graph::new().add_node(subnet).unwrap();
+        comp(1)
+            .add_layer(bind_shell(
+                Layer::new(LayerId::new(1), "Sub", network),
+                node_id,
+            ))
+            .add_layer(shell_reader(2, 200, "1"))
+    }
+
+    /// A reader inside a subnet, wired to the output the shell bound, feeds
+    /// the shell: its value leaves through that output like any other.
     #[test]
-    fn a_reader_inside_a_subnet_still_feeds_the_shell() {
-        let inner = Graph::new().add_node(layer_info_node(100, "2")).unwrap();
+    fn a_reader_wired_to_the_bound_subnet_output_feeds_the_shell() {
+        let comp = comp_with_subnet(subnet_with_reader(101, 100, 102, "2", 1, Some(0)));
+        assert!(validate_shell_bind_cycles(&comp).is_err());
+    }
+
+    /// The same subnet, with the reader wired to **nothing**. Its value
+    /// leaves the subnet nowhere, so the shell does not depend on it — and a
+    /// walk that took a subnet whole would delete the user's binding over a
+    /// cycle that does not exist.
+    #[test]
+    fn a_reader_that_reaches_no_subnet_output_is_no_edge() {
+        let comp = comp_with_subnet(subnet_with_reader(101, 100, 102, "2", 1, None));
+        assert!(validate_shell_bind_cycles(&comp).is_ok());
+    }
+
+    /// One node, two independent outputs: the shell binds port 0 and the
+    /// reader only reaches port 1. Node-level adjacency cannot tell those
+    /// apart; a subnet's ports the graph can, so this is where the walk has
+    /// to keep the port it was asked about.
+    #[test]
+    fn a_reader_on_another_output_of_the_bound_node_is_no_edge() {
+        let comp = comp_with_subnet(subnet_with_reader(101, 100, 102, "2", 2, Some(1)));
+        assert!(
+            validate_shell_bind_cycles(&comp).is_ok(),
+            "the shell bound output 0; the reader only reaches output 1"
+        );
+    }
+
+    /// And the control: the same two-output subnet with the reader on the
+    /// port the shell actually bound.
+    #[test]
+    fn a_reader_on_the_bound_output_of_a_two_output_node_is_an_edge() {
+        let comp = comp_with_subnet(subnet_with_reader(101, 100, 102, "2", 2, Some(0)));
+        assert!(validate_shell_bind_cycles(&comp).is_err());
+    }
+
+    /// A path through an ordinary node with several outputs cannot be
+    /// followed exactly — nothing in the model says which input feeds which
+    /// output — so the cycle is **reported** and left for the user, and the
+    /// load-time repair does not act on it.
+    #[test]
+    fn a_cycle_through_a_multi_output_node_is_reported_but_not_repairable() {
+        let splitter = Node::new(NodeId::new(101), "math.scalar")
+            .with_input("value", &[DataTypeId::VEC2])
+            .with_output("a", DataTypeId::SCALAR)
+            .with_output("b", DataTypeId::SCALAR);
         let network = Graph::new()
-            .add_node(Node::new(NodeId::new(101), "subnet").with_subnet(inner))
+            .add_node(layer_info_node(100, "2"))
+            .unwrap()
+            .add_node(splitter)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(102),
+                NodeId::new(100),
+                OutputPortIndex(0),
+                NodeId::new(101),
+                InputPortIndex(0),
+            )
             .unwrap();
         let comp = comp(1)
-            .add_layer(bind_shell(Layer::new(LayerId::new(1), "Sub", network), 101))
+            .add_layer(bind_shell(
+                Layer::new(LayerId::new(1), "Split", network),
+                101,
+            ))
             .add_layer(shell_reader(2, 200, "1"));
-        assert!(validate_shell_bind_cycles(&comp).is_err());
+
+        assert!(
+            validate_shell_bind_cycles(&comp).is_err(),
+            "detection is the strict question: the cycle is named"
+        );
+        assert!(
+            first_exact_shell_bind_cycle(&comp).is_none(),
+            "repair is the lenient one: a guess must not delete a binding"
+        );
     }
 
     /// A `layer.info` that feeds only the layer's **picture** is not a

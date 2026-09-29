@@ -615,6 +615,11 @@ impl ProjectFile {
 /// means either a hand-edited project or a bug in an editing path — and in
 /// both cases the layers that lost a binding have to be nameable. The chain
 /// is logged as the layer ids it runs through, in the order it closes.
+///
+/// Two outcomes, two lines. A cycle the graph states exactly was repaired and
+/// the count says how much went; one that rests on an approximated edge was
+/// **left alone**, and saying "dropped" about it would send the reader
+/// looking for work that was never done.
 fn report_shell_bind_cycles(notes: &[ravel_core::composition::ShellBindCycleNote]) {
     for note in notes {
         let chain = note
@@ -623,13 +628,27 @@ fn report_shell_bind_cycles(notes: &[ravel_core::composition::ShellBindCycleNote
             .map(|layer| layer.raw().to_string())
             .collect::<Vec<_>>()
             .join(" → ");
-        tracing::warn!(
-            comp = note.comp.raw(),
-            chain,
-            cleared = note.cleared,
-            "circular shell binding: these layers drove each other's transform or opacity \
-             through layer.info, so the node bindings were dropped to open the project"
-        );
+        if note.exact {
+            tracing::warn!(
+                comp = note.comp.raw(),
+                chain,
+                cleared = note.cleared,
+                "circular shell binding: these layers drove each other's transform or opacity \
+                 through layer.info, so the bindings carrying the cycle were dropped to open \
+                 the project"
+            );
+        } else {
+            // Nothing was touched, so the line has to say what the user is
+            // looking at: the shells read zero from those bindings, and only
+            // they can tell whether the loop is real.
+            tracing::warn!(
+                comp = note.comp.raw(),
+                chain,
+                "possible circular shell binding through layer.info: it runs through a node \
+                 whose outputs the graph cannot tell apart, so the bindings were left in \
+                 place and the shells read zero from them"
+            );
+        }
     }
 }
 

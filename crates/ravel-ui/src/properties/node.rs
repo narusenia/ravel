@@ -18,7 +18,7 @@ use ravel_core::registry::{
 
 use std::collections::HashSet;
 
-use super::{DrivenParam, PortRow, PropertyField, PropertySection};
+use super::{DrivenParam, PortCandidate, PortRow, PropertyField, PropertySection};
 
 /// Field key of the interface node's port list. One list per node, so the key
 /// names the section's single field rather than any port.
@@ -607,6 +607,37 @@ pub fn node_params_sections(
         .collect()
 }
 
+/// Build the Ports section of a node whose outputs are picked from a closed
+/// candidate set (`layer.info`, `comp.info`), or `None` for a type that
+/// declares none — which is every ordinary node, whose outputs the template
+/// fixes.
+///
+/// Every candidate is a row, picked or not: the set is the node's vocabulary
+/// and the checkbox is the only edit, so a list of the picked ones alone
+/// would have no way to grow. The type comes from the candidate rather than
+/// from the node, so a row reads the same whether the port is there or not.
+fn node_port_picker_section(node: &Node, registry: &NodeRegistry) -> Option<PropertySection> {
+    let options = registry.output_options(&node.type_key);
+    if options.is_empty() {
+        return None;
+    }
+    let candidates = options
+        .iter()
+        .map(|port| PortCandidate {
+            present: node.outputs.iter().any(|p| p.name == port.name),
+            name: port.name.clone(),
+            port_type: CustomPortType::from_data_type(port.data_type),
+        })
+        .collect();
+    Some(PropertySection {
+        title: "properties.section.ports".into(),
+        fields: vec![PropertyField::PortPicker {
+            key: FIELD_PORTS.into(),
+            candidates,
+        }],
+    })
+}
+
 /// Build the Ports section of a network interface node, or `None` for any
 /// other node (REQ-LAYER-002/003).
 ///
@@ -620,13 +651,23 @@ pub fn node_params_sections(
 /// only, while a subnet's inner In is a pin boundary that takes anything a
 /// wire carries. An Out node's set does not depend on it
 /// ([`CustomPortType::allowed_for_out`]).
-pub fn node_ports_section(node: &Node, context: NetworkContext) -> Option<PropertySection> {
+///
+/// A node whose type declares a **candidate set** of output ports instead
+/// (`registry.output_options`) gets a [`PropertyField::PortPicker`] here: the
+/// same section, a different edit. The branch is the registry's declaration
+/// and not the type key, so a type that grows a candidate set later gets the
+/// picker without this function learning its name.
+pub fn node_ports_section(
+    node: &Node,
+    registry: &NodeRegistry,
+    context: NetworkContext,
+) -> Option<PropertySection> {
     let (side, options) = if is_in_node(node) {
         (PortSide::Output, CustomPortType::allowed_for_in(context))
     } else if is_out_node(node) {
         (PortSide::Input, CustomPortType::allowed_for_out())
     } else {
-        return None;
+        return node_port_picker_section(node, registry);
     };
     let names: Vec<&str> = match side {
         PortSide::Input => node.inputs.iter().map(|p| p.name.as_str()).collect(),
@@ -680,7 +721,7 @@ pub fn sections_for_node(
     ));
     // Last: the ports are the node's shape, and a user reading an In node
     // wants its values before its plumbing.
-    sections.extend(node_ports_section(node, ctx.network));
+    sections.extend(node_ports_section(node, registry, ctx.network));
     sections
 }
 
@@ -1489,6 +1530,205 @@ mod tests {
         }
     }
 
+    fn port_picker(section: &PropertySection) -> &[PortCandidate] {
+        match &section.fields[0] {
+            PropertyField::PortPicker { candidates, .. } => candidates,
+            other => panic!("expected a PortPicker, got {other:?}"),
+        }
+    }
+
+    /// The candidate set of an info node, as the picker offers it: every
+    /// candidate the template declares, with the three the node starts with
+    /// picked.
+    #[test]
+    fn an_info_node_offers_its_candidates_and_marks_the_ones_it_carries() {
+        let reg = registry();
+        let node = reg
+            .create_node("layer.info", NodeId::new(1))
+            .expect("layer.info is registered");
+        let section =
+            node_ports_section(&node, &reg, NetworkContext::LayerRoot).expect("ports section");
+        let candidates = port_picker(&section);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            reg.output_options("layer.info")
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            "every candidate is a row, in offer order"
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|c| c.present)
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["index", "size", "local_t"],
+            "and the default three are the picked ones"
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|c| c.name == "size")
+                .map(|c| c.port_type),
+            Some(Some(CustomPortType::Vec2)),
+            "the type is the candidate's, so a row reads the same picked or not"
+        );
+    }
+
+    /// An info node's Ports section is a picker and nothing else: no name to
+    /// type, no type menu, no reorder — the candidate decides both, and the
+    /// only edit is whether the port is there.
+    #[test]
+    fn an_info_nodes_ports_section_offers_no_name_or_type_editor() {
+        let reg = registry();
+        for type_key in ["layer.info", "comp.info"] {
+            let node = reg.create_node(type_key, NodeId::new(1)).expect(type_key);
+            let section =
+                node_ports_section(&node, &reg, NetworkContext::LayerRoot).expect("ports section");
+            assert_eq!(section.fields.len(), 1, "{type_key}");
+            assert!(
+                matches!(section.fields[0], PropertyField::PortPicker { .. }),
+                "{type_key} got {:?}",
+                section.fields[0]
+            );
+        }
+    }
+
+    /// Picking and unpicking a candidate moves the node's ports and leaves
+    /// the edges on the ports the change did not touch
+    /// (`scene-info-nodes-plan` unit 4).
+    #[test]
+    fn picking_a_candidate_adds_the_port_and_keeps_the_other_edges() {
+        let reg = registry();
+        let options = reg.output_options("layer.info").to_vec();
+        let info = reg.create_node("layer.info", NodeId::new(1)).unwrap();
+        // `local_t` is the third default port, so the edge sits on index 2 and
+        // every insert before it re-indexes.
+        let sink = Node::new(NodeId::new(2), "math.abs").with_input("x", &[DataTypeId::SCALAR]);
+        let graph = ravel_core::graph::Graph::new()
+            .add_node(info)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                ravel_core::id::EdgeId::new(1),
+                NodeId::new(1),
+                ravel_core::id::OutputPortIndex(2),
+                NodeId::new(2),
+                ravel_core::id::InputPortIndex(0),
+            )
+            .unwrap();
+
+        let wired_port = |graph: &ravel_core::graph::Graph| {
+            let edge = graph
+                .edges()
+                .find(|e| e.id == ravel_core::id::EdgeId::new(1))?;
+            graph
+                .node(edge.source)?
+                .outputs
+                .get(edge.source_port.0 as usize)
+                .map(|p| p.name.clone())
+        };
+        let picked = |graph: &ravel_core::graph::Graph| {
+            let node = graph.node(NodeId::new(1)).unwrap();
+            let section = node_ports_section(node, &reg, NetworkContext::LayerRoot).unwrap();
+            port_picker(&section)
+                .iter()
+                .filter(|c| c.present)
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let graph = ravel_core::network::set_output_option(
+            graph,
+            NodeId::new(1),
+            "rotation",
+            true,
+            &options,
+        )
+        .expect("pick a candidate");
+        assert_eq!(picked(&graph), ["index", "size", "local_t", "rotation"]);
+        assert_eq!(
+            wired_port(&graph).as_deref(),
+            Some("local_t"),
+            "the edge still lands on the port it was drawn to"
+        );
+
+        let graph =
+            ravel_core::network::set_output_option(graph, NodeId::new(1), "index", false, &options)
+                .expect("unpick a candidate");
+        assert_eq!(picked(&graph), ["size", "local_t", "rotation"]);
+        assert_eq!(
+            wired_port(&graph).as_deref(),
+            Some("local_t"),
+            "and survives the re-index that removing an earlier port causes"
+        );
+
+        let graph = ravel_core::network::set_output_option(
+            graph,
+            NodeId::new(1),
+            "local_t",
+            false,
+            &options,
+        )
+        .expect("unpick the wired candidate");
+        assert!(
+            wired_port(&graph).is_none(),
+            "unpicking a wired port takes its edge with it — there is nowhere \
+             else for the edge to land, and the Document commit makes the two \
+             one undo step"
+        );
+    }
+
+    /// The picker cannot grow a name the type does not offer: the processor
+    /// answers ports by name and has no value for one nobody declared.
+    #[test]
+    fn a_name_outside_the_candidate_set_grows_no_port() {
+        let reg = registry();
+        let options = reg.output_options("comp.info").to_vec();
+        let node = reg.create_node("comp.info", NodeId::new(1)).unwrap();
+        let graph = ravel_core::graph::Graph::new().add_node(node).unwrap();
+
+        // A `layer.info` candidate, so the name is real — just not this
+        // type's — and the refusal cannot be mistaken for a typo check.
+        for name in ["world_position", "made_up"] {
+            let err = ravel_core::network::set_output_option(
+                graph.clone(),
+                NodeId::new(1),
+                name,
+                true,
+                &options,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ravel_core::network::NetworkError::NotOutputOption { name: ref n, .. }
+                        if n == name
+                ),
+                "{err}"
+            );
+        }
+        let section = node_ports_section(
+            graph.node(NodeId::new(1)).unwrap(),
+            &reg,
+            NetworkContext::LayerRoot,
+        )
+        .unwrap();
+        assert!(
+            port_picker(&section).iter().all(|c| reg
+                .output_options("comp.info")
+                .iter()
+                .any(|o| o.name == c.name)),
+            "and the picker offers nothing outside the set either"
+        );
+    }
+
     /// Selecting the In node offers a Ports section listing every port it
     /// declares — the shell's fixed ones marked as such, the user's not.
     #[test]
@@ -1614,7 +1854,7 @@ mod tests {
         let node = Node::new(NodeId::new(1), "blur")
             .with_input("input", &[DataTypeId::FRAME_BUFFER])
             .with_output("output", DataTypeId::FRAME_BUFFER);
-        assert!(node_ports_section(&node, NetworkContext::LayerRoot).is_none());
+        assert!(node_ports_section(&node, &registry(), NetworkContext::LayerRoot).is_none());
         assert!(
             sections_for_node(
                 &node,
@@ -1638,7 +1878,8 @@ mod tests {
             .with_output(PORT_TIME, DataTypeId::SCALAR)
             .with_output(PORT_FRAME_INDEX, DataTypeId::SCALAR)
             .with_param(PORT_FRAME_INDEX, ParameterValue::Int(3));
-        let section = node_ports_section(&node, NetworkContext::LayerRoot).expect("ports section");
+        let section = node_ports_section(&node, &registry(), NetworkContext::LayerRoot)
+            .expect("ports section");
         let (_, rows, _) = port_list(&section);
         assert_eq!(
             rows.iter()
@@ -2450,7 +2691,8 @@ mod tests {
             ],
             &[("width", "Size")],
         );
-        let section = node_ports_section(&node, NetworkContext::Subnet).expect("in node");
+        let section =
+            node_ports_section(&node, &registry(), NetworkContext::Subnet).expect("in node");
         let (_, rows, _) = port_list(&section);
         assert_eq!(
             rows.iter()
@@ -2470,7 +2712,8 @@ mod tests {
 
         let out = Node::new(NodeId::new(2), NET_OUT_TYPE_KEY)
             .with_input(PORT_FRAME, &[DataTypeId::FRAME_BUFFER]);
-        let section = node_ports_section(&out, NetworkContext::LayerRoot).expect("out node");
+        let section =
+            node_ports_section(&out, &registry(), NetworkContext::LayerRoot).expect("out node");
         let (_, rows, _) = port_list(&section);
         assert!(rows.iter().all(|row| row.group.is_none()));
     }

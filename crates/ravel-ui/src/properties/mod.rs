@@ -54,6 +54,26 @@ pub struct PortRow {
     pub group: Option<String>,
 }
 
+/// One row of a [`PropertyField::PortPicker`]: an output port the node's type
+/// **offers**, and whether the node carries it right now.
+///
+/// The whole candidate set is listed, picked or not — the list is the node's
+/// vocabulary, and one that showed only the picked ports would be a list with
+/// no way to add to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortCandidate {
+    /// Port name, which is also the candidate's identity: the processor
+    /// answers the port by this name
+    /// (`ravel_core::registry::NodeTemplate::output_option`).
+    pub name: String,
+    /// The type the candidate carries. `None` for a wire type no
+    /// [`CustomPortType`] describes, which only a template declaring an
+    /// exotic output type can produce; the host still has a row to draw.
+    pub port_type: Option<CustomPortType>,
+    /// Whether the node carries this port today — the checkbox's value.
+    pub present: bool,
+}
+
 /// A single editable (or read-only) field in a property section.
 ///
 /// Numeric fields carry two ranges: `range` is the hard clamp boundary a
@@ -162,6 +182,21 @@ pub enum PropertyField {
         /// [`ravel_core::network::NetworkContext`].
         options: Vec<CustomPortType>,
     },
+    /// The output ports of a node whose outputs are **picked** from the closed
+    /// candidate set its type declares (`layer.info`, `comp.info`).
+    ///
+    /// Not a [`PropertyField::PortList`], because none of that list's edits
+    /// exist here: the name and the type are the candidate's, so there is
+    /// nothing to type, retype or reorder — the only edit is whether the port
+    /// is there. Like the port list it is not a *value*, so it never travels
+    /// through [`PropertyValue`] and the host routes its edits to
+    /// `ravel_core::network::set_output_option`.
+    PortPicker {
+        key: String,
+        /// Every candidate the type offers, in offer order, which is also the
+        /// order the picked ones sit in on the node.
+        candidates: Vec<PortCandidate>,
+    },
     /// The project's exposed parameter declarations (REQ-PROJ-006): the
     /// external contract a CLI render or a template instantiation may set.
     ///
@@ -195,6 +230,7 @@ impl PropertyField {
             | Self::Ramp { key, .. }
             | Self::ReadOnly { key, .. }
             | Self::PortList { key, .. }
+            | Self::PortPicker { key, .. }
             | Self::ExposedList { key, .. } => key,
         }
     }

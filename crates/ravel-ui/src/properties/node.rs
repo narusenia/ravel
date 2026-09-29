@@ -47,6 +47,12 @@ pub const NO_SIBLING_LAYERS: &str = "properties.value.no_sibling_layers";
 /// go and fix.
 pub const NO_LAYER_OUTPUT_PORTS: &str = "properties.value.no_layer_output_ports";
 
+/// What a `layer.info` target row shows when the composition offers no layer
+/// to read — which means the node's own network has been detached from the
+/// stack, since the owning layer is otherwise always a candidate. A locale
+/// key for the same reason as [`NO_SIBLING_LAYERS`].
+pub const NO_COMP_LAYERS: &str = "properties.value.no_comp_layers";
+
 /// Why a contextual parameter offers nothing, as a locale key the display
 /// boundary translates ([`crate::properties::node::string_field`]).
 ///
@@ -59,6 +65,7 @@ pub const NO_LAYER_OUTPUT_PORTS: &str = "properties.value.no_layer_output_ports"
 fn no_candidates_reason(kind: ContextualKind) -> &'static str {
     match kind {
         ContextualKind::SiblingLayer => NO_SIBLING_LAYERS,
+        ContextualKind::CompLayer => NO_COMP_LAYERS,
         ContextualKind::LayerOutputPort => NO_LAYER_OUTPUT_PORTS,
     }
 }

@@ -472,6 +472,7 @@ off = "Off"
 none = "(none)"
 no_sibling_layers = "No other layer in this composition"
 no_layer_output_ports = "That layer has no output port"
+no_comp_layers = "No layer in this composition"
 mode_not_static = "Keyframed — an animated mode decides nothing"
 source_network = "Network ({count} nodes)"
 source_audio = "Audio"
@@ -870,6 +871,12 @@ description = "References the output of another layer in the same composition."
 [node."layer.ref".params]
 layer = "The layer in this composition to reference."
 port = "Output port of the referenced layer to read. This node's output takes that port's type."
+
+[node."layer.info"]
+label = "Layer Info"
+description = "Reads a layer's shell — placement, size, transform, opacity — without evaluating its network."
+[node."layer.info".params]
+layer = "The layer to read. Defaults to the layer this network belongs to."
 
 [node."subnet"]
 label = "Subnet"

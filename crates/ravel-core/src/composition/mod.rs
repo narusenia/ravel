@@ -1695,10 +1695,11 @@ impl Document {
             for edge in graph.edges() {
                 watermarks.edge = watermarks.edge.max(edge.id.raw());
             }
-            // `layer.ref` parameters reference layers by raw id, in any
-            // graph (layer networks, subnets, and the legacy flat graph).
+            // `layer.ref` / `layer.info` parameters reference layers by raw
+            // id, in any graph (layer networks, subnets, and the legacy flat
+            // graph).
             let mut targets = Vec::new();
-            validate::layer_ref_targets(graph, &mut targets);
+            validate::layer_target_ids(graph, &mut targets);
             for target in targets {
                 watermarks.layer = watermarks.layer.max(target.raw());
             }

@@ -249,8 +249,8 @@ ParameterValue::identifier() -> Identifier   // THE read mouth for references
     // row refuses a picker on the animatable spelling all the same, because
     // an edit inserts a key and would make it move.
     // Which parameters are identifiers is composition::validate::
-    // is_identifier_parameter (layer.ref `layer`, precomp `comp_id`, media
-    // `asset_id`); what one names is this. Evaluation goes through it too, so
+    // is_identifier_parameter (layer.ref / layer.info `layer`, precomp
+    // `comp_id`, media `asset_id`); what one names is this. Evaluation goes through it too, so
     // a wire into an identifier port is IGNORED (the port stays, and stays
     // disconnectable) and node_asset_reference agrees with the render.
     // DynamicIdentifier::as_str() is the untranslated shape word the CLI
@@ -450,8 +450,9 @@ trait ProcessorRegistry { register / processor / invalidate_node }
     .invalidate_shell_readers(&[ShellScope])    // drops the layer scopes whose
         // networks hold a node reading shell fields off the Document. Called by
         // the worker for an InvalidationHint::Shell, AFTER set_document (which
-        // removes store entries). No node type reads a shell yet, so this finds
-        // nothing until `layer.info` / `comp.info` exist
+        // removes store entries). The reader types are eval.rs's private
+        // SHELL_READER_TYPE_KEYS — `layer.info` today, `comp.info` when it
+        // lands; a type not listed there reads a stale shell
     .set_read_ahead(Option<CancelCheck>)        // CACHE-9; Some = this pull is
         // read-ahead: node results reserve at the speculative rank, and the
         // check is asked before EVERY process(); true ends the pull with
@@ -1671,9 +1672,14 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
     // math.scalar `op`)
     .with_contextual_param_options(key, ContextualKind)   // the candidates
     // come from WHERE THE NODE SITS, not from the template. Closed enum
-    // (SiblingLayer, LayerOutputPort), never a closure: NodeTemplate is data
-    // that is cloned and compared, and the resolution must stay in
-    // ravel-core.
+    // (SiblingLayer, CompLayer, LayerOutputPort), never a closure:
+    // NodeTemplate is data that is cloned and compared, and the resolution
+    // must stay in ravel-core.
+    .with_output_options([OutputPort, ..])   // the CLOSED CANDIDATE SET for a
+    // node whose output ports the USER picks (layer.info). Empty for every
+    // ordinary node. Name and type travel together, so a panel offering these
+    // adds and removes whole ports and never decides what one carries — the
+    // same division ParamOptions draws for parameters.
     .with_param_role(key, ParamRole)     // Position | Size: what a vector
     // param means on the canvas. The Viewer's ParamManipulator puts a handle
     // on it; Size is measured from the node's first Position param.
@@ -1718,6 +1724,9 @@ NodeTemplate::new(type_key, display_name, NodeCategory)
 registry.param_range(type_key, param_key) -> Option<&ParamRange>  // .clamp(v)
 registry.param_options(type_key, param_key) -> Option<&[String]>
     // the FIXED values only; a contextual declaration answers None here
+registry.output_options(type_key) -> &[OutputPort]
+    // the candidate set, empty for a type whose template fixes its outputs.
+    // template.output_option(name) turns one name back into its port
 registry.param_option_source(type_key, param_key) -> Option<&ParamOptions>
     // ParamOptions::{Fixed(Vec<String>), Contextual(ContextualKind)} — the
     // declaration itself, for a reader that can supply a context
@@ -1735,7 +1744,11 @@ registry::contextual_options(ContextualKind, &Node, &Composition,
     // bottom-most first and the Timeline draws its last element first, so
     // row = comp.layers.len() - index. Never the layer id, never the index
     // itself, never the position in the candidate list. The conversion lives
-    // only in `registry::layer_param_option(index, total, layer)`.
+    // only in `composition::timeline_row(index, total)`, which
+    // `registry::layer_param_option(index, total, layer)` and `layer.info`'s
+    // `index` port both call.
+    // CompLayer is SiblingLayer WITHOUT the owner dropped, for a reader that
+    // evaluates nothing and may therefore name its own layer (layer.info).
     // LayerOutputPort reads the NODE's own `layer` parameter — the candidates
     // are the ports of the layer that names, so neither the composition nor
     // the owner decides them. They are the target layer's `net.out` node's
@@ -2432,6 +2445,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `vector.dot` | CPU | two vectors of the same arity → Scalar. Both ports accept every arity (the output is a Scalar regardless), so a Vec2 × Vec3 pair is connectable and reported as an evaluation error. One connected side is not a mismatch: the other reads as that arity's zero |
 | `vector.cross.vec2` / `.vec3` | CPU | 2D cross product → Scalar (`ax·by − ay·bx`), 3D cross product → `Vec3`. Two templates because the *output* type differs per arity; there is no 4-component form |
 | `media` | CPU | decodes media via the document asset table (`asset_id`), branching on `AssetKind`: containers via `MediaReader` (layer-local seconds → media frame `floor(t·fps)`, clamped), stills via an injectable `ImageReaderFactory`, sequences by rebuilding the frame file name (`start + floor(t·seq_fps)` clamped to `start..=end`; seq_fps = `metadata.frame_rate` else comp fps); offline / decode failure → transparent frame at ctx resolution (warned once per asset); every decoded frame lands in the shared `MediaFrameCache` the processor was built with, the processor itself keeping only the open reader; FFmpeg backend behind the `ffmpeg` feature; `video` is a load-time alias normalized by `Document::normalize_node_type_aliases` |
+| `layer.info` | CPU | reads a layer's **shell** off the Document without evaluating its network, so it can name its own layer and forms no cycle; `layer` is `-1` (the owning layer, the default) or the target `LayerId` as decimal text, picked through `ContextualKind::CompLayer`; outputs are picked from the template's `output_options` candidate set (17 of them, `name` / `index` / timing / `size` / `local_t` / `local_f` / local transform / `opacity` / `world_*`) and a new node starts with `index` / `size` / `local_t`; the shell is read at the target's own local time and every port is a typed zero outside the target's interval; `index` is the Timeline row and `rotation` / `world_rotation` are radians; shell edits reach it through `InvalidationHint::Shell`, not through an edge |
 | `layer.ref` | CPU | same-comp reference to another layer's `net.out` port; `layer` is the target `LayerId` as decimal text (`""` = unset, `.ravprj` v13 — a string so Properties can offer named sibling candidates through `ContextualKind::SiblingLayer`) and `port` the port name, picked from the target's own ports (`ContextualKind::LayerOutputPort`) with the node's **output type following it** (`registry::builtin::dependent_port_updates`; an unresolvable reference leaves the type alone); pre-transform output at the target's local time; typed zero outside its interval |
 | `subnet` | CPU | evaluates `node.subnet` recursively (`PathSegment::Subnet`); connected pins bind the inner `net.in`, unconnected pins promote same-name node params |
 | `blur`, `transform`, `merge`, `color_correct` | GPU (wgpu compute, WGSL in `src/shaders/`) | tests need an adapter |

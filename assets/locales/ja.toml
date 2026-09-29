@@ -463,6 +463,7 @@ off = "オフ"
 none = "（なし）"
 no_sibling_layers = "このコンポジションに他のレイヤーがない"
 no_layer_output_ports = "そのレイヤーは出力ポートを持っていない"
+no_comp_layers = "このコンポジションにレイヤーがない"
 mode_not_static = "キーフレーム済み — アニメートされたモードは何も決めない"
 source_network = "ネットワーク（{count} ノード）"
 source_audio = "オーディオ"
@@ -858,6 +859,12 @@ description = "同じコンポジション内の別レイヤーの出力を参�
 [node."layer.ref".params]
 layer = "参照する同じコンポジション内のレイヤー。"
 port = "読み取る参照先レイヤーの出力ポート。このノードの出力はそのポートの型になる。"
+
+[node."layer.info"]
+label = "レイヤー情報"
+description = "レイヤーの殻（時間配置・サイズ・変換・不透明度）を、ネットワークを評価せずに読む。"
+[node."layer.info".params]
+layer = "読み取るレイヤー。既定はこのネットワークが属するレイヤー自身。"
 
 [node."subnet"]
 label = "サブネット"

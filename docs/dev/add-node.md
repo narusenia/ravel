@@ -115,6 +115,16 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   `every_geometry_producing_built_in_decides_about_the_section` に載せるまで
   テストが落ちる
 - 可変長入力は `variadic_input_group`
+- **出力ポートをユーザーに選ばせるなら `with_output_options` で候補を宣言する。**
+  引数は `OutputPort` の並び（名前と型は対になっている）で、テンプレートの
+  `with_output` はそのうち**新規ノードが最初から持つもの**を宣言する
+  （`layer.info` が 17 候補のうち 3 つで始まる形）。候補が要らないノードは
+  何も宣言しない。**パネル側に `type_key` の match を書かない** — 編集器は
+  候補の追加・削除だけを行い、ポートが何を運ぶかは決めない。読み出しは
+  `registry.output_options(type_key)` と
+  `template.output_option(name)`。プロセッサは `node.outputs` の名前で値を
+  返すので、**候補表とプロセッサの match が食い違わないことをテストで留める**
+  （`layer_info::tests::every_declared_candidate_port_answers_with_its_declared_type`）
 - **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
   Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /
   `Channel3`）を使う。理由は 3 つ: Properties が成分横並びの Vector 行 1 本に

@@ -218,6 +218,19 @@ impl ShellReader<'_> {
     /// `world_matrix` the renderer and the viewer's overlay compose
     /// (`composition::transform`). Recomputing the chain here would give the
     /// network a third answer to a question that already has one.
+    ///
+    /// **`world_scale` and `world_rotation` are a reading of the matrix, not
+    /// a factorisation of it.** `world_scale` is the length of each basis
+    /// vector of the linear part and `world_rotation` is the angle of the
+    /// first one. A chain of rotations and uniform scales is exactly
+    /// `R(world_rotation) · S(world_scale)`, so the two round-trip. A
+    /// **non-uniform** scale above a rotation shears, and a sheared matrix is
+    /// not any rotation-times-scale at all: the two ports still report the
+    /// basis honestly, but composing them back does **not** reproduce the
+    /// matrix, and `world_rotation` is then the first axis's angle rather
+    /// than "the layer's rotation". Pin it with `world_position`, which is a
+    /// point and stays exact under shear, or precompose the non-uniform
+    /// parent.
     fn world(&self, port: &str) -> Arc<dyn NodeData> {
         let m = world_matrix(self.comp, self.target, &self.ctx).0;
         match port {
@@ -618,6 +631,53 @@ mod tests {
             "comp frame 20 is half the parent's ramp, got {}",
             world.0
         );
+    }
+
+    /// A non-uniform scale above a rotation shears, and a sheared matrix is
+    /// not any rotation-times-scale. The two ports still read the basis —
+    /// each basis vector's length, and the first one's angle — so this pins
+    /// the **definition**: someone who later reports "world_rotation is not
+    /// 45°" is reading a value that is behaving as documented.
+    #[test]
+    fn a_sheared_chain_reports_the_basis_not_a_factorisation() {
+        let mut parent = layer(1, "Parent");
+        parent.transform.scale = [
+            AnimationChannel::constant(2.0),
+            AnimationChannel::constant(1.0),
+        ];
+        let mut child = layer(2, "Child").with_parent(LayerId::new(1));
+        child.transform.rotation = AnimationChannel::constant(45.0);
+        let comp = comp_of(vec![parent, child]);
+
+        let out = eval_at(
+            &comp,
+            LayerId::new(2),
+            info_node(10, "-1", &["world_scale", "world_rotation"]),
+            0,
+        )
+        .unwrap();
+        let v = record(&out);
+
+        // linear part = [[2c, -2s], [s, c]] with c = s = √2/2, so both basis
+        // vectors are √2.5 long and the first one sits at atan(1/2).
+        let len = 2.5f32.sqrt();
+        let (sx, sy) = vec2_of(&v[0]);
+        assert!(
+            (sx - len).abs() < 1e-4 && (sy - len).abs() < 1e-4,
+            "basis lengths {sx}, {sy} (expected {len} each)"
+        );
+        let rotation = scalar_of(&v[1]);
+        assert!(
+            (rotation - 0.5f32.atan()).abs() < 1e-4,
+            "the first basis vector's angle is atan(1/2), got {rotation}"
+        );
+        // The point port is exact under shear; this is the one to trust.
+        let point = world_matrix(
+            &comp,
+            comp.get_layer(LayerId::new(2)).unwrap(),
+            &EvalContext::new(0, FPS, RES),
+        );
+        assert!(!point.is_identity(), "the chain really does transform");
     }
 
     /// World values stay in composition space when the canvas is smaller (a

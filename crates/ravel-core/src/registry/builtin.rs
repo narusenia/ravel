@@ -1308,6 +1308,13 @@ fn layer_ref() -> NodeTemplate {
 /// silently folded in the parent chain would make "is parenting applied here"
 /// a property of nothing visible — the same value would mean two different
 /// things depending on a shell field the network cannot see.
+///
+/// `world_scale` and `world_rotation` read the composed matrix's basis — the
+/// length of each basis vector and the angle of the first — rather than
+/// factorising it. Under a non-uniform scale above a rotation the matrix
+/// shears and is not any rotation-times-scale, so the two do not compose back
+/// into it; `world_position` is a point and stays exact. The processor's
+/// `world` documents the whole rule.
 fn layer_info_port_options() -> Vec<OutputPort> {
     [
         ("name", DataTypeId::PLAIN_TEXT),

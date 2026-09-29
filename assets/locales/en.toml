@@ -874,7 +874,7 @@ port = "Output port of the referenced layer to read. This node's output takes th
 
 [node."layer.info"]
 label = "Layer Info"
-description = "Reads a layer's shell — placement, size, transform, opacity — without evaluating its network."
+description = "Reads a layer's shell — placement, size, transform, opacity — without evaluating its network. The world_* ports read the composed matrix: world_scale is the length of each basis vector and world_rotation the angle of the first, so a non-uniform scale above a rotation shears and the two no longer compose back into the matrix (world_position stays exact). Rotations are in radians."
 [node."layer.info".params]
 layer = "The layer to read. Defaults to the layer this network belongs to."
 

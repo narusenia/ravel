@@ -50,8 +50,9 @@
 | OPS-6 | `geometry.group_index`（index で要素指定） | `geometry-ops-plan.md` |
 | OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
 | OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
-| INFO-2 | `layer.info`（`INFO-1` ✅ / `NETIF-2` ✅ で依存が解けた） | `scene-info-nodes-plan.md` |
 | INFO-3 | `comp.info`（`INFO-1` ✅） | `scene-info-nodes-plan.md` |
+| INFO-4 | 情報ノードのポート選択 UI（`INFO-2` ✅ / `NETIF-3` ✅ で依存が解けた） | `scene-info-nodes-plan.md` |
+| INFO-5 | 殻バインドを含む循環検出（`INFO-2` ✅） | `scene-info-nodes-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
@@ -470,10 +471,10 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | INFO-1 | ✅ #558 | `InvalidationHint::Shell`（挙動不変で経路を通す）。判定は `ravel-ui` の `invalidation.rs` 1 箇所、3 パネルが共有 | — |
-| INFO-2 | 🟡 | `layer.info` | INFO-1 ✅, NETIF-2 ✅ |
+| INFO-2 | ✅ #560 | `layer.info`（殻を読むだけで対象ネットワークは評価しない。候補ポートは `with_output_options` で宣言） | INFO-1 ✅, NETIF-2 ✅ |
 | INFO-3 | 🟡 | `comp.info` | INFO-1 ✅ |
-| INFO-4 | ⬜ | 情報ノードのポート選択 UI | INFO-2, NETIF-3 |
-| INFO-5 | ⬜ | 殻バインドを含む循環検出 | INFO-2 |
+| INFO-4 | 🟡 | 情報ノードのポート選択 UI | INFO-2 ✅, NETIF-3 ✅ |
+| INFO-5 | 🟡 | 殻バインドを含む循環検出 | INFO-2 ✅ |
 | INFO-6 | ⬜ | レジストリ / ロケール / 文書 | INFO-2〜5 |
 
 殻の transform / 時間配置編集は `INFO-1`（#558）まで `InvalidationHint::None`

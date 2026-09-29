@@ -3825,9 +3825,8 @@ mod tests {
     // ---- shell readers ----------------------------------------------------
 
     /// The walk [`Evaluator::invalidate_shell_readers`] runs over each layer
-    /// network. Driven with an explicit key list because
-    /// `SHELL_READER_TYPE_KEYS` is empty until `layer.info` exists — with it,
-    /// the shell hint invalidates nothing, which is the point of unit 1.
+    /// network. Driven with an explicit key list so the recursion is pinned
+    /// independently of which node types happen to be registered as readers.
     ///
     /// What is worth pinning now is the subnet recursion: a reader dropped
     /// into a subnet reads the same shell as one at the top of the network,
@@ -3841,7 +3840,7 @@ mod tests {
         assert!(!holds_a_node_of(&bare, &["layer.info"]));
         assert!(
             !holds_a_node_of(&bare, SHELL_READER_TYPE_KEYS),
-            "no node type reads a shell yet"
+            "a shape is not a shell reader"
         );
 
         let top = bare
@@ -3929,10 +3928,9 @@ mod tests {
     /// every layer whose network holds a reader, and leaves the rest cached.
     ///
     /// Driven through `invalidate_readers_of` with a type this test builds a
-    /// document out of. The production entry point runs the same code with
-    /// `SHELL_READER_TYPE_KEYS`, which is empty until `layer.info` exists —
-    /// asserted below as well, so that "today it invalidates nothing" is a
-    /// pinned property of the real path rather than an untested claim.
+    /// document out of, so the walk is pinned whatever the registered reader
+    /// list holds. The production entry point runs the same code with
+    /// `SHELL_READER_TYPE_KEYS`.
     #[test]
     fn a_shell_hint_drops_the_scopes_of_the_layers_that_read_a_shell() {
         use crate::composition::Composition;

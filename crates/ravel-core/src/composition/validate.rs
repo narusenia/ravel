@@ -548,19 +548,24 @@ fn readers_feeding(
     seeds: Vec<(NodeId, OutputPortIndex, bool)>,
     owner: LayerId,
     out: &mut Vec<(LayerId, bool)>,
-) {
+) -> Vec<(OutputPortIndex, bool)> {
     // Built once per graph: the walk asks for a node's incoming edges as
     // often as it has nodes, and scanning the edge list each time would make
     // a validation pass quadratic in a network the user can make as large as
     // they like.
-    let mut incoming: HashMap<NodeId, Vec<(NodeId, OutputPortIndex)>> = HashMap::new();
+    // The target port is kept: a subnet walk needs the edges landing on one
+    // pin, and re-scanning the edge list for them would put the quadratic
+    // cost straight back.
+    let mut incoming: HashMap<NodeId, Vec<(NodeId, OutputPortIndex, u32)>> = HashMap::new();
     for edge in graph.edges() {
-        incoming
-            .entry(edge.target)
-            .or_default()
-            .push((edge.source, edge.source_port));
+        incoming.entry(edge.target).or_default().push((
+            edge.source,
+            edge.source_port,
+            edge.target_port.0,
+        ));
     }
 
+    let mut reached_in_ports = Vec::new();
     let mut seen: HashMap<(NodeId, OutputPortIndex), bool> = HashMap::new();
     let mut stack = seeds;
     while let Some((id, port, exact)) = stack.pop() {
@@ -582,25 +587,140 @@ fn readers_feeding(
             out.push((target, exact));
         }
 
-        if let Some(inner) = node.subnet.as_deref()
-            && let Some(out_node) = crate::network::find_out_node(inner)
-        {
-            let inner_seeds: Vec<(NodeId, OutputPortIndex, bool)> = inner
-                .edges()
-                .filter(|edge| edge.target == out_node.id && edge.target_port.0 == port.0)
-                .map(|edge| (edge.source, edge.source_port, exact))
-                .collect();
-            readers_feeding(inner, inner_seeds, owner, out);
+        // This network's own boundary: the value on this port came in from
+        // whatever encloses the graph. An enclosing subnet walk reads these
+        // back to decide which of its outer pins it has to follow.
+        if crate::network::is_in_node(node) {
+            reached_in_ports.push((port, exact));
         }
 
+        if let Some(inner) = node.subnet.as_deref() {
+            let in_step = subnet_pins_in_step(node, inner);
+            let out_node = crate::network::find_out_node(inner);
+
+            // Descend from the one inner input the chosen output *is*, but
+            // only while the stored pins still say what the inner graph
+            // says. Out of step, the index means something else than this
+            // assumes, and every seed goes in as an approximation instead.
+            let inner_seeds: Vec<(NodeId, OutputPortIndex, bool)> = match (in_step, out_node) {
+                (true, Some(out_node)) => inner
+                    .edges()
+                    .filter(|edge| edge.target == out_node.id && edge.target_port.0 == port.0)
+                    .map(|edge| (edge.source, edge.source_port, exact))
+                    .collect(),
+                (false, Some(out_node)) => inner
+                    .edges()
+                    .filter(|edge| edge.target == out_node.id)
+                    .map(|edge| (edge.source, edge.source_port, false))
+                    .collect(),
+                (_, None) => Vec::new(),
+            };
+            let reached = readers_feeding(inner, inner_seeds, owner, out);
+
+            if in_step {
+                // Back out through the pins the descent actually arrived at.
+                // A subnet's input pin `M` is the inner `net.in` node's
+                // `M`-th **non-fixed** output — `network::subnet_pins` builds
+                // the list by dropping the fixed ones, and this asks
+                // `network::is_fixed_port` the same question rather than
+                // assuming a 1:1 that is not there. An inner port that *is*
+                // fixed (`base_geometry`, `t`, `f`, `source`) is fed by the
+                // shell, not by the enclosing network, so it ends the walk.
+                //
+                // Every other outer pin is left alone, and that is the point:
+                // a `layer.info` wired into a pin whose value never reaches
+                // the output the shell bound is not a dependency of that
+                // shell, exactly as one wired to nothing inside the subnet is
+                // not.
+                let in_node = crate::network::find_in_node(inner);
+                for (inner_port, inner_exact) in reached {
+                    let Some(outer) =
+                        in_node.and_then(|in_node| outer_pin_of_in_port(in_node, inner_port))
+                    else {
+                        continue;
+                    };
+                    for (source, source_port, target_port) in
+                        incoming.get(&id).into_iter().flatten()
+                    {
+                        if *target_port == outer {
+                            stack.push((*source, *source_port, exact && inner_exact));
+                        }
+                    }
+                }
+                // A promoted parameter reaches the inner In node the same way
+                // a pin does, and which output it ends up feeding is the
+                // question this branch just answered for pins. It is not
+                // answered for parameters — the promotion is keyed by name,
+                // not by port index — so they go in approximated.
+                for (source, source_port) in node.parameter_sources() {
+                    stack.push((source, source_port, false));
+                }
+                continue;
+            }
+        }
+
+        // Which of an ordinary node's inputs feed which of its outputs is not
+        // something the model states: `OutputPort` carries a name and a type
+        // and nothing about where its value comes from. So every input is
+        // followed, and that is exact only while the node has one output to
+        // be the answer.
         let exact = exact && node.outputs.len() <= 1;
-        for (source, source_port) in incoming.get(&id).into_iter().flatten() {
+        for (source, source_port, _) in incoming.get(&id).into_iter().flatten() {
             stack.push((*source, *source_port, exact));
         }
         for (source, source_port) in node.parameter_sources() {
             stack.push((source, source_port, exact));
         }
     }
+    reached_in_ports
+}
+
+/// Whether `node`'s stored pins are the ones its inner graph defines.
+///
+/// [`network::sync_subnet_pins`](crate::network::sync_subnet_pins) derives
+/// them and a load runs it before this pass ever sees the document, so the
+/// answer is normally yes. It is asked anyway because the edit-time caller
+/// has no such guarantee, and a pin index that means something other than
+/// what the walk assumes is precisely the guess this pass must not make: it
+/// would follow the wrong branch of a subnet and delete a binding over a
+/// cycle that is not there.
+fn subnet_pins_in_step(node: &Node, inner: &Graph) -> bool {
+    let Some((inputs, outputs)) = crate::network::subnet_pins(inner) else {
+        return false;
+    };
+    inputs.len() == node.inputs.len()
+        && outputs.len() == node.outputs.len()
+        && inputs
+            .iter()
+            .zip(node.inputs.iter())
+            .all(|(derived, stored)| derived.name == stored.name)
+        && outputs
+            .iter()
+            .zip(node.outputs.iter())
+            .all(|(derived, stored)| derived.name == stored.name)
+}
+
+/// The enclosing subnet node's input pin index that an inner `net.in` output
+/// port arrives on, or `None` when that port is a fixed one the shell feeds
+/// and no outer pin carries.
+///
+/// The inverse of the filter in
+/// [`network::subnet_pins`](crate::network::subnet_pins), asked through the
+/// same [`network::is_fixed_port`](crate::network::is_fixed_port), so the two
+/// cannot drift into disagreeing about which output is a pin.
+fn outer_pin_of_in_port(in_node: &Node, inner_port: OutputPortIndex) -> Option<u32> {
+    let index = inner_port.0 as usize;
+    let port = in_node.outputs.get(index)?;
+    if crate::network::is_fixed_port(in_node, crate::graph::PortSide::Output, &port.name) {
+        return None;
+    }
+    let pin = in_node.outputs[..index]
+        .iter()
+        .filter(|earlier| {
+            !crate::network::is_fixed_port(in_node, crate::graph::PortSide::Output, &earlier.name)
+        })
+        .count();
+    Some(pin as u32)
 }
 
 /// The layer a `layer.info` node reads, given the layer whose network it sits
@@ -1086,13 +1206,15 @@ mod tests {
         ));
     }
 
-    /// A subnet node with `ports` outputs whose inner graph holds a
-    /// `layer.info(target)`, wired into the inner `net.out` node's input
-    /// `wired_to` — or into nothing, when that is `None`.
+    /// A subnet node with `ports` outputs and `pins` input pins, whose inner
+    /// graph holds a `layer.info(target)` wired into the inner `net.out`
+    /// node's input `wired_to` — or into nothing, when that is `None`.
     ///
-    /// A subnet's output `N` is its inner Out node's input `N`
-    /// (`network::subnet_pins`), so this is what lets a test say "the shell
-    /// bound output 0, the reader only reaches output 1".
+    /// The inner graph carries a real `net.in` node and the stored pins are
+    /// the ones `network::subnet_pins` derives from it, because the walk
+    /// refuses to trust an index on a subnet whose pins have drifted. A
+    /// fixture without an In node would exercise that refusal instead of the
+    /// port mapping it is here to test.
     fn subnet_with_reader(
         node_id: u64,
         info_id: u64,
@@ -1101,14 +1223,44 @@ mod tests {
         ports: usize,
         wired_to: Option<usize>,
     ) -> Node {
+        subnet_fixture(node_id, info_id, out_id, target, ports, wired_to, 0, None)
+    }
+
+    /// [`subnet_with_reader`] with the reader wired to an inner **In** pin
+    /// instead of straight to the Out node, plus a bridge from one inner pin
+    /// to one inner Out input.
+    ///
+    /// `pins` input pins exist; the reader drives pin `reader_pin`. The
+    /// bridge, when `bridge` is `Some((pin, out_input))`, carries pin `pin`
+    /// through to Out input `out_input` — that is what decides whether the
+    /// pin the reader drives reaches the output the shell bound.
+    #[allow(clippy::too_many_arguments)]
+    fn subnet_fixture(
+        node_id: u64,
+        info_id: u64,
+        out_id: u64,
+        target: &str,
+        ports: usize,
+        wired_to: Option<usize>,
+        pins: usize,
+        bridge: Option<(usize, usize)>,
+    ) -> Node {
+        let in_id = out_id + 100;
+        let mut in_node = Node::new(NodeId::new(in_id), crate::network::NET_IN_TYPE_KEY);
         let mut out_node = Node::new(NodeId::new(out_id), crate::network::NET_OUT_TYPE_KEY);
         let mut subnet = Node::new(NodeId::new(node_id), "subnet");
+        for index in 0..pins {
+            in_node = in_node.with_output(format!("pin{index}"), DataTypeId::VEC2);
+            subnet = subnet.with_input(format!("pin{index}"), &[DataTypeId::VEC2]);
+        }
         for index in 0..ports {
             out_node = out_node.with_input(format!("p{index}"), &[DataTypeId::VEC2]);
             subnet = subnet.with_output(format!("p{index}"), DataTypeId::SCALAR);
         }
         let mut inner = Graph::new()
             .add_node(layer_info_node(info_id, target))
+            .unwrap()
+            .add_node(in_node)
             .unwrap()
             .add_node(out_node)
             .unwrap();
@@ -1120,6 +1272,17 @@ mod tests {
                     OutputPortIndex(0),
                     NodeId::new(out_id),
                     InputPortIndex(index as u32),
+                )
+                .unwrap();
+        }
+        if let Some((pin, out_input)) = bridge {
+            inner = inner
+                .add_edge(
+                    EdgeId::new(out_id + 2),
+                    NodeId::new(in_id),
+                    OutputPortIndex(pin as u32),
+                    NodeId::new(out_id),
+                    InputPortIndex(out_input as u32),
                 )
                 .unwrap();
         }
@@ -1175,6 +1338,109 @@ mod tests {
     fn a_reader_on_the_bound_output_of_a_two_output_node_is_an_edge() {
         let comp = comp_with_subnet(subnet_with_reader(101, 100, 102, "2", 2, Some(0)));
         assert!(validate_shell_bind_cycles(&comp).is_err());
+    }
+
+    /// A layer whose shell is bound to a subnet's output, with a
+    /// `layer.info` wired into one of the subnet's **input pins** from
+    /// outside.
+    ///
+    /// `bridge` decides whether that pin reaches the output the shell bound.
+    fn comp_with_pin_reader(bridge: Option<(usize, usize)>) -> Composition {
+        let subnet = subnet_fixture(101, 999, 102, "2", 1, None, 1, bridge);
+        // The reader sits in the *outer* network and drives pin 0.
+        let network = Graph::new()
+            .add_node(layer_info_node(100, "2"))
+            .unwrap()
+            .add_node(subnet)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(103),
+                NodeId::new(100),
+                OutputPortIndex(0),
+                NodeId::new(101),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        comp(1)
+            .add_layer(bind_shell(Layer::new(LayerId::new(1), "Pin", network), 101))
+            .add_layer(shell_reader(2, 200, "1"))
+    }
+
+    /// The input-side mirror of
+    /// [`a_reader_that_reaches_no_subnet_output_is_no_edge`]: a reader wired
+    /// into a subnet pin whose value never reaches the output the shell
+    /// bound. Following every outer pin of a one-output subnet would make
+    /// this an **exact** edge and let the load delete a binding over a cycle
+    /// that does not exist.
+    #[test]
+    fn a_reader_on_a_subnet_pin_that_reaches_no_output_is_not_repairable() {
+        let comp = comp_with_pin_reader(None);
+        assert!(
+            first_exact_shell_bind_cycle(&comp).is_none(),
+            "nothing carries pin 0 to the bound output, so no repair may act on it"
+        );
+    }
+
+    /// The control: the same subnet with the pin carried through to the
+    /// output the shell bound. The dependency is real, and the walk states
+    /// it — `network::subnet_pins` derives the pin from the inner In node's
+    /// non-fixed outputs, so the index mapping is read, not assumed.
+    #[test]
+    fn a_reader_on_a_subnet_pin_that_reaches_the_bound_output_is_an_exact_edge() {
+        let comp = comp_with_pin_reader(Some((0, 0)));
+        assert!(validate_shell_bind_cycles(&comp).is_err());
+        assert!(
+            first_exact_shell_bind_cycle(&comp).is_some(),
+            "the pin reaches the bound output through the inner graph"
+        );
+    }
+
+    /// A subnet whose stored pins have drifted from its inner graph: the
+    /// index on an edge no longer means what the walk would assume, so the
+    /// walk refuses to read it and the cycle becomes unrepairable.
+    ///
+    /// Here the node stores one output while the inner Out node declares
+    /// two, so "output 0" names a different inner input under each reading.
+    /// Trusting the stored list would descend the wrong branch, reach the
+    /// reader, and call the edge exact — a binding deleted over an index
+    /// nobody checked. A load runs `sync_subnet_pins` first, so this is the
+    /// edit-time path's problem; the check costs one derivation.
+    #[test]
+    fn a_subnet_whose_pins_drifted_is_not_repairable() {
+        let out_node = Node::new(NodeId::new(102), crate::network::NET_OUT_TYPE_KEY)
+            .with_input("px", &[DataTypeId::VEC2])
+            .with_input("p0", &[DataTypeId::VEC2]);
+        let inner = Graph::new()
+            .add_node(layer_info_node(100, "2"))
+            .unwrap()
+            .add_node(Node::new(NodeId::new(202), crate::network::NET_IN_TYPE_KEY))
+            .unwrap()
+            .add_node(out_node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(103),
+                NodeId::new(100),
+                OutputPortIndex(0),
+                NodeId::new(102),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        // One stored output against the inner Out node's two: drift.
+        let subnet = Node::new(NodeId::new(101), "subnet")
+            .with_output("p0", DataTypeId::SCALAR)
+            .with_subnet(inner);
+        let network = Graph::new().add_node(subnet).unwrap();
+        let comp = comp(1)
+            .add_layer(bind_shell(
+                Layer::new(LayerId::new(1), "Drifted", network),
+                101,
+            ))
+            .add_layer(shell_reader(2, 200, "1"));
+
+        assert!(
+            first_exact_shell_bind_cycle(&comp).is_none(),
+            "an index the graph does not vouch for must not drive a repair"
+        );
     }
 
     /// A path through an ordinary node with several outputs cannot be

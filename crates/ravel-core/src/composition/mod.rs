@@ -302,8 +302,36 @@ impl Layer {
     /// unclamped value, so anything deciding "is this layer showing" has to
     /// agree with it.
     pub fn displayed_local_frame(&self, comp_frame: u64) -> Option<u64> {
-        let local = comp_frame as i64 - self.start_frame + self.in_frame as i64;
-        (local >= self.in_frame as i64 && local < self.out_frame as i64).then_some(local as u64)
+        self.displayed_local_frame_signed(comp_frame as i64)
+            .map(|local| local as u64)
+    }
+
+    /// [`displayed_local_frame`](Self::displayed_local_frame) for a
+    /// composition frame that may be **negative**.
+    ///
+    /// `start_frame` is signed, so a layer can begin before composition frame
+    /// 0 and a cross-layer reference mapped back into composition time can
+    /// land there while still falling inside the target's interval. Clamping
+    /// the composition frame at zero first would answer "not showing" for a
+    /// layer that is.
+    pub fn displayed_local_frame_signed(&self, comp_frame: i64) -> Option<i64> {
+        let local = comp_frame - self.start_frame + self.in_frame as i64;
+        (local >= self.in_frame as i64 && local < self.out_frame as i64).then_some(local)
+    }
+
+    /// The local frame `target` is showing while **this** layer sits at its
+    /// own local frame `local`: back out to composition time, then into the
+    /// target's local time (REQ-LAYER-006). `None` when `target` is outside
+    /// its display interval `[in_frame, out_frame)` at that moment.
+    ///
+    /// Every cross-layer node asks exactly this — `layer.ref` evaluates the
+    /// target's network at it, `layer.info` reads the target's shell at it —
+    /// and the round trip is here once because two copies of it drift: the
+    /// two nodes would then disagree about which frame of the same layer they
+    /// are looking at.
+    pub fn retimed_local_frame(&self, target: &Layer, local: u64) -> Option<i64> {
+        let comp_frame = local as i64 + self.start_frame - self.in_frame as i64;
+        target.displayed_local_frame_signed(comp_frame)
     }
 
     /// [`local_frame`](Self::local_frame) for a continuous composition frame.

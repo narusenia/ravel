@@ -905,7 +905,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `SNAP-1〜3` | Viewer の吸着・定規・ユーザーガイド（`done/viewer-snap-guides-plan.md`） |
 | `TOOLX-1〜5` | Viewer ツールの拡張（`done/viewer-tool-extensions-plan.md`）。**全単位済み**（#484 / #487 / #489 / #491 / #497）。REQ-UI-011 の v2 の 3 項目は引受先を持たない |
 | `MON-1〜MON-7` | スコープ 4 種（波形 / ベクトル / ヒストグラム / パレード。`viewer-scopes-plan.md`）。**2026-08-25 のユーザー判断で後回し** — 作るコストの割に入れるものがない。依存は解けているが指示があるまで拾わない |
-| `INFO-1` | `InvalidationHint::Shell` |
+| `INFO-1` | `InvalidationHint::Shell` **済**（#558 — 判定は `ravel-ui/src/invalidation.rs` に 1 本化。Properties / Timeline / Outliner が共有） |
 | `INFO-2` / `INFO-3` | `layer.info` / `comp.info` |
 | `INFO-4` | 情報ノードのポート選択 UI |
 | `SHEET-2` / `SHEET-3` | 属性スプレッドシート |

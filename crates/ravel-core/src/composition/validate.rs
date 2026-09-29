@@ -1345,9 +1345,13 @@ mod tests {
     /// outside.
     ///
     /// `bridge` decides whether that pin reaches the output the shell bound.
-    fn comp_with_pin_reader(bridge: Option<(usize, usize)>) -> Composition {
-        let subnet = subnet_fixture(101, 999, 102, "2", 1, None, 1, bridge);
-        // The reader sits in the *outer* network and drives pin 0.
+    fn comp_with_pin_reader(
+        pins: usize,
+        reader_pin: usize,
+        bridge: Option<(usize, usize)>,
+    ) -> Composition {
+        let subnet = subnet_fixture(101, 999, 102, "2", 1, None, pins, bridge);
+        // The reader sits in the *outer* network and drives one pin.
         let network = Graph::new()
             .add_node(layer_info_node(100, "2"))
             .unwrap()
@@ -1358,7 +1362,7 @@ mod tests {
                 NodeId::new(100),
                 OutputPortIndex(0),
                 NodeId::new(101),
-                InputPortIndex(0),
+                InputPortIndex(reader_pin as u32),
             )
             .unwrap();
         comp(1)
@@ -1374,7 +1378,7 @@ mod tests {
     /// that does not exist.
     #[test]
     fn a_reader_on_a_subnet_pin_that_reaches_no_output_is_not_repairable() {
-        let comp = comp_with_pin_reader(None);
+        let comp = comp_with_pin_reader(1, 0, None);
         assert!(
             first_exact_shell_bind_cycle(&comp).is_none(),
             "nothing carries pin 0 to the bound output, so no repair may act on it"
@@ -1387,11 +1391,43 @@ mod tests {
     /// non-fixed outputs, so the index mapping is read, not assumed.
     #[test]
     fn a_reader_on_a_subnet_pin_that_reaches_the_bound_output_is_an_exact_edge() {
-        let comp = comp_with_pin_reader(Some((0, 0)));
+        let comp = comp_with_pin_reader(1, 0, Some((0, 0)));
         assert!(validate_shell_bind_cycles(&comp).is_err());
         assert!(
             first_exact_shell_bind_cycle(&comp).is_some(),
             "the pin reaches the bound output through the inner graph"
+        );
+    }
+
+    /// Two pins on one subnet, one of which reaches the bound output and one
+    /// of which reaches nothing: the reader on the **dead** pin is not a
+    /// dependency of the shell.
+    ///
+    /// This is what pins the pin filter itself. The single-pin test beside it
+    /// cannot: there, no inner port reaches the output at all, so the walk
+    /// never gets as far as choosing between pins and the filter is never
+    /// asked. Only a subnet where one pin lives and another does not tells
+    /// the two apart — and getting it wrong is a binding deleted over a cycle
+    /// that is not there.
+    #[test]
+    fn a_reader_on_a_dead_pin_beside_a_live_one_is_no_edge() {
+        // Pin 0 is carried through to the output the shell bound; pin 1 ends
+        // in the subnet. The reader drives pin 1.
+        let comp = comp_with_pin_reader(2, 1, Some((0, 0)));
+        assert!(
+            validate_shell_bind_cycles(&comp).is_ok(),
+            "pin 1 reaches no output, so the layer it reads is not a dependency"
+        );
+        assert!(first_exact_shell_bind_cycle(&comp).is_none());
+
+        // The mirror, same subnet: the reader on the pin that *is* carried
+        // through. Without this the test above would also pass on a walk
+        // that had simply stopped following pins.
+        let live = comp_with_pin_reader(2, 0, Some((0, 0)));
+        assert!(validate_shell_bind_cycles(&live).is_err());
+        assert!(
+            first_exact_shell_bind_cycle(&live).is_some(),
+            "pin 0 reaches the bound output, and the walk states the path"
         );
     }
 

@@ -31,6 +31,33 @@ pub const LAYER_REF_TYPE_KEY: &str = "layer.ref";
 /// Parameter on the Layer Ref node holding the referenced layer id.
 pub const LAYER_REF_LAYER_PARAM: &str = "layer";
 
+/// Type key of the Layer Info node (reads another layer's **shell** — its
+/// placement, transform and opacity — without evaluating its network,
+/// REQ-LAYER-002/005).
+pub const LAYER_INFO_TYPE_KEY: &str = "layer.info";
+
+/// Parameter on the Layer Info node holding the layer it reads. `-1` is the
+/// owning layer itself, which is why this one has a spelling `layer.ref`'s
+/// has not.
+pub const LAYER_INFO_LAYER_PARAM: &str = "layer";
+
+/// Every node type whose `layer` parameter names a layer by raw id.
+///
+/// The reservation in
+/// [`Document::id_watermarks`](crate::composition::Document::id_watermarks)
+/// is about the *stored number*, so it covers every such type: a reference
+/// the composition no longer holds would otherwise have its id reallocated
+/// and silently point at an unrelated layer.
+///
+/// [`layer_ref_targets`] is deliberately the narrower question, because the
+/// other two readers of it are about **evaluation**: `layer.ref` pulls its
+/// target's network (so it can form a cycle, and so a target's shell edit
+/// must invalidate the referrer's scope), while `layer.info` reads shell
+/// fields only. Its invalidation runs through
+/// [`InvalidationHint::Shell`](crate::runtime::InvalidationHint::Shell)
+/// instead, and it has no cycle to detect at this layer.
+const LAYER_TARGET_TYPE_KEYS: &[&str] = &[LAYER_REF_TYPE_KEY, LAYER_INFO_TYPE_KEY];
+
 /// Whether the parameter `param_key` on a node of type `type_key` names an
 /// **identifier** rather than a value of its own — a reference read back
 /// through
@@ -75,7 +102,9 @@ pub fn is_identifier_parameter(type_key: &str, param_key: &str) -> bool {
     }
     matches!(
         (type_key, param_key),
-        (PRECOMP_TYPE_KEY, PRECOMP_COMP_ID_PARAM) | (LAYER_REF_TYPE_KEY, LAYER_REF_LAYER_PARAM)
+        (PRECOMP_TYPE_KEY, PRECOMP_COMP_ID_PARAM)
+            | (LAYER_REF_TYPE_KEY, LAYER_REF_LAYER_PARAM)
+            | (LAYER_INFO_TYPE_KEY, LAYER_INFO_LAYER_PARAM)
     )
 }
 
@@ -201,8 +230,19 @@ fn check_precomp_dfs(
 ///
 /// [`ParameterValue::static_text_identifier`]: crate::graph::ParameterValue::static_text_identifier
 pub(crate) fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
+    targets_of(network, &[LAYER_REF_TYPE_KEY], targets)
+}
+
+/// Layer ids referenced by **any** layer-reading node inside a network
+/// ([`LAYER_TARGET_TYPE_KEYS`]), subnets included — the id reservation's
+/// question, as opposed to [`layer_ref_targets`]'s evaluation one.
+pub(crate) fn layer_target_ids(network: &Graph, targets: &mut Vec<LayerId>) {
+    targets_of(network, LAYER_TARGET_TYPE_KEYS, targets)
+}
+
+fn targets_of(network: &Graph, type_keys: &[&str], targets: &mut Vec<LayerId>) {
     for node in network.nodes() {
-        if node.type_key == LAYER_REF_TYPE_KEY
+        if type_keys.contains(&node.type_key.as_str())
             && let Some(id) = node
                 .parameters
                 .iter()
@@ -213,7 +253,7 @@ pub(crate) fn layer_ref_targets(network: &Graph, targets: &mut Vec<LayerId>) {
             targets.push(id);
         }
         if let Some(inner) = node.subnet.as_deref() {
-            layer_ref_targets(inner, targets);
+            targets_of(inner, type_keys, targets);
         }
     }
 }

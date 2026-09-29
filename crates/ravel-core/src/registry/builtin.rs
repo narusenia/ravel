@@ -79,6 +79,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     ));
     reg.register(media());
     reg.register(layer_ref());
+    reg.register(layer_info());
     reg.register(subnet());
     reg.register(merge());
     reg.register(math_scalar());
@@ -1297,6 +1298,82 @@ fn layer_ref() -> NodeTemplate {
         .with_param(string_parameter("port", "frame"))
         .with_contextual_param_options("layer", ContextualKind::SiblingLayer)
         .with_contextual_param_options("port", ContextualKind::LayerOutputPort)
+}
+
+/// The output ports `layer.info` can grow, in the order an editor should
+/// offer them. Name and type together, because picking a candidate picks
+/// both.
+///
+/// **Local and world are separate ports on purpose.** One `position` that
+/// silently folded in the parent chain would make "is parenting applied here"
+/// a property of nothing visible — the same value would mean two different
+/// things depending on a shell field the network cannot see.
+///
+/// `world_scale` and `world_rotation` read the composed matrix's basis — the
+/// length of each basis vector and the angle of the first — rather than
+/// factorising it. Under a non-uniform scale above a rotation the matrix
+/// shears and is not any rotation-times-scale, so the two do not compose back
+/// into it; `world_position` is a point and stays exact. The processor's
+/// `world` documents the whole rule.
+fn layer_info_port_options() -> Vec<OutputPort> {
+    [
+        ("name", DataTypeId::PLAIN_TEXT),
+        ("index", DataTypeId::SCALAR),
+        ("start_frame", DataTypeId::SCALAR),
+        ("in_frame", DataTypeId::SCALAR),
+        ("out_frame", DataTypeId::SCALAR),
+        ("duration", DataTypeId::SCALAR),
+        ("size", DataTypeId::VEC2),
+        ("local_t", DataTypeId::SCALAR),
+        ("local_f", DataTypeId::SCALAR),
+        ("position", DataTypeId::VEC2),
+        ("scale", DataTypeId::VEC2),
+        ("anchor", DataTypeId::VEC2),
+        ("rotation", DataTypeId::SCALAR),
+        ("opacity", DataTypeId::SCALAR),
+        ("world_position", DataTypeId::VEC2),
+        ("world_scale", DataTypeId::VEC2),
+        ("world_rotation", DataTypeId::SCALAR),
+    ]
+    .into_iter()
+    .map(|(name, data_type)| OutputPort {
+        name: name.into(),
+        data_type,
+    })
+    .collect()
+}
+
+/// `layer.info`: reads a layer's **shell** — placement, size, transform,
+/// opacity — without evaluating its network (REQ-LAYER-002/005).
+///
+/// The counterpart of `layer.ref`, which reads a layer's network *output*.
+/// Because this one pulls nothing, it cannot form an evaluation cycle and it
+/// can name its own layer: `-1`, the default, is "the layer this network
+/// belongs to".
+///
+/// The outputs are picked from [`layer_info_port_options`] rather than fixed,
+/// and the node starts with the three that answer most questions. Growing all
+/// seventeen would make one node taller than the graph around it.
+fn layer_info() -> NodeTemplate {
+    let options = layer_info_port_options();
+    let defaults = ["index", "size", "local_t"].map(|name| {
+        options
+            .iter()
+            .find(|port| port.name == name)
+            .expect("a default port is one of the candidates")
+            .clone()
+    });
+    let mut template = NodeTemplate::new("layer.info", "Layer Info", NodeCategory::Utility)
+        // `-1` is the owning layer; anything else is the decimal `LayerId`,
+        // spelled as text for the same reason `layer.ref`'s is — what the
+        // user picks is a layer, and only a string row can carry labels.
+        .with_param(string_parameter("layer", "-1"))
+        .with_contextual_param_options("layer", ContextualKind::CompLayer)
+        .with_output_options(options);
+    for port in defaults {
+        template = template.with_output(port);
+    }
+    template
 }
 
 fn constant_color() -> NodeTemplate {
@@ -2572,7 +2649,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 88);
+        assert_eq!(reg.all_templates().count(), 89);
     }
 
     #[test]
@@ -2585,7 +2662,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 26);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 27);
     }
 
     /// Each `field.compose` arity declares one `FIELD` input per component,

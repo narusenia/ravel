@@ -78,15 +78,13 @@ impl NodeProcessor for LayerRefProcessor {
             anyhow::anyhow!("layer.ref: target layer {target_id:?} not in composition {comp_id:?}")
         })?;
 
-        // ctx is the source layer's local time; map back to composition
-        // time, then into the target's local time (REQ-LAYER-006).
-        let comp_frame = ctx.frame as i64 + source.start_frame - source.in_frame as i64;
-        let target_local = comp_frame - target.start_frame + target.in_frame as i64;
-
-        let zero = || zero_value(node.outputs.first().map(|p| &p.data_type), ctx);
-        if target_local < target.in_frame as i64 || target_local >= target.out_frame as i64 {
-            return Ok(zero());
-        }
+        // ctx is the source layer's local time; `retimed_local_frame` maps it
+        // back to composition time and into the target's (REQ-LAYER-006), and
+        // answers `None` outside the target's display interval — the same
+        // round trip and the same interval test `layer.info` asks for.
+        let Some(target_local) = source.retimed_local_frame(target, ctx.frame) else {
+            return Ok(zero_value(node.outputs.first().map(|p| &p.data_type), ctx));
+        };
 
         let out_node = net::find_out_node(&target.network).ok_or_else(|| {
             anyhow::anyhow!("layer.ref: target layer {target_id:?} has no net.out node")

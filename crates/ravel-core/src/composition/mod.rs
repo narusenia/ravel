@@ -302,8 +302,48 @@ impl Layer {
     /// unclamped value, so anything deciding "is this layer showing" has to
     /// agree with it.
     pub fn displayed_local_frame(&self, comp_frame: u64) -> Option<u64> {
-        let local = comp_frame as i64 - self.start_frame + self.in_frame as i64;
-        (local >= self.in_frame as i64 && local < self.out_frame as i64).then_some(local as u64)
+        self.displayed_local_frame_signed(comp_frame as i64)
+            .map(|local| local as u64)
+    }
+
+    /// [`displayed_local_frame`](Self::displayed_local_frame) for a
+    /// composition frame that may be **negative**.
+    ///
+    /// `start_frame` is signed, so a layer can begin before composition frame
+    /// 0 and a cross-layer reference mapped back into composition time can
+    /// land there while still falling inside the target's interval. Clamping
+    /// the composition frame at zero first would answer "not showing" for a
+    /// layer that is.
+    pub fn displayed_local_frame_signed(&self, comp_frame: i64) -> Option<i64> {
+        let local = comp_frame - self.start_frame + self.in_frame as i64;
+        (local >= self.in_frame as i64 && local < self.out_frame as i64).then_some(local)
+    }
+
+    /// The local frame `target` is showing while **this** layer sits at its
+    /// own local frame `local`: back out to composition time, then into the
+    /// target's local time (REQ-LAYER-006). `None` when `target` is outside
+    /// its display interval `[in_frame, out_frame)` at that moment.
+    ///
+    /// Every cross-layer node asks exactly this — `layer.ref` evaluates the
+    /// target's network at it, `layer.info` reads the target's shell at it —
+    /// and the round trip is here once because two copies of it drift: the
+    /// two nodes would then disagree about which frame of the same layer they
+    /// are looking at.
+    pub fn retimed_local_frame(&self, target: &Layer, local: u64) -> Option<i64> {
+        target.displayed_local_frame_signed(self.comp_frame(local as i64))
+    }
+
+    /// The composition frame this layer's local frame `local` sits at — the
+    /// inverse of [`local_frame`](Self::local_frame), unclamped.
+    ///
+    /// Separate from [`retimed_local_frame`](Self::retimed_local_frame)
+    /// because a caller sometimes wants the composition time itself rather
+    /// than another layer's local time: `world_matrix` folds in a parent
+    /// chain and derives **each** ancestor's own local frame from the
+    /// composition frame, so a node reading it from inside a layer network
+    /// has to convert back out first.
+    pub fn comp_frame(&self, local: i64) -> i64 {
+        local + self.start_frame - self.in_frame as i64
     }
 
     /// [`local_frame`](Self::local_frame) for a continuous composition frame.
@@ -425,6 +465,19 @@ impl Guide {
 // Composition
 // ===========================================================================
 
+/// The Timeline row number of the layer at `index` of a `layers` vector of
+/// length `total`: **row 1 is the topmost layer**.
+///
+/// `layers` is bottom-most first (the compositing order) while the Timeline
+/// draws the last element in its first row, so the two run opposite ways.
+/// Everything that shows a layer *number* — the reference pickers' labels,
+/// `layer.info`'s `index` port — converts here, once: a caller doing its own
+/// arithmetic is a caller that can get the direction wrong, and then the
+/// number a node emits disagrees with the number the Timeline draws.
+pub fn timeline_row(index: usize, total: usize) -> usize {
+    total.saturating_sub(index)
+}
+
 /// An AE-style composition: an ordered stack of layers with shared
 /// resolution, frame rate, and duration.
 ///
@@ -522,6 +575,13 @@ impl Composition {
     /// composites, and the shell decides what that contributes.
     pub fn composites(&self, layer: &Layer) -> bool {
         !layer.muted && (layer.solo || !self.layers.iter().any(|l| l.solo))
+    }
+
+    /// The Timeline row number of the layer with `id`, or `None` when the
+    /// composition does not hold it. See [`timeline_row`].
+    pub fn timeline_row_of(&self, id: LayerId) -> Option<usize> {
+        let index = self.layers.iter().position(|layer| layer.id == id)?;
+        Some(timeline_row(index, self.layers.len()))
     }
 
     /// The layer's parent chain, nearest ancestor first.
@@ -1647,10 +1707,11 @@ impl Document {
             for edge in graph.edges() {
                 watermarks.edge = watermarks.edge.max(edge.id.raw());
             }
-            // `layer.ref` parameters reference layers by raw id, in any
-            // graph (layer networks, subnets, and the legacy flat graph).
+            // `layer.ref` / `layer.info` parameters reference layers by raw
+            // id, in any graph (layer networks, subnets, and the legacy flat
+            // graph).
             let mut targets = Vec::new();
-            validate::layer_ref_targets(graph, &mut targets);
+            validate::layer_target_ids(graph, &mut targets);
             for target in targets {
                 watermarks.layer = watermarks.layer.max(target.raw());
             }

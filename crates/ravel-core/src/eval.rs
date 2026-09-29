@@ -2280,12 +2280,11 @@ impl Evaluator {
     /// The walk [`invalidate_shell_readers`](Self::invalidate_shell_readers)
     /// runs, with the reader types as an argument.
     ///
-    /// Split out so the walk itself is testable: `SHELL_READER_TYPE_KEYS` is
-    /// empty until `layer.info` exists, and a walk that can only be driven
-    /// with an empty list is a walk nothing checks. A test passes a type it
-    /// builds a document out of; the production path above passes the real
-    /// list, so nothing is swapped out under `cfg(test)` and the caller of
-    /// record stays the one that runs.
+    /// Split out so the walk itself is testable without a document made of
+    /// real reader nodes: a test passes a type it builds a document out of,
+    /// while the production path above passes `SHELL_READER_TYPE_KEYS`. So
+    /// nothing is swapped out under `cfg(test)` and the caller of record
+    /// stays the one that runs.
     fn invalidate_readers_of(&mut self, scopes: &[ShellScope], keys: &[&str]) {
         if scopes.is_empty() || keys.is_empty() {
             return;
@@ -3419,11 +3418,13 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
 /// edge to carry the change — the ones
 /// [`Evaluator::invalidate_shell_readers`] exists for.
 ///
-/// Empty today: `layer.info` and `comp.info` are units 2 and 3 of
-/// `docs/implementation/scene-info-nodes-plan.md`, and until one of them
-/// exists nothing in a graph reads a shell. Listing a type here is what
-/// puts it on the invalidation path.
-const SHELL_READER_TYPE_KEYS: &[&str] = &[];
+/// Listing a type here is what puts it on the invalidation path: the walk is
+/// driven by this list alone, so a reader that is not named reads a stale
+/// shell for as long as its cache lives.
+///
+/// `comp.info` is unit 3 of `docs/implementation/scene-info-nodes-plan.md`
+/// and belongs here when it lands.
+const SHELL_READER_TYPE_KEYS: &[&str] = &[crate::composition::validate::LAYER_INFO_TYPE_KEY];
 
 /// Whether `network` holds a node of one of `keys` — **subnets included**,
 /// because a reader nested in a subnet reads the same shell as one at the top

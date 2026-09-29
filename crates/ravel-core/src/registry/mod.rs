@@ -484,6 +484,16 @@ pub enum ParamOptions {
 pub enum ContextualKind {
     /// The other layers of the composition the node's network belongs to.
     SiblingLayer,
+    /// Every layer of that composition, the owning layer **included**.
+    ///
+    /// Separate from [`SiblingLayer`](Self::SiblingLayer) because the
+    /// exclusion there is not cosmetic: `layer.ref` pulls its target's
+    /// network, so offering the owner would offer a cycle
+    /// `validate_layer_ref_cycles` then rejects. `layer.info` reads shell
+    /// fields and evaluates nothing, so naming its own layer is an ordinary
+    /// thing to want — it is what the `-1` default already means, spelled as
+    /// the id instead.
+    CompLayer,
     /// The output ports of the layer the node's `layer` parameter names —
     /// which are the **input** ports of that layer's `net.out` node
     /// (REQ-LAYER-002/003), the same ports `layer.ref` reads at evaluation
@@ -499,17 +509,16 @@ pub enum ContextualKind {
 /// with the Timeline as soon as one candidate is excluded.
 ///
 /// `index` is the layer's position in `comp.layers` and `total` that vector's
-/// length, because the row number is **neither of them**: `comp.layers` is
-/// bottom-most first (`Composition::move_layer` calls it the compositing
-/// order) while the Timeline draws the last element in its first row
-/// (`layer_blocks` walks `layers().rev()`). So row 1 is the topmost layer,
-/// which is `comp.layers.len() - index`. Both halves of the conversion live
-/// here, once: a caller that did its own arithmetic is a caller that can get
-/// the direction wrong.
+/// length, because the row number is **neither of them**: the two orders run
+/// opposite ways. [`crate::composition::timeline_row`] owns that conversion.
 pub fn layer_param_option(index: usize, total: usize, layer: &Layer) -> ParamOption {
     ParamOption::new(
         layer.id.raw().to_string(),
-        format!("{}. {}", total.saturating_sub(index), layer.name),
+        format!(
+            "{}. {}",
+            crate::composition::timeline_row(index, total),
+            layer.name
+        ),
     )
 }
 
@@ -582,6 +591,21 @@ pub fn contextual_options(
                 .map(|(index, layer)| layer_param_option(index, total, layer))
                 .collect()
         }
+        // The owner is kept, but an owner the composition does not hold still
+        // answers with nothing: a node whose own place in the stack is
+        // unknown is a node whose network has been detached, and the picker
+        // would be offering a stack it is no longer part of.
+        ContextualKind::CompLayer => {
+            if owner.is_none_or(|id| comp.get_layer(id).is_none()) {
+                return Vec::new();
+            }
+            let total = comp.layers.len();
+            comp.layers
+                .iter()
+                .enumerate()
+                .map(|(index, layer)| layer_param_option(index, total, layer))
+                .collect()
+        }
         // The port names are the document's own text — a user named those
         // custom ports — but a port is read as itself, so value and label
         // coincide and `ParamOption::fixed` is what says so.
@@ -636,6 +660,20 @@ pub struct NodeTemplate {
     /// looks exactly as it did
     /// (`docs/implementation/parameter-groups-plan.md`, PGRP-1).
     pub param_groups: Vec<(String, Vec<String>)>,
+    /// The closed set of output ports this type's nodes may carry, for a node
+    /// whose outputs the user **picks** rather than the template fixing them.
+    ///
+    /// Empty for every ordinary node, whose [`outputs`](Self::outputs) are
+    /// the whole story. `layer.info` declares seventeen candidates and starts
+    /// with three of them, because a node that always grew all seventeen
+    /// would be taller than the rest of the graph put together.
+    ///
+    /// The name and the type travel together — picking a candidate is picking
+    /// both — so this is a list of [`OutputPort`] and not of names. That is
+    /// also what keeps the type out of the panel: an editor offering these
+    /// adds and removes whole ports and never decides what one carries, the
+    /// same division [`ParamOptions`] draws for parameters.
+    pub output_options: Vec<OutputPort>,
 }
 
 impl NodeTemplate {
@@ -658,6 +696,7 @@ impl NodeTemplate {
             color_params: HashMap::new(),
             derived_params: HashMap::new(),
             param_groups: Vec::new(),
+            output_options: Vec::new(),
         }
     }
 
@@ -676,6 +715,23 @@ impl NodeTemplate {
     pub fn with_output(mut self, port: OutputPort) -> Self {
         self.outputs.push(port);
         self
+    }
+
+    /// Declares the closed candidate set for a node whose output ports are
+    /// picked ([`output_options`](Self::output_options)).
+    pub fn with_output_options(mut self, options: impl IntoIterator<Item = OutputPort>) -> Self {
+        self.output_options = options.into_iter().collect();
+        self
+    }
+
+    /// The candidate output port named `name`, or `None` when this type
+    /// declares no such candidate.
+    ///
+    /// The one place a name is turned back into a port, so a processor
+    /// answering its node's ports and an editor offering them agree about
+    /// what each one carries.
+    pub fn output_option(&self, name: &str) -> Option<&OutputPort> {
+        self.output_options.iter().find(|port| port.name == name)
     }
 
     pub fn with_param(mut self, param: Parameter) -> Self {
@@ -951,6 +1007,15 @@ impl NodeRegistry {
     /// Option-set declaration for a string parameter, fixed or contextual.
     pub fn param_option_source(&self, type_key: &str, param_key: &str) -> Option<&ParamOptions> {
         self.templates.get(type_key)?.param_option_source(param_key)
+    }
+
+    /// The closed candidate set of output ports `type_key` declares, empty
+    /// for a type whose outputs the template fixes.
+    pub fn output_options(&self, type_key: &str) -> &[OutputPort] {
+        self.templates
+            .get(type_key)
+            .map(|t| t.output_options.as_slice())
+            .unwrap_or_default()
     }
 
     /// Geometric meaning of `param_key` on `type_key`, if declared.

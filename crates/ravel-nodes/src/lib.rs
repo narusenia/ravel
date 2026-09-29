@@ -22,6 +22,7 @@ pub mod flatten;
 pub mod geometry;
 mod gpu_util;
 pub use gpu_util::{GpuImage, begin_upload_scope, clone_frame_value, ensure_cpu, ensure_gpu};
+pub mod layer_info;
 pub mod layer_ref;
 pub mod math;
 pub mod media;
@@ -328,6 +329,7 @@ pub fn processor_for_node(
             media_frames,
         ))),
         // Cross-layer reference (REQ-LAYER-005)
+        "layer.info" => Some(Arc::new(layer_info::LayerInfoProcessor::from_node(node))),
         "layer.ref" => Some(Arc::new(layer_ref::LayerRefProcessor::from_node(node))),
         // Nested network (REQ-LAYER-003)
         "subnet" => Some(Arc::new(subnet::SubnetProcessor::from_node(node))),

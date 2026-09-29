@@ -61,6 +61,7 @@ use crate::composition::{Document, Layer};
 use crate::graph::{Graph, Node, ParameterValue};
 use crate::id::{CompId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use crate::network;
+use crate::runtime::ShellScope;
 use crate::types::{FrameRate, NodeData, PortRecord, Scalar};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -2255,6 +2256,55 @@ impl Evaluator {
         self.document = Some(document);
     }
 
+    /// Dirty the nodes that read shell fields of the compositions `scopes`
+    /// names ([`InvalidationHint::Shell`]).
+    ///
+    /// The synthetic shell nodes are covered by the document diff in
+    /// [`set_document`](Self::set_document); this is the half the diff cannot
+    /// see. A node that reads a layer's transform or time placement off the
+    /// `Document` has no incoming edge from it, so nothing else marks it
+    /// stale and the next pull would serve its cached value.
+    ///
+    /// Invalidation is at composition granularity, and drops the reader's
+    /// whole layer scope the way the `layer.ref` referrer pass above does: a
+    /// scope's `layer` names the edited shell, but which readers look at it
+    /// depends on each reader's own `layer` parameter, which only the node
+    /// type knows how to resolve — and a reader nested in a subnet is at a
+    /// path this walk does not enumerate.
+    ///
+    /// [`InvalidationHint::Shell`]: crate::runtime::InvalidationHint::Shell
+    pub fn invalidate_shell_readers(&mut self, scopes: &[ShellScope]) {
+        self.invalidate_readers_of(scopes, SHELL_READER_TYPE_KEYS);
+    }
+
+    /// The walk [`invalidate_shell_readers`](Self::invalidate_shell_readers)
+    /// runs, with the reader types as an argument.
+    ///
+    /// Split out so the walk itself is testable: `SHELL_READER_TYPE_KEYS` is
+    /// empty until `layer.info` exists, and a walk that can only be driven
+    /// with an empty list is a walk nothing checks. A test passes a type it
+    /// builds a document out of; the production path above passes the real
+    /// list, so nothing is swapped out under `cfg(test)` and the caller of
+    /// record stays the one that runs.
+    fn invalidate_readers_of(&mut self, scopes: &[ShellScope], keys: &[&str]) {
+        if scopes.is_empty() || keys.is_empty() {
+            return;
+        }
+        let Some(document) = self.document.clone() else {
+            return;
+        };
+        for (comp_id, comp) in &document.compositions {
+            if !scopes.iter().any(|scope| scope.comp == *comp_id) {
+                continue;
+            }
+            for layer in &comp.layers {
+                if holds_a_node_of(&layer.network, keys) {
+                    self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
+                }
+            }
+        }
+    }
+
     // ----- dirty propagation -----------------------------------------------
 
     /// Mark `node` and every node reachable downstream from it dirty (root
@@ -3365,6 +3415,29 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
         || new.parent != old.parent
 }
 
+/// Node types that read shell fields straight off the `Document`, with no
+/// edge to carry the change — the ones
+/// [`Evaluator::invalidate_shell_readers`] exists for.
+///
+/// Empty today: `layer.info` and `comp.info` are units 2 and 3 of
+/// `docs/implementation/scene-info-nodes-plan.md`, and until one of them
+/// exists nothing in a graph reads a shell. Listing a type here is what
+/// puts it on the invalidation path.
+const SHELL_READER_TYPE_KEYS: &[&str] = &[];
+
+/// Whether `network` holds a node of one of `keys` — **subnets included**,
+/// because a reader nested in a subnet reads the same shell as one at the top
+/// of the network.
+fn holds_a_node_of(network: &Graph, keys: &[&str]) -> bool {
+    network.nodes().any(|node| {
+        keys.contains(&node.type_key.as_str())
+            || node
+                .subnet
+                .as_deref()
+                .is_some_and(|inner| holds_a_node_of(inner, keys))
+    })
+}
+
 /// The value a processor sees for an **identifier** parameter: its stored
 /// value when that value stands still, and the *unset* spelling of the
 /// parameter's own type when it does not — because a wire, a keyframe curve or
@@ -3693,6 +3766,164 @@ mod tests {
 
     fn ctx_at(frame: u64) -> EvalContext {
         EvalContext::new(frame, FPS, (1920, 1080))
+    }
+
+    // ---- shell readers ----------------------------------------------------
+
+    /// The walk [`Evaluator::invalidate_shell_readers`] runs over each layer
+    /// network. Driven with an explicit key list because
+    /// `SHELL_READER_TYPE_KEYS` is empty until `layer.info` exists — with it,
+    /// the shell hint invalidates nothing, which is the point of unit 1.
+    ///
+    /// What is worth pinning now is the subnet recursion: a reader dropped
+    /// into a subnet reads the same shell as one at the top of the network,
+    /// and a walk that stopped at the top would leave it serving a stale
+    /// value with nothing to say so.
+    #[test]
+    fn the_shell_reader_walk_reaches_into_subnets() {
+        let bare = Graph::new()
+            .add_node(Node::new(NodeId::new(1), "shape.rect"))
+            .unwrap();
+        assert!(!holds_a_node_of(&bare, &["layer.info"]));
+        assert!(
+            !holds_a_node_of(&bare, SHELL_READER_TYPE_KEYS),
+            "no node type reads a shell yet"
+        );
+
+        let top = bare
+            .clone()
+            .add_node(Node::new(NodeId::new(2), "layer.info"))
+            .unwrap();
+        assert!(holds_a_node_of(&top, &["layer.info"]));
+
+        let nested = bare
+            .clone()
+            .add_node(Node::new(NodeId::new(3), "subnet").with_subnet(top.clone()))
+            .unwrap();
+        assert!(
+            holds_a_node_of(&nested, &["layer.info"]),
+            "a reader inside a subnet was missed"
+        );
+
+        let deeper = bare
+            .add_node(Node::new(NodeId::new(4), "subnet").with_subnet(nested))
+            .unwrap();
+        assert!(holds_a_node_of(&deeper, &["layer.info"]));
+    }
+
+    /// The walk itself, end to end: a shell hint drops the evaluator scope of
+    /// every layer whose network holds a reader, and leaves the rest cached.
+    ///
+    /// Driven through `invalidate_readers_of` with a type this test builds a
+    /// document out of. The production entry point runs the same code with
+    /// `SHELL_READER_TYPE_KEYS`, which is empty until `layer.info` exists —
+    /// asserted below as well, so that "today it invalidates nothing" is a
+    /// pinned property of the real path rather than an untested claim.
+    #[test]
+    fn a_shell_hint_drops_the_scopes_of_the_layers_that_read_a_shell() {
+        use crate::composition::Composition;
+        const READER: &str = "test.shell_reader";
+        let comp_id = CompId::new(1);
+        let (reads, plain) = (LayerId::new(1), LayerId::new(2));
+
+        let reads_calls = Arc::new(AtomicUsize::new(0));
+        let plain_calls = Arc::new(AtomicUsize::new(0));
+
+        let reads_network = Graph::new()
+            .add_node(scalar_node(7))
+            .unwrap()
+            .add_node(Node::new(NodeId::new(70), READER))
+            .unwrap();
+        let plain_network = Graph::new().add_node(scalar_node(8)).unwrap();
+
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(7),
+            Arc::new(FrameSource {
+                calls: reads_calls.clone(),
+            }),
+        );
+        ev.register(
+            NodeId::new(8),
+            Arc::new(FrameSource {
+                calls: plain_calls.clone(),
+            }),
+        );
+        ev.set_document(Arc::new(
+            Document::default().with_composition(
+                Composition::new(comp_id, "C", (16, 16), FPS, 100)
+                    .add_layer(Layer::new(reads, "reads a shell", reads_network.clone()))
+                    .add_layer(Layer::new(plain, "reads nothing", plain_network.clone())),
+            ),
+        ));
+
+        let pull = |ev: &mut Evaluator| {
+            ev.evaluate_sub(
+                PathSegment::Layer(comp_id, reads),
+                &reads_network,
+                NodeId::new(7),
+                &ctx_at(0),
+                Vec::new(),
+            )
+            .unwrap();
+            ev.evaluate_sub(
+                PathSegment::Layer(comp_id, plain),
+                &plain_network,
+                NodeId::new(8),
+                &ctx_at(0),
+                Vec::new(),
+            )
+            .unwrap();
+            (
+                reads_calls.load(Ordering::Relaxed),
+                plain_calls.load(Ordering::Relaxed),
+            )
+        };
+
+        assert_eq!(pull(&mut ev), (1, 1), "the first pull evaluated both");
+        assert_eq!(pull(&mut ev), (1, 1), "the second pull was not a cache hit");
+
+        // A scope in another composition reaches neither.
+        ev.invalidate_readers_of(
+            &[ShellScope {
+                comp: CompId::new(9),
+                layer: None,
+            }],
+            &[READER],
+        );
+        assert_eq!(
+            pull(&mut ev),
+            (1, 1),
+            "another composition's shell edit dropped a scope"
+        );
+
+        // The production entry point, on the right composition: no type reads
+        // a shell yet, so it is a no-op — by running the walk with an empty
+        // list, not by being left uncalled.
+        ev.invalidate_shell_readers(&[ShellScope {
+            comp: comp_id,
+            layer: None,
+        }]);
+        assert_eq!(
+            pull(&mut ev),
+            (1, 1),
+            "a reader type appeared in SHELL_READER_TYPE_KEYS without this test being updated"
+        );
+
+        // The walk with a reader type: only the layer that holds one loses
+        // its scope.
+        ev.invalidate_readers_of(
+            &[ShellScope {
+                comp: comp_id,
+                layer: None,
+            }],
+            &[READER],
+        );
+        assert_eq!(
+            pull(&mut ev),
+            (2, 1),
+            "the reading layer's scope survived, or the other layer's did not"
+        );
     }
 
     // ---- EvalContext::sample_frame ----------------------------------------

@@ -61,13 +61,14 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{CompositionSettings, resolve_network, update_composition, update_layer};
+use ravel_ui::invalidation::layer_field_hint;
 use ravel_ui::keyframes::{PropertyRowId, layer_local_frame};
 use ravel_ui::panels::timeline::PropertyGroup;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
 use ravel_ui::properties::expression;
 use ravel_ui::properties::layer::{
-    CUSTOM_FIELD_PREFIX, apply_layer_field, in_node_id, layer_field_keyframed, sections_for_layer,
+    CUSTOM_FIELD_PREFIX, apply_layer_field, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
 };
 use ravel_ui::properties::media_asset::{
@@ -2857,24 +2858,7 @@ impl PropertiesGpuiPanel {
         };
         let local_frame = layer_local_frame(&layer, Self::playback_frame(cx));
 
-        // Custom parameter edits invalidate the In node; solo/mute/blend/
-        // adjustment change the compiled merge chain (REQ-LAYER-007).
-        let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
-            in_node_id(&layer)
-                .map(|id| InvalidationHint::Params(vec![id]))
-                .unwrap_or(InvalidationHint::None)
-        } else {
-            match key {
-                // `parent` is structural for the same reason as the merge
-                // flags: `compile.rs` wires an edge from the parent's
-                // synthetic Transform node, so re-parenting changes the
-                // compiled graph's shape, not just a value in it.
-                "blend_mode" | "solo" | "muted" | "adjustment" | "parent" => {
-                    InvalidationHint::Structural
-                }
-                _ => InvalidationHint::None,
-            }
-        };
+        let hint = layer_field_hint(key, comp_id, &layer);
 
         let key = key.to_string();
         project.update(cx, |project, cx| {
@@ -2911,18 +2895,16 @@ impl PropertiesGpuiPanel {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let hint = if key.starts_with(CUSTOM_FIELD_PREFIX) {
-            project
-                .read(cx)
-                .document()
-                .get_composition(comp_id)
-                .and_then(|comp| comp.get_layer(layer_id))
-                .and_then(in_node_id)
-                .map(|id| InvalidationHint::Params(vec![id]))
-                .unwrap_or(InvalidationHint::None)
-        } else {
-            InvalidationHint::None
+        let Some(layer) = project
+            .read(cx)
+            .document()
+            .get_composition(comp_id)
+            .and_then(|comp| comp.get_layer(layer_id))
+            .cloned()
+        else {
+            return;
         };
+        let hint = layer_field_hint(key, comp_id, &layer);
 
         let key = key.to_string();
         project.update(cx, |project, cx| {

@@ -22,6 +22,7 @@
 pub mod command;
 pub mod document;
 pub mod export;
+pub mod invalidation;
 pub mod keybindings;
 pub mod keyframes;
 pub mod layout;

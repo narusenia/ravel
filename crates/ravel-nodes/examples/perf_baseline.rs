@@ -1025,7 +1025,9 @@ impl EvalWorkerHooks for BenchHooks {
     ) {
         match hint {
             InvalidationHint::None => {}
-            InvalidationHint::Params(ids) => {
+            // As in `GpuEvalHooks`: a shell edit rebuilds no processor of its
+            // own; only the `Params` coalesced into it does.
+            InvalidationHint::Params(ids) | InvalidationHint::Shell { params: ids, .. } => {
                 for id in ids {
                     if let Some(node) = graph.node(*id)
                         && let Some(proc) = ravel_nodes::processor_for_node(

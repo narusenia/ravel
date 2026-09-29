@@ -2292,6 +2292,17 @@ impl ProjectState {
         }
     }
 
+    /// The hint accumulated for the next evaluation request, taken out.
+    ///
+    /// Tests run without a worker, so the hint stays pending here instead of
+    /// leaving with the request — which is what lets a panel test read back
+    /// what its own gesture posted, rather than a stand-in written by the
+    /// test itself.
+    #[cfg(test)]
+    pub(crate) fn take_pending_hint(&mut self) -> InvalidationHint {
+        std::mem::replace(&mut self.pending_hint, InvalidationHint::None)
+    }
+
     /// Assemble the active-composition evaluation request, without the hint
     /// (filled by the caller). `Ok(None)` when nothing is evaluable,
     /// `Err` when the composition fails to compile.
@@ -5860,11 +5871,17 @@ mod tests {
     /// processor reads them from there at process time.
     ///
     /// Both halves matter, so both are asserted: the chain survives a value
-    /// edit (`None` for a layer shell field, `Params` for a node parameter —
+    /// edit (`Shell` for a layer shell field, `Params` for a node parameter —
     /// the two hints the scrub paths actually send), *and* the edited value is
     /// in the document the next request carries. A test that only checked
     /// retention would pass just as well if the edit stopped reaching the
     /// viewer entirely.
+    ///
+    /// The `Shell` half is also `RESP-3`'s guard (#193): a shell edit carries
+    /// a hint of its own so that information nodes reading the shell are
+    /// invalidated, and that hint must stay below `Structural` — the gate
+    /// above drops the chain on `Structural` alone, and a scrub posts one
+    /// hint per mouse move.
     #[gpui::test]
     fn a_value_edit_keeps_the_compiled_chain_and_still_reaches_the_viewer(cx: &mut TestAppContext) {
         disable_background_eval_for_tests();
@@ -5913,14 +5930,34 @@ mod tests {
             };
             let before = compiled_merge(project);
 
-            // A layer shell scrub (`apply_layer_change` sends `None` for every
-            // field that is not one of the merge-chain flags).
+            // A layer shell scrub: the `opacity` field, edited and
+            // classified under the **same** key, so the hint is the one the
+            // Properties panel would send for this very edit.
             let document =
                 ravel_ui::document::update_layer(project.document(), comp_id, layer_id, |layer| {
                     layer.opacity = AnimationChannel::constant(0.25);
                 })
                 .unwrap();
-            project.apply_document(document, InvalidationHint::None, cx);
+            let hint = ravel_ui::invalidation::layer_field_hint(
+                "opacity",
+                comp_id,
+                document
+                    .get_composition(comp_id)
+                    .unwrap()
+                    .get_layer(layer_id)
+                    .unwrap(),
+            );
+            // Spelt out rather than `!= Structural`: a decision that posted
+            // `None` would satisfy the weaker form and leave every shell
+            // reader stale, so the assertion has to name what it wants.
+            assert_eq!(
+                hint,
+                InvalidationHint::shell(comp_id, Some(layer_id)),
+                "a shell edit no longer posts Shell naming its own shell: \
+                 RESP-3 (#193) is guarded by what this hint is, not only by \
+                 what it is not"
+            );
+            project.apply_document(document, hint, cx);
             assert!(
                 Arc::ptr_eq(&before, &compiled_merge(project)),
                 "a layer value edit must not discard the compiled chain"

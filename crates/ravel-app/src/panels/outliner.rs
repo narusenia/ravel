@@ -25,6 +25,7 @@ use ravel_ui::command::CommandId;
 use ravel_ui::document::{
     NetworkPath, duplicate_layers, remove_layers, reorder_layer, update_layer,
 };
+use ravel_ui::invalidation;
 use ravel_ui::panels::layer_selection::{LayerClickMode, layer_selection_after_click};
 use ravel_ui::panels::outliner::{OutlinerKey, OutlinerPanel, OutlinerRow, OutlinerRowKind};
 use ravel_widgets::ActiveTokens as _;
@@ -517,19 +518,24 @@ impl OutlinerGpuiPanel {
             return;
         };
         project.update(cx, |project, cx| {
-            let unchanged = project
+            let Some(layer) = project
                 .document()
                 .get_composition(rename.comp)
                 .and_then(|c| c.get_layer(rename.layer))
-                .is_some_and(|layer| layer.name == name);
-            if unchanged {
+            else {
+                return;
+            };
+            if layer.name == name {
                 return;
             }
-            // Renaming does not change what the composition renders.
+            // The name changes nothing the composition renders, but it is a
+            // shell field and a node may read it, so it takes the same hint
+            // the other two panels give the same field.
+            let hint = invalidation::layer_field_hint("name", rename.comp, layer);
             if let Some(doc) = update_layer(project.document(), rename.comp, rename.layer, |l| {
                 l.name = name.clone();
             }) {
-                project.commit_document(doc, InvalidationHint::None, cx);
+                project.commit_document(doc, hint, cx);
             }
         });
     }

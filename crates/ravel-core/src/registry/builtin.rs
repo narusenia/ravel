@@ -80,6 +80,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(media());
     reg.register(layer_ref());
     reg.register(layer_info());
+    reg.register(comp_info());
     reg.register(subnet());
     reg.register(merge());
     reg.register(math_scalar());
@@ -1376,6 +1377,68 @@ fn layer_info() -> NodeTemplate {
     template
 }
 
+/// The output ports `comp.info` can grow, in the order an editor should
+/// offer them. Name and type together, as [`layer_info_port_options`] does.
+///
+/// `comp_t` and `comp_f` are one instant in two forms, and they are not
+/// interchangeable across compositions: the seconds are the authority and the
+/// frame number is that instant divided by the **target's** frame rate. A
+/// `FrameRate` is rational (30000/1001), so a frame number round-tripped
+/// through a second composition loses the instant it came from.
+fn comp_info_port_options() -> Vec<OutputPort> {
+    [
+        ("name", DataTypeId::PLAIN_TEXT),
+        ("resolution", DataTypeId::VEC2),
+        ("frame_rate", DataTypeId::SCALAR),
+        ("duration_frames", DataTypeId::SCALAR),
+        ("comp_t", DataTypeId::SCALAR),
+        ("comp_f", DataTypeId::SCALAR),
+        ("background", DataTypeId::COLOR),
+        ("layer_count", DataTypeId::SCALAR),
+    ]
+    .into_iter()
+    .map(|(name, data_type)| OutputPort {
+        name: name.into(),
+        data_type,
+    })
+    .collect()
+}
+
+/// `comp.info`: reads a **composition's** own fields — resolution, frame
+/// rate, duration, background, layer count — without evaluating anything
+/// (REQ-LAYER-002/005).
+///
+/// The composition-scale counterpart of `layer.info`, and like it a pure
+/// `Document` read: it pulls no network, so naming another composition here
+/// forms no cycle and needs none of `precomp`'s machinery. `-1`, the default,
+/// is the composition the node's network belongs to.
+///
+/// The outputs are picked from [`comp_info_port_options`]; a new node starts
+/// with the three that answer "how big, how fast, how far in".
+fn comp_info() -> NodeTemplate {
+    let options = comp_info_port_options();
+    let defaults = ["resolution", "frame_rate", "comp_t"].map(|name| {
+        options
+            .iter()
+            .find(|port| port.name == name)
+            .expect("a default port is one of the candidates")
+            .clone()
+    });
+    let mut template = NodeTemplate::new("comp.info", "Comp Info", NodeCategory::Utility)
+        // `-1` is the owning composition; anything else is the decimal
+        // `CompId`, spelled as text for the same reason `layer.info`'s target
+        // is — what the user picks is a composition, and only a string row
+        // can carry labels. There is no `ContextualKind` for it yet:
+        // `contextual_options` resolves against one `Composition` and cannot
+        // see the document's table, so the picker is unit 4's.
+        .with_param(string_parameter("comp", "-1"))
+        .with_output_options(options);
+    for port in defaults {
+        template = template.with_output(port);
+    }
+    template
+}
+
 fn constant_color() -> NodeTemplate {
     NodeTemplate::new("constant.color", "RGB Color", NodeCategory::Color)
         .with_output(OutputPort {
@@ -2649,7 +2712,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 89);
+        assert_eq!(reg.all_templates().count(), 90);
     }
 
     #[test]
@@ -2662,7 +2725,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
-        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 27);
+        assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);
     }
 
     /// Each `field.compose` arity declares one `FIELD` input per component,

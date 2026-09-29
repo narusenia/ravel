@@ -3422,9 +3422,16 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
 /// driven by this list alone, so a reader that is not named reads a stale
 /// shell for as long as its cache lives.
 ///
-/// `comp.info` is unit 3 of `docs/implementation/scene-info-nodes-plan.md`
-/// and belongs here when it lands.
-const SHELL_READER_TYPE_KEYS: &[&str] = &[crate::composition::validate::LAYER_INFO_TYPE_KEY];
+/// The walk is per **composition**: a reader is dropped when a scope names
+/// the composition its own network sits in. `comp.info` pointed at *another*
+/// composition is therefore not reached by that composition's shell edit —
+/// resolving each reader's own target is what the walk deliberately does not
+/// do (see [`Evaluator::invalidate_shell_readers`]), and a cross-composition
+/// read holds its cached values until something else drops them.
+const SHELL_READER_TYPE_KEYS: &[&str] = &[
+    crate::composition::validate::LAYER_INFO_TYPE_KEY,
+    crate::composition::validate::COMP_INFO_TYPE_KEY,
+];
 
 /// Whether `network` holds a node of one of `keys` — **subnets included**,
 /// because a reader nested in a subnet reads the same shell as one at the top

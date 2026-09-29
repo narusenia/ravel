@@ -168,6 +168,7 @@ pub enum RavelIcon {
     /// Node header/menu: `layer.ref`.
     NodeLayerRef,
     NodeLayerInfo,
+    NodeCompInfo,
     /// Node header/menu: `subnet`.
     NodeSubnet,
     /// Node header/menu: `merge`.
@@ -406,6 +407,7 @@ impl RavelIcon {
             "media" => Self::NodeMedia,
             "layer.ref" => Self::NodeLayerRef,
             "layer.info" => Self::NodeLayerInfo,
+            "comp.info" => Self::NodeCompInfo,
             "subnet" => Self::NodeSubnet,
             "merge" => Self::NodeMerge,
             "math.scalar" => Self::NodeMathScalar,
@@ -567,6 +569,8 @@ impl RavelIcon {
             Self::NodeMedia => "icons/film.svg",
             Self::NodeLayerRef => "icons/layers.svg",
             Self::NodeLayerInfo => "icons/table-properties.svg",
+            // The composition itself: the frame everything else sits in.
+            Self::NodeCompInfo => "icons/frame.svg",
             Self::NodeSubnet => "icons/network.svg",
             Self::NodeMerge => "icons/merge.svg",
             Self::NodeMathScalar => "icons/calculator.svg",

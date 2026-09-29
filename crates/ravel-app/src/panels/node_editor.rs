@@ -1470,6 +1470,32 @@ impl NodeEditorPanel {
         })
     }
 
+    /// Add or remove the output port `name` on a node whose outputs are
+    /// picked from its type's candidate set (`layer.info`, `comp.info`).
+    ///
+    /// The candidates are resolved here, from the registry this panel already
+    /// holds, so the core call cannot be handed a set that belongs to another
+    /// type. A node the open network does not hold offers nothing, which the
+    /// core then refuses by name — the same answer as a stale row.
+    pub fn set_output_option(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        present: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), NetworkError> {
+        let options = self
+            .graph
+            .node(node_id)
+            .map(|node| self.registry.output_options(&node.type_key).to_vec())
+            .unwrap_or_default();
+        let name = name.to_string();
+        self.edit_custom_ports(cx, move |graph, _context| {
+            ravel_core::network::set_output_option(graph, node_id, &name, present, &options)
+                .map(PortEdit::from)
+        })
+    }
+
     /// Move the custom port `name` one slot earlier (`offset < 0`) or later
     /// (`offset > 0`), never past a built-in port.
     pub fn move_custom_port(

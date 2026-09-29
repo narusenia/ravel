@@ -253,6 +253,13 @@ fn field_display(field: &PropertyField) -> String {
             .map(|row| format!("{}:{:?}", row.name, row.port_type))
             .collect::<Vec<_>>()
             .join(", "),
+        // A picked-output list belongs to an info node, unreachable here for
+        // the same reason and named for the same contract.
+        PropertyField::PortPicker { candidates, .. } => candidates
+            .iter()
+            .map(|c| format!("{}:{}", c.name, c.present))
+            .collect::<Vec<_>>()
+            .join(", "),
         // Declarations belong to the project, never to a layer's shell fields,
         // so this arm is unreachable through `sections_for_layers` for the same
         // reason the port list's is. Naming the rows keeps the contract true.

@@ -24,6 +24,12 @@
 //! shell owns and therefore nobody may remove, rename, retype or reorder
 //! ([`is_fixed_port`]).
 //!
+//! [`set_output_option`] is the other kind of user-shaped port: a node whose
+//! outputs are **picked from a closed candidate set** its registry template
+//! declares (`layer.info`, `comp.info`). Nothing about it is named or typed by
+//! the user, so it needs none of the rules above — only that a name outside
+//! the candidate set grows no port.
+//!
 //! A `subnet` node's own pins are not edited at all: they are **derived** from
 //! the In / Out pair of the graph it owns. [`seed_subnet_node`] builds that
 //! pair when the node is created and [`sync_subnet_pins`] re-derives the pins
@@ -293,7 +299,7 @@ impl CustomPortType {
     /// `SCALAR` answers `Float`: the parameter kind that distinguishes
     /// `Float` / `Int` / `Bool` is not in the wire type, so a caller holding a
     /// parameter has to refine the answer itself ([`custom_port_type`] does).
-    fn from_data_type(data_type: DataTypeId) -> Option<Self> {
+    pub fn from_data_type(data_type: DataTypeId) -> Option<Self> {
         Some(match data_type {
             DataTypeId::SCALAR => Self::Float,
             DataTypeId::VEC2 => Self::Vec2,
@@ -372,6 +378,9 @@ pub enum NetworkError {
 
     #[error("{name:?} is a built-in {side} port name and cannot name a custom port")]
     ReservedPortName { side: PortSide, name: String },
+
+    #[error("{name:?} is not one of the output ports node {node:?} can carry")]
+    NotOutputOption { node: NodeId, name: String },
 
     #[error("the built-in {side} port {name:?} on node {node:?} cannot be removed or renamed")]
     FixedPort {
@@ -996,6 +1005,75 @@ pub fn move_custom_port(
     let moved = order.remove(index);
     order.insert(target, moved);
     Ok(graph.reorder_ports(node_id, side, &order)?)
+}
+
+/// Add or remove the output port `name` on `node_id`, whose candidates
+/// `options` declares
+/// ([`NodeTemplate::output_options`](crate::registry::NodeTemplate::output_options)).
+///
+/// This is the editing half of a node whose outputs the user **picks** rather
+/// than the template fixing them (`layer.info`, `comp.info`). It is not a
+/// custom port: the name and the type are the candidate's, so there is no
+/// rename, no retype, and no parameter alongside — the processor answers the
+/// port by name, and a name the candidate set does not hold is
+/// [`NetworkError::NotOutputOption`] rather than a port the node could never
+/// fill.
+///
+/// **The candidate order is the port order.** A port is inserted after every
+/// present port that is offered before it, so unchecking and re-checking a
+/// candidate puts it back where it was instead of at the end. `Graph`'s
+/// insert and remove re-index the edges of the ports that shift, so every
+/// connection the change does not destroy survives it.
+///
+/// Removing a connected port **deletes its edges**, exactly as
+/// [`remove_custom_port`] does: the port is what the edge lands on, and there
+/// is nowhere else to put it. The caller's Document commit makes that one
+/// undo step together with the port.
+///
+/// A call that asks for the state the node already has answers with the graph
+/// it was given, so a caller that commits on difference records nothing.
+pub fn set_output_option(
+    graph: Graph,
+    node_id: NodeId,
+    name: &str,
+    present: bool,
+    options: &[OutputPort],
+) -> Result<Graph, NetworkError> {
+    let node = graph
+        .node(node_id)
+        .ok_or(GraphError::NodeNotFound(node_id))?
+        .clone();
+    let offered = options
+        .iter()
+        .position(|port| port.name == name)
+        .ok_or_else(|| NetworkError::NotOutputOption {
+            node: node_id,
+            name: name.to_string(),
+        })?;
+    let index = node.outputs.iter().position(|p| p.name == name);
+    match (present, index) {
+        (true, Some(_)) | (false, None) => Ok(graph),
+        (false, Some(index)) => {
+            Ok(graph.remove_output_port(node_id, OutputPortIndex(index as u32))?)
+        }
+        (true, None) => {
+            // Where the candidate order says it goes: after every port this
+            // node already carries that is offered earlier. A port the
+            // candidate set does not name counts as later, which only a
+            // hand-built graph can produce.
+            let index = node
+                .outputs
+                .iter()
+                .filter(|port| {
+                    options
+                        .iter()
+                        .position(|o| o.name == port.name)
+                        .is_some_and(|i| i < offered)
+                })
+                .count();
+            Ok(graph.insert_output_port(node_id, index, options[offered].clone())?)
+        }
+    }
 }
 
 /// Put the custom parameter `name` of the network-interface In node `node_id`
@@ -4641,5 +4719,246 @@ mod tests {
             node_of(&graph, in_id()).param_groups.is_empty(),
             "the old group does not come back with the parameter"
         );
+    }
+
+    // ----- picked output ports (scene-info-nodes plan, unit 4) -------------
+
+    fn info_id() -> NodeId {
+        NodeId::new(10)
+    }
+
+    fn info_sink_id() -> NodeId {
+        NodeId::new(11)
+    }
+
+    /// The candidate set of a node whose outputs the user picks, in offer
+    /// order — the shape `layer.info` declares, three candidates wide.
+    fn info_options() -> Vec<OutputPort> {
+        ["index", "size", "local_t"]
+            .into_iter()
+            .map(|name| OutputPort {
+                name: name.into(),
+                data_type: DataTypeId::SCALAR,
+            })
+            .collect()
+    }
+
+    /// An info node carrying the first and last candidate, with the last one
+    /// wired into a consumer. The middle candidate is the one a test picks,
+    /// and the edge is what has to survive the insert that shifts its port.
+    fn info_graph() -> Graph {
+        let info = Node::new(info_id(), "layer.info")
+            .with_output("index", DataTypeId::SCALAR)
+            .with_output("local_t", DataTypeId::SCALAR);
+        let sink = Node::new(info_sink_id(), "math.add")
+            .with_input("a", &[DataTypeId::SCALAR])
+            .with_input("b", &[DataTypeId::SCALAR]);
+        Graph::new()
+            .add_node(info)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                info_id(),
+                OutputPortIndex(1),
+                info_sink_id(),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    }
+
+    fn output_names(graph: &Graph, id: NodeId) -> Vec<String> {
+        node_of(graph, id)
+            .outputs
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    /// The port the edge leaves, resolved back to its name — the question
+    /// "is this still wired to `local_t`?" asked in the only way that
+    /// survives a re-index.
+    fn edge_source_name(graph: &Graph, edge: EdgeId) -> Option<String> {
+        let edge = graph.edges().find(|e| e.id == edge)?;
+        node_of(graph, edge.source)
+            .outputs
+            .get(edge.source_port.0 as usize)
+            .map(|p| p.name.clone())
+    }
+
+    /// A picked port lands where the candidate set offers it, not at the end,
+    /// and the edge on the port it displaces moves with it.
+    #[test]
+    fn a_picked_port_lands_in_candidate_order_and_keeps_the_edges() {
+        let graph = set_output_option(info_graph(), info_id(), "size", true, &info_options())
+            .expect("pick the middle candidate");
+        assert_eq!(
+            output_names(&graph, info_id()),
+            ["index", "size", "local_t"]
+        );
+        assert_eq!(
+            edge_source_name(&graph, EdgeId::new(1)).as_deref(),
+            Some("local_t"),
+            "the consumer still reads the port it was wired to"
+        );
+    }
+
+    /// Unpicking a port takes its own edges and nothing else: the ports after
+    /// it are re-indexed, so a neighbour's connection survives.
+    #[test]
+    fn unpicking_a_port_drops_its_edges_and_keeps_the_rest() {
+        let graph = set_output_option(info_graph(), info_id(), "index", false, &info_options())
+            .expect("unpick the first port");
+        assert_eq!(output_names(&graph, info_id()), ["local_t"]);
+        assert_eq!(
+            edge_source_name(&graph, EdgeId::new(1)).as_deref(),
+            Some("local_t"),
+            "the surviving port keeps its edge across the re-index"
+        );
+
+        let graph = set_output_option(graph, info_id(), "local_t", false, &info_options())
+            .expect("unpick the wired port");
+        assert!(
+            graph.edges().next().is_none(),
+            "the edge into the removed port goes with it"
+        );
+    }
+
+    /// Unchecking and re-checking a candidate puts it back where it was.
+    #[test]
+    fn re_picking_a_port_restores_its_slot() {
+        let options = info_options();
+        let graph = set_output_option(info_graph(), info_id(), "size", true, &options).unwrap();
+        let graph = set_output_option(graph, info_id(), "size", false, &options).unwrap();
+        let graph = set_output_option(graph, info_id(), "size", true, &options).unwrap();
+        assert_eq!(
+            output_names(&graph, info_id()),
+            ["index", "size", "local_t"]
+        );
+    }
+
+    /// A wider candidate set with three wired consumers, for the question a
+    /// single edit cannot ask: does the remap still hold after the ports in
+    /// front of an edge have shifted several times?
+    fn wide_options() -> Vec<OutputPort> {
+        ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|name| OutputPort {
+                name: name.into(),
+                data_type: DataTypeId::SCALAR,
+            })
+            .collect()
+    }
+
+    /// The node carries every candidate, and `c` / `d` / `e` each feed a
+    /// consumer of their own. The three edges are what the shifts have to
+    /// carry.
+    fn wide_graph() -> Graph {
+        let mut info = Node::new(info_id(), "layer.info");
+        for port in wide_options() {
+            info = info.with_output(port.name, port.data_type);
+        }
+        let mut graph = Graph::new().add_node(info).unwrap();
+        for (slot, port) in [(2u32, 2u32), (3, 3), (4, 4)] {
+            let sink = NodeId::new(100 + slot as u64);
+            graph = graph
+                .add_node(Node::new(sink, "math.abs").with_input("x", &[DataTypeId::SCALAR]))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(100 + slot as u64),
+                    info_id(),
+                    OutputPortIndex(port),
+                    sink,
+                    InputPortIndex(0),
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    /// Every consumer's edge, resolved to the **name** of the port it leaves.
+    /// By name and never by index: an index comparison is exactly what an
+    /// off-by-one remap keeps passing.
+    fn wired_names(graph: &Graph) -> Vec<Option<String>> {
+        [2u64, 3, 4]
+            .into_iter()
+            .map(|slot| {
+                let edge = graph.edges().find(|e| e.id == EdgeId::new(100 + slot))?;
+                node_of(graph, edge.source)
+                    .outputs
+                    .get(edge.source_port.0 as usize)
+                    .map(|p| p.name.clone())
+            })
+            .collect()
+    }
+
+    /// Unpicking two candidates **in front of** the wired ones, one after the
+    /// other, leaves every surviving consumer reading the port it was drawn
+    /// to — and picking them back restores both the slot and the wiring.
+    ///
+    /// One removal can pass with a remap that is wrong by a constant; two in
+    /// a row, then two inserts back, cannot.
+    #[test]
+    fn edges_follow_their_ports_across_repeated_picks() {
+        let options = wide_options();
+        let expected = vec![
+            Some("c".to_string()),
+            Some("d".to_string()),
+            Some("e".to_string()),
+        ];
+
+        let graph = set_output_option(wide_graph(), info_id(), "a", false, &options).unwrap();
+        assert_eq!(output_names(&graph, info_id()), ["b", "c", "d", "e"]);
+        assert_eq!(wired_names(&graph), expected, "after the first removal");
+
+        let graph = set_output_option(graph, info_id(), "b", false, &options).unwrap();
+        assert_eq!(output_names(&graph, info_id()), ["c", "d", "e"]);
+        assert_eq!(wired_names(&graph), expected, "after the second removal");
+
+        let graph = set_output_option(graph, info_id(), "b", true, &options).unwrap();
+        assert_eq!(output_names(&graph, info_id()), ["b", "c", "d", "e"]);
+        assert_eq!(wired_names(&graph), expected, "after picking `b` back");
+
+        let graph = set_output_option(graph, info_id(), "a", true, &options).unwrap();
+        assert_eq!(
+            output_names(&graph, info_id()),
+            ["a", "b", "c", "d", "e"],
+            "both candidates are back in the slots the offer order gives them"
+        );
+        assert_eq!(
+            wired_names(&graph),
+            expected,
+            "and every consumer still reads the port it was drawn to"
+        );
+    }
+
+    /// The candidate set is the whole vocabulary: a name outside it is
+    /// refused rather than grown, because the processor answers ports by name
+    /// and has no value for one nobody declared.
+    #[test]
+    fn a_name_outside_the_candidate_set_is_refused() {
+        let err = set_output_option(info_graph(), info_id(), "rotation", true, &info_options())
+            .unwrap_err();
+        assert!(
+            matches!(err, NetworkError::NotOutputOption { ref name, .. } if name == "rotation"),
+            "{err}"
+        );
+    }
+
+    /// Asking for the state the node already holds is not an edit, so a
+    /// caller that commits on difference records no undo step.
+    #[test]
+    fn setting_a_port_to_the_state_it_has_changes_nothing() {
+        let options = info_options();
+        let before = info_graph();
+        for (name, present) in [("index", true), ("size", false)] {
+            let after =
+                set_output_option(before.clone(), info_id(), name, present, &options).unwrap();
+            assert!(
+                after.ptr_eq(&before),
+                "{name} = {present} changed the graph"
+            );
+        }
     }
 }

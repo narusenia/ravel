@@ -499,17 +499,16 @@ pub enum ContextualKind {
 /// with the Timeline as soon as one candidate is excluded.
 ///
 /// `index` is the layer's position in `comp.layers` and `total` that vector's
-/// length, because the row number is **neither of them**: `comp.layers` is
-/// bottom-most first (`Composition::move_layer` calls it the compositing
-/// order) while the Timeline draws the last element in its first row
-/// (`layer_blocks` walks `layers().rev()`). So row 1 is the topmost layer,
-/// which is `comp.layers.len() - index`. Both halves of the conversion live
-/// here, once: a caller that did its own arithmetic is a caller that can get
-/// the direction wrong.
+/// length, because the row number is **neither of them**: the two orders run
+/// opposite ways. [`crate::composition::timeline_row`] owns that conversion.
 pub fn layer_param_option(index: usize, total: usize, layer: &Layer) -> ParamOption {
     ParamOption::new(
         layer.id.raw().to_string(),
-        format!("{}. {}", total.saturating_sub(index), layer.name),
+        format!(
+            "{}. {}",
+            crate::composition::timeline_row(index, total),
+            layer.name
+        ),
     )
 }
 

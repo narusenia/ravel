@@ -453,6 +453,19 @@ impl Guide {
 // Composition
 // ===========================================================================
 
+/// The Timeline row number of the layer at `index` of a `layers` vector of
+/// length `total`: **row 1 is the topmost layer**.
+///
+/// `layers` is bottom-most first (the compositing order) while the Timeline
+/// draws the last element in its first row, so the two run opposite ways.
+/// Everything that shows a layer *number* — the reference pickers' labels,
+/// `layer.info`'s `index` port — converts here, once: a caller doing its own
+/// arithmetic is a caller that can get the direction wrong, and then the
+/// number a node emits disagrees with the number the Timeline draws.
+pub fn timeline_row(index: usize, total: usize) -> usize {
+    total.saturating_sub(index)
+}
+
 /// An AE-style composition: an ordered stack of layers with shared
 /// resolution, frame rate, and duration.
 ///
@@ -550,6 +563,13 @@ impl Composition {
     /// composites, and the shell decides what that contributes.
     pub fn composites(&self, layer: &Layer) -> bool {
         !layer.muted && (layer.solo || !self.layers.iter().any(|l| l.solo))
+    }
+
+    /// The Timeline row number of the layer with `id`, or `None` when the
+    /// composition does not hold it. See [`timeline_row`].
+    pub fn timeline_row_of(&self, id: LayerId) -> Option<usize> {
+        let index = self.layers.iter().position(|layer| layer.id == id)?;
+        Some(timeline_row(index, self.layers.len()))
     }
 
     /// The layer's parent chain, nearest ancestor first.

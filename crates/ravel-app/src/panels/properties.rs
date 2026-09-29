@@ -341,22 +341,33 @@ fn port_candidate_row(
         .px_1()
         .py(px(1.0))
         .child(
-            Checkbox::new(SharedString::from(format!(
-                "port-option-{}",
-                candidate.name
-            )))
-            .compact()
-            .checked(candidate.present)
-            .label(SharedString::from(candidate.name.clone()))
-            .on_change(move |state: &CheckboxState, _window, cx| {
-                let present = *state == CheckboxState::Checked;
-                let name = name.clone();
-                panel
-                    .update(cx, move |this, cx| {
-                        this.set_output_option(&name, present, cx);
-                    })
-                    .ok();
-            }),
+            div()
+                // Test hook for `VisualTestContext::debug_bounds` (noop in
+                // release builds): it hugs the checkbox alone, so a test
+                // clicks the control rather than a point in the row that
+                // happens to be over it today.
+                .debug_selector({
+                    let name = candidate.name.clone();
+                    move || format!("port-option-{name}")
+                })
+                .child(
+                    Checkbox::new(SharedString::from(format!(
+                        "port-option-{}",
+                        candidate.name
+                    )))
+                    .compact()
+                    .checked(candidate.present)
+                    .label(SharedString::from(candidate.name.clone()))
+                    .on_change(move |state: &CheckboxState, _window, cx| {
+                        let present = *state == CheckboxState::Checked;
+                        let name = name.clone();
+                        panel
+                            .update(cx, move |this, cx| {
+                                this.set_output_option(&name, present, cx);
+                            })
+                            .ok();
+                    }),
+                ),
         )
         .child(
             div()
@@ -8860,6 +8871,75 @@ mod tests {
             );
             history.pop();
         }
+    }
+
+    /// The info node's output port names as the **document** holds them.
+    fn info_outputs(
+        project: &Entity<ProjectState>,
+        path: &ravel_ui::document::NetworkPath,
+        info_id: NodeId,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        project.read_with(cx, |project, _| {
+            resolve_network(project.document(), path)
+                .and_then(|graph| graph.node(info_id))
+                .expect("the info node is still in the network")
+                .outputs
+                .iter()
+                .map(|port| port.name.clone())
+                .collect()
+        })
+    }
+
+    /// The **rendered** checkbox reaches the document — by pointer and by
+    /// keyboard, through the same handler (UX invariant 10).
+    ///
+    /// The other picker tests call `set_output_option` directly, so every one
+    /// of them keeps passing if the checkbox stops being wired to it. This one
+    /// clicks the control the panel actually draws, then presses Space on the
+    /// control that click focused, and asks the Document both times.
+    #[gpui::test]
+    fn the_drawn_checkbox_reaches_the_document_from_pointer_and_keyboard(cx: &mut TestAppContext) {
+        let (properties, project, path, info_id) = setup_info_node_target(cx);
+        assert!(
+            !info_outputs(&project, &path, info_id, cx).contains(&"rotation".to_string()),
+            "the fixture starts without the candidate this test picks"
+        );
+
+        let mut visual = gpui::VisualTestContext::from_window(properties.into(), cx);
+        visual.simulate_resize(size(px(360.0), px(800.0)));
+        cx.run_until_parked();
+
+        let checkbox = visual
+            .debug_bounds("port-option-rotation")
+            .expect("the picker draws a checkbox for every candidate");
+        visual.simulate_click(checkbox.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            info_outputs(&project, &path, info_id, cx).contains(&"rotation".to_string()),
+            "clicking the drawn checkbox did not reach the document"
+        );
+
+        // The click also focused it, so Space is the same control's other
+        // activation — and it has to travel the same way back out.
+        visual.update(|window, cx| {
+            assert!(
+                window.focused(cx).is_some(),
+                "the checkbox did not take focus from the click"
+            );
+        });
+        let keystroke = gpui::Keystroke::parse("space").expect("the test keystroke parses");
+        visual.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        visual.simulate_event(gpui::KeyUpEvent { keystroke });
+        cx.run_until_parked();
+        assert!(
+            !info_outputs(&project, &path, info_id, cx).contains(&"rotation".to_string()),
+            "Space on the focused checkbox did not reach the document"
+        );
     }
 
     /// Unchecking a wired candidate takes its edge with it — and only its

@@ -8,9 +8,9 @@
 //! - Layer parenting cycles within a Composition
 //! - Layer Ref circular references within a Composition (REQ-LAYER-005)
 
-use crate::composition::Composition;
-use crate::graph::Graph;
-use crate::id::{CompId, LayerId};
+use crate::composition::{Composition, Layer};
+use crate::graph::{Graph, Node};
+use crate::id::{CompId, LayerId, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
@@ -69,7 +69,8 @@ pub const COMP_INFO_COMP_PARAM: &str = "comp";
 /// must invalidate the referrer's scope), while `layer.info` reads shell
 /// fields only. Its invalidation runs through
 /// [`InvalidationHint::Shell`](crate::runtime::InvalidationHint::Shell)
-/// instead, and it has no cycle to detect at this layer.
+/// instead, and the cycle it *can* form needs a shell binding on the other
+/// side — [`validate_shell_bind_cycles`], not this list.
 const LAYER_TARGET_TYPE_KEYS: &[&str] = &[LAYER_REF_TYPE_KEY, LAYER_INFO_TYPE_KEY];
 
 /// Whether the parameter `param_key` on a node of type `type_key` names an
@@ -143,6 +144,9 @@ pub enum ValidationError {
 
     #[error("circular Layer Ref in comp {comp:?}: {chain:?}")]
     CircularLayerRef { comp: CompId, chain: Vec<LayerId> },
+
+    #[error("circular shell binding in comp {comp:?}: {chain:?}")]
+    CircularShellBinding { comp: CompId, chain: Vec<LayerId> },
 }
 
 /// Extract referenced composition ids from a layer's network (PreComp nodes).
@@ -273,19 +277,27 @@ pub(crate) fn layer_target_ids(network: &Graph, targets: &mut Vec<LayerId>) {
 
 fn targets_of(network: &Graph, type_keys: &[&str], targets: &mut Vec<LayerId>) {
     for node in network.nodes() {
-        if type_keys.contains(&node.type_key.as_str())
-            && let Some(id) = node
-                .parameters
-                .iter()
-                .find(|p| p.key == LAYER_REF_LAYER_PARAM)
-                .and_then(|p| p.value.static_text_identifier())
-                .map(LayerId::new)
-        {
-            targets.push(id);
-        }
-        if let Some(inner) = node.subnet.as_deref() {
-            targets_of(inner, type_keys, targets);
-        }
+        targets_of_node(node, type_keys, targets);
+    }
+}
+
+/// [`targets_of`] for a single node and the subnet it owns. Split out so a
+/// caller that has already decided *which* nodes matter — the shell-binding
+/// walk below, which looks only at the ones feeding a bound channel — asks
+/// the same question about them, subnets included.
+fn targets_of_node(node: &Node, type_keys: &[&str], targets: &mut Vec<LayerId>) {
+    if type_keys.contains(&node.type_key.as_str())
+        && let Some(id) = node
+            .parameters
+            .iter()
+            .find(|p| p.key == LAYER_REF_LAYER_PARAM)
+            .and_then(|p| p.value.static_text_identifier())
+            .map(LayerId::new)
+    {
+        targets.push(id);
+    }
+    if let Some(inner) = node.subnet.as_deref() {
+        targets_of(inner, type_keys, targets);
     }
 }
 
@@ -302,38 +314,226 @@ pub fn validate_layer_ref_cycles(comp: &Composition) -> Result<(), ValidationErr
         refs.insert(layer.id, targets);
     }
 
+    match first_layer_cycle(comp, &refs) {
+        Some(chain) => Err(ValidationError::CircularLayerRef {
+            comp: comp.id,
+            chain,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Check for circular **shell bindings** within a single composition
+/// (REQ-LAYER-004): a layer whose shell is driven by a node output that is
+/// fed, through its own network, by a `layer.info` reading a layer whose
+/// shell is (transitively) driven back by this one.
+///
+/// ```text
+/// A.transform ← a node in A's network ← layer.info(B).position
+/// B.transform ← a node in B's network ← layer.info(A).position
+/// ```
+///
+/// **No graph holds this cycle**, which is why it needs its own pass: the
+/// shell binding is a [`ChannelSource::NodeOutput`] rather than an edge, so
+/// `Graph::add_edge`'s cycle check never sees it, and the reference crosses
+/// layers, so neither does the evaluator's per-graph re-entry guard.
+/// [`validate_layer_ref_cycles`] does not see it either — `layer.ref` pulls a
+/// *network*, `layer.info` reads a *shell*, and the loop here closes through
+/// the shell.
+///
+/// The edge is drawn only from the bound node's **upstream cone**, not from
+/// the whole network: a `layer.info` that feeds only the layer's picture,
+/// beside an unrelated shell binding, is not a dependency of the shell, and
+/// treating it as one would refuse a document that computes nothing circular.
+/// The cone spans wire edges *and* the hidden `NodeOutput` parameter bindings
+/// ([`Graph::downstream_adjacency`]), because a value reaches the bound node
+/// through either.
+///
+/// Runs at the same validation layer as [`validate_layer_ref_cycles`] and
+/// [`validate_precomp_cycles`], and shares their walk ([`first_layer_cycle`]).
+///
+/// # Why `comp.info` is not in this
+///
+/// `comp.info` reads [`Composition`]'s own fields — resolution, frame rate,
+/// duration, background, layer count, name — and every one of them is a plain
+/// stored value, not an [`AnimationChannel`]. Nothing a layer does can drive
+/// one, so there is no path from a shell binding back to a composition field
+/// and no cycle to detect. Adding it would draw edges that can never close.
+///
+/// [`ChannelSource::NodeOutput`]: crate::animation::channel::ChannelSource::NodeOutput
+/// [`AnimationChannel`]: crate::animation::channel::AnimationChannel
+pub fn validate_shell_bind_cycles(comp: &Composition) -> Result<(), ValidationError> {
+    match first_shell_bind_cycle(comp) {
+        Some(chain) => Err(ValidationError::CircularShellBinding {
+            comp: comp.id,
+            chain,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The first shell-binding cycle in `comp`, as the chain that closes it.
+///
+/// The load-time repair calls this directly and in a loop: it clears the
+/// chain's bindings and asks again, which is why the answer is the chain
+/// rather than a [`ValidationError`].
+pub(crate) fn first_shell_bind_cycle(comp: &Composition) -> Option<Vec<LayerId>> {
+    let refs: HashMap<LayerId, Vec<LayerId>> = comp
+        .layers
+        .iter()
+        .map(|layer| (layer.id, shell_bind_targets(layer)))
+        .collect();
+    first_layer_cycle(comp, &refs)
+}
+
+/// The layers whose **shell** `layer`'s shell reads — the edges
+/// [`validate_shell_bind_cycles`] looks for a cycle in.
+///
+/// Empty unless the shell is bound to a node output at all, which is the
+/// common case and costs one walk of the shell's channels.
+fn shell_bind_targets(layer: &Layer) -> Vec<LayerId> {
+    let bound: HashSet<NodeId> = layer
+        .shell_parameter_sources()
+        .into_iter()
+        .map(|(node, _port)| node)
+        .collect();
+    if bound.is_empty() {
+        return Vec::new();
+    }
+
+    // Flood *upstream* from the bound nodes once, rather than downstream from
+    // each candidate reader: one inversion plus one traversal is linear in the
+    // network, where asking each reader separately is quadratic in it.
+    let mut upstream: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for (source, targets) in layer.network.downstream_adjacency() {
+        for target in targets {
+            upstream.entry(target).or_default().push(source);
+        }
+    }
+    let mut feeds_the_shell: HashSet<NodeId> = HashSet::new();
+    let mut stack: Vec<NodeId> = bound.into_iter().collect();
+    while let Some(id) = stack.pop() {
+        if !feeds_the_shell.insert(id) {
+            continue;
+        }
+        if let Some(sources) = upstream.get(&id) {
+            stack.extend(sources.iter().copied());
+        }
+    }
+
+    let mut targets = Vec::new();
+    for node in layer.network.nodes() {
+        if feeds_the_shell.contains(&node.id) {
+            layer_info_targets_of_node(node, layer.id, &mut targets);
+        }
+    }
+    targets
+}
+
+/// The layers a node's `layer.info` reads, the ones inside the subnet it owns
+/// included, with `-1` resolved to `owner`.
+///
+/// A subnet is taken whole: whatever is inside it reaches the enclosing
+/// network through the subnet node's outputs, so a subnet that feeds the
+/// shell feeds it everything it reads. Same treatment [`targets_of_node`]
+/// gives a subnet, and the reason the brief's "a `layer.info` nested in a
+/// subnet still counts" holds.
+fn layer_info_targets_of_node(node: &Node, owner: LayerId, targets: &mut Vec<LayerId>) {
+    if node.type_key == LAYER_INFO_TYPE_KEY
+        && let Some(target) = layer_info_target(node, owner)
+    {
+        targets.push(target);
+    }
+    if let Some(inner) = node.subnet.as_deref() {
+        for inner_node in inner.nodes() {
+            layer_info_targets_of_node(inner_node, owner, targets);
+        }
+    }
+}
+
+/// The layer a `layer.info` node reads, given the layer whose network it sits
+/// in. `None` when it names none.
+///
+/// **Not [`layer_ref_targets`]'s reading**, and the difference is the whole
+/// reason this exists: `layer.info`'s target defaults to `-1`, its own layer,
+/// and `-1` is not a [`LayerId`] — `ParameterValue::static_text_identifier`
+/// answers `None` for it. A shell bound to a node fed by `layer.info(-1)` is
+/// a layer reading its own shell to compute its own shell, which is the
+/// shortest cycle there is, so the spelling has to resolve here or the
+/// self-reference passes.
+///
+/// Mirrors `layer_info::target_layer` in `ravel-nodes`, down to refusing `0`
+/// (the reserved "no layer" id `eval::identifier_overlay` writes over a target
+/// that does not stand still) and every unparsable spelling: a target the
+/// processor refuses is a reference that resolves to nothing, so it is no
+/// edge either.
+fn layer_info_target(node: &Node, owner: LayerId) -> Option<LayerId> {
+    let Some(parameter) = node
+        .parameters
+        .iter()
+        .find(|p| p.key == LAYER_INFO_LAYER_PARAM)
+    else {
+        // The template writes `-1`; a node without the parameter reads the
+        // same default through `ResolvedParams::str_or`.
+        return Some(owner);
+    };
+    let crate::graph::ParameterValue::String(text) = &parameter.value else {
+        return None;
+    };
+    match text.parse::<i64>() {
+        Ok(-1) => Some(owner),
+        Ok(raw) if raw > 0 => Some(LayerId::new(raw as u64)),
+        _ => None,
+    }
+}
+
+/// The first cycle in a layer → layers adjacency, as the chain that closes
+/// it, or `None` when there is none.
+///
+/// Shared by [`validate_layer_ref_cycles`] and
+/// [`validate_shell_bind_cycles`]: the two differ only in which edges they
+/// hand it and which error they wrap the answer in. A second walk of its own
+/// would be a second chance to disagree about what a cycle is — a self
+/// reference in particular, which both must reject.
+fn first_layer_cycle(
+    comp: &Composition,
+    refs: &HashMap<LayerId, Vec<LayerId>>,
+) -> Option<Vec<LayerId>> {
     let mut visited = HashSet::new();
     for layer in comp.layers.iter() {
         let mut path = Vec::new();
-        check_layer_ref_dfs(comp.id, layer.id, &refs, &mut path, &mut visited)?;
+        if let Some(chain) = layer_cycle_dfs(layer.id, refs, &mut path, &mut visited) {
+            return Some(chain);
+        }
     }
-    Ok(())
+    None
 }
 
-fn check_layer_ref_dfs(
-    comp: CompId,
+fn layer_cycle_dfs(
     layer: LayerId,
     refs: &HashMap<LayerId, Vec<LayerId>>,
     path: &mut Vec<LayerId>,
     visited: &mut HashSet<LayerId>,
-) -> Result<(), ValidationError> {
+) -> Option<Vec<LayerId>> {
     if let Some(pos) = path.iter().position(|&l| l == layer) {
         let mut chain = path[pos..].to_vec();
         chain.push(layer);
-        return Err(ValidationError::CircularLayerRef { comp, chain });
+        return Some(chain);
     }
     if visited.contains(&layer) {
-        return Ok(());
+        return None;
     }
     path.push(layer);
     if let Some(targets) = refs.get(&layer) {
         for &target in targets {
-            check_layer_ref_dfs(comp, target, refs, path, visited)?;
+            if let Some(chain) = layer_cycle_dfs(target, refs, path, visited) {
+                return Some(chain);
+            }
         }
     }
     path.pop();
     visited.insert(layer);
-    Ok(())
+    None
 }
 
 /// Check for circular layer parenting within a single composition.
@@ -627,6 +827,196 @@ mod tests {
                     .unwrap(),
             ));
         assert!(validate_layer_ref_cycles(&comp).is_ok());
+    }
+
+    // ---- Shell binding cycles -----------------------------------------------
+
+    use crate::animation::channel::{AnimationChannel, ChannelSource};
+    use crate::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
+
+    /// A `layer.info` reading `target`, spelled as the text the picker
+    /// writes. `"-1"` is the template default: the node's own layer.
+    fn layer_info_node(node_id: u64, target: &str) -> Node {
+        Node::new(NodeId::new(node_id), LAYER_INFO_TYPE_KEY)
+            .with_param(
+                LAYER_INFO_LAYER_PARAM,
+                ParameterValue::String(target.to_string()),
+            )
+            .with_output("position", DataTypeId::VEC2)
+    }
+
+    /// A node that consumes a value and produces a scalar — the thing a shell
+    /// channel can actually be bound to.
+    fn driver_node(node_id: u64) -> Node {
+        Node::new(NodeId::new(node_id), "math.scalar")
+            .with_input("value", &[DataTypeId::VEC2])
+            .with_output("out", DataTypeId::SCALAR)
+    }
+
+    /// Drive `layer`'s shell x position from node `node`'s first output.
+    fn bind_shell(mut layer: Layer, node: u64) -> Layer {
+        layer.transform.position[0] = AnimationChannel::new(ChannelSource::NodeOutput(
+            NodeId::new(node),
+            OutputPortIndex(0),
+        ));
+        layer
+    }
+
+    /// A layer whose shell is driven by a node wired downstream of a
+    /// `layer.info(target)` — the shape the cycle is made of. Node ids are
+    /// `base` (the reader) and `base + 1` (the driver the shell binds).
+    fn shell_reader(id: u64, base: u64, target: &str) -> Layer {
+        let network = Graph::new()
+            .add_node(layer_info_node(base, target))
+            .unwrap()
+            .add_node(driver_node(base + 1))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(base + 2),
+                NodeId::new(base),
+                OutputPortIndex(0),
+                NodeId::new(base + 1),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        bind_shell(
+            Layer::new(LayerId::new(id), format!("Shell {id}"), network),
+            base + 1,
+        )
+    }
+
+    /// Two layers whose shells drive each other through `layer.info`. No
+    /// graph holds this cycle, so nothing but this pass rejects it: drop the
+    /// shell binding from the edge set and this document validates.
+    #[test]
+    fn mutual_shell_bindings_are_a_cycle() {
+        let comp = comp(1)
+            .add_layer(shell_reader(1, 100, "2"))
+            .add_layer(shell_reader(2, 200, "1"));
+        let err = validate_shell_bind_cycles(&comp).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::CircularShellBinding { chain, .. }
+                if chain == vec![LayerId::new(1), LayerId::new(2), LayerId::new(1)]
+        ));
+    }
+
+    #[test]
+    fn shell_bindings_across_three_layers_are_a_cycle() {
+        let comp = comp(1)
+            .add_layer(shell_reader(1, 100, "2"))
+            .add_layer(shell_reader(2, 200, "3"))
+            .add_layer(shell_reader(3, 300, "1"));
+        assert!(validate_shell_bind_cycles(&comp).is_err());
+    }
+
+    /// One layer reading another's shell is the ordinary use of the feature,
+    /// and the pass must not refuse it.
+    #[test]
+    fn a_one_way_shell_binding_is_not_a_cycle() {
+        let comp = comp(1)
+            .add_layer(shell_reader(1, 100, "2"))
+            .add_layer(empty_layer(2));
+        assert!(validate_shell_bind_cycles(&comp).is_ok());
+    }
+
+    /// A layer whose shell is driven by a node fed by a reader of **its own**
+    /// shell is the shortest cycle there is — and the one a picker offering
+    /// `-1` makes easiest to build.
+    #[test]
+    fn a_shell_reading_its_own_layer_is_a_cycle() {
+        let comp = comp(1).add_layer(shell_reader(1, 100, "-1"));
+        let err = validate_shell_bind_cycles(&comp).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::CircularShellBinding { chain, .. }
+                if chain == vec![LayerId::new(1), LayerId::new(1)]
+        ));
+    }
+
+    /// The reader nested inside a subnet still feeds the shell: its value
+    /// leaves through the subnet node's output like any other.
+    #[test]
+    fn a_reader_inside_a_subnet_still_feeds_the_shell() {
+        let inner = Graph::new().add_node(layer_info_node(100, "2")).unwrap();
+        let network = Graph::new()
+            .add_node(Node::new(NodeId::new(101), "subnet").with_subnet(inner))
+            .unwrap();
+        let comp = comp(1)
+            .add_layer(bind_shell(Layer::new(LayerId::new(1), "Sub", network), 101))
+            .add_layer(shell_reader(2, 200, "1"));
+        assert!(validate_shell_bind_cycles(&comp).is_err());
+    }
+
+    /// A `layer.info` that feeds only the layer's **picture** is not a
+    /// dependency of its shell, even when the shell is separately bound to
+    /// some other node. Reading the whole network instead of the bound node's
+    /// upstream cone would refuse this pair, which computes nothing
+    /// circular.
+    #[test]
+    fn a_reader_that_does_not_feed_the_shell_is_no_edge() {
+        // Each layer: an unconnected `layer.info` naming the other, plus a
+        // shell bound to a driver nothing feeds.
+        let unrelated = |id: u64, base: u64, target: &str| {
+            let network = Graph::new()
+                .add_node(layer_info_node(base, target))
+                .unwrap()
+                .add_node(driver_node(base + 1))
+                .unwrap();
+            bind_shell(
+                Layer::new(LayerId::new(id), format!("Free {id}"), network),
+                base + 1,
+            )
+        };
+        let comp = comp(1)
+            .add_layer(unrelated(1, 100, "2"))
+            .add_layer(unrelated(2, 200, "1"));
+        assert!(validate_shell_bind_cycles(&comp).is_ok());
+    }
+
+    /// The cone spans the hidden `NodeOutput` parameter bindings as well as
+    /// wires: a reader that drives a node's *parameter* reaches the shell
+    /// just as surely as one wired into its input.
+    #[test]
+    fn a_reader_bound_to_a_parameter_feeds_the_shell() {
+        let driven = Node::new(NodeId::new(101), "math.scalar")
+            .with_param(
+                "value",
+                ParameterValue::Channel(AnimationChannel::new(ChannelSource::NodeOutput(
+                    NodeId::new(100),
+                    OutputPortIndex(0),
+                ))),
+            )
+            .with_output("out", DataTypeId::SCALAR);
+        let network = Graph::new()
+            .add_node(layer_info_node(100, "2"))
+            .unwrap()
+            .add_node(driven)
+            .unwrap();
+        let comp = comp(1)
+            .add_layer(bind_shell(
+                Layer::new(LayerId::new(1), "Param", network),
+                101,
+            ))
+            .add_layer(shell_reader(2, 200, "1"));
+        assert!(validate_shell_bind_cycles(&comp).is_err());
+    }
+
+    /// `layer.ref` is not a shell reader, so a `layer.ref` cycle is not this
+    /// pass's business — and a shell-binding cycle is not
+    /// [`validate_layer_ref_cycles`]'s. Neither pass may answer the other's
+    /// question.
+    #[test]
+    fn the_two_cycle_passes_do_not_answer_for_each_other() {
+        let shell_cycle = comp(1)
+            .add_layer(shell_reader(1, 100, "2"))
+            .add_layer(shell_reader(2, 200, "1"));
+        assert!(validate_layer_ref_cycles(&shell_cycle).is_ok());
+
+        let ref_cycle = comp(1)
+            .add_layer(layer_ref_layer(1, 100, LayerId::new(2)))
+            .add_layer(layer_ref_layer(2, 200, LayerId::new(1)));
+        assert!(validate_shell_bind_cycles(&ref_cycle).is_ok());
     }
 
     #[test]

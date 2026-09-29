@@ -30,6 +30,16 @@ pub mod validate;
 
 pub use color_upgrade::{ColorMigrationNote, ColorMigrationReport, is_color_param};
 
+/// One shell-binding cycle [`Document::break_shell_bind_cycles`] broke on
+/// load: the layers it ran through, and how many bindings went with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellBindCycleNote {
+    pub comp: CompId,
+    /// The cycle, first layer repeated last.
+    pub chain: Vec<LayerId>,
+    pub cleared: usize,
+}
+
 pub use asset::{
     AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource,
     MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS, MediaAssetEntry, expand_variables, name_from_path,
@@ -39,7 +49,7 @@ use crate::animation::channel::{AnimationChannel, ChannelSource};
 use crate::eval::PathSegment;
 use crate::exposed::ExposedParameters;
 use crate::graph::{DynamicIdentifier, Graph, InputPort, Node, Parameter, PortSide};
-use crate::id::{AssetId, CompId, DataTypeId, EdgeId, LayerId, NodeId};
+use crate::id::{AssetId, CompId, DataTypeId, EdgeId, LayerId, NodeId, OutputPortIndex};
 use crate::network;
 use crate::registry::NodeRegistry;
 use crate::types::{Color, FrameRate};
@@ -262,24 +272,101 @@ impl Layer {
         let mut duplicate = self.clone();
         duplicate.id = id;
         duplicate.network = network;
-        for channel in &mut duplicate.transform.anchor_point {
+        for channel in duplicate.shell_channels_mut() {
             remap_layer_channel_node_outputs(channel, &id_map);
-        }
-        for channel in &mut duplicate.transform.position {
-            remap_layer_channel_node_outputs(channel, &id_map);
-        }
-        for channel in &mut duplicate.transform.scale {
-            remap_layer_channel_node_outputs(channel, &id_map);
-        }
-        remap_layer_channel_node_outputs(&mut duplicate.transform.rotation, &id_map);
-        remap_layer_channel_node_outputs(&mut duplicate.opacity, &id_map);
-        if let Some(audio) = &mut duplicate.audio {
-            remap_layer_channel_node_outputs(&mut audio.gain, &id_map);
-        }
-        if let Some(time_remap) = &mut duplicate.time_remap {
-            remap_layer_channel_node_outputs(time_remap, &id_map);
         }
         duplicate
+    }
+
+    /// Every shell field that carries an [`AnimationChannel`] — the transform,
+    /// the opacity, the audio gain, the reserved time remap.
+    ///
+    /// The shell is the half of a layer that is *not* the network, so this is
+    /// the complete list of places a `ChannelSource::NodeOutput` binding
+    /// (REQ-LAYER-004) can sit. Three callers ask it: duplication remaps the
+    /// bindings, [`validate::validate_shell_bind_cycles`] reads them as graph
+    /// edges, and the load-time repair clears the ones that close a cycle. A
+    /// shell field added to one list and not the others is a binding that
+    /// duplicates but never validates — see
+    /// `shell_channel_lists_cover_the_same_fields`, which is what keeps the
+    /// `&self` and `&mut self` spellings below in step.
+    pub fn shell_channels(&self) -> Vec<&AnimationChannel> {
+        let mut out: Vec<&AnimationChannel> = Vec::new();
+        out.extend(self.transform.anchor_point.iter());
+        out.extend(self.transform.position.iter());
+        out.extend(self.transform.scale.iter());
+        out.push(&self.transform.rotation);
+        out.push(&self.opacity);
+        if let Some(audio) = &self.audio {
+            out.push(&audio.gain);
+        }
+        if let Some(time_remap) = &self.time_remap {
+            out.push(time_remap);
+        }
+        out
+    }
+
+    /// [`shell_channels`](Self::shell_channels) for a writer. The two must
+    /// list the same fields.
+    pub fn shell_channels_mut(&mut self) -> Vec<&mut AnimationChannel> {
+        let mut out: Vec<&mut AnimationChannel> = Vec::new();
+        out.extend(self.transform.anchor_point.iter_mut());
+        out.extend(self.transform.position.iter_mut());
+        out.extend(self.transform.scale.iter_mut());
+        out.push(&mut self.transform.rotation);
+        out.push(&mut self.opacity);
+        if let Some(audio) = &mut self.audio {
+            out.push(&mut audio.gain);
+        }
+        if let Some(time_remap) = &mut self.time_remap {
+            out.push(time_remap);
+        }
+        out
+    }
+
+    /// The nodes of this layer's own network that drive a **shell** field
+    /// (REQ-LAYER-004) — the layer-level twin of
+    /// [`Node::parameter_sources`], read through the same collector so a
+    /// binding nested in a [`ChannelSource::Blend`] counts for both.
+    pub fn shell_parameter_sources(&self) -> Vec<(NodeId, OutputPortIndex)> {
+        let mut sources = Vec::new();
+        for channel in self.shell_channels() {
+            crate::graph::collect_channel_sources(&channel.source, &mut sources);
+        }
+        sources
+    }
+
+    /// Replace every shell `ChannelSource::NodeOutput` with the constant the
+    /// binding currently evaluates to, and answer how many were replaced.
+    ///
+    /// [`ChannelSource::DEFAULT_VALUE`] is not an arbitrary fallback: a shell
+    /// channel is sampled by [`crate::composition::transform::world_matrix`]
+    /// and by `layer.info` through the plain [`ChannelSource::evaluate`],
+    /// which answers `NodeOutput` with exactly that. So dropping the binding
+    /// changes no rendered pixel — which is what makes it safe for the
+    /// load-time repair to do without asking.
+    pub(crate) fn clear_shell_bindings(&mut self) -> usize {
+        fn clear(source: &mut ChannelSource, cleared: &mut usize) {
+            match source {
+                ChannelSource::NodeOutput(_, _) => {
+                    *source = ChannelSource::Constant(ChannelSource::DEFAULT_VALUE);
+                    *cleared += 1;
+                }
+                ChannelSource::Blend(a, b, _, _) => {
+                    clear(a, cleared);
+                    clear(b, cleared);
+                }
+                ChannelSource::Constant(_)
+                | ChannelSource::Keyframes(_)
+                | ChannelSource::Expression(_)
+                | ChannelSource::AudioReactive(_) => {}
+            }
+        }
+        let mut cleared = 0;
+        for channel in self.shell_channels_mut() {
+            clear(&mut channel.source, &mut cleared);
+        }
+        cleared
     }
 
     /// The layer-local frame a composition frame maps to:
@@ -1452,6 +1539,80 @@ impl Document {
         asset_upgrade::upgrade(self, legacy)
     }
 
+    /// Drop the shell bindings that close a cycle through `layer.info`
+    /// ([`validate::validate_shell_bind_cycles`]), and report each cycle
+    /// broken.
+    ///
+    /// **A cycle must not keep a project from opening.** The document is
+    /// otherwise intact, and refusing it would be data loss over a structure
+    /// the editing path is supposed to have prevented — the same judgement
+    /// [`is_identifier_parameter`](validate::is_identifier_parameter) makes
+    /// about a keyframed reference. So the binding goes and the project
+    /// opens.
+    ///
+    /// **Dropping it changes no rendered pixel**: a shell
+    /// `ChannelSource::NodeOutput` is sampled through the plain
+    /// [`ChannelSource::evaluate`], which answers it with
+    /// `ChannelSource::DEFAULT_VALUE`, and that is exactly the constant
+    /// [`Layer::clear_shell_bindings`] leaves behind.
+    ///
+    /// Every layer of a cycle loses its bindings, not one picked as the
+    /// culprit: which of them "caused" it is not a question the document
+    /// answers, and clearing the whole chain is what makes the repair
+    /// independent of the order the layers happen to sit in. Each round
+    /// clears at least one binding — a layer with no shell binding has no
+    /// outgoing edge and so cannot be in a cycle — so the loop terminates.
+    ///
+    /// Ungated by format version: this is drift repair like
+    /// [`Self::sync_subnet_pins`], not a migration step. Idempotent, and a
+    /// document with no shell binding at all pays one walk of each shell.
+    ///
+    /// [`ChannelSource::evaluate`]: crate::animation::channel::ChannelSource::evaluate
+    pub fn break_shell_bind_cycles(mut self) -> (Self, Vec<ShellBindCycleNote>) {
+        let mut notes = Vec::new();
+        let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
+        for comp in comp_ids {
+            while let Some(chain) = self
+                .compositions
+                .get(&comp)
+                .and_then(|c| validate::first_shell_bind_cycle(c))
+            {
+                let mut updated = (**self
+                    .compositions
+                    .get(&comp)
+                    .expect("the composition the cycle was just found in"))
+                .clone();
+                let mut cleared = 0;
+                for layer in updated.layers.iter_mut() {
+                    if chain.contains(&layer.id) {
+                        cleared += layer.clear_shell_bindings();
+                    }
+                }
+                self.compositions.insert(comp, std::sync::Arc::new(updated));
+                notes.push(ShellBindCycleNote {
+                    comp,
+                    chain,
+                    cleared,
+                });
+                // Unreachable while every edge is drawn from a shell binding:
+                // a layer in a cycle has an outgoing edge, so it has a
+                // binding to lose. It is checked anyway because the cost of
+                // being wrong is not a bad repair but a **load that never
+                // returns** — an edge added here without a binding behind it
+                // would spin this loop forever on the user's machine, with no
+                // window up to say why.
+                if cleared == 0 {
+                    break;
+                }
+            }
+        }
+        // `compositions` is an unordered map, so the notes come out in
+        // whatever order it iterated. A warning log the same project produces
+        // differently on each open is one nobody can diff.
+        notes.sort_by(|a, b| (a.comp.raw(), &a.chain).cmp(&(b.comp.raw(), &b.chain)));
+        (self, notes)
+    }
+
     /// Reinterpret every authored colour for the linear working space
     /// (`.ravprj` v7 → v8), in every graph of the document — the flat graph,
     /// each layer network, and nested subnets.
@@ -2174,6 +2335,156 @@ mod tests {
         assert_eq!(duplicate.start_frame, 12);
         assert_eq!((duplicate.in_frame, duplicate.out_frame), (3, 90));
         assert!(duplicate.locked);
+    }
+
+    /// The `&self` and `&mut self` spellings of the shell's channel list have
+    /// to name the same fields: a field in one and not the other is a binding
+    /// that duplicates but never validates, or validates but never clears.
+    #[test]
+    fn shell_channel_lists_cover_the_same_fields() {
+        let mut layer = empty_layer(1);
+        layer.audio = Some(AudioSource::new(AssetId::next(), 0));
+        layer.time_remap = Some(AnimationChannel::constant(0.0));
+        assert_eq!(layer.shell_channels().len(), 10, "every optional field set");
+        assert_eq!(
+            layer.shell_channels().len(),
+            layer.shell_channels_mut().len()
+        );
+
+        let bare = empty_layer(2);
+        assert_eq!(bare.shell_channels().len(), 8, "neither optional field");
+    }
+
+    /// A document whose layers drive each other's shells through `layer.info`
+    /// **opens**: the bindings that close the cycle are dropped, the rest of
+    /// the document is untouched, and the caller is handed what to warn
+    /// about.
+    #[test]
+    fn loading_breaks_a_shell_binding_cycle_instead_of_refusing_the_document() {
+        use crate::animation::channel::ChannelSource;
+        use crate::composition::validate::{LAYER_INFO_LAYER_PARAM, LAYER_INFO_TYPE_KEY};
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId, OutputPortIndex};
+
+        // Two layers, each with a `layer.info` reading the other, each with
+        // its shell x position bound to that reader's output.
+        let reader = |id: u64, node: u64, target: u64| {
+            let network = Graph::new()
+                .add_node(
+                    Node::new(NodeId::new(node), LAYER_INFO_TYPE_KEY)
+                        .with_param(
+                            LAYER_INFO_LAYER_PARAM,
+                            crate::graph::ParameterValue::String(target.to_string()),
+                        )
+                        .with_output("position", DataTypeId::VEC2),
+                )
+                .unwrap();
+            let mut layer = Layer::new(LayerId::new(id), format!("Shell {id}"), network);
+            layer.transform.position[0] = AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(node),
+                OutputPortIndex(0),
+            ));
+            layer.opacity = keyframed_channel(&[(0, 0.25), (10, 0.75)]);
+            layer
+        };
+        let comp = Composition::new(
+            CompId::new(1),
+            "Cyclic",
+            (16, 16),
+            FrameRate::new(30, 1),
+            300,
+        )
+        .add_layer(reader(1, 100, 2))
+        .add_layer(reader(2, 200, 1))
+        // A bystander: bound to a reader of layer 1, which is in the cycle,
+        // but nothing reads layer 3 back. Its binding is not part of any
+        // cycle and must survive — clearing the whole composition instead of
+        // the chain would take it too.
+        .add_layer(reader(3, 300, 1));
+        let keyed_opacity = comp.layers[0].opacity.clone();
+        let document = Document::default().with_composition(comp);
+
+        let (repaired, notes) = document.break_shell_bind_cycles();
+
+        assert_eq!(notes.len(), 1, "one cycle, reported once");
+        assert_eq!(notes[0].comp, CompId::new(1));
+        assert_eq!(
+            notes[0].chain,
+            vec![LayerId::new(1), LayerId::new(2), LayerId::new(1)]
+        );
+        assert_eq!(notes[0].cleared, 2, "one binding per layer of the chain");
+
+        let comp = repaired.get_composition(CompId::new(1)).unwrap();
+        for layer in comp.layers.iter() {
+            let expected = if layer.id == LayerId::new(3) {
+                ChannelSource::NodeOutput(NodeId::new(300), OutputPortIndex(0))
+            } else {
+                ChannelSource::Constant(ChannelSource::DEFAULT_VALUE)
+            };
+            assert_eq!(
+                layer.transform.position[0].source, expected,
+                "layer {:?}: only the chain's bindings are replaced, by what they evaluated to",
+                layer.id
+            );
+            assert_eq!(
+                layer.opacity, keyed_opacity,
+                "an unbound shell channel is left alone"
+            );
+            assert_eq!(layer.network.node_count(), 1, "the network is untouched");
+        }
+        assert!(validate::validate_shell_bind_cycles(comp).is_ok());
+        assert_eq!(repaired.validate(), Ok(()));
+
+        let (again, notes) = repaired.break_shell_bind_cycles();
+        assert!(notes.is_empty(), "idempotent");
+        assert_eq!(
+            again.get_composition(CompId::new(1)).unwrap().layers[0]
+                .transform
+                .position[0]
+                .source,
+            ChannelSource::Constant(ChannelSource::DEFAULT_VALUE)
+        );
+    }
+
+    /// A one-way binding is the ordinary use of the feature: the repair must
+    /// not touch it.
+    #[test]
+    fn loading_leaves_an_acyclic_shell_binding_alone() {
+        use crate::animation::channel::ChannelSource;
+        use crate::composition::validate::{LAYER_INFO_LAYER_PARAM, LAYER_INFO_TYPE_KEY};
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId, OutputPortIndex};
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(100), LAYER_INFO_TYPE_KEY)
+                    .with_param(
+                        LAYER_INFO_LAYER_PARAM,
+                        crate::graph::ParameterValue::String("2".into()),
+                    )
+                    .with_output("position", DataTypeId::VEC2),
+            )
+            .unwrap();
+        let mut reader = Layer::new(LayerId::new(1), "Reader", network);
+        reader.transform.position[0] = AnimationChannel::new(ChannelSource::NodeOutput(
+            NodeId::new(100),
+            OutputPortIndex(0),
+        ));
+        let comp = Composition::new(CompId::new(1), "Fine", (16, 16), FrameRate::new(30, 1), 300)
+            .add_layer(reader)
+            .add_layer(empty_layer(2));
+        let document = Document::default().with_composition(comp);
+
+        let (repaired, notes) = document.clone().break_shell_bind_cycles();
+        assert!(notes.is_empty());
+        assert_eq!(
+            repaired.get_composition(CompId::new(1)).unwrap().layers[0]
+                .transform
+                .position[0]
+                .source,
+            ChannelSource::NodeOutput(NodeId::new(100), OutputPortIndex(0)),
+            "the binding survives"
+        );
     }
 
     #[test]

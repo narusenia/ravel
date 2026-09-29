@@ -330,8 +330,20 @@ impl Layer {
     /// two nodes would then disagree about which frame of the same layer they
     /// are looking at.
     pub fn retimed_local_frame(&self, target: &Layer, local: u64) -> Option<i64> {
-        let comp_frame = local as i64 + self.start_frame - self.in_frame as i64;
-        target.displayed_local_frame_signed(comp_frame)
+        target.displayed_local_frame_signed(self.comp_frame(local as i64))
+    }
+
+    /// The composition frame this layer's local frame `local` sits at — the
+    /// inverse of [`local_frame`](Self::local_frame), unclamped.
+    ///
+    /// Separate from [`retimed_local_frame`](Self::retimed_local_frame)
+    /// because a caller sometimes wants the composition time itself rather
+    /// than another layer's local time: `world_matrix` folds in a parent
+    /// chain and derives **each** ancestor's own local frame from the
+    /// composition frame, so a node reading it from inside a layer network
+    /// has to convert back out first.
+    pub fn comp_frame(&self, local: i64) -> i64 {
+        local + self.start_frame - self.in_frame as i64
     }
 
     /// [`local_frame`](Self::local_frame) for a continuous composition frame.

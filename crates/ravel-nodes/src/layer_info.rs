@@ -76,20 +76,41 @@ impl NodeProcessor for LayerInfoProcessor {
             anyhow::anyhow!("layer.info: target layer {target_id:?} not in composition {comp_id:?}")
         })?;
 
-        // `ctx` is the source layer's local time; the target's shell is read
-        // at the target's own local time (REQ-LAYER-006). Outside the
-        // target's display interval every port answers with its typed zero,
+        // `ctx` is the **source** layer's local time, and two different
+        // conversions come out of it.
+        //
+        // The target's own local frame is what every shell channel is
+        // sampled at (REQ-LAYER-006), and `None` outside the target's
+        // display interval — every port then answers with its typed zero,
         // exactly as `layer.ref` does.
         let local_frame = source.retimed_local_frame(target, ctx.frame);
+        // The **composition** frame is what `world_matrix` wants: it reads
+        // `ctx.sample_frame()` as composition time and derives each layer's
+        // and each ancestor's own local frame from it. Handing it the
+        // source's local time would sample the target and its whole parent
+        // chain at the wrong moment whenever the source is placed off zero —
+        // and the local ports, which pass the frame explicitly, would be
+        // right while the world ones were not.
+        let sub_frame = ctx.sample_frame() - ctx.frame as f64;
+        let comp_sample = source.comp_frame(ctx.frame as i64) as f64 + sub_frame;
         let reader = ShellReader {
             comp,
             target,
             local_frame,
-            // Composition space, not canvas space: the local transform ports
-            // read the channels raw, so the world ones have to be in the
-            // same units or the two disagree under a proxy resolution.
             ctx: EvalContext {
+                // `frame` and `time` are one instant in two forms and
+                // `sample_frame()` is what reads them back; the unsigned
+                // frame index is clamped only because a composition frame
+                // can be negative, and that subtraction cancels out.
+                frame: comp_sample.max(0.0) as u64,
+                time: comp_sample / comp.frame_rate.as_f64(),
+                fps: comp.frame_rate,
+                // Composition space, not canvas space: the local transform
+                // ports read the channels raw, so the world ones have to be
+                // in the same units or the two disagree under a proxy
+                // resolution.
                 resolution: comp.resolution,
+                comp_resolution: comp.resolution,
                 ..*ctx
             },
         };
@@ -142,7 +163,12 @@ struct ShellReader<'a> {
     target: &'a Layer,
     /// The target's local frame, `None` outside its display interval.
     local_frame: Option<i64>,
-    /// Composition-space evaluation context for the target's channels.
+    /// Composition-space context at **composition** time.
+    ///
+    /// Not the source network's context: this one is what `world_matrix`
+    /// reads its frame from, and the channel reads below pass
+    /// [`local_frame`](Self::local_frame) explicitly, so they are unaffected
+    /// by the frame it carries.
     ctx: EvalContext,
 }
 
@@ -535,6 +561,62 @@ mod tests {
         assert!(
             (scalar_of(&v[5]) - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
             "the parent's 90° reaches the child, in radians"
+        );
+    }
+
+    /// The world ports are sampled at **composition** time, not at the
+    /// reading network's local time.
+    ///
+    /// `world_matrix` takes `ctx.sample_frame()` as the composition frame and
+    /// derives each layer's and each ancestor's own local frame from it, so a
+    /// reader inside a layer network has to convert back out first. The
+    /// source therefore carries a non-zero `start_frame` **and** `in_frame`
+    /// (both terms of the conversion matter) and the parent is animated, so
+    /// handing `world_matrix` the source's own frame samples the chain at the
+    /// wrong moment and reads a different number.
+    #[test]
+    fn world_ports_are_sampled_at_composition_time() {
+        // Parent x ramps 0 → 100 over comp frames 0..40.
+        let mut parent = layer(1, "Parent");
+        let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
+        curve.insert(
+            0,
+            0.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        curve.insert(
+            40,
+            100.0,
+            ravel_core::animation::interpolation::Interpolation::Linear,
+        );
+        parent.transform.position[0] = AnimationChannel::keyframes(curve);
+
+        let target = layer(2, "Target").with_parent(LayerId::new(1));
+        // Source-local 5 → comp 5 + 20 - 5 = 20 → parent-local 20 → x = 50.
+        let source = layer(3, "Source").with_time(20, 5, 300);
+        let comp = comp_of(vec![parent, target, source]);
+
+        let out = eval_at(
+            &comp,
+            LayerId::new(3),
+            info_node(10, "2", &["world_position"]),
+            5,
+        )
+        .unwrap();
+        let world = vec2_of(&out);
+
+        // The authority: the composed matrix at the COMPOSITION frame.
+        let at_comp = EvalContext::new(20, FPS, RES);
+        let expected =
+            world_matrix(&comp, comp.get_layer(LayerId::new(2)).unwrap(), &at_comp).apply(0.0, 0.0);
+        assert!(
+            (world.0 - expected.0).abs() < 1e-4 && (world.1 - expected.1).abs() < 1e-4,
+            "world_position {world:?} vs the matrix at comp frame 20 {expected:?}"
+        );
+        assert!(
+            (world.0 - 50.0).abs() < 1e-4,
+            "comp frame 20 is half the parent's ramp, got {}",
+            world.0
         );
     }
 

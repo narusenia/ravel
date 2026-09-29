@@ -906,7 +906,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `TOOLX-1〜5` | Viewer ツールの拡張（`done/viewer-tool-extensions-plan.md`）。**全単位済み**（#484 / #487 / #489 / #491 / #497）。REQ-UI-011 の v2 の 3 項目は引受先を持たない |
 | `MON-1〜MON-7` | スコープ 4 種（波形 / ベクトル / ヒストグラム / パレード。`viewer-scopes-plan.md`）。**2026-08-25 のユーザー判断で後回し** — 作るコストの割に入れるものがない。依存は解けているが指示があるまで拾わない |
 | `INFO-1` | `InvalidationHint::Shell` **済**（#558 — 判定は `ravel-ui/src/invalidation.rs` に 1 本化。Properties / Timeline / Outliner が共有） |
-| `INFO-2` / `INFO-3` | `layer.info` **済**（#560）/ `comp.info` |
+| `INFO-2` / `INFO-3` | `layer.info` **済**（#560）/ `comp.info` **済**（#562 — 他コンプ参照は走査が対象を解決する） |
 | `INFO-4` | 情報ノードのポート選択 UI |
 | `SHEET-2` / `SHEET-3` | 属性スプレッドシート |
 | クラスタ: 操作の正しさ（13 件） | 選択とターゲットの取り合い（`MED-APP-04`〜`06`）、ドラッグの復帰なし（`MED-APP-03`）、no-op undo の記録（`MED-APP-07` / `LOW-APP-02` / `LOW-APP-07` / `LOW-APP-10`）、`HIGH-19`（Timeline ズームのアンカーがウィンドウ空間）、ボックス選択とラバーバンド（`LOW-APP-03` / `LOW-APP-04`）、`MED-APP-08`（サムネイルが Open を越えて stale） |

@@ -906,7 +906,7 @@ fn collect_parameter_sources(value: &ParameterValue, out: &mut Vec<(NodeId, Outp
     }
 }
 
-fn collect_channel_sources(
+pub(crate) fn collect_channel_sources(
     source: &crate::animation::channel::ChannelSource,
     out: &mut Vec<(NodeId, OutputPortIndex)>,
 ) {

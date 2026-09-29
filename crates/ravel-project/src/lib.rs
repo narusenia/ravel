@@ -456,6 +456,19 @@ impl ProjectFile {
             backfilled.validate()?;
             backfilled
         };
+        // A shell channel driven by a node output can close a cycle no graph
+        // holds — `A.transform ← A's network ← layer.info(B)` and back
+        // (`validate::validate_shell_bind_cycles`). Such a document must
+        // still open, so the bindings that close the cycle are dropped and
+        // the user is told, rather than the load failing. Ungated by format
+        // version and idempotent: drift repair like `sync_subnet_pins`, not a
+        // migration step, and a document whose editing path never produced
+        // one pays a walk of each shell.
+        let document = {
+            let (repaired, cycles) = document.break_shell_bind_cycles();
+            report_shell_bind_cycles(&cycles);
+            repaired
+        };
         // Settings (optional — absence yields an empty layer).
         let settings = match archive.get(container::entry::SETTINGS) {
             Some(bytes) => {
@@ -593,6 +606,49 @@ impl ProjectFile {
             layers.push(u.clone());
         }
         ResolvedSettings::from_layers(&layers)
+    }
+}
+
+/// Log every shell-binding cycle the load had to break.
+///
+/// A cycle is not something a user can author through the UI, so a line here
+/// means either a hand-edited project or a bug in an editing path — and in
+/// both cases the layers that lost a binding have to be nameable. The chain
+/// is logged as the layer ids it runs through, in the order it closes.
+///
+/// Two outcomes, two lines. A cycle the graph states exactly was repaired and
+/// the count says how much went; one that rests on an approximated edge was
+/// **left alone**, and saying "dropped" about it would send the reader
+/// looking for work that was never done.
+fn report_shell_bind_cycles(notes: &[ravel_core::composition::ShellBindCycleNote]) {
+    for note in notes {
+        let chain = note
+            .chain
+            .iter()
+            .map(|layer| layer.raw().to_string())
+            .collect::<Vec<_>>()
+            .join(" → ");
+        if note.exact {
+            tracing::warn!(
+                comp = note.comp.raw(),
+                chain,
+                cleared = note.cleared,
+                "circular shell binding: these layers drove each other's transform or opacity \
+                 through layer.info, so the bindings carrying the cycle were dropped to open \
+                 the project"
+            );
+        } else {
+            // Nothing was touched, so the line has to say what the user is
+            // looking at: the shells read zero from those bindings, and only
+            // they can tell whether the loop is real.
+            tracing::warn!(
+                comp = note.comp.raw(),
+                chain,
+                "possible circular shell binding through layer.info: it runs through a node \
+                 whose outputs the graph cannot tell apart, so the bindings were left in \
+                 place and the shells read zero from them"
+            );
+        }
     }
 }
 
@@ -3421,6 +3477,101 @@ mod tests {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    /// A shell-binding cycle must not cost the user their project.
+    ///
+    /// The document is otherwise intact, so the load drops the bindings that
+    /// close the cycle, warns, and opens — it does not refuse. The warning is
+    /// the only trace the repair leaves, so this captures it rather than
+    /// trusting the pass's return value: `report_shell_bind_cycles` is what
+    /// turns the notes into something a user can act on, and a load that
+    /// silently rewrote the document would pass every other assertion here.
+    #[test]
+    fn a_shell_binding_cycle_is_broken_on_load_and_warned_about() {
+        use ravel_core::animation::channel::ChannelSource;
+        use ravel_core::composition::validate::{LAYER_INFO_LAYER_PARAM, LAYER_INFO_TYPE_KEY};
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Two layers whose shells drive each other through `layer.info`.
+        let reader = |id: u64, node: u64, target: u64| {
+            let network = Graph::new()
+                .add_node(
+                    Node::new(NodeId::new(node), LAYER_INFO_TYPE_KEY)
+                        .with_param(
+                            LAYER_INFO_LAYER_PARAM,
+                            ParameterValue::String(target.to_string()),
+                        )
+                        .with_output("position", DataTypeId::VEC2),
+                )
+                .unwrap();
+            let mut layer =
+                Layer::new(LayerId::new(id), format!("Shell {id}"), network).with_time(0, 0, 100);
+            layer.transform.position[0] = AnimationChannel::new(ChannelSource::NodeOutput(
+                NodeId::new(node),
+                OutputPortIndex(0),
+            ));
+            layer
+        };
+        let comp = Composition::new(
+            CompId::new(1),
+            "Cyclic",
+            (640, 360),
+            ravel_core::types::FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(reader(1, 100, 2))
+        .add_layer(reader(2, 200, 1));
+        let document = Document::default().with_composition(comp);
+
+        // The archive is written by this build, so the cycle reaches the
+        // reader exactly as a hand-edited project would deliver it.
+        let archive = ProjectFile::from_document("Cyclic", "2026-08-20T00:00:00Z", document)
+            .to_archive()
+            .expect("the cycle is not a structural violation, so the save accepts it");
+
+        #[derive(Default)]
+        struct Collect(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collect {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push(format!("{:?}", event.metadata().fields()));
+                }
+            }
+        }
+        let warnings: Arc<Mutex<Vec<String>>> = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(Collect(warnings.clone()));
+        let project = tracing::subscriber::with_default(subscriber, || {
+            ProjectFile::from_archive(&archive).expect("the project still opens")
+        });
+
+        let comp = project.document.get_composition(CompId::new(1)).unwrap();
+        assert_eq!(comp.layers.len(), 2, "both layers came back");
+        for layer in comp.layers.iter() {
+            assert_eq!(
+                layer.transform.position[0].source,
+                ChannelSource::Constant(ChannelSource::DEFAULT_VALUE),
+                "the binding that closed the cycle is gone"
+            );
+            assert_eq!(
+                layer.network.node_count(),
+                1,
+                "the `layer.info` node itself is left alone"
+            );
+        }
+        let warnings = warnings.lock().unwrap();
+        assert!(
+            warnings.iter().any(|fields| fields.contains("chain")),
+            "the repair named the layers it cleared: {warnings:?}"
+        );
     }
 
     #[test]

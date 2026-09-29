@@ -4838,6 +4838,101 @@ mod tests {
         );
     }
 
+    /// A wider candidate set with three wired consumers, for the question a
+    /// single edit cannot ask: does the remap still hold after the ports in
+    /// front of an edge have shifted several times?
+    fn wide_options() -> Vec<OutputPort> {
+        ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|name| OutputPort {
+                name: name.into(),
+                data_type: DataTypeId::SCALAR,
+            })
+            .collect()
+    }
+
+    /// The node carries every candidate, and `c` / `d` / `e` each feed a
+    /// consumer of their own. The three edges are what the shifts have to
+    /// carry.
+    fn wide_graph() -> Graph {
+        let mut info = Node::new(info_id(), "layer.info");
+        for port in wide_options() {
+            info = info.with_output(port.name, port.data_type);
+        }
+        let mut graph = Graph::new().add_node(info).unwrap();
+        for (slot, port) in [(2u32, 2u32), (3, 3), (4, 4)] {
+            let sink = NodeId::new(100 + slot as u64);
+            graph = graph
+                .add_node(Node::new(sink, "math.abs").with_input("x", &[DataTypeId::SCALAR]))
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(100 + slot as u64),
+                    info_id(),
+                    OutputPortIndex(port),
+                    sink,
+                    InputPortIndex(0),
+                )
+                .unwrap();
+        }
+        graph
+    }
+
+    /// Every consumer's edge, resolved to the **name** of the port it leaves.
+    /// By name and never by index: an index comparison is exactly what an
+    /// off-by-one remap keeps passing.
+    fn wired_names(graph: &Graph) -> Vec<Option<String>> {
+        [2u64, 3, 4]
+            .into_iter()
+            .map(|slot| {
+                let edge = graph.edges().find(|e| e.id == EdgeId::new(100 + slot))?;
+                node_of(graph, edge.source)
+                    .outputs
+                    .get(edge.source_port.0 as usize)
+                    .map(|p| p.name.clone())
+            })
+            .collect()
+    }
+
+    /// Unpicking two candidates **in front of** the wired ones, one after the
+    /// other, leaves every surviving consumer reading the port it was drawn
+    /// to — and picking them back restores both the slot and the wiring.
+    ///
+    /// One removal can pass with a remap that is wrong by a constant; two in
+    /// a row, then two inserts back, cannot.
+    #[test]
+    fn edges_follow_their_ports_across_repeated_picks() {
+        let options = wide_options();
+        let expected = vec![
+            Some("c".to_string()),
+            Some("d".to_string()),
+            Some("e".to_string()),
+        ];
+
+        let graph = set_output_option(wide_graph(), info_id(), "a", false, &options).unwrap();
+        assert_eq!(output_names(&graph, info_id()), ["b", "c", "d", "e"]);
+        assert_eq!(wired_names(&graph), expected, "after the first removal");
+
+        let graph = set_output_option(graph, info_id(), "b", false, &options).unwrap();
+        assert_eq!(output_names(&graph, info_id()), ["c", "d", "e"]);
+        assert_eq!(wired_names(&graph), expected, "after the second removal");
+
+        let graph = set_output_option(graph, info_id(), "b", true, &options).unwrap();
+        assert_eq!(output_names(&graph, info_id()), ["b", "c", "d", "e"]);
+        assert_eq!(wired_names(&graph), expected, "after picking `b` back");
+
+        let graph = set_output_option(graph, info_id(), "a", true, &options).unwrap();
+        assert_eq!(
+            output_names(&graph, info_id()),
+            ["a", "b", "c", "d", "e"],
+            "both candidates are back in the slots the offer order gives them"
+        );
+        assert_eq!(
+            wired_names(&graph),
+            expected,
+            "and every consumer still reads the port it was drawn to"
+        );
+    }
+
     /// The candidate set is the whole vocabulary: a name outside it is
     /// refused rather than grown, because the processor answers ports by name
     /// and has no value for one nobody declared.

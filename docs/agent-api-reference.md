@@ -1108,6 +1108,18 @@ add_custom_port(graph, node_id, name, CustomPortType, NetworkContext)
     // In output falls back to the parameter of its own name, so a wire-only
     // port landing on an occupied key would answer with the wrong type.
 remove_custom_port(graph, node_id, name, NetworkContext)  // drops the parameter
+set_output_option(graph, node_id, name, present: bool, options: &[OutputPort])
+    // The OTHER kind of user-shaped port: a node whose outputs are PICKED
+    // from its template's `output_options` (`layer.info`, `comp.info`). No
+    // rename, no retype, no parameter — the candidate carries the name and
+    // the type, so the only edit is whether the port is there. A name the
+    // candidate set does not hold is `NetworkError::NotOutputOption`, not a
+    // port the processor could never fill. A picked port lands in CANDIDATE
+    // order (after every present port offered before it), so re-checking a
+    // candidate restores its slot; `Graph`'s insert/remove re-index the edges
+    // that shift, and unchecking a wired port drops its own edges with it.
+    // Asking for the state the node already has answers with the SAME graph,
+    // so a caller committing on difference records no undo step.
 rename_custom_port(graph, node_id, old, new, NetworkContext) -> PortEdit
     // A rename reaches TWO things the graph cannot: .graph() / .into_graph() /
     // .key_rename() -> Option<&KeyRename> / .pin_rename() -> Option<&PinRename>
@@ -2771,7 +2783,13 @@ Unknown type keys are skipped silently (plugin space).
   `Curve` carries a whole `CurveParam`; the panel renders it as a thumbnail
   row that expands
   `widgets::param_curve_editor` inline, and which rows are open is panel view
-  state that never enters the Document). `PortList { key, side, rows:
+  state that never enters the Document). `PortPicker { key, candidates:
+  Vec<PortCandidate { name, port_type, present }> }` is the same idea for a
+  node whose outputs are PICKED from its type's `registry.output_options`
+  candidate set (`layer.info`, `comp.info`): every candidate is a row whether
+  picked or not, the host draws each as a checkbox, and the edit routes to
+  `network::set_output_option`. Not a `PortList`, because none of that list's
+  edits exist here — the candidate carries the name and the type. `PortList { key, side, rows:
   Vec<PortRow { name, port_type, fixed, group }>, options }` is the odd one out: it
   describes a network interface node's SHAPE, not a value, so it never travels
   through `PropertyValue` — the host routes its edits to
@@ -2790,9 +2808,10 @@ Unknown type keys are skipped silently (plugin space).
   &registry, frame, driven, NodeContext)` (samples animated channels at the
   layer-local frame). `properties::node::NodeContext { network: NetworkContext,
   comp: Option<&Composition>, owner: Option<LayerId> }` says where the node
-  sits: `network` reaches only `node_ports_section`, which returns `None` for
-  anything but `net.in` / `net.out` (collapse a `NetworkPath` with
-  `NetworkPath::context()`), while `comp` + `owner` resolve a
+  sits: `network` reaches only `node_ports_section`, which builds a `PortList`
+  for `net.in` / `net.out`, a `PortPicker` for a type declaring
+  `output_options`, and `None` for every other node (collapse a `NetworkPath`
+  with `NetworkPath::context()`), while `comp` + `owner` resolve a
   `ParamOptions::Contextual` parameter's candidates. Feed them
   `document.get_composition(path.comp)` and `Some(path.layer)` — `path.layer`
   is the owner for a node inside a subnet too. `NodeContext::detached(network)`

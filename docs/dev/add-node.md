@@ -124,7 +124,9 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   `registry.output_options(type_key)` と
   `template.output_option(name)`。プロセッサは `node.outputs` の名前で値を
   返すので、**候補表とプロセッサの match が食い違わないことをテストで留める**
-  （`layer_info::tests::every_declared_candidate_port_answers_with_its_declared_type`）
+  （`layer_info::tests::every_declared_candidate_port_answers_with_its_declared_type`）。
+  宣言するだけで Properties の Ports セクションが候補チェックリストになる
+  （`ravel-ui` の `node_ports_section` が `output_options` の有無で分岐する）
 - **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
   Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /
   `Channel3`）を使う。理由は 3 つ: Properties が成分横並びの Vector 行 1 本に

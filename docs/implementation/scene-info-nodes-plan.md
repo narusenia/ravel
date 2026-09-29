@@ -239,6 +239,24 @@ InvalidationHint::Shell { comp, layer }
 - 候補一覧からポートを追加・削除でき、エッジが保存される `ravel-ui` テスト
 - 候補外の名前を生やせないテスト
 
+#### `comp.info` の `comp` パラメータは自由入力のまま置く
+
+単位 3 で候補ピッカーが付かなかった理由（`registry::contextual_options` が
+`&Composition` 1 個と owner しか受けず、Document のコンプ表を見られない）は
+この単位でも解消しない。**この単位では手を付けない。**
+
+理由は範囲。`ContextualKind::Composition` を足すには `contextual_options` の
+署名に Document 相当を通し、`NodeContext` にも同じものを持たせることになる。
+`NodeContext` は構造体リテラルで組まれる箇所が 20 以上あり、
+`no_candidates_reason` の網羅 match とロケールキーも連動する。
+ポートの選択 UI とは別の話で、`precomp`（REQ-LAYER-005 で v2）が同じ
+「Document 全体を見る候補」を必要とするので、**そちらと一緒に 1 単位として
+設計する方が安い**。
+
+現状の影響は「`-1` 以外を指すには `CompId` を 10 進で手書きする必要がある」
+こと。既定の `-1`（自コンポジション）は動くので、ノードが何もしないわけでは
+ない。他コンポジションの読み出しは `precomp` が来るまで主用途ではない。
+
 ### 単位 5: 殻バインドを含む循環検出
 
 - 殻の node-output バインドを辺として扱い、`layer.info` の参照辺と合わせて

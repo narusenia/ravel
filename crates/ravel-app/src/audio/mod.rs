@@ -536,6 +536,30 @@ impl AudioService {
         self.pending.retain(|other, _| !superseded(other));
     }
 
+    /// Forget everything derived from these assets' files: the file behind
+    /// them was overwritten in place, so the same path now holds other audio.
+    ///
+    /// [`Self::drop_superseded`] cannot see this — the key carries the path
+    /// and the path did not change — so the buffer, the failure entry, the
+    /// pending slot (its running decode read the old bytes) and the track
+    /// already in the mixer all go by asset id. The next [`Self::sync`] finds
+    /// no `sent` entry and decodes again.
+    pub fn invalidate_assets(&mut self, ids: &HashSet<AssetId>) {
+        self.cache.retain(|key, _| !ids.contains(&key.asset_id));
+        self.failed.retain(|key| !ids.contains(&key.asset_id));
+        self.pending.retain(|key, _| !ids.contains(&key.asset_id));
+        let stale: Vec<LayerId> = self
+            .sent
+            .iter()
+            .filter(|(_, sent)| ids.contains(&sent.spec.asset_id))
+            .map(|(layer, _)| *layer)
+            .collect();
+        for layer in stale {
+            self.sent.remove(&layer);
+            self.send(AudioCommand::RemoveTrack(layer.raw()));
+        }
+    }
+
     /// Release the pending slot of a completed preparation, and report
     /// whether it was this task's slot to release.
     ///
@@ -600,6 +624,14 @@ pub fn forward_transport(
 pub fn sync_from_document(document: &Document, cx: &mut App) {
     if let Some(service) = service(cx) {
         service.update(cx, |service, cx| service.sync(document, cx));
+    }
+}
+
+/// Drop the decoded audio of assets whose files changed on disk (no-op
+/// without a service). Call before the [`sync_from_document`] that follows.
+pub fn invalidate_assets(ids: &HashSet<AssetId>, cx: &mut App) {
+    if let Some(service) = service(cx) {
+        service.update(cx, |service, _cx| service.invalidate_assets(ids));
     }
 }
 
@@ -706,6 +738,52 @@ mod tests {
             service.finish_pending_generation(&other_stream, 0),
             "another stream's decode still owns its slot"
         );
+    }
+
+    /// An overwritten file keeps its path, so the key does not change and
+    /// `drop_superseded` cannot help: the asset's entries must go by id, the
+    /// mixer's track with them, and other assets stay.
+    #[test]
+    fn invalidating_an_asset_drops_its_decode_state_and_only_its() {
+        let mut service = AudioService::with_sink(None, 48_000);
+        let changed = spec(7, music(), 2);
+        let other = spec(8, AssetId::new(2), 2);
+        for spec in [&changed, &other] {
+            service.cache_decoded(
+                spec.cache_key(),
+                DecodedAudio {
+                    samples: vec![0.0; 8].into(),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+            );
+            service.failed.insert(spec.cache_key());
+            service.pending.insert(spec.cache_key(), service.generation);
+            service.sent.insert(
+                spec.layer_id,
+                SentTrack {
+                    spec: spec.clone(),
+                    delivered: true,
+                    built: None,
+                },
+            );
+        }
+
+        service.invalidate_assets(&HashSet::from([music()]));
+
+        let key = changed.cache_key();
+        assert!(!service.cache.contains_key(&key), "buffer freed");
+        assert!(!service.failed.contains(&key), "failure retried");
+        assert!(!service.pending.contains_key(&key), "old decode disowned");
+        assert!(
+            !service.sent.contains_key(&changed.layer_id),
+            "the next sync must rebuild the track"
+        );
+        let key = other.cache_key();
+        assert!(service.cache.contains_key(&key));
+        assert!(service.failed.contains(&key));
+        assert!(service.pending.contains_key(&key));
+        assert!(service.sent.contains_key(&other.layer_id));
     }
 
     #[test]

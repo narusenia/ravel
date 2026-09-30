@@ -108,6 +108,24 @@ TIFF / DPX は float も log も入りうるが**リニア扱いにしない**: 
 持たない組（Rec.2020 原色 + BT.709 OETF など）は `None` のまま拡張子既定へ
 落ちる。
 
+FFmpeg が何も宣言しない静止画は `ravel_media::color_probe` がファイル
+ヘッダだけを読んで同じフィールドを埋める（画素はデコードしない。連番は
+代表フレーム＝先頭フレームのヘッダ）。コンテナが宣言済みなら上書きしない。
+読めない・解釈できない場合は `None`（推測しない）。
+
+| 形式 | ヘッダ | 結果（原色, 伝達関数） |
+|---|---|---|
+| EXR | `chromaticities` が Rec.709 / Rec.2020 / AP1 のいずれか | (その原色, Linear) — EXR は慣習上リニア |
+| EXR | 属性なし・不一致 | (None, None) |
+| PNG | `iCCP` あり | (None, None) — ICC は解析せず、`iCCP` が他のチャンクに優先する |
+| PNG | `sRGB` | (Rec709, Srgb) |
+| PNG | `gAMA` = 1.0、`cHRM` なし | (Rec709, Linear) |
+| PNG | `gAMA` = 1.0、`cHRM` が上の 3 原色のいずれか | (その原色, Linear) |
+| PNG | 上記以外（`gAMA` 1/2.2 のみ等 — sRGB カーブではない） | (None, None) |
+
+原色の照合は R・G・B・白色点の xy がそれぞれ ±0.002 以内。`gAMA` の
+リニア判定は 1.0 から ±0.001 以内。
+
 ## 表示変換
 
 `ravel_nodes::DisplayTransform`（`display_transform.wgsl`）**1 箇所**。

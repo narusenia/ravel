@@ -19,9 +19,15 @@ use ravel_core::media::{MediaInfo, MediaResult};
 /// This is the most reliable way to detect format, codec, resolution,
 /// and other metadata.  Falls back to the heuristic extension check if
 /// FFmpeg cannot open the file.
+///
+/// FFmpeg declares no colour for EXR / PNG stills, so those fields are filled
+/// from the file header ([`crate::color_probe`]). Image sequences are probed
+/// through their representative frame, so they take the same path.
 #[cfg(feature = "ffmpeg")]
 pub fn probe(path: &Path) -> MediaResult<MediaInfo> {
-    crate::decoder::FfmpegDecoder::probe(path)
+    let mut info = crate::decoder::FfmpegDecoder::probe(path)?;
+    crate::color_probe::fill_still_color(&mut info, path);
+    Ok(info)
 }
 
 /// Quick format detection from file extension only (no I/O).

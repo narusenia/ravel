@@ -144,29 +144,6 @@ version が動き、この穴には当たらない。
 
 ---
 
-## MED-APP-38 | bug | 表示設定の切り替えが「飛んでいる評価」を締め出さないので、古い設定のフレームがキャッシュに戻る
-
-**該当**: `crates/ravel-app/src/project_state.rs:1780-1795`（`set_display_channel`）、
-`:1840-1855`（`set_pixel_readout`）、`crates/ravel-core/src/runtime/eval_service.rs:836`
-
-どちらの setter も**出力段フレームキャッシュを捨ててから**再要求する
-（`INSP-2` / `INSP-3`）。しかし**捨てた時点で走っているワーカーの評価**（先読み
-`CACHE-9` を含む）は古い設定で finalize を終え、`clear()` の**後に**キャッシュへ
-入りうる。
-
-- チャンネル: 古いモードの表示バイト列が入る → 次のヒットで前のモードの絵が返る
-- 読み取り: リニアフレームを持たない（または持ったままの）エントリが入る →
-  読み取りが空のまま / off にしたのに f32 を運び続ける
-
-いずれも**次の無効化まで残る**（一過性ではない）。
-
-→ 設定の世代（`u64`）を要求と結果に載せ、**世代が古い結果はキャッシュへ入れない**。
-`AudioService` の `generation` と `finish_pending_generation`（#472）が同じ形の前例。
-
-**検証**: 古い世代の結果を配達して、キャッシュに入らないことを落とすテスト。
-
----
-
 ## MED-APP-40 | debt | macOS では GPUI 自身の Metal device の喪失を問う口が fork に無い
 
 **該当**: `crates/ravel-app/src/workspace.rs`（`host_gpu_context` / capability 判定の

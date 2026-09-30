@@ -72,7 +72,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-LAYER-002 | ネットワークインターフェース（In / Out ノード） | Must | Draft |
 | REQ-LAYER-003 | サブネットワーク | Must | Draft |
 | REQ-LAYER-004 | ネットワーク内パラメータのアニメーション | Must | Draft |
-| REQ-LAYER-005 | Layer Ref ノード（レイヤー間参照）と Null レイヤー | Must | Draft |
+| REQ-LAYER-005 | Layer Ref ノード（レイヤー間参照）と Null レイヤー、シーン情報ノード | Must | Draft |
 | REQ-LAYER-006 | レイヤーローカル時間評価 | Must | Draft |
 | REQ-LAYER-007 | 評価モデル（殻コンパイル + ネットワーク再帰評価） | Must | Draft |
 | REQ-LAYER-008 | レイヤーテンプレートと作成時ネットワーク生成 | Must | Draft |

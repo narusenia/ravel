@@ -50,7 +50,7 @@
 | OPS-6 | `geometry.group_index`（index で要素指定） | `geometry-ops-plan.md` |
 | OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
 | OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
-| INFO-6 | レジストリ / ロケール / 文書（`INFO-2`〜`INFO-5` ✅ で依存が解けた） | `scene-info-nodes-plan.md` |
+| INFO-6 | レジストリ / ロケール / 文書（`INFO-2`〜`INFO-5` ✅ で依存が解けた） | `done/scene-info-nodes-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |

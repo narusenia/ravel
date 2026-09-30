@@ -65,7 +65,11 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
 - 候補が**ノードの置かれた文脈で決まる**ときは
   `with_contextual_param_options(key, ContextualKind)`。解決は
   `registry::contextual_options(kind, node, comp, owner)` の 1 関数で、
-  `ContextualKind` は閉じた列挙（`SiblingLayer` / `LayerOutputPort`）。
+  `ContextualKind` は閉じた列挙（`SiblingLayer` / `CompLayer` /
+  `LayerOutputPort`）。`SiblingLayer` と `CompLayer` の違いは化粧ではない —
+  前者は所有レイヤーを除き（`layer.ref` は参照先を評価するので自分を
+  出すと循環を提示することになる）、後者は含む（`layer.info` は殻を
+  読むだけで評価しないので自分を指すのは普通に欲しい動作）。
   腕を足したら**候補が無いときの理由のロケールキー**も決める
   （`ravel_ui::properties::node::no_candidates_reason` は網羅 match なので、
   足さないとコンパイルが落ちる。キーは en / ja 両方に入れる）。
@@ -126,7 +130,11 @@ NodeTemplate::new("field.noise", "Noise Field", NodeCategory::Field)
   返すので、**候補表とプロセッサの match が食い違わないことをテストで留める**
   （`layer_info::tests::every_declared_candidate_port_answers_with_its_declared_type`）。
   宣言するだけで Properties の Ports セクションが候補チェックリストになる
-  （`ravel-ui` の `node_ports_section` が `output_options` の有無で分岐する）
+  （`ravel-ui` の `node_ports_section` が `output_options` の有無で分岐する）。
+  **候補の名前はロケールを持たない** — ポート名はどのノードでも
+  そのまま描かれる（理由は [`add-locale.md`](add-locale.md) の
+  「ポート名は翻訳しない」）ので、名前は英語の識別子として読めるものに
+  すること
 - **幾何ベクタは 1 パラメータで宣言する。** `center_x` / `center_y` のような
   Float 2 本ではなく `ParameterValue::vec2` / `vec3`（= `Channel2` /
   `Channel3`）を使う。理由は 3 つ: Properties が成分横並びの Vector 行 1 本に

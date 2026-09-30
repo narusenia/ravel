@@ -65,10 +65,11 @@ the node's pins from that inner network — on every inner commit and again on
 load, as drift repair. **What is still missing is collapse / extract** (unit 6),
 so nodes cannot be gathered into a subnet, and the loose ends unit 7 sweeps up.
 See
-`network-interface-editing-plan.md`. Networks also cannot read their own
-context: no node exposes layer or composition metadata
-(`scene-info-nodes-plan.md`), and `precomp` is reserved with cycle detection
-only, with no processor.
+`network-interface-editing-plan.md`. Networks **can** read their own context:
+`layer.info` and `comp.info` expose layer and composition metadata off the
+document without evaluating the target network
+(`done/scene-info-nodes-plan.md`), while `precomp` is still reserved with
+cycle detection only, with no processor.
 
 ### Media
 

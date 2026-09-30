@@ -1601,7 +1601,7 @@ mod tests {
 
     /// Picking and unpicking a candidate moves the node's ports and leaves
     /// the edges on the ports the change did not touch
-    /// (`scene-info-nodes-plan` unit 4).
+    /// (`done/scene-info-nodes-plan` unit 4).
     #[test]
     fn picking_a_candidate_adds_the_port_and_keeps_the_other_edges() {
         let reg = registry();

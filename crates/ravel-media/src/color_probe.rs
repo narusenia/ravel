@@ -18,13 +18,22 @@
 //!
 //! | Source | Result |
 //! |---|---|
-//! | EXR, `chromaticities` recognised | `(primaries, Linear)` (EXR is linear by convention) |
+//! | EXR, `colorInteropID` `lin_rec709_scene` / `lin_rec2020_scene` / `lin_ap1_scene` | `(Rec709 / Rec2020 / ApOne, Linear)` |
+//! | EXR, `colorInteropID` `srgb_rec709_scene` | `(Rec709, Srgb)` |
+//! | EXR, any other `colorInteropID` | `(None, None)` (supersedes `chromaticities`) |
+//! | EXR, no id, `chromaticities` recognised | `(primaries, Linear)` (EXR is linear by convention) |
 //! | EXR, attribute absent or unrecognised | `(None, None)` |
+//! | PNG, `cICP` (highest priority, decides alone): primaries 1 / 9, transfer 8 / 13 / 1, 6, 14, 15 / 16, matrix 0, full range | `(Rec709 / Rec2020, Linear / Srgb / Rec709 / Pq)` |
+//! | PNG, `cICP` with any other code, a non-zero matrix or narrow range | `(None, None)` |
 //! | PNG, `iCCP` present | `(None, None)` (profiles are not parsed; `iCCP` overrides the rest) |
 //! | PNG, `sRGB` | `(Rec709, Srgb)` |
 //! | PNG, `gAMA` = 1.0 and `cHRM` absent | `(Rec709, Linear)` |
 //! | PNG, `gAMA` = 1.0 and `cHRM` recognised | `(primaries, Linear)` |
 //! | anything else (e.g. `gAMA` 1/2.2, which is not the sRGB curve) | `(None, None)` |
+//!
+//! `gAMA` = 1.0 without `cHRM` takes only the declared transfer: Rec.709 is
+//! the PNG extension default anyway, so the result is never worse than the
+//! default.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -105,6 +114,24 @@ fn probe_exr(path: &Path) -> (Option<Primaries>, Option<Transfer>) {
     let Ok(meta) = exr::meta::MetaData::read_from_file(path, false) else {
         return (None, None);
     };
+    // `colorInteropID` supersedes `chromaticities` when present, and an id
+    // Ravel has no name for is unknown whatever the chromaticities say.
+    if let Some(id) = meta.headers.first().and_then(|h| {
+        h.own_attributes.other.iter().find_map(|(name, value)| {
+            match (name.eq("colorInteropID"), value) {
+                (true, exr::meta::attribute::AttributeValue::Text(t)) => Some(t.to_string()),
+                _ => None,
+            }
+        })
+    }) {
+        return match id.as_str() {
+            "lin_rec709_scene" => (Some(Primaries::Rec709), Some(Transfer::Linear)),
+            "lin_rec2020_scene" => (Some(Primaries::Rec2020), Some(Transfer::Linear)),
+            "lin_ap1_scene" => (Some(Primaries::ApOne), Some(Transfer::Linear)),
+            "srgb_rec709_scene" => (Some(Primaries::Rec709), Some(Transfer::Srgb)),
+            _ => (None, None),
+        };
+    }
     let primaries = meta
         .headers
         .first()
@@ -119,6 +146,27 @@ fn probe_exr(path: &Path) -> (Option<Primaries>, Option<Transfer>) {
     }
 }
 
+/// H.273 code points (`cICP`) onto Ravel's vocabulary. Only RGB, full-range
+/// signals with a code Ravel names are interpreted.
+fn cicp(c: png::CodingIndependentCodePoints) -> (Option<Primaries>, Option<Transfer>) {
+    let primaries = match c.color_primaries {
+        1 => Primaries::Rec709,
+        9 => Primaries::Rec2020,
+        _ => return (None, None),
+    };
+    let transfer = match c.transfer_function {
+        8 => Transfer::Linear,
+        13 => Transfer::Srgb,
+        1 | 6 | 14 | 15 => Transfer::Rec709,
+        16 => Transfer::Pq,
+        _ => return (None, None),
+    };
+    if c.matrix_coefficients != 0 || !c.is_video_full_range_image {
+        return (None, None);
+    }
+    (Some(primaries), Some(transfer))
+}
+
 fn probe_png(path: &Path) -> (Option<Primaries>, Option<Transfer>) {
     let Ok(file) = File::open(path) else {
         return (None, None);
@@ -127,6 +175,10 @@ fn probe_png(path: &Path) -> (Option<Primaries>, Option<Transfer>) {
         return (None, None);
     };
     let info = reader.info();
+    // `cICP` outranks every other colour chunk and decides alone.
+    if let Some(c) = info.coding_independent_code_points {
+        return cicp(c);
+    }
     if info.icc_profile.is_some() {
         return (None, None);
     }
@@ -180,10 +232,25 @@ mod tests {
     }
 
     fn write_exr(path: &Path, chromaticities: Option<exr::meta::attribute::Chromaticities>) {
+        write_exr_with_id(path, chromaticities, None);
+    }
+
+    fn write_exr_with_id(
+        path: &Path,
+        chromaticities: Option<exr::meta::attribute::Chromaticities>,
+        interop_id: Option<&str>,
+    ) {
         use exr::prelude::*;
+        let mut layer_attrs = LayerAttributes::default();
+        if let Some(id) = interop_id {
+            layer_attrs.other.insert(
+                Text::new_or_panic("colorInteropID"),
+                AttributeValue::Text(Text::new_or_panic(id)),
+            );
+        }
         let layer = Layer::new(
             (2, 2),
-            LayerAttributes::default(),
+            layer_attrs,
             Encoding::FAST_LOSSLESS,
             SpecificChannels::rgb(|_| (0.5_f32, 0.5_f32, 0.5_f32)),
         );
@@ -231,6 +298,109 @@ mod tests {
         odd[1] = (0.2, 0.7);
         write_exr(&path, Some(exr_chroma(odd)));
         assert_eq!(probe_still(&path), (None, None));
+    }
+
+    #[test]
+    fn exr_known_interop_id_names_the_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.exr");
+        write_exr_with_id(&path, None, Some("lin_ap1_scene"));
+        assert_eq!(
+            probe_still(&path),
+            (Some(Primaries::ApOne), Some(Transfer::Linear))
+        );
+        write_exr_with_id(&path, None, Some("srgb_rec709_scene"));
+        assert_eq!(
+            probe_still(&path),
+            (Some(Primaries::Rec709), Some(Transfer::Srgb))
+        );
+    }
+
+    #[test]
+    fn exr_unknown_interop_id_is_unknown_despite_chromaticities() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.exr");
+        write_exr_with_id(&path, Some(exr_chroma(REC709)), Some("something_else"));
+        assert_eq!(probe_still(&path), (None, None));
+    }
+
+    #[test]
+    fn exr_interop_id_beats_conflicting_chromaticities() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.exr");
+        write_exr_with_id(&path, Some(exr_chroma(REC709)), Some("lin_rec2020_scene"));
+        assert_eq!(
+            probe_still(&path),
+            (Some(Primaries::Rec2020), Some(Transfer::Linear))
+        );
+    }
+
+    /// Write a PNG, then splice a `cICP` chunk in after `IHDR` (the encoder
+    /// cannot write one).
+    fn png_with_cicp(
+        configure: impl FnOnce(&mut png::Encoder<'_, BufWriter<File>>),
+        code: [u8; 4],
+    ) -> (Option<Primaries>, Option<Transfer>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        write_png(&path, configure);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&4u32.to_be_bytes());
+        let mut body = b"cICP".to_vec();
+        body.extend_from_slice(&code);
+        chunk.extend_from_slice(&body);
+        chunk.extend_from_slice(&crc32(&body).to_be_bytes());
+        // signature (8) + IHDR (4 length + 4 type + 13 data + 4 crc)
+        bytes.splice(33..33, chunk);
+        std::fs::write(&path, bytes).unwrap();
+        probe_still(&path)
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn png_cicp_rec2020_pq() {
+        assert_eq!(
+            png_with_cicp(|_| {}, [9, 16, 0, 1]),
+            (Some(Primaries::Rec2020), Some(Transfer::Pq))
+        );
+    }
+
+    #[test]
+    fn png_cicp_overrides_a_co_present_srgb_chunk() {
+        let got = png_with_cicp(
+            |e| e.set_source_srgb(SrgbRenderingIntent::Perceptual),
+            [9, 8, 0, 1],
+        );
+        assert_eq!(got, (Some(Primaries::Rec2020), Some(Transfer::Linear)));
+    }
+
+    #[test]
+    fn png_cicp_unknown_or_unsupported_codes_are_unknown() {
+        assert_eq!(png_with_cicp(|_| {}, [5, 13, 0, 1]), (None, None));
+        assert_eq!(png_with_cicp(|_| {}, [1, 99, 0, 1]), (None, None));
+        assert_eq!(png_with_cicp(|_| {}, [1, 13, 0, 0]), (None, None));
+        assert_eq!(png_with_cicp(|_| {}, [1, 13, 1, 1]), (None, None));
+        // unknown cICP still wins over a co-present sRGB chunk
+        let got = png_with_cicp(
+            |e| e.set_source_srgb(SrgbRenderingIntent::Perceptual),
+            [5, 13, 0, 1],
+        );
+        assert_eq!(got, (None, None));
     }
 
     #[test]

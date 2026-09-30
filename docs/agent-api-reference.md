@@ -2188,6 +2188,11 @@ so `ImageSequenceEncoder::new` cannot fail. The depth is chosen by
 `ravel-cli render --png-depth 8|16` (`EXPORT-3`); the export dialog picks it up
 in `EXPORT-5`.
 
+`.with_overwrite(OverwritePolicy::Refuse)` makes the final placement itself refuse
+to replace (`hard_link`, atomic; filesystems without hard links fall back to a
+fresh existence check before `rename`). The default is `Replace`; the app and
+CLI pass the job's policy.
+
 `MediaWriter` writes one container with interleaved streams; `Encoder` is the
 render worker's contract and also covers the `n`-files case. `index` is the
 **absolute** frame number, so a split range names files consistently. After

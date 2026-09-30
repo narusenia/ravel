@@ -194,6 +194,12 @@ happens-before により finalize は新しい設定を読んでいる。どち�
   `rebase_asset_references` :1501）。書き込み途中の連続イベントはまとめる。
   版を進める判定は純粋関数（Document と変更パスの集合 → Document）に出して
   テストする
+- `PROV-5` は版を進めた素材について、パスをキーにした**残り 2 つのキャッシュ**も
+  捨てる — 再生の音声デコードキャッシュ（`ravel-audio` `mixdown::CacheKey` =
+  asset id・ストリーム・解決済みパス）と Media Bin のサムネイル
+  （`ThumbnailRequest` = パス・ソース・色空間）。どちらも版を持たず、放置すると
+  絵だけ新しく音とサムネイルが古いまま残る（`PROV-4` のレビューで判明、
+  2026-09-30 ユーザー判断で `PROV-5` に含める）
 
 ### 完了条件
 
@@ -205,7 +211,8 @@ happens-before により finalize は新しい設定を読んでいる。どち�
   ディレクトリ単位で一致する）。`ProjectState` 経由で undo 段が増えず dirty に
   ならず、再要求が出るテスト。版を進める前の世代の `ViewerUpdate` が publish
   されないテスト（fence を消すと落ちる）。監視そのものは手動確認（外部から素材を
-  上書きして Viewer が追随する）を PR に記す
+  上書きして Viewer が追随する）を PR に記す。版を進めると音声キャッシュと
+  サムネイルの該当エントリが消えるテスト
 - `MED-MED-08` を `issues/closed/` へ移す（`PROV-5`）
 
 ## Phase 4: 文書

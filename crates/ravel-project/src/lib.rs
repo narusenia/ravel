@@ -2981,6 +2981,7 @@ mod tests {
                     // variable form on save.
                     exposed_owner: None,
                     resolved: Some(PathBuf::from("/stale/plate.mov")),
+                    content_revision: 0,
                 },
             );
         let project = ProjectFile::from_document("Variable", "2026-07-26T00:00:00Z", document);
@@ -3383,6 +3384,7 @@ mod tests {
                     metadata: AssetMetadata::default(),
                     exposed_owner: None,
                     resolved: None,
+                    content_revision: 0,
                 },
             );
         let project = ProjectFile::from_document("Offline", "2026-07-26T00:00:00Z", document);

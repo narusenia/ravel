@@ -1804,6 +1804,7 @@ impl ProjectState {
                             metadata: asset.metadata.clone(),
                             exposed_owner: None,
                             resolved: Some(asset.path.clone()),
+                            content_revision: 0,
                         },
                     );
                     id
@@ -1852,6 +1853,10 @@ impl ProjectState {
             color_space: entry.color_space,
             exposed_owner: entry.exposed_owner.clone(),
             resolved: Some(probed.path),
+            // Session state about the asset, not a user statement: keep it so
+            // relinking back to a path never revives entries from before an
+            // overwrite.
+            content_revision: entry.content_revision,
         };
         if relinked == *entry {
             return false;

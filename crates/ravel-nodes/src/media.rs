@@ -75,6 +75,9 @@ pub fn media_frame_for(t_seconds: f64, stream: &VideoStreamInfo) -> u64 {
 struct OpenReader {
     path: PathBuf,
     color_space: ColorSpace,
+    /// A reader holds the file open, so one opened before an overwrite still
+    /// decodes the old content.
+    revision: u64,
     reader: Box<dyn MediaReader>,
 }
 
@@ -189,18 +192,19 @@ impl MediaProcessor {
         &self,
         path: &Path,
         color_space: ColorSpace,
+        revision: u64,
         ctx: &EvalContext,
     ) -> anyhow::Result<Arc<FrameBuffer>> {
         let mut open = self.open.lock().expect("media reader lock poisoned");
-        if open
-            .as_ref()
-            .is_none_or(|o| o.path != path || o.color_space != color_space)
-        {
+        if open.as_ref().is_none_or(|o| {
+            o.path != path || o.color_space != color_space || o.revision != revision
+        }) {
             let reader = (self.factory)(path, color_space)
                 .map_err(|e| anyhow::anyhow!("media: failed to open {path:?}: {e}"))?;
             *open = Some(OpenReader {
                 path: path.to_path_buf(),
                 color_space,
+                revision,
                 reader,
             });
         }
@@ -214,7 +218,7 @@ impl MediaProcessor {
             .ok_or_else(|| anyhow::anyhow!("media: {:?} has no video stream", open.path))?
             .clone();
         let frame = media_frame_for(ctx.time, &stream);
-        let key = FrameKey::video(path, color_space, stream.stream_index, frame);
+        let key = FrameKey::video(path, color_space, stream.stream_index, frame, revision);
         if let Some(hit) = self.frames.get(&key) {
             return Ok(hit);
         }
@@ -232,8 +236,13 @@ impl MediaProcessor {
     /// sequence frame is one picture per file, so the path is the position:
     /// scrubbing back over a sequence hits every frame the budget still
     /// holds, not merely the previous one.
-    fn decode_image(&self, path: &Path, color_space: ColorSpace) -> MediaResult<Arc<FrameBuffer>> {
-        let key = FrameKey::image(path, color_space);
+    fn decode_image(
+        &self,
+        path: &Path,
+        color_space: ColorSpace,
+        revision: u64,
+    ) -> MediaResult<Arc<FrameBuffer>> {
+        let key = FrameKey::image(path, color_space, revision);
         if let Some(hit) = self.frames.get(&key) {
             return Ok(hit);
         }
@@ -317,9 +326,11 @@ impl NodeProcessor for MediaProcessor {
         }
 
         let decoded: anyhow::Result<Arc<FrameBuffer>> = match &asset.kind {
-            AssetKind::Container => self.decode_container_frame(path, color_space, ctx),
+            AssetKind::Container => {
+                self.decode_container_frame(path, color_space, asset.content_revision, ctx)
+            }
             AssetKind::Still => self
-                .decode_image(path, color_space)
+                .decode_image(path, color_space, asset.content_revision)
                 .map_err(|e| anyhow::anyhow!("media: decoding still {path:?} failed: {e}")),
             AssetKind::Sequence { start, end, .. } => {
                 // A sequence carries no rate of its own: the probed metadata
@@ -339,7 +350,7 @@ impl NodeProcessor for MediaProcessor {
                 let dir = path.parent().ok_or_else(|| {
                     anyhow::anyhow!("media: sequence frame {path:?} has no directory")
                 })?;
-                self.decode_image(&dir.join(name), color_space)
+                self.decode_image(&dir.join(name), color_space, asset.content_revision)
                     .map_err(|e| {
                         anyhow::anyhow!("media: decoding sequence frame {index} failed: {e}")
                     })
@@ -645,6 +656,7 @@ mod tests {
                 metadata: AssetMetadata::default(),
                 exposed_owner: None,
                 resolved: None,
+                content_revision: 0,
             },
         )));
         ev.register(
@@ -679,6 +691,7 @@ mod tests {
             metadata: AssetMetadata::default(),
             exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/clip.mov")),
+            content_revision: 0,
         };
         let (mut ev, graph) = media_evaluator(MediaProcessor::with_reader_factory(factory), entry);
 
@@ -719,6 +732,7 @@ mod tests {
                 metadata: AssetMetadata::default(),
                 exposed_owner: None,
                 resolved: Some(PathBuf::from("/proj/footage/clip.mov")),
+                content_revision: 0,
             },
         )));
         ev.register(
@@ -781,6 +795,7 @@ mod tests {
             metadata: AssetMetadata::default(),
             exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/plate.png")),
+            content_revision: 0,
         };
         let (mut ev, graph) = media_evaluator(processor, entry);
 
@@ -800,6 +815,113 @@ mod tests {
             );
         }
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
+    }
+
+    fn red_of(ev: &mut Evaluator, graph: &Graph) -> f32 {
+        let out = ev
+            .evaluate(
+                graph,
+                NodeId::new(1),
+                &EvalContext::new(0, FrameRate::new(30, 1), (4, 4)),
+            )
+            .unwrap();
+        out.downcast_ref::<FrameBuffer>().unwrap().as_f32()[0]
+    }
+
+    fn with_entry(entry: MediaAssetEntry) -> Arc<Document> {
+        Arc::new(Document::default().with_media_asset_entry(test_asset(), entry))
+    }
+
+    /// Overwriting a file in place keeps its path, so only the content
+    /// revision can tell the decode cache the pixels are stale. Before the
+    /// bump the old pixels are (correctly) still served from the cache; after
+    /// it the file is decoded again.
+    #[test]
+    fn advancing_the_content_revision_returns_the_new_pixels() {
+        use ravel_core::composition::AssetMetadata;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let decodes = Arc::new(AtomicUsize::new(0));
+        // The "file": its red value, in thousandths.
+        let content = Arc::new(AtomicUsize::new(250));
+        let image_factory: ImageReaderFactory = {
+            let (decodes, content) = (Arc::clone(&decodes), Arc::clone(&content));
+            Arc::new(move |_path, _color_space| {
+                decodes.fetch_add(1, Ordering::SeqCst);
+                Ok(solid_image(content.load(Ordering::SeqCst) as f32 / 1000.0))
+            })
+        };
+        let processor = MediaProcessor::with_factories(
+            fake_factory(FrameRate::new(24, 1), None),
+            image_factory,
+        );
+        let mut entry = MediaAssetEntry::from_absolute("/fake/plate.png");
+        entry.metadata = AssetMetadata::default();
+        let (mut ev, graph) = media_evaluator(processor, entry.clone());
+
+        assert!((red_of(&mut ev, &graph) - 0.25).abs() < 1e-6);
+
+        // Same path, new bytes, same revision: the cache legitimately answers.
+        content.store(750, Ordering::SeqCst);
+        ev.invalidate_all();
+        assert!((red_of(&mut ev, &graph) - 0.25).abs() < 1e-6);
+        assert_eq!(decodes.load(Ordering::SeqCst), 1, "served from the cache");
+
+        entry.bump_content_revision();
+        ev.set_document(with_entry(entry));
+        assert!((red_of(&mut ev, &graph) - 0.75).abs() < 1e-6);
+        assert_eq!(decodes.load(Ordering::SeqCst), 2);
+    }
+
+    /// The evaluator's node cache is dropped by a revision-only document
+    /// change too, or a `media` result already pulled would keep answering.
+    #[test]
+    fn a_revision_only_document_change_empties_the_node_cache() {
+        let mut entry = MediaAssetEntry::from_absolute("/fake/plate.png");
+        let processor = MediaProcessor::with_factories(
+            fake_factory(FrameRate::new(24, 1), None),
+            Arc::new(|_path, _color_space| Ok(solid_image(0.5))),
+        );
+        let (mut ev, graph) = media_evaluator(processor, entry.clone());
+        red_of(&mut ev, &graph);
+        assert!(ev.cache_stats().entries > 0);
+
+        ev.set_document(with_entry(entry.clone()));
+        assert!(ev.cache_stats().entries > 0, "the same document keeps it");
+        entry.bump_content_revision();
+        ev.set_document(with_entry(entry));
+        assert_eq!(ev.cache_stats().entries, 0);
+    }
+
+    /// A container reader holds the file open, so a new revision must open it
+    /// again rather than keep decoding through the old handle.
+    #[test]
+    fn a_new_content_revision_reopens_the_container_reader() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let factory: ReaderFactory = {
+            let opens = Arc::clone(&opens);
+            Arc::new(move |_path, _color_space| {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FakeReader::new(FrameRate::new(24, 1), None)) as Box<_>)
+            })
+        };
+        let mut entry = MediaAssetEntry::from_absolute("/fake/clip.mov");
+        entry.kind = AssetKind::Container;
+        let (mut ev, graph) =
+            media_evaluator(MediaProcessor::with_reader_factory(factory), entry.clone());
+
+        red_of(&mut ev, &graph);
+        // The same revision keeps the open reader.
+        ev.invalidate_all();
+        red_of(&mut ev, &graph);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+        entry.bump_content_revision();
+        ev.set_document(with_entry(entry));
+        red_of(&mut ev, &graph);
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
     }
 
     /// CM-2: the resolved input colour space reaches the decoder, and the
@@ -846,6 +968,7 @@ mod tests {
                 metadata: AssetMetadata::default(),
                 exposed_owner: None,
                 resolved: Some(PathBuf::from(format!("/fake/{name}"))),
+                content_revision: 0,
             }
         }
 
@@ -901,6 +1024,7 @@ mod tests {
             },
             exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/seq/f_0100.png")),
+            content_revision: 0,
         };
         let (mut ev, graph) = media_evaluator(processor, entry);
 
@@ -960,6 +1084,7 @@ mod tests {
             metadata: AssetMetadata::default(),
             exposed_owner: None,
             resolved: Some(PathBuf::from("/fake/seq/f_0100.png")),
+            content_revision: 0,
         };
         let (mut ev, graph) = media_evaluator(processor, entry);
 
@@ -1029,6 +1154,7 @@ mod tests {
             metadata: AssetMetadata::default(),
             exposed_owner: None,
             resolved: Some(PathBuf::from(path)),
+            content_revision: 0,
         }
     }
 

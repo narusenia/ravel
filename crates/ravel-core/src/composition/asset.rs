@@ -471,6 +471,15 @@ pub struct MediaAssetEntry {
     pub exposed_owner: Option<String>,
     #[serde(skip)]
     pub resolved: Option<PathBuf>,
+    /// Which content the file at `resolved` has held this session. Not
+    /// persisted (a load starts every asset at 0, like `resolved`), and part
+    /// of equality on purpose: a document that differs only here is a
+    /// different document to `media_assets` comparison, which is what drops
+    /// the frame and node caches when a file is overwritten in place.
+    /// Bump it with [`MediaAssetEntry::bump_content_revision`]; it is a
+    /// component of the media frame-cache key and of the open-reader check.
+    #[serde(skip)]
+    pub content_revision: u64,
 }
 
 /// Which tier of the resolution order supplied an asset's input colour
@@ -550,6 +559,7 @@ impl<'de> Deserialize<'de> for MediaAssetEntry {
             exposed_owner: repr.exposed_owner,
             // Never persisted: the host re-injects it after the load.
             resolved: None,
+            content_revision: 0,
         })
     }
 }
@@ -567,8 +577,16 @@ impl MediaAssetEntry {
             color_space: None,
             exposed_owner: None,
             resolved: Some(path.clone()),
+            content_revision: 0,
             path: AssetPath::Absolute(path),
         }
+    }
+
+    /// Record that the file's content changed on disk. Wrapping is
+    /// unreachable in practice and harmless: the value is only compared for
+    /// inequality.
+    pub fn bump_content_revision(&mut self) {
+        self.content_revision = self.content_revision.wrapping_add(1);
     }
 
     /// Whether this asset currently has no location on disk.
@@ -734,6 +752,70 @@ mod tests {
             explicit.input_color_space(),
             (ColorSpace::REC709, ColorSpaceSource::Explicit)
         );
+    }
+
+    /// The revision is session state: it never reaches the file (so the
+    /// format needs no version bump) and a load starts back at 0. It still
+    /// takes part in equality, which is what `media_assets` comparison uses
+    /// to notice an in-place overwrite.
+    #[test]
+    fn content_revision_is_session_only_but_part_of_equality() {
+        let mut entry = MediaAssetEntry::from_absolute("/f/clip.mov");
+        let before = ron::ser::to_string(&entry).unwrap();
+        entry.bump_content_revision();
+        assert_eq!(entry.content_revision, 1);
+        assert_eq!(ron::ser::to_string(&entry).unwrap(), before);
+        assert!(!before.contains("content_revision"));
+
+        let back: MediaAssetEntry = ron::from_str(&before).unwrap();
+        assert_eq!(back.content_revision, 0);
+        assert_ne!(back.resolved_against(None, &HashMap::new()), entry);
+        assert_eq!(
+            entry
+                .resolved_against(None, &HashMap::new())
+                .content_revision,
+            1,
+            "re-resolving keeps the revision"
+        );
+    }
+
+    /// A document that differs from another only by a bumped revision is a
+    /// different document to both caches: this is the guard that lets an
+    /// in-place overwrite drop stale frames without a per-asset index.
+    #[test]
+    fn a_revision_only_document_diff_drops_the_frame_cache() {
+        use crate::composition::Document;
+        use crate::eval::EvalContext;
+        use crate::id::{AssetId, CompId};
+        use crate::runtime::frame_cache::{CacheIdentity, SharedFrameCache};
+        use crate::types::{FrameBuffer, FrameRate};
+        use std::sync::Arc;
+
+        let old = Document::default().with_media_asset_entry(
+            AssetId::new(1),
+            MediaAssetEntry::from_absolute("/f/clip.mov"),
+        );
+        let mut bumped = old.get_media_asset(AssetId::new(1)).unwrap().clone();
+        bumped.bump_content_revision();
+        let new = old.clone().with_media_asset_entry(AssetId::new(1), bumped);
+
+        let comp = CompId::new(1);
+        let identity = CacheIdentity::of_frame(&EvalContext::new(0, FrameRate::new(30, 1), (4, 4)));
+        let cache = SharedFrameCache::new(None);
+        let insert = |cache: &SharedFrameCache| {
+            cache.insert(
+                comp,
+                identity,
+                Arc::new(FrameBuffer::from_f32(4, 4, vec![0.5; 64])),
+                false,
+            );
+        };
+
+        insert(&cache);
+        cache.sync_document(Some(&old), &old.clone(), None);
+        assert_eq!(cache.stats().entries, 1, "an identical document keeps it");
+        cache.sync_document(Some(&old), &new, None);
+        assert_eq!(cache.stats().entries, 0, "a bumped revision drops it");
     }
 
     /// The explicit setting is persisted, and a document written before the
@@ -911,6 +993,7 @@ mod tests {
             color_space: None,
             exposed_owner: None,
             resolved: Some(PathBuf::from("/proj/a.mov")),
+            content_revision: 0,
         };
         assert_eq!(
             variable.relativized(Some(Path::new("/proj"))).path,
@@ -925,6 +1008,7 @@ mod tests {
             color_space: None,
             exposed_owner: None,
             resolved: None,
+            content_revision: 0,
         };
         assert_eq!(
             offline.relativized(Some(Path::new("/other"))).path,
@@ -1002,6 +1086,7 @@ mod tests {
             },
             exposed_owner: None,
             resolved: Some(PathBuf::from("/proj/footage/clip.mov")),
+            content_revision: 0,
         };
         let text = ron::to_string(&entry).unwrap();
         let back: MediaAssetEntry = ron::from_str(&text).unwrap();

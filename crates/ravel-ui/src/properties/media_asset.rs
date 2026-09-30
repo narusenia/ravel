@@ -293,6 +293,7 @@ mod tests {
             color_space: None,
             exposed_owner: None,
             resolved: resolved.map(PathBuf::from),
+            content_revision: 0,
         }
     }
 

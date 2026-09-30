@@ -60,7 +60,10 @@ geometry 自体は永続化されない（`ravel-project` に geometry の直列
   合成する。描画・バウンズ・展開・ピースが同じ変換を使う
 - `rot` / `scale` の意味と、それを書く既存ノード（`scatter`、`text.layout`、
   `text.on_path`、`field.apply` 経由の変調）はそのまま
-- せん断が生じない合成は、今と同じ `rot` / `scale` を返す
+- **今の式が厳密な合成**（外側のスケールが一様、または内側の回転が 0、かつ両側の
+  `shear` が 0）は、今と同じ `rot` / `scale` を返す。今の式が近似だった合成は
+  結果の `rot` / `scale` 自体が変わる（例: 外側 `(2, 1)`・内側 90° の厳密な積は
+  `rot = 90°`、`scale = (1, 2)` で、今の `(2, 1)` ではない）。それが直す対象
 
 ## 目標アーキテクチャ
 
@@ -90,12 +93,15 @@ L = R(rot) · S(scale) · H(shear)
   `R S H` をそのまま掛ける
 - `compose(outer, inner)` は線形部分を 2×2 の積で求め、**1 つの分解関数**で
   `rot` / `scale` / `shear` に戻す。分解の規約:
-  - せん断が生じない合成（外側が一様、または内側の回転が 0、かつ両側の
+  - 今の式が厳密な合成（外側が一様、または内側の回転が 0、かつ両側の
     `shear` が 0）は**今の式と同じ値**を返す（許容 1e-6）。鏡映（負のスケール）の
     符号と `rot` の値域を今と変えないため、分解の符号は `outer.scale` と
     `inner.scale` の積の符号に合わせる
-  - `sx` が 0 に潰れた退化（行列式 0 を含む）は `shear = 0` とし、何も描かれない
-    ことを今と同じに保つ
+  - 特異な行列も**厳密に表す**。第 1 列が 0（`sx = 0`）なら `shear = 0`、
+    `rot` と `sy` は第 2 列から取る（`R(rot)·(0, sy)` が第 2 列になる向き）。
+    全体が 0 なら `scale = (0, 0)`。ランク 1 の配置は形を線に潰すだけで消さない
+    — 今の `expand_instances` と同じ。**消えるのは画像の標本化だけ**で、それは
+    分解ではなく描画側の行列式ガードが決める（Phase 2）
 - 逆変換（画像の標本化）は同じ行列の逆行列。ゼロスケールのガード
   （rasterize/mod.rs:797-803、:1455-1462）は**行列式のガード**になる
 - 流用: 2×3 の `ravel_core::composition::transform::Affine`
@@ -104,8 +110,8 @@ L = R(rot) · S(scale) · H(shear)
 
 ### 列の読み書きを 1 つにする
 
-instance ドメインから配置を読む箇所が 5 つある（ops.rs:1405、2305、2562、2721、
-rasterize/mod.rs:1036 / 1378）。`shear` を足すと 5 箇所に同じ読み取りが増えるので、
+instance ドメインから配置を読む箇所が 6 つある（ops.rs:1405、2305、2562、2721、
+rasterize/mod.rs:1036、1378）。`shear` を足すと 6 箇所に同じ読み取りが増えるので、
 `InstanceTransform` を列から組む関数を 1 つ置いて全部をそこへ寄せる。
 書き戻し（`placed()`、`geometry.transform`）も同様。`shear` 列は
 **値が 1 つでも非 0 か、列が既にある場合だけ書く**（全ジオメトリに 0 の列が
@@ -141,6 +147,10 @@ rasterize/mod.rs:1036 / 1378）。`shear` を足すと 5 箇所に同じ読み�
   （`reserved_names_keep_their_spelling`）、`is_placement_attribute` への追加
 - ops.rs の 4 つの読み取りを列から組む関数へ寄せ、`placed()` が `shear` を書く
 - doc の「展開と描画は同じ絵」「組み込みは作らない」を事実に合わせる
+- **workspace をビルドできる状態で閉じる。** `InstanceTransform` の構造体
+  リテラルを持つ下流（`crates/ravel-nodes/src/geometry.rs:164-168`、
+  `rasterize/mod.rs:178-182`）には `shear: 0.0` だけを足す。挙動の変更は
+  `IXF-2` / `IXF-3` に残す
 
 ### 完了条件
 
@@ -148,8 +158,8 @@ rasterize/mod.rs:1036 / 1378）。`shear` を足すと 5 箇所に同じ読み�
   `compose(outer, inner).apply(p) == outer.apply(inner.apply(p))`
 - ランダムな `rot` / `scale` / `shear` の組（鏡映を含む）で、`compose` 後の
   `apply` が 2 回の `apply` と一致する（許容 1e-5）
-- せん断が生じない組で `compose` が今の式と同じ `rot` / `scale` を返し、
-  `shear == 0`
+- 今の式が厳密な組で `compose` が今と同じ `rot` / `scale` を返し、`shear == 0`
+- 特異な行列（`sx = 0`、全体 0）の分解が `apply` を保つ
 - **近似を固定しているテストを厳密値へ書き換える**:
   `nesting_is_bounded_the_way_the_placements_compose`（ops.rs:3331、コメントに
   「厳密なら正方形」とある）

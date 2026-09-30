@@ -4308,6 +4308,7 @@ mod tests {
                 color_space: None,
                 exposed_owner: None,
                 resolved: None,
+                content_revision: 0,
             },
         );
         assert_eq!(doc.validate(), Err(DocumentValidationError::UnsetAssetKey));

@@ -1042,6 +1042,7 @@ fn offline_media_layer_composes_transparent_and_other_layers_continue() {
                 // Never resolved: the project has no root for this file.
                 exposed_owner: None,
                 resolved: None,
+                content_revision: 0,
             },
         );
 

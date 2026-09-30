@@ -617,6 +617,7 @@ fn inspect(
                     // thing `apply` reads to find it again.
                     exposed_owner: Some(declaration.name().to_string()),
                     resolved: Some(resolved.to_path_buf()),
+                    content_revision: 0,
                 }),
             },
             unapplied: None,

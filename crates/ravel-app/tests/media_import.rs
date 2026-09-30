@@ -754,6 +754,7 @@ fn offline_asset(project: &gpui::Entity<ProjectState>, cx: &mut TestAppContext) 
                 // orphan every reference to this one.
                 exposed_owner: Some("hero".into()),
                 resolved: None,
+                content_revision: 0,
             },
         );
         project.commit_document(doc, ravel_core::runtime::InvalidationHint::Structural, cx);

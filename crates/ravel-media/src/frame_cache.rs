@@ -19,7 +19,7 @@
 //! # What the key says the value depends on
 //!
 //! ```text
-//! (resolved path, input colour space, stream index, frame number)
+//! (resolved path, input colour space, stream index, frame number, content revision)
 //! ```
 //!
 //! - **Path**, because that is the identity of the footage. A relinked asset
@@ -37,11 +37,14 @@
 //! - **Frame number**, the position within the stream. Stills and image
 //!   sequence frames are single-frame files, so they use frame `0` of stream
 //!   `0` and the path alone separates them.
+//! - **Content revision**, the session-only counter on the asset entry
+//!   (`MediaAssetEntry::content_revision`). A file overwritten in place keeps
+//!   every other component, so the host advances the counter when it learns
+//!   the content changed and the old entries stop matching.
 //!
 //! The file's modification time is deliberately **not** in the key. Reading
-//! it means a `stat` on the decode path for every frame, and the caches this
-//! one replaces did not do it either: a file overwritten in place while the
-//! project is open keeps serving the frames already decoded from it.
+//! it means a `stat` on the decode path for every frame; the revision is
+//! read from the document instead, at no I/O cost.
 //!
 //! # Budget
 //!
@@ -92,23 +95,34 @@ pub struct FrameKey {
     pub stream_index: usize,
     /// The frame's position in that stream.
     pub frame: u64,
+    /// Which content the file held (`MediaAssetEntry::content_revision`).
+    /// Overwriting a file in place keeps its path, colour space and frame
+    /// number, so without this a stale decode would keep answering.
+    pub revision: u64,
 }
 
 impl FrameKey {
     /// A frame decoded out of a container stream.
-    pub fn video(path: &Path, color_space: ColorSpace, stream_index: usize, frame: u64) -> Self {
+    pub fn video(
+        path: &Path,
+        color_space: ColorSpace,
+        stream_index: usize,
+        frame: u64,
+        revision: u64,
+    ) -> Self {
         Self {
             path: path.to_path_buf(),
             color_space,
             stream_index,
             frame,
+            revision,
         }
     }
 
     /// A single-image file — a still, or one frame of an image sequence.
     /// The file holds one picture, so the path carries the position.
-    pub fn image(path: &Path, color_space: ColorSpace) -> Self {
-        Self::video(path, color_space, 0, 0)
+    pub fn image(path: &Path, color_space: ColorSpace, revision: u64) -> Self {
+        Self::video(path, color_space, 0, 0, revision)
     }
 }
 
@@ -296,7 +310,7 @@ mod tests {
     }
 
     fn key(path: &str, frame: u64) -> FrameKey {
-        FrameKey::video(Path::new(path), ColorSpace::SRGB, 0, frame)
+        FrameKey::video(Path::new(path), ColorSpace::SRGB, 0, frame, 0)
     }
 
     #[test]
@@ -326,7 +340,8 @@ mod tests {
                     Path::new("/clip.mov"),
                     ColorSpace::SRGB,
                     1,
-                    7
+                    7,
+                    0
                 ))
                 .is_none(),
             "stream index"
@@ -337,10 +352,23 @@ mod tests {
                     Path::new("/clip.mov"),
                     ColorSpace::LINEAR_REC709,
                     0,
-                    7
+                    7,
+                    0
                 ))
                 .is_none(),
             "input colour space"
+        );
+        assert!(
+            cache
+                .get(&FrameKey::video(
+                    Path::new("/clip.mov"),
+                    ColorSpace::SRGB,
+                    0,
+                    7,
+                    1
+                ))
+                .is_none(),
+            "content revision"
         );
         assert!(cache.get(&base).is_some(), "the original entry survived");
     }

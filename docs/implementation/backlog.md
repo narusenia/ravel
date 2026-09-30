@@ -50,7 +50,7 @@
 | OPS-6 | `geometry.group_index`（index で要素指定） | `geometry-ops-plan.md` |
 | OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
 | OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
-| INFO-5 | 殻バインドを含む循環検出（`INFO-2` ✅） | `scene-info-nodes-plan.md` |
+| INFO-6 | レジストリ / ロケール / 文書（`INFO-2`〜`INFO-5` ✅ で依存が解けた） | `scene-info-nodes-plan.md` |
 | FX-3b | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | `effects-library-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
@@ -472,8 +472,8 @@ Vec は `Channel2` / `Channel3` の 1 パラメータになったので、
 | INFO-2 | ✅ #560 | `layer.info`（殻を読むだけで対象ネットワークは評価しない。候補ポートは `with_output_options` で宣言） | INFO-1 ✅, NETIF-2 ✅ |
 | INFO-3 | ✅ #562 | `comp.info`（他コンプも指せる。走査がリーダーの `comp` を解決する） | INFO-1 ✅ |
 | INFO-4 | ✅ #564 | 情報ノードのポート選択 UI（候補チェックリスト。分岐は `output_options` が空かどうかで、`type_key` の match は無い） | INFO-2 ✅, NETIF-3 ✅ |
-| INFO-5 | 🟡 | 殻バインドを含む循環検出 | INFO-2 ✅ |
-| INFO-6 | ⬜ | レジストリ / ロケール / 文書 | INFO-2〜5 |
+| INFO-5 | ✅ #566 | 殻バインドを含む循環検出（検出は exact / inexact を問わず報告、ロード時の修復は exact な循環のみ） | INFO-2 ✅ |
+| INFO-6 | 🟡 | レジストリ / ロケール / 文書 | INFO-2〜5 ✅ |
 
 殻の transform / 時間配置編集は `INFO-1`（#558）まで `InvalidationHint::None`
 （`panels/properties.rs:839-842`）。情報ノードは殻フィールドをグラフの入力に

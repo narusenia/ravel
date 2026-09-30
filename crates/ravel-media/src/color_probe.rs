@@ -155,6 +155,8 @@ fn probe_png(path: &Path) -> (Option<Primaries>, Option<Transfer>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufWriter;
+
     use png::{ScaledFloat, SourceChromaticities, SrgbRenderingIntent};
 
     fn write_png(path: &Path, configure: impl FnOnce(&mut png::Encoder<'_, BufWriter<File>>)) {
@@ -167,8 +169,6 @@ mod tests {
             .write_image_data(&[0, 0, 0])
             .unwrap();
     }
-
-    use std::io::BufWriter;
 
     fn png_probe(
         configure: impl FnOnce(&mut png::Encoder<'_, BufWriter<File>>),

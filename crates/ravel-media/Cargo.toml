@@ -16,6 +16,8 @@ ravel-core = { workspace = true }
 # image sequences are the output path that must work in every build
 # (`docs/implementation/render-export-plan.md`, "v1 の出力形式").
 image = { workspace = true }
+exr = { workspace = true }
+png = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

@@ -476,6 +476,8 @@ struct MediaAssetEntry {
                                   // `#[serde(default)]` で追加、format は上げない）
     #[serde(skip)]
     resolved: Option<PathBuf>,    // 実行時のみ。app が注入。None = オフライン
+    #[serde(skip)]
+    content_revision: u64,        // 実行時のみ。同じパスの中身が変わったら進める（0 から）
 }
 
 enum AssetPath {
@@ -527,7 +529,9 @@ format v3 の `MediaAssetEntry { path: PathBuf }`（常に絶対）がそのま�
 **責務の分離**:
 
 - 永続化されるのは `name` / `path` / `kind` / `metadata` / `color_space` /
-  `exposed_owner`。`resolved` は保存しない。
+  `exposed_owner`。`resolved` と `content_revision` は保存しない。
+  `content_revision` は等価比較に含まれ、メディアのフレームキャッシュのキーと
+  開いているリーダーの照合にも入る。進めると Document の diff がキャッシュを捨てる。
 - **表示名は編集できる。** インポートは `AssetId::next()` で ID を採り、
   `name` にはファイルステムを入れる（同名は画面上だけ `" 2"` を付ける）。
   MediaBin の行から改名でき（1 ジェスチャ = 1 undo）、素材から作るレイヤーの

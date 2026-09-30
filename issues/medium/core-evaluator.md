@@ -116,33 +116,3 @@ match から導く）。
 low でないのは、`docs/dev/add-node.md` 自身が警告している穴が
 **ノードを足すたびに踏まれる可能性を持ち続ける**ため。2026-09-03 の
 `MOD-3` / `MOD-4` / `OPS-2` の実装で**3 回独立に指摘された**。
-
-## MED-CORE-12 | bug | ドメインパラメータの選択肢を宣言していないノードがあり、タイポが既定値に黙って吸われる
-
-> 起票時は `MED-CORE-10` を名乗っていたが、その番号は
-> [closed/medium-core-evaluator.md](../closed/medium-core-evaluator.md) の
-> 「閉集合の文字列パラメータが dropdown でない」（解決済み）が既に使っている。
-> **同じ監査の取りこぼし分**なので内容は続きだが、ID は別に取り直した（2026-09-28）。
-
-**該当**: `crates/ravel-core/src/registry/builtin.rs`（`attribute.promote` の
-`source_domain` / `target_domain`、`attribute.curveu`）
-
-`attribute.set` / `attribute.transfer` / `attribute.delete` は
-`with_param_options(ATTRIBUTE_DOMAINS)` を宣言しているので、Properties は
-選択肢から選ぶ UI になる。**`attribute.promote` の 2 つのドメイン
-パラメータと `attribute.curveu` は宣言していない**ので自由入力になり、
-綴りを間違えると `domain_param` の警告 + 既定フォールバックで
-**黙って別のドメインに書き込む**。
-
-既存テスト（`closed_attribute_parameter_options_match_the_processor_contracts`）
-は `promote` の `aggregate` しか見ていないので、この抜けを捕まえない。
-
-**実害**: 小さいが黙っている。プロジェクトを保存すると誤ったドメイン名が
-そのまま残り、開き直しても同じ既定に吸われ続ける。
-
-**修正方針**: 3 パラメータに `with_param_options` を足し、既存テストの
-走査対象を「ドメインを取る全パラメータ」に広げる。
-
-**severity の根拠**: bug（誤った入力が無言で別の意味になる）。low でないのは
-永続化された値が黙って別解釈されるため、high でないのは誤りが 1 ノードに
-閉じ、データが壊れないため。

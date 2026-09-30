@@ -1442,7 +1442,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 |---|---|
 | スカラ → 全成分同値の Vec | broadcast。`VEC-6`（`constant.vec2/3/4`）の隣 |
 | Vec の全軸同時操作 | Shift 押下で全成分を一緒に動かす。`MED-APP-20`（成分ラベルとリンクトグル）と同じ範囲 |
-| `field.apply` の domain / target 補完 | 自由文字列なので候補を出す。`MED-APP-29` の Select 化と同型 |
+| `field.apply` の target 補完 | 自由文字列なので候補を出す（domain は `MED-CORE-12` で選択肢を宣言済み）。`MED-APP-29` の Select 化と同型 |
 | Noise フィールドの evolution / flow | 時間で連続変化させるシード軸 |
 | ベジエ Ellipse と Arc | 内半径を持つ Arc（ドーナツ）を含む |
 

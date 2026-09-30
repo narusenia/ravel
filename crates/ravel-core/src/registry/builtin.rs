@@ -652,7 +652,9 @@ fn attribute_promote() -> NodeTemplate {
     .with_input(geometry_input("geometry"))
     .with_output(geometry_output())
     .with_param(string_parameter("source_domain", "point"))
+    .with_param_options("source_domain", ATTRIBUTE_DOMAINS)
     .with_param(string_parameter("target_domain", "detail"))
+    .with_param_options("target_domain", ATTRIBUTE_DOMAINS)
     .with_param(string_parameter("name", "value"))
     .with_param(string_parameter("aggregate", "average"))
     .with_param_options("aggregate", ATTRIBUTE_AGGREGATES)
@@ -927,6 +929,11 @@ fn field_constant() -> NodeTemplate {
         .with_param_range("value", -1e9..=1e9, -10.0..=10.0)
 }
 
+/// Domains `field.apply` samples. `primitive` is absent on purpose: the
+/// processor maps anything but `instance` / `detail` to `point`, so offering
+/// it would write to points.
+pub const FIELD_APPLY_DOMAINS: [&str; 3] = ["point", "instance", "detail"];
+
 /// How `field.apply` combines a sampled value with the existing one.
 /// Mirrors [`crate::geometry::CombineMode`].
 pub const FIELD_COMBINE_MODES: [&str; 5] = ["set", "add", "multiply", "min", "max"];
@@ -937,6 +944,7 @@ fn field_apply() -> NodeTemplate {
         .with_input(field_input("field"))
         .with_output(geometry_output())
         .with_param(string_parameter("domain", "point"))
+        .with_param_options("domain", FIELD_APPLY_DOMAINS)
         .with_param(string_parameter("target", "value"))
         .with_param(float_parameter("amount", 1.0))
         .with_param_range("amount", -10.0..=10.0, 0.0..=1.0)
@@ -2928,6 +2936,23 @@ mod tests {
                 "attribute.transfer.{key}"
             );
         }
+        // Every parameter that takes a domain declares its option set, so a
+        // new node cannot reintroduce a free-text domain.
+        let mut seen = 0;
+        for template in reg.all_templates() {
+            let type_key = &template.type_key;
+            for parameter in &template.default_params {
+                if parameter.key == "domain" || parameter.key.ends_with("_domain") {
+                    seen += 1;
+                    assert!(
+                        reg.param_options(type_key, &parameter.key).is_some(),
+                        "{type_key}.{} has no declared options",
+                        parameter.key
+                    );
+                }
+            }
+        }
+        assert!(seen >= 10, "found only {seen} domain parameters");
         assert_eq!(
             reg.param_options("attribute.promote", "aggregate").unwrap(),
             ATTRIBUTE_AGGREGATES

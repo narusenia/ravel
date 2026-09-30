@@ -92,33 +92,6 @@ authoritative なレジストリは `ProjectState` が所有している（Viewe
 
 ---
 
-## MED-APP-37 | bug | 評価結果が「届いた時点のコンポジション」と対で扱われ、切替中の結果が別コンプの寸法で解釈される
-
-**該当**: `crates/ravel-app/src/project_state.rs:2160-2178`（`ViewerOutput::Frame` /
-`ViewerOutput::Gpu` の組み立て）
-
-届いた評価結果に `composition_resolution` を付けるとき、**その結果がどのコンプの
-ものかではなく「今アクティブなコンプ」**を読んでいる。コンプ A の評価が飛んでいる
-最中に B へ切り替えると、A の絵が **B の解像度**で解釈される。
-
-- 症状 1（従来から）: オーバーレイのコンプ座標変換がずれる。bbox やマニピュレータが
-  絵と合わない
-- 症状 2（`INSP-3` で増えた）: ピクセル読み取りが**別の画素の値**を報告する
-  （`comp_to_buffer_index` がコンプ寸法とバッファ寸法の比を使うため）
-
-`ViewerUpdate` は自分がどのコンプを評価したかを持たないので、**受け取り側では
-判定できない**のが根本。`load_project_from` の `load_request` / `revision` ガードと
-同じ形（要求時の識別子を結果に添えて、届いたときに突き合わせる）が要る。
-
-→ `ViewerUpdate`（`ravel-core` の `ViewerResult`）に評価したコンプ id を載せ、
-アクティブなコンプと一致しない結果は捨てる。捨てるだけで良いのは、切替時には
-必ず新しい要求が出ているため。
-
-**検証**: 遅い結果を A のまま作り、B へ切り替えてから配達して、
-`ViewerFrame` が更新されない（または A の寸法で解釈される）ことを落とすテスト。
-
----
-
 ## MED-APP-39 | bug | プレビュー解像度を切り替えても、キャッシュ帯が前の係数のまま残ることがある
 
 **該当**: `crates/ravel-app/src/project_state.rs:2229-2252`（`publish_cache_band`）、

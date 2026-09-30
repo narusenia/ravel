@@ -393,6 +393,14 @@ pub struct ProjectState {
     /// always move the display forward; direct blanks (empty composition,
     /// compile error) advance this to the post-`cancel_pending` generation
     /// so an in-flight older result cannot overwrite them.
+    ///
+    /// A change that makes an in-flight result *wrong* to show (the active
+    /// composition, the display channel, the pixel readout) fences here too,
+    /// through [`Self::fence_in_flight_results`]: the result is interpreted
+    /// with the state at arrival, so one requested under the old state must
+    /// never publish. A change that only costs *precision* (the preview
+    /// resolution) does not fence: a slightly coarse frame is still right, and
+    /// dropping it would only leave the old picture up longer.
     published_generation: u64,
     /// `SharedFrameCache::version()` the Timeline's cache band was last
     /// computed at, so an evaluation that changed nothing skips the walk.
@@ -1177,8 +1185,24 @@ impl ProjectState {
         // matter.
         self.structure_epoch += 1;
         crate::audio::sync_from_document(self.store.document(), cx);
+        // A result of the previous composition would be read with this one's
+        // resolution: overlays drift and the readout indexes the wrong pixel.
+        self.fence_in_flight_results();
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
+    }
+
+    /// Outdate every evaluation requested so far, without posting one.
+    ///
+    /// Call this **before** the re-request that follows a change which makes
+    /// in-flight results wrong to show: generations are monotonic in request
+    /// order, so everything at or below the current latest was requested under
+    /// the old state, and the request that follows lands above the fence.
+    /// `max` keeps a direct blank's fence from ever moving backwards.
+    fn fence_in_flight_results(&mut self) {
+        if let Some(eval) = self.eval.as_ref() {
+            self.published_generation = self.published_generation.max(eval.latest_generation());
+        }
     }
 
     // ----- document edits ----------------------------------------------------
@@ -1675,6 +1699,8 @@ impl ProjectState {
             cx.set_global(NodeEvalTimings::default());
         }
         crate::audio::sync_from_document(self.store.document(), cx);
+        // A result of the previous project must not be shown against this one.
+        self.fence_in_flight_results();
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
     }
@@ -2190,6 +2216,8 @@ impl ProjectState {
         if let Some(eval) = self.eval.as_ref() {
             eval.frame_cache().clear();
         }
+        // A result already in flight was finished under the old setting.
+        self.fence_in_flight_results();
         self.request_viewer_eval(InvalidationHint::None, cx);
         cx.notify();
     }
@@ -2220,6 +2248,8 @@ impl ProjectState {
         if let Some(eval) = self.eval.as_ref() {
             eval.frame_cache().clear();
         }
+        // A result already in flight was finished under the old setting.
+        self.fence_in_flight_results();
         self.request_viewer_eval(InvalidationHint::None, cx);
         cx.notify();
     }
@@ -7537,6 +7567,150 @@ mod tests {
                 cx.global::<EvalResults>().values.is_empty(),
                 "the blank path kept the results of the composition before it"
             );
+        });
+    }
+
+    /// A change that makes an in-flight result wrong to show fences the
+    /// display: a result requested before the switch is dropped whatever it
+    /// carries, and the first one requested after it is published.
+    fn assert_switch_fences_stale_results(
+        cx: &mut TestAppContext,
+        switch: impl FnOnce(&mut ProjectState, &mut Context<ProjectState>),
+    ) {
+        use crate::panels::ViewerFrame;
+
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, _rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+        let scalar: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::types::Scalar(2.0));
+        // Frame size tells the updates apart; the overlay node tells whether
+        // the scoped results were installed.
+        let update = |generation, size| {
+            ViewerUpdate::from_eval(EvalUpdate {
+                generation,
+                frame: 0,
+                results: vec![(NodeId::new(1), Ok(blank_display_frame(size, size)))],
+                timings: Vec::new(),
+                // One overlay node per size, so a snapshot that changed hands
+                // shows up as a different key.
+                scoped: vec![scoped_result(
+                    NodeId::new(9000 + u64::from(size)),
+                    Ok(scalar.clone()),
+                )],
+            })
+        };
+        let shown = |cx: &mut TestAppContext| {
+            project.read_with(cx, |_, cx| {
+                let size = match cx.try_global::<ViewerFrame>() {
+                    Some(ViewerFrame::Frame { image, .. }) => image.width(),
+                    other => panic!("expected a frame, got {other:?}"),
+                };
+                let overlays = cx.try_global::<EvalResults>().map_or(Vec::new(), |r| {
+                    r.values.keys().map(|(_, node)| *node).collect()
+                });
+                (size, overlays)
+            })
+        };
+
+        // A second composition with a layer, so switching to it posts a
+        // request (an empty one would blank and fence on its own).
+        let second = project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, 0, tx));
+            let first = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), first, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            let second = CompId::next();
+            let composition = ravel_core::composition::Composition::new(
+                second,
+                "Second",
+                (64, 64),
+                FrameRate::new(30, 1),
+                30,
+            );
+            let document = project.document().clone().with_composition(composition);
+            let document =
+                ravel_ui::document::add_layer(&document, second, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            second
+        });
+        cx.update(|cx| crate::panels::set_active_composition_for_tests(Some(second), cx));
+        // Put a known frame on screen, then leave one request in flight above it.
+        let stale = project.update(cx, |project, cx| {
+            project.on_eval_update(update(1, 2), cx);
+            project.request_viewer_eval(InvalidationHint::None, cx);
+            let stale = project.eval.as_ref().unwrap().latest_generation();
+            assert!(
+                stale > 1,
+                "the in-flight request must be newer than the frame shown"
+            );
+            switch(project, cx);
+            stale
+        });
+        assert_eq!(shown(cx), (2, vec![NodeId::new(9002)]));
+
+        // The result of the request made under the old state: dropped.
+        project.update(cx, |project, cx| {
+            project.on_eval_update(update(stale, 8), cx)
+        });
+        assert_eq!(
+            shown(cx),
+            (2, vec![NodeId::new(9002)]),
+            "a pre-switch result was published"
+        );
+
+        // The request the switch itself made: published.
+        project.update(cx, |project, cx| {
+            let fresh = project.eval.as_ref().unwrap().latest_generation();
+            assert!(fresh > stale, "the switch posted no request");
+            project.on_eval_update(update(fresh, 16), cx);
+        });
+        assert_eq!(
+            shown(cx),
+            (16, vec![NodeId::new(9016)]),
+            "the post-switch result was not published"
+        );
+    }
+
+    #[gpui::test]
+    fn switching_the_composition_fences_in_flight_results(cx: &mut TestAppContext) {
+        // The fixture is viewing its second composition; switch back.
+        assert_switch_fences_stale_results(cx, |project, cx| {
+            let first = project.document().root_comp.unwrap();
+            project.set_active_composition(Some(first), cx);
+        });
+    }
+
+    #[gpui::test]
+    fn replacing_the_document_fences_in_flight_results(cx: &mut TestAppContext) {
+        assert_switch_fences_stale_results(cx, |project, cx| {
+            let document = default_document(FrameRate::new(30, 1));
+            let comp = document.root_comp.expect("root comp");
+            let document = ravel_ui::document::add_layer(&document, comp, content_layer()).unwrap();
+            project.replace_document(
+                document,
+                None,
+                &UiState::with_active_comp(Some(comp)),
+                SettingsLayer::default(),
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn switching_the_display_channel_fences_in_flight_results(cx: &mut TestAppContext) {
+        assert_switch_fences_stale_results(cx, |project, cx| {
+            project.set_display_channel(DisplayChannel::Alpha, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn switching_the_pixel_readout_fences_in_flight_results(cx: &mut TestAppContext) {
+        assert_switch_fences_stale_results(cx, |project, cx| {
+            project.set_pixel_readout(true, cx);
         });
     }
 

@@ -6,3 +6,4 @@
 pub mod cache;
 pub mod import;
 pub mod thumbnail;
+pub mod watch;

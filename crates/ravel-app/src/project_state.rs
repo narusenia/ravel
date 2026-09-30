@@ -1556,6 +1556,41 @@ impl ProjectState {
         self.document_changed(InvalidationHint::Structural, cx);
     }
 
+    /// The files behind some assets changed on disk: advance those assets'
+    /// content revision so nothing decoded from the old bytes is served again
+    /// (`MediaAssetEntry::content_revision`), and ask for the picture anew.
+    ///
+    /// Like [`Self::rebase_asset_references`] this is not an edit — no
+    /// `revision` bump, no undo step, the project does not become dirty: the
+    /// `.ravprj` on disk still describes the same references. The retained
+    /// versions are advanced too, so an undo cannot restore a revision whose
+    /// cache entries this call just made unreachable.
+    ///
+    /// The fence is the point of the ordering. Everything requested so far
+    /// read the old file, so it is wrong to show, not merely old
+    /// ([`Self::fence_in_flight_results`]); the request `document_changed`
+    /// posts lands above it. Audio and thumbnails are keyed by path, which did
+    /// not change, so they are dropped by asset instead.
+    ///
+    /// Returns whether any asset matched.
+    pub fn advance_changed_assets(
+        &mut self,
+        changed: &HashSet<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ids = crate::media::watch::changed_assets(self.store.document(), changed);
+        if ids.is_empty() {
+            return false;
+        }
+        tracing::info!(assets = ids.len(), "media files changed on disk");
+        self.store
+            .rederive(|document| crate::media::watch::advance_content_revisions(document, changed));
+        crate::audio::invalidate_assets(&ids, cx);
+        self.fence_in_flight_results();
+        self.document_changed(InvalidationHint::Structural, cx);
+        true
+    }
+
     /// Load a `.ravprj` from `path`, replacing the current document (File ▸
     /// Open). The file read runs on the background executor; loading is not
     /// an undo step (the store and its history are replaced wholesale).
@@ -7951,6 +7986,133 @@ mod tests {
         assert_switch_fences_stale_results(cx, |project, cx| {
             project.set_display_channel(DisplayChannel::Alpha, cx);
         });
+    }
+
+    /// The asset a change to `MOVIE` touches; `content_layer` alone has none.
+    const MOVIE: &str = "/ravel/tests/overwritten.mov";
+
+    fn add_movie_asset(project: &mut ProjectState, cx: &mut Context<ProjectState>) -> AssetId {
+        let id = AssetId::next();
+        let document = project
+            .document()
+            .clone()
+            .with_media_asset_entry(id, MediaAssetEntry::from_absolute(MOVIE));
+        project.commit_document(document, InvalidationHint::Structural, cx);
+        id
+    }
+
+    /// A result requested before the file changed read the old bytes, so it
+    /// is dropped whatever it carries; the request the change made is shown.
+    /// Breaks on: removing `fence_in_flight_results` from
+    /// `advance_changed_assets`.
+    #[gpui::test]
+    fn an_overwritten_file_fences_in_flight_results(cx: &mut TestAppContext) {
+        assert_switch_fences_stale_results(cx, |project, cx| {
+            add_movie_asset(project, cx);
+            let changed = HashSet::from([PathBuf::from(MOVIE)]);
+            assert!(project.advance_changed_assets(&changed, cx));
+        });
+    }
+
+    /// The audio cache is keyed by path, which an overwrite keeps, so the
+    /// project has to tell the audio service. Breaks on: removing the
+    /// `audio::invalidate_assets` call in `advance_changed_assets`.
+    #[gpui::test]
+    fn an_overwritten_file_drops_the_assets_decoded_audio(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let audio = cx.new(|_| crate::audio::AudioService::with_sink(None, 48_000));
+        cx.update(|cx| cx.set_global(crate::audio::AudioServiceHandle(audio.downgrade())));
+        let id = project.update(cx, add_movie_asset);
+        audio.update(cx, |audio, _| {
+            audio.cache_decoded(
+                ravel_audio::mixdown::CacheKey {
+                    asset_id: id,
+                    stream_index: 1,
+                    resolved: Some(Arc::from(Path::new(MOVIE))),
+                },
+                ravel_audio::mixdown::DecodedAudio {
+                    samples: vec![0.0; 8].into(),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+            );
+            assert!(audio.holds_decode_state(id));
+        });
+
+        project.update(cx, |project, cx| {
+            let changed = HashSet::from([PathBuf::from(MOVIE)]);
+            assert!(project.advance_changed_assets(&changed, cx));
+        });
+
+        assert!(!audio.read_with(cx, |audio, _| audio.holds_decode_state(id)));
+    }
+
+    /// The change is not an edit: no undo step, no dirty flag, and the
+    /// retained versions carry the new revision — while a viewer request goes
+    /// out, since the picture is wrong now.
+    #[gpui::test]
+    fn an_overwritten_file_is_not_an_edit_but_requests_the_picture(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, _rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+        let revision_of = |project: &ProjectState, id| {
+            project
+                .document()
+                .get_media_asset(id)
+                .expect("asset")
+                .content_revision
+        };
+        let (id, before) = project.update(cx, |project, cx| {
+            project.eval = Some(spawn_viewer_eval_service(FrameHooks, budget, 0, tx));
+            let comp = project.document().root_comp.expect("root comp");
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            let id = add_movie_asset(project, cx);
+            project.saved_revision = project.revision;
+            (id, project.eval.as_ref().unwrap().latest_generation())
+        });
+        assert!(!project.read_with(cx, |project, _| project.is_dirty()));
+
+        // An unrelated path touches nothing and asks for nothing.
+        project.update(cx, |project, cx| {
+            let elsewhere = HashSet::from([PathBuf::from("/ravel/tests/other.mov")]);
+            assert!(!project.advance_changed_assets(&elsewhere, cx));
+        });
+        assert_eq!(
+            project.read_with(cx, |project, _| revision_of(project, id)),
+            0
+        );
+
+        project.update(cx, |project, cx| {
+            let changed = HashSet::from([PathBuf::from(MOVIE)]);
+            assert!(project.advance_changed_assets(&changed, cx));
+        });
+        project.read_with(cx, |project, _| {
+            assert_eq!(revision_of(project, id), 1);
+            assert!(!project.is_dirty(), "the project file did not change");
+            assert!(
+                project.eval.as_ref().unwrap().latest_generation() > before,
+                "no request went out for the new content"
+            );
+        });
+
+        // One undo undoes the import, not the overwrite; the overwrite is
+        // carried into the version it lands on and into redo.
+        project.update(cx, |project, cx| {
+            assert!(project.undo(cx));
+            assert!(project.document().get_media_asset(id).is_none());
+            assert!(project.redo(cx));
+        });
+        assert_eq!(
+            project.read_with(cx, |project, _| revision_of(project, id)),
+            1,
+            "redo restored a revision older than the file on disk"
+        );
     }
 
     #[gpui::test]

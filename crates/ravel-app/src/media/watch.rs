@@ -90,6 +90,10 @@ pub struct AssetWatch {
     /// The map `watched` was derived from; a document edit that shares it
     /// (every layer edit) skips the walk.
     last_assets: Option<MediaAssets>,
+    /// The watcher being built off the UI thread. Replacing it drops (and so
+    /// cancels) a setup a newer retarget has superseded, so a stale watcher is
+    /// never installed.
+    setup: Option<Task<()>>,
     _observe: Subscription,
     _drain: Task<()>,
 }
@@ -99,7 +103,7 @@ impl AssetWatch {
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<PathBuf>();
         let observe = cx.observe(project, |this, project, cx| {
             let document = project.read(cx).document().clone();
-            this.retarget(&document);
+            this.retarget(&document, cx);
         });
         let project_entity = project.clone();
         let project = project.downgrade();
@@ -127,17 +131,22 @@ impl AssetWatch {
             watcher: None,
             watched: BTreeSet::new(),
             last_assets: None,
+            setup: None,
             _observe: observe,
             _drain: drain,
         };
         // A project that already holds assets when the watch is built.
         let document = project_entity.read(cx).document().clone();
-        watch.retarget(&document);
+        watch.retarget(&document, cx);
         watch
     }
 
     /// Point the watcher at the directories `document` reads from.
-    fn retarget(&mut self, document: &Document) {
+    ///
+    /// Resolving the directories (`canonicalize` can block on an offline
+    /// volume) and registering them with the OS run on the background
+    /// executor; the finished watcher is installed here.
+    fn retarget(&mut self, document: &Document, cx: &mut Context<Self>) {
         if self
             .last_assets
             .as_ref()
@@ -152,8 +161,15 @@ impl AssetWatch {
         }
         // A watch that failed (the directory is gone) is not retried until
         // the set of directories moves again; the asset is offline anyway.
-        self.watcher = start_watcher(&dirs, self.tx.clone());
-        self.watched = dirs;
+        self.watched = dirs.clone();
+        let tx = self.tx.clone();
+        let build = cx
+            .background_executor()
+            .spawn(async move { start_watcher(&dirs, tx) });
+        self.setup = Some(cx.spawn(async move |this, cx| {
+            let watcher = build.await;
+            let _ = this.update(cx, |this, _| this.watcher = watcher);
+        }));
     }
 }
 

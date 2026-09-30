@@ -265,7 +265,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 | クラスタ | 内容 |
 |---|---|
 | 結果と前提の対応付け | `MED-APP-37`（評価結果が届いた時点のコンプと対で扱われ、切替中の結果を別コンプの寸法で解釈する）、`MED-APP-38`（表示設定の切り替えが「飛んでいる評価」を締め出さず、古い設定のフレームがキャッシュに戻る）、`MED-APP-39`（プレビュー解像度を切り替えてもキャッシュ帯が前の係数のまま残る）、`MED-MED-08`（共有デコードキャッシュのキーに素材の版が無く、同一パスの上書き後も古いフレームを返し続ける） |
-| 出力そのものの誤り | `MED-GPU-09`（`Placement::compose` が非一様スケールと回転の合成で誤った変換を作る）、~~`MED-CORE-12`~~（✅ `attribute.promote` と `field.apply` のドメインに選択肢を宣言。個票は `issues/closed/medium-core-evaluator.md`）、`MED-MED-09`（EXR の `chromaticities` と PNG の `iCCP` / `gAMA` を読まず、素材が自分で告げている色空間を拡張子既定で上書きする） |
+| 出力そのものの誤り | `MED-GPU-09`（`Placement::compose` が非一様スケールと回転の合成で誤った変換を作る）、~~`MED-CORE-12`~~（✅ `attribute.promote` と `field.apply` のドメインに選択肢を宣言。個票は `issues/closed/medium-core-evaluator.md`）、~~`MED-MED-09`~~（✅ EXR / PNG のヘッダの色宣言を読むようにした。個票は `issues/closed/medium-media-audio.md`） |
 | 消える | `MED-MED-06`（連番の最終配置が置換なので、レンダーワーカーの上書き拒否を競合で迂回できる） |
 
 **基準 0 に該当するので、本来は A 系と同じ高さにある。** ここに独立した

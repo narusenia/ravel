@@ -506,7 +506,7 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 | PROV-2 | 🟡 | キャッシュ帯の鍵を `(frame cache version, comp, 要求文脈)` にする。`VRES-4` の降格解除とコンプ切替も塞ぐ（`MED-APP-39`） | — |
 | PROV-3 | 🟡 | `SharedFrameCache` の insert epoch。ワーカーが取り出し時の ticket で insert し、`clear` / `invalidate_comp` 後の古い insert を捨てる（`MED-APP-38`） | — |
 | PROV-4 | 🟡 | `MediaAssetEntry::content_revision`（セッション限り）を `FrameKey` と `OpenReader` に反映（ヘッドレス） | — |
-| PROV-5 | ⬜ | 素材パスの `notify` 監視 → `rederive` で版を進める（undo 段なし・dirty にしない）（`MED-MED-08`） | PROV-4 |
+| PROV-5 | ⬜ | 素材パスの `notify` 監視 → `rederive` で版を進める（undo 段なし・dirty にしない）。音声デコードキャッシュとサムネイルも捨てる（`MED-MED-08`） | PROV-4 |
 | PROV-6 | ⬜ | 「受け入れ地点で前提を照合する」規則を `architecture.md` へ、計画を `done/` へ | PROV-1〜5 |
 
 4 件は別々の場所にあるが欠陥は 1 つ（結果にもキャッシュ行にも「どの前提で作ったか」が無い）。規則は 1 つ、識別子は受け入れ地点ごと（単一 epoch にしない理由は計画書）。`PROV-5` の検知はファイル監視、素材の変更でキャッシュを全部捨てるのは許容（2026-09-30 決定）。

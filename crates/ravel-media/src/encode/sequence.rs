@@ -333,17 +333,21 @@ impl Encoder for ImageSequenceEncoder {
             .map_err(|e| MediaError::EncodeError(format!("write {}: {e}", guard.display())))?;
         drop(file);
 
-        place_frame(guard.path(), &final_path, self.overwrite).map_err(|e| {
+        let linked = place_frame(guard.path(), &final_path, self.overwrite).map_err(|e| {
             MediaError::EncodeError(format!(
                 "move {} into place at {}: {e}",
                 guard.display(),
                 final_path.display()
             ))
         })?;
-        // The temporary no longer exists under that name (or, after a link,
-        // is removed here); re-deleting it later could only catch a file
-        // somebody else has since created.
-        guard.disarm_and_remove();
+        if linked {
+            // A link leaves the temporary name behind; it is still ours.
+            guard.remove();
+        } else {
+            // The rename consumed the temporary name; deleting it now could
+            // only catch a file somebody else has since created.
+            guard.disarm();
+        }
 
         if !preexisting {
             self.written.push(final_path);
@@ -436,12 +440,18 @@ impl PartialFile {
         self.path.display()
     }
 
-    /// Give up ownership: the file has been placed. After a rename the name
-    /// is already gone and the removal is a harmless `NotFound`; after a hard
-    /// link the temporary name is still there and this is what removes it.
-    fn disarm_and_remove(mut self) {
-        let _ = std::fs::remove_file(&self.path);
+    /// Give up ownership: the file has been renamed into place.
+    fn disarm(mut self) {
         self.armed = false;
+    }
+
+    /// Remove the temporary name a hard link left behind. The frame is
+    /// already in place, so a failure is reported, not returned.
+    fn remove(mut self) {
+        self.armed = false;
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            tracing::warn!(path = %self.path.display(), "remove temporary frame: {e}");
+        }
     }
 }
 
@@ -478,17 +488,24 @@ fn link_failure_falls_back_to_rename(kind: std::io::ErrorKind) -> bool {
 /// ([`link_failure_falls_back_to_rename`]) the guarantee is only a fresh
 /// existence check right before the `rename`, which narrows the race but does
 /// not close it.
-fn place_frame(temp: &Path, final_path: &Path, overwrite: OverwritePolicy) -> std::io::Result<()> {
+///
+/// Returns whether the temporary name is still present (a link), so the
+/// caller removes it only then.
+fn place_frame(
+    temp: &Path,
+    final_path: &Path,
+    overwrite: OverwritePolicy,
+) -> std::io::Result<bool> {
     if overwrite == OverwritePolicy::Replace {
-        return std::fs::rename(temp, final_path);
+        return std::fs::rename(temp, final_path).map(|()| false);
     }
     match std::fs::hard_link(temp, final_path) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Err(e) if link_failure_falls_back_to_rename(e.kind()) => {
             if final_path.symlink_metadata().is_ok() {
                 return Err(std::io::ErrorKind::AlreadyExists.into());
             }
-            std::fs::rename(temp, final_path)
+            std::fs::rename(temp, final_path).map(|()| false)
         }
         Err(e) => Err(e),
     }

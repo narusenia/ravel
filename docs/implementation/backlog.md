@@ -30,8 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| PROV-2 | キャッシュ帯の鍵を入力一式にする（`MED-APP-39`） | `result-provenance-plan.md` |
-| PROV-5 | 素材の監視と版の更新、音声キャッシュとサムネイルの破棄（`MED-MED-08`） | `result-provenance-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -496,16 +494,16 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 8 ハンドルは**操作が未実装なのでカーソルを付けない** — フェーズ E で機能と
 同じ単位に入れる。
 
-### 結果の前提照合（フェーズ A6、`result-provenance-plan.md`）
+### 結果の前提照合（フェーズ A6、`done/result-provenance-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | PROV-1 | ✅ | #575 コンプ切替・表示チャンネル・ピクセル読み取り・プロジェクトを開くときに `published_generation` を fence（`MED-APP-37`） | — |
-| PROV-2 | 🟡 | キャッシュ帯の鍵を `(frame cache version, comp, 要求文脈)` にする。`VRES-4` の降格解除とコンプ切替も塞ぐ（`MED-APP-39`） | — |
+| PROV-2 | ✅ | #577 キャッシュ帯の鍵を `(frame cache version, comp, 要求文脈)` にする。`VRES-4` の降格解除とコンプ切替も塞ぐ（`MED-APP-39`） | — |
 | PROV-3 | ✅ | #573 `SharedFrameCache` の insert epoch。ワーカーが取り出し時の ticket で insert し、`clear` / `invalidate_comp` 後の古い insert を捨てる（`MED-APP-38`） | — |
 | PROV-4 | ✅ | #574 `MediaAssetEntry::content_revision`（セッション限り）を `FrameKey` と `OpenReader` に反映（ヘッドレス） | — |
-| PROV-5 | 🟡 | 素材パスの `notify` 監視 → `rederive` で版を進める（undo 段なし・dirty にしない）。音声デコードキャッシュとサムネイルも捨てる（`MED-MED-08`） | PROV-4 |
-| PROV-6 | ⬜ | 「受け入れ地点で前提を照合する」規則を `architecture.md` へ、計画を `done/` へ | PROV-1〜5 |
+| PROV-5 | ✅ | #578 素材パスの `notify` 監視 → `rederive` で版を進める（undo 段なし・dirty にしない）。音声デコードキャッシュとサムネイルも捨てる（`MED-MED-08`） | PROV-4 |
+| PROV-6 | ✅ | #579 「受け入れ地点で前提を照合する」規則を `architecture.md` へ、計画を `done/` へ | PROV-1〜5 |
 
 4 件は別々の場所にあるが欠陥は 1 つ（結果にもキャッシュ行にも「どの前提で作ったか」が無い）。規則は 1 つ、識別子は受け入れ地点ごと（単一 epoch にしない理由は計画書）。`PROV-5` の検知はファイル監視、素材の変更でキャッシュを全部捨てるのは許容（2026-09-30 決定）。
 

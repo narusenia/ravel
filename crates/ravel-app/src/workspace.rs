@@ -899,6 +899,9 @@ pub struct RavelWorkspace {
     audio: Entity<crate::audio::AudioService>,
     #[allow(dead_code)]
     audio_event_sub: Subscription,
+    /// Watches the files behind media assets; dropping it stops the watch.
+    #[allow(dead_code)]
+    asset_watch: Entity<crate::media::watch::AssetWatch>,
     /// Strong owner of the render queue; dropping the workspace on window
     /// close cancels what it was still working on (see
     /// [`crate::export::RenderService`]'s note on a discarded queue).
@@ -1438,6 +1441,7 @@ impl RavelWorkspace {
         // device; dropping the workspace (window close) shuts it down.
         let audio = cx.new(|_| crate::audio::AudioService::new());
         cx.set_global(crate::audio::AudioServiceHandle(audio.downgrade()));
+        let asset_watch = cx.new(|cx| crate::media::watch::AssetWatch::new(&project, cx));
         let audio_event_sub = cx.subscribe_in(
             &audio,
             window,
@@ -1530,6 +1534,7 @@ impl RavelWorkspace {
             project,
             audio,
             audio_event_sub,
+            asset_watch,
             render,
             render_event_sub,
             window_title,

@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-09-28
+最終更新: 2026-09-30
 
 ## 凡例
 
@@ -30,6 +30,10 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| PROV-1 | 前提を誤らせる変更で Viewer の publish を fence（`MED-APP-37`） | `result-provenance-plan.md` |
+| PROV-2 | キャッシュ帯の鍵を入力一式にする（`MED-APP-39`） | `result-provenance-plan.md` |
+| PROV-3 | フレームキャッシュの insert epoch（`MED-APP-38`） | `result-provenance-plan.md` |
+| PROV-4 | 素材の版と `FrameKey` / リーダーへの反映（ヘッドレス） | `result-provenance-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -493,6 +497,19 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 （`MED-APP-13` を悪化させない）。Hand / Zoom（`MED-APP-15`）と Viewer bbox の
 8 ハンドルは**操作が未実装なのでカーソルを付けない** — フェーズ E で機能と
 同じ単位に入れる。
+
+### 結果の前提照合（フェーズ A6、`result-provenance-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| PROV-1 | 🟡 | コンプ切替・表示チャンネル・ピクセル読み取りの切替で `published_generation` を fence（`MED-APP-37`） | — |
+| PROV-2 | 🟡 | キャッシュ帯の鍵を `(frame cache version, comp, 要求文脈)` にする。`VRES-4` の降格解除とコンプ切替も塞ぐ（`MED-APP-39`） | — |
+| PROV-3 | 🟡 | `SharedFrameCache` の insert epoch。ワーカーが取り出し時の ticket で insert し、`clear` / `invalidate_comp` 後の古い insert を捨てる（`MED-APP-38`） | — |
+| PROV-4 | 🟡 | `MediaAssetEntry::content_revision`（セッション限り）を `FrameKey` と `OpenReader` に反映（ヘッドレス） | — |
+| PROV-5 | ⬜ | 素材パスの `notify` 監視 → `rederive` で版を進める（undo 段なし・dirty にしない）（`MED-MED-08`） | PROV-4 |
+| PROV-6 | ⬜ | 「受け入れ地点で前提を照合する」規則を `architecture.md` へ、計画を `done/` へ | PROV-1〜5 |
+
+4 件は別々の場所にあるが欠陥は 1 つ（結果にもキャッシュ行にも「どの前提で作ったか」が無い）。規則は 1 つ、識別子は受け入れ地点ごと（単一 epoch にしない理由は計画書）。`PROV-5` の検知方法（監視 / 手動コマンド / フォーカス復帰時の `stat`）は判断待ち。
 
 ### Viewer の表示オプションと検査
 

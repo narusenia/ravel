@@ -186,6 +186,22 @@ pub struct DocumentReplaced {
     pub workspace_layout: Option<LayoutDocument>,
 }
 
+/// The inputs of one Timeline cache band (`CACHE-6`): the band is a function
+/// of the frame cache's contents (`version`), the composition, and every axis
+/// of the request context that `CacheIdentity::mismatch` compares
+/// (resolution, comp resolution, fps, quality, precision — all carried by
+/// `EvalContext`; its frame position is per-entry and is fixed at 0 here).
+///
+/// A version alone misses the changes that move no cache entry: returning to
+/// a preview factor whose frames are already cached, the `VRES-4` downgrade
+/// lifting, and a switch to a fully cached composition (`MED-APP-39`).
+#[derive(Clone, Copy, PartialEq)]
+struct BandKey {
+    version: u64,
+    comp: CompId,
+    context: EvalContext,
+}
+
 struct CompiledRoot {
     graph: Graph,
     output: NodeId,
@@ -402,9 +418,9 @@ pub struct ProjectState {
     /// resolution) does not fence: a slightly coarse frame is still right, and
     /// dropping it would only leave the old picture up longer.
     published_generation: u64,
-    /// `SharedFrameCache::version()` the Timeline's cache band was last
-    /// computed at, so an evaluation that changed nothing skips the walk.
-    published_band_version: Option<u64>,
+    /// Everything the Timeline's cache band was last computed from, so an
+    /// evaluation that changed none of it skips the walk. See [`BandKey`].
+    published_band: Option<BandKey>,
     /// Bumped only by changes that can add or remove nodes: a `Structural`
     /// document change, a document replacement, and a composition switch.
     ///
@@ -702,7 +718,7 @@ impl ProjectState {
             load_request: 0,
             mirror_epoch: 0,
             published_generation: 0,
-            published_band_version: None,
+            published_band: None,
             structure_epoch: 0,
             live_nodes: HashSet::new(),
             live_nodes_epoch: None,
@@ -2659,28 +2675,31 @@ impl ProjectState {
         // served from the cache added none, so the version guard turns the
         // scan into one atomic read for exactly the requests a user makes
         // fastest — scrubbing back over frames already visited.
-        let version = eval.frame_cache().version();
-        if self.published_band_version == Some(version) {
-            return;
-        }
         let Some(comp) = self.active_composition(cx) else {
             return;
         };
         let id = comp.id;
         // The very context the next request will carry, so the band and the
         // hit test agree on every axis.
-        let ranges = eval
-            .frame_cache()
-            .cached_ranges(id, &self.viewer_eval_context(comp, 0));
-        self.published_band_version = Some(version);
+        let context = self.viewer_eval_context(comp, 0);
+        let key = BandKey {
+            version: eval.frame_cache().version(),
+            comp: id,
+            context,
+        };
+        if self.published_band == Some(key) {
+            return;
+        }
+        let ranges = eval.frame_cache().cached_ranges(id, &context);
+        self.published_band = Some(key);
         crate::panels::set_cache_band(id, ranges, cx);
     }
 
-    /// Drop the Timeline's cache band and the version it was computed at, so
+    /// Drop the Timeline's cache band and the key it was computed from, so
     /// the next evaluation republishes it even if the frame cache did not
     /// change in between (an edit to another composition, say).
     fn clear_cache_band(&mut self, cx: &mut App) {
-        self.published_band_version = None;
+        self.published_band = None;
         crate::panels::clear_cache_band(cx);
     }
 
@@ -3912,7 +3931,11 @@ mod tests {
             crate::panels::set_cache_band(comp_id, vec![0..10, 20..30], cx);
         });
         project.update(cx, |project, _cx| {
-            project.published_band_version = Some(7);
+            project.published_band = Some(BandKey {
+                version: 7,
+                comp: comp_id,
+                context: EvalContext::new(0, FrameRate::new(30, 1), (1, 1)),
+            });
         });
 
         // No active composition: `build_viewer_request` returns `Ok(None)`,
@@ -3931,12 +3954,230 @@ mod tests {
             );
         });
         project.read_with(cx, |project, _| {
-            assert_eq!(
-                project.published_band_version, None,
+            assert!(
+                project.published_band.is_none(),
                 "the band was cleared but its version was latched: it can \
                  never be republished from a cache that stops changing"
             );
         });
+    }
+
+    /// A project on a viewer worker **without read-ahead**, so the frame cache
+    /// holds exactly the frames a test asked for and its version moves only
+    /// when the test makes it. The band tests below assert that a change
+    /// *which moves no cache entry* still recomputes the band.
+    fn band_project(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ProjectState>,
+        futures::channel::mpsc::UnboundedReceiver<ViewerUpdate>,
+    ) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let (tx, rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+        project.update(cx, |project, cx| {
+            let config = EvalServiceConfig {
+                budget: Some(budget),
+                read_ahead: None,
+                generation: 0,
+            };
+            project.eval = Some(EvalService::spawn_with_config(
+                FrameHooks,
+                config,
+                move |update| {
+                    let _ = tx.unbounded_send(ViewerUpdate::from_eval(update));
+                },
+            ));
+            let comp_id = project.document().root_comp.unwrap();
+            let document =
+                ravel_ui::document::add_layer(project.document(), comp_id, content_layer())
+                    .unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+        });
+        (project, rx)
+    }
+
+    /// Block until the worker has answered the **latest** request, then check
+    /// the active composition has `frame` cached under the context the viewer
+    /// asks with right now.
+    ///
+    /// Deterministic because the worker inserts a finished frame into the frame
+    /// cache *before* it sends the request's update (`insert_at` precedes
+    /// `on_update`), and there is no read-ahead here to insert anything later.
+    /// Requests the worker coalesced never send, so the wait is for the update
+    /// of the newest generation, not for a count.
+    fn settle(
+        project: &Entity<ProjectState>,
+        rx: &mut futures::channel::mpsc::UnboundedReceiver<ViewerUpdate>,
+        frame: u64,
+        cx: &mut TestAppContext,
+    ) {
+        let latest = project.read_with(cx, |p, _| p.eval.as_ref().unwrap().latest_generation());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(update) = rx.try_recv()
+                && update.generation >= latest
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never answered generation {latest}"
+            );
+            std::thread::yield_now();
+        }
+        let cached = project.read_with(cx, |project, cx| {
+            let comp = project.active_composition(cx).unwrap();
+            let ctx = project.viewer_eval_context(comp, 0);
+            project
+                .eval
+                .as_ref()
+                .unwrap()
+                .frame_cache()
+                .cached_ranges(comp.id, &ctx)
+                .iter()
+                .any(|range| range.contains(&frame))
+        });
+        assert!(cached, "frame {frame} is not cached after the update");
+    }
+
+    /// Park the playhead on `frame`. The frame cache slots a frame by
+    /// composition and position alone, so one frame holds one factor at a
+    /// time: two factors are both cached only at *different* frames.
+    fn goto_frame(frame: u64, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::panels::PlaybackPosition {
+                frame,
+                ..Default::default()
+            })
+        });
+    }
+
+    fn published_band_ranges(cx: &mut TestAppContext) -> Vec<std::ops::Range<u64>> {
+        cx.update(|cx| crate::panels::cache_band(cx).to_vec())
+    }
+
+    /// Republish the band and return the key it now stands at.
+    fn publish_band(project: &Entity<ProjectState>, cx: &mut TestAppContext) -> BandKey {
+        project.update(cx, |project, cx| project.publish_cache_band(cx));
+        project.read_with(cx, |project, _| project.published_band.expect("a band"))
+    }
+
+    /// Frame 0 cached at `Full`, frame 1 cached at `Half`; going back to
+    /// `Full` on frame 0 is a pure cache hit, so the frame cache's version does
+    /// not move, and a band keyed on the version alone stays at `Half`'s
+    /// `[1, 2)` (`MED-APP-39`).
+    #[gpui::test]
+    fn returning_to_a_cached_factor_recomputes_the_band(cx: &mut TestAppContext) {
+        let (project, mut rx) = band_project(cx);
+        goto_frame(0, cx);
+        project.update(cx, |p, cx| {
+            p.set_viewer_resolution(ViewerResolution::Full, cx)
+        });
+        settle(&project, &mut rx, 0, cx);
+        publish_band(&project, cx);
+
+        goto_frame(1, cx);
+        project.update(cx, |p, cx| {
+            p.set_viewer_resolution(ViewerResolution::Half, cx)
+        });
+        settle(&project, &mut rx, 1, cx);
+        let half = publish_band(&project, cx);
+        assert_eq!(published_band_ranges(cx), vec![1..2], "the fixture");
+
+        goto_frame(0, cx);
+        project.update(cx, |p, cx| {
+            p.set_viewer_resolution(ViewerResolution::Full, cx)
+        });
+        settle(&project, &mut rx, 0, cx);
+        let back = publish_band(&project, cx);
+        assert_eq!(back.version, half.version, "the return must be a pure hit");
+        assert_eq!(
+            published_band_ranges(cx),
+            vec![0..1],
+            "the band still stands at the factor the user left"
+        );
+    }
+
+    /// The `VRES-4` downgrade lifting changes the effective factor without any
+    /// setter that could clear the band.
+    #[gpui::test]
+    fn lifting_the_adaptive_downgrade_recomputes_the_band(cx: &mut TestAppContext) {
+        let (project, mut rx) = band_project(cx);
+        goto_frame(0, cx);
+        project.update(cx, |p, cx| {
+            p.set_viewer_resolution(ViewerResolution::Full, cx)
+        });
+        settle(&project, &mut rx, 0, cx);
+        publish_band(&project, cx);
+
+        // A gesture is in flight: one factor lower, on another frame.
+        goto_frame(1, cx);
+        project.update(cx, |p, cx| {
+            p.viewer_input_active = true;
+            p.request_viewer_eval(InvalidationHint::None, cx);
+        });
+        settle(&project, &mut rx, 1, cx);
+        let lowered = publish_band(&project, cx);
+        assert_eq!(published_band_ranges(cx), vec![1..2], "the fixture");
+
+        // The gesture ends on frame 0: the full-factor frame is a cache hit.
+        goto_frame(0, cx);
+        project.update(cx, |p, cx| {
+            p.viewer_input_active = false;
+            p.request_viewer_eval(InvalidationHint::None, cx);
+        });
+        settle(&project, &mut rx, 0, cx);
+        let lifted = publish_band(&project, cx);
+        assert_eq!(
+            lifted.version, lowered.version,
+            "the lift must be a pure hit"
+        );
+        assert_eq!(published_band_ranges(cx), vec![0..1]);
+    }
+
+    /// Switching to a composition whose frames are all cached adds nothing,
+    /// so only the composition in the key can tell the band is another's.
+    #[gpui::test]
+    fn switching_to_a_cached_composition_recomputes_the_band(cx: &mut TestAppContext) {
+        let (project, mut rx) = band_project(cx);
+        settle(&project, &mut rx, 0, cx);
+        let first = project.read_with(cx, |p, _| p.document().root_comp.unwrap());
+
+        let second = project.update(cx, |project, cx| {
+            let second = ravel_core::id::CompId::next();
+            let composition = ravel_core::composition::Composition::new(
+                second,
+                "Second",
+                (64, 64),
+                FrameRate::new(30, 1),
+                30,
+            );
+            let document = project.document().clone().with_composition(composition);
+            let document =
+                ravel_ui::document::add_layer(&document, second, content_layer()).unwrap();
+            project.commit_document(document, InvalidationHint::Structural, cx);
+            project.set_active_composition(Some(second), cx);
+            second
+        });
+        settle(&project, &mut rx, 0, cx);
+
+        project.update(cx, |p, cx| p.set_active_composition(Some(first), cx));
+        settle(&project, &mut rx, 0, cx);
+        let on_first = publish_band(&project, cx);
+        assert_eq!(on_first.comp, first);
+
+        project.update(cx, |p, cx| p.set_active_composition(Some(second), cx));
+        settle(&project, &mut rx, 0, cx);
+        let on_second = publish_band(&project, cx);
+        assert_eq!(
+            on_second.version, on_first.version,
+            "the switch must be a pure hit"
+        );
+        assert_eq!(on_second.comp, second);
     }
 
     #[gpui::test]

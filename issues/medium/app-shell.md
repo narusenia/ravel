@@ -92,31 +92,6 @@ authoritative なレジストリは `ProjectState` が所有している（Viewe
 
 ---
 
-## MED-APP-39 | bug | プレビュー解像度を切り替えても、キャッシュ帯が前の係数のまま残ることがある
-
-**該当**: `crates/ravel-app/src/project_state.rs:2229-2252`（`publish_cache_band`）、
-`:1767-1774`（`set_viewer_resolution`）
-
-`publish_cache_band` は**フレームキャッシュの version だけ**を見て早期 return する。
-帯そのものは `viewer_eval_context`（実効係数を含む）で計算するので、係数が変われば
-帯も変わるべきだが、**`set_viewer_resolution` は `published_band_version` を
-落とさない**。
-
-新しい係数のフレームがまだキャッシュに無ければ、続く評価で version が上がるので
-1 回分の遅れで収まる。**問題は両方がキャッシュに載っている場合** —
-`Full` → `1/2` → `Full` と往復すると version が動かないので、帯は
-**別の係数で計算したまま**残る。Timeline は「スクラブがタダで済む」と言い、
-`INSP-4` の Viewer 右上は同じ帯から割合を出すので、両方が同じだけ嘘をつく。
-
-→ `set_viewer_resolution` で `clear_cache_band`（`published_band_version = None`）
-を通す。表示チャンネル・ピクセル読み取りの setter はキャッシュ自体を捨てるので
-version が動き、この穴には当たらない。
-
-**検証**: 2 つの係数のフレームを両方キャッシュに入れてから係数を戻し、帯が
-戻した係数のものになることを落とすテスト。
-
----
-
 ## MED-APP-40 | debt | macOS では GPUI 自身の Metal device の喪失を問う口が fork に無い
 
 **該当**: `crates/ravel-app/src/workspace.rs`（`host_gpu_context` / capability 判定の

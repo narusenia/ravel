@@ -265,7 +265,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 | クラスタ | 内容 |
 |---|---|
 | 結果と前提の対応付け | `MED-APP-37`（評価結果が届いた時点のコンプと対で扱われ、切替中の結果を別コンプの寸法で解釈する）、`MED-APP-38`（表示設定の切り替えが「飛んでいる評価」を締め出さず、古い設定のフレームがキャッシュに戻る）、`MED-APP-39`（プレビュー解像度を切り替えてもキャッシュ帯が前の係数のまま残る）、`MED-MED-08`（共有デコードキャッシュのキーに素材の版が無く、同一パスの上書き後も古いフレームを返し続ける） |
-| 出力そのものの誤り | `MED-GPU-09`（`Placement::compose` が非一様スケールと回転の合成で誤った変換を作る）、~~`MED-CORE-12`~~（✅ `attribute.promote` と `field.apply` のドメインに選択肢を宣言。個票は `issues/closed/medium-core-evaluator.md`）、~~`MED-MED-09`~~（✅ EXR / PNG のヘッダの色宣言を読むようにした。個票は `issues/closed/medium-media-audio.md`） |
+| 出力そのものの誤り | `MED-GPU-09`（`Placement::compose` が非一様スケールと回転の合成で誤った変換を作る。計画 `instance-transform-shear-plan.md`、`IXF-1`〜`4`）、~~`MED-CORE-12`~~（✅ `attribute.promote` と `field.apply` のドメインに選択肢を宣言。個票は `issues/closed/medium-core-evaluator.md`）、~~`MED-MED-09`~~（✅ EXR / PNG のヘッダの色宣言を読むようにした。個票は `issues/closed/medium-media-audio.md`） |
 | 消える | `MED-MED-06`（連番の最終配置が置換なので、レンダーワーカーの上書き拒否を競合で迂回できる） |
 
 **基準 0 に該当するので、本来は A 系と同じ高さにある。** ここに独立した
@@ -291,6 +291,8 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 同じ形なので、同じように 1 つの設計で解く。
 
 計画は 2026-09-30 に起こした。受け入れ地点ごとに識別子を照合する形で、`PROV-1`（Viewer の fence）・`PROV-2`（帯の鍵）・`PROV-3`（insert epoch）・`PROV-4`（素材の版）は独立に着手でき、`PROV-5`（監視）が `PROV-4` に続く。起こす際に 4 件と残り 4 件（`MED-GPU-09` / `MED-CORE-12` / `MED-MED-06` / `MED-MED-09`）が main で未修正であることを現物で確認した。`MED-CORE-12` の個票が挙げる `attribute.curveu` にはドメインパラメータが無く、直す対象は `attribute.promote` の 2 パラメータと、個票に漏れていた `field.apply` の `domain`。
+
+`MED-GPU-09` は 2026-09-30 に計画を起こした（`instance-transform-shear-plan.md`）。コア・rasterize（WGSL を含む）・`geometry.transform` の 3 層にまたがり、属性の表現を変えるので Design gate に当たる。調べると `expand_instances` は既に厳密で、描画・バウンズ・ピースと食い違っていた。`geometry.transform` にも `compose` を通らない同じ近似があり、組み込みノードだけで踏める。
 
 **`MED-APP-02` はこのフェーズを起こした時点で既に解決していた** —
 `HIGH-24`（フェーズ A4）の修正が `tick_with` の「変化なし」判定に再生状態の

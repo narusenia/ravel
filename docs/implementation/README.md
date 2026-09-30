@@ -40,6 +40,7 @@ several plans here wait on its later units rather than on each other.
 
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
+| `instance-transform-shear-plan.md` | Exact composition of instance placements (`MED-GPU-09`): a reserved instance attribute `shear` (F32, absent = 0) makes `rot` / `scale` / `shear` represent any 2×2, so nesting, `geometry.transform` and the root placement compose exactly and drawing, bounds, expansion and pieces agree. Image instances carry the inverse 2×2 in the unused `stroke_color` slot | — | REQ-MOGRAPH-001, REQ-RENDER-001 |
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `hands-on-findings-handoff.md` | Where the 2026-08-08 hands-on findings landed, and the order to pick the filed bugs up in | — | — |
 | `refactor-plan-0808.md` | Workflow-penetration UX: the instrumentation that counts panel round-trips and re-searches, plus the known Timeline / import / search fixes — **the pre-release UX bucket** | — | REQ-UI-002–004, REQ-UI-013 |

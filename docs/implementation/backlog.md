@@ -30,6 +30,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
+| IXF-1 | `InstanceTransform` の厳密な合成と予約属性 `shear`（`MED-GPU-09`、フェーズ A6） | `instance-transform-shear-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -493,6 +494,17 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 （`MED-APP-13` を悪化させない）。Hand / Zoom（`MED-APP-15`）と Viewer bbox の
 8 ハンドルは**操作が未実装なのでカーソルを付けない** — フェーズ E で機能と
 同じ単位に入れる。
+
+### インスタンス配置の厳密な合成（フェーズ A6、`instance-transform-shear-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| IXF-1 | 🟡 | `InstanceTransform` の厳密な合成と予約属性 `shear`、ops.rs の配置の読み書きを 1 関数へ（ravel-core） | — |
+| IXF-2 | ⬜ | rasterize の CPU / GPU / WGSL を厳密な配置へ。画像の逆 2×2 を `stroke_color` に（`DrawItem` は広げない） | IXF-1 |
+| IXF-3 | ⬜ | `geometry.transform` の instance ドメインを `compose` 経由に（`text.on_path` → 非一様 transform の穴） | IXF-1 |
+| IXF-4 | ⬜ | 文書・スプレッドシートの列順・`MED-GPU-09` と計画のクローズ | IXF-1〜3 |
+
+せん断は予約属性 `shear`（F32、無ければ 0）で持つ（2026-09-30 決定）。無い列を 0 と読むので既存の書き手の意味は変わらず、`merge` のゼロ埋めもそのまま正しい。`expand_instances` は既に厳密で、描画・バウンズ・ピースだけが近似だった。
 
 ### 結果の前提照合（フェーズ A6、`done/result-provenance-plan.md`）
 

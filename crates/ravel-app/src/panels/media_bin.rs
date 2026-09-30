@@ -82,6 +82,11 @@ pub struct MediaBinGpuiPanel {
     /// path, decode source, or resolved input colour space means the stored
     /// image is stale and must be regenerated.
     thumb_images: HashMap<AssetId, (ThumbnailIdentity, Arc<RenderImage>)>,
+    /// The content revision each asset's thumbnail was last requested under.
+    /// The cache is keyed by path, which an in-place overwrite keeps, so a
+    /// moved revision is what tells this panel to invalidate the path — for
+    /// a finished image and for a request still in flight alike.
+    thumb_revisions: HashMap<AssetId, u64>,
     search: Entity<InputState>,
     /// In-flight inline rename, `None` when no row is being renamed.
     rename: Option<AssetRename>,
@@ -192,6 +197,7 @@ impl MediaBinGpuiPanel {
             last_media_assets: None,
             thumbnails,
             thumb_images: HashMap::new(),
+            thumb_revisions: HashMap::new(),
             search,
             rename: None,
             focus_handle,
@@ -306,6 +312,27 @@ impl MediaBinGpuiPanel {
         // screen for good (`MED-APP-08`). It subsumes dropping the images of
         // assets that left the document, which is the same rule with no
         // current identity at all.
+        let overwritten: Vec<PathBuf> = document
+            .iter()
+            .flat_map(|document| document.media_assets.iter())
+            .filter_map(|(id, entry)| {
+                let seen = self.thumb_revisions.insert(*id, entry.content_revision)?;
+                (seen != entry.content_revision)
+                    .then(|| entry.resolved.clone())
+                    .flatten()
+            })
+            .collect();
+        if let Some(document) = document.as_ref() {
+            self.thumb_revisions
+                .retain(|id, _| document.media_assets.contains_key(id));
+        }
+        if !overwritten.is_empty() {
+            self.thumbnails.update(cx, |cache, _| {
+                for path in &overwritten {
+                    cache.invalidate(path);
+                }
+            });
+        }
         let before = self.thumb_images.len();
         self.thumb_images.retain(|id, (stored, _)| {
             document
@@ -822,6 +849,8 @@ struct ThumbnailIdentity {
     path: PathBuf,
     source: ThumbnailSource,
     input_color_space: ColorSpace,
+    /// The file was overwritten in place: same path, other pixels.
+    content_revision: u64,
 }
 
 /// The identity of `entry`'s thumbnail, or `None` while the asset is
@@ -831,6 +860,7 @@ fn thumbnail_identity(entry: &MediaAssetEntry) -> Option<ThumbnailIdentity> {
         path: entry.resolved.clone()?,
         source: thumbnail_source(&entry.kind),
         input_color_space: entry.input_color_space().0,
+        content_revision: entry.content_revision,
     })
 }
 
@@ -1488,6 +1518,53 @@ mod tests {
                 .get(&asset_id)
                 .expect("thumbnail image stored");
             assert_eq!(identity.input_color_space, ColorSpace::LINEAR_REC709);
+        });
+    }
+
+    /// A file overwritten in place keeps its path, colour space and id, so
+    /// nothing in the thumbnail request changes; only the content revision
+    /// says the stored image is old. Breaks on: dropping the
+    /// `thumb_revisions` invalidation in `refresh_thumbnails` (the memory
+    /// cache would answer with the previous file's frame).
+    #[gpui::test]
+    fn an_overwritten_file_regenerates_its_thumbnail(cx: &mut gpui::TestAppContext) {
+        let calls = Arc::new(Mutex::new(0usize));
+        let counter = calls.clone();
+        let generator: ThumbnailGenerator = Arc::new(move |_path, _source, _space| {
+            *counter.lock().unwrap() += 1;
+            Ok(FrameBuffer::from_f32(8, 8, vec![0.5; 8 * 8 * 4]))
+        });
+        let (project, panel) = thumbnail_panel(cx, generator);
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let clip = temp.path().join("clip.mov");
+        std::fs::write(&clip, b"media fixture").expect("write media fixture");
+        project.update(cx, |project, cx| {
+            project.import_media(vec![probed_clip(clip.to_str().unwrap())], vec![], cx);
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+        assert_eq!(*calls.lock().unwrap(), 1, "first thumbnail");
+
+        // Unrelated refreshes are served from the cache.
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+        assert_eq!(*calls.lock().unwrap(), 1, "no change, no decode");
+
+        project.update(cx, |project, cx| {
+            project.advance_changed_assets(&std::collections::HashSet::from([clip.clone()]), cx);
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.refresh_thumbnails(cx));
+
+        assert_eq!(*calls.lock().unwrap(), 2, "the new content is decoded");
+        let asset_id = panel.read_with(cx, |panel, _| panel.rows[0].asset_id);
+        panel.read_with(cx, |panel, _| {
+            let (identity, _) = panel
+                .thumb_images
+                .get(&asset_id)
+                .expect("thumbnail image stored");
+            assert_eq!(identity.content_revision, 1);
         });
     }
 }

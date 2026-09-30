@@ -113,6 +113,11 @@ pub struct FrameCacheStats {
     pub entries: usize,
     /// Bytes currently cached per tier, in [`Tier::ALL`] order.
     pub bytes_by_tier: [u64; 3],
+    /// Inserts refused because their [`InsertTicket`] predated a `clear` /
+    /// `invalidate_comp`. A steady stream is a display setting being
+    /// dragged, not a fault; a count that climbs with no setting changing is
+    /// the "cache never fills" signal (`CACHE-6`).
+    pub stale_inserts: u64,
 }
 
 impl FrameCacheStats {
@@ -155,6 +160,31 @@ fn tier_index(tier: Tier) -> usize {
     }
 }
 
+/// Proof of when an evaluation started, taken from [`SharedFrameCache::ticket`]
+/// and spent in `insert_at`.
+///
+/// A frame is only worth caching if nothing that could have made it wrong was
+/// invalidated while it was being produced. The ticket is the cache's insert
+/// epoch at the moment the worker picked the request up; an insert whose ticket
+/// is older than the current epoch is refused.
+///
+/// Ordering invariant (`MED-APP-38`), all three legs are load-bearing:
+///
+/// 1. A setter that changes what `finalize` reads (display channel, pixel
+///    readout) **stores the setting, then calls `clear()`** — never the
+///    reverse.
+/// 2. The worker takes its ticket when it picks the request up (after
+///    `sync_document`, before the evaluation), and only then does `finalize`
+///    read the setting.
+/// 3. `insert_at` compares ticket and epoch under the cache lock.
+///
+/// A ticket taken before the bump is refused. A ticket taken after it
+/// happens-after the setting was stored (the cache mutex orders them), so
+/// `finalize` read the new setting. Either way a frame made under the old
+/// setting cannot outlive the `clear()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InsertTicket(u64);
+
 /// The cache itself. Reach it through [`SharedFrameCache`].
 #[derive(Default)]
 pub struct FrameCache {
@@ -176,6 +206,12 @@ pub struct FrameCache {
     /// asks after *each* evaluation — including the hits, which by definition
     /// added nothing (`CACHE-6`).
     version: u64,
+    /// Insert epoch: bumped by every `clear` / `invalidate_comp`, **even when
+    /// nothing was cached** — an empty cache is exactly where an in-flight
+    /// evaluation is about to land. Separate from [`Self::version`], which
+    /// only moves when the set of entries does.
+    epoch: u64,
+    stale_inserts: u64,
 }
 
 impl FrameCache {
@@ -286,6 +322,7 @@ impl FrameCache {
             misses_by_reason: self.misses,
             entries: self.entries.len(),
             bytes_by_tier: self.used,
+            stale_inserts: self.stale_inserts,
         }
     }
 
@@ -301,13 +338,21 @@ impl FrameCache {
     /// request a user waited for (`CACHE-9`). It changes nothing about the
     /// entry except its eviction rank: under pressure the budget empties
     /// speculation first.
+    ///
+    /// A `ticket` older than the current epoch is refused before anything is
+    /// reserved or replaced (see [`InsertTicket`]).
     fn insert(
         &mut self,
+        ticket: InsertTicket,
         comp: CompId,
         identity: CacheIdentity,
         value: Arc<dyn NodeData>,
         speculative: bool,
     ) {
+        if ticket.0 != self.epoch {
+            self.stale_inserts += 1;
+            return;
+        }
         let slot = FrameSlot {
             comp,
             time: identity.time,
@@ -383,6 +428,9 @@ impl FrameCache {
 
     /// Drop every frame of `comp`.
     fn invalidate_comp(&mut self, comp: CompId) {
+        // Also reached from `sync_document` on the worker; harmless there
+        // because the worker takes its ticket after the sync.
+        self.epoch += 1;
         let slots: Vec<FrameSlot> = self
             .entries
             .keys()
@@ -396,6 +444,7 @@ impl FrameCache {
 
     /// Drop everything.
     fn clear(&mut self) {
+        self.epoch += 1;
         for slot in self.entries.keys().copied().collect::<Vec<_>>() {
             self.drop_slot(&slot);
         }
@@ -784,10 +833,30 @@ impl SharedFrameCache {
         self.lock().get(comp, wanted)
     }
 
-    /// Store `value` as the finished frame of `comp` for `identity`.
+    /// The insert epoch as of now; take it before the evaluation it guards.
+    pub(crate) fn ticket(&self) -> InsertTicket {
+        InsertTicket(self.lock().epoch)
+    }
+
+    /// Store `value` as the finished frame of `comp` for `identity`, unless a
+    /// `clear` / `invalidate_comp` happened since `ticket` was taken.
     ///
     /// `speculative` ranks the entry below anything an interaction paid for
     /// when the budget has to evict (`CACHE-9`).
+    pub(crate) fn insert_at(
+        &self,
+        ticket: InsertTicket,
+        comp: CompId,
+        identity: CacheIdentity,
+        value: Arc<dyn NodeData>,
+        speculative: bool,
+    ) {
+        self.lock()
+            .insert(ticket, comp, identity, value, speculative);
+    }
+
+    /// [`Self::insert_at`] with a ticket taken now: nothing can be stale.
+    #[cfg(test)]
     pub(crate) fn insert(
         &self,
         comp: CompId,
@@ -795,7 +864,7 @@ impl SharedFrameCache {
         value: Arc<dyn NodeData>,
         speculative: bool,
     ) {
-        self.lock().insert(comp, identity, value, speculative);
+        self.insert_at(self.ticket(), comp, identity, value, speculative);
     }
 
     /// Whether a request for `wanted` would be answered, without recording a
@@ -828,12 +897,12 @@ impl SharedFrameCache {
         self.lock().sync_document(old, new, params);
     }
 
-    /// Drop every frame of `comp`.
+    /// Drop every frame of `comp`, and refuse inserts already in flight.
     pub fn invalidate_comp(&self, comp: CompId) {
         self.lock().invalidate_comp(comp);
     }
 
-    /// Drop everything.
+    /// Drop everything, and refuse inserts already in flight.
     pub fn clear(&self) {
         self.lock().clear();
     }
@@ -941,6 +1010,70 @@ mod tests {
                 .insert(*id, Arc::new(Composition::new(*id, "c", (4, 4), FPS, 100)));
         }
         document
+    }
+
+    #[test]
+    fn an_insert_ticketed_before_a_clear_is_refused() {
+        let cache = SharedFrameCache::new(None);
+        let identity = CacheIdentity::of_frame(&ctx(0));
+        cache.insert(comp_a(), identity, frame_value(), false);
+        let stale = cache.ticket();
+        cache.clear();
+        cache.insert_at(stale, comp_a(), identity, frame_value(), false);
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().stale_inserts, 1);
+
+        // The other side: a ticket taken after the clear is honoured.
+        cache.insert_at(cache.ticket(), comp_a(), identity, frame_value(), false);
+        assert_eq!(cache.stats().entries, 1);
+        assert_eq!(cache.stats().stale_inserts, 1);
+    }
+
+    #[test]
+    fn clearing_an_empty_cache_still_refuses_older_tickets() {
+        let cache = SharedFrameCache::new(None);
+        let stale = cache.ticket();
+        cache.clear();
+        cache.insert_at(
+            stale,
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
+        assert_eq!(cache.stats().entries, 0);
+        assert_eq!(cache.stats().stale_inserts, 1);
+    }
+
+    #[test]
+    fn invalidating_a_composition_refuses_older_tickets_even_when_empty() {
+        let cache = SharedFrameCache::new(None);
+        let stale = cache.ticket();
+        cache.invalidate_comp(comp_b());
+        cache.insert_at(
+            stale,
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
+        assert_eq!(cache.stats().entries, 0);
+    }
+
+    #[test]
+    fn a_refused_insert_reserves_nothing() {
+        let budget = budget(0, 1_000);
+        let cache = SharedFrameCache::new(Some(budget.clone()));
+        let stale = cache.ticket();
+        cache.clear();
+        cache.insert_at(
+            stale,
+            comp_a(),
+            CacheIdentity::of_frame(&ctx(0)),
+            frame_value(),
+            false,
+        );
+        assert_eq!(budget.stats().used(Tier::Ram), 0);
     }
 
     #[test]

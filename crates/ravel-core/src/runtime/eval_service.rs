@@ -909,6 +909,12 @@ impl EvalService {
                     // channel, never a clock. Installed after the structural
                     // reset above, which would otherwise clear it.
                     evaluator.set_read_ahead(speculative.then(|| interrupt.clone()));
+                    // The insert epoch this evaluation is valid for: taken
+                    // after the document sync (which may itself invalidate)
+                    // and before `finalize` reads the display settings, so a
+                    // `clear()` that lands in between refuses our insert. The
+                    // ordering argument is on `InsertTicket`.
+                    let ticket = frames.ticket();
                     let frame_identity = CacheIdentity::of_frame(&request.ctx);
                     let started = std::time::Instant::now();
                     let mut results = Vec::with_capacity(request.nodes.len());
@@ -949,7 +955,13 @@ impl EvalService {
                             });
                         if let (Some(comp), Ok(value)) = (frame_comp.filter(|_| finalized), &result)
                         {
-                            frames.insert(comp, frame_identity, value.clone(), speculative);
+                            frames.insert_at(
+                                ticket,
+                                comp,
+                                frame_identity,
+                                value.clone(),
+                                speculative,
+                            );
                         }
                         // The budget's tiers are shared, so any of the three
                         // caches can push another's entry out. Settling after
@@ -1053,6 +1065,7 @@ impl EvalService {
                         ?elapsed,
                         frames_cached = frame_stats.entries,
                         frame_hit_rate = frame_stats.hit_rate(),
+                        frame_stale_inserts = frame_stats.stale_inserts,
                         frame_bytes_vram = frame_stats.bytes(crate::cache_budget::Tier::Vram),
                         frame_bytes_ram = frame_stats.bytes(crate::cache_budget::Tier::Ram),
                         node_hit_rate = node_stats.hit_rate(),
@@ -2389,6 +2402,11 @@ mod tests {
         /// that has already cost this repository two CI runs. A completed
         /// frame announces itself instead.
         done: Option<Sender<u64>>,
+        /// Parks `finalize` after announcing its frame on the first channel
+        /// until the second one delivers a token (or its sender is dropped):
+        /// lets a test act while an evaluation is between "evaluated" and
+        /// "inserted", without sleeping.
+        hold: Option<(Sender<u64>, Receiver<()>)>,
     }
 
     impl FrameHooks {
@@ -2398,7 +2416,13 @@ mod tests {
                 finalized: Arc::new(AtomicUsize::new(0)),
                 fails_until: 0,
                 done: None,
+                hold: None,
             }
+        }
+
+        fn holding(mut self, entered: Sender<u64>, release: Receiver<()>) -> Self {
+            self.hold = Some((entered, release));
+            self
         }
 
         fn counting_finalize(mut self, finalized: Arc<AtomicUsize>) -> Self {
@@ -2440,6 +2464,10 @@ mod tests {
             ctx: &EvalContext,
         ) -> Option<Arc<dyn NodeData>> {
             self.finalized.fetch_add(1, Ordering::SeqCst);
+            if let Some((entered, release)) = &self.hold {
+                let _ = entered.send(ctx.frame);
+                let _ = release.recv();
+            }
             // `fails_until` finalize failures first, then success — the shape
             // of a transient readback loss.
             let ok = self.finalized.load(Ordering::SeqCst) > self.fails_until;
@@ -3144,6 +3172,97 @@ mod tests {
             vec![0..1, 50..51],
             "the abandoned speculative frame was cached anyway"
         );
+    }
+
+    /// `MED-APP-38`: a `clear()` while an evaluation is between `finalize` and
+    /// `insert` must keep that frame out of the cache; the next evaluation
+    /// (ticket taken after the clear) must still be cached.
+    #[test]
+    fn a_clear_during_an_evaluation_keeps_its_frame_out_of_the_cache() {
+        let (entered_tx, entered) = unbounded();
+        let (release_tx, release) = unbounded();
+        let (update_tx, update_rx) = unbounded();
+        let mut service = EvalService::spawn(
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))).holding(entered_tx, release),
+            move |update| {
+                let _ = update_tx.send(update);
+            },
+        );
+        let node = NodeId::new(1);
+        let frames = service.frame_cache().clone();
+        let document = frame_document();
+        let ask = |service: &mut EvalService| {
+            service.request(frame_request(
+                frame_graph(node),
+                node,
+                0,
+                document.clone(),
+                InvalidationHint::None,
+            ));
+        };
+
+        ask(&mut service);
+        assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        frames.clear();
+        release_tx.send(()).unwrap();
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(frames.stats().entries, 0, "a stale frame was cached");
+        assert_eq!(frames.stats().stale_inserts, 1);
+
+        // Not an always-drop cache: the same request, no clear, is kept.
+        ask(&mut service);
+        assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        release_tx.send(()).unwrap();
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(frames.stats().entries, 1);
+        assert_eq!(frames.stats().stale_inserts, 1);
+    }
+
+    /// The same for a read-ahead frame, which reaches the cache through the
+    /// same path but has no update to wait on: the next frame announcing
+    /// itself proves the previous insert has been decided.
+    #[test]
+    fn a_clear_during_a_speculative_evaluation_keeps_its_frame_out_of_the_cache() {
+        let (entered_tx, entered) = unbounded();
+        let (release_tx, release) = unbounded();
+        let (mut service, update_rx) = spawn_reading_ahead(
+            FrameHooks::new(Arc::new(AtomicUsize::new(0))).holding(entered_tx, release),
+            8,
+        );
+        let node = NodeId::new(1);
+        let frames = service.frame_cache().clone();
+        let range = |frames: &SharedFrameCache| {
+            frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2)))
+        };
+
+        service.request(frame_request(
+            frame_graph(node),
+            node,
+            0,
+            frame_document(),
+            InvalidationHint::None,
+        ));
+        assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        release_tx.send(()).unwrap();
+        update_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // Read-ahead is now inside frame 1's finalize.
+        assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+        frames.clear();
+        release_tx.send(()).unwrap();
+        // Frame 2 announcing itself means frame 1's insert was decided.
+        assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+        assert!(
+            range(&frames).is_empty(),
+            "a stale speculative frame was cached"
+        );
+        assert_eq!(frames.stats().stale_inserts, 1);
+
+        // Frame 2 was ticketed after the clear and is kept.
+        release_tx.send(()).unwrap();
+        assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+        assert_eq!(range(&frames), vec![2..3]);
+        drop(release_tx);
     }
 
     fn completed_pair(started: &Receiver<(u64, NodeId)>) -> (u64, NodeId) {

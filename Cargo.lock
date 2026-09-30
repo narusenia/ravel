@@ -6109,8 +6109,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "criterion",
+ "exr",
  "ffmpeg-the-third",
  "image",
+ "png 0.18.1",
  "ravel-core",
  "rayon",
  "tempfile",

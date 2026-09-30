@@ -143,6 +143,10 @@ futures = "0.3"
 # one image codec entry point;
 # `exr` and its `lebe` are BSD-3-Clause, the rest MIT / Apache-2.0 / Zlib.
 image = { version = "0.25", default-features = false, features = ["png", "exr"] }
+# Header-only colour metadata reads (`ravel_media::color_probe`); the same
+# versions `image` already resolves, so the lockfile gains no package.
+exr = { version = "1.74", default-features = false }
+png = "0.18"
 smallvec = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util"] }
 tracing = "0.1"

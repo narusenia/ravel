@@ -187,6 +187,29 @@ mod ffmpeg_tests {
         assert_eq!(video.color_transfer, None);
     }
 
+    /// FFmpeg declares no colour for a PNG still; `format::probe` fills it
+    /// from the header (`MED-MED-09`).
+    #[test]
+    fn probe_reads_png_still_colour_from_the_header() {
+        use ravel_core::color::{Primaries, Transfer};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tagged.png");
+        let mut enc = png::Encoder::new(std::fs::File::create(&path).unwrap(), 1, 1);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        enc.write_header()
+            .unwrap()
+            .write_image_data(&[0, 0, 0])
+            .unwrap();
+
+        let info = ravel_media::format::probe(&path).expect("probe failed");
+        let video = info.first_video().expect("no video stream");
+        assert_eq!(video.color_primaries, Some(Primaries::Rec709));
+        assert_eq!(video.color_transfer, Some(Transfer::Srgb));
+    }
+
     // ---- Video decode -----------------------------------------------------
 
     #[test]

@@ -290,7 +290,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 側に穴が残る。フェーズ A3 の `HIGH-12`〜`15`（チャンクキューの epoch 化）と
 同じ形なので、同じように 1 つの設計で解く。
 
-計画は 2026-09-30 に起こした。受け入れ地点ごとに識別子を照合する形で、`PROV-1`（Viewer の fence）・`PROV-2`（帯の鍵）・`PROV-3`（insert epoch）・`PROV-4`（素材の版）は独立に着手でき、`PROV-5`（監視）が `PROV-4` に続く。起こす際に 4 件と残り 4 件（`MED-GPU-09` / `MED-CORE-12` / `MED-MED-06` / `MED-MED-09`）が main で未修正であることを現物で確認した。`MED-CORE-12` の個票が挙げる `attribute.curveu` にはドメインパラメータが無く、直す対象は `attribute.promote` の 2 パラメータだけ。
+計画は 2026-09-30 に起こした。受け入れ地点ごとに識別子を照合する形で、`PROV-1`（Viewer の fence）・`PROV-2`（帯の鍵）・`PROV-3`（insert epoch）・`PROV-4`（素材の版）は独立に着手でき、`PROV-5`（監視）が `PROV-4` に続く。起こす際に 4 件と残り 4 件（`MED-GPU-09` / `MED-CORE-12` / `MED-MED-06` / `MED-MED-09`）が main で未修正であることを現物で確認した。`MED-CORE-12` の個票が挙げる `attribute.curveu` にはドメインパラメータが無く、直す対象は `attribute.promote` の 2 パラメータと、個票に漏れていた `field.apply` の `domain`。
 
 **`MED-APP-02` はこのフェーズを起こした時点で既に解決していた** —
 `HIGH-24`（フェーズ A4）の修正が `tick_with` の「変化なし」判定に再生状態の

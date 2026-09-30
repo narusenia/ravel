@@ -3966,13 +3966,15 @@ mod tests {
     /// holds exactly the frames a test asked for and its version moves only
     /// when the test makes it. The band tests below assert that a change
     /// *which moves no cache entry* still recomputes the band.
-    fn band_project(cx: &mut TestAppContext) -> Entity<ProjectState> {
+    fn band_project(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ProjectState>,
+        futures::channel::mpsc::UnboundedReceiver<ViewerUpdate>,
+    ) {
         disable_background_eval_for_tests();
         let project = cx.new(ProjectState::new);
         let (tx, rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
-        // Nothing reads the channel: the band is asked for directly, and an
-        // unread sender only queues.
-        std::mem::forget(rx);
         let budget = SharedCacheBudget::new(
             ravel_project::settings::ResolvedSettings::default().cache_budget(),
         );
@@ -3995,35 +3997,51 @@ mod tests {
                     .unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
         });
-        project
+        (project, rx)
     }
 
-    /// Block until the active composition has `frame` cached under the
-    /// context the viewer asks with *right now*.
-    fn await_cached(project: &Entity<ProjectState>, frame: u64, cx: &mut TestAppContext) {
+    /// Block until the worker has answered the **latest** request, then check
+    /// the active composition has `frame` cached under the context the viewer
+    /// asks with right now.
+    ///
+    /// Deterministic because the worker inserts a finished frame into the frame
+    /// cache *before* it sends the request's update (`insert_at` precedes
+    /// `on_update`), and there is no read-ahead here to insert anything later.
+    /// Requests the worker coalesced never send, so the wait is for the update
+    /// of the newest generation, not for a count.
+    fn settle(
+        project: &Entity<ProjectState>,
+        rx: &mut futures::channel::mpsc::UnboundedReceiver<ViewerUpdate>,
+        frame: u64,
+        cx: &mut TestAppContext,
+    ) {
+        let latest = project.read_with(cx, |p, _| p.eval.as_ref().unwrap().latest_generation());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let cached = project.read_with(cx, |project, cx| {
-                let comp = project.active_composition(cx).unwrap();
-                let ctx = project.viewer_eval_context(comp, 0);
-                project
-                    .eval
-                    .as_ref()
-                    .unwrap()
-                    .frame_cache()
-                    .cached_ranges(comp.id, &ctx)
-                    .iter()
-                    .any(|range| range.contains(&frame))
-            });
-            if cached {
-                return;
+            if let Ok(update) = rx.try_recv()
+                && update.generation >= latest
+            {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the worker never cached frame {frame}"
+                "the worker never answered generation {latest}"
             );
             std::thread::yield_now();
         }
+        let cached = project.read_with(cx, |project, cx| {
+            let comp = project.active_composition(cx).unwrap();
+            let ctx = project.viewer_eval_context(comp, 0);
+            project
+                .eval
+                .as_ref()
+                .unwrap()
+                .frame_cache()
+                .cached_ranges(comp.id, &ctx)
+                .iter()
+                .any(|range| range.contains(&frame))
+        });
+        assert!(cached, "frame {frame} is not cached after the update");
     }
 
     /// Park the playhead on `frame`. The frame cache slots a frame by
@@ -4042,23 +4060,8 @@ mod tests {
         cx.update(|cx| crate::panels::cache_band(cx).to_vec())
     }
 
-    /// Republish the band and return the key it now stands at, once the worker
-    /// has stopped adding entries (a request for a cached frame still runs on
-    /// the worker, and a publish racing it would read a moving version).
+    /// Republish the band and return the key it now stands at.
     fn publish_band(project: &Entity<ProjectState>, cx: &mut TestAppContext) -> BandKey {
-        let version = |cx: &mut TestAppContext| {
-            project.read_with(cx, |p, _| p.eval.as_ref().unwrap().frame_cache().version())
-        };
-        let mut seen = version(cx);
-        let mut quiet_since = std::time::Instant::now();
-        while quiet_since.elapsed() < Duration::from_millis(150) {
-            std::thread::sleep(Duration::from_millis(10));
-            let now = version(cx);
-            if now != seen {
-                seen = now;
-                quiet_since = std::time::Instant::now();
-            }
-        }
         project.update(cx, |project, cx| project.publish_cache_band(cx));
         project.read_with(cx, |project, _| project.published_band.expect("a band"))
     }
@@ -4069,19 +4072,19 @@ mod tests {
     /// `[1, 2)` (`MED-APP-39`).
     #[gpui::test]
     fn returning_to_a_cached_factor_recomputes_the_band(cx: &mut TestAppContext) {
-        let project = band_project(cx);
+        let (project, mut rx) = band_project(cx);
         goto_frame(0, cx);
         project.update(cx, |p, cx| {
             p.set_viewer_resolution(ViewerResolution::Full, cx)
         });
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
         publish_band(&project, cx);
 
         goto_frame(1, cx);
         project.update(cx, |p, cx| {
             p.set_viewer_resolution(ViewerResolution::Half, cx)
         });
-        await_cached(&project, 1, cx);
+        settle(&project, &mut rx, 1, cx);
         let half = publish_band(&project, cx);
         assert_eq!(published_band_ranges(cx), vec![1..2], "the fixture");
 
@@ -4089,7 +4092,7 @@ mod tests {
         project.update(cx, |p, cx| {
             p.set_viewer_resolution(ViewerResolution::Full, cx)
         });
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
         let back = publish_band(&project, cx);
         assert_eq!(back.version, half.version, "the return must be a pure hit");
         assert_eq!(
@@ -4103,12 +4106,12 @@ mod tests {
     /// setter that could clear the band.
     #[gpui::test]
     fn lifting_the_adaptive_downgrade_recomputes_the_band(cx: &mut TestAppContext) {
-        let project = band_project(cx);
+        let (project, mut rx) = band_project(cx);
         goto_frame(0, cx);
         project.update(cx, |p, cx| {
             p.set_viewer_resolution(ViewerResolution::Full, cx)
         });
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
         publish_band(&project, cx);
 
         // A gesture is in flight: one factor lower, on another frame.
@@ -4117,7 +4120,7 @@ mod tests {
             p.viewer_input_active = true;
             p.request_viewer_eval(InvalidationHint::None, cx);
         });
-        await_cached(&project, 1, cx);
+        settle(&project, &mut rx, 1, cx);
         let lowered = publish_band(&project, cx);
         assert_eq!(published_band_ranges(cx), vec![1..2], "the fixture");
 
@@ -4127,7 +4130,7 @@ mod tests {
             p.viewer_input_active = false;
             p.request_viewer_eval(InvalidationHint::None, cx);
         });
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
         let lifted = publish_band(&project, cx);
         assert_eq!(
             lifted.version, lowered.version,
@@ -4140,8 +4143,8 @@ mod tests {
     /// so only the composition in the key can tell the band is another's.
     #[gpui::test]
     fn switching_to_a_cached_composition_recomputes_the_band(cx: &mut TestAppContext) {
-        let project = band_project(cx);
-        await_cached(&project, 0, cx);
+        let (project, mut rx) = band_project(cx);
+        settle(&project, &mut rx, 0, cx);
         let first = project.read_with(cx, |p, _| p.document().root_comp.unwrap());
 
         let second = project.update(cx, |project, cx| {
@@ -4160,15 +4163,15 @@ mod tests {
             project.set_active_composition(Some(second), cx);
             second
         });
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
 
         project.update(cx, |p, cx| p.set_active_composition(Some(first), cx));
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
         let on_first = publish_band(&project, cx);
         assert_eq!(on_first.comp, first);
 
         project.update(cx, |p, cx| p.set_active_composition(Some(second), cx));
-        await_cached(&project, 0, cx);
+        settle(&project, &mut rx, 0, cx);
         let on_second = publish_band(&project, cx);
         assert_eq!(
             on_second.version, on_first.version,

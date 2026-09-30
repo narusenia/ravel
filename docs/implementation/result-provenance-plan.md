@@ -63,7 +63,7 @@
 
 | 受け入れ地点 | 識別子 | 新規か | 前提を変える側がすること |
 |---|---|---|---|
-| Viewer publish | 評価の世代（`generation`）と fence（`published_generation`） | 既存 | 結果を**誤り**にする変更（コンプ切替、表示チャンネル、ピクセル読み取り）は再要求の前に `published_generation = latest_generation()` で fence する |
+| Viewer publish | 評価の世代（`generation`）と fence（`published_generation`） | 既存 | 結果を**誤り**にする変更（コンプ切替、表示チャンネル、ピクセル読み取り、素材の変更）は再要求の前に `published_generation = latest_generation()` で fence する |
 | フレームキャッシュ insert | キャッシュの insert epoch（ワーカーが要求の取り出し時に受け取る ticket） | **新規** | `SharedFrameCache::clear` / `invalidate_comp` が epoch を進める（空でも進める） |
 | キャッシュ帯 | 帯の入力一式 `(frame cache version, comp, 要求文脈)` | version は既存、鍵を拡張 | 何もしない。入力が変われば鍵が変わる |
 | デコードのヒット | 素材の版 `content_revision`（`MediaAssetEntry`、セッション限り） | **新規** | ファイル監視が変更を検知したら `DocumentStore::rederive` で版を進める |
@@ -98,7 +98,7 @@
 | `MED-APP-37` | `EvalUpdate` に comp id を載せて照合 | 切替時に既存の fence を打つ | ravel-core の API を変えずに済み、表示設定の setter にも同じ手が効く。世代は要求順に単調なので、fence 以前の世代はすべて切替前の要求 |
 | `MED-APP-38` | 設定の世代を要求と結果に載せる | キャッシュ側の insert epoch | 要求型と `ReadAheadTemplate` に設定の概念を通さずに済み、UI スレッドからの**あらゆる**無効化（将来の `invalidate_comp` 呼び出しを含む）を守る。フェーズ A3 の `TransportSync::try_commit_frames`（`ravel-audio/src/sync.rs:60`、期待 epoch と一致したときだけ commit）と同じ形 |
 | `MED-APP-39` | `set_viewer_resolution` で `clear_cache_band` | 帯の鍵を入力一式にする | 降格解除とコンプ切替には呼べる setter が無い |
-| `MED-MED-08` | インポート時の mtime+size を版にする / 監視 | 監視 + セッション限りの版 | インポート時の値だけでは開いている間の上書きを検知できない。版を Document に置くと、既存の文書 diff（`frame_cache.rs:446`、`eval.rs:2123`）がフレームキャッシュとノードキャッシュの無効化をそのまま引き受ける |
+| `MED-MED-08` | インポート時の mtime+size を版にする / 監視 | 監視 + セッション限りの版 | インポート時の値だけでは開いている間の上書きを検知できない。版を Document に置くと、既存の文書 diff（`ravel-core/src/runtime/frame_cache.rs:446`、`eval.rs:2123`）がフレームキャッシュとノードキャッシュの無効化をそのまま引き受ける |
 
 ### insert epoch の順序の不変条件（`PROV-3`）
 
@@ -187,7 +187,9 @@ happens-before により finalize は新しい設定を読んでいる。どち�
   無効化することをテストで固定する（既存の `media_assets` 比較が拾う）
 - `PROV-5`（app）: 解決済みパスの親ディレクトリを `notify` で監視し
   （前例: `themes.rs:238` の `ThemeWatch`。新しい依存は足さない）、変更された
-  パスに一致する素材の版を `DocumentStore::rederive` で進めて再要求する。
+  パスに一致する素材の版を `DocumentStore::rederive` で進め、`published_generation`
+  を fence してから再要求する（素材の変更は飛んでいる結果を**誤り**にする。
+  fence しないと旧版でデコードした結果が監視の通知の後に publish される）。
   rederive は undo 段を作らず、プロジェクトを dirty にしない（前例:
   `rebase_asset_references` :1501）。書き込み途中の連続イベントはまとめる。
   版を進める判定は純粋関数（Document と変更パスの集合 → Document）に出して
@@ -201,7 +203,8 @@ happens-before により finalize は新しい設定を読んでいる。どち�
   エントリが消えるテスト
 - `PROV-5`: 版を進める純粋関数のテスト（一致する素材だけが進み、連番は
   ディレクトリ単位で一致する）。`ProjectState` 経由で undo 段が増えず dirty に
-  ならず、再要求が出るテスト。監視そのものは手動確認（外部から素材を
+  ならず、再要求が出るテスト。版を進める前の世代の `ViewerUpdate` が publish
+  されないテスト（fence を消すと落ちる）。監視そのものは手動確認（外部から素材を
   上書きして Viewer が追随する）を PR に記す
 - `MED-MED-08` を `issues/closed/` へ移す（`PROV-5`）
 
@@ -246,7 +249,9 @@ happens-before により finalize は新しい設定を読んでいる。どち�
 
 `PROV-1`〜`PROV-4` は互いに独立で並行できる。触るファイルは `PROV-1` と
 `PROV-2` が同じ `project_state.rs`（別の関数）なので、並行するならどちらかを
-先にマージしてからリベースする。
+先にマージしてからリベースする。`PROV-3` は `ravel-core/src/runtime/frame_cache.rs`
+を改修し、`PROV-4` は同ファイルの既存 diff（:446）をテストで固定するだけなので、
+`PROV-4` のテストを同ファイルに置くなら `PROV-3` の後にリベースする。
 
 ## 決定事項（2026-09-30、ユーザー判断）
 
@@ -255,7 +260,7 @@ happens-before により finalize は新しい設定を読んでいる。どち�
   フォーカス復帰時の `stat` は採らない
 - **素材の変更でノードキャッシュを全部捨てることを許容する**。既存の
   `media_assets` 比較（`eval.rs:2123`）は構造変更として扱い、ノードキャッシュを
-  すべて捨てる（`invalidate_all`）。フレームキャッシュも同様（`frame_cache.rs:446`）。
+  すべて捨てる（`invalidate_all`）。フレームキャッシュも同様（`ravel-core/src/runtime/frame_cache.rs:446`）。
   上書きは稀なのでこの挙動を引き継ぎ、素材単位への絞り込みは `PROV-4` の範囲に入れない
 
 ## 実施状況

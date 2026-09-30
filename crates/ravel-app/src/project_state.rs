@@ -1699,6 +1699,8 @@ impl ProjectState {
             cx.set_global(NodeEvalTimings::default());
         }
         crate::audio::sync_from_document(self.store.document(), cx);
+        // A result of the previous project must not be shown against this one.
+        self.fence_in_flight_results();
         self.request_viewer_eval(InvalidationHint::Structural, cx);
         cx.notify();
     }
@@ -7679,6 +7681,22 @@ mod tests {
         assert_switch_fences_stale_results(cx, |project, cx| {
             let first = project.document().root_comp.unwrap();
             project.set_active_composition(Some(first), cx);
+        });
+    }
+
+    #[gpui::test]
+    fn replacing_the_document_fences_in_flight_results(cx: &mut TestAppContext) {
+        assert_switch_fences_stale_results(cx, |project, cx| {
+            let document = default_document(FrameRate::new(30, 1));
+            let comp = document.root_comp.expect("root comp");
+            let document = ravel_ui::document::add_layer(&document, comp, content_layer()).unwrap();
+            project.replace_document(
+                document,
+                None,
+                &UiState::with_active_comp(Some(comp)),
+                SettingsLayer::default(),
+                cx,
+            );
         });
     }
 

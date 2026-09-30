@@ -13,6 +13,16 @@ ravel-widgets = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 
+# Renamed because `ravel-widgets` ships an `examples/gallery.rs` too, and two
+# examples of the same name write the same `target/debug/examples/gallery`.
+# Cargo only warns about that collision on macOS and Linux, but on Windows the
+# second linker cannot open the file the first one holds and CI dies with
+# `LNK1104`. The path stays put so every `examples/gallery` reference in the
+# docs still resolves; only the binary is renamed.
+[[example]]
+name = "dock-gallery"
+path = "examples/gallery.rs"
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 gpui_platform = { workspace = true }

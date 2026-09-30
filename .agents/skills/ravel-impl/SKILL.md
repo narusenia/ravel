@@ -216,7 +216,7 @@ worktree を切るのは `--self` でも同じ。並行して別の作業が走�
 
 | agent | 起動 | 完了の判断 |
 |---|---|---|
-| `claude` | サブエージェント機構（worktree 隔離が使えるならそれに乗る） | 完了通知 |
+| `claude` | Agent ツールで `subagent_type: ravel-implementer`（`.claude/agents/`、sonnet 5.5）。`isolation` は付けず、§3 で作った worktree のパスをブリーフで渡す。プロンプトは「ブリーフのパスを読んで従え」だけ | 完了通知 |
 | `kimi` / `codex` | `herdr pane run <pane>` にブリーフのパスを渡す。**実行前に cwd と前面プロセスを確認** | **worktree の `git log` / `git status` の変化**と画面 |
 
 **`agent_status` 単独を根拠にしない。** kimi はツール呼び出しごとに `idle` に

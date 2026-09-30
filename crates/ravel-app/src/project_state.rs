@@ -8014,6 +8014,40 @@ mod tests {
         });
     }
 
+    /// The audio cache is keyed by path, which an overwrite keeps, so the
+    /// project has to tell the audio service. Breaks on: removing the
+    /// `audio::invalidate_assets` call in `advance_changed_assets`.
+    #[gpui::test]
+    fn an_overwritten_file_drops_the_assets_decoded_audio(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let audio = cx.new(|_| crate::audio::AudioService::with_sink(None, 48_000));
+        cx.update(|cx| cx.set_global(crate::audio::AudioServiceHandle(audio.downgrade())));
+        let id = project.update(cx, add_movie_asset);
+        audio.update(cx, |audio, _| {
+            audio.cache_decoded(
+                ravel_audio::mixdown::CacheKey {
+                    asset_id: id,
+                    stream_index: 1,
+                    resolved: Some(Arc::from(Path::new(MOVIE))),
+                },
+                ravel_audio::mixdown::DecodedAudio {
+                    samples: vec![0.0; 8].into(),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+            );
+            assert!(audio.holds_decode_state(id));
+        });
+
+        project.update(cx, |project, cx| {
+            let changed = HashSet::from([PathBuf::from(MOVIE)]);
+            assert!(project.advance_changed_assets(&changed, cx));
+        });
+
+        assert!(!audio.read_with(cx, |audio, _| audio.holds_decode_state(id)));
+    }
+
     /// The change is not an edit: no undo step, no dirty flag, and the
     /// retained versions carry the new revision — while a viewer request goes
     /// out, since the picture is wrong now.

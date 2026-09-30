@@ -183,6 +183,15 @@ impl AudioService {
         self.cache.insert(key, Arc::new(audio));
     }
 
+    /// Whether any decode state (buffer, failure, pending slot) is held for
+    /// `asset_id`.
+    #[cfg(test)]
+    pub(crate) fn holds_decode_state(&self, asset_id: AssetId) -> bool {
+        self.cache.keys().any(|key| key.asset_id == asset_id)
+            || self.failed.iter().any(|key| key.asset_id == asset_id)
+            || self.pending.keys().any(|key| key.asset_id == asset_id)
+    }
+
     /// Mirror the transport into the engine: loop range and seek first (so a
     /// resume continues from the right position), then play/pause. Sent
     /// whenever the transport changes, even with zero audio tracks, so the

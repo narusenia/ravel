@@ -40,7 +40,7 @@ several plans here wait on its later units rather than on each other.
 
 | File | Subject | Depends on | Related requirements |
 |---|---|---|---|
-| `result-provenance-plan.md` | Roadmap phase A6's lead epic: every place a result is accepted (viewer publish, frame-cache insert, cache band, decode hit) checks the premises it was made under — `MED-APP-37/38/39`, `MED-MED-08` (`PROV-1`–`6`) | — | REQ-CORE-006, REQ-UI-004 |
+| `result-provenance-plan.md` | Roadmap phase A6's lead epic: every place a result is accepted (viewer publish, frame-cache insert, cache band, decode hit) checks the premises it was made under — `MED-APP-37/38/39`, `MED-MED-08` (`PROV-1`–`6`) | PROV-1/3/4 done — 2026-09-30 | REQ-CORE-006, REQ-UI-004 |
 | `geometry-ops-plan.md` | Blast, sort, resample, measure, switch, null, line/grid, connect, curve parameter | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `hands-on-findings-handoff.md` | Where the 2026-08-08 hands-on findings landed, and the order to pick the filed bugs up in | — | — |
 | `refactor-plan-0808.md` | Workflow-penetration UX: the instrumentation that counts panel round-trips and re-searches, plus the known Timeline / import / search fixes — **the pre-release UX bucket** | — | REQ-UI-002–004, REQ-UI-013 |

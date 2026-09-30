@@ -320,3 +320,41 @@ fn positions_bounds(&self) -> Option<Rect> {
 
 `layer-content-size-plan.md` の「問題 2」で見つけた 3 件のうちの 1 つ。
 残りは `MED-APP-45` と `LOW-APP-33`。
+
+## MED-CORE-12 | bug | ドメインパラメータの選択肢を宣言していないノードがあり、タイポが既定値に黙って吸われる
+
+> 起票時は `MED-CORE-10` を名乗っていたが、その番号は
+> [closed/medium-core-evaluator.md](../closed/medium-core-evaluator.md) の
+> 「閉集合の文字列パラメータが dropdown でない」（解決済み）が既に使っている。
+> **同じ監査の取りこぼし分**なので内容は続きだが、ID は別に取り直した（2026-09-28）。
+
+**該当**: `crates/ravel-core/src/registry/builtin.rs`（`attribute.promote` の
+`source_domain` / `target_domain`、`attribute.curveu`）
+
+> **解決済み**: `attribute.promote` の `source_domain` / `target_domain` に
+> `ATTRIBUTE_DOMAINS` を宣言した。同じ抜けが `field.apply` の `domain` にもあったので
+> `FIELD_APPLY_DOMAINS`（`point` / `instance` / `detail`）を宣言した（プロセッサは
+> `primitive` を黙って `point` に落とすので、選択肢には出さない）。
+> 既存テストは「`domain` / `*_domain` という名前のパラメータを登録簿から全走査して
+> 選択肢の宣言を要求する」形に広げた。**起票文の `attribute.curveu` は誤記**で、
+> そのノードは `mode` しか持たずドメインパラメータが無い。
+
+`attribute.set` / `attribute.transfer` / `attribute.delete` は
+`with_param_options(ATTRIBUTE_DOMAINS)` を宣言しているので、Properties は
+選択肢から選ぶ UI になる。**`attribute.promote` の 2 つのドメイン
+パラメータと `attribute.curveu` は宣言していない**ので自由入力になり、
+綴りを間違えると `domain_param` の警告 + 既定フォールバックで
+**黙って別のドメインに書き込む**。
+
+既存テスト（`closed_attribute_parameter_options_match_the_processor_contracts`）
+は `promote` の `aggregate` しか見ていないので、この抜けを捕まえない。
+
+**実害**: 小さいが黙っている。プロジェクトを保存すると誤ったドメイン名が
+そのまま残り、開き直しても同じ既定に吸われ続ける。
+
+**修正方針**: 3 パラメータに `with_param_options` を足し、既存テストの
+走査対象を「ドメインを取る全パラメータ」に広げる。
+
+**severity の根拠**: bug（誤った入力が無言で別の意味になる）。low でないのは
+永続化された値が黙って別解釈されるため、high でないのは誤りが 1 ノードに
+閉じ、データが壊れないため。

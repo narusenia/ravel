@@ -56,6 +56,7 @@ use ravel_core::media::encode::{
     Encoder, ImageSequenceOutput, PngDepth, SequenceCodec, remove_partial_output,
 };
 use ravel_core::media::{MediaError, MediaResult};
+use ravel_core::runtime::OverwritePolicy;
 use ravel_core::types::FrameBuffer;
 
 /// Where the encoder is in its lifecycle.
@@ -105,6 +106,8 @@ pub struct ImageSequenceEncoder {
     created_dirs: Vec<PathBuf>,
     /// Distinguishes this encoder's temporary files from every other one's.
     job_tag: String,
+    /// What the final placement does when the frame's name is taken.
+    overwrite: OverwritePolicy,
 }
 
 /// Whether a failed `create_dir` at `level` means a directory is already there —
@@ -153,7 +156,20 @@ impl ImageSequenceEncoder {
             written: Vec::new(),
             created_dirs: Vec::new(),
             job_tag,
+            overwrite: OverwritePolicy::Replace,
         }
+    }
+
+    /// Set what happens when a frame's final name is already taken.
+    ///
+    /// The default is [`OverwritePolicy::Replace`] (re-rendering a range over
+    /// its previous output). Under [`OverwritePolicy::Refuse`] the placement
+    /// itself declines to replace, so a file another writer creates *after*
+    /// the render worker's up-front check survives — see [`place_frame`].
+    #[must_use]
+    pub fn with_overwrite(mut self, overwrite: OverwritePolicy) -> Self {
+        self.overwrite = overwrite;
+        self
     }
 
     /// The frames written so far, in order.
@@ -317,16 +333,17 @@ impl Encoder for ImageSequenceEncoder {
             .map_err(|e| MediaError::EncodeError(format!("write {}: {e}", guard.display())))?;
         drop(file);
 
-        std::fs::rename(guard.path(), &final_path).map_err(|e| {
+        place_frame(guard.path(), &final_path, self.overwrite).map_err(|e| {
             MediaError::EncodeError(format!(
                 "move {} into place at {}: {e}",
                 guard.display(),
                 final_path.display()
             ))
         })?;
-        // The temporary no longer exists under that name; re-deleting it could
-        // only catch a file somebody else has since created.
-        guard.disarm();
+        // The temporary no longer exists under that name (or, after a link,
+        // is removed here); re-deleting it later could only catch a file
+        // somebody else has since created.
+        guard.disarm_and_remove();
 
         if !preexisting {
             self.written.push(final_path);
@@ -419,8 +436,11 @@ impl PartialFile {
         self.path.display()
     }
 
-    /// Give up ownership: the file has been renamed into place.
-    fn disarm(mut self) {
+    /// Give up ownership: the file has been placed. After a rename the name
+    /// is already gone and the removal is a harmless `NotFound`; after a hard
+    /// link the temporary name is still there and this is what removes it.
+    fn disarm_and_remove(mut self) {
+        let _ = std::fs::remove_file(&self.path);
         self.armed = false;
     }
 }
@@ -430,6 +450,47 @@ impl Drop for PartialFile {
         if self.armed {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+}
+
+/// Whether a failed `hard_link` means "this filesystem cannot link" rather
+/// than "the name is taken".
+///
+/// **Only `AlreadyExists` is a verdict.** Every other kind falls back to the
+/// check-then-rename placement: hard links are missing on exFAT / FAT and some
+/// network shares, and the error they report differs by OS and filesystem
+/// (`Unsupported`, `PermissionDenied`, `InvalidInput`, uncategorised codes),
+/// so an allow-list of kinds would silently break output to those drives. The
+/// fallback is no weaker than the previous behaviour, and a genuine failure
+/// (missing directory, full disk) fails again in the rename with its own
+/// message.
+fn link_failure_falls_back_to_rename(kind: std::io::ErrorKind) -> bool {
+    kind != std::io::ErrorKind::AlreadyExists
+}
+
+/// Put the finished temporary at `final_path`.
+///
+/// `Replace` is a plain `rename`. `Refuse` uses `hard_link`, which fails with
+/// `AlreadyExists` instead of replacing — atomically on POSIX (`link(2)`) and
+/// Windows (`CreateHardLinkW`) — so a file that appears after the worker's
+/// up-front check is left alone. The caller removes the temporary name
+/// afterwards. Where hard links are unavailable
+/// ([`link_failure_falls_back_to_rename`]) the guarantee is only a fresh
+/// existence check right before the `rename`, which narrows the race but does
+/// not close it.
+fn place_frame(temp: &Path, final_path: &Path, overwrite: OverwritePolicy) -> std::io::Result<()> {
+    if overwrite == OverwritePolicy::Replace {
+        return std::fs::rename(temp, final_path);
+    }
+    match std::fs::hard_link(temp, final_path) {
+        Ok(()) => Ok(()),
+        Err(e) if link_failure_falls_back_to_rename(e.kind()) => {
+            if final_path.symlink_metadata().is_ok() {
+                return Err(std::io::ErrorKind::AlreadyExists.into());
+            }
+            std::fs::rename(temp, final_path)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -978,6 +1039,74 @@ mod tests {
             "the pre-existing file was truncated",
         );
         assert!(!dir.path().join("frame_0000.png").exists());
+    }
+
+    #[test]
+    fn refuse_does_not_replace_a_frame_that_appeared_after_begin() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 0.5);
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8))
+            .with_overwrite(OverwritePolicy::Refuse);
+        encoder.begin().unwrap();
+
+        // The race: another writer lands the name after the worker's check.
+        let theirs = dir.path().join("frame_0000.png");
+        std::fs::write(&theirs, b"someone else's frame").unwrap();
+
+        let err = encoder
+            .write_frame(&source, 0)
+            .expect_err("the placement must refuse to replace");
+        assert!(matches!(err, MediaError::EncodeError(_)), "{err}");
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's frame");
+        assert!(
+            partials(dir.path()).is_empty(),
+            "{:?}",
+            partials(dir.path())
+        );
+        assert!(encoder.written_frames().is_empty());
+
+        // Neither finish nor abort may reach the foreign file.
+        encoder.abort().unwrap();
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's frame");
+    }
+
+    #[test]
+    fn refuse_places_a_free_frame_and_leaves_no_temporary() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 0.5);
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8))
+            .with_overwrite(OverwritePolicy::Refuse);
+        encoder.begin().unwrap();
+        encoder.write_frame(&source, 0).unwrap();
+        assert_eq!(encoder.written_frames().len(), 1);
+        encoder.finish().unwrap();
+        assert!(dir.path().join("frame_0000.png").is_file());
+        assert!(partials(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn replace_still_replaces_a_frame_that_appeared_after_begin() {
+        let dir = TempDir::new().unwrap();
+        let source = frame(1, 1, |_| 0.5);
+        let mut encoder = ImageSequenceEncoder::new(output(dir.path(), PNG8))
+            .with_overwrite(OverwritePolicy::Replace);
+        encoder.begin().unwrap();
+        let theirs = dir.path().join("frame_0000.png");
+        std::fs::write(&theirs, b"old").unwrap();
+
+        encoder.write_frame(&source, 0).unwrap();
+        assert_ne!(std::fs::read(&theirs).unwrap(), b"old");
+        assert!(encoder.written_frames().is_empty(), "replaced, not created");
+        assert!(partials(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn only_already_exists_is_never_a_reason_to_fall_back() {
+        use std::io::ErrorKind::*;
+        assert!(!link_failure_falls_back_to_rename(AlreadyExists));
+        for kind in [Unsupported, PermissionDenied, InvalidInput, Other, NotFound] {
+            assert!(link_failure_falls_back_to_rename(kind), "{kind:?}");
+        }
     }
 
     /// Names of the leftover `.ravel-partial` files in `dir`.

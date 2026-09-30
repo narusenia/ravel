@@ -18,6 +18,14 @@ paths:
   changes. Cross-cutting mutations must remain atomic for undo/redo.
 - Keep blocking I/O, decoding, graph evaluation, and expensive work off the UI
   thread.
+- A place that accepts a result produced earlier (a publish, a cache insert, a
+  cache hit) compares the identifier of the premises the result was made under
+  with the current one and drops a mismatch — it does not rely on whoever
+  changed the premise remembering to purge. A new acceptance point adds its row
+  to the table in `docs/specifications/architecture.md` (結果を受け入れる地点での
+  前提照合) in the same change. Four such stale-result bugs (`MED-APP-37`–`39`,
+  `MED-MED-08`) came from points whose identifier either did not cover every
+  premise or was not checked at the moment of acceptance.
 - Reuse the workspace-pinned `wgpu` revision. Do not introduce a second
   incompatible wgpu version into application-facing GPU paths.
 - Keep backend-native GPU handles inside `ravel_gpu::interop`. Handing a

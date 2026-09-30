@@ -447,6 +447,8 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
 
 ### 単位 5 (`CACHE-5`): フレームキャッシュ層（comp 単位の無効化）
 
+> **後続**: insert は要求の取り出し時の `InsertTicket` で照合し、`clear` / `invalidate_comp` 後の古い insert を捨てる（`PROV-3`）。受け入れ地点の規則は [`done/result-provenance-plan.md`](done/result-provenance-plan.md) と `architecture.md`「結果を受け入れる地点での前提照合」。
+
 **設計時の記述**（2026-07-31。下の「実装時の決定」が上書きした箇所がある）:
 
 - `EvalService` 側に出力段のフレームキャッシュを新設。キーは
@@ -516,6 +518,8 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
   （ヒットは `finalize` を再実行しないので、一度の失敗が恒久化しうる）。
 
 ### 単位 6 (`CACHE-6`): Timeline のキャッシュ帯と統計
+
+> **後続**: 帯の早期 return は version 単独でなく `(frame cache version, comp, EvalContext)` の鍵で判定する（`PROV-2`）。受け入れ地点の規則は [`done/result-provenance-plan.md`](done/result-provenance-plan.md) と `architecture.md`「結果を受け入れる地点での前提照合」。
 
 - `cached_ranges(comp, &EvalContext)` を追加。
 - Timeline にキャッシュ帯を描く（RAM = 緑、将来のディスク = 青）。
@@ -616,6 +620,8 @@ REQ-CORE-014 / REQ-CORE-015 の式が入ると、**`CacheIdentity` に式が参�
   取りこぼさない）ことの比較テスト。
 
 ### 単位 8 ✅ (`CACHE-8`): 共有デコードフレームキャッシュ
+
+> **後続**: `FrameKey` とリーダーは素材の版（`MediaAssetEntry::content_revision`）も持ち、素材の監視が版を進める（`PROV-4` / `PROV-5`）。受け入れ地点の規則は [`done/result-provenance-plan.md`](done/result-provenance-plan.md) と `architecture.md`「結果を受け入れる地点での前提照合」。
 
 - `ravel-media` にアセット単位の共有キャッシュを追加。予算は
   `CacheKind::MediaFrame`（**HIGH-16 を回収**）。

@@ -2937,7 +2937,7 @@ Unknown type keys are skipped silently (plugin space).
   `drop_highlight`, `DROP_EDGE_FRACTION`, `DEFAULT_SPLIT_RATIO`).
 - `examples/gallery`: validation binary — four built-in presets over a real
   `WorkspaceLayout`, dummy panes, theme toggle. Run with
-  `cargo run -p ravel-dock --example gallery`.
+  `cargo run -p ravel-dock --example dock-gallery` (the binary is renamed so it does not collide with `ravel-widgets`'s own `examples/gallery`).
 
 ## ravel-widgets — design tokens and Ravel's own parts
 

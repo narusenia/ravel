@@ -908,6 +908,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `INFO-1` | `InvalidationHint::Shell` **済**（#558 — 判定は `ravel-ui/src/invalidation.rs` に 1 本化。Properties / Timeline / Outliner が共有） |
 | `INFO-2` / `INFO-3` | `layer.info` **済**（#560）/ `comp.info` **済**（#562 — 他コンプ参照は走査が対象を解決する） |
 | `INFO-4` | 情報ノードのポート選択 UI **済**（#564） |
+| `INFO-5` | 殻バインドを含む循環検出 **済**（#566 — 検出は厳格、ロード時の修復は正確に辿れた循環だけ） |
 | `SHEET-2` / `SHEET-3` | 属性スプレッドシート |
 | クラスタ: 操作の正しさ（13 件） | 選択とターゲットの取り合い（`MED-APP-04`〜`06`）、ドラッグの復帰なし（`MED-APP-03`）、no-op undo の記録（`MED-APP-07` / `LOW-APP-02` / `LOW-APP-07` / `LOW-APP-10`）、`HIGH-19`（Timeline ズームのアンカーがウィンドウ空間）、ボックス選択とラバーバンド（`LOW-APP-03` / `LOW-APP-04`）、`MED-APP-08`（サムネイルが Open を越えて stale） |
 | クラスタ: 表示の欠落（4 件） | `MED-APP-17`（カーブエディタの縦ズーム。`PARAM-5` で値域の置き場所は済み、Timeline に書き込み操作を足す分が残る）、`MED-APP-19`（`Channel4` が常に Color 描画）、`MED-APP-20`（Vector に成分ラベルとリンクトグルなし。`VEC-5` で Vector 行が実際に使われるようになったので、ここは残った UI 側の修正）、`MED-APP-21`（Viewer bbox の `type_key` 固定 match = `OVL-3` が同時に消す） |

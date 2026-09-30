@@ -1511,3 +1511,36 @@ Properties の行は **`&node.parameters` を回して**作られる。ノード
 更新を emit する（またはティックループで明示的に publish / forward する）。
 
 ---
+
+## MED-APP-38 | bug | 表示設定の切り替えが「飛んでいる評価」を締め出さないので、古い設定のフレームがキャッシュに戻る
+
+> **解決済み**: フレームキャッシュ側の insert epoch（`InsertTicket`）。個票の案（設定の
+> 世代を要求と結果に載せる）は採らず、`SharedFrameCache::clear` / `invalidate_comp` が
+> 空でも epoch を進め、ワーカーが要求の取り出し時に ticket を取って `insert_at` に渡す。
+> ticket が古い insert は予算の予約もせず捨て、`FrameCacheStats::stale_inserts` に数えて
+> `eval result sent` に載せる。要求型と先読みに設定の概念を通さずに済み、UI スレッドからの
+> あらゆる無効化を守る。順序の不変条件（setter は設定 store → `clear()`）は
+> `InsertTicket` の doc に書いた。ワーカー経由のテスト（通常・先読みの両方）は
+> finalize で止まるフックで決定的に走り、epoch の比較を外すと落ちることを確認した。
+
+**該当**: `crates/ravel-app/src/project_state.rs:1780-1795`（`set_display_channel`）、
+`:1840-1855`（`set_pixel_readout`）、`crates/ravel-core/src/runtime/eval_service.rs:836`
+
+どちらの setter も**出力段フレームキャッシュを捨ててから**再要求する
+（`INSP-2` / `INSP-3`）。しかし**捨てた時点で走っているワーカーの評価**（先読み
+`CACHE-9` を含む）は古い設定で finalize を終え、`clear()` の**後に**キャッシュへ
+入りうる。
+
+- チャンネル: 古いモードの表示バイト列が入る → 次のヒットで前のモードの絵が返る
+- 読み取り: リニアフレームを持たない（または持ったままの）エントリが入る →
+  読み取りが空のまま / off にしたのに f32 を運び続ける
+
+いずれも**次の無効化まで残る**（一過性ではない）。
+
+→ 設定の世代（`u64`）を要求と結果に載せ、**世代が古い結果はキャッシュへ入れない**。
+`AudioService` の `generation` と `finish_pending_generation`（#472）が同じ形の前例。
+
+**検証**: 古い世代の結果を配達して、キャッシュに入らないことを落とすテスト。
+
+---
+

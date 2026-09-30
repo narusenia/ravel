@@ -16,10 +16,12 @@ You own the diff.
 
 1. Read the brief at the path you were given. It is outside the repo. If no
    path was given, stop and say so — do not improvise scope.
-2. `cd` to the worktree path in the brief and run `pwd` and
-   `git branch --show-current`. If either differs from the brief, stop and
-   report. Never touch the main worktree or any other worktree; parallel work
-   is running there.
+2. Take the worktree path in the brief as an absolute path `<wt>`. Run
+   `cd <wt> && pwd && git branch --show-current`; if either differs from the
+   brief, stop and report. Never touch the main worktree or any other
+   worktree; parallel work is running there.
+   The shell's cwd can drift between calls, so start **every** Bash command
+   with `cd <wt> &&`, and give Read / Edit / Write absolute paths under `<wt>`.
 3. Run `mise trust` once (a new worktree fails every `mise run` otherwise).
 4. Read `AGENTS.md`, every `.agents/rules/*.md` whose `paths` frontmatter
    matches the files you will edit, the plan section for your unit, and the
